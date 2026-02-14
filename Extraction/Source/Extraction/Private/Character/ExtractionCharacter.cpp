@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionCharacter.h"
+#include "ExtractionAnimInstance.h"
 #include "Animation/AnimInstance.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -117,4 +118,25 @@ void AExtractionCharacter::DoJumpEnd()
 {
 	// pass StopJumping to the character
 	StopJumping();
+}
+
+UExtractionAnimInstance* AExtractionCharacter::GetExtractionAnimInstance() const
+{
+	UAnimInstance* AnimInst = GetMesh()->GetAnimInstance();
+	if (!IsValid(AnimInst))
+	{
+		return nullptr;
+	}
+
+	UExtractionAnimInstance* TypedInst = Cast<UExtractionAnimInstance>(AnimInst);
+	if (!IsValid(TypedInst))
+	{
+		UE_LOG(LogExtraction, Warning,
+			TEXT("AnimInstance on '%s' is not UExtractionAnimInstance. "
+				"Ensure the ABP parent class is set correctly."),
+			*GetNameSafe(this));
+		return nullptr;
+	}
+
+	return TypedInst;
 }
