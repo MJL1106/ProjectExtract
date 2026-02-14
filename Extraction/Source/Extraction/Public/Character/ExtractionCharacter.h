@@ -11,6 +11,7 @@ class UInputComponent;
 class USkeletalMeshComponent;
 class UCameraComponent;
 class UInputAction;
+class UExtractionAnimInstance;
 struct FInputActionValue;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
@@ -89,6 +90,10 @@ public:
 
 	/** Returns first person camera component **/
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
+
+	/** Returns the typed AnimInstance from the third-person mesh, or nullptr */
+	UFUNCTION(BlueprintPure, Category = "Animation")
+	UExtractionAnimInstance* GetExtractionAnimInstance() const;
 
 };
 
