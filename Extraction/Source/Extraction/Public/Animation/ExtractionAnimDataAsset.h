@@ -78,6 +78,38 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Weapon")
 	TObjectPtr<UAnimMontage> EquipMontage;
 
+	// ---- Prone ----
+
+	/** 2D Blendspace for 8-directional prone crawling. Axes: Speed (0-80), Direction (-180, 180). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone")
+	TObjectPtr<UBlendSpace> ProneLocomotionBlendSpace;
+
+	/** Prone idle pose (center of blendspace / no velocity) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone")
+	TObjectPtr<UAnimSequence> ProneIdleAnim;
+
+	// ---- Prone Transitions ----
+
+	/** Transition montage: standing idle -> prone. Root motion. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
+	TObjectPtr<UAnimMontage> IdleToProneTransition;
+
+	/** Transition montage: walking -> prone. Root motion. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
+	TObjectPtr<UAnimMontage> WalkToProneTransition;
+
+	/** Transition montage: sprinting -> prone (knee slide). Root motion with forward momentum. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
+	TObjectPtr<UAnimMontage> SprintToProneTransition;
+
+	/** Transition montage: crouching -> prone. Root motion. (Reuses idle-to-prone, skipped partway.) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
+	TObjectPtr<UAnimMontage> CrouchToProneTransition;
+
+	/** Transition montage: prone -> standing. Root motion. Shared for all exit paths. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
+	TObjectPtr<UAnimMontage> ProneToStandTransition;
+
 	// ---- Hit Reactions & Death ----
 
 	/** Multiple hit reacts for random selection */

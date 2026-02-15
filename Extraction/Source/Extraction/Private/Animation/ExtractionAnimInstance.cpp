@@ -24,13 +24,16 @@ UExtractionAnimInstance::UExtractionAnimInstance()
 	, bIsCrouching(false)
 	, bIsSprinting(false)
 	, bIsSliding(false)
+	, bIsProne(false)
+	, bIsTransitioningToProne(false)
+	, bIsTransitioningFromProne(false)
 	, bIsADS(false)
 	, bHasVelocity(false)
 	, bIsAccelerating(false)
 	, bIsAlive(true)
 	, AimPitch(0.f)
 	, AimYaw(0.f)
-	, CurrentWeaponType(EWeaponType::Unarmed)
+	, CurrentWeaponType(EWeaponType::Rifle)
 {
 }
 
@@ -107,9 +110,22 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	AimPitch = FMath::ClampAngle(AimDelta.Pitch, -90.f, 90.f);
 	AimYaw = FMath::ClampAngle(AimDelta.Yaw, -180.f, 180.f);
 
-	// Sprint and slide read from character's replicated state
+	// Sprint, slide, and prone read from character's replicated state
 	bIsSprinting = OwningCharacter->GetIsSprinting();
 	bIsSliding = OwningCharacter->GetIsSliding();
+
+	const bool bWasProne = bIsProne;
+	bIsProne = OwningCharacter->GetIsProne();
+	bIsTransitioningToProne = OwningCharacter->GetIsTransitioningToProne();
+	bIsTransitioningFromProne = OwningCharacter->GetIsTransitioningFromProne();
+
+	// Log prone state changes for debugging
+	if (bIsProne != bWasProne)
+	{
+		UE_LOG(LogExtractionAnim, Log,
+			TEXT("AnimInstance: bIsProne changed %d -> %d | bIsCrouching=%d | bIsTransToProne=%d | bIsTransFromProne=%d | Speed=%.1f"),
+			bWasProne, bIsProne, bIsCrouching, bIsTransitioningToProne, bIsTransitioningFromProne, Speed);
+	}
 
 	// bIsADS, bIsAlive are set externally via setters or gameplay systems
 }
@@ -134,6 +150,16 @@ UExtractionAnimDataAsset* UExtractionAnimInstance::GetActiveAnimData() const
 		return nullptr;
 	}
 	return *Found;
+}
+
+UBlendSpace* UExtractionAnimInstance::GetActiveProneLocomotionBlendSpace() const
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data))
+	{
+		return nullptr;
+	}
+	return Data->ProneLocomotionBlendSpace;
 }
 
 // ---- Montage Playback ----
@@ -188,6 +214,46 @@ float UExtractionAnimInstance::PlayDeathMontage(float PlayRate)
 		return 0.f;
 	}
 	return PlayRandomMontage(Data->DeathMontages, PlayRate);
+}
+
+float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType TransitionType, float PlayRate)
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data))
+	{
+		return 0.f;
+	}
+
+	UAnimMontage* Montage = nullptr;
+	switch (TransitionType)
+	{
+	case EProneTransitionType::FromIdle:
+		Montage = Data->IdleToProneTransition;
+		break;
+	case EProneTransitionType::FromWalk:
+		Montage = Data->WalkToProneTransition;
+		break;
+	case EProneTransitionType::FromSprint:
+		Montage = Data->SprintToProneTransition;
+		break;
+	case EProneTransitionType::FromCrouch:
+		Montage = Data->CrouchToProneTransition;
+		break;
+	default:
+		return 0.f;
+	}
+
+	return PlayMontageInternal(Montage, PlayRate);
+}
+
+float UExtractionAnimInstance::PlayProneExitMontage(float PlayRate)
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data))
+	{
+		return 0.f;
+	}
+	return PlayMontageInternal(Data->ProneToStandTransition, PlayRate);
 }
 
 void UExtractionAnimInstance::SetWeaponType(EWeaponType NewWeaponType)

@@ -72,6 +72,17 @@ public:
 	bool bIsSliding;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
+	bool bIsProne;
+
+	/** True while a transition-to-prone montage is playing */
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
+	bool bIsTransitioningToProne;
+
+	/** True while the prone-to-stand montage is playing */
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
+	bool bIsTransitioningFromProne;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
 	bool bIsADS;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
@@ -101,12 +112,16 @@ public:
 	// ---- Convenience Getters (for ABP) ----
 
 	/** Returns the active weapon's locomotion blendspace, or nullptr */
-	UFUNCTION(BlueprintPure, Category = "Animation|Data")
+	UFUNCTION(BlueprintPure, Category = "Animation|Data", meta = (BlueprintThreadSafe))
 	UBlendSpace* GetActiveLocomotionBlendSpace() const;
 
 	/** Returns the active weapon's DataAsset, or nullptr */
-	UFUNCTION(BlueprintPure, Category = "Animation|Data")
+	UFUNCTION(BlueprintPure, Category = "Animation|Data", meta = (BlueprintThreadSafe))
 	UExtractionAnimDataAsset* GetActiveAnimData() const;
+
+	/** Returns the active weapon's prone locomotion blendspace, or nullptr */
+	UFUNCTION(BlueprintPure, Category = "Animation|Data", meta = (BlueprintThreadSafe))
+	UBlendSpace* GetActiveProneLocomotionBlendSpace() const;
 
 	// ---- Montage Playback API ----
 
@@ -129,6 +144,14 @@ public:
 	/** Play a random death montage (full body). Returns duration. */
 	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
 	float PlayDeathMontage(float PlayRate = 1.0f);
+
+	/** Play the transition-to-prone montage matching the given type. Returns duration. */
+	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
+	float PlayProneTransitionMontage(EProneTransitionType TransitionType, float PlayRate = 1.0f);
+
+	/** Play the prone-to-stand transition montage. Returns duration. */
+	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
+	float PlayProneExitMontage(float PlayRate = 1.0f);
 
 	/** Set the current weapon type. Validates that a DataAsset exists for it. */
 	UFUNCTION(BlueprintCallable, Category = "Animation|Weapon")
