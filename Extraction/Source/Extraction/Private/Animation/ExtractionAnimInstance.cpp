@@ -110,23 +110,11 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	AimPitch = FMath::ClampAngle(AimDelta.Pitch, -90.f, 90.f);
 	AimYaw = FMath::ClampAngle(AimDelta.Yaw, -180.f, 180.f);
 
-	// Sprint, slide, and prone read from character's replicated state
+	// Sprint and slide read from character's replicated state
 	bIsSprinting = OwningCharacter->GetIsSprinting();
 	bIsSliding = OwningCharacter->GetIsSliding();
 
-	const bool bWasProne = bIsProne;
-	bIsProne = OwningCharacter->GetIsProne();
-	bIsTransitioningToProne = OwningCharacter->GetIsTransitioningToProne();
-	bIsTransitioningFromProne = OwningCharacter->GetIsTransitioningFromProne();
-
-	// Log prone state changes for debugging
-	if (bIsProne != bWasProne)
-	{
-		UE_LOG(LogExtractionAnim, Log,
-			TEXT("AnimInstance: bIsProne changed %d -> %d | bIsCrouching=%d | bIsTransToProne=%d | bIsTransFromProne=%d | Speed=%.1f"),
-			bWasProne, bIsProne, bIsCrouching, bIsTransitioningToProne, bIsTransitioningFromProne, Speed);
-	}
-
+	// bIsProne, bIsTransitioningToProne/FromProne — will be populated when prone system is re-implemented
 	// bIsADS, bIsAlive are set externally via setters or gameplay systems
 }
 

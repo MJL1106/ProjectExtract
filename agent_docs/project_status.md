@@ -1,4 +1,4 @@
-# Project Status (Last Updated: Session 4)
+# Project Status (Last Updated: Session 5)
 
 ## Project Overview
 - **Name:** ProjectExtract — First-person extraction shooter
@@ -6,8 +6,8 @@
 - **Module:** `Extraction` (single module)
 - **Purpose:** MSc Game Programming degree project
 
-## Current State: Prone System C++ Complete (Needs Editor Setup)
-All locomotion systems are implemented: walk, sprint, crouch (toggle with smooth camera), jump, slide (curve-based decel), and **prone** (C++ complete, editor assets pending). Crouch and slide merged onto C key (context-sensitive). Prone system supports 4 context-sensitive entry transitions (idle, walk, sprint knee-slide, crouch), two exit paths (Z = full stand, C = exit to crouch), 8-directional prone locomotion blendspace, root-motion transitions, and capsule/camera management.
+## Current State: Core Locomotion Complete, Prone Deferred
+All core locomotion systems are implemented: walk, sprint, crouch (toggle with smooth camera), jump, slide (curve-based decel). Prone system was attempted in Session 4–5 but deferred due to mesh/camera offset issues — animation infrastructure (AnimInstance/AnimDataAsset declarations, montage playback API, editor assets) is committed and ready, but the character-side prone logic has been removed pending a better approach to mesh Z-offset when the capsule shrinks.
 
 ## What Works
 - Project compiles and plays cleanly
@@ -20,31 +20,18 @@ All locomotion systems are implemented: walk, sprint, crouch (toggle with smooth
 - **Crouch:** Toggle on IA_Crouch (Pressed trigger), smooth camera interp via BaseEyeHeight + FInterpTo, geometry blocking, sprint cancel
 - **Jump:** JumpStart → FallLoop → JumpEnd states, bIsInAir/bIsFalling transitions
 - **Slide:** Curve-based deceleration (SlidePeakSpeed → SlideEndSpeed over SlideDuration with power curve exponent), steerable mid-slide (SlideSteerRate), slides off ledges (bCanWalkOffLedgesWhenCrouching toggled), holds animation in air, sprint resumes after slide if key held, smooth camera snap on exit
-- **Prone (C++ complete, editor assets pending):** Toggle on Z key. 4 context-sensitive entry transitions (idle, walk, sprint knee-slide, crouch — determined by DetermineProneTransitionType). Two exit paths: Z = full prone-to-stand, C = partial prone-to-crouch (stops montage early). Root-motion-driven transitions via montages. Capsule resizes (30 half-height, 40 radius). Camera interp to prone height (ProneCameraInterpSpeed). Geometry overlap test blocks exit under low ceilings. MaxWalkSpeedProne = 70 cm/s. Crouch-to-prone skips into idle-to-prone montage (CrouchToProneStartPosition = 0.35). Prone-to-crouch stops exit montage at ProneToStandCrouchPosition = 0.6. All state guards: prone blocks sprint, jump, slide, crouch.
-- **Merged C key:** CrouchSlideAction replaces separate CrouchAction + SlideAction. Sprint+C = slide, walk+C = crouch toggle, prone+C = exit to crouch.
 - BeginPlay re-applies BP movement speeds (fixes constructor using C++ defaults instead of BP overrides)
-- Replication: bReplicates, bIsSprinting + bIsSliding + bIsProne with COND_SkipOwner, OnRep functions
+- Replication: bReplicates, bIsSprinting + bIsSliding with COND_SkipOwner, OnRep functions
 - Blendspaces: idle/walk/run (0-480 Speed axis), crouch (0-120 Speed axis)
-- AnimInstance reads all state from character: Speed, Direction, bIsSprinting, bIsSliding, bIsCrouching, bIsProne, bIsTransitioningToProne, bIsTransitioningFromProne, bIsInAir, bIsFalling, AimPitch, AimYaw
+- AnimInstance reads state from character: Speed, Direction, bIsSprinting, bIsSliding, bIsCrouching, bIsInAir, bIsFalling, AimPitch, AimYaw
+- **Prone animation infrastructure (committed, unused):** AnimInstance has bIsProne/bIsTransitioningToProne/FromProne flags, GetActiveProneLocomotionBlendSpace getter, PlayProneTransitionMontage/PlayProneExitMontage API. AnimDataAsset has prone blendspace + 5 transition montage fields. EProneTransitionType enum exists. Editor assets created (BS_Prone, 5 montages, DA_Anim_Rifle, ABP prone state). All dormant — AnimInstance doesn't read prone state from character yet.
 - Tooltips on non-obvious slide config properties (exponent, steer rate)
 
 ## What's Next
-- **Prone editor setup (immediate):**
-  - Create `IA_Prone` input action (Digital bool) in editor, map Z in `IMC_Default`
-  - Create `IA_CrouchSlide` input action (Digital bool) in editor, map C in `IMC_Default` (replaces IA_Crouch + IA_Slide)
-  - Assign `IA_Prone` → ProneAction and `IA_CrouchSlide` → CrouchSlideAction on BP_ExtractionCharacter
-  - Create 5 transition montages from LAMP Vol 2 UnarmedProne anims (enable root motion):
-    - `AM_IdleToProne_Rifle` ← `anim_Stand_To_Prone`
-    - `AM_WalkToProne_Rifle` ← `anim_Run_To_Prone_02_R`
-    - `AM_SprintToProne_Rifle` ← `anim_Run_To_Prone_01_R`
-    - `AM_CrouchToProne_Rifle` ← same as idle (reused, code skips partway)
-    - `AM_ProneToStand_Rifle` ← `anim_Prone_To_Stand`
-  - Create `BS_RifleProne` blendspace (Speed 0-80, Direction -180/180) with 8-dir prone loops
-  - Create/update `DA_Anim_Rifle` data asset with all prone references assigned
-  - Add "Prone" state to ABP state machine (uses GetActiveProneLocomotionBlendSpace)
-  - Add ABP transitions: Idle/Walk/Run → Prone (bIsProne), Crouch → Prone (bIsProne), Prone → Idle/Walk/Run (!bIsProne && !bIsTransitioningFromProne), Prone → Crouch (!bIsProne && !bIsTransitioningFromProne && bIsCrouching)
-  - Add `!bIsProne` guards to existing ABP transitions to Jump/Slide states
-  - Test all transitions and tune CrouchToProneStartPosition / ProneToStandCrouchPosition values
+- **Prone system (deferred):**
+  - Character-side prone code needs re-implementation. The core challenge is mesh Z-offset: when the capsule shrinks from HH=96 to HH=30, the 3P mesh sinks into the ground. Moving the mesh up causes camera spazzing because the FP mesh + camera are children of the 3P mesh, and BaseEyeHeight interp fights the offset.
+  - Recommended approach for next attempt: adjust the animation skeleton's root bone offset in the prone animations rather than moving the mesh component at runtime, OR use the CMC's built-in crouch height system with a custom prone-height mode.
+  - Animation infrastructure is already in place (AnimInstance API, AnimDataAsset fields, editor assets). Only the character logic (input, state management, capsule resize, camera) needs to be written.
 - **ABP expansion:**
   - Create DataAsset instances (DA_Anim_Unarmed, DA_Anim_Rifle) and assign animation refs
   - Set up per-weapon blendspaces for 8-dir locomotion
@@ -76,23 +63,23 @@ All locomotion systems are implemented: walk, sprint, crouch (toggle with smooth
 | File | Purpose |
 |------|---------|
 | `ExtractionAnimDataAsset.h` | UDataAsset holding all anim refs for one weapon type (blendspace, idles, jumps, prone blendspace + transitions, montages) |
-| `ExtractionAnimInstance.h` | Core AnimInstance — locomotion props, state flags (bIsSliding, bIsSprinting, bIsCrouching, bIsProne, bIsTransitioningToProne/FromProne, etc.), aim offset, montage API (incl. PlayProneTransitionMontage, PlayProneExitMontage), weapon switching, GetActiveProneLocomotionBlendSpace |
+| `ExtractionAnimInstance.h` | Core AnimInstance — locomotion props, state flags (bIsSliding, bIsSprinting, bIsCrouching, bIsProne [dormant], bIsTransitioningToProne/FromProne [dormant], etc.), aim offset, montage API (incl. PlayProneTransitionMontage, PlayProneExitMontage [dormant]), weapon switching, GetActiveProneLocomotionBlendSpace [dormant] |
 
 ### Source/Extraction/Private/Animation/
 | File | Purpose |
 |------|---------|
-| `ExtractionAnimInstance.cpp` | AnimInstance impl — caches character/movement, zero-alloc update, reads bIsSprinting + bIsSliding + bIsProne + transition flags from character, montage helpers incl. prone transition/exit montage playback |
+| `ExtractionAnimInstance.cpp` | AnimInstance impl — caches character/movement, zero-alloc update, reads bIsSprinting + bIsSliding from character (prone reads commented out pending character re-impl), montage helpers incl. prone transition/exit montage playback [dormant] |
 
 ### Source/Extraction/Public/Character/
 | File | Purpose |
 |------|---------|
-| `ExtractionCharacter.h` | FP character — replication, input actions (CrouchSlideAction merged, ProneAction added), sprint, crouch, slide, prone (toggle, 4 entry transitions, 2 exit paths, capsule/camera management, geometry checks), movement config with tooltips |
+| `ExtractionCharacter.h` | FP character — replication, input actions (separate CrouchAction + SlideAction), sprint, crouch, slide, movement config with tooltips. No prone code (removed Session 5). |
 | `ExtractionCameraManager.h` | Camera manager with pitch limits (-70, 80) |
 
 ### Source/Extraction/Private/Character/
 | File | Purpose |
 |------|---------|
-| `ExtractionCharacter.cpp` | Character impl — BeginPlay re-applies BP speeds, sprint (locally controlled, forward-only), CrouchSlideInput (merged C key: sprint+C=slide, walk+C=crouch, prone+C=exit-to-crouch), slide (EnterSlide/UpdateSlide/EndSlide), prone (ProneToggle/DetermineTransitionType/EnterProne/ExitProne/ExitProneToCrouch/UpdateProne with montage callbacks and geometry overlap checks), replication (COND_SkipOwner) |
+| `ExtractionCharacter.cpp` | Character impl — BeginPlay re-applies BP speeds, sprint (locally controlled, forward-only), crouch (toggle), slide (EnterSlide/UpdateSlide/EndSlide), replication (COND_SkipOwner). No prone code (removed Session 5). |
 | `ExtractionCameraManager.cpp` | Sets pitch limits in constructor |
 
 ### Source/Extraction/Public/Game/
@@ -115,10 +102,10 @@ All locomotion systems are implemented: walk, sprint, crouch (toggle with smooth
 | `BP_ExtractionCharacter` | Character BP — FP arms mesh, 9 IA assigned, ABP assigned, movement speeds tuned (Walk=300, Sprint=600, Crouch=120), slide config (PeakSpeed, EndSpeed, Duration, Exponent, SteerRate) |
 | `BP_ExtractionPlayerController` | Player controller BP — IMC_Default assigned |
 | `BP_ExtractionGameMode` | GameMode BP — DefaultPawn = BP_ExtractionCharacter |
-| `ABP_ExtractionAnimBp` | Animation Blueprint — 6-state machine (Idle/Walk/Run, Crouch, JumpStart, FallLoop, JumpEnd, Slide) + Prone state pending. Inertialization node, transitions guard bIsSliding for air states |
+| `ABP_ExtractionAnimBp` | Animation Blueprint — 6-state machine (Idle/Walk/Run, Crouch, JumpStart, FallLoop, JumpEnd, Slide) + Prone state (editor wiring exists but character code deferred). Inertialization node, transitions guard bIsSliding for air states |
 | `BS_Idle_Walk_Run` | Blendspace — Speed 0-480, Direction -180/180 (idle=0, walk=120, jog=240, sprint=480) |
 | `BS_Crouch` | Blendspace — Speed 0-120, Direction -180/180 |
-| `IMC_Default` | Input Mapping Context — WASD, mouse, Shift(sprint), C(crouch/slide merged — pending remap from Ctrl+C to just C), Z(prone — pending), Space(jump), V(vault), E(interact) |
+| `IMC_Default` | Input Mapping Context — WASD, mouse, Shift(sprint), C(crouch), C(slide — separate action), Z(prone — editor-bound but character code deferred), Space(jump), V(vault), E(interact) |
 
 ### Config
 | File | Purpose |
@@ -133,7 +120,7 @@ All locomotion systems are implemented: walk, sprint, crouch (toggle with smooth
 4. **Composition over inheritance** — flat class hierarchy
 5. **Zero-allocation NativeUpdateAnimation** — reads cached refs only
 6. **Subfolder organisation** — Core, Character, Animation, Game
-7. **Replication-ready** — bReplicates, COND_SkipOwner on bIsSprinting/bIsSliding/bIsProne
+7. **Replication-ready** — bReplicates, COND_SkipOwner on bIsSprinting/bIsSliding
 8. **Sprint only on locally controlled** — avoids wasted Tick on proxies
 9. **Config-driven movement** — EditDefaultsOnly UPROPERTYs with tooltips on non-obvious values
 10. **Curve-based slide decel** over friction hack — predictable, tuneable via exponent
@@ -157,4 +144,5 @@ All locomotion systems are implemented: walk, sprint, crouch (toggle with smooth
 - **Session 1:** Fixed MSVC toolchain, stripped template, restructured source into subfolders, built animation C++ foundation (AnimInstance, AnimDataAsset, EWeaponType), created agent_docs
 - **Session 2:** GameMode C++ defaults, GameInstance, replication, 5 new input actions + stubs, movement config, sprint system, crouch, QCHECK review, fresh BPs, ABP with blendspace, PlayerStart spawning
 - **Session 3:** Implemented toggle crouch with smooth camera interp (BaseEyeHeight + FInterpTo). Set up ABP states for crouch, jump (Start/FallLoop/End), and slide with Inertialization blending. Fixed crouch input (needed Pressed trigger on IA_Crouch). Implemented full slide system: initially friction-based, then refactored to curve-based deceleration (SlidePeakSpeed→SlideEndSpeed with power exponent). Added slide steering (SlideSteerRate). Fixed sprint-on-spawn (BeginPlay re-applies BP speeds). Fixed crouch-faster-than-walk (same root cause). Fixed slide ledge blocking (bCanWalkOffLedgesWhenCrouching). Removed ground check from slide so it holds in air. Added ABP transition guards (NOT bIsSliding on jump/fall transitions). Added tooltips to non-obvious slide properties. Updated ue5_conventions.md with tooltip convention. Tuned movement speeds to match blendspace axes (Walk=300, Sprint=600, Crouch=120). Renamed Content/FirstPerson to Content/Core in-editor.
-- **Session 4:** Full prone system C++ implementation. Added EProneTransitionType enum. Extended ExtractionAnimDataAsset with prone blendspace + 5 transition montage fields. Extended ExtractionAnimInstance with bIsProne/bIsTransitioningToProne/bIsTransitioningFromProne flags, GetActiveProneLocomotionBlendSpace getter, PlayProneTransitionMontage/PlayProneExitMontage API. Major ExtractionCharacter changes: merged CrouchAction+SlideAction into CrouchSlideAction (context-sensitive C key), added ProneAction (Z key toggle), added prone config (MaxWalkSpeedProne, ProneHalfHeight, ProneCapsuleRadius, ProneCameraInterpSpeed, CrouchToProneStartPosition, ProneToStandCrouchPosition), replicated bIsProne with COND_SkipOwner. Implemented full prone lifecycle: ProneToggle → DetermineProneTransitionType → EnterProne (montage + Montage_SetPosition for crouch skip) → OnProneTransitionFinished (capsule shrink, speed set) → ExitProne/ExitProneToCrouch (geometry overlap test, montage, timer-based early stop for crouch exit) → OnProneExitFinished/OnProneExitToCrouchFinished. Extended Tick camera interp for prone height. Added state guards to sprint/jump/slide/crouch. Editor assets pending: IA_Prone, IA_CrouchSlide, BS_RifleProne, 5 transition montages, DA_Anim_Rifle, ABP Prone state + transitions.
+- **Session 4:** Added prone animation infrastructure (committed as `bb65931`). Created EProneTransitionType enum, extended AnimDataAsset with prone blendspace + 5 transition montage fields, extended AnimInstance with prone flags/getters/montage API. Created editor assets: IA_Prone, IA_CrouchSlide, BS_Prone, 5 prone transition montages, DA_Anim_Rifle, ABP prone state. Character-side prone C++ was written (full lifecycle: toggle, 4 entry transitions, 2 exit paths, capsule resize, camera interp, geometry checks, merged C key) but was never committed separately.
+- **Session 5:** Attempted to fix prone mesh sinking into ground (mesh at Z=-90 vs expected ~-42 when capsule shrinks from HH=96 to HH=30). Tried 5 approaches: (1) mesh Z offset — floated too high, (2) -ProneHalfHeight offset — close but camera spazzing, (3) SetRenderTranslation — doesn't exist on USkeletalMeshComponent, (4) counter-offset FP mesh — BaseEyeHeight interp fought it, (5) decouple FP from 3P mesh — still sank. Root cause: component hierarchy (Camera→FP→3P→Capsule) means any 3P mesh movement cascades to camera, and BaseEyeHeight interp creates a competing system. Decision: discard all character-side prone code for now. Reverted character files to Session 3 commit state (separate CrouchAction + SlideAction, no prone). Removed prone state reads from AnimInstance.cpp (commented out pending character re-implementation). Animation infrastructure remains intact and dormant. Next prone attempt should use root bone offset in animations or CMC's built-in crouch height system.
