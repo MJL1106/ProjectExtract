@@ -1,4 +1,4 @@
-# Project Status (Last Updated: Session 1)
+# Project Status (Last Updated: Session 2)
 
 ## Project Overview
 - **Name:** ProjectExtract — First-person extraction shooter
@@ -6,13 +6,20 @@
 - **Module:** `Extraction` (single module)
 - **Purpose:** MSc Game Programming degree project
 
-## Current State: Foundation Complete
-The project has been stripped from the UE5 First Person template down to a bare controllable FP character. A scalable C++ animation system has been built but the Animation Blueprint has **not yet been created** in-editor.
+## Current State: Core Systems In Place
+The project has been stripped from the UE5 First Person template. All core base classes are implemented in C++ with replication support. Movement, sprint, crouch, and jump are functional. A scalable C++ animation system has been built but the Animation Blueprint has **not yet been created** in-editor. Input Actions for future systems (slide, vault, interact) are bound with stub handlers.
 
 ## What Works
 - Project compiles cleanly
-- Controllable first-person character with Enhanced Input
+- Controllable first-person character with Enhanced Input (9 input actions bound)
+- Replication enabled (bReplicates, GetLifetimeReplicatedProps)
+- Movement: WASD (600 cm/s walk), sprint (900 cm/s, hold shift, forward-only, cancel on stop/crouch/airborne), crouch (built-in UE5 crouch)
+- Jump: JumpZVelocity 500, AirControl 0.2
+- Mouse look with pitch clamp (-70, +80)
+- GameMode sets default pawn + controller in C++
+- GameInstance class created and configured in DefaultEngine.ini
 - C++ animation foundation: AnimInstance, AnimDataAsset, weapon type enums
+- AnimInstance reads bIsSprinting from character's replicated state
 - Subfolder source structure (Core, Character, Animation, Game)
 
 ## What's Next (Not Started)
@@ -20,8 +27,14 @@ The project has been stripped from the UE5 First Person template down to a bare 
 - Create DataAsset instances (Unarmed, Pistol, Rifle) and assign animation references
 - Set up blendspaces for 8-dir locomotion per weapon type
 - Wire up upper/lower body layer blend in ABP (Layered Blend per Bone on spine_03)
+- Create Input Action assets in editor (IA_Move, IA_Look, IA_Jump, IA_Sprint, IA_Crouch, IA_Slide, IA_Vault, IA_Interact) and assign to character BP
+- Create Input Mapping Context (IMC_Default) and assign key bindings
+- Implement slide system
+- Implement vault system
+- Implement interact system
 - Build weapon system (C++)
 - Build AI system
+- Build health/damage system
 - Build game mode / level flow
 
 ## File Map
@@ -46,36 +59,39 @@ The project has been stripped from the UE5 First Person template down to a bare 
 ### Source/Extraction/Private/Animation/
 | File | Purpose |
 |------|---------|
-| `ExtractionAnimInstance.cpp` | AnimInstance implementation — caches character/movement, zero-alloc NativeUpdateAnimation, montage helpers |
+| `ExtractionAnimInstance.cpp` | AnimInstance impl — caches character/movement, zero-alloc update, reads bIsSprinting from character, montage helpers |
 
 ### Source/Extraction/Public/Character/
 | File | Purpose |
 |------|---------|
-| `ExtractionCharacter.h` | FP character — first-person mesh, camera, Enhanced Input actions, GetExtractionAnimInstance() getter |
+| `ExtractionCharacter.h` | FP character — replication, 9 input actions, sprint system, movement config, crouch, stub handlers for slide/vault/interact |
 | `ExtractionCameraManager.h` | Camera manager with pitch limits (-70, 80) |
 
 ### Source/Extraction/Private/Character/
 | File | Purpose |
 |------|---------|
-| `ExtractionCharacter.cpp` | Character implementation — input binding, movement, jump, AnimInstance getter |
+| `ExtractionCharacter.cpp` | Character impl — constructor (movement tuning, replication), input binding, sprint logic (UpdateSprint, ApplySprintSpeed), crouch, stubs |
 | `ExtractionCameraManager.cpp` | Sets pitch limits in constructor |
 
 ### Source/Extraction/Public/Game/
 | File | Purpose |
 |------|---------|
-| `ExtractionGameMode.h` | Minimal GameMode — sets default pawn and player controller classes |
+| `ExtractionGameMode.h` | GameMode — sets default pawn and player controller classes in C++ |
 | `ExtractionPlayerController.h` | Player controller — input mapping contexts, mobile controls support |
+| `ExtractionGameInstance.h` | **NEW** — Persistent GameInstance for loadouts, progression, session data |
 
 ### Source/Extraction/Private/Game/
 | File | Purpose |
 |------|---------|
-| `ExtractionGameMode.cpp` | GameMode constructor — assigns default classes |
+| `ExtractionGameMode.cpp` | Constructor sets DefaultPawnClass and PlayerControllerClass |
 | `ExtractionPlayerController.cpp` | Input context setup, mobile controls, BeginPlay logic |
+| `ExtractionGameInstance.cpp` | **NEW** — Empty constructor (ready for future systems) |
 
 ### Config
 | File | Purpose |
 |------|---------|
 | `Extraction.Build.cs` | Module deps: Core, CoreUObject, Engine, InputCore, EnhancedInput, AnimGraphRuntime, UMG, Slate. Include paths for all subfolders. |
+| `DefaultEngine.ini` | GameInstanceClass = ExtractionGameInstance, GameMode = BP_FirstPersonGameMode (Blueprint), renderer/platform settings |
 
 ## Key Design Decisions
 1. **Enums over GameplayTags** for weapon types — known finite set, compile-time safety, simpler debugging
@@ -84,6 +100,9 @@ The project has been stripped from the UE5 First Person template down to a bare 
 4. **Composition over inheritance** — flat class hierarchy, no deep chains
 5. **Zero-allocation NativeUpdateAnimation** — reads cached refs only, no TArray copies or string ops
 6. **Subfolder organisation** — Core, Character, Animation, Game — keeps related files grouped
+7. **Replication-ready from day one** — bReplicates, DOREPLIFETIME on bIsSprinting, future multiplayer support
+8. **Sprint as Tick evaluation** — bWantsToSprint (input) + conditions check each frame, only applies speed change on state transition
+9. **Config-driven movement values** — WalkSpeed/SprintSpeed as EditDefaultsOnly UPROPERTY, not hardcoded
 
 ## Build Notes
 - MSVC toolchain 14.44.35207 required (14.40-14.43 banned by UE 5.7)
@@ -92,3 +111,4 @@ The project has been stripped from the UE5 First Person template down to a bare 
 
 ## Session Log
 - **Session 1:** Fixed MSVC toolchain, stripped template, restructured source, built animation C++ foundation, created agent_docs
+- **Session 2:** GameMode sets C++ defaults, created GameInstance, added replication to character, added 5 new input actions (Sprint/Crouch/Slide/Vault/Interact) with bindings, configured movement (600/2048/2048), jump (500/0.2), implemented full sprint system with replicated state, crouch using built-in UE5 system, stub handlers for slide/vault/interact, updated DefaultEngine.ini

@@ -7,10 +7,12 @@
 #include "ExtractionGameMode.generated.h"
 
 /**
- *  Simple GameMode for a first person game
+ * Base GameMode for Extraction.
+ * Sets default pawn, controller, and HUD classes.
+ * Subclass or use a Blueprint child for level-specific overrides.
  */
 UCLASS()
-class AExtractionGameMode : public AGameModeBase
+class EXTRACTION_API AExtractionGameMode : public AGameModeBase
 {
 	GENERATED_BODY()
 
