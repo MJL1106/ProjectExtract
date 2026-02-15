@@ -21,6 +21,9 @@ namespace ExtractionCharacterConstants
 AExtractionCharacter::AExtractionCharacter()
 	: bIsSprinting(false)
 	, bWantsToSprint(false)
+	, CrouchCameraCurrentOffset(0.f)
+	, CrouchCameraTargetOffset(0.f)
+	, StandingBaseEyeHeight(0.f)
 {
 	// Replication
 	bReplicates = true;
@@ -63,7 +66,11 @@ AExtractionCharacter::AExtractionCharacter()
 		MoveComp->JumpZVelocity = 500.0f;
 		MoveComp->AirControl = 0.2f;
 		MoveComp->NavAgentProps.bCanCrouch = true;
+		MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+		MoveComp->MaxWalkSpeedCrouched = MaxWalkSpeedCrouched;
 	}
+
+	StandingBaseEyeHeight = BaseEyeHeight;
 }
 
 void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -80,6 +87,28 @@ void AExtractionCharacter::Tick(float DeltaTime)
 	if (IsLocallyControlled())
 	{
 		UpdateSprint();
+	}
+
+	// Smooth camera height interpolation during crouch transitions
+	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+	{
+		const float HalfHeightDelta = MoveComp->GetCrouchedHalfHeight() - GetDefaultHalfHeight();
+		CrouchCameraTargetOffset = MoveComp->IsCrouching() ? HalfHeightDelta : 0.f;
+
+		if (!FMath::IsNearlyEqual(CrouchCameraCurrentOffset, CrouchCameraTargetOffset, 0.1f))
+		{
+			CrouchCameraCurrentOffset = FMath::FInterpTo(
+				CrouchCameraCurrentOffset, CrouchCameraTargetOffset,
+				DeltaTime, CrouchCameraInterpSpeed);
+
+			BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
+		}
+		else
+		{
+			CrouchCameraCurrentOffset = CrouchCameraTargetOffset;
+			BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
+		}
 	}
 }
 
@@ -111,9 +140,8 @@ void AExtractionCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	EnhancedInput->BindAction(SprintAction, ETriggerEvent::Started, this, &AExtractionCharacter::SprintStart);
 	EnhancedInput->BindAction(SprintAction, ETriggerEvent::Completed, this, &AExtractionCharacter::SprintStop);
 
-	// Crouch
-	EnhancedInput->BindAction(CrouchAction, ETriggerEvent::Started, this, &AExtractionCharacter::CrouchStart);
-	EnhancedInput->BindAction(CrouchAction, ETriggerEvent::Completed, this, &AExtractionCharacter::CrouchStop);
+	// Crouch (toggle)
+	EnhancedInput->BindAction(CrouchAction, ETriggerEvent::Triggered, this, &AExtractionCharacter::ToggleCrouch);
 
 	// Slide
 	EnhancedInput->BindAction(SlideAction, ETriggerEvent::Started, this, &AExtractionCharacter::SlideStart);
@@ -226,17 +254,30 @@ void AExtractionCharacter::ApplySprintSpeed()
 	MoveComp->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
 }
 
-// ---- Stub Handlers ----
+// ---- Crouch ----
 
-void AExtractionCharacter::CrouchStart(const FInputActionValue& Value)
+void AExtractionCharacter::ToggleCrouch(const FInputActionValue& Value)
 {
-	Crouch();
+	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp))
+	{
+		return;
+	}
+
+	if (MoveComp->IsCrouching())
+	{
+		UnCrouch();
+	}
+	else
+	{
+		Crouch();
+
+		// Cancel sprint when entering crouch
+		bWantsToSprint = false;
+	}
 }
 
-void AExtractionCharacter::CrouchStop(const FInputActionValue& Value)
-{
-	UnCrouch();
-}
+// ---- Stub Handlers (future systems) ----
 
 void AExtractionCharacter::SlideStart(const FInputActionValue& Value)
 {

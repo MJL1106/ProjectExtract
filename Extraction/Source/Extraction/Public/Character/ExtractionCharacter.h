@@ -72,6 +72,18 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
 	float SprintSpeed = 900.0f;
 
+	/** Half-height of capsule when crouched */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
+	float CrouchedHalfHeight = 44.0f;
+
+	/** Max walk speed while crouched in cm/s */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
+	float MaxWalkSpeedCrouched = 300.0f;
+
+	/** How fast the camera interpolates between standing and crouched height (units/s) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
+	float CrouchCameraInterpSpeed = 12.0f;
+
 	// ---- Replicated State ----
 
 	/** True while sprint input is held and conditions are met */
@@ -118,10 +130,11 @@ protected:
 	/** Applies the correct MaxWalkSpeed based on sprint state */
 	void ApplySprintSpeed();
 
-	// ---- Stub Handlers (future systems) ----
+	// ---- Crouch ----
 
-	void CrouchStart(const FInputActionValue& Value);
-	void CrouchStop(const FInputActionValue& Value);
+	void ToggleCrouch(const FInputActionValue& Value);
+
+	// ---- Stub Handlers (future systems) ----
 	void SlideStart(const FInputActionValue& Value);
 	void VaultStart(const FInputActionValue& Value);
 	void InteractStart(const FInputActionValue& Value);
@@ -147,4 +160,13 @@ private:
 
 	/** Tracks whether the sprint input is currently held */
 	bool bWantsToSprint;
+
+	/** Current camera Z offset driven by crouch interpolation */
+	float CrouchCameraCurrentOffset;
+
+	/** Target camera Z offset (0 when standing, negative when crouched) */
+	float CrouchCameraTargetOffset;
+
+	/** Standing BaseEyeHeight cached from constructor, used as interp baseline */
+	float StandingBaseEyeHeight;
 };
