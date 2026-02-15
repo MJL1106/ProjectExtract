@@ -14,86 +14,137 @@ class UInputAction;
 class UExtractionAnimInstance;
 struct FInputActionValue;
 
-DECLARE_LOG_CATEGORY_EXTERN(LogTemplateCharacter, Log, All);
-
 /**
- *  A basic first person character
+ * Base first-person character for Extraction.
+ * Handles movement, input binding, sprint, and replication setup.
  */
 UCLASS()
-class AExtractionCharacter : public ACharacter
+class EXTRACTION_API AExtractionCharacter : public ACharacter
 {
 	GENERATED_BODY()
 
 	/** Pawn mesh: first person view (arms; seen only by self) */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
-	USkeletalMeshComponent* FirstPersonMesh;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<USkeletalMeshComponent> FirstPersonMesh;
 
 	/** First person camera */
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta = (AllowPrivateAccess = "true"))
-	UCameraComponent* FirstPersonCameraComponent;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UCameraComponent> FirstPersonCameraComponent;
 
 protected:
 
-	/** Jump Input Action */
-	UPROPERTY(EditAnywhere, Category ="Input")
-	UInputAction* JumpAction;
+	// ---- Input Actions ----
 
-	/** Move Input Action */
-	UPROPERTY(EditAnywhere, Category ="Input")
-	UInputAction* MoveAction;
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> JumpAction;
 
-	/** Look Input Action */
-	UPROPERTY(EditAnywhere, Category ="Input")
-	class UInputAction* LookAction;
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> MoveAction;
 
-	/** Mouse Look Input Action */
-	UPROPERTY(EditAnywhere, Category ="Input")
-	class UInputAction* MouseLookAction;
-	
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> LookAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> MouseLookAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> SprintAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> CrouchAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> SlideAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> VaultAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> InteractAction;
+
+	// ---- Movement Config ----
+
+	/** Walk speed in cm/s */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
+	float WalkSpeed = 600.0f;
+
+	/** Sprint speed in cm/s */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
+	float SprintSpeed = 900.0f;
+
+	// ---- Replicated State ----
+
+	/** True while sprint input is held and conditions are met */
+	UPROPERTY(ReplicatedUsing = OnRep_IsSprinting, BlueprintReadOnly, Category = "Movement|State")
+	bool bIsSprinting;
+
 public:
+
 	AExtractionCharacter();
 
+	virtual void Tick(float DeltaTime) override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 protected:
 
-	/** Called from Input Actions for movement input */
-	void MoveInput(const FInputActionValue& Value);
+	// ---- Input Handlers ----
 
-	/** Called from Input Actions for looking input */
+	void MoveInput(const FInputActionValue& Value);
 	void LookInput(const FInputActionValue& Value);
 
-	/** Handles aim inputs from either controls or UI interfaces */
-	UFUNCTION(BlueprintCallable, Category="Input")
+	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoAim(float Yaw, float Pitch);
 
-	/** Handles move inputs from either controls or UI interfaces */
-	UFUNCTION(BlueprintCallable, Category="Input")
+	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoMove(float Right, float Forward);
 
-	/** Handles jump start inputs from either controls or UI interfaces */
-	UFUNCTION(BlueprintCallable, Category="Input")
+	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoJumpStart();
 
-	/** Handles jump end inputs from either controls or UI interfaces */
-	UFUNCTION(BlueprintCallable, Category="Input")
+	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoJumpEnd();
 
-protected:
+	// ---- Sprint ----
 
-	/** Set up input action bindings */
+	void SprintStart(const FInputActionValue& Value);
+	void SprintStop(const FInputActionValue& Value);
+
+	/** Evaluates sprint conditions and updates bIsSprinting */
+	void UpdateSprint();
+
+	UFUNCTION()
+	void OnRep_IsSprinting();
+
+	/** Applies the correct MaxWalkSpeed based on sprint state */
+	void ApplySprintSpeed();
+
+	// ---- Stub Handlers (future systems) ----
+
+	void CrouchStart(const FInputActionValue& Value);
+	void CrouchStop(const FInputActionValue& Value);
+	void SlideStart(const FInputActionValue& Value);
+	void VaultStart(const FInputActionValue& Value);
+	void InteractStart(const FInputActionValue& Value);
+
+	// ---- Input Binding ----
+
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
-	
 
 public:
 
-	/** Returns the first person mesh **/
-	USkeletalMeshComponent* GetFirstPersonMesh() const { return FirstPersonMesh; }
+	// ---- Getters ----
 
-	/** Returns first person camera component **/
+	USkeletalMeshComponent* GetFirstPersonMesh() const { return FirstPersonMesh; }
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
 
-	/** Returns the typed AnimInstance from the third-person mesh, or nullptr */
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	UExtractionAnimInstance* GetExtractionAnimInstance() const;
 
-};
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool GetIsSprinting() const { return bIsSprinting; }
 
+private:
+
+	/** Tracks whether the sprint input is currently held */
+	bool bWantsToSprint;
+};

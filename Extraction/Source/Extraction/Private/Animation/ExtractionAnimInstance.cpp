@@ -9,6 +9,12 @@
 
 DEFINE_LOG_CATEGORY(LogExtractionAnim);
 
+namespace ExtractionAnimConstants
+{
+	/** Minimum ground speed (cm/s) to consider the character as having velocity */
+	static constexpr float MinVelocityThreshold = 3.0f;
+}
+
 UExtractionAnimInstance::UExtractionAnimInstance()
 	: Speed(0.f)
 	, Direction(0.f)
@@ -68,7 +74,7 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	const FVector Velocity = MovementComponent->Velocity;
 	const FVector GroundVelocity(Velocity.X, Velocity.Y, 0.f);
 	Speed = GroundVelocity.Size();
-	bHasVelocity = Speed > 3.0f;
+	bHasVelocity = Speed > ExtractionAnimConstants::MinVelocityThreshold;
 
 	const float MaxSpeed = MovementComponent->MaxWalkSpeed;
 	NormalizedSpeed = (MaxSpeed > UE_KINDA_SMALL_NUMBER)
@@ -100,7 +106,10 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	AimPitch = FMath::ClampAngle(AimDelta.Pitch, -90.f, 90.f);
 	AimYaw = FMath::ClampAngle(AimDelta.Yaw, -180.f, 180.f);
 
-	// bIsSprinting, bIsADS, bIsAlive are set externally via setters
+	// Sprint reads from character's replicated state
+	bIsSprinting = OwningCharacter->GetIsSprinting();
+
+	// bIsADS, bIsAlive are set externally via setters or gameplay systems
 }
 
 // ---- Convenience Getters ----
@@ -201,8 +210,9 @@ float UExtractionAnimInstance::PlayMontageInternal(UAnimMontage* Montage, float 
 		return 0.f;
 	}
 
-	Montage_Play(Montage, PlayRate);
-	return Montage->GetPlayLength() / PlayRate;
+	const float SafePlayRate = FMath::Max(PlayRate, UE_KINDA_SMALL_NUMBER);
+	Montage_Play(Montage, SafePlayRate);
+	return Montage->GetPlayLength() / SafePlayRate;
 }
 
 float UExtractionAnimInstance::PlayRandomMontage(
