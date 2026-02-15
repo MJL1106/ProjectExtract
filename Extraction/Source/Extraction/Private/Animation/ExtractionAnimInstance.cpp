@@ -23,6 +23,7 @@ UExtractionAnimInstance::UExtractionAnimInstance()
 	, bIsFalling(false)
 	, bIsCrouching(false)
 	, bIsSprinting(false)
+	, bIsSliding(false)
 	, bIsADS(false)
 	, bHasVelocity(false)
 	, bIsAccelerating(false)
@@ -106,8 +107,9 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	AimPitch = FMath::ClampAngle(AimDelta.Pitch, -90.f, 90.f);
 	AimYaw = FMath::ClampAngle(AimDelta.Yaw, -180.f, 180.f);
 
-	// Sprint reads from character's replicated state
+	// Sprint and slide read from character's replicated state
 	bIsSprinting = OwningCharacter->GetIsSprinting();
+	bIsSliding = OwningCharacter->GetIsSliding();
 
 	// bIsADS, bIsAlive are set externally via setters or gameplay systems
 }

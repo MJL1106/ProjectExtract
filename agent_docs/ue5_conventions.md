@@ -26,6 +26,30 @@ TObjectPtr<AExtractionCharacter> OwningCharacter;
 UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Components", meta=(AllowPrivateAccess="true"))
 ```
 
+## Tooltip Convention
+Any UPROPERTY that is designer-tweakable and **not self-explanatory** MUST include a `ToolTip` in the `meta` specifier. This appears when hovering the property in the Details panel.
+
+**When to add a ToolTip:**
+- The value's effect is non-linear or curve-based (exponents, easing, blend factors)
+- The property interacts with other properties in non-obvious ways
+- Valid ranges aren't obvious from the name alone
+- The property uses units that aren't in the name (degrees/s, cm/s, etc.)
+- A few example values with descriptions help the designer understand the feel
+
+**When a ToolTip is NOT needed:**
+- The property name + comment fully explains it (e.g., `WalkSpeed` in cm/s)
+- Simple on/off booleans
+
+**Format:**
+```cpp
+UPROPERTY(EditDefaultsOnly, Category = "Movement|Slide",
+    meta = (ClampMin = "0.5", ClampMax = "5.0",
+        ToolTip = "Controls how the speed drops off over the slide duration.\n1.0 = Linear\n2.0 = Holds speed then drops\n3.0+ = More hang time"))
+float SlideDecelerationExponent = 2.0f;
+```
+
+Use `\n` for line breaks within tooltips. Keep tooltips concise but include example values where useful for tuning.
+
 ## UFUNCTION Patterns
 ```cpp
 // Pure getter (no side effects, usable in ABP)
