@@ -20,10 +20,14 @@ namespace ExtractionCharacterConstants
 
 AExtractionCharacter::AExtractionCharacter()
 	: bIsSprinting(false)
+	, bIsSliding(false)
 	, bWantsToSprint(false)
 	, CrouchCameraCurrentOffset(0.f)
 	, CrouchCameraTargetOffset(0.f)
 	, StandingBaseEyeHeight(0.f)
+	, SlideElapsed(0.f)
+	, SlideStartSpeed(0.f)
+	, SlideDirection(FVector::ZeroVector)
 {
 	// Replication
 	bReplicates = true;
@@ -73,11 +77,27 @@ AExtractionCharacter::AExtractionCharacter()
 	StandingBaseEyeHeight = BaseEyeHeight;
 }
 
+void AExtractionCharacter::BeginPlay()
+{
+	Super::BeginPlay();
+
+	// Re-apply movement speeds with BP-overridden values
+	// (constructor uses C++ defaults which may differ from BP instance values)
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+	{
+		MoveComp->MaxWalkSpeed = WalkSpeed;
+		MoveComp->MaxWalkSpeedCrouched = MaxWalkSpeedCrouched;
+		MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+	}
+}
+
 void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsSprinting, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsSliding, COND_SkipOwner);
 }
 
 void AExtractionCharacter::Tick(float DeltaTime)
@@ -86,6 +106,11 @@ void AExtractionCharacter::Tick(float DeltaTime)
 
 	if (IsLocallyControlled())
 	{
+		if (bIsSliding)
+		{
+			UpdateSlide(DeltaTime);
+		}
+
 		UpdateSprint();
 	}
 
@@ -187,6 +212,11 @@ void AExtractionCharacter::DoMove(float Right, float Forward)
 
 void AExtractionCharacter::DoJumpStart()
 {
+	if (bIsSliding)
+	{
+		EndSlide();
+	}
+
 	Jump();
 }
 
@@ -229,7 +259,7 @@ void AExtractionCharacter::UpdateSprint()
 		bMovingForward = FVector::DotProduct(VelocityDir, ForwardDir) > ExtractionCharacterConstants::SprintForwardDotThreshold;
 	}
 
-	const bool bShouldSprint = bWantsToSprint && bHasVelocity && bOnGround && bNotCrouching && bMovingForward;
+	const bool bShouldSprint = bWantsToSprint && bHasVelocity && bOnGround && bNotCrouching && !bIsSliding && bMovingForward;
 
 	if (bIsSprinting != bShouldSprint)
 	{
@@ -277,12 +307,145 @@ void AExtractionCharacter::ToggleCrouch(const FInputActionValue& Value)
 	}
 }
 
-// ---- Stub Handlers (future systems) ----
+// ---- Slide ----
 
 void AExtractionCharacter::SlideStart(const FInputActionValue& Value)
 {
-	// TODO: Implement slide system
+	if (bIsSliding)
+	{
+		return;
+	}
+
+	// Slide requires: sprinting and on ground
+	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp))
+	{
+		return;
+	}
+
+	if (!bIsSprinting || !MoveComp->IsMovingOnGround())
+	{
+		return;
+	}
+
+	EnterSlide();
 }
+
+void AExtractionCharacter::EnterSlide()
+{
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp))
+	{
+		return;
+	}
+
+	bIsSliding = true;
+	SlideElapsed = 0.f;
+
+	// Lock slide direction to current forward
+	SlideDirection = GetActorForwardVector().GetSafeNormal2D();
+
+	// Capture entry speed — ramp up to peak from here, not an instant teleport
+	SlideStartSpeed = FMath::Max(MoveComp->Velocity.Size2D(), SprintSpeed);
+
+	// Cancel sprint state (but preserve bWantsToSprint so sprint resumes after slide if still held)
+	bIsSprinting = false;
+	ApplySprintSpeed();
+
+	// Crouch the capsule for the slide
+	Crouch();
+
+	// Allow sliding off ledges (crouched characters are blocked by default)
+	MoveComp->bCanWalkOffLedgesWhenCrouching = true;
+
+	// Set initial velocity to slide direction at entry speed (no instant impulse)
+	MoveComp->Velocity = SlideDirection * SlideStartSpeed + FVector(0.f, 0.f, MoveComp->Velocity.Z);
+}
+
+void AExtractionCharacter::UpdateSlide(float DeltaTime)
+{
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp))
+	{
+		EndSlide();
+		return;
+	}
+
+	SlideElapsed += DeltaTime;
+
+	if (SlideElapsed >= SlideDuration)
+	{
+		EndSlide();
+		return;
+	}
+
+	// Steer slide direction toward player's look direction
+	if (SlideSteerRate > UE_KINDA_SMALL_NUMBER)
+	{
+		const FVector LookDir = GetActorForwardVector().GetSafeNormal2D();
+		const FRotator CurrentRot = SlideDirection.Rotation();
+		const FRotator TargetRot = LookDir.Rotation();
+		const FRotator NewRot = FMath::RInterpConstantTo(CurrentRot, TargetRot, DeltaTime, SlideSteerRate);
+		SlideDirection = NewRot.Vector().GetSafeNormal2D();
+	}
+
+	// Normalized time [0..1]
+	const float Alpha = FMath::Clamp(SlideElapsed / SlideDuration, 0.f, 1.f);
+
+	// Power curve: holds speed longer at the start, then drops off toward the end
+	// Exponent 1 = linear, 2 = quadratic ease-out, 3 = even more hang time at peak
+	const float CurvedAlpha = FMath::Pow(Alpha, SlideDecelerationExponent);
+
+	// Lerp from peak speed down to end speed along the curve
+	const float DesiredSpeed = FMath::Lerp(SlidePeakSpeed, SlideEndSpeed, CurvedAlpha);
+
+	// Apply velocity along the (potentially steered) slide direction
+	MoveComp->Velocity = SlideDirection * DesiredSpeed + FVector(0.f, 0.f, MoveComp->Velocity.Z);
+}
+
+void AExtractionCharacter::EndSlide()
+{
+	if (!bIsSliding)
+	{
+		return;
+	}
+
+	bIsSliding = false;
+	SlideElapsed = 0.f;
+
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+	{
+		// Restore ledge blocking for normal crouching
+		MoveComp->bCanWalkOffLedgesWhenCrouching = false;
+
+		// Set exit velocity to the appropriate walk/sprint speed for a smooth handoff
+		const float ExitSpeed = bWantsToSprint ? SprintSpeed : WalkSpeed;
+		MoveComp->Velocity = SlideDirection * ExitSpeed + FVector(0.f, 0.f, MoveComp->Velocity.Z);
+	}
+
+	// Stand back up — snap camera offset so there's no interp jolt
+	CrouchCameraCurrentOffset = 0.f;
+	CrouchCameraTargetOffset = 0.f;
+	BaseEyeHeight = StandingBaseEyeHeight;
+
+	UnCrouch();
+}
+
+void AExtractionCharacter::OnRep_IsSliding()
+{
+	// Proxies: sync the crouched visual state
+	if (bIsSliding)
+	{
+		Crouch();
+	}
+	else
+	{
+		UnCrouch();
+	}
+}
+
+// ---- Stub Handlers (future systems) ----
 
 void AExtractionCharacter::VaultStart(const FInputActionValue& Value)
 {

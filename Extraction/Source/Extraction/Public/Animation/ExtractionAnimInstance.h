@@ -69,6 +69,9 @@ public:
 	bool bIsSprinting;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
+	bool bIsSliding;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
 	bool bIsADS;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
