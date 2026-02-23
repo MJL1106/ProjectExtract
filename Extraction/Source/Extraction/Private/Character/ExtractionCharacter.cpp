@@ -16,6 +16,9 @@ namespace ExtractionCharacterConstants
 {
 	/** Dot product threshold to consider movement as "forward" for sprint */
 	static constexpr float SprintForwardDotThreshold = 0.1f;
+
+	/** Minimum 2D speed (cm/s) to use walk-to-prone instead of idle-to-prone */
+	static constexpr float ProneWalkVelocityThreshold = 10.0f;
 }
 
 AExtractionCharacter::AExtractionCharacter()
@@ -438,9 +441,55 @@ void AExtractionCharacter::OnRep_IsSliding()
 
 // ---- Prone ----
 
+/** Selects the correct entry montage type based on the character's current movement state. */
+static EProneTransitionType DetermineProneEntryType(const AExtractionCharacter& Char)
+{
+	const UCharacterMovementComponent* MoveComp = Char.GetCharacterMovement();
+	if (!IsValid(MoveComp)) { return EProneTransitionType::FromIdle; }
+
+	if (MoveComp->IsCrouching())  { return EProneTransitionType::FromCrouch; }
+	if (Char.GetIsSprinting())    { return EProneTransitionType::FromSprint; }
+	if (MoveComp->Velocity.SizeSquared2D() >
+		FMath::Square(ExtractionCharacterConstants::ProneWalkVelocityThreshold))
+	{
+		return EProneTransitionType::FromWalk;
+	}
+	return EProneTransitionType::FromIdle;
+}
+
 void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 {
-	bIsProne = !bIsProne;
+	// 3P mesh AnimInstance — authoritative for state guards
+	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
+	if (!IsValid(AnimInst)) { return; }
+
+	// Block re-entry during any active prone transition
+	if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) { return; }
+
+	// FP mesh AnimInstance — mirrors montage playback so the camera-driving head bone animates
+	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
+		GetFirstPersonMesh()->GetAnimInstance());
+
+	if (bIsProne)
+	{
+		// --- Exit prone ---
+		bIsProne = false;
+		AnimInst->PlayProneExitMontage();
+		if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneExitMontage(); }
+	}
+	else
+	{
+		// --- Enter prone ---
+		// Cancel sprint before querying state (sprint state must be stale-free for DetermineProneEntryType)
+		bWantsToSprint = false;
+		bIsSprinting = false;
+		ApplySprintSpeed();
+
+		const EProneTransitionType TransitionType = DetermineProneEntryType(*this);
+		bIsProne = true;
+		AnimInst->PlayProneTransitionMontage(TransitionType);
+		if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneTransitionMontage(TransitionType); }
+	}
 }
 
 void AExtractionCharacter::OnRep_IsProne()

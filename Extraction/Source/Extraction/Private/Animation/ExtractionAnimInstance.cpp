@@ -13,6 +13,9 @@ namespace ExtractionAnimConstants
 {
 	/** Minimum ground speed (cm/s) to consider the character as having velocity */
 	static constexpr float MinVelocityThreshold = 3.0f;
+
+	/** Interpolation speed for Direction smoothing — prevents snapping when speed crosses the velocity threshold */
+	static constexpr float DirectionInterpSpeed = 15.0f;
 }
 
 UExtractionAnimInstance::UExtractionAnimInstance()
@@ -86,16 +89,15 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		: 0.f;
 
 	// --- Direction (relative to actor facing) ---
+	// Interpolate toward target to prevent snapping when speed crosses the velocity threshold.
+	float TargetDirection = 0.f;
 	if (bHasVelocity)
 	{
 		const FRotator ActorRotation = OwningCharacter->GetActorRotation();
-		Direction = UKismetMathLibrary::NormalizedDeltaRotator(
+		TargetDirection = UKismetMathLibrary::NormalizedDeltaRotator(
 			GroundVelocity.Rotation(), ActorRotation).Yaw;
 	}
-	else
-	{
-		Direction = 0.f;
-	}
+	Direction = FMath::FInterpTo(Direction, TargetDirection, DeltaSeconds, ExtractionAnimConstants::DirectionInterpSpeed);
 
 	// --- Movement state flags ---
 	bIsInAir = MovementComponent->IsFalling();
@@ -115,7 +117,23 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	bIsSliding = OwningCharacter->GetIsSliding();
 	bIsProne = OwningCharacter->GetIsProne();
 
-	// bIsTransitioningToProne/FromProne — will be populated when prone transitions are implemented
+	// --- Prone transition flags (computed from active montages — self-corrects on interruption) ---
+	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
+	if (IsValid(AnimData))
+	{
+		bIsTransitioningToProne =
+			Montage_IsPlaying(AnimData->IdleToProneTransition)   ||
+			Montage_IsPlaying(AnimData->WalkToProneTransition)   ||
+			Montage_IsPlaying(AnimData->SprintToProneTransition) ||
+			Montage_IsPlaying(AnimData->CrouchToProneTransition);
+		bIsTransitioningFromProne = Montage_IsPlaying(AnimData->ProneToStandTransition);
+	}
+	else
+	{
+		bIsTransitioningToProne   = false;
+		bIsTransitioningFromProne = false;
+	}
+
 	// bIsADS, bIsAlive are set externally via setters or gameplay systems
 }
 
