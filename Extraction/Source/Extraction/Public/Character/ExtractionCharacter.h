@@ -50,17 +50,18 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> SprintAction;
 
+	/** Single action for crouch and slide. Sprint + press = slide. No sprint + press = toggle crouch. */
 	UPROPERTY(EditAnywhere, Category = "Input")
-	TObjectPtr<UInputAction> CrouchAction;
-
-	UPROPERTY(EditAnywhere, Category = "Input")
-	TObjectPtr<UInputAction> SlideAction;
+	TObjectPtr<UInputAction> CrouchSlideAction;
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> VaultAction;
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> InteractAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> ProneAction;
 
 	// ---- Movement Config ----
 
@@ -121,6 +122,10 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_IsSliding, BlueprintReadOnly, Category = "Movement|State")
 	bool bIsSliding;
 
+	/** True while the character is prone */
+	UPROPERTY(ReplicatedUsing = OnRep_IsProne, BlueprintReadOnly, Category = "Movement|State")
+	bool bIsProne;
+
 public:
 
 	AExtractionCharacter();
@@ -162,13 +167,10 @@ protected:
 	/** Applies the correct MaxWalkSpeed based on sprint state */
 	void ApplySprintSpeed();
 
-	// ---- Crouch ----
+	// ---- Crouch / Slide (unified) ----
 
-	void ToggleCrouch(const FInputActionValue& Value);
-
-	// ---- Slide ----
-
-	void SlideStart(const FInputActionValue& Value);
+	/** Sprint + press = slide. No sprint + press = toggle crouch. Ignores input while prone. */
+	void HandleCrouchSlide(const FInputActionValue& Value);
 
 	/** Evaluates whether the slide should continue or end */
 	void UpdateSlide(float DeltaTime);
@@ -181,6 +183,13 @@ protected:
 
 	UFUNCTION()
 	void OnRep_IsSliding();
+
+	// ---- Prone ----
+
+	void ToggleProne(const FInputActionValue& Value);
+
+	UFUNCTION()
+	void OnRep_IsProne();
 
 	// ---- Stub Handlers (future systems) ----
 	void VaultStart(const FInputActionValue& Value);
@@ -205,6 +214,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool GetIsSliding() const { return bIsSliding; }
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool GetIsProne() const { return bIsProne; }
 
 private:
 

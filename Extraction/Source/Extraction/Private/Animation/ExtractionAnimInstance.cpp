@@ -110,11 +110,12 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	AimPitch = FMath::ClampAngle(AimDelta.Pitch, -90.f, 90.f);
 	AimYaw = FMath::ClampAngle(AimDelta.Yaw, -180.f, 180.f);
 
-	// Sprint and slide read from character's replicated state
+	// Sprint, slide, and prone read from character's replicated state
 	bIsSprinting = OwningCharacter->GetIsSprinting();
 	bIsSliding = OwningCharacter->GetIsSliding();
+	bIsProne = OwningCharacter->GetIsProne();
 
-	// bIsProne, bIsTransitioningToProne/FromProne — will be populated when prone system is re-implemented
+	// bIsTransitioningToProne/FromProne — will be populated when prone transitions are implemented
 	// bIsADS, bIsAlive are set externally via setters or gameplay systems
 }
 

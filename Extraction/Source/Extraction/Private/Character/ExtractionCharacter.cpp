@@ -21,6 +21,7 @@ namespace ExtractionCharacterConstants
 AExtractionCharacter::AExtractionCharacter()
 	: bIsSprinting(false)
 	, bIsSliding(false)
+	, bIsProne(false)
 	, bWantsToSprint(false)
 	, CrouchCameraCurrentOffset(0.f)
 	, CrouchCameraTargetOffset(0.f)
@@ -98,6 +99,7 @@ void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsSprinting, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsSliding, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsProne, COND_SkipOwner);
 }
 
 void AExtractionCharacter::Tick(float DeltaTime)
@@ -165,11 +167,11 @@ void AExtractionCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	EnhancedInput->BindAction(SprintAction, ETriggerEvent::Started, this, &AExtractionCharacter::SprintStart);
 	EnhancedInput->BindAction(SprintAction, ETriggerEvent::Completed, this, &AExtractionCharacter::SprintStop);
 
-	// Crouch (toggle)
-	EnhancedInput->BindAction(CrouchAction, ETriggerEvent::Triggered, this, &AExtractionCharacter::ToggleCrouch);
+	// Crouch / Slide (unified — sprint+press = slide, no sprint+press = toggle crouch)
+	EnhancedInput->BindAction(CrouchSlideAction, ETriggerEvent::Started, this, &AExtractionCharacter::HandleCrouchSlide);
 
-	// Slide
-	EnhancedInput->BindAction(SlideAction, ETriggerEvent::Started, this, &AExtractionCharacter::SlideStart);
+	// Prone
+	EnhancedInput->BindAction(ProneAction, ETriggerEvent::Started, this, &AExtractionCharacter::ToggleProne);
 
 	// Vault
 	EnhancedInput->BindAction(VaultAction, ETriggerEvent::Started, this, &AExtractionCharacter::VaultStart);
@@ -284,16 +286,29 @@ void AExtractionCharacter::ApplySprintSpeed()
 	MoveComp->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
 }
 
-// ---- Crouch ----
+// ---- Crouch / Slide (unified) ----
 
-void AExtractionCharacter::ToggleCrouch(const FInputActionValue& Value)
+void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 {
+	if (bIsProne || bIsSliding)
+	{
+		return;
+	}
+
 	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (!IsValid(MoveComp))
 	{
 		return;
 	}
 
+	// Sprint + grounded = slide
+	if (bIsSprinting && MoveComp->IsMovingOnGround())
+	{
+		EnterSlide();
+		return;
+	}
+
+	// Otherwise toggle crouch
 	if (MoveComp->IsCrouching())
 	{
 		UnCrouch();
@@ -305,30 +320,6 @@ void AExtractionCharacter::ToggleCrouch(const FInputActionValue& Value)
 		// Cancel sprint when entering crouch
 		bWantsToSprint = false;
 	}
-}
-
-// ---- Slide ----
-
-void AExtractionCharacter::SlideStart(const FInputActionValue& Value)
-{
-	if (bIsSliding)
-	{
-		return;
-	}
-
-	// Slide requires: sprinting and on ground
-	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
-	if (!IsValid(MoveComp))
-	{
-		return;
-	}
-
-	if (!bIsSprinting || !MoveComp->IsMovingOnGround())
-	{
-		return;
-	}
-
-	EnterSlide();
 }
 
 void AExtractionCharacter::EnterSlide()
@@ -443,6 +434,18 @@ void AExtractionCharacter::OnRep_IsSliding()
 	{
 		UnCrouch();
 	}
+}
+
+// ---- Prone ----
+
+void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
+{
+	bIsProne = !bIsProne;
+}
+
+void AExtractionCharacter::OnRep_IsProne()
+{
+	// Proxies: AnimInstance reads bIsProne via GetIsProne() each frame
 }
 
 // ---- Stub Handlers (future systems) ----
