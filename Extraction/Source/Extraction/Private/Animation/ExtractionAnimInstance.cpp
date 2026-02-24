@@ -129,10 +129,8 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsTransitioningToProne =
 			Montage_IsPlaying(AnimData->IdleToProneTransition)   ||
 			Montage_IsPlaying(AnimData->WalkToProneTransition)   ||
-			Montage_IsPlaying(AnimData->SprintToProneTransition) ||
-			Montage_IsPlaying(AnimData->CrouchToProneTransition);
+			Montage_IsPlaying(AnimData->SprintToProneTransition);
 
-		// ProneToStandTransition is shared for prone->stand, prone->crouch, and crouch->prone (reversed)
 		bIsTransitioningFromProne = Montage_IsPlaying(AnimData->ProneToStandTransition);
 	}
 	else
@@ -251,7 +249,7 @@ float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType T
 		Montage = Data->SprintToProneTransition;
 		break;
 	case EProneTransitionType::FromCrouch:
-		// Handled by PlayCrouchToProneMontage (reverse of ProneToStand)
+		// No montage — character UnCrouches immediately and the ABP transitions via inertialization
 		return 0.f;
 	default:
 		return 0.f;
@@ -294,27 +292,6 @@ float UExtractionAnimInstance::PlayProneToCrouchMontage(float PlayRate)
 	return Montage->GetPlayLength() / SafePlayRate;
 }
 
-float UExtractionAnimInstance::PlayCrouchToProneMontage(float PlayRate)
-{
-	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning, TEXT("PlayCrouchToProneMontage: No active anim data."));
-		return 0.f;
-	}
-
-	if (!IsValid(Data->CrouchToProneTransition))
-	{
-		UE_LOG(LogExtractionAnim, Warning, TEXT("PlayCrouchToProneMontage: CrouchToProneTransition is null."));
-		return 0.f;
-	}
-
-	// CrouchToProne plays the transition montage in reverse (end→start).
-	// Negative InPlayRate tells UE5 to start from the end of the montage.
-	const float ReverseRate = -FMath::Abs(PlayRate);
-	return PlayMontageInternal(Data->CrouchToProneTransition, ReverseRate);
-}
-
 bool UExtractionAnimInstance::IsPlayingProneEntryMontage() const
 {
 	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
@@ -325,8 +302,7 @@ bool UExtractionAnimInstance::IsPlayingProneEntryMontage() const
 
 	return Montage_IsPlaying(AnimData->IdleToProneTransition)   ||
 	       Montage_IsPlaying(AnimData->WalkToProneTransition)   ||
-	       Montage_IsPlaying(AnimData->SprintToProneTransition) ||
-	       Montage_IsPlaying(AnimData->CrouchToProneTransition);
+	       Montage_IsPlaying(AnimData->SprintToProneTransition);
 }
 
 void UExtractionAnimInstance::SetWeaponType(EWeaponType NewWeaponType)

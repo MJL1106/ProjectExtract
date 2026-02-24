@@ -20,8 +20,6 @@ namespace ExtractionCharacterConstants
 	/** Minimum 2D speed (cm/s) to use walk-to-prone instead of idle-to-prone */
 	static constexpr float ProneWalkVelocityThreshold = 10.0f;
 
-	/** Play rate for the crouch-to-prone reversed montage (lower = slower transition) */
-	static constexpr float CrouchToPronePlayRate = 0.75f;
 }
 
 AExtractionCharacter::AExtractionCharacter()
@@ -129,7 +127,8 @@ void AExtractionCharacter::Tick(float DeltaTime)
 		if (bIsProne && GetCharacterMovement()->IsCrouching())
 		{
 			UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
-			if (!IsValid(AnimInst) || !AnimInst->IsPlayingProneEntryMontage())
+			const bool bMontPlaying = IsValid(AnimInst) && AnimInst->IsPlayingProneEntryMontage();
+			if (!IsValid(AnimInst) || !bMontPlaying)
 			{
 				UnCrouch();
 			}
@@ -281,7 +280,7 @@ void AExtractionCharacter::UpdateSprint()
 		bMovingForward = FVector::DotProduct(VelocityDir, ForwardDir) > ExtractionCharacterConstants::SprintForwardDotThreshold;
 	}
 
-	const bool bShouldSprint = bWantsToSprint && bHasVelocity && bOnGround && bNotCrouching && !bIsSliding && bMovingForward;
+	const bool bShouldSprint = bWantsToSprint && bHasVelocity && bOnGround && bNotCrouching && !bIsSliding && !bIsProne && bMovingForward;
 
 	if (bIsSprinting != bShouldSprint)
 	{
@@ -303,7 +302,14 @@ void AExtractionCharacter::ApplySprintSpeed()
 		return;
 	}
 
-	MoveComp->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
+	if (bIsProne)
+	{
+		MoveComp->MaxWalkSpeed = ProneSpeed;
+	}
+	else
+	{
+		MoveComp->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
+	}
 }
 
 // ---- Crouch / Slide (unified) ----
@@ -328,6 +334,7 @@ void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 			GetFirstPersonMesh()->GetAnimInstance());
 
 		bIsProne = false;
+		ApplySprintSpeed();
 		AnimInst->PlayProneToCrouchMontage();
 		if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneToCrouchMontage(); }
 
@@ -511,6 +518,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 	{
 		// --- Exit prone ---
 		bIsProne = false;
+		ApplySprintSpeed();
 		AnimInst->PlayProneExitMontage();
 		if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneExitMontage(); }
 	}
@@ -520,18 +528,16 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 		// Cancel sprint before querying state (sprint state must be stale-free for DetermineProneEntryType)
 		bWantsToSprint = false;
 		bIsSprinting = false;
-		ApplySprintSpeed();
 
 		const EProneTransitionType TransitionType = DetermineProneEntryType(*this);
 		bIsProne = true;
+		ApplySprintSpeed();
 
 		if (TransitionType == EProneTransitionType::FromCrouch)
 		{
-			// Play montage only — do NOT UnCrouch here. UnCrouch in the same frame
-			// triggers a state machine transition whose Inertialization stomps the montage.
-			// Tick() will handle the deferred UnCrouch on the next frame.
-			AnimInst->PlayCrouchToProneMontage(ExtractionCharacterConstants::CrouchToPronePlayRate);
-			if (IsValid(FPAnimInst)) { FPAnimInst->PlayCrouchToProneMontage(ExtractionCharacterConstants::CrouchToPronePlayRate); }
+			// No montage — just UnCrouch and let the ABP state machine
+			// transition Crouch→Prone via inertialization.
+			UnCrouch();
 		}
 		else
 		{

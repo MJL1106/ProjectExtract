@@ -81,6 +81,10 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
 	float MaxWalkSpeedCrouched = 300.0f;
 
+	/** Max walk speed while prone in cm/s (should match prone blendspace max Speed axis) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
+	float ProneSpeed = 80.0f;
+
 	/** How fast the camera interpolates between standing and crouched height (units/s) */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
 	float CrouchCameraInterpSpeed = 12.0f;
@@ -132,7 +136,7 @@ public:
 
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
-	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 protected:
 
@@ -240,4 +244,5 @@ private:
 
 	/** Direction the slide was initiated in (locked at entry) */
 	FVector SlideDirection;
+
 };
