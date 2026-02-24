@@ -102,11 +102,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
 	TObjectPtr<UAnimMontage> SprintToProneTransition;
 
-	/** Transition montage: crouching -> prone. Root motion. (Reuses idle-to-prone, skipped partway.) */
+	/** Transition montage: crouching -> prone. Plays forward. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
 	TObjectPtr<UAnimMontage> CrouchToProneTransition;
 
-	/** Transition montage: prone -> standing. Root motion. Shared for all exit paths. */
+	/**
+	 * Transition montage: prone -> standing. Root motion.
+	 * Also reused for prone -> crouch (plays only the first section).
+	 * Add a second section (e.g. "StandUp") at the crouch-height keyframe
+	 * so prone-to-crouch stops there while prone-to-stand plays the full montage.
+	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
 	TObjectPtr<UAnimMontage> ProneToStandTransition;
 

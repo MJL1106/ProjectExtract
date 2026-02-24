@@ -4,6 +4,7 @@
 #include "ExtractionCharacter.h"
 #include "ExtractionAnimDataAsset.h"
 #include "Extraction.h"
+#include "Animation/AnimMontage.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/KismetMathLibrary.h"
 
@@ -16,6 +17,10 @@ namespace ExtractionAnimConstants
 
 	/** Interpolation speed for Direction smoothing — prevents snapping when speed crosses the velocity threshold */
 	static constexpr float DirectionInterpSpeed = 15.0f;
+
+	/** Blend-in time (seconds) for prone<->crouch transitions using explicit Inertialization */
+	static constexpr float ProneTransitionBlendTime = 0.2f;
+
 }
 
 UExtractionAnimInstance::UExtractionAnimInstance()
@@ -126,6 +131,8 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			Montage_IsPlaying(AnimData->WalkToProneTransition)   ||
 			Montage_IsPlaying(AnimData->SprintToProneTransition) ||
 			Montage_IsPlaying(AnimData->CrouchToProneTransition);
+
+		// ProneToStandTransition is shared for prone->stand, prone->crouch, and crouch->prone (reversed)
 		bIsTransitioningFromProne = Montage_IsPlaying(AnimData->ProneToStandTransition);
 	}
 	else
@@ -244,8 +251,8 @@ float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType T
 		Montage = Data->SprintToProneTransition;
 		break;
 	case EProneTransitionType::FromCrouch:
-		Montage = Data->CrouchToProneTransition;
-		break;
+		// Handled by PlayCrouchToProneMontage (reverse of ProneToStand)
+		return 0.f;
 	default:
 		return 0.f;
 	}
@@ -261,6 +268,65 @@ float UExtractionAnimInstance::PlayProneExitMontage(float PlayRate)
 		return 0.f;
 	}
 	return PlayMontageInternal(Data->ProneToStandTransition, PlayRate);
+}
+
+float UExtractionAnimInstance::PlayProneToCrouchMontage(float PlayRate)
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data) || !IsValid(Data->ProneToStandTransition))
+	{
+		return 0.f;
+	}
+
+	UAnimMontage* Montage = Data->ProneToStandTransition;
+	const float SafePlayRate = FMath::Max(PlayRate, UE_KINDA_SMALL_NUMBER);
+
+	FMontageBlendSettings BlendIn(ExtractionAnimConstants::ProneTransitionBlendTime);
+	BlendIn.BlendMode = EMontageBlendMode::Inertialization;
+
+	Montage_PlayWithBlendSettings(Montage, BlendIn, SafePlayRate);
+
+	// Only play the first section (up to crouch height), then stop.
+	// Requires a second section in the montage at the crouch-height keyframe.
+	const FName FirstSectionName = Montage->GetSectionName(0);
+	Montage_SetNextSection(FirstSectionName, NAME_None, Montage);
+
+	return Montage->GetPlayLength() / SafePlayRate;
+}
+
+float UExtractionAnimInstance::PlayCrouchToProneMontage(float PlayRate)
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning, TEXT("PlayCrouchToProneMontage: No active anim data."));
+		return 0.f;
+	}
+
+	if (!IsValid(Data->CrouchToProneTransition))
+	{
+		UE_LOG(LogExtractionAnim, Warning, TEXT("PlayCrouchToProneMontage: CrouchToProneTransition is null."));
+		return 0.f;
+	}
+
+	// CrouchToProne plays the transition montage in reverse (end→start).
+	// Negative InPlayRate tells UE5 to start from the end of the montage.
+	const float ReverseRate = -FMath::Abs(PlayRate);
+	return PlayMontageInternal(Data->CrouchToProneTransition, ReverseRate);
+}
+
+bool UExtractionAnimInstance::IsPlayingProneEntryMontage() const
+{
+	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
+	if (!IsValid(AnimData))
+	{
+		return false;
+	}
+
+	return Montage_IsPlaying(AnimData->IdleToProneTransition)   ||
+	       Montage_IsPlaying(AnimData->WalkToProneTransition)   ||
+	       Montage_IsPlaying(AnimData->SprintToProneTransition) ||
+	       Montage_IsPlaying(AnimData->CrouchToProneTransition);
 }
 
 void UExtractionAnimInstance::SetWeaponType(EWeaponType NewWeaponType)
@@ -285,9 +351,9 @@ float UExtractionAnimInstance::PlayMontageInternal(UAnimMontage* Montage, float 
 		return 0.f;
 	}
 
-	const float SafePlayRate = FMath::Max(PlayRate, UE_KINDA_SMALL_NUMBER);
+	const float SafePlayRate = (FMath::Abs(PlayRate) < UE_KINDA_SMALL_NUMBER) ? 1.0f : PlayRate;
 	Montage_Play(Montage, SafePlayRate);
-	return Montage->GetPlayLength() / SafePlayRate;
+	return Montage->GetPlayLength() / FMath::Abs(SafePlayRate);
 }
 
 float UExtractionAnimInstance::PlayRandomMontage(

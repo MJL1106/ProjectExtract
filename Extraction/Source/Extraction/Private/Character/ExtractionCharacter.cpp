@@ -19,6 +19,9 @@ namespace ExtractionCharacterConstants
 
 	/** Minimum 2D speed (cm/s) to use walk-to-prone instead of idle-to-prone */
 	static constexpr float ProneWalkVelocityThreshold = 10.0f;
+
+	/** Play rate for the crouch-to-prone reversed montage (lower = slower transition) */
+	static constexpr float CrouchToPronePlayRate = 0.75f;
 }
 
 AExtractionCharacter::AExtractionCharacter()
@@ -117,6 +120,20 @@ void AExtractionCharacter::Tick(float DeltaTime)
 		}
 
 		UpdateSprint();
+
+		// Deferred UnCrouch: when entering prone from crouch, the UnCrouch is delayed
+		// until the crouch-to-prone montage finishes. Uses IsPlayingProneEntryMontage()
+		// (real-time Montage_IsPlaying check) instead of bIsTransitioningToProne
+		// because NativeUpdateAnimation runs AFTER Tick — the cached flag would be
+		// stale on the frame the montage starts, allowing UnCrouch to fire too early.
+		if (bIsProne && GetCharacterMovement()->IsCrouching())
+		{
+			UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
+			if (!IsValid(AnimInst) || !AnimInst->IsPlayingProneEntryMontage())
+			{
+				UnCrouch();
+			}
+		}
 	}
 
 	// Smooth camera height interpolation during crouch transitions
@@ -293,8 +310,28 @@ void AExtractionCharacter::ApplySprintSpeed()
 
 void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 {
-	if (bIsProne || bIsSliding)
+	if (bIsSliding)
 	{
+		return;
+	}
+
+	// Prone -> Crouch: exit prone and enter crouch
+	if (bIsProne)
+	{
+		UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
+		if (!IsValid(AnimInst)) { return; }
+
+		// Block during any active prone transition
+		if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) { return; }
+
+		UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
+			GetFirstPersonMesh()->GetAnimInstance());
+
+		bIsProne = false;
+		AnimInst->PlayProneToCrouchMontage();
+		if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneToCrouchMontage(); }
+
+		Crouch();
 		return;
 	}
 
@@ -487,8 +524,20 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 
 		const EProneTransitionType TransitionType = DetermineProneEntryType(*this);
 		bIsProne = true;
-		AnimInst->PlayProneTransitionMontage(TransitionType);
-		if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneTransitionMontage(TransitionType); }
+
+		if (TransitionType == EProneTransitionType::FromCrouch)
+		{
+			// Play montage only — do NOT UnCrouch here. UnCrouch in the same frame
+			// triggers a state machine transition whose Inertialization stomps the montage.
+			// Tick() will handle the deferred UnCrouch on the next frame.
+			AnimInst->PlayCrouchToProneMontage(ExtractionCharacterConstants::CrouchToPronePlayRate);
+			if (IsValid(FPAnimInst)) { FPAnimInst->PlayCrouchToProneMontage(ExtractionCharacterConstants::CrouchToPronePlayRate); }
+		}
+		else
+		{
+			AnimInst->PlayProneTransitionMontage(TransitionType);
+			if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneTransitionMontage(TransitionType); }
+		}
 	}
 }
 
