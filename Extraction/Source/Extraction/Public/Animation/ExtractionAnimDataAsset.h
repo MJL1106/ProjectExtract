@@ -102,7 +102,7 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
 	TObjectPtr<UAnimMontage> SprintToProneTransition;
 
-	/** Transition montage: crouching -> prone. Plays forward. */
+	/** Transition montage: crouching -> prone. Currently unused — crouch-to-prone uses inertialization only. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
 	TObjectPtr<UAnimMontage> CrouchToProneTransition;
 

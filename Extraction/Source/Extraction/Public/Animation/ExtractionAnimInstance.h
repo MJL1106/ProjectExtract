@@ -157,10 +157,6 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
 	float PlayProneToCrouchMontage(float PlayRate = 1.0f);
 
-	/** Play the crouch-to-prone transition (first section of ProneToStand, reversed). Returns duration. */
-	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
-	float PlayCrouchToProneMontage(float PlayRate = 1.0f);
-
 	/** Returns true if any prone-entry transition montage is currently active (real-time, no frame delay). */
 	UFUNCTION(BlueprintPure, Category = "Animation|State")
 	bool IsPlayingProneEntryMontage() const;
