@@ -85,6 +85,12 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
 	float ProneSpeed = 80.0f;
 
+	/** Exponent controlling the sprint-to-prone momentum deceleration curve */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Prone",
+		meta = (ClampMin = "0.5", ClampMax = "5.0",
+			ToolTip = "Controls how sprint-to-prone momentum decays.\n1.0 = Linear (constant deceleration)\n2.0 = Holds speed longer, then drops off\n3.0+ = Even more hang time at peak before a sharp decel"))
+	float ProneMomentumDecelerationExponent = 2.0f;
+
 	/** How fast the camera interpolates between standing and crouched height (units/s) */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
 	float CrouchCameraInterpSpeed = 12.0f;
@@ -192,6 +198,12 @@ protected:
 
 	void ToggleProne(const FInputActionValue& Value);
 
+	/** Drives sprint-to-prone deceleration each frame (identical pattern to UpdateSlide) */
+	void UpdateProneMomentum(float DeltaTime);
+
+	/** Ends the sprint-to-prone momentum phase, hands off to normal prone crawl speed */
+	void EndProneMomentum();
+
 	UFUNCTION()
 	void OnRep_IsProne();
 
@@ -244,5 +256,20 @@ private:
 
 	/** Direction the slide was initiated in (locked at entry) */
 	FVector SlideDirection;
+
+	/** True during the sprint-to-prone momentum phase (knee slide) */
+	bool bIsInProneMomentum;
+
+	/** Forward direction locked at prone momentum entry */
+	FVector ProneMomentumDirection;
+
+	/** Time elapsed since prone momentum started */
+	float ProneMomentumElapsed;
+
+	/** Speed captured at momentum entry (typically SprintSpeed) */
+	float ProneMomentumStartSpeed;
+
+	/** Total momentum duration — captured from montage play length at entry */
+	float ProneMomentumDuration;
 
 };
