@@ -33,6 +33,11 @@ AExtractionCharacter::AExtractionCharacter()
 	, SlideElapsed(0.f)
 	, SlideStartSpeed(0.f)
 	, SlideDirection(FVector::ZeroVector)
+	, bIsInProneMomentum(false)
+	, ProneMomentumDirection(FVector::ZeroVector)
+	, ProneMomentumElapsed(0.f)
+	, ProneMomentumStartSpeed(0.f)
+	, ProneMomentumDuration(0.f)
 {
 	// Replication
 	bReplicates = true;
@@ -115,6 +120,11 @@ void AExtractionCharacter::Tick(float DeltaTime)
 		if (bIsSliding)
 		{
 			UpdateSlide(DeltaTime);
+		}
+
+		if (bIsInProneMomentum)
+		{
+			UpdateProneMomentum(DeltaTime);
 		}
 
 		UpdateSprint();
@@ -301,6 +311,9 @@ void AExtractionCharacter::ApplySprintSpeed()
 	{
 		return;
 	}
+
+	// During prone momentum, MaxWalkSpeed is managed by the momentum system
+	if (bIsInProneMomentum) { return; }
 
 	if (bIsProne)
 	{
@@ -525,25 +538,105 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 	else
 	{
 		// --- Enter prone ---
-		// Cancel sprint before querying state (sprint state must be stale-free for DetermineProneEntryType)
+		// Query state BEFORE cancelling sprint (GetIsSprinting must still be valid)
+		const EProneTransitionType TransitionType = DetermineProneEntryType(*this);
+
 		bWantsToSprint = false;
 		bIsSprinting = false;
-
-		const EProneTransitionType TransitionType = DetermineProneEntryType(*this);
 		bIsProne = true;
-		ApplySprintSpeed();
 
-		if (TransitionType == EProneTransitionType::FromCrouch)
+		if (TransitionType == EProneTransitionType::FromSprint)
 		{
+			// Momentum carry: decelerate from sprint speed to prone speed
+			// over the montage duration using a power curve (like the slide system).
+			bIsInProneMomentum = true;
+			ProneMomentumElapsed = 0.f;
+			ProneMomentumStartSpeed = SprintSpeed;
+			ProneMomentumDirection = GetActorForwardVector().GetSafeNormal2D();
+
+			// Capture montage duration so the decel curve matches the animation length
+			const float MontageDuration = AnimInst->PlayProneTransitionMontage(TransitionType);
+			ProneMomentumDuration = FMath::Max(MontageDuration, 0.1f);
+			if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneTransitionMontage(TransitionType); }
+
+			UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+			if (IsValid(MoveComp))
+			{
+				// Keep MaxWalkSpeed high so CMC doesn't clamp our velocity writes
+				MoveComp->MaxWalkSpeed = SprintSpeed;
+				// Set initial velocity in the locked direction at sprint speed
+				MoveComp->Velocity = ProneMomentumDirection * ProneMomentumStartSpeed
+					+ FVector(0.f, 0.f, MoveComp->Velocity.Z);
+			}
+		}
+		else if (TransitionType == EProneTransitionType::FromCrouch)
+		{
+			ApplySprintSpeed();
 			// No montage — just UnCrouch and let the ABP state machine
 			// transition Crouch→Prone via inertialization.
 			UnCrouch();
 		}
 		else
 		{
+			ApplySprintSpeed();
 			AnimInst->PlayProneTransitionMontage(TransitionType);
 			if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneTransitionMontage(TransitionType); }
 		}
+	}
+}
+
+void AExtractionCharacter::UpdateProneMomentum(float DeltaTime)
+{
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp))
+	{
+		EndProneMomentum();
+		return;
+	}
+
+	ProneMomentumElapsed += DeltaTime;
+
+	// End when decel duration reached
+	if (ProneMomentumElapsed >= ProneMomentumDuration)
+	{
+		EndProneMomentum();
+		return;
+	}
+
+	// Safety net: montage was interrupted (e.g. player jumped or got hit)
+	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
+	if (!IsValid(AnimInst) || !AnimInst->IsPlayingProneEntryMontage())
+	{
+		EndProneMomentum();
+		return;
+	}
+
+	// Power curve deceleration: SprintSpeed -> ProneSpeed (same pattern as UpdateSlide)
+	const float Alpha = FMath::Clamp(ProneMomentumElapsed / ProneMomentumDuration, 0.f, 1.f);
+	const float CurvedAlpha = FMath::Pow(Alpha, ProneMomentumDecelerationExponent);
+	const float DesiredSpeed = FMath::Lerp(ProneMomentumStartSpeed, ProneSpeed, CurvedAlpha);
+
+	// Ramp MaxWalkSpeed down with desired speed so CMC doesn't fight our velocity
+	MoveComp->MaxWalkSpeed = DesiredSpeed;
+
+	// Write velocity directly along the locked direction
+	MoveComp->Velocity = ProneMomentumDirection * DesiredSpeed
+		+ FVector(0.f, 0.f, MoveComp->Velocity.Z);
+}
+
+void AExtractionCharacter::EndProneMomentum()
+{
+	bIsInProneMomentum = false;
+	ProneMomentumElapsed = 0.f;
+
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+	{
+		MoveComp->MaxWalkSpeed = ProneSpeed;
+
+		// Set velocity to prone speed in the locked direction for clean blendspace handoff
+		MoveComp->Velocity = ProneMomentumDirection * ProneSpeed
+			+ FVector(0.f, 0.f, MoveComp->Velocity.Z);
 	}
 }
 
