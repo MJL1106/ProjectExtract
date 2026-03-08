@@ -90,6 +90,10 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
 	float MaxWalkSpeedCrouched = 300.0f;
 
+	/** Half-height of capsule when prone (default = capsule radius for a near-sphere) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config", meta = (ClampMin = "20.0", ClampMax = "96.0"))
+	float ProneHalfHeight = 34.0f;
+
 	/** Max walk speed while prone in cm/s (should match prone blendspace max Speed axis) */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
 	float ProneSpeed = 80.0f;
@@ -566,6 +570,16 @@ private:
 	/** Delegate callback fired when the sprint jump montage ends or is interrupted */
 	UFUNCTION()
 	void OnSprintJumpMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	// ---- Capsule Resize ----
+
+	/** Resize capsule half-height and adjust actor Z to keep feet on the ground.
+	 *  When expanding, performs an overlap clearance check first.
+	 *  @return true if resize succeeded (always true when shrinking; may fail when expanding if blocked) */
+	bool SetCapsuleHalfHeightWithFloorAdjust(float NewHalfHeight);
+
+	/** Standing capsule half-height cached from constructor, used as restore target */
+	float StandingCapsuleHalfHeight;
 
 	// ---- Traversal Detection (helpers) ----
 

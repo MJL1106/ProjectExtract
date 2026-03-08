@@ -68,6 +68,7 @@ AExtractionCharacter::AExtractionCharacter()
 	, bIsSnappingToVault(false)
 	, VaultSnapTimeRemaining(0.f)
 	, bIsSprintJumping(false)
+	, StandingCapsuleHalfHeight(96.0f)
 {
 	// Replication
 	bReplicates = true;
@@ -134,6 +135,10 @@ void AExtractionCharacter::BeginPlay()
 		MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
 	}
 
+	const UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (IsValid(Capsule))
+		StandingCapsuleHalfHeight = Capsule->GetUnscaledCapsuleHalfHeight();
+
 	if (IsValid(HealthComponent))
 		HealthComponent->OnDeath.AddDynamic(this, &AExtractionCharacter::HandleDeath);
 }
@@ -195,17 +200,6 @@ void AExtractionCharacter::Tick(float DeltaTime)
 
 		UpdateSprint();
 
-		// Deferred UnCrouch: when entering prone from crouch, the UnCrouch is delayed
-		// until the crouch-to-prone montage finishes. Uses IsPlayingProneEntryMontage()
-		// (real-time Montage_IsPlaying check) instead of bIsTransitioningToProne
-		// because NativeUpdateAnimation runs AFTER Tick — the cached flag would be
-		// stale on the frame the montage starts, allowing UnCrouch to fire too early.
-		if (bIsProne && GetCharacterMovement()->IsCrouching())
-		{
-			UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
-			const bool bMontPlaying = IsValid(AnimInst) && AnimInst->IsPlayingProneEntryMontage();
-			if (!IsValid(AnimInst) || !bMontPlaying) UnCrouch();
-		}
 	}
 
 	// Smooth camera height interpolation during crouch transitions
@@ -441,9 +435,20 @@ void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 		// Block during any active prone transition
 		if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) return;
 
+		// Expand capsule from prone to crouch height — clearance check included
+		if (!SetCapsuleHalfHeightWithFloorAdjust(CrouchedHalfHeight))
+		{
+			UE_LOG(LogExtraction, Verbose, TEXT("Cannot transition prone->crouch — clearance blocked"));
+			return;
+		}
+
+		// Sync CMC's crouch height so it doesn't fight the new capsule size
+		UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+		if (IsValid(MoveComp))
+			MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+
 		bIsProne = false;
 		ApplySprintSpeed();
-		Crouch();
 		return;
 	}
 
@@ -619,6 +624,19 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 	if (bIsProne)
 	{
 		// --- Exit prone ---
+		// Clearance check: can we expand from prone to standing height?
+		if (!SetCapsuleHalfHeightWithFloorAdjust(StandingCapsuleHalfHeight))
+		{
+			UE_LOG(LogExtraction, Verbose, TEXT("Cannot exit prone — clearance blocked"));
+			return;
+		}
+
+		// Restore real crouch height and uncrouch — CMC now matches our capsule
+		UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+		if (IsValid(MoveComp))
+			MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+		UnCrouch();
+
 		bIsProne = false;
 		ApplySprintSpeed();
 		AnimInst->PlayProneExitMontage();
@@ -634,8 +652,15 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 		bIsSprinting = false;
 		bIsProne = true;
 
+		// Shrink capsule via the CMC crouch system so it enforces prone height
+		UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+		if (IsValid(MoveComp))
+			MoveComp->CrouchedHalfHeight = ProneHalfHeight;
+
 		if (TransitionType == EProneTransitionType::FromSprint)
 		{
+			Crouch();
+
 			// Momentum carry: decelerate from sprint speed to prone speed
 			// over the montage duration using a power curve (like the slide system).
 			bIsInProneMomentum = true;
@@ -648,7 +673,6 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 			ProneMomentumDuration = FMath::Max(MontageDuration, 0.1f);
 			if (IsValid(FPAnimInst)) FPAnimInst->PlayProneTransitionMontage(TransitionType);
 
-			UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 			if (IsValid(MoveComp))
 			{
 				// Keep MaxWalkSpeed high so CMC doesn't clamp our velocity writes
@@ -661,13 +685,15 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 		else if (TransitionType == EProneTransitionType::FromCrouch)
 		{
 			ApplySprintSpeed();
-			// No montage — just UnCrouch and let the ABP state machine
-			// transition Crouch→Prone via inertialization.
-			UnCrouch();
+			// Already crouched — shrink capsule directly from crouch to prone height
+			// (always succeeds since we're going smaller). CMC stays in crouch state
+			// with CrouchedHalfHeight already set to ProneHalfHeight above.
+			SetCapsuleHalfHeightWithFloorAdjust(ProneHalfHeight);
 		}
 		else
 		{
 			ApplySprintSpeed();
+			Crouch();
 			AnimInst->PlayProneTransitionMontage(TransitionType);
 			if (IsValid(FPAnimInst)) FPAnimInst->PlayProneTransitionMontage(TransitionType);
 		}
@@ -731,7 +757,19 @@ void AExtractionCharacter::EndProneMomentum()
 
 void AExtractionCharacter::OnRep_IsProne()
 {
-	// Proxies: AnimInstance reads bIsProne via GetIsProne() each frame
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp)) return;
+
+	if (bIsProne)
+	{
+		MoveComp->CrouchedHalfHeight = ProneHalfHeight;
+		Crouch();
+	}
+	else
+	{
+		MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+		UnCrouch();
+	}
 }
 
 // ---- Traversal (Vault / Climb / Mantle) ----
@@ -1202,6 +1240,38 @@ void AExtractionCharacter::OnSprintJumpMontageEnded(UAnimMontage* Montage, bool 
 	EndSprintJump();
 }
 
+// ---- Capsule Resize ----
+
+bool AExtractionCharacter::SetCapsuleHalfHeightWithFloorAdjust(float NewHalfHeight)
+{
+	UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!IsValid(Capsule)) return false;
+
+	const float OldHalfHeight = Capsule->GetUnscaledCapsuleHalfHeight();
+	if (FMath::IsNearlyEqual(OldHalfHeight, NewHalfHeight, 0.1f)) return true;
+
+	const float HeightDelta = NewHalfHeight - OldHalfHeight;
+
+	// Clearance check when expanding
+	if (NewHalfHeight > OldHalfHeight)
+	{
+		const FVector TestLocation = GetActorLocation() + FVector(0.f, 0.f, HeightDelta);
+		const FCollisionShape TestShape = FCollisionShape::MakeCapsule(
+			Capsule->GetUnscaledCapsuleRadius(), NewHalfHeight);
+
+		FCollisionQueryParams Params;
+		Params.AddIgnoredActor(this);
+
+		if (GetWorld()->OverlapAnyTestByChannel(
+				TestLocation, FQuat::Identity, ECC_Pawn, TestShape, Params))
+			return false;
+	}
+
+	Capsule->SetCapsuleHalfHeight(NewHalfHeight);
+	SetActorLocation(GetActorLocation() + FVector(0.f, 0.f, HeightDelta));
+	return true;
+}
+
 // ---- Health / DBNO ----
 
 float AExtractionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -1231,17 +1301,26 @@ void AExtractionCharacter::EnterDBNO()
 	if (IsInTraversal()) EndTraversal();
 	if (bIsSliding) EndSlide();
 	if (bIsSprintJumping) EndSprintJump();
-	if (bIsProne)
+
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+
+	// Restore real crouch height before UnCrouch so CMC doesn't try to expand from wrong value
+	if (bIsProne || bIsCrouched)
 	{
-		bIsProne = false;
-		ApplySprintSpeed();
+		if (IsValid(MoveComp))
+			MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+		if (bIsProne) bIsProne = false;
+		UnCrouch();
 	}
-	if (bIsCrouched) UnCrouch();
 	bWantsToSprint = false;
 	bIsSprinting = false;
 
+	// Shrink capsule to prone height via CMC crouch system
+	if (IsValid(MoveComp))
+		MoveComp->CrouchedHalfHeight = ProneHalfHeight;
+	Crouch();
+
 	// Stop movement but do NOT call DisableInput (camera look must work)
-	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
 	{
 		MoveComp->StopMovementImmediately();
@@ -1281,9 +1360,14 @@ void AExtractionCharacter::ExitDBNO()
 	if (IsValid(HealthComponent))
 		HealthComponent->Revive(ReviveHealthPercent);
 
+	// Restore standing capsule via CMC uncrouch
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
+	{
+		MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
 		MoveComp->SetMovementMode(MOVE_Walking);
+	}
+	UnCrouch();
 
 	OnDBNOStateChanged.Broadcast(false, 0.f);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' revived at %.0f%% health"),
@@ -1317,12 +1401,16 @@ void AExtractionCharacter::OnRep_IsDBNO()
 	{
 		if (bIsDBNO)
 		{
+			MoveComp->CrouchedHalfHeight = ProneHalfHeight;
+			Crouch();
 			MoveComp->StopMovementImmediately();
 			MoveComp->DisableMovement();
 		}
 		else
 		{
+			MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
 			MoveComp->SetMovementMode(MOVE_Walking);
+			UnCrouch();
 		}
 	}
 
