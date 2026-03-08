@@ -115,11 +115,19 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
 	TObjectPtr<UAnimMontage> ProneToStandTransition;
 
-	// ---- Vault ----
+	// ---- Traversal (Vault / Climb / Mantle) ----
 
 	/** Full-body vault montage. Must have root motion enabled. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Vault")
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Traversal")
 	TObjectPtr<UAnimMontage> VaultMontage;
+
+	/** Climb-up montage for waist-to-chest height obstacles. Root motion required. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Traversal")
+	TObjectPtr<UAnimMontage> ClimbMontage;
+
+	/** Mantle/pull-up montage for above-head height ledges. Root motion required. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Traversal")
+	TObjectPtr<UAnimMontage> MantleMontage;
 
 	// ---- Hit Reactions & Death ----
 

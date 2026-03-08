@@ -36,6 +36,8 @@ UExtractionAnimInstance::UExtractionAnimInstance()
 	, bIsTransitioningToProne(false)
 	, bIsTransitioningFromProne(false)
 	, bIsVaulting(false)
+	, bIsClimbing(false)
+	, bIsMantling(false)
 	, bIsADS(false)
 	, bHasVelocity(false)
 	, bIsAccelerating(false)
@@ -116,7 +118,10 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	bIsSprinting = OwningCharacter->GetIsSprinting();
 	bIsSliding = OwningCharacter->GetIsSliding();
 	bIsProne = OwningCharacter->GetIsProne();
-	bIsVaulting = OwningCharacter->GetIsVaulting();
+	const ETraversalType Traversal = OwningCharacter->GetActiveTraversalType();
+	bIsVaulting  = (Traversal == ETraversalType::Vault);
+	bIsClimbing  = (Traversal == ETraversalType::Climb);
+	bIsMantling  = (Traversal == ETraversalType::Mantle);
 
 	// --- Prone transition flags (computed from active montages — self-corrects on interruption) ---
 	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
@@ -256,6 +261,39 @@ bool UExtractionAnimInstance::IsPlayingVaultMontage() const
 	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
 	if (!IsValid(AnimData)) return false;
 	return Montage_IsPlaying(AnimData->VaultMontage);
+}
+
+float UExtractionAnimInstance::PlayClimbMontage(float PlayRate)
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data)) return 0.f;
+	return PlayMontageInternal(Data->ClimbMontage, PlayRate);
+}
+
+bool UExtractionAnimInstance::IsPlayingClimbMontage() const
+{
+	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
+	if (!IsValid(AnimData)) return false;
+	return Montage_IsPlaying(AnimData->ClimbMontage);
+}
+
+float UExtractionAnimInstance::PlayMantleMontage(float PlayRate)
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data)) return 0.f;
+	return PlayMontageInternal(Data->MantleMontage, PlayRate);
+}
+
+bool UExtractionAnimInstance::IsPlayingMantleMontage() const
+{
+	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
+	if (!IsValid(AnimData)) return false;
+	return Montage_IsPlaying(AnimData->MantleMontage);
+}
+
+bool UExtractionAnimInstance::IsPlayingAnyTraversalMontage() const
+{
+	return IsPlayingVaultMontage() || IsPlayingClimbMontage() || IsPlayingMantleMontage();
 }
 
 void UExtractionAnimInstance::SetWeaponType(EWeaponType NewWeaponType)

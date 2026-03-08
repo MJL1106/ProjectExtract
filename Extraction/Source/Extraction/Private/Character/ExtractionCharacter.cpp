@@ -23,8 +23,8 @@ namespace ExtractionCharacterConstants
 	/** Small forward offset past the wall face for the downward surface trace (cm) */
 	static constexpr float VaultLedgeTraceForwardOffset = 10.0f;
 
-	/** Buffer above MaxVaultHeight for the downward trace start position (cm) */
-	static constexpr float VaultHeightTraceBuffer = 50.0f;
+	/** Buffer above the tallest traversal height for the downward trace start position (cm) */
+	static constexpr float TraversalHeightTraceBuffer = 50.0f;
 
 	/** Min dot product between wall normal and -ForwardVector to accept wall as face-on (~60 degrees) */
 	static constexpr float VaultWallFacingDotThreshold = 0.5f;
@@ -35,7 +35,7 @@ AExtractionCharacter::AExtractionCharacter()
 	: bIsSprinting(false)
 	, bIsSliding(false)
 	, bIsProne(false)
-	, bIsVaulting(false)
+	, ActiveTraversalType(ETraversalType::None)
 	, bWantsToSprint(false)
 	, CrouchCameraCurrentOffset(0.f)
 	, CrouchCameraTargetOffset(0.f)
@@ -50,14 +50,13 @@ AExtractionCharacter::AExtractionCharacter()
 	, ProneMomentumDuration(0.f)
 	, LastCrouchSlideTime(0.0)
 	, bWasSprintingOnLastCrouchPress(false)
-	, bCanVault(false)
-	, bPendingVault(false)
+	, PendingTraversalType(ETraversalType::None)
 	, VaultTargetLocation(FVector::ZeroVector)
 	, VaultSurfaceLocation(FVector::ZeroVector)
 	, VaultWallNormal(FVector::ZeroVector)
 	, VaultWallImpactPoint(FVector::ZeroVector)
 	, VaultSurfaceHeight(0.f)
-	, bWasSprintingAtVaultEntry(false)
+	, bWasSprintingAtTraversalEntry(false)
 	, VaultSnapTarget(FVector::ZeroVector)
 	, bIsSnappingToVault(false)
 	, VaultSnapTimeRemaining(0.f)
@@ -132,8 +131,8 @@ void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsSprinting, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsSliding, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsProne, COND_SkipOwner);
-	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsVaulting, COND_SkipOwner);
-	DOREPLIFETIME_CONDITION(AExtractionCharacter, bWasSprintingAtVaultEntry, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(AExtractionCharacter, ActiveTraversalType, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(AExtractionCharacter, bWasSprintingAtTraversalEntry, COND_SkipOwner);
 }
 
 void AExtractionCharacter::Tick(float DeltaTime)
@@ -146,13 +145,14 @@ void AExtractionCharacter::Tick(float DeltaTime)
 
 		if (bIsInProneMomentum) UpdateProneMomentum(DeltaTime);
 
-		if (bIsVaulting) UpdateVault(DeltaTime);
+		if (IsInTraversal()) UpdateTraversal(DeltaTime);
 
-		// Deferred vault: execute as soon as uncrouch camera interp finishes
-		if (bPendingVault && FMath::IsNearlyEqual(CrouchCameraCurrentOffset, 0.f, 1.f))
+		// Deferred traversal: execute as soon as uncrouch camera interp finishes
+		if (PendingTraversalType != ETraversalType::None && FMath::IsNearlyEqual(CrouchCameraCurrentOffset, 0.f, 1.f))
 		{
-			bPendingVault = false;
-			ExecuteVault();
+			const ETraversalType Type = PendingTraversalType;
+			PendingTraversalType = ETraversalType::None;
+			ExecuteTraversalByType(Type);
 		}
 
 		UpdateSprint();
@@ -259,7 +259,7 @@ void AExtractionCharacter::DoAim(float Yaw, float Pitch)
 
 void AExtractionCharacter::DoMove(float Right, float Forward)
 {
-	if (bIsVaulting) return;
+	if (IsInTraversal()) return;
 
 	if (IsValid(GetController()))
 	{
@@ -271,23 +271,25 @@ void AExtractionCharacter::DoMove(float Right, float Forward)
 void AExtractionCharacter::DoJumpStart()
 {
 	if (bIsProne) return;
-	if (bIsVaulting) return;
+	if (IsInTraversal()) return;
 	if (bIsSliding) return;
 
-	// Vault check — grounded and not in a blocking state
+	// Traversal check — grounded and not in a blocking state
 	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
-	bCanVault = IsValid(MoveComp) && MoveComp->IsMovingOnGround()
-		&& !bIsInProneMomentum
-		&& PerformVaultDetection();
-	if (bCanVault)
+	const ETraversalType DetectedType =
+		(IsValid(MoveComp) && MoveComp->IsMovingOnGround() && !bIsInProneMomentum)
+		? PerformTraversalDetection()
+		: ETraversalType::None;
+
+	if (DetectedType != ETraversalType::None)
 	{
 		if (IsValid(MoveComp) && MoveComp->IsCrouching())
 		{
 			UnCrouch();
-			bPendingVault = true;
+			PendingTraversalType = DetectedType;
 			return;
 		}
-		ExecuteVault();
+		ExecuteTraversalByType(DetectedType);
 		return;
 	}
 
@@ -303,7 +305,7 @@ void AExtractionCharacter::DoJumpEnd()
 
 void AExtractionCharacter::SprintStart(const FInputActionValue& Value)
 {
-	if (bIsVaulting) return;
+	if (IsInTraversal()) return;
 
 	bWantsToSprint = true;
 
@@ -336,7 +338,7 @@ void AExtractionCharacter::UpdateSprint()
 		bMovingForward = FVector::DotProduct(VelocityDir, ForwardDir) > ExtractionCharacterConstants::SprintForwardDotThreshold;
 	}
 
-	const bool bShouldSprint = bWantsToSprint && bHasVelocity && bOnGround && bNotCrouching && !bIsSliding && !bIsProne && !bIsVaulting && bMovingForward;
+	const bool bShouldSprint = bWantsToSprint && bHasVelocity && bOnGround && bNotCrouching && !bIsSliding && !bIsProne && !IsInTraversal() && bMovingForward;
 
 	if (bIsSprinting != bShouldSprint)
 	{
@@ -373,8 +375,8 @@ void AExtractionCharacter::ApplySprintSpeed()
 void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 {
 	if (bIsSliding) return;
-	if (bIsVaulting) return;
-	bPendingVault = false;
+	if (IsInTraversal()) return;
+	PendingTraversalType = ETraversalType::None;
 
 	// Prone -> Crouch: exit prone and enter crouch (ABP handles blend via inertialization)
 	if (bIsProne)
@@ -545,8 +547,8 @@ static EProneTransitionType DetermineProneEntryType(const AExtractionCharacter& 
 
 void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 {
-	if (bIsVaulting) return;
-	bPendingVault = false;
+	if (IsInTraversal()) return;
+	PendingTraversalType = ETraversalType::None;
 
 	// 3P mesh AnimInstance — authoritative for state guards
 	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
@@ -677,11 +679,11 @@ void AExtractionCharacter::OnRep_IsProne()
 	// Proxies: AnimInstance reads bIsProne via GetIsProne() each frame
 }
 
-// ---- Vault ----
+// ---- Traversal (Vault / Climb / Mantle) ----
 
 void AExtractionCharacter::VaultStart(const FInputActionValue& Value)
 {
-	if (bIsVaulting) return;
+	if (IsInTraversal()) return;
 	if (bIsSliding) return;
 	if (bIsProne) return;
 	if (bIsInProneMomentum) return;
@@ -690,40 +692,53 @@ void AExtractionCharacter::VaultStart(const FInputActionValue& Value)
 	if (!IsValid(MoveComp)) return;
 	if (MoveComp->IsFalling()) return;
 
-	bCanVault = PerformVaultDetection();
-	if (bCanVault)
+	const ETraversalType DetectedType = PerformTraversalDetection();
+	if (DetectedType != ETraversalType::None)
 	{
 		if (MoveComp->IsCrouching())
 		{
 			UnCrouch();
-			bPendingVault = true;
+			PendingTraversalType = DetectedType;
 			return;
 		}
-		ExecuteVault();
+		ExecuteTraversalByType(DetectedType);
 	}
 }
 
-bool AExtractionCharacter::PerformVaultDetection()
+ETraversalType AExtractionCharacter::PerformTraversalDetection()
 {
 	// Step 1: Forward sweep to find a wall
 	FHitResult WallHit;
-	if (!TraceForwardForWall(WallHit)) return false;
+	if (!TraceForwardForWall(WallHit))
+	{
+		UE_LOG(LogExtraction, Verbose, TEXT("Traversal: No wall hit"));
+		return ETraversalType::None;
+	}
 
 	// Reject hits on other characters/pawns
-	if (IsValid(WallHit.GetActor()) && WallHit.GetActor()->IsA(APawn::StaticClass())) return false;
+	if (IsValid(WallHit.GetActor()) && WallHit.GetActor()->IsA(APawn::StaticClass())) return ETraversalType::None;
 
 	// Reject walls that aren't roughly facing us
 	const FVector Forward = GetActorForwardVector();
 	const float FacingDot = FVector::DotProduct(WallHit.ImpactNormal, -Forward);
-	if (FacingDot < ExtractionCharacterConstants::VaultWallFacingDotThreshold) return false;
+	if (FacingDot < ExtractionCharacterConstants::VaultWallFacingDotThreshold)
+	{
+		UE_LOG(LogExtraction, Verbose, TEXT("Traversal: Wall not facing us (dot=%.2f)"), FacingDot);
+		return ETraversalType::None;
+	}
 
 	// Step 2: Trace down from above the wall to find the top surface
 	FHitResult SurfaceHit;
-	if (!TraceDownForSurface(WallHit, SurfaceHit)) return false;
+	if (!TraceDownForSurface(WallHit, SurfaceHit))
+	{
+		UE_LOG(LogExtraction, Verbose, TEXT("Traversal: No surface found above wall"));
+		return ETraversalType::None;
+	}
 
-	// Step 3: Compute and validate landing position
+	// Step 3: Store shared detection results
 	const UCapsuleComponent* Capsule = GetCapsuleComponent();
-	if (!IsValid(Capsule)) return false;
+	if (!IsValid(Capsule)) return ETraversalType::None;
+	const float CapsuleRadius = Capsule->GetScaledCapsuleRadius();
 	const float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
 	const float FeetZ = GetActorLocation().Z - CapsuleHalfHeight;
 
@@ -731,13 +746,63 @@ bool AExtractionCharacter::PerformVaultDetection()
 	VaultWallImpactPoint = WallHit.ImpactPoint;
 	VaultSurfaceLocation = SurfaceHit.ImpactPoint;
 	VaultSurfaceHeight = SurfaceHit.ImpactPoint.Z - FeetZ;
-	VaultTargetLocation = SurfaceHit.ImpactPoint + Forward * VaultLandingForwardOffset;
-	VaultTargetLocation.Z = SurfaceHit.ImpactPoint.Z + CapsuleHalfHeight;
 
-	// Step 4: Check clearance at the landing position
-	if (!CheckVaultClearance(SurfaceHit.ImpactPoint)) return false;
+	// Step 4: Classify by height and clearance
+	// VaultTargetLocation is set per-type: vault lands past the obstacle, climb/mantle land on top.
+	static constexpr float ClearanceBufferOffset = 5.f;
+	const float SurfOnTopOffset = CapsuleRadius + ClearanceBufferOffset;
 
-	return true;
+	// Helper: set VaultTargetLocation at a given forward offset from the surface
+	auto SetTargetLocation = [&](float Offset)
+	{
+		VaultTargetLocation = SurfaceHit.ImpactPoint + Forward * Offset;
+		VaultTargetLocation.Z = SurfaceHit.ImpactPoint.Z + CapsuleHalfHeight;
+	};
+
+	// Vault range (50-120cm): try thin-obstacle vault first, then climb fallback
+	if (VaultSurfaceHeight >= VaultMinHeight && VaultSurfaceHeight <= VaultMaxHeight)
+	{
+		const bool bVaultClear = CheckClearance(SurfaceHit.ImpactPoint, VaultLandingForwardOffset);
+		if (bVaultClear)
+		{
+			SetTargetLocation(VaultLandingForwardOffset);
+			return ETraversalType::Vault;
+		}
+
+		if (VaultSurfaceHeight >= ClimbMinHeight)
+		{
+			const bool bClimbClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset);
+			if (bClimbClear)
+			{
+				SetTargetLocation(SurfOnTopOffset);
+				return ETraversalType::Climb;
+			}
+		}
+	}
+
+	// Climb-only range (above vault max, up to climb max)
+	if (VaultSurfaceHeight > VaultMaxHeight && VaultSurfaceHeight <= ClimbMaxHeight)
+	{
+		const bool bClimbClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset);
+		if (bClimbClear)
+		{
+			SetTargetLocation(SurfOnTopOffset);
+			return ETraversalType::Climb;
+		}
+	}
+
+	// Mantle range (above climb max, up to mantle max)
+	if (VaultSurfaceHeight > ClimbMaxHeight && VaultSurfaceHeight <= MantleMaxHeight)
+	{
+		const bool bMantleClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset);
+		if (bMantleClear)
+		{
+			SetTargetLocation(SurfOnTopOffset);
+			return ETraversalType::Mantle;
+		}
+	}
+
+	return ETraversalType::None;
 }
 
 bool AExtractionCharacter::TraceForwardForWall(FHitResult& OutHit) const
@@ -779,8 +844,10 @@ bool AExtractionCharacter::TraceDownForSurface(
 	const FVector LedgeOrigin = WallHit.ImpactPoint
 		+ Forward * ExtractionCharacterConstants::VaultLedgeTraceForwardOffset;
 
+	// Scan from above the tallest possible traversal (mantle) down to feet
+	const float MaxTraversalHeight = FMath::Max3(VaultMaxHeight, ClimbMaxHeight, MantleMaxHeight);
 	const FVector TraceStart(LedgeOrigin.X, LedgeOrigin.Y,
-		FeetZ + VaultMaxHeight + ExtractionCharacterConstants::VaultHeightTraceBuffer);
+		FeetZ + MaxTraversalHeight + ExtractionCharacterConstants::TraversalHeightTraceBuffer);
 	const FVector TraceEnd(LedgeOrigin.X, LedgeOrigin.Y, FeetZ);
 
 	FCollisionQueryParams QueryParams;
@@ -790,12 +857,12 @@ bool AExtractionCharacter::TraceDownForSurface(
 			OutSurfaceHit, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
 		return false;
 
-	// Validate the surface height is within the vaultable range
+	// Validate the surface height is within the broadest traversal range
 	const float SurfaceHeight = OutSurfaceHit.ImpactPoint.Z - FeetZ;
-	return SurfaceHeight >= VaultMinHeight && SurfaceHeight <= VaultMaxHeight;
+	return SurfaceHeight >= VaultMinHeight && SurfaceHeight <= MaxTraversalHeight;
 }
 
-bool AExtractionCharacter::CheckVaultClearance(const FVector& SurfaceLocation) const
+bool AExtractionCharacter::CheckClearance(const FVector& SurfaceLocation, float ForwardOffset) const
 {
 	const UCapsuleComponent* Capsule = GetCapsuleComponent();
 	if (!IsValid(Capsule)) return false;
@@ -804,11 +871,15 @@ bool AExtractionCharacter::CheckVaultClearance(const FVector& SurfaceLocation) c
 	const float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
 	const FVector Forward = GetActorForwardVector();
 
-	// Test at the landing position (past the ledge edge)
+	// Small upward offset prevents the capsule bottom from overlapping the surface itself.
+	// Without this, climb/mantle checks fail because the test capsule sits exactly on the ledge.
+	static constexpr float SurfaceSkinOffset = 2.f;
+
+	// Test at the offset position (vault=past obstacle, climb/mantle=on top)
 	const FVector TestLocation(
-		SurfaceLocation.X + Forward.X * VaultLandingForwardOffset,
-		SurfaceLocation.Y + Forward.Y * VaultLandingForwardOffset,
-		SurfaceLocation.Z + CapsuleHalfHeight);
+		SurfaceLocation.X + Forward.X * ForwardOffset,
+		SurfaceLocation.Y + Forward.Y * ForwardOffset,
+		SurfaceLocation.Z + CapsuleHalfHeight + SurfaceSkinOffset);
 
 	const FCollisionShape TestShape = FCollisionShape::MakeCapsule(
 		CapsuleRadius, CapsuleHalfHeight);
@@ -823,17 +894,14 @@ bool AExtractionCharacter::CheckVaultClearance(const FVector& SurfaceLocation) c
 	return !bBlocked;
 }
 
-void AExtractionCharacter::ExecuteVault()
+void AExtractionCharacter::StartTraversal(ETraversalType Type)
 {
-	// Capture sprint state before cancelling
-	bWasSprintingAtVaultEntry = bIsSprinting;
+	bWasSprintingAtTraversalEntry = bIsSprinting;
 
-	// Lock the actor's yaw so mouse look can't steer the vault mid-flight.
-	// Capture current rotation BEFORE decoupling from the controller.
 	VaultLockedRotation = GetActorRotation();
 	bUseControllerRotationYaw = false;
 
-	bIsVaulting = true;
+	ActiveTraversalType = Type;
 	bIsSprinting = false;
 	bWantsToSprint = false;
 
@@ -844,38 +912,79 @@ void AExtractionCharacter::ExecuteVault()
 		MoveComp->Velocity = FVector::ZeroVector;
 	}
 
-	// Disable capsule collision so root motion can move through the obstacle
 	UCapsuleComponent* Capsule = GetCapsuleComponent();
 	if (IsValid(Capsule))
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	// Set up interpolation toward a consistent vault start position.
-	// Time-budgeted so it yields to root motion before they conflict.
 	VaultSnapTarget = VaultWallImpactPoint + VaultWallNormal * VaultSnapDistance;
 	VaultSnapTarget.Z = GetActorLocation().Z;
 	bIsSnappingToVault = true;
 	VaultSnapTimeRemaining = 0.15f;
+}
 
-	const float PlayRate = bWasSprintingAtVaultEntry ? VaultSprintPlayRate : VaultWalkPlayRate;
+void AExtractionCharacter::ExecuteVault()
+{
+	StartTraversal(ETraversalType::Vault);
 
-	// Play vault montage on 3P mesh
+	const float PlayRate = bWasSprintingAtTraversalEntry ? VaultSprintPlayRate : VaultWalkPlayRate;
+
 	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
 	if (IsValid(AnimInst))
 		AnimInst->PlayVaultMontage(PlayRate);
 
-	// Mirror on FP mesh for camera-driving head bone
 	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
 		GetFirstPersonMesh()->GetAnimInstance());
 	if (IsValid(FPAnimInst))
 		FPAnimInst->PlayVaultMontage(PlayRate);
 }
 
-void AExtractionCharacter::UpdateVault(float DeltaTime)
+void AExtractionCharacter::ExecuteClimb()
 {
-	// Keep the actor facing the vault direction (camera is free to look around)
+	StartTraversal(ETraversalType::Climb);
+
+	const float PlayRate = bWasSprintingAtTraversalEntry ? ClimbSprintPlayRate : ClimbWalkPlayRate;
+
+	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
+	if (IsValid(AnimInst))
+		AnimInst->PlayClimbMontage(PlayRate);
+
+	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
+		GetFirstPersonMesh()->GetAnimInstance());
+	if (IsValid(FPAnimInst))
+		FPAnimInst->PlayClimbMontage(PlayRate);
+}
+
+void AExtractionCharacter::ExecuteMantle()
+{
+	StartTraversal(ETraversalType::Mantle);
+
+	const float PlayRate = bWasSprintingAtTraversalEntry ? MantleSprintPlayRate : MantleWalkPlayRate;
+
+	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
+	if (IsValid(AnimInst))
+		AnimInst->PlayMantleMontage(PlayRate);
+
+	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
+		GetFirstPersonMesh()->GetAnimInstance());
+	if (IsValid(FPAnimInst))
+		FPAnimInst->PlayMantleMontage(PlayRate);
+}
+
+void AExtractionCharacter::ExecuteTraversalByType(ETraversalType Type)
+{
+	switch (Type)
+	{
+	case ETraversalType::Vault:  ExecuteVault();  break;
+	case ETraversalType::Climb:  ExecuteClimb();  break;
+	case ETraversalType::Mantle: ExecuteMantle(); break;
+	default: break;
+	}
+}
+
+void AExtractionCharacter::UpdateTraversal(float DeltaTime)
+{
 	SetActorRotation(VaultLockedRotation);
 
-	// Smooth interp toward the vault start position (time-budgeted to avoid fighting root motion)
 	if (bIsSnappingToVault)
 	{
 		VaultSnapTimeRemaining -= DeltaTime;
@@ -895,29 +1004,26 @@ void AExtractionCharacter::UpdateVault(float DeltaTime)
 	}
 
 	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
-	if (!IsValid(AnimInst) || !AnimInst->IsPlayingVaultMontage())
-		EndVault();
+	if (!IsValid(AnimInst) || !AnimInst->IsPlayingAnyTraversalMontage())
+		EndTraversal();
 }
 
-void AExtractionCharacter::EndVault()
+void AExtractionCharacter::EndTraversal()
 {
-	if (!bIsVaulting) return;
+	if (ActiveTraversalType == ETraversalType::None) return;
 
-	bIsVaulting = false;
-	bCanVault = false;
-	bPendingVault = false;
+	ActiveTraversalType = ETraversalType::None;
+	PendingTraversalType = ETraversalType::None;
 	bIsSnappingToVault = false;
 
-	// Re-couple actor rotation to the controller (normal FPS behaviour)
 	bUseControllerRotationYaw = true;
 
-	// Re-enable capsule collision and sweep to resolve any overlaps safely
+	// Sweep-in-place to resolve any overlap after root motion movement
+	SetActorLocation(GetActorLocation(), true);
+
 	UCapsuleComponent* Capsule = GetCapsuleComponent();
 	if (IsValid(Capsule))
 		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-
-	// Sweep-in-place to let the engine push the capsule out of any geometry it overlaps
-	SetActorLocation(GetActorLocation(), true);
 
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
@@ -926,14 +1032,23 @@ void AExtractionCharacter::EndVault()
 	ApplySprintSpeed();
 }
 
-void AExtractionCharacter::OnRep_IsVaulting()
+void AExtractionCharacter::OnRep_TraversalType()
 {
-	if (bIsVaulting)
+	if (ActiveTraversalType == ETraversalType::None) return;
+
+	const float VaultRate = bWasSprintingAtTraversalEntry ? VaultSprintPlayRate : VaultWalkPlayRate;
+	const float ClimbRate = bWasSprintingAtTraversalEntry ? ClimbSprintPlayRate : ClimbWalkPlayRate;
+	const float MantleRate = bWasSprintingAtTraversalEntry ? MantleSprintPlayRate : MantleWalkPlayRate;
+
+	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
+	if (!IsValid(AnimInst)) return;
+
+	switch (ActiveTraversalType)
 	{
-		const float PlayRate = bWasSprintingAtVaultEntry ? VaultSprintPlayRate : VaultWalkPlayRate;
-		UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
-		if (IsValid(AnimInst))
-			AnimInst->PlayVaultMontage(PlayRate);
+	case ETraversalType::Vault:  AnimInst->PlayVaultMontage(VaultRate);   break;
+	case ETraversalType::Climb:  AnimInst->PlayClimbMontage(ClimbRate);   break;
+	case ETraversalType::Mantle: AnimInst->PlayMantleMontage(MantleRate); break;
+	default: break;
 	}
 }
 
