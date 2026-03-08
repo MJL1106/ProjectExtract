@@ -400,6 +400,9 @@ private:
 	/** True when a valid vaultable surface was detected on the last check */
 	bool bCanVault;
 
+	/** True when waiting for uncrouch to finish before executing a vault */
+	bool bPendingVault;
+
 	/** Final position the character will move to after vaulting (capsule center) */
 	FVector VaultTargetLocation;
 

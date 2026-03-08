@@ -51,6 +51,7 @@ AExtractionCharacter::AExtractionCharacter()
 	, LastCrouchSlideTime(0.0)
 	, bWasSprintingOnLastCrouchPress(false)
 	, bCanVault(false)
+	, bPendingVault(false)
 	, VaultTargetLocation(FVector::ZeroVector)
 	, VaultSurfaceLocation(FVector::ZeroVector)
 	, VaultWallNormal(FVector::ZeroVector)
@@ -146,6 +147,13 @@ void AExtractionCharacter::Tick(float DeltaTime)
 		if (bIsInProneMomentum) UpdateProneMomentum(DeltaTime);
 
 		if (bIsVaulting) UpdateVault(DeltaTime);
+
+		// Deferred vault: execute as soon as uncrouch camera interp finishes
+		if (bPendingVault && FMath::IsNearlyEqual(CrouchCameraCurrentOffset, 0.f, 1.f))
+		{
+			bPendingVault = false;
+			ExecuteVault();
+		}
 
 		UpdateSprint();
 
@@ -264,16 +272,21 @@ void AExtractionCharacter::DoJumpStart()
 {
 	if (bIsProne) return;
 	if (bIsVaulting) return;
-
-	if (bIsSliding) EndSlide();
+	if (bIsSliding) return;
 
 	// Vault check — grounded and not in a blocking state
 	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	bCanVault = IsValid(MoveComp) && MoveComp->IsMovingOnGround()
-		&& !bIsSliding && !bIsInProneMomentum
+		&& !bIsInProneMomentum
 		&& PerformVaultDetection();
 	if (bCanVault)
 	{
+		if (IsValid(MoveComp) && MoveComp->IsCrouching())
+		{
+			UnCrouch();
+			bPendingVault = true;
+			return;
+		}
 		ExecuteVault();
 		return;
 	}
@@ -361,6 +374,7 @@ void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 {
 	if (bIsSliding) return;
 	if (bIsVaulting) return;
+	bPendingVault = false;
 
 	// Prone -> Crouch: exit prone and enter crouch (ABP handles blend via inertialization)
 	if (bIsProne)
@@ -532,6 +546,7 @@ static EProneTransitionType DetermineProneEntryType(const AExtractionCharacter& 
 void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 {
 	if (bIsVaulting) return;
+	bPendingVault = false;
 
 	// 3P mesh AnimInstance — authoritative for state guards
 	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
@@ -676,7 +691,16 @@ void AExtractionCharacter::VaultStart(const FInputActionValue& Value)
 	if (MoveComp->IsFalling()) return;
 
 	bCanVault = PerformVaultDetection();
-	if (bCanVault) ExecuteVault();
+	if (bCanVault)
+	{
+		if (MoveComp->IsCrouching())
+		{
+			UnCrouch();
+			bPendingVault = true;
+			return;
+		}
+		ExecuteVault();
+	}
 }
 
 bool AExtractionCharacter::PerformVaultDetection()
@@ -881,6 +905,7 @@ void AExtractionCharacter::EndVault()
 
 	bIsVaulting = false;
 	bCanVault = false;
+	bPendingVault = false;
 	bIsSnappingToVault = false;
 
 	// Re-couple actor rotation to the controller (normal FPS behaviour)
