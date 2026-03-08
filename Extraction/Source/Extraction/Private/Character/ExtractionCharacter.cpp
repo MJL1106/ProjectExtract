@@ -11,6 +11,7 @@
 #include "InputActionValue.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "HealthComponent.h"
 #include "Extraction.h"
 
 namespace ExtractionCharacterConstants
@@ -51,6 +52,7 @@ AExtractionCharacter::AExtractionCharacter()
 	, ProneMomentumDuration(0.f)
 	, LastCrouchSlideTime(0.0)
 	, bWasSprintingOnLastCrouchPress(false)
+	, bIsDBNO(false)
 	, PendingTraversalType(ETraversalType::None)
 	, VaultTargetLocation(FVector::ZeroVector)
 	, VaultSurfaceLocation(FVector::ZeroVector)
@@ -108,6 +110,9 @@ AExtractionCharacter::AExtractionCharacter()
 		MoveComp->MaxWalkSpeedCrouched = MaxWalkSpeedCrouched;
 	}
 
+	// Health component
+	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+
 	StandingBaseEyeHeight = BaseEyeHeight;
 }
 
@@ -124,6 +129,9 @@ void AExtractionCharacter::BeginPlay()
 		MoveComp->MaxWalkSpeedCrouched = MaxWalkSpeedCrouched;
 		MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
 	}
+
+	if (IsValid(HealthComponent))
+		HealthComponent->OnDeath.AddDynamic(this, &AExtractionCharacter::HandleDeath);
 }
 
 void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -1162,6 +1170,43 @@ void AExtractionCharacter::EndSprintJump()
 void AExtractionCharacter::OnSprintJumpMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
 	EndSprintJump();
+}
+
+// ---- Health / DBNO ----
+
+float AExtractionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+
+	if (IsValid(HealthComponent))
+		HealthComponent->TakeDamage(ActualDamage);
+
+	return ActualDamage;
+}
+
+void AExtractionCharacter::HandleDeath()
+{
+	if (bIsDBNO) return;
+	bIsDBNO = true;
+
+	// Disable player input
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (IsValid(PC))
+		DisableInput(PC);
+
+	// Stop all movement
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+	{
+		MoveComp->StopMovementImmediately();
+		MoveComp->DisableMovement();
+	}
+
+	// Cancel any active traversal or slide
+	if (IsInTraversal()) EndTraversal();
+	if (bIsSliding) EndSlide();
+
+	UE_LOG(LogExtraction, Log, TEXT("'%s' entered DBNO state"), *GetNameSafe(this));
 }
 
 // ---- Stub Handlers (future systems) ----

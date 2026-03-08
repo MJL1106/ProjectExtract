@@ -13,6 +13,7 @@ class USkeletalMeshComponent;
 class UCameraComponent;
 class UInputAction;
 class UExtractionAnimInstance;
+class UHealthComponent;
 class UAnimMontage;
 struct FInputActionValue;
 
@@ -32,6 +33,10 @@ class EXTRACTION_API AExtractionCharacter : public ACharacter
 	/** First person camera */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UCameraComponent> FirstPersonCameraComponent;
+
+	/** Health and shield management */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UHealthComponent> HealthComponent;
 
 protected:
 
@@ -284,6 +289,7 @@ public:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
 protected:
 
@@ -394,6 +400,10 @@ public:
 
 	USkeletalMeshComponent* GetFirstPersonMesh() const { return FirstPersonMesh; }
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
+	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	bool GetIsDBNO() const { return bIsDBNO; }
 
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	UExtractionAnimInstance* GetExtractionAnimInstance() const;
@@ -426,6 +436,15 @@ public:
 	float GetVaultSurfaceHeight() const { return VaultSurfaceHeight; }
 
 private:
+
+	// ---- Health / DBNO ----
+
+	/** Called when OnDeath fires from the health component */
+	UFUNCTION()
+	void HandleDeath();
+
+	/** True while the character is in Down But Not Out state */
+	bool bIsDBNO;
 
 	/** Tracks whether the sprint input is currently held */
 	bool bWantsToSprint;
