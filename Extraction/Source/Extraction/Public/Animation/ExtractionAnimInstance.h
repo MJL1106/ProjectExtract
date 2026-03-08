@@ -12,6 +12,7 @@ class UExtractionAnimDataAsset;
 class UCharacterMovementComponent;
 class UBlendSpace;
 class UAnimMontage;
+class UAnimSequence;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogExtractionAnim, Log, All);
 
@@ -132,6 +133,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Animation|Data", meta = (BlueprintThreadSafe))
 	UBlendSpace* GetActiveProneLocomotionBlendSpace() const;
 
+	/** Returns the active weapon's jump start animation, or nullptr */
+	UFUNCTION(BlueprintPure, Category = "Animation|Data", meta = (BlueprintThreadSafe))
+	UAnimSequence* GetActiveJumpStartAnim() const;
+
+	/** Returns the active weapon's fall loop animation, or nullptr */
+	UFUNCTION(BlueprintPure, Category = "Animation|Data", meta = (BlueprintThreadSafe))
+	UAnimSequence* GetActiveFallLoopAnim() const;
+
+	/** Returns the active weapon's land animation, or nullptr */
+	UFUNCTION(BlueprintPure, Category = "Animation|Data", meta = (BlueprintThreadSafe))
+	UAnimSequence* GetActiveLandAnim() const;
+
 	// ---- Montage Playback API ----
 
 	/** Play the fire montage for the current weapon. Returns duration. */
@@ -189,6 +202,14 @@ public:
 	/** Returns true if any traversal montage (vault, climb, or mantle) is currently playing. */
 	UFUNCTION(BlueprintPure, Category = "Animation|State")
 	bool IsPlayingAnyTraversalMontage() const;
+
+	/** Play the sprint jump montage (full-body root motion). Returns duration. */
+	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
+	float PlaySprintJumpMontage(float PlayRate = 1.0f);
+
+	/** Returns true if the sprint jump montage is currently playing. */
+	UFUNCTION(BlueprintPure, Category = "Animation|State")
+	bool IsPlayingSprintJumpMontage() const;
 
 	/** Returns true if any prone-entry transition montage is currently active (real-time, no frame delay). */
 	UFUNCTION(BlueprintPure, Category = "Animation|State")

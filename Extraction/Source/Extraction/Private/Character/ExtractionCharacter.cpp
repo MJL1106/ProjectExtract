@@ -3,6 +3,7 @@
 #include "ExtractionCharacter.h"
 #include "ExtractionAnimInstance.h"
 #include "Animation/AnimInstance.h"
+#include "Animation/AnimMontage.h"
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -60,6 +61,7 @@ AExtractionCharacter::AExtractionCharacter()
 	, VaultSnapTarget(FVector::ZeroVector)
 	, bIsSnappingToVault(false)
 	, VaultSnapTimeRemaining(0.f)
+	, bIsSprintJumping(false)
 {
 	// Replication
 	bReplicates = true;
@@ -146,6 +148,14 @@ void AExtractionCharacter::Tick(float DeltaTime)
 		if (bIsInProneMomentum) UpdateProneMomentum(DeltaTime);
 
 		if (IsInTraversal()) UpdateTraversal(DeltaTime);
+
+		// Sprint jump safety net: end if montage was interrupted without delegate firing
+		if (bIsSprintJumping)
+		{
+			UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
+			if (!IsValid(AnimInst) || !AnimInst->IsPlayingSprintJumpMontage())
+				EndSprintJump();
+		}
 
 		// Deferred traversal: execute as soon as uncrouch camera interp finishes
 		if (PendingTraversalType != ETraversalType::None && FMath::IsNearlyEqual(CrouchCameraCurrentOffset, 0.f, 1.f))
@@ -273,6 +283,7 @@ void AExtractionCharacter::DoJumpStart()
 	if (bIsProne) return;
 	if (IsInTraversal()) return;
 	if (bIsSliding) return;
+	if (bIsSprintJumping) return;
 
 	// Traversal check — grounded and not in a blocking state
 	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
@@ -293,6 +304,13 @@ void AExtractionCharacter::DoJumpStart()
 		return;
 	}
 
+	// Sprint jump: normal physics jump + visual montage overlay
+	if (bIsSprinting && IsValid(MoveComp) && MoveComp->IsMovingOnGround())
+	{
+		StartSprintJump();
+		return;
+	}
+
 	Jump();
 }
 
@@ -305,7 +323,7 @@ void AExtractionCharacter::DoJumpEnd()
 
 void AExtractionCharacter::SprintStart(const FInputActionValue& Value)
 {
-	if (IsInTraversal()) return;
+	if (IsInTraversal() || bIsSprintJumping) return;
 
 	bWantsToSprint = true;
 
@@ -375,7 +393,7 @@ void AExtractionCharacter::ApplySprintSpeed()
 void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 {
 	if (bIsSliding) return;
-	if (IsInTraversal()) return;
+	if (IsInTraversal() || bIsSprintJumping) return;
 	PendingTraversalType = ETraversalType::None;
 
 	// Prone -> Crouch: exit prone and enter crouch (ABP handles blend via inertialization)
@@ -547,7 +565,7 @@ static EProneTransitionType DetermineProneEntryType(const AExtractionCharacter& 
 
 void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 {
-	if (IsInTraversal()) return;
+	if (IsInTraversal() || bIsSprintJumping) return;
 	PendingTraversalType = ETraversalType::None;
 
 	// 3P mesh AnimInstance — authoritative for state guards
@@ -683,7 +701,7 @@ void AExtractionCharacter::OnRep_IsProne()
 
 void AExtractionCharacter::VaultStart(const FInputActionValue& Value)
 {
-	if (IsInTraversal()) return;
+	if (IsInTraversal() || bIsSprintJumping) return;
 	if (bIsSliding) return;
 	if (bIsProne) return;
 	if (bIsInProneMomentum) return;
@@ -1093,6 +1111,58 @@ void AExtractionCharacter::OnRep_TraversalType()
 	}
 }
 
+
+// ---- Sprint Jump ----
+
+void AExtractionCharacter::StartSprintJump()
+{
+	bIsSprintJumping = true;
+
+	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
+	if (IsValid(AnimInst))
+	{
+		AnimInst->PlaySprintJumpMontage(SprintJumpPlayRate);
+
+		FOnMontageEnded EndDelegate;
+		EndDelegate.BindUObject(this, &AExtractionCharacter::OnSprintJumpMontageEnded);
+		AnimInst->Montage_SetEndDelegate(EndDelegate, AnimInst->GetCurrentActiveMontage());
+	}
+
+	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
+		GetFirstPersonMesh()->GetAnimInstance());
+	if (IsValid(FPAnimInst))
+		FPAnimInst->PlaySprintJumpMontage(SprintJumpPlayRate);
+
+	// Normal jump — CMC handles gravity, velocity, landing
+	Jump();
+
+	// Boost forward velocity and disable air braking so momentum carries through the arc
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+	{
+		const FVector ForwardDir = GetActorForwardVector().GetSafeNormal2D();
+		MoveComp->Velocity += ForwardDir * SprintJumpForwardBoost;
+
+		CachedBrakingDecelerationFalling = MoveComp->BrakingDecelerationFalling;
+		MoveComp->BrakingDecelerationFalling = 0.f;
+	}
+}
+
+void AExtractionCharacter::EndSprintJump()
+{
+	if (!bIsSprintJumping) return;
+
+	bIsSprintJumping = false;
+
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+		MoveComp->BrakingDecelerationFalling = CachedBrakingDecelerationFalling;
+}
+
+void AExtractionCharacter::OnSprintJumpMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	EndSprintJump();
+}
 
 // ---- Stub Handlers (future systems) ----
 

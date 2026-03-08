@@ -166,6 +166,27 @@ UBlendSpace* UExtractionAnimInstance::GetActiveProneLocomotionBlendSpace() const
 	return Data->ProneLocomotionBlendSpace;
 }
 
+UAnimSequence* UExtractionAnimInstance::GetActiveJumpStartAnim() const
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data)) return nullptr;
+	return Data->JumpStartAnim;
+}
+
+UAnimSequence* UExtractionAnimInstance::GetActiveFallLoopAnim() const
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data)) return nullptr;
+	return Data->FallLoopAnim;
+}
+
+UAnimSequence* UExtractionAnimInstance::GetActiveLandAnim() const
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data)) return nullptr;
+	return Data->LandAnim;
+}
+
 // ---- Montage Playback ----
 
 float UExtractionAnimInstance::PlayFireMontage(float PlayRate)
@@ -294,6 +315,20 @@ bool UExtractionAnimInstance::IsPlayingMantleMontage() const
 bool UExtractionAnimInstance::IsPlayingAnyTraversalMontage() const
 {
 	return IsPlayingVaultMontage() || IsPlayingClimbMontage() || IsPlayingMantleMontage();
+}
+
+float UExtractionAnimInstance::PlaySprintJumpMontage(float PlayRate)
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data)) return 0.f;
+	return PlayMontageInternal(Data->SprintJumpMontage, PlayRate);
+}
+
+bool UExtractionAnimInstance::IsPlayingSprintJumpMontage() const
+{
+	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
+	if (!IsValid(AnimData)) return false;
+	return Montage_IsPlaying(AnimData->SprintJumpMontage);
 }
 
 void UExtractionAnimInstance::SetWeaponType(EWeaponType NewWeaponType)
