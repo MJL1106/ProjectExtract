@@ -115,6 +115,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Prone|Transitions")
 	TObjectPtr<UAnimMontage> ProneToStandTransition;
 
+	// ---- Vault ----
+
+	/** Full-body vault montage. Must have root motion enabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Vault")
+	TObjectPtr<UAnimMontage> VaultMontage;
+
 	// ---- Hit Reactions & Death ----
 
 	/** Multiple hit reacts for random selection */
