@@ -251,6 +251,8 @@ void AExtractionCharacter::DoAim(float Yaw, float Pitch)
 
 void AExtractionCharacter::DoMove(float Right, float Forward)
 {
+	if (bIsVaulting) return;
+
 	if (IsValid(GetController()))
 	{
 		AddMovementInput(GetActorRightVector(), Right);
@@ -802,6 +804,11 @@ void AExtractionCharacter::ExecuteVault()
 	// Capture sprint state before cancelling
 	bWasSprintingAtVaultEntry = bIsSprinting;
 
+	// Lock the actor's yaw so mouse look can't steer the vault mid-flight.
+	// Capture current rotation BEFORE decoupling from the controller.
+	VaultLockedRotation = GetActorRotation();
+	bUseControllerRotationYaw = false;
+
 	bIsVaulting = true;
 	bIsSprinting = false;
 	bWantsToSprint = false;
@@ -841,6 +848,8 @@ void AExtractionCharacter::ExecuteVault()
 
 void AExtractionCharacter::UpdateVault(float DeltaTime)
 {
+	// Keep the actor facing the vault direction (camera is free to look around)
+	SetActorRotation(VaultLockedRotation);
 
 	// Smooth interp toward the vault start position (time-budgeted to avoid fighting root motion)
 	if (bIsSnappingToVault)
@@ -873,6 +882,9 @@ void AExtractionCharacter::EndVault()
 	bIsVaulting = false;
 	bCanVault = false;
 	bIsSnappingToVault = false;
+
+	// Re-couple actor rotation to the controller (normal FPS behaviour)
+	bUseControllerRotationYaw = true;
 
 	// Re-enable capsule collision and sweep to resolve any overlaps safely
 	UCapsuleComponent* Capsule = GetCapsuleComponent();

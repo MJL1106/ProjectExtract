@@ -424,4 +424,7 @@ private:
 	/** Time remaining for snap interpolation before root motion takes over */
 	float VaultSnapTimeRemaining;
 
+	/** Actor yaw locked at vault entry so root motion stays on course */
+	FRotator VaultLockedRotation;
+
 };
