@@ -26,7 +26,8 @@ public class Extraction : ModuleRules
 			"Extraction/Public/Core",
 			"Extraction/Public/Character",
 			"Extraction/Public/Animation",
-			"Extraction/Public/Game"
+			"Extraction/Public/Game",
+			"Extraction/Public/Components"
 		});
 
 		// Private subfolder include paths
@@ -34,7 +35,8 @@ public class Extraction : ModuleRules
 			"Extraction/Private/Core",
 			"Extraction/Private/Character",
 			"Extraction/Private/Animation",
-			"Extraction/Private/Game"
+			"Extraction/Private/Game",
+			"Extraction/Private/Components"
 		});
 	}
 }
