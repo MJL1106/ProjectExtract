@@ -759,16 +759,45 @@ ETraversalType AExtractionCharacter::PerformTraversalDetection()
 		VaultTargetLocation.Z = SurfaceHit.ImpactPoint.Z + CapsuleHalfHeight;
 	};
 
-	// Vault range (50-120cm): try thin-obstacle vault first, then climb fallback
+	// Vault range: try thin-obstacle vault first, then climb fallback for thick surfaces
 	if (VaultSurfaceHeight >= VaultMinHeight && VaultSurfaceHeight <= VaultMaxHeight)
 	{
 		const bool bVaultClear = CheckClearance(SurfaceHit.ImpactPoint, VaultLandingForwardOffset);
 		if (bVaultClear)
 		{
-			SetTargetLocation(VaultLandingForwardOffset);
-			return ETraversalType::Vault;
+			// In the overlap zone (vault + climb both valid), check obstacle thickness.
+			// Trace down at the vault landing position — if the ground is still at surface
+			// height, the obstacle is thick (e.g. a ledge) so prefer climb over vault.
+			bool bPreferClimb = false;
+			if (VaultSurfaceHeight >= ClimbMinHeight)
+			{
+				static constexpr float DropThreshold = 30.f;
+
+				FCollisionQueryParams DropParams;
+				DropParams.AddIgnoredActor(this);
+
+				const FVector DropStart(
+					SurfaceHit.ImpactPoint.X + Forward.X * VaultLandingForwardOffset,
+					SurfaceHit.ImpactPoint.Y + Forward.Y * VaultLandingForwardOffset,
+					SurfaceHit.ImpactPoint.Z + 10.f);
+				const FVector DropEnd(DropStart.X, DropStart.Y, FeetZ - 10.f);
+
+				FHitResult DropHit;
+				const bool bHitGround = GetWorld()->LineTraceSingleByChannel(
+					DropHit, DropStart, DropEnd, ECC_Visibility, DropParams);
+
+				bPreferClimb = bHitGround &&
+					(DropHit.ImpactPoint.Z > SurfaceHit.ImpactPoint.Z - DropThreshold);
+			}
+
+			if (!bPreferClimb)
+			{
+				SetTargetLocation(VaultLandingForwardOffset);
+				return ETraversalType::Vault;
+			}
 		}
 
+		// Thick surface or vault clearance failed — try climb
 		if (VaultSurfaceHeight >= ClimbMinHeight)
 		{
 			const bool bClimbClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset);
