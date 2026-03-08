@@ -200,6 +200,13 @@ protected:
 			ToolTip = "Surfaces taller than this trigger mantle instead of climb."))
 	float ClimbMaxHeight = 170.0f;
 
+	/** Obstacle height the climb animation was authored for (cm).
+	 *  Used to calculate a vertical boost when the actual surface is taller/shorter. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
+		meta = (ClampMin = "50.0", ClampMax = "300.0",
+			ToolTip = "The obstacle height the climb montage's root motion was built for.\nAt this exact height, no boost is applied. Taller surfaces get a pre-animation lift."))
+	float ClimbAnimReferenceHeight = 100.0f;
+
 	/** Montage play rate when climbing while walking */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
 		meta = (ClampMin = "0.5", ClampMax = "3.0"))
@@ -217,6 +224,13 @@ protected:
 		meta = (ClampMin = "0.0",
 			ToolTip = "Surfaces taller than this cannot be mantled.\nMantle min height equals ClimbMaxHeight (no gap)."))
 	float MantleMaxHeight = 260.0f;
+
+	/** Obstacle height the mantle animation was authored for (cm).
+	 *  Used to calculate a vertical boost when the actual surface is taller/shorter. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Mantle",
+		meta = (ClampMin = "50.0", ClampMax = "400.0",
+			ToolTip = "The obstacle height the mantle montage's root motion was built for.\nAt this exact height, no boost is applied. Taller surfaces get a pre-animation lift."))
+	float MantleAnimReferenceHeight = 200.0f;
 
 	/** Montage play rate when mantling while walking */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Mantle",
