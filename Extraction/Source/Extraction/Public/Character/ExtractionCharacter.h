@@ -313,7 +313,7 @@ protected:
 	bool bIsDBNO;
 
 	/** Seconds remaining before bleedout death (set on DBNO entry, clients use for UI) */
-	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Health|State")
+	UPROPERTY(BlueprintReadOnly, Category = "Health|State")
 	float BleedoutTimeRemaining = 0.f;
 
 public:
@@ -494,6 +494,14 @@ private:
 	void DebugApplyDamage();
 
 	FTimerHandle BleedoutTimerHandle;
+
+	/** Cached 3P anim instance (populated in BeginPlay — avoids Cast per call) */
+	UPROPERTY()
+	TObjectPtr<UExtractionAnimInstance> CachedAnimInstance;
+
+	/** Cached 1P anim instance (populated in BeginPlay — avoids Cast per call) */
+	UPROPERTY()
+	TObjectPtr<UExtractionAnimInstance> CachedFPAnimInstance;
 
 	// ---- Revive ----
 

@@ -141,6 +141,13 @@ void AExtractionCharacter::BeginPlay()
 
 	if (IsValid(HealthComponent))
 		HealthComponent->OnDeath.AddDynamic(this, &AExtractionCharacter::HandleDeath);
+
+	// Cache anim instances — these don't change after initialization
+	CachedAnimInstance = Cast<UExtractionAnimInstance>(GetMesh()->GetAnimInstance());
+	if (!IsValid(CachedAnimInstance))
+		UE_LOG(LogExtraction, Warning, TEXT("'%s': 3P AnimInstance is not UExtractionAnimInstance — check ABP parent class."), *GetNameSafe(this));
+
+	CachedFPAnimInstance = Cast<UExtractionAnimInstance>(FirstPersonMesh->GetAnimInstance());
 }
 
 void AExtractionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -161,15 +168,14 @@ void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, ActiveTraversalType, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bWasSprintingAtTraversalEntry, COND_SkipOwner);
 	DOREPLIFETIME(AExtractionCharacter, bIsDBNO);
-	DOREPLIFETIME(AExtractionCharacter, BleedoutTimeRemaining);
 }
 
 void AExtractionCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	// Server: tick down bleedout timer for UI replication
-	if (HasAuthority() && bIsDBNO && BleedoutTimeRemaining > 0.f)
+	// Tick down bleedout locally (server uses FTimerHandle for authoritative expiry)
+	if (bIsDBNO && BleedoutTimeRemaining > 0.f)
 		BleedoutTimeRemaining = FMath::Max(BleedoutTimeRemaining - DeltaTime, 0.f);
 
 	if (IsLocallyControlled())
@@ -200,27 +206,26 @@ void AExtractionCharacter::Tick(float DeltaTime)
 
 		UpdateSprint();
 
-	}
-
-	// Smooth camera height interpolation during crouch transitions
-	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
-	if (IsValid(MoveComp))
-	{
-		const float HalfHeightDelta = MoveComp->GetCrouchedHalfHeight() - GetDefaultHalfHeight();
-		CrouchCameraTargetOffset = MoveComp->IsCrouching() ? HalfHeightDelta : 0.f;
-
-		if (!FMath::IsNearlyEqual(CrouchCameraCurrentOffset, CrouchCameraTargetOffset, 0.1f))
+		// Smooth camera height interpolation during crouch transitions (local player only)
+		const UCharacterMovementComponent* CameraComp = GetCharacterMovement();
+		if (IsValid(CameraComp))
 		{
-			CrouchCameraCurrentOffset = FMath::FInterpTo(
-				CrouchCameraCurrentOffset, CrouchCameraTargetOffset,
-				DeltaTime, CrouchCameraInterpSpeed);
+			const float HalfHeightDelta = CameraComp->GetCrouchedHalfHeight() - GetDefaultHalfHeight();
+			CrouchCameraTargetOffset = CameraComp->IsCrouching() ? HalfHeightDelta : 0.f;
 
-			BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
-		}
-		else
-		{
-			CrouchCameraCurrentOffset = CrouchCameraTargetOffset;
-			BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
+			if (!FMath::IsNearlyEqual(CrouchCameraCurrentOffset, CrouchCameraTargetOffset, 0.1f))
+			{
+				CrouchCameraCurrentOffset = FMath::FInterpTo(
+					CrouchCameraCurrentOffset, CrouchCameraTargetOffset,
+					DeltaTime, CrouchCameraInterpSpeed);
+
+				BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
+			}
+			else
+			{
+				CrouchCameraCurrentOffset = CrouchCameraTargetOffset;
+				BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
+			}
 		}
 	}
 }
@@ -617,10 +622,6 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 	// Block re-entry during any active prone transition
 	if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) return;
 
-	// FP mesh AnimInstance — mirrors montage playback so the camera-driving head bone animates
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-
 	if (bIsProne)
 	{
 		// --- Exit prone ---
@@ -640,7 +641,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 		bIsProne = false;
 		ApplySprintSpeed();
 		AnimInst->PlayProneExitMontage();
-		if (IsValid(FPAnimInst)) FPAnimInst->PlayProneExitMontage();
+		if (IsValid(CachedFPAnimInstance)) CachedFPAnimInstance->PlayProneExitMontage();
 	}
 	else
 	{
@@ -671,7 +672,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 			// Capture montage duration so the decel curve matches the animation length
 			const float MontageDuration = AnimInst->PlayProneTransitionMontage(TransitionType);
 			ProneMomentumDuration = FMath::Max(MontageDuration, 0.1f);
-			if (IsValid(FPAnimInst)) FPAnimInst->PlayProneTransitionMontage(TransitionType);
+			if (IsValid(CachedFPAnimInstance)) CachedFPAnimInstance->PlayProneTransitionMontage(TransitionType);
 
 			if (IsValid(MoveComp))
 			{
@@ -695,7 +696,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 			ApplySprintSpeed();
 			Crouch();
 			AnimInst->PlayProneTransitionMontage(TransitionType);
-			if (IsValid(FPAnimInst)) FPAnimInst->PlayProneTransitionMontage(TransitionType);
+			if (IsValid(CachedFPAnimInstance)) CachedFPAnimInstance->PlayProneTransitionMontage(TransitionType);
 		}
 	}
 }
@@ -1067,10 +1068,8 @@ void AExtractionCharacter::ExecuteVault()
 	if (IsValid(AnimInst))
 		AnimInst->PlayVaultMontage(PlayRate);
 
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-	if (IsValid(FPAnimInst))
-		FPAnimInst->PlayVaultMontage(PlayRate);
+	if (IsValid(CachedFPAnimInstance))
+		CachedFPAnimInstance->PlayVaultMontage(PlayRate);
 }
 
 void AExtractionCharacter::ExecuteClimb()
@@ -1083,10 +1082,8 @@ void AExtractionCharacter::ExecuteClimb()
 	if (IsValid(AnimInst))
 		AnimInst->PlayClimbMontage(PlayRate);
 
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-	if (IsValid(FPAnimInst))
-		FPAnimInst->PlayClimbMontage(PlayRate);
+	if (IsValid(CachedFPAnimInstance))
+		CachedFPAnimInstance->PlayClimbMontage(PlayRate);
 }
 
 void AExtractionCharacter::ExecuteMantle()
@@ -1099,10 +1096,8 @@ void AExtractionCharacter::ExecuteMantle()
 	if (IsValid(AnimInst))
 		AnimInst->PlayMantleMontage(PlayRate);
 
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-	if (IsValid(FPAnimInst))
-		FPAnimInst->PlayMantleMontage(PlayRate);
+	if (IsValid(CachedFPAnimInstance))
+		CachedFPAnimInstance->PlayMantleMontage(PlayRate);
 }
 
 void AExtractionCharacter::ExecuteTraversalByType(ETraversalType Type)
@@ -1204,10 +1199,8 @@ void AExtractionCharacter::StartSprintJump()
 		AnimInst->Montage_SetEndDelegate(EndDelegate, AnimInst->GetCurrentActiveMontage());
 	}
 
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-	if (IsValid(FPAnimInst))
-		FPAnimInst->PlaySprintJumpMontage(SprintJumpPlayRate);
+	if (IsValid(CachedFPAnimInstance))
+		CachedFPAnimInstance->PlaySprintJumpMontage(SprintJumpPlayRate);
 
 	// Normal jump — CMC handles gravity, velocity, landing
 	Jump();
@@ -1414,6 +1407,10 @@ void AExtractionCharacter::OnRep_IsDBNO()
 		}
 	}
 
+	// Initialize local countdown so client can tick it down without replication
+	if (bIsDBNO)
+		BleedoutTimeRemaining = BleedoutDuration;
+
 	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
 }
 
@@ -1553,18 +1550,5 @@ void AExtractionCharacter::Server_CompleteRevive_Implementation(AExtractionChara
 
 UExtractionAnimInstance* AExtractionCharacter::GetExtractionAnimInstance() const
 {
-	UAnimInstance* AnimInst = GetMesh()->GetAnimInstance();
-	if (!IsValid(AnimInst)) return nullptr;
-
-	UExtractionAnimInstance* TypedInst = Cast<UExtractionAnimInstance>(AnimInst);
-	if (!IsValid(TypedInst))
-	{
-		UE_LOG(LogExtraction, Warning,
-			TEXT("AnimInstance on '%s' is not UExtractionAnimInstance. "
-				"Ensure the ABP parent class is set correctly."),
-			*GetNameSafe(this));
-		return nullptr;
-	}
-
-	return TypedInst;
+	return CachedAnimInstance;
 }
