@@ -10,7 +10,6 @@
 #include "InputActionValue.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
-#include "DrawDebugHelpers.h"
 #include "Extraction.h"
 
 namespace ExtractionCharacterConstants
@@ -29,9 +28,6 @@ namespace ExtractionCharacterConstants
 
 	/** Min dot product between wall normal and -ForwardVector to accept wall as face-on (~60 degrees) */
 	static constexpr float VaultWallFacingDotThreshold = 0.5f;
-
-	/** How long debug draw visualization persists (seconds) */
-	static constexpr float VaultDebugDrawDuration = 2.0f;
 
 }
 
@@ -270,7 +266,6 @@ void AExtractionCharacter::DoJumpStart()
 		&& !bIsSliding && !bIsInProneMomentum
 		&& PerformVaultDetection())
 	{
-		UE_LOG(LogExtraction, Log, TEXT("Vault detection passed — height=%.1f — executing vault"), VaultSurfaceHeight);
 		ExecuteVault();
 		return;
 	}
@@ -680,54 +675,34 @@ bool AExtractionCharacter::PerformVaultDetection()
 {
 	// Step 1: Forward sweep to find a wall
 	FHitResult WallHit;
-	if (!TraceForwardForWall(WallHit))
-	{
-		DrawVaultDebug(WallHit, FHitResult(), false);
-		return false;
-	}
+	if (!TraceForwardForWall(WallHit)) return false;
 
 	// Reject hits on other characters/pawns
-	if (IsValid(WallHit.GetActor()) && WallHit.GetActor()->IsA(APawn::StaticClass()))
-	{
-		DrawVaultDebug(WallHit, FHitResult(), false);
-		return false;
-	}
+	if (IsValid(WallHit.GetActor()) && WallHit.GetActor()->IsA(APawn::StaticClass())) return false;
 
 	// Reject walls that aren't roughly facing us
 	const FVector Forward = GetActorForwardVector();
 	const float FacingDot = FVector::DotProduct(WallHit.ImpactNormal, -Forward);
-	if (FacingDot < ExtractionCharacterConstants::VaultWallFacingDotThreshold)
-	{
-		DrawVaultDebug(WallHit, FHitResult(), false);
-		return false;
-	}
+	if (FacingDot < ExtractionCharacterConstants::VaultWallFacingDotThreshold) return false;
 
 	// Step 2: Trace down from above the wall to find the top surface
 	FHitResult SurfaceHit;
-	if (!TraceDownForSurface(WallHit, SurfaceHit))
-	{
-		DrawVaultDebug(WallHit, SurfaceHit, false);
-		return false;
-	}
+	if (!TraceDownForSurface(WallHit, SurfaceHit)) return false;
 
 	// Step 3: Compute and validate landing position
 	const float CapsuleHalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
 	const float FeetZ = GetActorLocation().Z - CapsuleHalfHeight;
 
 	VaultWallNormal = WallHit.ImpactNormal;
+	VaultWallImpactPoint = WallHit.ImpactPoint;
 	VaultSurfaceLocation = SurfaceHit.ImpactPoint;
 	VaultSurfaceHeight = SurfaceHit.ImpactPoint.Z - FeetZ;
 	VaultTargetLocation = SurfaceHit.ImpactPoint + Forward * VaultLandingForwardOffset;
 	VaultTargetLocation.Z = SurfaceHit.ImpactPoint.Z + CapsuleHalfHeight;
 
 	// Step 4: Check clearance at the landing position
-	if (!CheckVaultClearance(SurfaceHit.ImpactPoint))
-	{
-		DrawVaultDebug(WallHit, SurfaceHit, false);
-		return false;
-	}
+	if (!CheckVaultClearance(SurfaceHit.ImpactPoint)) return false;
 
-	DrawVaultDebug(WallHit, SurfaceHit, true);
 	return true;
 }
 
@@ -740,10 +715,8 @@ bool AExtractionCharacter::TraceForwardForWall(FHitResult& OutHit) const
 	const float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
 	const FVector Forward = GetActorForwardVector();
 
-	// Trace at the midpoint of the vaultable height range (relative to feet)
-	// so the sphere sweep contacts obstacles between VaultMinHeight and VaultMaxHeight
 	const float FeetZ = GetActorLocation().Z - CapsuleHalfHeight;
-	const float TraceHeight = FeetZ + (VaultMinHeight + VaultMaxHeight) * 0.5f;
+	const float TraceHeight = FeetZ + VaultForwardTraceHeight;
 
 	FVector Start = GetActorLocation() + Forward * CapsuleRadius;
 	Start.Z = TraceHeight;
@@ -835,23 +808,17 @@ void AExtractionCharacter::ExecuteVault()
 	if (IsValid(Capsule))
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
+	// Set up interpolation toward a consistent vault start position
+	VaultSnapTarget = VaultWallImpactPoint + VaultWallNormal * VaultSnapDistance;
+	VaultSnapTarget.Z = GetActorLocation().Z;
+	bIsSnappingToVault = true;
+
 	const float PlayRate = bWasSprintingAtVaultEntry ? VaultSprintPlayRate : VaultWalkPlayRate;
 
 	// Play vault montage on 3P mesh
 	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
-	float Duration = 0.f;
 	if (IsValid(AnimInst))
-	{
-		Duration = AnimInst->PlayVaultMontage(PlayRate);
-		UE_LOG(LogExtraction, Log, TEXT("Vault montage (3P) duration=%.2f, PlayRate=%.2f"), Duration, PlayRate);
-	}
-	else
-	{
-		UE_LOG(LogExtraction, Warning, TEXT("ExecuteVault: 3P AnimInstance is null"));
-	}
-
-	if (Duration <= 0.f)
-		UE_LOG(LogExtraction, Warning, TEXT("ExecuteVault: No vault montage assigned! Vault will end immediately next frame."));
+		AnimInst->PlayVaultMontage(PlayRate);
 
 	// Mirror on FP mesh for camera-driving head bone
 	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
@@ -862,13 +829,22 @@ void AExtractionCharacter::ExecuteVault()
 
 void AExtractionCharacter::UpdateVault()
 {
+	const float DeltaTime = GetWorld()->GetDeltaSeconds();
+
+	// Smooth interp toward the vault start position
+	if (bIsSnappingToVault)
+	{
+		const FVector Current = GetActorLocation();
+		const FVector NewLoc = FMath::VInterpTo(Current, VaultSnapTarget, DeltaTime, VaultSnapInterpSpeed);
+		SetActorLocation(NewLoc);
+
+		if (FVector::DistSquared(NewLoc, VaultSnapTarget) < 1.f)
+			bIsSnappingToVault = false;
+	}
+
 	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
 	if (!IsValid(AnimInst) || !AnimInst->IsPlayingVaultMontage())
-	{
-		UE_LOG(LogExtraction, Log, TEXT("UpdateVault: montage not playing — ending vault (AnimInst valid=%d)"),
-			IsValid(AnimInst));
 		EndVault();
-	}
 }
 
 void AExtractionCharacter::EndVault()
@@ -877,6 +853,7 @@ void AExtractionCharacter::EndVault()
 
 	bIsVaulting = false;
 	bCanVault = false;
+	bIsSnappingToVault = false;
 
 	// Re-enable capsule collision
 	UCapsuleComponent* Capsule = GetCapsuleComponent();
@@ -901,53 +878,6 @@ void AExtractionCharacter::OnRep_IsVaulting()
 	}
 }
 
-void AExtractionCharacter::DrawVaultDebug(
-	const FHitResult& WallHit, const FHitResult& SurfaceHit, bool bVaultValid) const
-{
-#if ENABLE_DRAW_DEBUG
-	const UWorld* World = GetWorld();
-	if (!IsValid(World)) return;
-
-	const float Duration = ExtractionCharacterConstants::VaultDebugDrawDuration;
-	const float CapsuleRadius = GetCapsuleComponent()->GetScaledCapsuleRadius();
-	const FVector Forward = GetActorForwardVector();
-	const FVector TraceStart = GetActorLocation() + Forward * CapsuleRadius;
-	const FVector TraceEnd = TraceStart + Forward * VaultForwardTraceDistance;
-
-	// Forward trace line (green = hit, red = miss)
-	const FColor ForwardColor = WallHit.bBlockingHit ? FColor::Green : FColor::Red;
-	DrawDebugLine(World, TraceStart, WallHit.bBlockingHit ? WallHit.ImpactPoint : TraceEnd,
-		ForwardColor, false, Duration, 0, 2.0f);
-
-	if (!WallHit.bBlockingHit) return;
-
-	// Wall hit point
-	DrawDebugSphere(World, WallHit.ImpactPoint, 6.0f, 8, FColor::Yellow, false, Duration);
-
-	// Wall normal arrow
-	DrawDebugDirectionalArrow(World, WallHit.ImpactPoint,
-		WallHit.ImpactPoint + WallHit.ImpactNormal * 30.0f,
-		5.0f, FColor::Yellow, false, Duration);
-
-	if (!SurfaceHit.bBlockingHit) return;
-
-	// Down trace
-	DrawDebugLine(World, SurfaceHit.TraceStart, SurfaceHit.TraceEnd,
-		FColor::Cyan, false, Duration, 0, 1.5f);
-
-	// Surface hit point
-	const FColor SurfaceColor = bVaultValid ? FColor::Green : FColor::Red;
-	DrawDebugSphere(World, SurfaceHit.ImpactPoint, 8.0f, 8, SurfaceColor, false, Duration);
-
-	// Vault target capsule (if valid)
-	if (bVaultValid)
-	{
-		const float HalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
-		DrawDebugCapsule(World, VaultTargetLocation, HalfHeight, CapsuleRadius,
-			FQuat::Identity, FColor::Green, false, Duration);
-	}
-#endif
-}
 
 // ---- Stub Handlers (future systems) ----
 

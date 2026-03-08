@@ -136,6 +136,12 @@ protected:
 			ToolTip = "Radius of the sphere sweep for forward wall detection.\nLarger = more forgiving alignment."))
 	float VaultForwardTraceRadius = 15.0f;
 
+	/** Height above feet where the forward trace fires (cm) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "0.0", ClampMax = "200.0",
+			ToolTip = "Height of the forward wall-detection trace above the character's feet.\nLower = catches shorter obstacles. Independent of VaultMinHeight."))
+	float VaultForwardTraceHeight = 50.0f;
+
 	/** Minimum obstacle height from feet to be vaultable (cm) */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
 		meta = (ClampMin = "0.0",
@@ -165,6 +171,19 @@ protected:
 		meta = (ClampMin = "0.5", ClampMax = "3.0",
 			ToolTip = "Playback speed multiplier for walk vaults."))
 	float VaultWalkPlayRate = 1.0f;
+
+	/** Distance from the wall face the character snaps to when a vault starts (cm).
+	 *  Ensures the montage always begins at a consistent offset regardless of detection range. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "5.0", ClampMax = "100.0",
+			ToolTip = "How far from the wall the character is placed at vault start.\nTune to match where the vault animation expects the character to be."))
+	float VaultSnapDistance = 50.0f;
+
+	/** How fast the character interpolates to the vault start position */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "5.0", ClampMax = "50.0",
+			ToolTip = "Interpolation speed for the vault snap.\nHigher = faster/snappier, lower = smoother glide."))
+	float VaultSnapInterpSpeed = 18.0f;
 
 	// ---- Replicated State ----
 
@@ -372,9 +391,6 @@ private:
 	 *  @return true if there is room for the character */
 	bool CheckVaultClearance(const FVector& SurfaceLocation) const;
 
-	/** Draws debug lines, spheres, and a target capsule for vault tuning (editor builds only) */
-	void DrawVaultDebug(const FHitResult& WallHit, const FHitResult& SurfaceHit, bool bVaultValid) const;
-
 	// ---- Vault State ----
 
 	/** True when a valid vaultable surface was detected on the last check */
@@ -389,10 +405,19 @@ private:
 	/** Normal of the wall face (points away from wall, toward character) */
 	FVector VaultWallNormal;
 
+	/** Impact point on the wall face from the forward trace */
+	FVector VaultWallImpactPoint;
+
 	/** Height of the vault surface above the character's feet (cm) */
 	float VaultSurfaceHeight;
 
 	/** Whether the character was sprinting when the vault started (for play rate) */
 	bool bWasSprintingAtVaultEntry;
+
+	/** Position the character is interpolating toward at vault start */
+	FVector VaultSnapTarget;
+
+	/** True while still interpolating to the snap position */
+	bool bIsSnappingToVault;
 
 };
