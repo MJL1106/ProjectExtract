@@ -1,0 +1,151 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+#include "HealthComponent.h"
+#include "Net/UnrealNetwork.h"
+#include "TimerManager.h"
+
+UHealthComponent::UHealthComponent()
+{
+	PrimaryComponentTick.bCanEverTick = false;
+	SetIsReplicatedByDefault(true);
+}
+
+void UHealthComponent::BeginPlay()
+{
+	Super::BeginPlay();
+
+	CurrentHealth = MaxHealth;
+	CurrentShield = MaxShield;
+}
+
+void UHealthComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (const UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(ShieldRegenDelayHandle);
+		World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+	}
+
+	Super::EndPlay(EndPlayReason);
+}
+
+void UHealthComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(UHealthComponent, CurrentHealth);
+	DOREPLIFETIME(UHealthComponent, CurrentShield);
+}
+
+void UHealthComponent::TakeDamage(float Damage)
+{
+	if (bIsDead || Damage <= 0.f) return;
+
+	// Stop any active shield regen
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	World->GetTimerManager().ClearTimer(ShieldRegenDelayHandle);
+	World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+
+	// Deplete shield first, overflow into health
+	if (CurrentShield > 0.f)
+	{
+		const float ShieldDamage = FMath::Min(Damage, CurrentShield);
+		CurrentShield = FMath::Max(CurrentShield - ShieldDamage, 0.f);
+		Damage -= ShieldDamage;
+		OnShieldChanged.Broadcast(CurrentShield, MaxShield);
+	}
+
+	if (Damage > 0.f)
+	{
+		CurrentHealth = FMath::Max(CurrentHealth - Damage, 0.f);
+		OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+	}
+
+	if (CurrentHealth <= 0.f)
+	{
+		Die();
+		return;
+	}
+
+	// Restart shield regen delay
+	World->GetTimerManager().SetTimer(
+		ShieldRegenDelayHandle,
+		this,
+		&UHealthComponent::StartShieldRegen,
+		ShieldRegenDelay,
+		false
+	);
+}
+
+void UHealthComponent::Heal(float Amount)
+{
+	if (bIsDead || Amount <= 0.f) return;
+
+	CurrentHealth = FMath::Min(CurrentHealth + Amount, MaxHealth);
+	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+}
+
+void UHealthComponent::Die()
+{
+	if (bIsDead) return;
+	bIsDead = true;
+
+	CurrentHealth = 0.f;
+
+	UWorld* World = GetWorld();
+	if (IsValid(World))
+	{
+		World->GetTimerManager().ClearTimer(ShieldRegenDelayHandle);
+		World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+	}
+
+	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+	OnDeath.Broadcast();
+}
+
+void UHealthComponent::StartShieldRegen()
+{
+	if (bIsDead || CurrentShield >= MaxShield) return;
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	World->GetTimerManager().SetTimer(
+		ShieldRegenTickHandle,
+		this,
+		&UHealthComponent::RegenShield,
+		0.1f,
+		true
+	);
+}
+
+void UHealthComponent::RegenShield()
+{
+	if (bIsDead)
+	{
+		if (const UWorld* World = GetWorld())
+			World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+		return;
+	}
+
+	CurrentShield = FMath::Min(CurrentShield + ShieldRegenRate * 0.1f, MaxShield);
+	OnShieldChanged.Broadcast(CurrentShield, MaxShield);
+
+	if (CurrentShield >= MaxShield)
+	{
+		if (const UWorld* World = GetWorld())
+			World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+	}
+}
+
+void UHealthComponent::OnRep_CurrentHealth()
+{
+	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+}
+
+void UHealthComponent::OnRep_CurrentShield()
+{
+	OnShieldChanged.Broadcast(CurrentShield, MaxShield);
+}
