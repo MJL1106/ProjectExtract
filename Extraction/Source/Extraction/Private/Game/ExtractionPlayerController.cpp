@@ -7,6 +7,7 @@
 #include "InputMappingContext.h"
 #include "ExtractionCameraManager.h"
 #include "Blueprint/UserWidget.h"
+#include "PlayerHealthWidget.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
@@ -14,6 +15,12 @@ AExtractionPlayerController::AExtractionPlayerController()
 {
 	// set the player camera manager class
 	PlayerCameraManagerClass = AExtractionCameraManager::StaticClass();
+
+	// Default HUD widget class
+	static ConstructorHelpers::FClassFinder<UPlayerHealthWidget> HUDWidgetBP(
+		TEXT("/Game/Core/UI/WBP_PlayerHealth"));
+	if (HUDWidgetBP.Succeeded())
+		HUDWidgetClass = HUDWidgetBP.Class;
 }
 
 void AExtractionPlayerController::BeginPlay()
@@ -38,6 +45,14 @@ void AExtractionPlayerController::BeginPlay()
 
 		}
 
+	}
+
+	// Spawn health/shield HUD for local player
+	if (IsLocalPlayerController() && HUDWidgetClass)
+	{
+		HUDWidget = CreateWidget<UPlayerHealthWidget>(this, HUDWidgetClass);
+		if (IsValid(HUDWidget))
+			HUDWidget->AddToPlayerScreen();
 	}
 }
 
