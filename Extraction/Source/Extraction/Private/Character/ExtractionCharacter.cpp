@@ -38,6 +38,8 @@ AExtractionCharacter::AExtractionCharacter()
 	, ProneMomentumElapsed(0.f)
 	, ProneMomentumStartSpeed(0.f)
 	, ProneMomentumDuration(0.f)
+	, LastCrouchSlideTime(0.0)
+	, bWasSprintingOnLastCrouchPress(false)
 {
 	// Replication
 	bReplicates = true;
@@ -319,7 +321,7 @@ void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 {
 	if (bIsSliding) return;
 
-	// Prone -> Crouch: exit prone and enter crouch
+	// Prone -> Crouch: exit prone and enter crouch (ABP handles blend via inertialization)
 	if (bIsProne)
 	{
 		UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
@@ -328,14 +330,8 @@ void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 		// Block during any active prone transition
 		if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) return;
 
-		UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-			GetFirstPersonMesh()->GetAnimInstance());
-
 		bIsProne = false;
 		ApplySprintSpeed();
-		AnimInst->PlayProneToCrouchMontage();
-		if (IsValid(FPAnimInst)) FPAnimInst->PlayProneToCrouchMontage();
-
 		Crouch();
 		return;
 	}
@@ -343,14 +339,28 @@ void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (!IsValid(MoveComp)) return;
 
-	// Sprint + grounded = slide
+	// Double-tap crouch while sprinting = slide
+	const double CurrentTime = GetWorld()->GetTimeSeconds();
+	const bool bIsDoubleTap = (CurrentTime - LastCrouchSlideTime) < SlideDoubleTapWindow;
+	LastCrouchSlideTime = CurrentTime;
+
+	// While sprinting: first press records intent, second press triggers slide
 	if (bIsSprinting && MoveComp->IsMovingOnGround())
 	{
-		EnterSlide();
+		if (bIsDoubleTap && bWasSprintingOnLastCrouchPress)
+		{
+			bWasSprintingOnLastCrouchPress = false;
+			EnterSlide();
+			return;
+		}
+
+		bWasSprintingOnLastCrouchPress = true;
 		return;
 	}
 
-	// Otherwise toggle crouch
+	bWasSprintingOnLastCrouchPress = false;
+
+	// Toggle crouch
 	if (MoveComp->IsCrouching())
 	{
 		UnCrouch();

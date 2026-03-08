@@ -232,27 +232,6 @@ float UExtractionAnimInstance::PlayProneExitMontage(float PlayRate)
 	return PlayMontageInternal(Data->ProneToStandTransition, PlayRate);
 }
 
-float UExtractionAnimInstance::PlayProneToCrouchMontage(float PlayRate)
-{
-	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data) || !IsValid(Data->ProneToStandTransition)) return 0.f;
-
-	UAnimMontage* Montage = Data->ProneToStandTransition;
-	const float SafePlayRate = FMath::Max(PlayRate, UE_KINDA_SMALL_NUMBER);
-
-	FMontageBlendSettings BlendIn(ExtractionAnimConstants::ProneTransitionBlendTime);
-	BlendIn.BlendMode = EMontageBlendMode::Inertialization;
-
-	Montage_PlayWithBlendSettings(Montage, BlendIn, SafePlayRate);
-
-	// Only play the first section (up to crouch height), then stop.
-	// Requires a second section in the montage at the crouch-height keyframe.
-	const FName FirstSectionName = Montage->GetSectionName(0);
-	Montage_SetNextSection(FirstSectionName, NAME_None, Montage);
-
-	return Montage->GetPlayLength() / SafePlayRate;
-}
-
 bool UExtractionAnimInstance::IsPlayingProneEntryMontage() const
 {
 	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
