@@ -117,27 +117,32 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	// Sprint, slide, prone, and vault read from character's replicated state
 	bIsSprinting = OwningCharacter->GetIsSprinting();
 	bIsSliding = OwningCharacter->GetIsSliding();
+	// Capture previous prone state before updating — used to catch the exit frame
+	const bool bWasProne = bIsProne;
 	bIsProne = OwningCharacter->GetIsProne();
 	const ETraversalType Traversal = OwningCharacter->GetActiveTraversalType();
 	bIsVaulting  = (Traversal == ETraversalType::Vault);
 	bIsClimbing  = (Traversal == ETraversalType::Climb);
 	bIsMantling  = (Traversal == ETraversalType::Mantle);
 
-	// --- Prone transition flags (computed from active montages — self-corrects on interruption) ---
-	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
-	if (IsValid(AnimData))
+	// --- Prone transition flags (only check montages when prone-related) ---
+	if (bIsProne || bWasProne || bIsTransitioningToProne || bIsTransitioningFromProne)
 	{
-		bIsTransitioningToProne =
-			Montage_IsPlaying(AnimData->IdleToProneTransition)   ||
-			Montage_IsPlaying(AnimData->WalkToProneTransition)   ||
-			Montage_IsPlaying(AnimData->SprintToProneTransition);
+		const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
+		if (IsValid(AnimData))
+		{
+			bIsTransitioningToProne =
+				Montage_IsPlaying(AnimData->IdleToProneTransition)   ||
+				Montage_IsPlaying(AnimData->WalkToProneTransition)   ||
+				Montage_IsPlaying(AnimData->SprintToProneTransition);
 
-		bIsTransitioningFromProne = Montage_IsPlaying(AnimData->ProneToStandTransition);
-	}
-	else
-	{
-		bIsTransitioningToProne   = false;
-		bIsTransitioningFromProne = false;
+			bIsTransitioningFromProne = Montage_IsPlaying(AnimData->ProneToStandTransition);
+		}
+		else
+		{
+			bIsTransitioningToProne   = false;
+			bIsTransitioningFromProne = false;
+		}
 	}
 
 	// bIsADS, bIsAlive are set externally via setters or gameplay systems
