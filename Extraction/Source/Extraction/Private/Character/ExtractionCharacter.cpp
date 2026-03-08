@@ -117,15 +117,9 @@ void AExtractionCharacter::Tick(float DeltaTime)
 
 	if (IsLocallyControlled())
 	{
-		if (bIsSliding)
-		{
-			UpdateSlide(DeltaTime);
-		}
+		if (bIsSliding) UpdateSlide(DeltaTime);
 
-		if (bIsInProneMomentum)
-		{
-			UpdateProneMomentum(DeltaTime);
-		}
+		if (bIsInProneMomentum) UpdateProneMomentum(DeltaTime);
 
 		UpdateSprint();
 
@@ -138,10 +132,7 @@ void AExtractionCharacter::Tick(float DeltaTime)
 		{
 			UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
 			const bool bMontPlaying = IsValid(AnimInst) && AnimInst->IsPlayingProneEntryMontage();
-			if (!IsValid(AnimInst) || !bMontPlaying)
-			{
-				UnCrouch();
-			}
+			if (!IsValid(AnimInst) || !bMontPlaying) UnCrouch();
 		}
 	}
 
@@ -243,10 +234,9 @@ void AExtractionCharacter::DoMove(float Right, float Forward)
 
 void AExtractionCharacter::DoJumpStart()
 {
-	if (bIsSliding)
-	{
-		EndSlide();
-	}
+	if (bIsProne) return;
+
+	if (bIsSliding) EndSlide();
 
 	Jump();
 }
@@ -261,6 +251,10 @@ void AExtractionCharacter::DoJumpEnd()
 void AExtractionCharacter::SprintStart(const FInputActionValue& Value)
 {
 	bWantsToSprint = true;
+
+	// If crouching, stand up so UpdateSprint can engage sprint
+	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp) && MoveComp->IsCrouching() && !bIsProne && !bIsSliding) UnCrouch();
 }
 
 void AExtractionCharacter::SprintStop(const FInputActionValue& Value)
@@ -271,10 +265,7 @@ void AExtractionCharacter::SprintStop(const FInputActionValue& Value)
 void AExtractionCharacter::UpdateSprint()
 {
 	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
-	if (!IsValid(MoveComp))
-	{
-		return;
-	}
+	if (!IsValid(MoveComp)) return;
 
 	// Sprint requires: input held, moving forward, on ground, not crouching
 	const bool bHasVelocity = MoveComp->Velocity.SizeSquared2D() > KINDA_SMALL_NUMBER;
@@ -307,13 +298,10 @@ void AExtractionCharacter::OnRep_IsSprinting()
 void AExtractionCharacter::ApplySprintSpeed()
 {
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
-	if (!IsValid(MoveComp))
-	{
-		return;
-	}
+	if (!IsValid(MoveComp)) return;
 
 	// During prone momentum, MaxWalkSpeed is managed by the momentum system
-	if (bIsInProneMomentum) { return; }
+	if (bIsInProneMomentum) return;
 
 	if (bIsProne)
 	{
@@ -329,19 +317,16 @@ void AExtractionCharacter::ApplySprintSpeed()
 
 void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 {
-	if (bIsSliding)
-	{
-		return;
-	}
+	if (bIsSliding) return;
 
 	// Prone -> Crouch: exit prone and enter crouch
 	if (bIsProne)
 	{
 		UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
-		if (!IsValid(AnimInst)) { return; }
+		if (!IsValid(AnimInst)) return;
 
 		// Block during any active prone transition
-		if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) { return; }
+		if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) return;
 
 		UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
 			GetFirstPersonMesh()->GetAnimInstance());
@@ -349,17 +334,14 @@ void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 		bIsProne = false;
 		ApplySprintSpeed();
 		AnimInst->PlayProneToCrouchMontage();
-		if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneToCrouchMontage(); }
+		if (IsValid(FPAnimInst)) FPAnimInst->PlayProneToCrouchMontage();
 
 		Crouch();
 		return;
 	}
 
 	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
-	if (!IsValid(MoveComp))
-	{
-		return;
-	}
+	if (!IsValid(MoveComp)) return;
 
 	// Sprint + grounded = slide
 	if (bIsSprinting && MoveComp->IsMovingOnGround())
@@ -385,10 +367,7 @@ void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 void AExtractionCharacter::EnterSlide()
 {
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
-	if (!IsValid(MoveComp))
-	{
-		return;
-	}
+	if (!IsValid(MoveComp)) return;
 
 	bIsSliding = true;
 	SlideElapsed = 0.f;
@@ -430,16 +409,6 @@ void AExtractionCharacter::UpdateSlide(float DeltaTime)
 		return;
 	}
 
-	// Steer slide direction toward player's look direction
-	if (SlideSteerRate > UE_KINDA_SMALL_NUMBER)
-	{
-		const FVector LookDir = GetActorForwardVector().GetSafeNormal2D();
-		const FRotator CurrentRot = SlideDirection.Rotation();
-		const FRotator TargetRot = LookDir.Rotation();
-		const FRotator NewRot = FMath::RInterpConstantTo(CurrentRot, TargetRot, DeltaTime, SlideSteerRate);
-		SlideDirection = NewRot.Vector().GetSafeNormal2D();
-	}
-
 	// Normalized time [0..1]
 	const float Alpha = FMath::Clamp(SlideElapsed / SlideDuration, 0.f, 1.f);
 
@@ -456,10 +425,7 @@ void AExtractionCharacter::UpdateSlide(float DeltaTime)
 
 void AExtractionCharacter::EndSlide()
 {
-	if (!bIsSliding)
-	{
-		return;
-	}
+	if (!bIsSliding) return;
 
 	bIsSliding = false;
 	SlideElapsed = 0.f;
@@ -502,15 +468,13 @@ void AExtractionCharacter::OnRep_IsSliding()
 static EProneTransitionType DetermineProneEntryType(const AExtractionCharacter& Char)
 {
 	const UCharacterMovementComponent* MoveComp = Char.GetCharacterMovement();
-	if (!IsValid(MoveComp)) { return EProneTransitionType::FromIdle; }
+	if (!IsValid(MoveComp)) return EProneTransitionType::FromIdle;
 
-	if (MoveComp->IsCrouching())  { return EProneTransitionType::FromCrouch; }
-	if (Char.GetIsSprinting())    { return EProneTransitionType::FromSprint; }
+	if (MoveComp->IsCrouching())  return EProneTransitionType::FromCrouch;
+	if (Char.GetIsSprinting())    return EProneTransitionType::FromSprint;
 	if (MoveComp->Velocity.SizeSquared2D() >
 		FMath::Square(ExtractionCharacterConstants::ProneWalkVelocityThreshold))
-	{
 		return EProneTransitionType::FromWalk;
-	}
 	return EProneTransitionType::FromIdle;
 }
 
@@ -518,10 +482,10 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 {
 	// 3P mesh AnimInstance — authoritative for state guards
 	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
-	if (!IsValid(AnimInst)) { return; }
+	if (!IsValid(AnimInst)) return;
 
 	// Block re-entry during any active prone transition
-	if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) { return; }
+	if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) return;
 
 	// FP mesh AnimInstance — mirrors montage playback so the camera-driving head bone animates
 	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
@@ -533,7 +497,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 		bIsProne = false;
 		ApplySprintSpeed();
 		AnimInst->PlayProneExitMontage();
-		if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneExitMontage(); }
+		if (IsValid(FPAnimInst)) FPAnimInst->PlayProneExitMontage();
 	}
 	else
 	{
@@ -557,7 +521,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 			// Capture montage duration so the decel curve matches the animation length
 			const float MontageDuration = AnimInst->PlayProneTransitionMontage(TransitionType);
 			ProneMomentumDuration = FMath::Max(MontageDuration, 0.1f);
-			if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneTransitionMontage(TransitionType); }
+			if (IsValid(FPAnimInst)) FPAnimInst->PlayProneTransitionMontage(TransitionType);
 
 			UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 			if (IsValid(MoveComp))
@@ -580,7 +544,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 		{
 			ApplySprintSpeed();
 			AnimInst->PlayProneTransitionMontage(TransitionType);
-			if (IsValid(FPAnimInst)) { FPAnimInst->PlayProneTransitionMontage(TransitionType); }
+			if (IsValid(FPAnimInst)) FPAnimInst->PlayProneTransitionMontage(TransitionType);
 		}
 	}
 }
@@ -662,10 +626,7 @@ void AExtractionCharacter::InteractStart(const FInputActionValue& Value)
 UExtractionAnimInstance* AExtractionCharacter::GetExtractionAnimInstance() const
 {
 	UAnimInstance* AnimInst = GetMesh()->GetAnimInstance();
-	if (!IsValid(AnimInst))
-	{
-		return nullptr;
-	}
+	if (!IsValid(AnimInst)) return nullptr;
 
 	UExtractionAnimInstance* TypedInst = Cast<UExtractionAnimInstance>(AnimInst);
 	if (!IsValid(TypedInst))
