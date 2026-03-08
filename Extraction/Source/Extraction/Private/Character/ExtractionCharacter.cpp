@@ -947,6 +947,18 @@ void AExtractionCharacter::StartTraversal(ETraversalType Type)
 
 	VaultSnapTarget = VaultWallImpactPoint + VaultWallNormal * VaultSnapDistance;
 	VaultSnapTarget.Z = GetActorLocation().Z;
+
+	// Climb/mantle: boost character Z during snap so root motion lands on the surface.
+	// The animation covers ReferenceHeight of vertical movement — any extra is pre-applied.
+	if (Type == ETraversalType::Climb || Type == ETraversalType::Mantle)
+	{
+		const float RefHeight = (Type == ETraversalType::Climb)
+			? ClimbAnimReferenceHeight
+			: MantleAnimReferenceHeight;
+		const float HeightBoost = FMath::Max(0.f, VaultSurfaceHeight - RefHeight);
+		VaultSnapTarget.Z += HeightBoost;
+	}
+
 	bIsSnappingToVault = true;
 	VaultSnapTimeRemaining = 0.15f;
 }
