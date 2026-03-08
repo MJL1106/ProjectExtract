@@ -83,6 +83,9 @@ public:
 	bool bIsTransitioningFromProne;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
+	bool bIsVaulting;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
 	bool bIsADS;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
@@ -152,6 +155,14 @@ public:
 	/** Play the prone-to-stand transition montage. Returns duration. */
 	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
 	float PlayProneExitMontage(float PlayRate = 1.0f);
+
+	/** Play the vault montage. Returns duration. */
+	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
+	float PlayVaultMontage(float PlayRate = 1.0f);
+
+	/** Returns true if the vault montage is currently playing (real-time, no frame delay). */
+	UFUNCTION(BlueprintPure, Category = "Animation|State")
+	bool IsPlayingVaultMontage() const;
 
 	/** Returns true if any prone-entry transition montage is currently active (real-time, no frame delay). */
 	UFUNCTION(BlueprintPure, Category = "Animation|State")

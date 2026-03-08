@@ -122,6 +122,50 @@ protected:
 			ToolTip = "Max time between two crouch presses to trigger a slide while sprinting.\nLower = tighter timing required."))
 	float SlideDoubleTapWindow = 0.3f;
 
+	// ---- Vault Config ----
+
+	/** Maximum forward distance from capsule edge to detect a vaultable wall (cm) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "10.0", ClampMax = "200.0",
+			ToolTip = "How far ahead of the capsule edge the character checks for vaultable surfaces."))
+	float VaultForwardTraceDistance = 80.0f;
+
+	/** Radius of the forward sphere sweep for wall detection (cm) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "1.0", ClampMax = "34.0",
+			ToolTip = "Radius of the sphere sweep for forward wall detection.\nLarger = more forgiving alignment."))
+	float VaultForwardTraceRadius = 15.0f;
+
+	/** Minimum obstacle height from feet to be vaultable (cm) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "0.0",
+			ToolTip = "Obstacles shorter than this are stepped over, not vaulted.\nTune after reviewing vault montages."))
+	float VaultMinHeight = 50.0f;
+
+	/** Maximum obstacle height from feet to be vaultable (cm) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "0.0",
+			ToolTip = "Obstacles taller than this cannot be vaulted.\nTune after reviewing vault montages."))
+	float VaultMaxHeight = 120.0f;
+
+	/** Forward distance past the ledge edge for the landing target (cm) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "0.0",
+			ToolTip = "How far past the ledge edge the vault target is placed.\nShould be >= capsule radius (34) to prevent clipping back off the edge."))
+	float VaultLandingForwardOffset = 45.0f;
+
+	/** Montage play rate when vaulting while sprinting */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "0.5", ClampMax = "3.0",
+			ToolTip = "Playback speed multiplier for sprint vaults.\nHigher = faster vault animation."))
+	float VaultSprintPlayRate = 1.3f;
+
+	/** Montage play rate when vaulting while walking */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
+		meta = (ClampMin = "0.5", ClampMax = "3.0",
+			ToolTip = "Playback speed multiplier for walk vaults."))
+	float VaultWalkPlayRate = 1.0f;
+
 	// ---- Replicated State ----
 
 	/** True while sprint input is held and conditions are met */
@@ -135,6 +179,10 @@ protected:
 	/** True while the character is prone */
 	UPROPERTY(ReplicatedUsing = OnRep_IsProne, BlueprintReadOnly, Category = "Movement|State")
 	bool bIsProne;
+
+	/** True while the character is mid-vault */
+	UPROPERTY(ReplicatedUsing = OnRep_IsVaulting, BlueprintReadOnly, Category = "Movement|State")
+	bool bIsVaulting;
 
 public:
 
@@ -207,8 +255,28 @@ protected:
 	UFUNCTION()
 	void OnRep_IsProne();
 
-	// ---- Stub Handlers (future systems) ----
+	// ---- Vault ----
+
+	/** Called on IA_Vault press. Runs detection, executes vault if valid. No jump fallback. */
 	void VaultStart(const FInputActionValue& Value);
+
+	/** Runs the full multi-trace vault detection sequence. Stores results in member state.
+	 *  @return true if a valid vaultable surface was found */
+	bool PerformVaultDetection();
+
+	/** Starts the vault: switches to MOVE_Flying, plays montage with root motion */
+	void ExecuteVault();
+
+	/** Ends the vault: restores MOVE_Walking, resets state */
+	void EndVault();
+
+	/** Tick safety net — ends vault if montage was interrupted */
+	void UpdateVault();
+
+	UFUNCTION()
+	void OnRep_IsVaulting();
+
+	// ---- Stub Handlers (future systems) ----
 	void InteractStart(const FInputActionValue& Value);
 
 	// ---- Input Binding ----
@@ -233,6 +301,18 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool GetIsProne() const { return bIsProne; }
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool GetIsVaulting() const { return bIsVaulting; }
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool GetCanVault() const { return bCanVault; }
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	FVector GetVaultTargetLocation() const { return VaultTargetLocation; }
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	float GetVaultSurfaceHeight() const { return VaultSurfaceHeight; }
 
 private:
 
@@ -277,5 +357,42 @@ private:
 
 	/** Whether the player was sprinting on the previous crouch press (for double-tap slide detection) */
 	bool bWasSprintingOnLastCrouchPress;
+
+	// ---- Vault Detection (helpers) ----
+
+	/** Sphere-sweeps forward from capsule edge to find a wall or obstacle.
+	 *  @return true if an obstacle was hit */
+	bool TraceForwardForWall(FHitResult& OutHit) const;
+
+	/** Traces downward from above the wall hit to find the top surface.
+	 *  @return true if a walkable surface was found within the vaultable height range */
+	bool TraceDownForSurface(const FHitResult& WallHit, FHitResult& OutSurfaceHit) const;
+
+	/** Capsule overlap test at the proposed landing position to verify the character fits.
+	 *  @return true if there is room for the character */
+	bool CheckVaultClearance(const FVector& SurfaceLocation) const;
+
+	/** Draws debug lines, spheres, and a target capsule for vault tuning (editor builds only) */
+	void DrawVaultDebug(const FHitResult& WallHit, const FHitResult& SurfaceHit, bool bVaultValid) const;
+
+	// ---- Vault State ----
+
+	/** True when a valid vaultable surface was detected on the last check */
+	bool bCanVault;
+
+	/** Final position the character will move to after vaulting (capsule center) */
+	FVector VaultTargetLocation;
+
+	/** Impact point on top of the detected vaultable surface */
+	FVector VaultSurfaceLocation;
+
+	/** Normal of the wall face (points away from wall, toward character) */
+	FVector VaultWallNormal;
+
+	/** Height of the vault surface above the character's feet (cm) */
+	float VaultSurfaceHeight;
+
+	/** Whether the character was sprinting when the vault started (for play rate) */
+	bool bWasSprintingAtVaultEntry;
 
 };

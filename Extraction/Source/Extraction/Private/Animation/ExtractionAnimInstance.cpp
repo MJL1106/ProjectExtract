@@ -35,6 +35,7 @@ UExtractionAnimInstance::UExtractionAnimInstance()
 	, bIsProne(false)
 	, bIsTransitioningToProne(false)
 	, bIsTransitioningFromProne(false)
+	, bIsVaulting(false)
 	, bIsADS(false)
 	, bHasVelocity(false)
 	, bIsAccelerating(false)
@@ -111,10 +112,11 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	AimPitch = FMath::ClampAngle(AimDelta.Pitch, -90.f, 90.f);
 	AimYaw = FMath::ClampAngle(AimDelta.Yaw, -180.f, 180.f);
 
-	// Sprint, slide, and prone read from character's replicated state
+	// Sprint, slide, prone, and vault read from character's replicated state
 	bIsSprinting = OwningCharacter->GetIsSprinting();
 	bIsSliding = OwningCharacter->GetIsSliding();
 	bIsProne = OwningCharacter->GetIsProne();
+	bIsVaulting = OwningCharacter->GetIsVaulting();
 
 	// --- Prone transition flags (computed from active montages — self-corrects on interruption) ---
 	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
@@ -240,6 +242,20 @@ bool UExtractionAnimInstance::IsPlayingProneEntryMontage() const
 	return Montage_IsPlaying(AnimData->IdleToProneTransition)   ||
 	       Montage_IsPlaying(AnimData->WalkToProneTransition)   ||
 	       Montage_IsPlaying(AnimData->SprintToProneTransition);
+}
+
+float UExtractionAnimInstance::PlayVaultMontage(float PlayRate)
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data)) return 0.f;
+	return PlayMontageInternal(Data->VaultMontage, PlayRate);
+}
+
+bool UExtractionAnimInstance::IsPlayingVaultMontage() const
+{
+	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
+	if (!IsValid(AnimData)) return false;
+	return Montage_IsPlaying(AnimData->VaultMontage);
 }
 
 void UExtractionAnimInstance::SetWeaponType(EWeaponType NewWeaponType)
