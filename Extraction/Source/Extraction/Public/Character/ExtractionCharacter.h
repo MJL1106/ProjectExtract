@@ -443,6 +443,9 @@ private:
 	UFUNCTION()
 	void HandleDeath();
 
+	/** Temp debug: apply 25 damage to self (bound to H key) */
+	void DebugApplyDamage();
+
 	/** True while the character is in Down But Not Out state */
 	bool bIsDBNO;
 

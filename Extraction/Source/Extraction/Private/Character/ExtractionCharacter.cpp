@@ -250,6 +250,9 @@ void AExtractionCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 
 	// Interact
 	EnhancedInput->BindAction(InteractAction, ETriggerEvent::Started, this, &AExtractionCharacter::InteractStart);
+
+	// Temp debug: H key applies 25 damage
+	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionCharacter::DebugApplyDamage);
 }
 
 // ---- Core Input Handlers ----
@@ -1207,6 +1210,17 @@ void AExtractionCharacter::HandleDeath()
 	if (bIsSliding) EndSlide();
 
 	UE_LOG(LogExtraction, Log, TEXT("'%s' entered DBNO state"), *GetNameSafe(this));
+}
+
+void AExtractionCharacter::DebugApplyDamage()
+{
+	if (IsValid(HealthComponent))
+	{
+		HealthComponent->TakeDamage(25.f);
+		UE_LOG(LogExtraction, Log, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
+			HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
+			HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
+	}
 }
 
 // ---- Stub Handlers (future systems) ----
