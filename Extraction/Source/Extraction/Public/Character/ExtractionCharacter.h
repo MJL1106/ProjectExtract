@@ -116,11 +116,11 @@ protected:
 			ToolTip = "Controls how the speed drops off over the slide duration.\n1.0 = Linear (constant deceleration)\n2.0 = Holds peak speed longer, then drops off quickly at the end\n3.0+ = Even more hang time at peak before a sharp decel\nHigher values make the slide feel faster for longer."))
 	float SlideDecelerationExponent = 2.0f;
 
-	/** How fast the slide direction steers toward the player's look direction (degrees/s) */
+	/** Time window for double-tap crouch to trigger a slide while sprinting */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Slide",
-		meta = (ClampMin = "0.0",
-			ToolTip = "How quickly the slide curves toward where the player is looking, in degrees per second.\n0 = Fully locked to entry direction (no steering)\n45 = Subtle drift\n90 = Moderate steering (can curve around corners)\n180 = Very responsive mid-slide control"))
-	float SlideSteerRate = 90.0f;
+		meta = (ClampMin = "0.1", ClampMax = "1.0",
+			ToolTip = "Max time between two crouch presses to trigger a slide while sprinting.\nLower = tighter timing required."))
+	float SlideDoubleTapWindow = 0.3f;
 
 	// ---- Replicated State ----
 
@@ -271,5 +271,11 @@ private:
 
 	/** Total momentum duration — captured from montage play length at entry */
 	float ProneMomentumDuration;
+
+	/** Timestamp of last crouch/slide button press (for double-tap slide detection) */
+	double LastCrouchSlideTime;
+
+	/** Whether the player was sprinting on the previous crouch press (for double-tap slide detection) */
+	bool bWasSprintingOnLastCrouchPress;
 
 };
