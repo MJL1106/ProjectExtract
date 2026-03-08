@@ -17,6 +17,8 @@ class UHealthComponent;
 class UAnimMontage;
 struct FInputActionValue;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDBNOStateChanged, bool, bNewIsDBNO, float, BleedoutDuration);
+
 /**
  * Base first-person character for Extraction.
  * Handles movement, input binding, sprint, and replication setup.
@@ -260,6 +262,26 @@ protected:
 		meta = (ClampMin = "0.0", ClampMax = "1500.0"))
 	float SprintJumpForwardBoost = 300.0f;
 
+	// ---- DBNO Config ----
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
+	float BleedoutDuration = 30.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.5"))
+	float ReviveDuration = 4.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float ReviveHealthPercent = 0.3f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "50.0"))
+	float ReviveProximityRadius = 200.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "50.0"))
+	float ReviveTraceDistance = 300.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "5.0"))
+	float ReviveTraceSphereRadius = 30.f;
+
 	// ---- Replicated State ----
 
 	/** True while sprint input is held and conditions are met */
@@ -282,14 +304,26 @@ protected:
 	UPROPERTY(Replicated)
 	bool bWasSprintingAtTraversalEntry;
 
+	/** True while the character is in Down But Not Out state */
+	UPROPERTY(ReplicatedUsing = OnRep_IsDBNO, BlueprintReadOnly, Category = "Health|State")
+	bool bIsDBNO;
+
+	/** Seconds remaining before bleedout death (set on DBNO entry, clients use for UI) */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Health|State")
+	float BleedoutTimeRemaining = 0.f;
+
 public:
 
 	AExtractionCharacter();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+
+	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
+	FOnDBNOStateChanged OnDBNOStateChanged;
 
 protected:
 
@@ -387,8 +421,10 @@ protected:
 	UFUNCTION()
 	void OnRep_TraversalType();
 
-	// ---- Stub Handlers (future systems) ----
+	// ---- Interaction / Revive ----
+
 	void InteractStart(const FInputActionValue& Value);
+	void InteractStop(const FInputActionValue& Value);
 
 	// ---- Input Binding ----
 
@@ -439,15 +475,37 @@ private:
 
 	// ---- Health / DBNO ----
 
-	/** Called when OnDeath fires from the health component */
 	UFUNCTION()
 	void HandleDeath();
+
+	void EnterDBNO();
+	void ExitDBNO();
+	void OnBleedoutExpired();
+	void FullDeath();
+
+	UFUNCTION()
+	void OnRep_IsDBNO();
 
 	/** Temp debug: apply 25 damage to self (bound to H key) */
 	void DebugApplyDamage();
 
-	/** True while the character is in Down But Not Out state */
-	bool bIsDBNO;
+	FTimerHandle BleedoutTimerHandle;
+
+	// ---- Revive ----
+
+	void UpdateRevive(float DeltaTime);
+	AExtractionCharacter* FindReviveTarget() const;
+	void CancelRevive();
+	void CompleteRevive();
+
+	UFUNCTION(Server, Reliable)
+	void Server_CompleteRevive(AExtractionCharacter* Target);
+
+	UPROPERTY()
+	TObjectPtr<AExtractionCharacter> ReviveTarget;
+
+	float ReviveElapsed = 0.f;
+	bool bIsReviving = false;
 
 	/** Tracks whether the sprint input is currently held */
 	bool bWantsToSprint;

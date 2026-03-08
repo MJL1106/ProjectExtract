@@ -12,6 +12,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "HealthComponent.h"
+#include "TimerManager.h"
 #include "Extraction.h"
 
 namespace ExtractionCharacterConstants
@@ -53,6 +54,9 @@ AExtractionCharacter::AExtractionCharacter()
 	, LastCrouchSlideTime(0.0)
 	, bWasSprintingOnLastCrouchPress(false)
 	, bIsDBNO(false)
+	, BleedoutTimeRemaining(0.f)
+	, ReviveElapsed(0.f)
+	, bIsReviving(false)
 	, PendingTraversalType(ETraversalType::None)
 	, VaultTargetLocation(FVector::ZeroVector)
 	, VaultSurfaceLocation(FVector::ZeroVector)
@@ -134,6 +138,14 @@ void AExtractionCharacter::BeginPlay()
 		HealthComponent->OnDeath.AddDynamic(this, &AExtractionCharacter::HandleDeath);
 }
 
+void AExtractionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+
+	Super::EndPlay(EndPlayReason);
+}
+
 void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
@@ -143,11 +155,17 @@ void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsProne, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, ActiveTraversalType, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bWasSprintingAtTraversalEntry, COND_SkipOwner);
+	DOREPLIFETIME(AExtractionCharacter, bIsDBNO);
+	DOREPLIFETIME(AExtractionCharacter, BleedoutTimeRemaining);
 }
 
 void AExtractionCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Server: tick down bleedout timer for UI replication
+	if (HasAuthority() && bIsDBNO && BleedoutTimeRemaining > 0.f)
+		BleedoutTimeRemaining = FMath::Max(BleedoutTimeRemaining - DeltaTime, 0.f);
 
 	if (IsLocallyControlled())
 	{
@@ -172,6 +190,8 @@ void AExtractionCharacter::Tick(float DeltaTime)
 			PendingTraversalType = ETraversalType::None;
 			ExecuteTraversalByType(Type);
 		}
+
+		if (bIsReviving) UpdateRevive(DeltaTime);
 
 		UpdateSprint();
 
@@ -248,8 +268,9 @@ void AExtractionCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	// Vault
 	EnhancedInput->BindAction(VaultAction, ETriggerEvent::Started, this, &AExtractionCharacter::VaultStart);
 
-	// Interact
+	// Interact (hold for revive)
 	EnhancedInput->BindAction(InteractAction, ETriggerEvent::Started, this, &AExtractionCharacter::InteractStart);
+	EnhancedInput->BindAction(InteractAction, ETriggerEvent::Completed, this, &AExtractionCharacter::InteractStop);
 
 	// Temp debug: H key applies 25 damage
 	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionCharacter::DebugApplyDamage);
@@ -280,6 +301,7 @@ void AExtractionCharacter::DoAim(float Yaw, float Pitch)
 
 void AExtractionCharacter::DoMove(float Right, float Forward)
 {
+	if (bIsDBNO) return;
 	if (IsInTraversal()) return;
 
 	if (IsValid(GetController()))
@@ -291,6 +313,7 @@ void AExtractionCharacter::DoMove(float Right, float Forward)
 
 void AExtractionCharacter::DoJumpStart()
 {
+	if (bIsDBNO) return;
 	if (bIsProne) return;
 	if (IsInTraversal()) return;
 	if (bIsSliding) return;
@@ -334,6 +357,7 @@ void AExtractionCharacter::DoJumpEnd()
 
 void AExtractionCharacter::SprintStart(const FInputActionValue& Value)
 {
+	if (bIsDBNO) return;
 	if (IsInTraversal() || bIsSprintJumping) return;
 
 	bWantsToSprint = true;
@@ -403,6 +427,7 @@ void AExtractionCharacter::ApplySprintSpeed()
 
 void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 {
+	if (bIsDBNO) return;
 	if (bIsSliding) return;
 	if (IsInTraversal() || bIsSprintJumping) return;
 	PendingTraversalType = ETraversalType::None;
@@ -576,6 +601,7 @@ static EProneTransitionType DetermineProneEntryType(const AExtractionCharacter& 
 
 void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 {
+	if (bIsDBNO) return;
 	if (IsInTraversal() || bIsSprintJumping) return;
 	PendingTraversalType = ETraversalType::None;
 
@@ -712,6 +738,7 @@ void AExtractionCharacter::OnRep_IsProne()
 
 void AExtractionCharacter::VaultStart(const FInputActionValue& Value)
 {
+	if (bIsDBNO) return;
 	if (IsInTraversal() || bIsSprintJumping) return;
 	if (bIsSliding) return;
 	if (bIsProne) return;
@@ -1189,15 +1216,31 @@ float AExtractionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& D
 
 void AExtractionCharacter::HandleDeath()
 {
+	EnterDBNO();
+}
+
+void AExtractionCharacter::EnterDBNO()
+{
 	if (bIsDBNO) return;
 	bIsDBNO = true;
 
-	// Disable player input
-	APlayerController* PC = Cast<APlayerController>(GetController());
-	if (IsValid(PC))
-		DisableInput(PC);
+	// Cancel active revive (C2: downed player can't finish reviving someone)
+	if (bIsReviving) CancelRevive();
 
-	// Stop all movement
+	// Cancel active movement states
+	if (IsInTraversal()) EndTraversal();
+	if (bIsSliding) EndSlide();
+	if (bIsSprintJumping) EndSprintJump();
+	if (bIsProne)
+	{
+		bIsProne = false;
+		ApplySprintSpeed();
+	}
+	if (bIsCrouched) UnCrouch();
+	bWantsToSprint = false;
+	bIsSprinting = false;
+
+	// Stop movement but do NOT call DisableInput (camera look must work)
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
 	{
@@ -1205,29 +1248,217 @@ void AExtractionCharacter::HandleDeath()
 		MoveComp->DisableMovement();
 	}
 
-	// Cancel any active traversal or slide
-	if (IsInTraversal()) EndTraversal();
-	if (bIsSliding) EndSlide();
+	// Start bleedout timer (server only)
+	if (HasAuthority())
+	{
+		BleedoutTimeRemaining = BleedoutDuration;
 
-	UE_LOG(LogExtraction, Log, TEXT("'%s' entered DBNO state"), *GetNameSafe(this));
+		UWorld* World = GetWorld();
+		if (IsValid(World))
+		{
+			World->GetTimerManager().SetTimer(
+				BleedoutTimerHandle, this,
+				&AExtractionCharacter::OnBleedoutExpired,
+				BleedoutDuration, false);
+		}
+	}
+
+	OnDBNOStateChanged.Broadcast(true, BleedoutDuration);
+	UE_LOG(LogExtraction, Log, TEXT("'%s' entered DBNO (%.0fs bleedout)"),
+		*GetNameSafe(this), BleedoutDuration);
+}
+
+void AExtractionCharacter::ExitDBNO()
+{
+	if (!bIsDBNO) return;
+	bIsDBNO = false;
+
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+
+	BleedoutTimeRemaining = 0.f;
+
+	if (IsValid(HealthComponent))
+		HealthComponent->Revive(ReviveHealthPercent);
+
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+		MoveComp->SetMovementMode(MOVE_Walking);
+
+	OnDBNOStateChanged.Broadcast(false, 0.f);
+	UE_LOG(LogExtraction, Log, TEXT("'%s' revived at %.0f%% health"),
+		*GetNameSafe(this), ReviveHealthPercent * 100.f);
+}
+
+void AExtractionCharacter::OnBleedoutExpired()
+{
+	if (!bIsDBNO) return;
+
+	UE_LOG(LogExtraction, Log, TEXT("'%s' bleedout expired — full death"), *GetNameSafe(this));
+	FullDeath();
+}
+
+void AExtractionCharacter::FullDeath()
+{
+	bIsDBNO = false;
+	BleedoutTimeRemaining = 0.f;
+
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+
+	// TODO: Ragdoll, drop loot, spectate camera
+	UE_LOG(LogExtraction, Log, TEXT("'%s' is fully dead"), *GetNameSafe(this));
+}
+
+void AExtractionCharacter::OnRep_IsDBNO()
+{
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+	{
+		if (bIsDBNO)
+		{
+			MoveComp->StopMovementImmediately();
+			MoveComp->DisableMovement();
+		}
+		else
+		{
+			MoveComp->SetMovementMode(MOVE_Walking);
+		}
+	}
+
+	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
 }
 
 void AExtractionCharacter::DebugApplyDamage()
 {
-	if (IsValid(HealthComponent))
-	{
-		HealthComponent->TakeDamage(25.f);
-		UE_LOG(LogExtraction, Log, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
-			HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
-			HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
-	}
+	if (!HasAuthority()) return;
+	if (!IsValid(HealthComponent)) return;
+
+	HealthComponent->TakeDamage(25.f);
+	UE_LOG(LogExtraction, Log, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
+		HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
+		HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
 }
 
-// ---- Stub Handlers (future systems) ----
+// ---- Interaction / Revive ----
 
 void AExtractionCharacter::InteractStart(const FInputActionValue& Value)
 {
-	// TODO: Implement interaction system
+	if (bIsDBNO) return;
+
+	AExtractionCharacter* Target = FindReviveTarget();
+	if (!IsValid(Target)) return;
+
+	ReviveTarget = Target;
+	ReviveElapsed = 0.f;
+	bIsReviving = true;
+
+	UE_LOG(LogExtraction, Verbose, TEXT("'%s' began reviving '%s'"),
+		*GetNameSafe(this), *GetNameSafe(Target));
+}
+
+void AExtractionCharacter::InteractStop(const FInputActionValue& Value)
+{
+	if (bIsReviving) CancelRevive();
+}
+
+AExtractionCharacter* AExtractionCharacter::FindReviveTarget() const
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return nullptr;
+
+	const UCameraComponent* Camera = GetFirstPersonCameraComponent();
+	if (!IsValid(Camera)) return nullptr;
+
+	const FVector TraceStart = Camera->GetComponentLocation();
+	const FVector TraceEnd = TraceStart + Camera->GetForwardVector() * ReviveTraceDistance;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	FHitResult HitResult;
+	const FCollisionShape SweepShape = FCollisionShape::MakeSphere(ReviveTraceSphereRadius);
+
+	const bool bHit = World->SweepSingleByChannel(
+		HitResult, TraceStart, TraceEnd, FQuat::Identity,
+		ECC_Pawn, SweepShape, QueryParams);
+
+	if (!bHit) return nullptr;
+
+	AExtractionCharacter* HitCharacter = Cast<AExtractionCharacter>(HitResult.GetActor());
+	if (!IsValid(HitCharacter)) return nullptr;
+	if (!HitCharacter->GetIsDBNO()) return nullptr;
+
+	// TODO: Validate team membership when team system exists
+	return HitCharacter;
+}
+
+void AExtractionCharacter::UpdateRevive(float DeltaTime)
+{
+	if (!IsValid(ReviveTarget) || !ReviveTarget->GetIsDBNO())
+	{
+		CancelRevive();
+		return;
+	}
+
+	const float DistSq = FVector::DistSquared(GetActorLocation(), ReviveTarget->GetActorLocation());
+	if (DistSq > FMath::Square(ReviveProximityRadius))
+	{
+		CancelRevive();
+		return;
+	}
+
+	ReviveElapsed += DeltaTime;
+	if (ReviveElapsed >= ReviveDuration) CompleteRevive();
+}
+
+void AExtractionCharacter::CancelRevive()
+{
+	if (!bIsReviving) return;
+
+	UE_LOG(LogExtraction, Verbose, TEXT("'%s' cancelled revive on '%s'"),
+		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
+
+	bIsReviving = false;
+	ReviveElapsed = 0.f;
+	ReviveTarget = nullptr;
+}
+
+void AExtractionCharacter::CompleteRevive()
+{
+	if (!IsValid(ReviveTarget))
+	{
+		CancelRevive();
+		return;
+	}
+
+	UE_LOG(LogExtraction, Log, TEXT("'%s' completed revive on '%s'"),
+		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
+
+	Server_CompleteRevive(ReviveTarget);
+
+	bIsReviving = false;
+	ReviveElapsed = 0.f;
+	ReviveTarget = nullptr;
+}
+
+void AExtractionCharacter::Server_CompleteRevive_Implementation(AExtractionCharacter* Target)
+{
+	if (!IsValid(Target)) return;
+	if (!Target->GetIsDBNO()) return;
+	if (bIsDBNO) return;
+
+	// Server-side proximity validation
+	const float DistSq = FVector::DistSquared(GetActorLocation(), Target->GetActorLocation());
+	if (DistSq > FMath::Square(ReviveProximityRadius))
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("Server_CompleteRevive: '%s' too far from '%s'"),
+			*GetNameSafe(this), *GetNameSafe(Target));
+		return;
+	}
+
+	// TODO: Validate team membership when team system exists
+	Target->ExitDBNO();
 }
 
 // ---- Getters ----
