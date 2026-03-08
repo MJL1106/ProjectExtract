@@ -45,16 +45,14 @@ public:
 	TObjectPtr<UAnimSequence> JumpStartAnim;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Jump")
-	TObjectPtr<UAnimSequence> JumpApexAnim;
-
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Jump")
 	TObjectPtr<UAnimSequence> FallLoopAnim;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Jump")
 	TObjectPtr<UAnimSequence> LandAnim;
 
+	/** Full-body root motion montage for sprint jumps. Controls entire arc. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Jump")
-	TObjectPtr<UAnimSequence> JumpRecoveryAdditiveAnim;
+	TObjectPtr<UAnimMontage> SprintJumpMontage;
 
 	// ---- Weapon Actions (Upper Body) ----
 

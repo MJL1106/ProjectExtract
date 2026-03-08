@@ -13,6 +13,7 @@ class USkeletalMeshComponent;
 class UCameraComponent;
 class UInputAction;
 class UExtractionAnimInstance;
+class UAnimMontage;
 struct FInputActionValue;
 
 /**
@@ -242,6 +243,18 @@ protected:
 		meta = (ClampMin = "0.5", ClampMax = "3.0"))
 	float MantleSprintPlayRate = 1.0f;
 
+	// ---- Sprint Jump Config ----
+
+	/** Montage play rate for the sprint jump */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|SprintJump",
+		meta = (ClampMin = "0.5", ClampMax = "3.0"))
+	float SprintJumpPlayRate = 1.0f;
+
+	/** Extra forward velocity (cm/s) added on top of sprint speed when sprint jumping */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|SprintJump",
+		meta = (ClampMin = "0.0", ClampMax = "1500.0"))
+	float SprintJumpForwardBoost = 300.0f;
+
 	// ---- Replicated State ----
 
 	/** True while sprint input is held and conditions are met */
@@ -401,6 +414,9 @@ public:
 	bool IsInTraversal() const { return ActiveTraversalType != ETraversalType::None; }
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool GetIsSprintJumping() const { return bIsSprintJumping; }
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool GetIsVaulting() const { return ActiveTraversalType == ETraversalType::Vault; }
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
@@ -452,6 +468,24 @@ private:
 
 	/** Whether the player was sprinting on the previous crouch press (for double-tap slide detection) */
 	bool bWasSprintingOnLastCrouchPress;
+
+	// ---- Sprint Jump ----
+
+	/** True while a root-motion sprint jump montage is playing */
+	bool bIsSprintJumping;
+
+	/** Cached BrakingDecelerationFalling to restore after sprint jump */
+	float CachedBrakingDecelerationFalling;
+
+	/** Begin a root-motion sprint jump (MOVE_Flying + montage) */
+	void StartSprintJump();
+
+	/** End sprint jump — restore movement mode */
+	void EndSprintJump();
+
+	/** Delegate callback fired when the sprint jump montage ends or is interrupted */
+	UFUNCTION()
+	void OnSprintJumpMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	// ---- Traversal Detection (helpers) ----
 
