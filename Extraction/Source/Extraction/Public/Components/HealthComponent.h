@@ -34,6 +34,18 @@ public:
 	bool IsAlive() const { return CurrentHealth > 0.f; }
 
 	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetCurrentHealth() const { return CurrentHealth; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetMaxHealth() const { return MaxHealth; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetCurrentShield() const { return CurrentShield; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetMaxShield() const { return MaxShield; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetHealthPercent() const { return MaxHealth > 0.f ? CurrentHealth / MaxHealth : 0.f; }
 
 	UFUNCTION(BlueprintPure, Category = "Health")
