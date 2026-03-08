@@ -54,8 +54,12 @@ AExtractionCharacter::AExtractionCharacter()
 	, VaultTargetLocation(FVector::ZeroVector)
 	, VaultSurfaceLocation(FVector::ZeroVector)
 	, VaultWallNormal(FVector::ZeroVector)
+	, VaultWallImpactPoint(FVector::ZeroVector)
 	, VaultSurfaceHeight(0.f)
 	, bWasSprintingAtVaultEntry(false)
+	, VaultSnapTarget(FVector::ZeroVector)
+	, bIsSnappingToVault(false)
+	, VaultSnapTimeRemaining(0.f)
 {
 	// Replication
 	bReplicates = true;
@@ -128,6 +132,7 @@ void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsSliding, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsProne, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsVaulting, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(AExtractionCharacter, bWasSprintingAtVaultEntry, COND_SkipOwner);
 }
 
 void AExtractionCharacter::Tick(float DeltaTime)
@@ -140,7 +145,7 @@ void AExtractionCharacter::Tick(float DeltaTime)
 
 		if (bIsInProneMomentum) UpdateProneMomentum(DeltaTime);
 
-		if (bIsVaulting) UpdateVault();
+		if (bIsVaulting) UpdateVault(DeltaTime);
 
 		UpdateSprint();
 
@@ -262,9 +267,10 @@ void AExtractionCharacter::DoJumpStart()
 
 	// Vault check — grounded and not in a blocking state
 	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
-	if (IsValid(MoveComp) && MoveComp->IsMovingOnGround()
+	bCanVault = IsValid(MoveComp) && MoveComp->IsMovingOnGround()
 		&& !bIsSliding && !bIsInProneMomentum
-		&& PerformVaultDetection())
+		&& PerformVaultDetection();
+	if (bCanVault)
 	{
 		ExecuteVault();
 		return;
@@ -690,7 +696,9 @@ bool AExtractionCharacter::PerformVaultDetection()
 	if (!TraceDownForSurface(WallHit, SurfaceHit)) return false;
 
 	// Step 3: Compute and validate landing position
-	const float CapsuleHalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!IsValid(Capsule)) return false;
+	const float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
 	const float FeetZ = GetActorLocation().Z - CapsuleHalfHeight;
 
 	VaultWallNormal = WallHit.ImpactNormal;
@@ -735,7 +743,9 @@ bool AExtractionCharacter::TraceForwardForWall(FHitResult& OutHit) const
 bool AExtractionCharacter::TraceDownForSurface(
 	const FHitResult& WallHit, FHitResult& OutSurfaceHit) const
 {
-	const float CapsuleHalfHeight = GetCapsuleComponent()->GetScaledCapsuleHalfHeight();
+	const UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!IsValid(Capsule)) return false;
+	const float CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
 	const FVector Forward = GetActorForwardVector();
 	const float FeetZ = GetActorLocation().Z - CapsuleHalfHeight;
 
@@ -808,10 +818,12 @@ void AExtractionCharacter::ExecuteVault()
 	if (IsValid(Capsule))
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
-	// Set up interpolation toward a consistent vault start position
+	// Set up interpolation toward a consistent vault start position.
+	// Time-budgeted so it yields to root motion before they conflict.
 	VaultSnapTarget = VaultWallImpactPoint + VaultWallNormal * VaultSnapDistance;
 	VaultSnapTarget.Z = GetActorLocation().Z;
 	bIsSnappingToVault = true;
+	VaultSnapTimeRemaining = 0.15f;
 
 	const float PlayRate = bWasSprintingAtVaultEntry ? VaultSprintPlayRate : VaultWalkPlayRate;
 
@@ -827,19 +839,26 @@ void AExtractionCharacter::ExecuteVault()
 		FPAnimInst->PlayVaultMontage(PlayRate);
 }
 
-void AExtractionCharacter::UpdateVault()
+void AExtractionCharacter::UpdateVault(float DeltaTime)
 {
-	const float DeltaTime = GetWorld()->GetDeltaSeconds();
 
-	// Smooth interp toward the vault start position
+	// Smooth interp toward the vault start position (time-budgeted to avoid fighting root motion)
 	if (bIsSnappingToVault)
 	{
-		const FVector Current = GetActorLocation();
-		const FVector NewLoc = FMath::VInterpTo(Current, VaultSnapTarget, DeltaTime, VaultSnapInterpSpeed);
-		SetActorLocation(NewLoc);
-
-		if (FVector::DistSquared(NewLoc, VaultSnapTarget) < 1.f)
+		VaultSnapTimeRemaining -= DeltaTime;
+		if (VaultSnapTimeRemaining <= 0.f)
+		{
 			bIsSnappingToVault = false;
+		}
+		else
+		{
+			const FVector Current = GetActorLocation();
+			const FVector NewLoc = FMath::VInterpTo(Current, VaultSnapTarget, DeltaTime, VaultSnapInterpSpeed);
+			SetActorLocation(NewLoc);
+
+			if (FVector::DistSquared(NewLoc, VaultSnapTarget) < 1.f)
+				bIsSnappingToVault = false;
+		}
 	}
 
 	UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
@@ -855,10 +874,13 @@ void AExtractionCharacter::EndVault()
 	bCanVault = false;
 	bIsSnappingToVault = false;
 
-	// Re-enable capsule collision
+	// Re-enable capsule collision and sweep to resolve any overlaps safely
 	UCapsuleComponent* Capsule = GetCapsuleComponent();
 	if (IsValid(Capsule))
 		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+
+	// Sweep-in-place to let the engine push the capsule out of any geometry it overlaps
+	SetActorLocation(GetActorLocation(), true);
 
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
@@ -871,10 +893,10 @@ void AExtractionCharacter::OnRep_IsVaulting()
 {
 	if (bIsVaulting)
 	{
-		// Proxy: play vault montage so remote clients see the animation
+		const float PlayRate = bWasSprintingAtVaultEntry ? VaultSprintPlayRate : VaultWalkPlayRate;
 		UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
 		if (IsValid(AnimInst))
-			AnimInst->PlayVaultMontage(VaultWalkPlayRate);
+			AnimInst->PlayVaultMontage(PlayRate);
 	}
 }
 

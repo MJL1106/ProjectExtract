@@ -203,6 +203,10 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_IsVaulting, BlueprintReadOnly, Category = "Movement|State")
 	bool bIsVaulting;
 
+	/** Whether the character was sprinting when the vault started (replicated for proxy play rate) */
+	UPROPERTY(Replicated)
+	bool bWasSprintingAtVaultEntry;
+
 public:
 
 	AExtractionCharacter();
@@ -283,14 +287,14 @@ protected:
 	 *  @return true if a valid vaultable surface was found */
 	bool PerformVaultDetection();
 
-	/** Starts the vault: switches to MOVE_Flying, plays montage with root motion */
+	/** Starts the vault: disables collision, switches to MOVE_Flying, snaps to wall, plays montage */
 	void ExecuteVault();
 
 	/** Ends the vault: restores MOVE_Walking, resets state */
 	void EndVault();
 
 	/** Tick safety net — ends vault if montage was interrupted */
-	void UpdateVault();
+	void UpdateVault(float DeltaTime);
 
 	UFUNCTION()
 	void OnRep_IsVaulting();
@@ -411,13 +415,13 @@ private:
 	/** Height of the vault surface above the character's feet (cm) */
 	float VaultSurfaceHeight;
 
-	/** Whether the character was sprinting when the vault started (for play rate) */
-	bool bWasSprintingAtVaultEntry;
-
 	/** Position the character is interpolating toward at vault start */
 	FVector VaultSnapTarget;
 
 	/** True while still interpolating to the snap position */
 	bool bIsSnappingToVault;
+
+	/** Time remaining for snap interpolation before root motion takes over */
+	float VaultSnapTimeRemaining;
 
 };
