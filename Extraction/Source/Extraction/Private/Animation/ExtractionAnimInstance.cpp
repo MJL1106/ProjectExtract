@@ -50,10 +50,7 @@ void UExtractionAnimInstance::NativeInitializeAnimation()
 	Super::NativeInitializeAnimation();
 
 	APawn* PawnOwner = TryGetPawnOwner();
-	if (!IsValid(PawnOwner))
-	{
-		return;
-	}
+	if (!IsValid(PawnOwner)) return;
 
 	OwningCharacter = Cast<AExtractionCharacter>(PawnOwner);
 	if (!IsValid(OwningCharacter))
@@ -77,10 +74,7 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 {
 	Super::NativeUpdateAnimation(DeltaSeconds);
 
-	if (!IsValid(OwningCharacter) || !IsValid(MovementComponent))
-	{
-		return;
-	}
+	if (!IsValid(OwningCharacter) || !IsValid(MovementComponent)) return;
 
 	// --- Velocity / Speed (no allocations) ---
 	const FVector Velocity = MovementComponent->Velocity;
@@ -147,30 +141,21 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 UBlendSpace* UExtractionAnimInstance::GetActiveLocomotionBlendSpace() const
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		return nullptr;
-	}
+	if (!IsValid(Data)) return nullptr;
 	return Data->LocomotionBlendSpace;
 }
 
 UExtractionAnimDataAsset* UExtractionAnimInstance::GetActiveAnimData() const
 {
 	const TObjectPtr<UExtractionAnimDataAsset>* Found = WeaponAnimSets.Find(CurrentWeaponType);
-	if (!Found || !IsValid(*Found))
-	{
-		return nullptr;
-	}
+	if (!Found || !IsValid(*Found)) return nullptr;
 	return *Found;
 }
 
 UBlendSpace* UExtractionAnimInstance::GetActiveProneLocomotionBlendSpace() const
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		return nullptr;
-	}
+	if (!IsValid(Data)) return nullptr;
 	return Data->ProneLocomotionBlendSpace;
 }
 
@@ -179,40 +164,28 @@ UBlendSpace* UExtractionAnimInstance::GetActiveProneLocomotionBlendSpace() const
 float UExtractionAnimInstance::PlayFireMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
 	return PlayMontageInternal(Data->FireMontage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayReloadMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
 	return PlayMontageInternal(Data->ReloadMontage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayEquipMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
 	return PlayMontageInternal(Data->EquipMontage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayHitReactMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
 	return PlayRandomMontage(Data->HitReactMontages, PlayRate);
 }
 
@@ -221,20 +194,14 @@ float UExtractionAnimInstance::PlayDeathMontage(float PlayRate)
 	bIsAlive = false;
 
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
 	return PlayRandomMontage(Data->DeathMontages, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType TransitionType, float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
 
 	UAnimMontage* Montage = nullptr;
 	switch (TransitionType)
@@ -261,20 +228,14 @@ float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType T
 float UExtractionAnimInstance::PlayProneExitMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
 	return PlayMontageInternal(Data->ProneToStandTransition, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayProneToCrouchMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data) || !IsValid(Data->ProneToStandTransition))
-	{
-		return 0.f;
-	}
+	if (!IsValid(Data) || !IsValid(Data->ProneToStandTransition)) return 0.f;
 
 	UAnimMontage* Montage = Data->ProneToStandTransition;
 	const float SafePlayRate = FMath::Max(PlayRate, UE_KINDA_SMALL_NUMBER);
@@ -295,10 +256,7 @@ float UExtractionAnimInstance::PlayProneToCrouchMontage(float PlayRate)
 bool UExtractionAnimInstance::IsPlayingProneEntryMontage() const
 {
 	const UExtractionAnimDataAsset* AnimData = GetActiveAnimData();
-	if (!IsValid(AnimData))
-	{
-		return false;
-	}
+	if (!IsValid(AnimData)) return false;
 
 	return Montage_IsPlaying(AnimData->IdleToProneTransition)   ||
 	       Montage_IsPlaying(AnimData->WalkToProneTransition)   ||
@@ -322,10 +280,7 @@ void UExtractionAnimInstance::SetWeaponType(EWeaponType NewWeaponType)
 
 float UExtractionAnimInstance::PlayMontageInternal(UAnimMontage* Montage, float PlayRate)
 {
-	if (!IsValid(Montage))
-	{
-		return 0.f;
-	}
+	if (!IsValid(Montage)) return 0.f;
 
 	const float SafePlayRate = (FMath::Abs(PlayRate) < UE_KINDA_SMALL_NUMBER) ? 1.0f : PlayRate;
 	Montage_Play(Montage, SafePlayRate);
@@ -335,10 +290,7 @@ float UExtractionAnimInstance::PlayMontageInternal(UAnimMontage* Montage, float 
 float UExtractionAnimInstance::PlayRandomMontage(
 	const TArray<TObjectPtr<UAnimMontage>>& Montages, float PlayRate)
 {
-	if (Montages.Num() == 0)
-	{
-		return 0.f;
-	}
+	if (Montages.Num() == 0) return 0.f;
 
 	const int32 Index = FMath::RandRange(0, Montages.Num() - 1);
 	UAnimMontage* Chosen = Montages[Index];
