@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "ExtractionTypes.h"
 #include "Logging/LogMacros.h"
 #include "ExtractionCharacter.generated.h"
 
@@ -152,7 +153,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
 		meta = (ClampMin = "0.0",
 			ToolTip = "Obstacles taller than this cannot be vaulted.\nTune after reviewing vault montages."))
-	float VaultMaxHeight = 120.0f;
+	float VaultMaxHeight = 90.0f;
 
 	/** Forward distance past the ledge edge for the landing target (cm) */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
@@ -185,6 +186,48 @@ protected:
 			ToolTip = "Interpolation speed for the vault snap.\nHigher = faster/snappier, lower = smoother glide."))
 	float VaultSnapInterpSpeed = 18.0f;
 
+	// ---- Climb Config ----
+
+	/** Minimum surface height from feet for a climb-up (cm) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
+		meta = (ClampMin = "0.0",
+			ToolTip = "Surfaces shorter than this won't trigger climb.\nOverlaps with vault range — vault is tried first for thin obstacles."))
+	float ClimbMinHeight = 80.0f;
+
+	/** Maximum surface height from feet for a climb-up (cm). Above this = mantle. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
+		meta = (ClampMin = "0.0",
+			ToolTip = "Surfaces taller than this trigger mantle instead of climb."))
+	float ClimbMaxHeight = 170.0f;
+
+	/** Montage play rate when climbing while walking */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
+		meta = (ClampMin = "0.5", ClampMax = "3.0"))
+	float ClimbWalkPlayRate = 1.0f;
+
+	/** Montage play rate when climbing while sprinting */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
+		meta = (ClampMin = "0.5", ClampMax = "3.0"))
+	float ClimbSprintPlayRate = 1.0f;
+
+	// ---- Mantle Config ----
+
+	/** Maximum surface height from feet for a mantle/pull-up (cm). MantleMin = ClimbMaxHeight. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Mantle",
+		meta = (ClampMin = "0.0",
+			ToolTip = "Surfaces taller than this cannot be mantled.\nMantle min height equals ClimbMaxHeight (no gap)."))
+	float MantleMaxHeight = 260.0f;
+
+	/** Montage play rate when mantling while walking */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Mantle",
+		meta = (ClampMin = "0.5", ClampMax = "3.0"))
+	float MantleWalkPlayRate = 1.0f;
+
+	/** Montage play rate when mantling while sprinting */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Mantle",
+		meta = (ClampMin = "0.5", ClampMax = "3.0"))
+	float MantleSprintPlayRate = 1.0f;
+
 	// ---- Replicated State ----
 
 	/** True while sprint input is held and conditions are met */
@@ -199,13 +242,13 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_IsProne, BlueprintReadOnly, Category = "Movement|State")
 	bool bIsProne;
 
-	/** True while the character is mid-vault */
-	UPROPERTY(ReplicatedUsing = OnRep_IsVaulting, BlueprintReadOnly, Category = "Movement|State")
-	bool bIsVaulting;
+	/** Current traversal action (Vault, Climb, Mantle, or None) */
+	UPROPERTY(ReplicatedUsing = OnRep_TraversalType, BlueprintReadOnly, Category = "Movement|State")
+	ETraversalType ActiveTraversalType;
 
-	/** Whether the character was sprinting when the vault started (replicated for proxy play rate) */
+	/** Whether the character was sprinting when the traversal started (replicated for proxy play rate) */
 	UPROPERTY(Replicated)
-	bool bWasSprintingAtVaultEntry;
+	bool bWasSprintingAtTraversalEntry;
 
 public:
 
@@ -213,7 +256,7 @@ public:
 
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
-virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 protected:
 
@@ -278,26 +321,38 @@ protected:
 	UFUNCTION()
 	void OnRep_IsProne();
 
-	// ---- Vault ----
+	// ---- Traversal (Vault / Climb / Mantle) ----
 
-	/** Called on IA_Vault press. Runs detection, executes vault if valid. No jump fallback. */
+	/** Called on IA_Vault press. Runs detection, executes traversal if valid. No jump fallback. */
 	void VaultStart(const FInputActionValue& Value);
 
-	/** Runs the full multi-trace vault detection sequence. Stores results in member state.
-	 *  @return true if a valid vaultable surface was found */
-	bool PerformVaultDetection();
+	/** Runs the multi-trace detection sequence.
+	 *  @return the traversal type to execute, or None if nothing detected */
+	ETraversalType PerformTraversalDetection();
 
-	/** Starts the vault: disables collision, switches to MOVE_Flying, snaps to wall, plays montage */
+	/** Shared setup for all traversal types: MOVE_Flying, collision off, snap, rotation lock */
+	void StartTraversal(ETraversalType Type);
+
+	/** Vault-specific: StartTraversal + vault montage */
 	void ExecuteVault();
 
-	/** Ends the vault: restores MOVE_Walking, resets state */
-	void EndVault();
+	/** Climb-specific: StartTraversal + climb montage */
+	void ExecuteClimb();
 
-	/** Tick safety net — ends vault if montage was interrupted */
-	void UpdateVault(float DeltaTime);
+	/** Mantle-specific: StartTraversal + mantle montage */
+	void ExecuteMantle();
+
+	/** Dispatches to the correct Execute function based on type */
+	void ExecuteTraversalByType(ETraversalType Type);
+
+	/** Tick safety net — ends traversal if montage was interrupted */
+	void UpdateTraversal(float DeltaTime);
+
+	/** Ends any active traversal: restores MOVE_Walking, resets state */
+	void EndTraversal();
 
 	UFUNCTION()
-	void OnRep_IsVaulting();
+	void OnRep_TraversalType();
 
 	// ---- Stub Handlers (future systems) ----
 	void InteractStart(const FInputActionValue& Value);
@@ -326,10 +381,13 @@ public:
 	bool GetIsProne() const { return bIsProne; }
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool GetIsVaulting() const { return bIsVaulting; }
+	ETraversalType GetActiveTraversalType() const { return ActiveTraversalType; }
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool GetCanVault() const { return bCanVault; }
+	bool IsInTraversal() const { return ActiveTraversalType != ETraversalType::None; }
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool GetIsVaulting() const { return ActiveTraversalType == ETraversalType::Vault; }
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	FVector GetVaultTargetLocation() const { return VaultTargetLocation; }
@@ -381,32 +439,32 @@ private:
 	/** Whether the player was sprinting on the previous crouch press (for double-tap slide detection) */
 	bool bWasSprintingOnLastCrouchPress;
 
-	// ---- Vault Detection (helpers) ----
+	// ---- Traversal Detection (helpers) ----
 
 	/** Sphere-sweeps forward from capsule edge to find a wall or obstacle.
 	 *  @return true if an obstacle was hit */
 	bool TraceForwardForWall(FHitResult& OutHit) const;
 
 	/** Traces downward from above the wall hit to find the top surface.
-	 *  @return true if a walkable surface was found within the vaultable height range */
+	 *  Validates height within [VaultMinHeight, MantleMaxHeight].
+	 *  @return true if a walkable surface was found within the valid height range */
 	bool TraceDownForSurface(const FHitResult& WallHit, FHitResult& OutSurfaceHit) const;
 
-	/** Capsule overlap test at the proposed landing position to verify the character fits.
+	/** Capsule overlap test at a forward offset from the surface to verify the character fits.
+	 *  @param SurfaceLocation  Impact point on the surface top
+	 *  @param ForwardOffset    Distance past the surface edge to test (vault=past obstacle, climb/mantle=on top)
 	 *  @return true if there is room for the character */
-	bool CheckVaultClearance(const FVector& SurfaceLocation) const;
+	bool CheckClearance(const FVector& SurfaceLocation, float ForwardOffset) const;
 
-	// ---- Vault State ----
+	// ---- Traversal State ----
 
-	/** True when a valid vaultable surface was detected on the last check */
-	bool bCanVault;
+	/** Traversal type waiting for uncrouch to finish before executing (None = no pending) */
+	ETraversalType PendingTraversalType;
 
-	/** True when waiting for uncrouch to finish before executing a vault */
-	bool bPendingVault;
-
-	/** Final position the character will move to after vaulting (capsule center) */
+	/** Final position the character will move to after traversal (capsule center) */
 	FVector VaultTargetLocation;
 
-	/** Impact point on top of the detected vaultable surface */
+	/** Impact point on top of the detected surface */
 	FVector VaultSurfaceLocation;
 
 	/** Normal of the wall face (points away from wall, toward character) */
@@ -415,10 +473,10 @@ private:
 	/** Impact point on the wall face from the forward trace */
 	FVector VaultWallImpactPoint;
 
-	/** Height of the vault surface above the character's feet (cm) */
+	/** Height of the surface above the character's feet (cm) */
 	float VaultSurfaceHeight;
 
-	/** Position the character is interpolating toward at vault start */
+	/** Position the character is interpolating toward at traversal start */
 	FVector VaultSnapTarget;
 
 	/** True while still interpolating to the snap position */
@@ -427,7 +485,7 @@ private:
 	/** Time remaining for snap interpolation before root motion takes over */
 	float VaultSnapTimeRemaining;
 
-	/** Actor yaw locked at vault entry so root motion stays on course */
+	/** Actor yaw locked at traversal entry so root motion stays on course */
 	FRotator VaultLockedRotation;
 
 };

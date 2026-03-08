@@ -86,6 +86,12 @@ public:
 	bool bIsVaulting;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
+	bool bIsClimbing;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
+	bool bIsMantling;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
 	bool bIsADS;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Animation|State")
@@ -163,6 +169,26 @@ public:
 	/** Returns true if the vault montage is currently playing (real-time, no frame delay). */
 	UFUNCTION(BlueprintPure, Category = "Animation|State")
 	bool IsPlayingVaultMontage() const;
+
+	/** Play the climb-up montage. Returns duration. */
+	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
+	float PlayClimbMontage(float PlayRate = 1.0f);
+
+	/** Returns true if the climb montage is currently playing. */
+	UFUNCTION(BlueprintPure, Category = "Animation|State")
+	bool IsPlayingClimbMontage() const;
+
+	/** Play the mantle/pull-up montage. Returns duration. */
+	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
+	float PlayMantleMontage(float PlayRate = 1.0f);
+
+	/** Returns true if the mantle montage is currently playing. */
+	UFUNCTION(BlueprintPure, Category = "Animation|State")
+	bool IsPlayingMantleMontage() const;
+
+	/** Returns true if any traversal montage (vault, climb, or mantle) is currently playing. */
+	UFUNCTION(BlueprintPure, Category = "Animation|State")
+	bool IsPlayingAnyTraversalMontage() const;
 
 	/** Returns true if any prone-entry transition montage is currently active (real-time, no frame delay). */
 	UFUNCTION(BlueprintPure, Category = "Animation|State")

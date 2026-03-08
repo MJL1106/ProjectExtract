@@ -30,3 +30,16 @@ enum class EProneTransitionType : uint8
 	FromSprint	UMETA(DisplayName = "From Sprint"),
 	FromCrouch	UMETA(DisplayName = "From Crouch"),
 };
+
+/**
+ * Active traversal action type.
+ * Determines which montage plays and what clearance logic applies.
+ */
+UENUM(BlueprintType)
+enum class ETraversalType : uint8
+{
+	None	UMETA(DisplayName = "None"),
+	Vault	UMETA(DisplayName = "Vault"),
+	Climb	UMETA(DisplayName = "Climb"),
+	Mantle	UMETA(DisplayName = "Mantle"),
+};
