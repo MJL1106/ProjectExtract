@@ -12,7 +12,9 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "HealthComponent.h"
+#include "ExtractionDamageType.h"
 #include "TimerManager.h"
+#include "Engine/DamageEvents.h"
 #include "Extraction.h"
 
 namespace ExtractionCharacterConstants
@@ -117,6 +119,34 @@ AExtractionCharacter::AExtractionCharacter()
 
 	// Health component
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+
+	// Default bone-to-region map (UE5 mannequin skeleton)
+	BoneToHitRegionMap.Reserve(24);
+	BoneToHitRegionMap.Add(FName("head"), EHitRegion::Head);
+	BoneToHitRegionMap.Add(FName("neck_01"), EHitRegion::Torso);
+	BoneToHitRegionMap.Add(FName("neck_02"), EHitRegion::Torso);
+	BoneToHitRegionMap.Add(FName("spine_01"), EHitRegion::Torso);
+	BoneToHitRegionMap.Add(FName("spine_02"), EHitRegion::Torso);
+	BoneToHitRegionMap.Add(FName("spine_03"), EHitRegion::Torso);
+	BoneToHitRegionMap.Add(FName("spine_04"), EHitRegion::Torso);
+	BoneToHitRegionMap.Add(FName("spine_05"), EHitRegion::Torso);
+	BoneToHitRegionMap.Add(FName("pelvis"), EHitRegion::Torso);
+	BoneToHitRegionMap.Add(FName("clavicle_l"), EHitRegion::Arms);
+	BoneToHitRegionMap.Add(FName("upperarm_l"), EHitRegion::Arms);
+	BoneToHitRegionMap.Add(FName("lowerarm_l"), EHitRegion::Arms);
+	BoneToHitRegionMap.Add(FName("hand_l"), EHitRegion::Arms);
+	BoneToHitRegionMap.Add(FName("clavicle_r"), EHitRegion::Arms);
+	BoneToHitRegionMap.Add(FName("upperarm_r"), EHitRegion::Arms);
+	BoneToHitRegionMap.Add(FName("lowerarm_r"), EHitRegion::Arms);
+	BoneToHitRegionMap.Add(FName("hand_r"), EHitRegion::Arms);
+	BoneToHitRegionMap.Add(FName("thigh_l"), EHitRegion::Legs);
+	BoneToHitRegionMap.Add(FName("calf_l"), EHitRegion::Legs);
+	BoneToHitRegionMap.Add(FName("foot_l"), EHitRegion::Legs);
+	BoneToHitRegionMap.Add(FName("thigh_r"), EHitRegion::Legs);
+	BoneToHitRegionMap.Add(FName("calf_r"), EHitRegion::Legs);
+	BoneToHitRegionMap.Add(FName("foot_r"), EHitRegion::Legs);
+	BoneToHitRegionMap.Add(FName("ball_l"), EHitRegion::Legs);
+	BoneToHitRegionMap.Add(FName("ball_r"), EHitRegion::Legs);
 
 	StandingBaseEyeHeight = BaseEyeHeight;
 }
@@ -1267,14 +1297,37 @@ bool AExtractionCharacter::SetCapsuleHalfHeightWithFloorAdjust(float NewHalfHeig
 
 // ---- Health / DBNO ----
 
+float AExtractionCharacter::GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const
+{
+	if (!DamageEvent.IsOfType(FPointDamageEvent::ClassID))
+		return 1.0f;
+
+	const FPointDamageEvent& PointDamage = static_cast<const FPointDamageEvent&>(DamageEvent);
+
+	const EHitRegion* Region = BoneToHitRegionMap.Find(PointDamage.HitInfo.BoneName);
+	if (!Region)
+		return 1.0f;
+
+	if (!PointDamage.DamageTypeClass)
+		return 1.0f;
+
+	const UExtractionDamageType* DmgType = Cast<UExtractionDamageType>(
+		PointDamage.DamageTypeClass->GetDefaultObject());
+	if (!IsValid(DmgType))
+		return 1.0f;
+
+	return DmgType->GetMultiplierForRegion(*Region);
+}
+
 float AExtractionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
 	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+	const float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent);
 
 	if (IsValid(HealthComponent))
-		HealthComponent->TakeDamage(ActualDamage);
+		HealthComponent->TakeDamage(FinalDamage);
 
-	return ActualDamage;
+	return FinalDamage;
 }
 
 void AExtractionCharacter::HandleDeath()

@@ -286,6 +286,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "5.0"))
 	float ReviveTraceSphereRadius = 30.f;
 
+	// ---- Hitbox Config ----
+
+	/** Maps skeleton bone names to hit regions for damage multiplier lookup.
+	 *  Defaults to UE5 mannequin bones. Override in Blueprint for custom skeletons. */
+	UPROPERTY(EditDefaultsOnly, Category = "Damage|Hitbox")
+	TMap<FName, EHitRegion> BoneToHitRegionMap;
+
 	// ---- Replicated State ----
 
 	/** True while sprint input is held and conditions are met */
@@ -486,6 +493,10 @@ private:
 	void ExitDBNO();
 	void OnBleedoutExpired();
 	void FullDeath();
+
+	/** Resolves hitbox multiplier from the damage event's bone + damage type.
+	 *  Returns 1.0 for non-point damage, unknown bones, or non-Extraction damage types. */
+	float GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const;
 
 	UFUNCTION()
 	void OnRep_IsDBNO();
