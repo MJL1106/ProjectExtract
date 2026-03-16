@@ -35,6 +35,7 @@ void UHealthComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 
 	DOREPLIFETIME(UHealthComponent, CurrentHealth);
 	DOREPLIFETIME(UHealthComponent, CurrentShield);
+	DOREPLIFETIME(UHealthComponent, bIsDead);
 }
 
 void UHealthComponent::TakeDamage(float Damage)
@@ -103,6 +104,20 @@ void UHealthComponent::Die()
 
 	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
 	OnDeath.Broadcast();
+}
+
+void UHealthComponent::Revive(float HealthPercent)
+{
+	if (!bIsDead) return;
+	if (HealthPercent <= 0.f) return;
+
+	bIsDead = false;
+	CurrentHealth = FMath::Clamp(HealthPercent * MaxHealth, 1.f, MaxHealth);
+	CurrentShield = 0.f;
+
+	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+	OnShieldChanged.Broadcast(CurrentShield, MaxShield);
+	OnRevive.Broadcast();
 }
 
 void UHealthComponent::StartShieldRegen()

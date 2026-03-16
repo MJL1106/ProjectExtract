@@ -11,6 +11,8 @@
 #include "InputActionValue.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "HealthComponent.h"
+#include "TimerManager.h"
 #include "Extraction.h"
 
 namespace ExtractionCharacterConstants
@@ -51,6 +53,10 @@ AExtractionCharacter::AExtractionCharacter()
 	, ProneMomentumDuration(0.f)
 	, LastCrouchSlideTime(0.0)
 	, bWasSprintingOnLastCrouchPress(false)
+	, bIsDBNO(false)
+	, BleedoutTimeRemaining(0.f)
+	, ReviveElapsed(0.f)
+	, bIsReviving(false)
 	, PendingTraversalType(ETraversalType::None)
 	, VaultTargetLocation(FVector::ZeroVector)
 	, VaultSurfaceLocation(FVector::ZeroVector)
@@ -62,6 +68,7 @@ AExtractionCharacter::AExtractionCharacter()
 	, bIsSnappingToVault(false)
 	, VaultSnapTimeRemaining(0.f)
 	, bIsSprintJumping(false)
+	, StandingCapsuleHalfHeight(96.0f)
 {
 	// Replication
 	bReplicates = true;
@@ -108,6 +115,9 @@ AExtractionCharacter::AExtractionCharacter()
 		MoveComp->MaxWalkSpeedCrouched = MaxWalkSpeedCrouched;
 	}
 
+	// Health component
+	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+
 	StandingBaseEyeHeight = BaseEyeHeight;
 }
 
@@ -124,6 +134,28 @@ void AExtractionCharacter::BeginPlay()
 		MoveComp->MaxWalkSpeedCrouched = MaxWalkSpeedCrouched;
 		MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
 	}
+
+	const UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (IsValid(Capsule))
+		StandingCapsuleHalfHeight = Capsule->GetUnscaledCapsuleHalfHeight();
+
+	if (IsValid(HealthComponent))
+		HealthComponent->OnDeath.AddDynamic(this, &AExtractionCharacter::HandleDeath);
+
+	// Cache anim instances — these don't change after initialization
+	CachedAnimInstance = Cast<UExtractionAnimInstance>(GetMesh()->GetAnimInstance());
+	if (!IsValid(CachedAnimInstance))
+		UE_LOG(LogExtraction, Warning, TEXT("'%s': 3P AnimInstance is not UExtractionAnimInstance — check ABP parent class."), *GetNameSafe(this));
+
+	CachedFPAnimInstance = Cast<UExtractionAnimInstance>(FirstPersonMesh->GetAnimInstance());
+}
+
+void AExtractionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+
+	Super::EndPlay(EndPlayReason);
 }
 
 void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -135,11 +167,16 @@ void AExtractionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>&
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bIsProne, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, ActiveTraversalType, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AExtractionCharacter, bWasSprintingAtTraversalEntry, COND_SkipOwner);
+	DOREPLIFETIME(AExtractionCharacter, bIsDBNO);
 }
 
 void AExtractionCharacter::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Tick down bleedout locally (server uses FTimerHandle for authoritative expiry)
+	if (bIsDBNO && BleedoutTimeRemaining > 0.f)
+		BleedoutTimeRemaining = FMath::Max(BleedoutTimeRemaining - DeltaTime, 0.f);
 
 	if (IsLocallyControlled())
 	{
@@ -165,40 +202,30 @@ void AExtractionCharacter::Tick(float DeltaTime)
 			ExecuteTraversalByType(Type);
 		}
 
+		if (bIsReviving) UpdateRevive(DeltaTime);
+
 		UpdateSprint();
 
-		// Deferred UnCrouch: when entering prone from crouch, the UnCrouch is delayed
-		// until the crouch-to-prone montage finishes. Uses IsPlayingProneEntryMontage()
-		// (real-time Montage_IsPlaying check) instead of bIsTransitioningToProne
-		// because NativeUpdateAnimation runs AFTER Tick — the cached flag would be
-		// stale on the frame the montage starts, allowing UnCrouch to fire too early.
-		if (bIsProne && GetCharacterMovement()->IsCrouching())
+		// Smooth camera height interpolation during crouch transitions (local player only)
+		const UCharacterMovementComponent* CameraComp = GetCharacterMovement();
+		if (IsValid(CameraComp))
 		{
-			UExtractionAnimInstance* AnimInst = GetExtractionAnimInstance();
-			const bool bMontPlaying = IsValid(AnimInst) && AnimInst->IsPlayingProneEntryMontage();
-			if (!IsValid(AnimInst) || !bMontPlaying) UnCrouch();
-		}
-	}
+			const float HalfHeightDelta = CameraComp->GetCrouchedHalfHeight() - GetDefaultHalfHeight();
+			CrouchCameraTargetOffset = CameraComp->IsCrouching() ? HalfHeightDelta : 0.f;
 
-	// Smooth camera height interpolation during crouch transitions
-	const UCharacterMovementComponent* MoveComp = GetCharacterMovement();
-	if (IsValid(MoveComp))
-	{
-		const float HalfHeightDelta = MoveComp->GetCrouchedHalfHeight() - GetDefaultHalfHeight();
-		CrouchCameraTargetOffset = MoveComp->IsCrouching() ? HalfHeightDelta : 0.f;
+			if (!FMath::IsNearlyEqual(CrouchCameraCurrentOffset, CrouchCameraTargetOffset, 0.1f))
+			{
+				CrouchCameraCurrentOffset = FMath::FInterpTo(
+					CrouchCameraCurrentOffset, CrouchCameraTargetOffset,
+					DeltaTime, CrouchCameraInterpSpeed);
 
-		if (!FMath::IsNearlyEqual(CrouchCameraCurrentOffset, CrouchCameraTargetOffset, 0.1f))
-		{
-			CrouchCameraCurrentOffset = FMath::FInterpTo(
-				CrouchCameraCurrentOffset, CrouchCameraTargetOffset,
-				DeltaTime, CrouchCameraInterpSpeed);
-
-			BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
-		}
-		else
-		{
-			CrouchCameraCurrentOffset = CrouchCameraTargetOffset;
-			BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
+				BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
+			}
+			else
+			{
+				CrouchCameraCurrentOffset = CrouchCameraTargetOffset;
+				BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
+			}
 		}
 	}
 }
@@ -240,8 +267,12 @@ void AExtractionCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	// Vault
 	EnhancedInput->BindAction(VaultAction, ETriggerEvent::Started, this, &AExtractionCharacter::VaultStart);
 
-	// Interact
+	// Interact (hold for revive)
 	EnhancedInput->BindAction(InteractAction, ETriggerEvent::Started, this, &AExtractionCharacter::InteractStart);
+	EnhancedInput->BindAction(InteractAction, ETriggerEvent::Completed, this, &AExtractionCharacter::InteractStop);
+
+	// Temp debug: H key applies 25 damage
+	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionCharacter::DebugApplyDamage);
 }
 
 // ---- Core Input Handlers ----
@@ -269,6 +300,7 @@ void AExtractionCharacter::DoAim(float Yaw, float Pitch)
 
 void AExtractionCharacter::DoMove(float Right, float Forward)
 {
+	if (bIsDBNO) return;
 	if (IsInTraversal()) return;
 
 	if (IsValid(GetController()))
@@ -280,6 +312,7 @@ void AExtractionCharacter::DoMove(float Right, float Forward)
 
 void AExtractionCharacter::DoJumpStart()
 {
+	if (bIsDBNO) return;
 	if (bIsProne) return;
 	if (IsInTraversal()) return;
 	if (bIsSliding) return;
@@ -323,6 +356,7 @@ void AExtractionCharacter::DoJumpEnd()
 
 void AExtractionCharacter::SprintStart(const FInputActionValue& Value)
 {
+	if (bIsDBNO) return;
 	if (IsInTraversal() || bIsSprintJumping) return;
 
 	bWantsToSprint = true;
@@ -392,6 +426,7 @@ void AExtractionCharacter::ApplySprintSpeed()
 
 void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 {
+	if (bIsDBNO) return;
 	if (bIsSliding) return;
 	if (IsInTraversal() || bIsSprintJumping) return;
 	PendingTraversalType = ETraversalType::None;
@@ -405,9 +440,20 @@ void AExtractionCharacter::HandleCrouchSlide(const FInputActionValue& Value)
 		// Block during any active prone transition
 		if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) return;
 
+		// Expand capsule from prone to crouch height — clearance check included
+		if (!SetCapsuleHalfHeightWithFloorAdjust(CrouchedHalfHeight))
+		{
+			UE_LOG(LogExtraction, Verbose, TEXT("Cannot transition prone->crouch — clearance blocked"));
+			return;
+		}
+
+		// Sync CMC's crouch height so it doesn't fight the new capsule size
+		UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+		if (IsValid(MoveComp))
+			MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+
 		bIsProne = false;
 		ApplySprintSpeed();
-		Crouch();
 		return;
 	}
 
@@ -565,6 +611,7 @@ static EProneTransitionType DetermineProneEntryType(const AExtractionCharacter& 
 
 void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 {
+	if (bIsDBNO) return;
 	if (IsInTraversal() || bIsSprintJumping) return;
 	PendingTraversalType = ETraversalType::None;
 
@@ -575,17 +622,26 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 	// Block re-entry during any active prone transition
 	if (AnimInst->bIsTransitioningToProne || AnimInst->bIsTransitioningFromProne) return;
 
-	// FP mesh AnimInstance — mirrors montage playback so the camera-driving head bone animates
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-
 	if (bIsProne)
 	{
 		// --- Exit prone ---
+		// Clearance check: can we expand from prone to standing height?
+		if (!SetCapsuleHalfHeightWithFloorAdjust(StandingCapsuleHalfHeight))
+		{
+			UE_LOG(LogExtraction, Verbose, TEXT("Cannot exit prone — clearance blocked"));
+			return;
+		}
+
+		// Restore real crouch height and uncrouch — CMC now matches our capsule
+		UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+		if (IsValid(MoveComp))
+			MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+		UnCrouch();
+
 		bIsProne = false;
 		ApplySprintSpeed();
 		AnimInst->PlayProneExitMontage();
-		if (IsValid(FPAnimInst)) FPAnimInst->PlayProneExitMontage();
+		if (IsValid(CachedFPAnimInstance)) CachedFPAnimInstance->PlayProneExitMontage();
 	}
 	else
 	{
@@ -597,8 +653,15 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 		bIsSprinting = false;
 		bIsProne = true;
 
+		// Shrink capsule via the CMC crouch system so it enforces prone height
+		UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+		if (IsValid(MoveComp))
+			MoveComp->CrouchedHalfHeight = ProneHalfHeight;
+
 		if (TransitionType == EProneTransitionType::FromSprint)
 		{
+			Crouch();
+
 			// Momentum carry: decelerate from sprint speed to prone speed
 			// over the montage duration using a power curve (like the slide system).
 			bIsInProneMomentum = true;
@@ -609,9 +672,8 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 			// Capture montage duration so the decel curve matches the animation length
 			const float MontageDuration = AnimInst->PlayProneTransitionMontage(TransitionType);
 			ProneMomentumDuration = FMath::Max(MontageDuration, 0.1f);
-			if (IsValid(FPAnimInst)) FPAnimInst->PlayProneTransitionMontage(TransitionType);
+			if (IsValid(CachedFPAnimInstance)) CachedFPAnimInstance->PlayProneTransitionMontage(TransitionType);
 
-			UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 			if (IsValid(MoveComp))
 			{
 				// Keep MaxWalkSpeed high so CMC doesn't clamp our velocity writes
@@ -624,15 +686,17 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 		else if (TransitionType == EProneTransitionType::FromCrouch)
 		{
 			ApplySprintSpeed();
-			// No montage — just UnCrouch and let the ABP state machine
-			// transition Crouch→Prone via inertialization.
-			UnCrouch();
+			// Already crouched — shrink capsule directly from crouch to prone height
+			// (always succeeds since we're going smaller). CMC stays in crouch state
+			// with CrouchedHalfHeight already set to ProneHalfHeight above.
+			SetCapsuleHalfHeightWithFloorAdjust(ProneHalfHeight);
 		}
 		else
 		{
 			ApplySprintSpeed();
+			Crouch();
 			AnimInst->PlayProneTransitionMontage(TransitionType);
-			if (IsValid(FPAnimInst)) FPAnimInst->PlayProneTransitionMontage(TransitionType);
+			if (IsValid(CachedFPAnimInstance)) CachedFPAnimInstance->PlayProneTransitionMontage(TransitionType);
 		}
 	}
 }
@@ -694,13 +758,26 @@ void AExtractionCharacter::EndProneMomentum()
 
 void AExtractionCharacter::OnRep_IsProne()
 {
-	// Proxies: AnimInstance reads bIsProne via GetIsProne() each frame
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp)) return;
+
+	if (bIsProne)
+	{
+		MoveComp->CrouchedHalfHeight = ProneHalfHeight;
+		Crouch();
+	}
+	else
+	{
+		MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+		UnCrouch();
+	}
 }
 
 // ---- Traversal (Vault / Climb / Mantle) ----
 
 void AExtractionCharacter::VaultStart(const FInputActionValue& Value)
 {
+	if (bIsDBNO) return;
 	if (IsInTraversal() || bIsSprintJumping) return;
 	if (bIsSliding) return;
 	if (bIsProne) return;
@@ -991,10 +1068,8 @@ void AExtractionCharacter::ExecuteVault()
 	if (IsValid(AnimInst))
 		AnimInst->PlayVaultMontage(PlayRate);
 
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-	if (IsValid(FPAnimInst))
-		FPAnimInst->PlayVaultMontage(PlayRate);
+	if (IsValid(CachedFPAnimInstance))
+		CachedFPAnimInstance->PlayVaultMontage(PlayRate);
 }
 
 void AExtractionCharacter::ExecuteClimb()
@@ -1007,10 +1082,8 @@ void AExtractionCharacter::ExecuteClimb()
 	if (IsValid(AnimInst))
 		AnimInst->PlayClimbMontage(PlayRate);
 
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-	if (IsValid(FPAnimInst))
-		FPAnimInst->PlayClimbMontage(PlayRate);
+	if (IsValid(CachedFPAnimInstance))
+		CachedFPAnimInstance->PlayClimbMontage(PlayRate);
 }
 
 void AExtractionCharacter::ExecuteMantle()
@@ -1023,10 +1096,8 @@ void AExtractionCharacter::ExecuteMantle()
 	if (IsValid(AnimInst))
 		AnimInst->PlayMantleMontage(PlayRate);
 
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-	if (IsValid(FPAnimInst))
-		FPAnimInst->PlayMantleMontage(PlayRate);
+	if (IsValid(CachedFPAnimInstance))
+		CachedFPAnimInstance->PlayMantleMontage(PlayRate);
 }
 
 void AExtractionCharacter::ExecuteTraversalByType(ETraversalType Type)
@@ -1128,10 +1199,8 @@ void AExtractionCharacter::StartSprintJump()
 		AnimInst->Montage_SetEndDelegate(EndDelegate, AnimInst->GetCurrentActiveMontage());
 	}
 
-	UExtractionAnimInstance* FPAnimInst = Cast<UExtractionAnimInstance>(
-		GetFirstPersonMesh()->GetAnimInstance());
-	if (IsValid(FPAnimInst))
-		FPAnimInst->PlaySprintJumpMontage(SprintJumpPlayRate);
+	if (IsValid(CachedFPAnimInstance))
+		CachedFPAnimInstance->PlaySprintJumpMontage(SprintJumpPlayRate);
 
 	// Normal jump — CMC handles gravity, velocity, landing
 	Jump();
@@ -1164,29 +1233,322 @@ void AExtractionCharacter::OnSprintJumpMontageEnded(UAnimMontage* Montage, bool 
 	EndSprintJump();
 }
 
-// ---- Stub Handlers (future systems) ----
+// ---- Capsule Resize ----
+
+bool AExtractionCharacter::SetCapsuleHalfHeightWithFloorAdjust(float NewHalfHeight)
+{
+	UCapsuleComponent* Capsule = GetCapsuleComponent();
+	if (!IsValid(Capsule)) return false;
+
+	const float OldHalfHeight = Capsule->GetUnscaledCapsuleHalfHeight();
+	if (FMath::IsNearlyEqual(OldHalfHeight, NewHalfHeight, 0.1f)) return true;
+
+	const float HeightDelta = NewHalfHeight - OldHalfHeight;
+
+	// Clearance check when expanding
+	if (NewHalfHeight > OldHalfHeight)
+	{
+		const FVector TestLocation = GetActorLocation() + FVector(0.f, 0.f, HeightDelta);
+		const FCollisionShape TestShape = FCollisionShape::MakeCapsule(
+			Capsule->GetUnscaledCapsuleRadius(), NewHalfHeight);
+
+		FCollisionQueryParams Params;
+		Params.AddIgnoredActor(this);
+
+		if (GetWorld()->OverlapAnyTestByChannel(
+				TestLocation, FQuat::Identity, ECC_Pawn, TestShape, Params))
+			return false;
+	}
+
+	Capsule->SetCapsuleHalfHeight(NewHalfHeight);
+	SetActorLocation(GetActorLocation() + FVector(0.f, 0.f, HeightDelta));
+	return true;
+}
+
+// ---- Health / DBNO ----
+
+float AExtractionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+
+	if (IsValid(HealthComponent))
+		HealthComponent->TakeDamage(ActualDamage);
+
+	return ActualDamage;
+}
+
+void AExtractionCharacter::HandleDeath()
+{
+	EnterDBNO();
+}
+
+void AExtractionCharacter::EnterDBNO()
+{
+	if (bIsDBNO) return;
+	bIsDBNO = true;
+
+	// Cancel active revive (C2: downed player can't finish reviving someone)
+	if (bIsReviving) CancelRevive();
+
+	// Cancel active movement states
+	if (IsInTraversal()) EndTraversal();
+	if (bIsSliding) EndSlide();
+	if (bIsSprintJumping) EndSprintJump();
+
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+
+	// Restore real crouch height before UnCrouch so CMC doesn't try to expand from wrong value
+	if (bIsProne || bIsCrouched)
+	{
+		if (IsValid(MoveComp))
+			MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+		if (bIsProne) bIsProne = false;
+		UnCrouch();
+	}
+	bWantsToSprint = false;
+	bIsSprinting = false;
+
+	// Shrink capsule to prone height via CMC crouch system
+	if (IsValid(MoveComp))
+		MoveComp->CrouchedHalfHeight = ProneHalfHeight;
+	Crouch();
+
+	// Stop movement but do NOT call DisableInput (camera look must work)
+	if (IsValid(MoveComp))
+	{
+		MoveComp->StopMovementImmediately();
+		MoveComp->DisableMovement();
+	}
+
+	// Start bleedout timer (server only)
+	if (HasAuthority())
+	{
+		BleedoutTimeRemaining = BleedoutDuration;
+
+		UWorld* World = GetWorld();
+		if (IsValid(World))
+		{
+			World->GetTimerManager().SetTimer(
+				BleedoutTimerHandle, this,
+				&AExtractionCharacter::OnBleedoutExpired,
+				BleedoutDuration, false);
+		}
+	}
+
+	OnDBNOStateChanged.Broadcast(true, BleedoutDuration);
+	UE_LOG(LogExtraction, Log, TEXT("'%s' entered DBNO (%.0fs bleedout)"),
+		*GetNameSafe(this), BleedoutDuration);
+}
+
+void AExtractionCharacter::ExitDBNO()
+{
+	if (!bIsDBNO) return;
+	bIsDBNO = false;
+
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+
+	BleedoutTimeRemaining = 0.f;
+
+	if (IsValid(HealthComponent))
+		HealthComponent->Revive(ReviveHealthPercent);
+
+	// Restore standing capsule via CMC uncrouch
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+	{
+		MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+		MoveComp->SetMovementMode(MOVE_Walking);
+	}
+	UnCrouch();
+
+	OnDBNOStateChanged.Broadcast(false, 0.f);
+	UE_LOG(LogExtraction, Log, TEXT("'%s' revived at %.0f%% health"),
+		*GetNameSafe(this), ReviveHealthPercent * 100.f);
+}
+
+void AExtractionCharacter::OnBleedoutExpired()
+{
+	if (!bIsDBNO) return;
+
+	UE_LOG(LogExtraction, Log, TEXT("'%s' bleedout expired — full death"), *GetNameSafe(this));
+	FullDeath();
+}
+
+void AExtractionCharacter::FullDeath()
+{
+	bIsDBNO = false;
+	BleedoutTimeRemaining = 0.f;
+
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+
+	// TODO: Ragdoll, drop loot, spectate camera
+	UE_LOG(LogExtraction, Log, TEXT("'%s' is fully dead"), *GetNameSafe(this));
+}
+
+void AExtractionCharacter::OnRep_IsDBNO()
+{
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (IsValid(MoveComp))
+	{
+		if (bIsDBNO)
+		{
+			MoveComp->CrouchedHalfHeight = ProneHalfHeight;
+			Crouch();
+			MoveComp->StopMovementImmediately();
+			MoveComp->DisableMovement();
+		}
+		else
+		{
+			MoveComp->CrouchedHalfHeight = CrouchedHalfHeight;
+			MoveComp->SetMovementMode(MOVE_Walking);
+			UnCrouch();
+		}
+	}
+
+	// Initialize local countdown so client can tick it down without replication
+	if (bIsDBNO)
+		BleedoutTimeRemaining = BleedoutDuration;
+
+	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
+}
+
+void AExtractionCharacter::DebugApplyDamage()
+{
+	if (!HasAuthority()) return;
+	if (!IsValid(HealthComponent)) return;
+
+	HealthComponent->TakeDamage(25.f);
+	UE_LOG(LogExtraction, Log, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
+		HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
+		HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
+}
+
+// ---- Interaction / Revive ----
 
 void AExtractionCharacter::InteractStart(const FInputActionValue& Value)
 {
-	// TODO: Implement interaction system
+	if (bIsDBNO) return;
+
+	AExtractionCharacter* Target = FindReviveTarget();
+	if (!IsValid(Target)) return;
+
+	ReviveTarget = Target;
+	ReviveElapsed = 0.f;
+	bIsReviving = true;
+
+	UE_LOG(LogExtraction, Verbose, TEXT("'%s' began reviving '%s'"),
+		*GetNameSafe(this), *GetNameSafe(Target));
+}
+
+void AExtractionCharacter::InteractStop(const FInputActionValue& Value)
+{
+	if (bIsReviving) CancelRevive();
+}
+
+AExtractionCharacter* AExtractionCharacter::FindReviveTarget() const
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return nullptr;
+
+	const UCameraComponent* Camera = GetFirstPersonCameraComponent();
+	if (!IsValid(Camera)) return nullptr;
+
+	const FVector TraceStart = Camera->GetComponentLocation();
+	const FVector TraceEnd = TraceStart + Camera->GetForwardVector() * ReviveTraceDistance;
+
+	FCollisionQueryParams QueryParams;
+	QueryParams.AddIgnoredActor(this);
+
+	FHitResult HitResult;
+	const FCollisionShape SweepShape = FCollisionShape::MakeSphere(ReviveTraceSphereRadius);
+
+	const bool bHit = World->SweepSingleByChannel(
+		HitResult, TraceStart, TraceEnd, FQuat::Identity,
+		ECC_Pawn, SweepShape, QueryParams);
+
+	if (!bHit) return nullptr;
+
+	AExtractionCharacter* HitCharacter = Cast<AExtractionCharacter>(HitResult.GetActor());
+	if (!IsValid(HitCharacter)) return nullptr;
+	if (!HitCharacter->GetIsDBNO()) return nullptr;
+
+	// TODO: Validate team membership when team system exists
+	return HitCharacter;
+}
+
+void AExtractionCharacter::UpdateRevive(float DeltaTime)
+{
+	if (!IsValid(ReviveTarget) || !ReviveTarget->GetIsDBNO())
+	{
+		CancelRevive();
+		return;
+	}
+
+	const float DistSq = FVector::DistSquared(GetActorLocation(), ReviveTarget->GetActorLocation());
+	if (DistSq > FMath::Square(ReviveProximityRadius))
+	{
+		CancelRevive();
+		return;
+	}
+
+	ReviveElapsed += DeltaTime;
+	if (ReviveElapsed >= ReviveDuration) CompleteRevive();
+}
+
+void AExtractionCharacter::CancelRevive()
+{
+	if (!bIsReviving) return;
+
+	UE_LOG(LogExtraction, Verbose, TEXT("'%s' cancelled revive on '%s'"),
+		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
+
+	bIsReviving = false;
+	ReviveElapsed = 0.f;
+	ReviveTarget = nullptr;
+}
+
+void AExtractionCharacter::CompleteRevive()
+{
+	if (!IsValid(ReviveTarget))
+	{
+		CancelRevive();
+		return;
+	}
+
+	UE_LOG(LogExtraction, Log, TEXT("'%s' completed revive on '%s'"),
+		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
+
+	Server_CompleteRevive(ReviveTarget);
+
+	bIsReviving = false;
+	ReviveElapsed = 0.f;
+	ReviveTarget = nullptr;
+}
+
+void AExtractionCharacter::Server_CompleteRevive_Implementation(AExtractionCharacter* Target)
+{
+	if (!IsValid(Target)) return;
+	if (!Target->GetIsDBNO()) return;
+	if (bIsDBNO) return;
+
+	// Server-side proximity validation
+	const float DistSq = FVector::DistSquared(GetActorLocation(), Target->GetActorLocation());
+	if (DistSq > FMath::Square(ReviveProximityRadius))
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("Server_CompleteRevive: '%s' too far from '%s'"),
+			*GetNameSafe(this), *GetNameSafe(Target));
+		return;
+	}
+
+	// TODO: Validate team membership when team system exists
+	Target->ExitDBNO();
 }
 
 // ---- Getters ----
 
 UExtractionAnimInstance* AExtractionCharacter::GetExtractionAnimInstance() const
 {
-	UAnimInstance* AnimInst = GetMesh()->GetAnimInstance();
-	if (!IsValid(AnimInst)) return nullptr;
-
-	UExtractionAnimInstance* TypedInst = Cast<UExtractionAnimInstance>(AnimInst);
-	if (!IsValid(TypedInst))
-	{
-		UE_LOG(LogExtraction, Warning,
-			TEXT("AnimInstance on '%s' is not UExtractionAnimInstance. "
-				"Ensure the ABP parent class is set correctly."),
-			*GetNameSafe(this));
-		return nullptr;
-	}
-
-	return TypedInst;
+	return CachedAnimInstance;
 }

@@ -10,6 +10,7 @@
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnHealthChanged, float, CurrentHealth, float, MaxHealth);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnShieldChanged, float, CurrentShield, float, MaxShield);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnDeath);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnRevive);
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class EXTRACTION_API UHealthComponent : public UActorComponent
@@ -30,8 +31,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Health")
 	void Die();
 
+	UFUNCTION(BlueprintCallable, Category = "Health")
+	void Revive(float HealthPercent);
+
 	UFUNCTION(BlueprintPure, Category = "Health")
 	bool IsAlive() const { return CurrentHealth > 0.f; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	bool IsDead() const { return bIsDead; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetCurrentHealth() const { return CurrentHealth; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetMaxHealth() const { return MaxHealth; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetCurrentShield() const { return CurrentShield; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	float GetMaxShield() const { return MaxShield; }
 
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetHealthPercent() const { return MaxHealth > 0.f ? CurrentHealth / MaxHealth : 0.f; }
@@ -47,6 +66,9 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
 	FOnDeath OnDeath;
+
+	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
+	FOnRevive OnRevive;
 
 protected:
 	virtual void BeginPlay() override;
@@ -83,5 +105,6 @@ private:
 	FTimerHandle ShieldRegenDelayHandle;
 	FTimerHandle ShieldRegenTickHandle;
 
+	UPROPERTY(Replicated)
 	bool bIsDead = false;
 };

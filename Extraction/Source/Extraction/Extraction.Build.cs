@@ -16,7 +16,8 @@ public class Extraction : ModuleRules
 			"EnhancedInput",
 			"AnimGraphRuntime",
 			"UMG",
-			"Slate"
+			"Slate",
+			"SlateCore"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
@@ -27,7 +28,8 @@ public class Extraction : ModuleRules
 			"Extraction/Public/Character",
 			"Extraction/Public/Animation",
 			"Extraction/Public/Game",
-			"Extraction/Public/Components"
+			"Extraction/Public/Components",
+			"Extraction/Public/UI"
 		});
 
 		// Private subfolder include paths
@@ -36,7 +38,8 @@ public class Extraction : ModuleRules
 			"Extraction/Private/Character",
 			"Extraction/Private/Animation",
 			"Extraction/Private/Game",
-			"Extraction/Private/Components"
+			"Extraction/Private/Components",
+			"Extraction/Private/UI"
 		});
 	}
 }
