@@ -12,6 +12,9 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "HealthComponent.h"
+#include "WeaponComponent.h"
+#include "WeaponBase.h"
+#include "WeaponDataAsset.h"
 #include "ExtractionDamageType.h"
 #include "TimerManager.h"
 #include "Engine/DamageEvents.h"
@@ -33,6 +36,9 @@ namespace ExtractionCharacterConstants
 
 	/** Min dot product between wall normal and -ForwardVector to accept wall as face-on (~60 degrees) */
 	static constexpr float VaultWallFacingDotThreshold = 0.5f;
+
+	/** Default ADS movement speed fallback when no weapon data asset is available */
+	static constexpr float DefaultADSMovementSpeed = 400.0f;
 
 }
 
@@ -71,6 +77,8 @@ AExtractionCharacter::AExtractionCharacter()
 	, VaultSnapTimeRemaining(0.f)
 	, bIsSprintJumping(false)
 	, StandingCapsuleHalfHeight(96.0f)
+	, BaseFOV(70.0f)
+	, PreADSWalkSpeed(600.0f)
 {
 	// Replication
 	bReplicates = true;
@@ -119,6 +127,9 @@ AExtractionCharacter::AExtractionCharacter()
 
 	// Health component
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+
+	// Weapon component
+	WeaponComponent = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
 
 	// Default bone-to-region map (UE5 mannequin skeleton)
 	BoneToHitRegionMap.Reserve(24);
@@ -178,6 +189,9 @@ void AExtractionCharacter::BeginPlay()
 		UE_LOG(LogExtraction, Warning, TEXT("'%s': 3P AnimInstance is not UExtractionAnimInstance — check ABP parent class."), *GetNameSafe(this));
 
 	CachedFPAnimInstance = Cast<UExtractionAnimInstance>(FirstPersonMesh->GetAnimInstance());
+
+	if (IsValid(FirstPersonCameraComponent))
+		BaseFOV = FirstPersonCameraComponent->FirstPersonFieldOfView;
 }
 
 void AExtractionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -235,6 +249,16 @@ void AExtractionCharacter::Tick(float DeltaTime)
 		if (bIsReviving) UpdateRevive(DeltaTime);
 
 		UpdateSprint();
+
+		// Weapon: FOV interpolation and recoil recovery
+		UpdateWeaponFOV(DeltaTime);
+
+		if (IsValid(WeaponComponent))
+		{
+			AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
+			if (IsValid(Weapon))
+				Weapon->UpdateRecoilRecovery(DeltaTime);
+		}
 
 		// Smooth camera height interpolation during crouch transitions (local player only)
 		const UCharacterMovementComponent* CameraComp = GetCharacterMovement();
@@ -301,6 +325,24 @@ void AExtractionCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	EnhancedInput->BindAction(InteractAction, ETriggerEvent::Started, this, &AExtractionCharacter::InteractStart);
 	EnhancedInput->BindAction(InteractAction, ETriggerEvent::Completed, this, &AExtractionCharacter::InteractStop);
 
+	// Fire
+	if (FireAction)
+	{
+		EnhancedInput->BindAction(FireAction, ETriggerEvent::Started, this, &AExtractionCharacter::FireStart);
+		EnhancedInput->BindAction(FireAction, ETriggerEvent::Completed, this, &AExtractionCharacter::FireStop);
+	}
+
+	// Reload
+	if (ReloadAction)
+		EnhancedInput->BindAction(ReloadAction, ETriggerEvent::Started, this, &AExtractionCharacter::ReloadStart);
+
+	// ADS
+	if (ADSAction)
+	{
+		EnhancedInput->BindAction(ADSAction, ETriggerEvent::Started, this, &AExtractionCharacter::ADSStart);
+		EnhancedInput->BindAction(ADSAction, ETriggerEvent::Completed, this, &AExtractionCharacter::ADSStop);
+	}
+
 	// Temp debug: H key applies 25 damage
 	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionCharacter::DebugApplyDamage);
 }
@@ -316,6 +358,15 @@ void AExtractionCharacter::MoveInput(const FInputActionValue& Value)
 void AExtractionCharacter::LookInput(const FInputActionValue& Value)
 {
 	const FVector2D LookAxisVector = Value.Get<FVector2D>();
+
+	// Cancel recoil recovery when player moves mouse
+	if (IsValid(WeaponComponent))
+	{
+		AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
+		if (IsValid(Weapon))
+			Weapon->CancelRecoilRecovery();
+	}
+
 	DoAim(LookAxisVector.X, LookAxisVector.Y);
 }
 
@@ -446,9 +497,19 @@ void AExtractionCharacter::ApplySprintSpeed()
 	{
 		MoveComp->MaxWalkSpeed = ProneSpeed;
 	}
+	else if (bIsSprinting)
+	{
+		MoveComp->MaxWalkSpeed = SprintSpeed;
+	}
+	else if (IsValid(WeaponComponent) && WeaponComponent->IsAiming())
+	{
+		const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
+		const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
+		MoveComp->MaxWalkSpeed = IsValid(Data) ? Data->ADSMovementSpeed : WalkSpeed;
+	}
 	else
 	{
-		MoveComp->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
+		MoveComp->MaxWalkSpeed = WalkSpeed;
 	}
 }
 
@@ -1597,6 +1658,107 @@ void AExtractionCharacter::Server_CompleteRevive_Implementation(AExtractionChara
 
 	// TODO: Validate team membership when team system exists
 	Target->ExitDBNO();
+}
+
+// ---- Weapon Input ----
+
+void AExtractionCharacter::FireStart(const FInputActionValue& Value)
+{
+	if (bIsDBNO) return;
+	if (IsInTraversal()) return;
+	if (!IsValid(WeaponComponent)) return;
+
+	WeaponComponent->StartFire();
+}
+
+void AExtractionCharacter::FireStop(const FInputActionValue& Value)
+{
+	if (!IsValid(WeaponComponent)) return;
+	WeaponComponent->StopFire();
+}
+
+void AExtractionCharacter::ReloadStart(const FInputActionValue& Value)
+{
+	if (bIsDBNO) return;
+	if (IsInTraversal()) return;
+	if (!IsValid(WeaponComponent)) return;
+
+	WeaponComponent->StartReload();
+}
+
+void AExtractionCharacter::ADSStart(const FInputActionValue& Value)
+{
+	if (bIsDBNO) return;
+	if (IsInTraversal()) return;
+	if (!IsValid(WeaponComponent)) return;
+
+	// Cancel sprint when entering ADS
+	if (bIsSprinting)
+	{
+		bWantsToSprint = false;
+		UpdateSprint();
+	}
+
+	WeaponComponent->SetAiming(true);
+	UpdateADSMovementSpeed();
+}
+
+void AExtractionCharacter::ADSStop(const FInputActionValue& Value)
+{
+	if (!IsValid(WeaponComponent)) return;
+
+	WeaponComponent->SetAiming(false);
+	UpdateADSMovementSpeed();
+}
+
+void AExtractionCharacter::UpdateWeaponFOV(float DeltaTime)
+{
+	if (!IsValid(FirstPersonCameraComponent)) return;
+	if (!IsValid(WeaponComponent)) return;
+
+	const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
+	const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
+
+	const float TargetFOV = (WeaponComponent->IsAiming() && IsValid(Data))
+		? Data->ADSFOV
+		: BaseFOV;
+
+	const float InterpSpeed = IsValid(Data) && Data->ADSTransitionTime > 0.f
+		? 1.0f / Data->ADSTransitionTime
+		: 10.0f;
+
+	const float CurrentFOV = FirstPersonCameraComponent->FirstPersonFieldOfView;
+	if (!FMath::IsNearlyEqual(CurrentFOV, TargetFOV, 0.1f))
+	{
+		FirstPersonCameraComponent->FirstPersonFieldOfView = FMath::FInterpTo(
+			CurrentFOV, TargetFOV, DeltaTime, InterpSpeed);
+	}
+	else
+	{
+		FirstPersonCameraComponent->FirstPersonFieldOfView = TargetFOV;
+	}
+}
+
+void AExtractionCharacter::UpdateADSMovementSpeed()
+{
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp)) return;
+	if (!IsValid(WeaponComponent)) return;
+
+	if (WeaponComponent->IsAiming())
+	{
+		PreADSWalkSpeed = MoveComp->MaxWalkSpeed;
+
+		const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
+		const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
+		const float ADSSpeed = IsValid(Data) ? Data->ADSMovementSpeed : ExtractionCharacterConstants::DefaultADSMovementSpeed;
+
+		MoveComp->MaxWalkSpeed = ADSSpeed;
+	}
+	else
+	{
+		MoveComp->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
+	}
 }
 
 // ---- Getters ----

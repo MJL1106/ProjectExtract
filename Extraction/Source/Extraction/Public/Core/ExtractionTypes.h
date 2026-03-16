@@ -56,3 +56,42 @@ enum class EHitRegion : uint8
 	Arms	UMETA(DisplayName = "Arms"),
 	Legs	UMETA(DisplayName = "Legs"),
 };
+
+/**
+ * Current weapon operational state.
+ * Drives animation selection and input gating.
+ */
+UENUM(BlueprintType)
+enum class EWeaponState : uint8
+{
+	Idle		UMETA(DisplayName = "Idle"),
+	Firing		UMETA(DisplayName = "Firing"),
+	Reloading	UMETA(DisplayName = "Reloading"),
+	Equipping	UMETA(DisplayName = "Equipping"),
+};
+
+/**
+ * Per-weapon recoil pattern data.
+ * Points define camera offset per shot (X=yaw, Y=pitch).
+ */
+USTRUCT(BlueprintType)
+struct FRecoilPattern
+{
+	GENERATED_BODY()
+
+	/** Recoil offset per shot index (X=yaw, Y=pitch in degrees) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil")
+	TArray<FVector2D> Points;
+
+	/** Time after last shot before pattern index resets to 0 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.01"))
+	float ResetDelay = 0.15f;
+
+	/** Duration for camera to recover to pre-recoil rotation after firing stops */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.01"))
+	float RecoveryTime = 0.4f;
+
+	/** Recoil scale multiplier while aiming down sights (1.0 = no reduction) */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ADSMultiplier = 0.7f;
+};
