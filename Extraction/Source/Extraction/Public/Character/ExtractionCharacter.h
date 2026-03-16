@@ -14,6 +14,7 @@ class UCameraComponent;
 class UInputAction;
 class UExtractionAnimInstance;
 class UHealthComponent;
+class UWeaponComponent;
 class UAnimMontage;
 struct FInputActionValue;
 
@@ -39,6 +40,10 @@ class EXTRACTION_API AExtractionCharacter : public ACharacter
 	/** Health and shield management */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UHealthComponent> HealthComponent;
+
+	/** Weapon equip, ADS, and fire management */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UWeaponComponent> WeaponComponent;
 
 protected:
 
@@ -71,6 +76,15 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> ProneAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> FireAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> ReloadAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> ADSAction;
 
 	// ---- Movement Config ----
 
@@ -336,15 +350,17 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
 	FOnDBNOStateChanged OnDBNOStateChanged;
 
+public:
+
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	virtual void DoAim(float Yaw, float Pitch);
+
 protected:
 
 	// ---- Input Handlers ----
 
 	void MoveInput(const FInputActionValue& Value);
 	void LookInput(const FInputActionValue& Value);
-
-	UFUNCTION(BlueprintCallable, Category = "Input")
-	virtual void DoAim(float Yaw, float Pitch);
 
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoMove(float Right, float Forward);
@@ -448,6 +464,7 @@ public:
 	USkeletalMeshComponent* GetFirstPersonMesh() const { return FirstPersonMesh; }
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
 	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
+	UWeaponComponent* GetWeaponComponent() const { return WeaponComponent; }
 
 	UFUNCTION(BlueprintPure, Category = "Health")
 	bool GetIsDBNO() const { return bIsDBNO; }
@@ -599,6 +616,26 @@ private:
 
 	/** Standing capsule half-height cached from constructor, used as restore target */
 	float StandingCapsuleHalfHeight;
+
+	// ---- Weapon Input ----
+
+	void FireStart(const FInputActionValue& Value);
+	void FireStop(const FInputActionValue& Value);
+	void ReloadStart(const FInputActionValue& Value);
+	void ADSStart(const FInputActionValue& Value);
+	void ADSStop(const FInputActionValue& Value);
+
+	/** Interpolates camera FOV for ADS transitions */
+	void UpdateWeaponFOV(float DeltaTime);
+
+	/** Interpolates movement speed for ADS transitions */
+	void UpdateADSMovementSpeed();
+
+	/** Base field of view (non-ADS) */
+	float BaseFOV;
+
+	/** Cached walk speed to restore when exiting ADS */
+	float PreADSWalkSpeed;
 
 	// ---- Traversal Detection (helpers) ----
 
