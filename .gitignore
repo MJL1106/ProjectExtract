@@ -54,3 +54,4 @@ Extraction/Config/DefaultEditorPerProjectUserSettings.ini
 agent_docs/
 CLAUDE.md
 .mcp.json
+Extraction/Config/DefaultAgentIntegrationKit.ini

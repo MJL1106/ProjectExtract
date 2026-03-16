@@ -13,8 +13,11 @@ class USkeletalMeshComponent;
 class UCameraComponent;
 class UInputAction;
 class UExtractionAnimInstance;
+class UHealthComponent;
 class UAnimMontage;
 struct FInputActionValue;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDBNOStateChanged, bool, bNewIsDBNO, float, BleedoutDuration);
 
 /**
  * Base first-person character for Extraction.
@@ -32,6 +35,10 @@ class EXTRACTION_API AExtractionCharacter : public ACharacter
 	/** First person camera */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UCameraComponent> FirstPersonCameraComponent;
+
+	/** Health and shield management */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UHealthComponent> HealthComponent;
 
 protected:
 
@@ -82,6 +89,10 @@ protected:
 	/** Max walk speed while crouched in cm/s */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
 	float MaxWalkSpeedCrouched = 300.0f;
+
+	/** Half-height of capsule when prone (default = capsule radius for a near-sphere) */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config", meta = (ClampMin = "20.0", ClampMax = "96.0"))
+	float ProneHalfHeight = 34.0f;
 
 	/** Max walk speed while prone in cm/s (should match prone blendspace max Speed axis) */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
@@ -255,6 +266,26 @@ protected:
 		meta = (ClampMin = "0.0", ClampMax = "1500.0"))
 	float SprintJumpForwardBoost = 300.0f;
 
+	// ---- DBNO Config ----
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
+	float BleedoutDuration = 30.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.5"))
+	float ReviveDuration = 4.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float ReviveHealthPercent = 0.3f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "50.0"))
+	float ReviveProximityRadius = 200.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "50.0"))
+	float ReviveTraceDistance = 300.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "5.0"))
+	float ReviveTraceSphereRadius = 30.f;
+
 	// ---- Replicated State ----
 
 	/** True while sprint input is held and conditions are met */
@@ -277,13 +308,26 @@ protected:
 	UPROPERTY(Replicated)
 	bool bWasSprintingAtTraversalEntry;
 
+	/** True while the character is in Down But Not Out state */
+	UPROPERTY(ReplicatedUsing = OnRep_IsDBNO, BlueprintReadOnly, Category = "Health|State")
+	bool bIsDBNO;
+
+	/** Seconds remaining before bleedout death (set on DBNO entry, clients use for UI) */
+	UPROPERTY(BlueprintReadOnly, Category = "Health|State")
+	float BleedoutTimeRemaining = 0.f;
+
 public:
 
 	AExtractionCharacter();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+
+	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
+	FOnDBNOStateChanged OnDBNOStateChanged;
 
 protected:
 
@@ -381,8 +425,10 @@ protected:
 	UFUNCTION()
 	void OnRep_TraversalType();
 
-	// ---- Stub Handlers (future systems) ----
+	// ---- Interaction / Revive ----
+
 	void InteractStart(const FInputActionValue& Value);
+	void InteractStop(const FInputActionValue& Value);
 
 	// ---- Input Binding ----
 
@@ -394,6 +440,10 @@ public:
 
 	USkeletalMeshComponent* GetFirstPersonMesh() const { return FirstPersonMesh; }
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
+	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	bool GetIsDBNO() const { return bIsDBNO; }
 
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	UExtractionAnimInstance* GetExtractionAnimInstance() const;
@@ -426,6 +476,48 @@ public:
 	float GetVaultSurfaceHeight() const { return VaultSurfaceHeight; }
 
 private:
+
+	// ---- Health / DBNO ----
+
+	UFUNCTION()
+	void HandleDeath();
+
+	void EnterDBNO();
+	void ExitDBNO();
+	void OnBleedoutExpired();
+	void FullDeath();
+
+	UFUNCTION()
+	void OnRep_IsDBNO();
+
+	/** Temp debug: apply 25 damage to self (bound to H key) */
+	void DebugApplyDamage();
+
+	FTimerHandle BleedoutTimerHandle;
+
+	/** Cached 3P anim instance (populated in BeginPlay — avoids Cast per call) */
+	UPROPERTY()
+	TObjectPtr<UExtractionAnimInstance> CachedAnimInstance;
+
+	/** Cached 1P anim instance (populated in BeginPlay — avoids Cast per call) */
+	UPROPERTY()
+	TObjectPtr<UExtractionAnimInstance> CachedFPAnimInstance;
+
+	// ---- Revive ----
+
+	void UpdateRevive(float DeltaTime);
+	AExtractionCharacter* FindReviveTarget() const;
+	void CancelRevive();
+	void CompleteRevive();
+
+	UFUNCTION(Server, Reliable)
+	void Server_CompleteRevive(AExtractionCharacter* Target);
+
+	UPROPERTY()
+	TObjectPtr<AExtractionCharacter> ReviveTarget;
+
+	float ReviveElapsed = 0.f;
+	bool bIsReviving = false;
 
 	/** Tracks whether the sprint input is currently held */
 	bool bWantsToSprint;
@@ -486,6 +578,16 @@ private:
 	/** Delegate callback fired when the sprint jump montage ends or is interrupted */
 	UFUNCTION()
 	void OnSprintJumpMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	// ---- Capsule Resize ----
+
+	/** Resize capsule half-height and adjust actor Z to keep feet on the ground.
+	 *  When expanding, performs an overlap clearance check first.
+	 *  @return true if resize succeeded (always true when shrinking; may fail when expanding if blocked) */
+	bool SetCapsuleHalfHeightWithFloorAdjust(float NewHalfHeight);
+
+	/** Standing capsule half-height cached from constructor, used as restore target */
+	float StandingCapsuleHalfHeight;
 
 	// ---- Traversal Detection (helpers) ----
 
