@@ -43,3 +43,16 @@ enum class ETraversalType : uint8
 	Climb	UMETA(DisplayName = "Climb"),
 	Mantle	UMETA(DisplayName = "Mantle"),
 };
+
+/**
+ * Hit region categories for hitbox-based damage multipliers.
+ * Mapped from skeleton bone names via BoneToHitRegionMap on the character.
+ */
+UENUM(BlueprintType)
+enum class EHitRegion : uint8
+{
+	Head	UMETA(DisplayName = "Head"),
+	Torso	UMETA(DisplayName = "Torso"),
+	Arms	UMETA(DisplayName = "Arms"),
+	Legs	UMETA(DisplayName = "Legs"),
+};
