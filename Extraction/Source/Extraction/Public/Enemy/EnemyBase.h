@@ -10,6 +10,7 @@
 #include "EnemyBase.generated.h"
 
 class UHealthComponent;
+class AWeaponBase;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogEnemy, Log, All);
 
@@ -51,6 +52,24 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Patrol", meta = (ClampMin = "0.0"))
 	float PatrolSpeed = 200.0f;
 
+	// --- Combat (optional) ---
+
+	/** Weapon class to spawn. Leave None to disable firing. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Combat")
+	TSubclassOf<AWeaponBase> WeaponClass;
+
+	/** Seconds between fire attempts. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Combat", meta = (ClampMin = "0.1"))
+	float FireInterval = 1.5f;
+
+	/** Random aim offset in degrees per shot. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
+	float AimInaccuracyDegrees = 5.0f;
+
+	/** Max distance to engage a target. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
+	float MaxEngageRange = 2000.0f;
+
 	virtual void Tick(float DeltaTime) override;
 
 private:
@@ -58,9 +77,14 @@ private:
 	void HandleDeath();
 
 	void DestroyAfterDeath();
+	void TryFire();
+	AActor* FindClosestTarget() const;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Enemy|Tags")
 	FGameplayTagContainer OwnedTags;
+
+	UPROPERTY()
+	TObjectPtr<AWeaponBase> CurrentWeapon;
 
 	FVector SpawnLocation;
 
@@ -69,4 +93,5 @@ private:
 	int8 PatrolDirection = 1;
 
 	FTimerHandle DestroyTimerHandle;
+	FTimerHandle FireTimerHandle;
 };
