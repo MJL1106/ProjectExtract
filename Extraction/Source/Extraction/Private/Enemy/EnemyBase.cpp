@@ -12,7 +12,7 @@ DEFINE_LOG_CATEGORY(LogEnemy);
 
 AEnemyBase::AEnemyBase()
 {
-	PrimaryActorTick.bCanEverTick = false;
+	PrimaryActorTick.bCanEverTick = true;
 	bReplicates = true;
 
 	// Capsule
@@ -68,6 +68,8 @@ void AEnemyBase::BeginPlay()
 		}
 	}
 
+	SpawnLocation = GetActorLocation();
+
 	UE_LOG(LogEnemy, Log, TEXT("%s spawned with tag Character.Enemy"), *GetName());
 }
 
@@ -82,9 +84,40 @@ void AEnemyBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	Super::EndPlay(EndPlayReason);
 }
 
+void AEnemyBase::Tick(float DeltaTime)
+{
+	Super::Tick(DeltaTime);
+
+	if (PatrolDistance <= 0.0f || PatrolSpeed <= 0.0f) return;
+
+	// Advance alpha based on speed and patrol distance
+	const float AlphaStep = (PatrolSpeed * DeltaTime) / (PatrolDistance * 2.0f);
+	PatrolAlpha += AlphaStep * PatrolDirection;
+
+	if (PatrolAlpha >= 1.0f)
+	{
+		PatrolAlpha = 1.0f;
+		PatrolDirection = -1;
+	}
+	else if (PatrolAlpha <= 0.0f)
+	{
+		PatrolAlpha = 0.0f;
+		PatrolDirection = 1;
+	}
+
+	const FVector LeftPoint = SpawnLocation - FVector(PatrolDistance, 0.0f, 0.0f);
+	const FVector RightPoint = SpawnLocation + FVector(PatrolDistance, 0.0f, 0.0f);
+	const FVector NewLocation = FMath::Lerp(LeftPoint, RightPoint, PatrolAlpha);
+
+	SetActorLocation(FVector(NewLocation.X, NewLocation.Y, GetActorLocation().Z));
+}
+
 void AEnemyBase::HandleDeath()
 {
 	UE_LOG(LogEnemy, Log, TEXT("%s died"), *GetName());
+
+	// Stop patrol
+	SetActorTickEnabled(false);
 
 	// Disable collision so projectiles pass through
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())

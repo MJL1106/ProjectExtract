@@ -41,6 +41,18 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Config", meta = (ClampMin = "0.0"))
 	float DestroyDelay = 3.0f;
 
+	// --- Patrol ---
+
+	/** Half-distance of the patrol path from spawn origin. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Patrol", meta = (ClampMin = "0.0"))
+	float PatrolDistance = 300.0f;
+
+	/** Movement speed in cm/s along the patrol path. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Patrol", meta = (ClampMin = "0.0"))
+	float PatrolSpeed = 200.0f;
+
+	virtual void Tick(float DeltaTime) override;
+
 private:
 	UFUNCTION()
 	void HandleDeath();
@@ -49,6 +61,12 @@ private:
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Enemy|Tags")
 	FGameplayTagContainer OwnedTags;
+
+	FVector SpawnLocation;
+
+	/** Ping-pong alpha: 0 = left extent, 1 = right extent. */
+	float PatrolAlpha = 0.0f;
+	int8 PatrolDirection = 1;
 
 	FTimerHandle DestroyTimerHandle;
 };
