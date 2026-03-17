@@ -9,6 +9,7 @@
 #include "Blueprint/UserWidget.h"
 #include "PlayerHealthWidget.h"
 #include "CrosshairWidget.h"
+#include "AmmoWidget.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
@@ -28,6 +29,12 @@ AExtractionPlayerController::AExtractionPlayerController()
 		TEXT("/Game/Core/UI/WBP_Crosshair"));
 	if (CrosshairBP.Succeeded())
 		CrosshairWidgetClass = CrosshairBP.Class;
+
+	// Default ammo widget class
+	static ConstructorHelpers::FClassFinder<UAmmoWidget> AmmoBP(
+		TEXT("/Game/Core/UI/WBP_Ammo"));
+	if (AmmoBP.Succeeded())
+		AmmoWidgetClass = AmmoBP.Class;
 }
 
 void AExtractionPlayerController::BeginPlay()
@@ -68,6 +75,14 @@ void AExtractionPlayerController::BeginPlay()
 		CrosshairWidget = CreateWidget<UCrosshairWidget>(this, CrosshairWidgetClass);
 		if (IsValid(CrosshairWidget))
 			CrosshairWidget->AddToPlayerScreen();
+	}
+
+	// Spawn ammo display for local player
+	if (IsLocalPlayerController() && AmmoWidgetClass)
+	{
+		AmmoWidget = CreateWidget<UAmmoWidget>(this, AmmoWidgetClass);
+		if (IsValid(AmmoWidget))
+			AmmoWidget->AddToPlayerScreen();
 	}
 }
 
