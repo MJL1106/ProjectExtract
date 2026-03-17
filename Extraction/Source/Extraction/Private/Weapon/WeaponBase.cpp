@@ -221,11 +221,6 @@ void AWeaponBase::PerformHitscan()
 	{
 		const bool bHit = World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, QueryParams);
 
-#if ENABLE_DRAW_DEBUG
-		const FVector DebugEnd = bHit ? HitResult.ImpactPoint : TraceEnd;
-		const FColor DebugColor = bHit ? FColor::Green : FColor::Red;
-		DrawDebugLine(World, TraceStart, DebugEnd, DebugColor, false, 0.5f, 0, 1.0f);
-#endif
 
 		if (bHit)
 		{
