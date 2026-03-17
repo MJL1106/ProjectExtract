@@ -7,11 +7,13 @@
 #include "HealthComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Camera/CameraComponent.h"
+#include "GameFramework/Character.h"
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
 #include "Engine/DamageEvents.h"
+#include "DrawDebugHelpers.h"
 #include "Extraction.h"
 
 namespace WeaponConstants
@@ -186,13 +188,13 @@ void AWeaponBase::PerformHitscan()
 {
 	if (!IsValid(WeaponData)) return;
 
-	AExtractionCharacter* OwnerChar = Cast<AExtractionCharacter>(GetOwner());
+	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
 	if (!IsValid(OwnerChar)) return;
 
 	FVector TraceStart;
 	FVector TraceEnd;
 
-	// Player: trace from camera. AI: trace from muzzle.
+	// Player: trace from camera. AI/enemy: trace from muzzle along actor forward.
 	APlayerController* PC = Cast<APlayerController>(OwnerChar->GetController());
 	if (IsValid(PC))
 	{
@@ -204,7 +206,7 @@ void AWeaponBase::PerformHitscan()
 	}
 	else
 	{
-		// AI path: trace from muzzle socket
+		// AI path: trace from muzzle socket along owner's forward vector
 		TraceStart = WeaponMesh->GetSocketLocation(WeaponConstants::MuzzleSocketName);
 		TraceEnd = TraceStart + OwnerChar->GetActorForwardVector() * WeaponData->MaxRange;
 	}
@@ -215,9 +217,17 @@ void AWeaponBase::PerformHitscan()
 	QueryParams.AddIgnoredActor(OwnerChar);
 	QueryParams.bReturnPhysicalMaterial = false;
 
-	if (const UWorld* World = GetWorld())
+	if (UWorld* World = GetWorld())
 	{
-		if (World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, QueryParams))
+		const bool bHit = World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, QueryParams);
+
+#if ENABLE_DRAW_DEBUG
+		const FVector DebugEnd = bHit ? HitResult.ImpactPoint : TraceEnd;
+		const FColor DebugColor = bHit ? FColor::Green : FColor::Red;
+		DrawDebugLine(World, TraceStart, DebugEnd, DebugColor, false, 0.5f, 0, 1.0f);
+#endif
+
+		if (bHit)
 		{
 			AActor* HitActor = HitResult.GetActor();
 			if (IsValid(HitActor))

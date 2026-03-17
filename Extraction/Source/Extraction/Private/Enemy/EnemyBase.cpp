@@ -49,6 +49,14 @@ AEnemyBase::AEnemyBase()
 	OwnedTags.AddTag(TAG_Character_Enemy);
 }
 
+float AEnemyBase::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
+{
+	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+	if (IsValid(HealthComponent))
+		HealthComponent->TakeDamage(ActualDamage);
+	return ActualDamage;
+}
+
 void AEnemyBase::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
 {
 	TagContainer.AppendTags(OwnedTags);
@@ -113,28 +121,62 @@ void AEnemyBase::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	if (PatrolDistance <= 0.0f || PatrolSpeed <= 0.0f) return;
-
-	// Advance alpha based on speed and patrol distance
-	const float AlphaStep = (PatrolSpeed * DeltaTime) / (PatrolDistance * 2.0f);
-	PatrolAlpha += AlphaStep * PatrolDirection;
-
-	if (PatrolAlpha >= 1.0f)
+	// --- Patrol movement via CMC ---
+	if (PatrolDistance > 0.0f && PatrolSpeed > 0.0f)
 	{
-		PatrolAlpha = 1.0f;
-		PatrolDirection = -1;
+		const float AlphaStep = (PatrolSpeed * DeltaTime) / (PatrolDistance * 2.0f);
+		PatrolAlpha += AlphaStep * PatrolDirection;
+
+		if (PatrolAlpha >= 1.0f)
+		{
+			PatrolAlpha = 1.0f;
+			PatrolDirection = -1;
+		}
+		else if (PatrolAlpha <= 0.0f)
+		{
+			PatrolAlpha = 0.0f;
+			PatrolDirection = 1;
+		}
+
+		const FVector LeftPoint = SpawnLocation - FVector(PatrolDistance, 0.0f, 0.0f);
+		const FVector RightPoint = SpawnLocation + FVector(PatrolDistance, 0.0f, 0.0f);
+		const FVector TargetLocation = FMath::Lerp(LeftPoint, RightPoint, PatrolAlpha);
+		const FVector CurrentLocation = GetActorLocation();
+		const FVector ToTarget = TargetLocation - CurrentLocation;
+		const FVector MoveDir = ToTarget.GetSafeNormal2D();
+
+		if (!MoveDir.IsNearlyZero())
+		{
+			UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+			if (IsValid(MoveComp))
+			{
+				MoveComp->MaxWalkSpeed = PatrolSpeed;
+				AddMovementInput(MoveDir, 1.0f);
+			}
+		}
 	}
-	else if (PatrolAlpha <= 0.0f)
+
+	// --- Rotation: face target if in range, otherwise face patrol direction ---
+	AActor* Target = FindClosestTarget();
+	if (Target)
 	{
-		PatrolAlpha = 0.0f;
-		PatrolDirection = 1;
+		const float DistSq = FVector::DistSquared(GetActorLocation(), Target->GetActorLocation());
+		if (DistSq <= FMath::Square(MaxEngageRange))
+		{
+			const FRotator LookAtRot = (Target->GetActorLocation() - GetActorLocation()).Rotation();
+			const FRotator DesiredRot = FRotator(0.0f, LookAtRot.Yaw, 0.0f);
+			SetActorRotation(FMath::RInterpTo(GetActorRotation(), DesiredRot, DeltaTime, RotationInterpSpeed));
+			return;
+		}
 	}
 
-	const FVector LeftPoint = SpawnLocation - FVector(PatrolDistance, 0.0f, 0.0f);
-	const FVector RightPoint = SpawnLocation + FVector(PatrolDistance, 0.0f, 0.0f);
-	const FVector NewLocation = FMath::Lerp(LeftPoint, RightPoint, PatrolAlpha);
-
-	SetActorLocation(FVector(NewLocation.X, NewLocation.Y, GetActorLocation().Z));
+	// No target in range — face patrol direction
+	if (PatrolDistance > 0.0f && PatrolSpeed > 0.0f)
+	{
+		const float DesiredYaw = (PatrolDirection > 0) ? 0.0f : 180.0f;
+		const FRotator DesiredRot(0.0f, DesiredYaw, 0.0f);
+		SetActorRotation(FMath::RInterpTo(GetActorRotation(), DesiredRot, DeltaTime, RotationInterpSpeed));
+	}
 }
 
 void AEnemyBase::HandleDeath()

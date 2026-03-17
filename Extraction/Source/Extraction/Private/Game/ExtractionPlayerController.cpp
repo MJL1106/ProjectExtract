@@ -8,6 +8,7 @@
 #include "ExtractionCameraManager.h"
 #include "Blueprint/UserWidget.h"
 #include "PlayerHealthWidget.h"
+#include "CrosshairWidget.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
@@ -21,6 +22,12 @@ AExtractionPlayerController::AExtractionPlayerController()
 		TEXT("/Game/Core/UI/WBP_PlayerHealth"));
 	if (HUDWidgetBP.Succeeded())
 		HUDWidgetClass = HUDWidgetBP.Class;
+
+	// Default crosshair widget class
+	static ConstructorHelpers::FClassFinder<UCrosshairWidget> CrosshairBP(
+		TEXT("/Game/Core/UI/WBP_Crosshair"));
+	if (CrosshairBP.Succeeded())
+		CrosshairWidgetClass = CrosshairBP.Class;
 }
 
 void AExtractionPlayerController::BeginPlay()
@@ -53,6 +60,14 @@ void AExtractionPlayerController::BeginPlay()
 		HUDWidget = CreateWidget<UPlayerHealthWidget>(this, HUDWidgetClass);
 		if (IsValid(HUDWidget))
 			HUDWidget->AddToPlayerScreen();
+	}
+
+	// Spawn crosshair for local player
+	if (IsLocalPlayerController() && CrosshairWidgetClass)
+	{
+		CrosshairWidget = CreateWidget<UCrosshairWidget>(this, CrosshairWidgetClass);
+		if (IsValid(CrosshairWidget))
+			CrosshairWidget->AddToPlayerScreen();
 	}
 }
 

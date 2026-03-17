@@ -22,6 +22,8 @@ class EXTRACTION_API AEnemyBase : public ACharacter, public IGameplayTagAssetInt
 public:
 	AEnemyBase();
 
+	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+
 	// --- IGameplayTagAssetInterface ---
 	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
 
@@ -69,6 +71,10 @@ protected:
 	/** Max distance to engage a target. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
 	float MaxEngageRange = 2000.0f;
+
+	/** How fast the enemy rotates toward its target (degrees/s interp speed). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Combat", meta = (ClampMin = "1.0"))
+	float RotationInterpSpeed = 5.0f;
 
 	virtual void Tick(float DeltaTime) override;
 
