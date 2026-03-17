@@ -3,7 +3,11 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "NativeGameplayTags.h"
 #include "ExtractionTypes.generated.h"
+
+// --- Gameplay Tags ---
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Character_Enemy);
 
 /**
  * Weapon type categories.
