@@ -16,6 +16,9 @@ void UHealthComponent::BeginPlay()
 
 	CurrentHealth = MaxHealth;
 	CurrentShield = MaxShield;
+
+	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+	OnShieldChanged.Broadcast(CurrentShield, MaxShield);
 }
 
 void UHealthComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
