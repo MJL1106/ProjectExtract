@@ -55,3 +55,8 @@ agent_docs/
 CLAUDE.md
 .mcp.json
 Extraction/Config/DefaultAgentIntegrationKit.ini
+
+# ----------------------------------------------------------------------------
+# Third-party plugins (installed locally, not tracked)
+# ----------------------------------------------------------------------------
+Extraction/Plugins/

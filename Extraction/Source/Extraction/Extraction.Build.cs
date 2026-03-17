@@ -30,7 +30,8 @@ public class Extraction : ModuleRules
 			"Extraction/Public/Game",
 			"Extraction/Public/Components",
 			"Extraction/Public/UI",
-			"Extraction/Public/Data"
+			"Extraction/Public/Data",
+			"Extraction/Public/Weapon"
 		});
 
 		// Private subfolder include paths
@@ -41,7 +42,8 @@ public class Extraction : ModuleRules
 			"Extraction/Private/Game",
 			"Extraction/Private/Components",
 			"Extraction/Private/UI",
-			"Extraction/Private/Data"
+			"Extraction/Private/Data",
+			"Extraction/Private/Weapon"
 		});
 	}
 }
