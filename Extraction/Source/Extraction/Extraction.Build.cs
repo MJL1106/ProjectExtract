@@ -17,7 +17,8 @@ public class Extraction : ModuleRules
 			"AnimGraphRuntime",
 			"UMG",
 			"Slate",
-			"SlateCore"
+			"SlateCore",
+			"GameplayTags"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
@@ -31,7 +32,8 @@ public class Extraction : ModuleRules
 			"Extraction/Public/Components",
 			"Extraction/Public/UI",
 			"Extraction/Public/Data",
-			"Extraction/Public/Weapon"
+			"Extraction/Public/Weapon",
+			"Extraction/Public/Enemy"
 		});
 
 		// Private subfolder include paths
@@ -43,7 +45,8 @@ public class Extraction : ModuleRules
 			"Extraction/Private/Components",
 			"Extraction/Private/UI",
 			"Extraction/Private/Data",
-			"Extraction/Private/Weapon"
+			"Extraction/Private/Weapon",
+			"Extraction/Private/Enemy"
 		});
 	}
 }
