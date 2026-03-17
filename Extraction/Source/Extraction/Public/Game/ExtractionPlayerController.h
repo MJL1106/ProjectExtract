@@ -9,6 +9,7 @@
 class UInputMappingContext;
 class UUserWidget;
 class UPlayerHealthWidget;
+class UCrosshairWidget;
 
 /**
  *  Simple first person Player Controller
@@ -50,6 +51,14 @@ protected:
 	/** Active HUD widget instance */
 	UPROPERTY()
 	TObjectPtr<UPlayerHealthWidget> HUDWidget;
+
+	/** Crosshair widget class */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UCrosshairWidget> CrosshairWidgetClass;
+
+	/** Active crosshair widget instance */
+	UPROPERTY()
+	TObjectPtr<UCrosshairWidget> CrosshairWidget;
 
 	/** If true, the player will use UMG touch controls even if not playing on mobile platforms */
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")
