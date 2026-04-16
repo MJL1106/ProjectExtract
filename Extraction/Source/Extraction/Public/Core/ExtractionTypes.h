@@ -8,6 +8,7 @@
 
 // --- Gameplay Tags ---
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Character_Enemy);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Character_Companion);
 
 /**
  * Weapon type categories.
