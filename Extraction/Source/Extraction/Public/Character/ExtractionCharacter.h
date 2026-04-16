@@ -469,6 +469,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	bool GetIsDBNO() const { return bIsDBNO; }
 
+	/** Exit DBNO state and restore health/movement.
+	 *  Called by server authority (revive system, companion AI). */
+	void ExitDBNO();
+
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	UExtractionAnimInstance* GetExtractionAnimInstance() const;
 
@@ -507,7 +511,6 @@ private:
 	void HandleDeath();
 
 	void EnterDBNO();
-	void ExitDBNO();
 	void OnBleedoutExpired();
 	void FullDeath();
 

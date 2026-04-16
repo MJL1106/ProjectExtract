@@ -18,7 +18,10 @@ public class Extraction : ModuleRules
 			"UMG",
 			"Slate",
 			"SlateCore",
-			"GameplayTags"
+			"GameplayTags",
+			"AIModule",
+			"GameplayTasks",
+			"NavigationSystem"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
@@ -33,7 +36,12 @@ public class Extraction : ModuleRules
 			"Extraction/Public/UI",
 			"Extraction/Public/Data",
 			"Extraction/Public/Weapon",
-			"Extraction/Public/Enemy"
+			"Extraction/Public/Enemy",
+			"Extraction/Public/Companion",
+			"Extraction/Public/AI",
+			"Extraction/Public/AI/BTS",
+			"Extraction/Public/AI/Tasks",
+			"Extraction/Public/AI/EQS"
 		});
 
 		// Private subfolder include paths
@@ -46,7 +54,12 @@ public class Extraction : ModuleRules
 			"Extraction/Private/UI",
 			"Extraction/Private/Data",
 			"Extraction/Private/Weapon",
-			"Extraction/Private/Enemy"
+			"Extraction/Private/Enemy",
+			"Extraction/Private/Companion",
+			"Extraction/Private/AI",
+			"Extraction/Private/AI/BTS",
+			"Extraction/Private/AI/Tasks",
+			"Extraction/Private/AI/EQS"
 		});
 	}
 }
