@@ -51,6 +51,7 @@ Extraction/Config/DefaultEditorPerProjectUserSettings.ini
 # Claude Code local settings
 # ----------------------------------------------------------------------------
 .claude/
+.omc/
 agent_docs/
 CLAUDE.md
 .mcp.json
