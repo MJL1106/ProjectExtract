@@ -17,8 +17,8 @@ AEnemyBase::AEnemyBase()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	bReplicates = true;
-	NetUpdateFrequency = 10.0f;
-	MinNetUpdateFrequency = 5.0f;
+	SetNetUpdateFrequency(10.0f);
+	SetMinNetUpdateFrequency(5.0f);
 
 	// Capsule
 	GetCapsuleComponent()->SetCapsuleSize(34.0f, 88.0f);
