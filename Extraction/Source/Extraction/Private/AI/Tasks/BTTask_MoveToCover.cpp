@@ -32,7 +32,7 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	bQueryInProgress = true;
 
 	FEnvQueryRequest QueryRequest(CoverQuery, Controller->GetPawn());
-	QueryRequest.Execute(EEnvQueryRunMode::SingleBestItem,
+	QueryRequest.Execute(EEnvQueryRunMode::SingleResult,
 		FQueryFinishedSignature::CreateUObject(this, &UBTTask_MoveToCover::OnQueryFinished));
 
 	return EBTNodeResult::InProgress;
@@ -42,7 +42,7 @@ void UBTTask_MoveToCover::OnQueryFinished(TSharedPtr<FEnvQueryResult> Result)
 {
 	bQueryInProgress = false;
 
-	if (!CachedOwnerComp.IsValid()) return;
+	if (!CachedOwnerComp) return;
 
 	UBlackboardComponent* BB = CachedOwnerComp->GetBlackboardComponent();
 	if (!BB) return;
