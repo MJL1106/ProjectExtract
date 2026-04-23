@@ -32,6 +32,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.1"))
 	float FirePauseDuration = 0.5f;
 
+	/** Toggle verbose exit-gate logs + debug draw under LogCompanionAI. Enable per-instance in BT. */
+	UPROPERTY(EditAnywhere, Category = "Debug")
+	bool bDebugLogging = false;
+
 private:
 	float BurstTimer = 0.0f;
 	bool bIsFiringBurst = false;

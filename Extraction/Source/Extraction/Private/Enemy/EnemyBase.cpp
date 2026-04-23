@@ -216,13 +216,21 @@ void AEnemyBase::TryFire()
 	if (!IsValid(CurrentWeapon) || !CurrentWeapon->CanFire()) return;
 
 	AActor* Target = FindClosestTarget();
-	if (!Target) return;
+	if (!Target)
+	{
+		CurrentTarget = nullptr;
+		return;
+	}
 
 	const FVector MyLocation = GetActorLocation();
 	const FVector TargetLocation = Target->GetActorLocation();
 	const float DistSq = FVector::DistSquared(MyLocation, TargetLocation);
 
-	if (DistSq > FMath::Square(MaxEngageRange)) return;
+	if (DistSq > FMath::Square(MaxEngageRange))
+	{
+		CurrentTarget = nullptr;
+		return;
+	}
 
 	// Line of sight check
 	const UWorld* World = GetWorld();
@@ -236,13 +244,14 @@ void AEnemyBase::TryFire()
 	const bool bHit = World->LineTraceSingleByChannel(Hit, MyLocation, TargetLocation, ECC_Visibility, QueryParams);
 	if (bHit && Hit.GetActor() != Target) return;
 
-	// Aim at target with random inaccuracy
+	// Yaw-only body rotation — weapon aim is decoupled via CurrentTarget + WeaponBase muzzle->target trace.
 	FRotator AimRotation = (TargetLocation - MyLocation).Rotation();
 	AimRotation.Yaw += FMath::RandRange(-AimInaccuracyDegrees, AimInaccuracyDegrees);
-	AimRotation.Pitch += FMath::RandRange(-AimInaccuracyDegrees, AimInaccuracyDegrees);
 	SetActorRotation(FRotator(0.0f, AimRotation.Yaw, 0.0f));
 
-	// Fire a single shot
+	CurrentTarget = Target;
+
+	// Fire a single shot — weapon aims muzzle -> CurrentTarget via WeaponBase::PerformHitscan.
 	CurrentWeapon->StartFiring();
 	CurrentWeapon->StopFiring();
 }

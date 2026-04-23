@@ -27,6 +27,14 @@ public:
 	// --- IGameplayTagAssetInterface ---
 	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
 
+	/** Target the enemy is currently aiming at. Used by WeaponBase to aim along muzzle->target. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Combat")
+	AActor* GetCurrentTarget() const { return CurrentTarget.Get(); }
+
+	/** Degrees of random aim spread applied by the weapon when this enemy fires. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Combat")
+	float GetAimInaccuracyDegrees() const { return AimInaccuracyDegrees; }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -91,6 +99,8 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<AWeaponBase> CurrentWeapon;
+
+	TWeakObjectPtr<AActor> CurrentTarget;
 
 	FVector SpawnLocation;
 

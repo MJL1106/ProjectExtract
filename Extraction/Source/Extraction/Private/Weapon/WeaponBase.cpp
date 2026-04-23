@@ -3,6 +3,8 @@
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
 #include "ExtractionCharacter.h"
+#include "CompanionCharacter.h"
+#include "EnemyBase.h"
 #include "ExtractionDamageType.h"
 #include "HealthComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -206,9 +208,42 @@ void AWeaponBase::PerformHitscan()
 	}
 	else
 	{
-		// AI path: trace from muzzle socket along owner's forward vector
+		// AI path: trace from muzzle socket. Aim directly at the AI's current target location
+		// (not ActorForward) so vertical offsets and yaw interp lag don't cause misses.
 		TraceStart = WeaponMesh->GetSocketLocation(WeaponConstants::MuzzleSocketName);
-		TraceEnd = TraceStart + OwnerChar->GetActorForwardVector() * WeaponData->MaxRange;
+
+		FVector AimDirection = OwnerChar->GetActorForwardVector(); // fallback
+		float InaccuracyDeg = 0.0f;
+		AActor* AimTarget = nullptr;
+
+		if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(OwnerChar))
+		{
+			AimTarget = Companion->GetAimTarget();
+			InaccuracyDeg = Companion->GetCurrentInaccuracy();
+		}
+		else if (const AEnemyBase* Enemy = Cast<AEnemyBase>(OwnerChar))
+		{
+			AimTarget = Enemy->GetCurrentTarget();
+			InaccuracyDeg = Enemy->GetAimInaccuracyDegrees();
+		}
+
+		if (IsValid(AimTarget))
+		{
+			const FVector ToTarget = AimTarget->GetActorLocation() - TraceStart;
+			if (!ToTarget.IsNearlyZero())
+				AimDirection = ToTarget.GetSafeNormal();
+		}
+
+		// Apply spread to the fire direction (not the actor rotation — body stays upright).
+		if (InaccuracyDeg > 0.0f)
+		{
+			FRotator SpreadRot = AimDirection.Rotation();
+			SpreadRot.Yaw += FMath::RandRange(-InaccuracyDeg, InaccuracyDeg);
+			SpreadRot.Pitch += FMath::RandRange(-InaccuracyDeg, InaccuracyDeg);
+			AimDirection = SpreadRot.Vector();
+		}
+
+		TraceEnd = TraceStart + AimDirection * WeaponData->MaxRange;
 	}
 
 	FHitResult HitResult;
@@ -221,6 +256,12 @@ void AWeaponBase::PerformHitscan()
 	{
 		const bool bHit = World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, QueryParams);
 
+#if ENABLE_DRAW_DEBUG
+		if (bHit)
+			DrawDebugLine(World, TraceStart, HitResult.ImpactPoint, FColor::Red, false, 0.5f, 0, 1.0f);
+		else
+			DrawDebugLine(World, TraceStart, TraceEnd, FColor::Yellow, false, 0.5f, 0, 1.0f);
+#endif
 
 		if (bHit)
 		{
@@ -236,6 +277,9 @@ void AWeaponBase::PerformHitscan()
 					DamageEvent.DamageTypeClass = WeaponData->DamageTypeClass;
 				else
 					UE_LOG(LogExtraction, Warning, TEXT("'%s': WeaponData has no DamageTypeClass — hitbox multipliers won't apply."), *GetNameSafe(this));
+
+				UE_LOG(LogExtraction, Log, TEXT("%s hit %s for %.1f damage"),
+					*GetNameSafe(OwnerChar), *GetNameSafe(HitActor), WeaponData->BaseDamage);
 
 				HitActor->TakeDamage(
 					WeaponData->BaseDamage,

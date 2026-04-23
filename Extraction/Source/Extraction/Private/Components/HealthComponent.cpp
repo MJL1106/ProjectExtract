@@ -121,6 +121,20 @@ void UHealthComponent::Revive(float HealthPercent)
 	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
 	OnShieldChanged.Broadcast(CurrentShield, MaxShield);
 	OnRevive.Broadcast();
+
+	// Kick off shield regen after the usual delay, same as the post-damage path.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(ShieldRegenDelayHandle);
+		World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+		World->GetTimerManager().SetTimer(
+			ShieldRegenDelayHandle,
+			this,
+			&UHealthComponent::StartShieldRegen,
+			ShieldRegenDelay,
+			false
+		);
+	}
 }
 
 void UHealthComponent::StartShieldRegen()

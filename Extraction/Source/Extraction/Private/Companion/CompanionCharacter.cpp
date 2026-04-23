@@ -1,6 +1,7 @@
 // AI companion character — follows player, engages enemies, revives downed teammates.
 
 #include "CompanionCharacter.h"
+#include "CompanionAIController.h"
 #include "HealthComponent.h"
 #include "WeaponBase.h"
 #include "ExtractionTypes.h"
@@ -52,6 +53,16 @@ ACompanionCharacter::ACompanionCharacter()
 		MoveComp->MaxWalkSpeed = 600.0f;
 	}
 	bUseControllerRotationYaw = false;
+}
+
+void ACompanionCharacter::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+
+	// Catch the most common BP misconfiguration: no weapon class assigned.
+	// Runs once on spawn, server only (weapon is server-spawned).
+	if (HasAuthority() && !WeaponClass)
+		UE_LOG(LogCompanionAI, Warning, TEXT("%s has no WeaponClass assigned - companion will never fire"), *GetName());
 }
 
 void ACompanionCharacter::BeginPlay()
@@ -114,7 +125,11 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 {
 	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 	if (IsValid(HealthComponent))
+	{
 		HealthComponent->TakeDamage(ActualDamage);
+		UE_LOG(LogCompanion, Log, TEXT("Companion took %.1f damage — HP: %.0f / Shield: %.0f"),
+			ActualDamage, HealthComponent->GetCurrentHealth(), HealthComponent->GetCurrentShield());
+	}
 	return ActualDamage;
 }
 

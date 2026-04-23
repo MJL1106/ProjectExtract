@@ -9,6 +9,10 @@
 #include "Kismet/GameplayStatics.h"
 #include "ExtractionCharacter.h"
 #include "CompanionCharacter.h"
+#include "WeaponBase.h"
+#include "UObject/ConstructorHelpers.h"
+
+DEFINE_LOG_CATEGORY(LogCompanionAI);
 
 const FName ACompanionAIController::BB_PlayerActor(TEXT("PlayerActor"));
 const FName ACompanionAIController::BB_PlayerNeedsRevive(TEXT("PlayerNeedsRevive"));
@@ -18,6 +22,10 @@ const FName ACompanionAIController::BB_HasCoverPosition(TEXT("HasCoverPosition")
 
 ACompanionAIController::ACompanionAIController()
 {
+	static ConstructorHelpers::FObjectFinder<UBehaviorTree> BTFinder(
+		TEXT("/Game/Core/Blueprints/AI/Companion/BT_Companion"));
+	if (BTFinder.Succeeded()) CompanionBehaviorTree = BTFinder.Object;
+
 	// Perception component
 	PerceptionComponent = CreateDefaultSubobject<UAIPerceptionComponent>(TEXT("AIPerception"));
 	SetPerceptionComponent(*PerceptionComponent);
@@ -54,7 +62,7 @@ void ACompanionAIController::OnPossess(APawn* InPawn)
 
 	if (!CompanionBehaviorTree)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("CompanionAIController: No BehaviorTree assigned"));
+		UE_LOG(LogCompanionAI, Warning, TEXT("%s: No BehaviorTree assigned"), *GetName());
 		return;
 	}
 
@@ -66,7 +74,19 @@ void ACompanionAIController::OnPossess(APawn* InPawn)
 
 	RunBehaviorTree(CompanionBehaviorTree);
 
-	UE_LOG(LogTemp, Log, TEXT("CompanionAIController possessed %s, running BT"), *GetNameSafe(InPawn));
+	// Diagnostic: log possession state so user can confirm config at a glance.
+	const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(InPawn);
+	const FString WeaponClassName = (Companion && Companion->GetWeaponClass()) ? Companion->GetWeaponClass()->GetName() : TEXT("NONE");
+	const float MaxEngageRange = Companion ? Companion->MaxEngageRange : -1.0f;
+	const float SightRadius = SightConfig ? SightConfig->SightRadius : -1.0f;
+
+	UE_LOG(LogCompanionAI, Log,
+		TEXT("Possessed %s | BT=%s | WeaponClass=%s | MaxEngageRange=%.0f | Sight=%.0f"),
+		*GetNameSafe(InPawn),
+		*GetNameSafe(CompanionBehaviorTree),
+		*WeaponClassName,
+		MaxEngageRange,
+		SightRadius);
 }
 
 void ACompanionAIController::OnUnPossess()

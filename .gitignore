@@ -61,3 +61,5 @@ Extraction/Config/DefaultAgentIntegrationKit.ini
 # Third-party plugins (installed locally, not tracked)
 # ----------------------------------------------------------------------------
 Extraction/Plugins/
+# Added by code-review-graph
+.code-review-graph/

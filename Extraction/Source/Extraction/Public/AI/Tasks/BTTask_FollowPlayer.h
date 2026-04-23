@@ -25,27 +25,31 @@ protected:
 
 	/** Distance from formation point to consider arrived */
 	UPROPERTY(EditAnywhere, Category = "Follow", meta = (ClampMin = "50.0"))
-	float AcceptableRadius = 300.0f;
+	float AcceptableRadius = 250.0f;
 
 	/** Distance beyond which companion sprints to catch up */
 	UPROPERTY(EditAnywhere, Category = "Follow", meta = (ClampMin = "100.0"))
-	float SprintDistanceThreshold = 600.0f;
+	float SprintDistanceThreshold = 1000.0f;
 
 	/** Offset behind the player's forward vector */
 	UPROPERTY(EditAnywhere, Category = "Follow")
-	float FormationOffsetBack = 200.0f;
+	float FormationOffsetBack = 350.0f;
 
 	/** Offset to the player's right */
 	UPROPERTY(EditAnywhere, Category = "Follow")
-	float FormationOffsetRight = 150.0f;
+	float FormationOffsetRight = 200.0f;
 
 	/** Always sprint (used for revive branch) */
 	UPROPERTY(EditAnywhere, Category = "Follow")
 	bool bSprintToTarget = false;
 
 	UPROPERTY(EditAnywhere, Category = "Follow", meta = (ClampMin = "100.0"))
-	float WalkSpeed = 600.0f;
+	float WalkSpeed = 400.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Follow", meta = (ClampMin = "100.0"))
-	float SprintSpeed = 900.0f;
+	float SprintSpeed = 650.0f;
+
+private:
+	FVector LastMoveTarget = FVector::ZeroVector;
+	bool bIsIdling = false;
 };
