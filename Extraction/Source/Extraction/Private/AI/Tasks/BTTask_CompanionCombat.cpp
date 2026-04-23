@@ -3,8 +3,11 @@
 #include "BTTask_CompanionCombat.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
+#include "CompanionAIController.h" // for LogCompanionAI
 #include "CompanionCharacter.h"
+#include "WeaponBase.h"
 #include "HealthComponent.h"
+#include "DrawDebugHelpers.h"
 
 UBTTask_CompanionCombat::UBTTask_CompanionCombat()
 {
@@ -25,6 +28,17 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	Companion->SetAimTarget(Target);
 	BurstTimer = 0.0f;
 	bIsFiringBurst = false;
+
+	// Always warn (not gated) — a missing weapon means the task will silently do nothing forever.
+	if (!Companion->GetCurrentWeapon())
+		UE_LOG(LogCompanionAI, Warning, TEXT("%s: combat task started but CurrentWeapon is null"), *Companion->GetName());
+
+	if (bDebugLogging)
+	{
+		const float Distance = FVector::Dist(Companion->GetActorLocation(), Target->GetActorLocation());
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: combat ENTER target=%s dist=%.0f MaxRange=%.0f"),
+			*Companion->GetName(), *Target->GetName(), Distance, Companion->MaxEngageRange);
+	}
 
 	return EBTNodeResult::InProgress;
 }
@@ -62,6 +76,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	if (Distance > Companion->MaxEngageRange)
 	{
 		Companion->StopWeaponFire();
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: OUT OF RANGE dist=%.0f > MaxRange=%.0f -> Failed"),
+				*Companion->GetName(), Distance, Companion->MaxEngageRange);
+#if ENABLE_DRAW_DEBUG
+		if (bDebugLogging)
+			DrawDebugLine(Companion->GetWorld(), MyLocation, TargetLocation, FColor::Yellow, false, 0.5f, 0, 2.0f);
+#endif
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
@@ -77,6 +98,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Companion->StopWeaponFire();
 		Companion->ReloadWeapon();
 		bIsFiringBurst = false;
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: reloading"), *Companion->GetName());
 		return;
 	}
 
@@ -85,6 +108,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 	// Line-of-sight check
 	const UWorld* World = Companion->GetWorld();
+	bool bLineOfSight = true;
+	AActor* BlockedBy = nullptr;
 	if (World)
 	{
 		FHitResult Hit;
@@ -95,12 +120,22 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		const bool bHit = World->LineTraceSingleByChannel(Hit, MyLocation, TargetLocation, ECC_Visibility, QueryParams);
 		if (bHit && Hit.GetActor() != Target)
 		{
+			bLineOfSight = false;
+			BlockedBy = Hit.GetActor();
+
 			// Blocked — stop firing, wait
 			if (bIsFiringBurst)
 			{
 				Companion->StopWeaponFire();
 				bIsFiringBurst = false;
 			}
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: LOS BLOCKED by %s"),
+					*Companion->GetName(), *GetNameSafe(BlockedBy));
+#if ENABLE_DRAW_DEBUG
+			if (bDebugLogging)
+				DrawDebugLine(World, MyLocation, Hit.ImpactPoint, FColor::Red, false, 0.25f, 0, 2.0f);
+#endif
 			return;
 		}
 	}
@@ -114,20 +149,26 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Companion->StopWeaponFire();
 		bIsFiringBurst = false;
 		BurstTimer = FirePauseDuration;
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: burst END"), *Companion->GetName());
 	}
 	else if (!bIsFiringBurst && BurstTimer <= 0.0f)
 	{
-		// Start new burst — apply inaccuracy to aim
-		const float Inaccuracy = Companion->GetCurrentInaccuracy();
-		FRotator AimRot = (TargetLocation - MyLocation).Rotation();
-		AimRot.Yaw += FMath::RandRange(-Inaccuracy, Inaccuracy);
-		AimRot.Pitch += FMath::RandRange(-Inaccuracy, Inaccuracy);
-		Companion->SetActorRotation(FRotator(0.0f, AimRot.Yaw, 0.0f));
-
+		// Start new burst. Body stays on the smooth look-at interp above; the weapon applies
+		// spread to the fire direction via Companion->GetCurrentInaccuracy() in WeaponBase.
 		Companion->StartWeaponFire();
 		bIsFiringBurst = true;
 		BurstTimer = FireBurstDuration;
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: burst START (inaccuracy=%.1f deg)"),
+				*Companion->GetName(), Companion->GetCurrentInaccuracy());
 	}
+
+#if ENABLE_DRAW_DEBUG
+	// Green line while actively firing + LOS clear
+	if (bDebugLogging && bIsFiringBurst && bLineOfSight)
+		DrawDebugLine(World, MyLocation, TargetLocation, FColor::Green, false, 0.1f, 0, 1.5f);
+#endif
 }
 
 void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult)

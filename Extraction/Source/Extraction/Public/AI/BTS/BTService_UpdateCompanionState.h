@@ -31,4 +31,8 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Blackboard")
 	FBlackboardKeySelector HasCoverPositionKey;
+
+	/** Toggle verbose perception/target logs under LogCompanionAI. Enable per-instance in BT. */
+	UPROPERTY(EditAnywhere, Category = "Debug")
+	bool bDebugLogging = false;
 };

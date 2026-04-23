@@ -10,6 +10,8 @@ class UAISenseConfig_Sight;
 class UAISenseConfig_Hearing;
 class AExtractionCharacter;
 
+DECLARE_LOG_CATEGORY_EXTERN(LogCompanionAI, Log, All);
+
 UCLASS()
 class EXTRACTION_API ACompanionAIController : public AAIController
 {
@@ -27,6 +29,8 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Companion|AI")
 	AExtractionCharacter* GetPlayerCharacter() const { return CachedPlayerCharacter; }
+
+	void SetPlayerCharacter(AExtractionCharacter* InPlayer) { CachedPlayerCharacter = InPlayer; }
 
 protected:
 	virtual void OnPossess(APawn* InPawn) override;

@@ -63,9 +63,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion")
 	AWeaponBase* GetCurrentWeapon() const { return CurrentWeapon; }
 
+	UFUNCTION(BlueprintPure, Category = "Companion")
+	TSubclassOf<AWeaponBase> GetWeaponClass() const { return WeaponClass; }
+
+	/** Target the companion is currently aiming at. Used by WeaponBase to aim along muzzle->target. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	AActor* GetAimTarget() const { return CurrentAimTarget.Get(); }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void PostInitializeComponents() override;
 
 	// --- Components ---
 
