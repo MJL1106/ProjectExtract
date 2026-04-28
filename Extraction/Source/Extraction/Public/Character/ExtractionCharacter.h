@@ -15,6 +15,7 @@ class UInputAction;
 class UExtractionAnimInstance;
 class UHealthComponent;
 class UWeaponComponent;
+class UTraversalComponent;
 class UAnimMontage;
 struct FInputActionValue;
 
@@ -44,6 +45,10 @@ class EXTRACTION_API AExtractionCharacter : public ACharacter
 	/** Weapon equip, ADS, and fire management */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UWeaponComponent> WeaponComponent;
+
+	/** Traversal (vault/climb/mantle) logic */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UTraversalComponent> TraversalComponent;
 
 protected:
 
@@ -149,125 +154,6 @@ protected:
 			ToolTip = "Max time between two crouch presses to trigger a slide while sprinting.\nLower = tighter timing required."))
 	float SlideDoubleTapWindow = 0.3f;
 
-	// ---- Vault Config ----
-
-	/** Maximum forward distance from capsule edge to detect a vaultable wall (cm) */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "10.0", ClampMax = "200.0",
-			ToolTip = "How far ahead of the capsule edge the character checks for vaultable surfaces."))
-	float VaultForwardTraceDistance = 80.0f;
-
-	/** Radius of the forward sphere sweep for wall detection (cm) */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "1.0", ClampMax = "34.0",
-			ToolTip = "Radius of the sphere sweep for forward wall detection.\nLarger = more forgiving alignment."))
-	float VaultForwardTraceRadius = 15.0f;
-
-	/** Height above feet where the forward trace fires (cm) */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "0.0", ClampMax = "200.0",
-			ToolTip = "Height of the forward wall-detection trace above the character's feet.\nLower = catches shorter obstacles. Independent of VaultMinHeight."))
-	float VaultForwardTraceHeight = 50.0f;
-
-	/** Minimum obstacle height from feet to be vaultable (cm) */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "0.0",
-			ToolTip = "Obstacles shorter than this are stepped over, not vaulted.\nTune after reviewing vault montages."))
-	float VaultMinHeight = 50.0f;
-
-	/** Maximum obstacle height from feet to be vaultable (cm) */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "0.0",
-			ToolTip = "Obstacles taller than this cannot be vaulted.\nTune after reviewing vault montages."))
-	float VaultMaxHeight = 90.0f;
-
-	/** Forward distance past the ledge edge for the landing target (cm) */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "0.0",
-			ToolTip = "How far past the ledge edge the vault target is placed.\nShould be >= capsule radius (34) to prevent clipping back off the edge."))
-	float VaultLandingForwardOffset = 45.0f;
-
-	/** Montage play rate when vaulting while sprinting */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "0.5", ClampMax = "3.0",
-			ToolTip = "Playback speed multiplier for sprint vaults.\nHigher = faster vault animation."))
-	float VaultSprintPlayRate = 1.3f;
-
-	/** Montage play rate when vaulting while walking */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "0.5", ClampMax = "3.0",
-			ToolTip = "Playback speed multiplier for walk vaults."))
-	float VaultWalkPlayRate = 1.0f;
-
-	/** Distance from the wall face the character snaps to when a vault starts (cm).
-	 *  Ensures the montage always begins at a consistent offset regardless of detection range. */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "5.0", ClampMax = "100.0",
-			ToolTip = "How far from the wall the character is placed at vault start.\nTune to match where the vault animation expects the character to be."))
-	float VaultSnapDistance = 50.0f;
-
-	/** How fast the character interpolates to the vault start position */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",
-		meta = (ClampMin = "5.0", ClampMax = "50.0",
-			ToolTip = "Interpolation speed for the vault snap.\nHigher = faster/snappier, lower = smoother glide."))
-	float VaultSnapInterpSpeed = 18.0f;
-
-	// ---- Climb Config ----
-
-	/** Minimum surface height from feet for a climb-up (cm) */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
-		meta = (ClampMin = "0.0",
-			ToolTip = "Surfaces shorter than this won't trigger climb.\nOverlaps with vault range — vault is tried first for thin obstacles."))
-	float ClimbMinHeight = 80.0f;
-
-	/** Maximum surface height from feet for a climb-up (cm). Above this = mantle. */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
-		meta = (ClampMin = "0.0",
-			ToolTip = "Surfaces taller than this trigger mantle instead of climb."))
-	float ClimbMaxHeight = 170.0f;
-
-	/** Obstacle height the climb animation was authored for (cm).
-	 *  Used to calculate a vertical boost when the actual surface is taller/shorter. */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
-		meta = (ClampMin = "50.0", ClampMax = "300.0",
-			ToolTip = "The obstacle height the climb montage's root motion was built for.\nAt this exact height, no boost is applied. Taller surfaces get a pre-animation lift."))
-	float ClimbAnimReferenceHeight = 100.0f;
-
-	/** Montage play rate when climbing while walking */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
-		meta = (ClampMin = "0.5", ClampMax = "3.0"))
-	float ClimbWalkPlayRate = 1.0f;
-
-	/** Montage play rate when climbing while sprinting */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Climb",
-		meta = (ClampMin = "0.5", ClampMax = "3.0"))
-	float ClimbSprintPlayRate = 1.0f;
-
-	// ---- Mantle Config ----
-
-	/** Maximum surface height from feet for a mantle/pull-up (cm). MantleMin = ClimbMaxHeight. */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Mantle",
-		meta = (ClampMin = "0.0",
-			ToolTip = "Surfaces taller than this cannot be mantled.\nMantle min height equals ClimbMaxHeight (no gap)."))
-	float MantleMaxHeight = 260.0f;
-
-	/** Obstacle height the mantle animation was authored for (cm).
-	 *  Used to calculate a vertical boost when the actual surface is taller/shorter. */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Mantle",
-		meta = (ClampMin = "50.0", ClampMax = "400.0",
-			ToolTip = "The obstacle height the mantle montage's root motion was built for.\nAt this exact height, no boost is applied. Taller surfaces get a pre-animation lift."))
-	float MantleAnimReferenceHeight = 200.0f;
-
-	/** Montage play rate when mantling while walking */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Mantle",
-		meta = (ClampMin = "0.5", ClampMax = "3.0"))
-	float MantleWalkPlayRate = 1.0f;
-
-	/** Montage play rate when mantling while sprinting */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Mantle",
-		meta = (ClampMin = "0.5", ClampMax = "3.0"))
-	float MantleSprintPlayRate = 1.0f;
-
 	// ---- Sprint Jump Config ----
 
 	/** Montage play rate for the sprint jump */
@@ -321,14 +207,6 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_IsProne, BlueprintReadOnly, Category = "Movement|State")
 	bool bIsProne;
 
-	/** Current traversal action (Vault, Climb, Mantle, or None) */
-	UPROPERTY(ReplicatedUsing = OnRep_TraversalType, BlueprintReadOnly, Category = "Movement|State")
-	ETraversalType ActiveTraversalType;
-
-	/** Whether the character was sprinting when the traversal started (replicated for proxy play rate) */
-	UPROPERTY(Replicated)
-	bool bWasSprintingAtTraversalEntry;
-
 	/** True while the character is in Down But Not Out state */
 	UPROPERTY(ReplicatedUsing = OnRep_IsDBNO, BlueprintReadOnly, Category = "Health|State")
 	bool bIsDBNO;
@@ -341,6 +219,7 @@ public:
 
 	AExtractionCharacter();
 
+	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
@@ -417,36 +296,18 @@ protected:
 
 	// ---- Traversal (Vault / Climb / Mantle) ----
 
-	/** Called on IA_Vault press. Runs detection, executes traversal if valid. No jump fallback. */
+	/** Called on IA_Vault press. Delegates detection+execution to TraversalComponent. */
 	void VaultStart(const FInputActionValue& Value);
 
-	/** Runs the multi-trace detection sequence.
-	 *  @return the traversal type to execute, or None if nothing detected */
-	ETraversalType PerformTraversalDetection();
+	/** Delegate handler: plays traversal montage on both 3P and 1P anim instances */
+	void HandleTraversalStarted(ETraversalType Type, float PlayRate);
 
-	/** Shared setup for all traversal types: MOVE_Flying, collision off, snap, rotation lock */
-	void StartTraversal(ETraversalType Type);
+	/** Delegate handler: post-traversal cleanup (sprint speed restore) */
+	void HandleTraversalEnded();
 
-	/** Vault-specific: StartTraversal + vault montage */
-	void ExecuteVault();
-
-	/** Climb-specific: StartTraversal + climb montage */
-	void ExecuteClimb();
-
-	/** Mantle-specific: StartTraversal + mantle montage */
-	void ExecuteMantle();
-
-	/** Dispatches to the correct Execute function based on type */
-	void ExecuteTraversalByType(ETraversalType Type);
-
-	/** Tick safety net — ends traversal if montage was interrupted */
-	void UpdateTraversal(float DeltaTime);
-
-	/** Ends any active traversal: restores MOVE_Walking, resets state */
-	void EndTraversal();
-
+	/** Montage end callback bound after a traversal montage starts; ends traversal on completion or interrupt. */
 	UFUNCTION()
-	void OnRep_TraversalType();
+	void OnTraversalMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	// ---- Interaction / Revive ----
 
@@ -486,22 +347,22 @@ public:
 	bool GetIsProne() const { return bIsProne; }
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	ETraversalType GetActiveTraversalType() const { return ActiveTraversalType; }
+	UTraversalComponent* GetTraversalComponent() const { return TraversalComponent; }
 
-	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool IsInTraversal() const { return ActiveTraversalType != ETraversalType::None; }
+	ETraversalType GetActiveTraversalType() const;
+	bool IsInTraversal() const;
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool GetIsSprintJumping() const { return bIsSprintJumping; }
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool GetIsVaulting() const { return ActiveTraversalType == ETraversalType::Vault; }
+	bool GetIsVaulting() const;
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	FVector GetVaultTargetLocation() const { return VaultTargetLocation; }
+	FVector GetVaultTargetLocation() const;
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	float GetVaultSurfaceHeight() const { return VaultSurfaceHeight; }
+	float GetVaultSurfaceHeight() const;
 
 private:
 
@@ -640,53 +501,9 @@ private:
 	/** Cached walk speed to restore when exiting ADS */
 	float PreADSWalkSpeed;
 
-	// ---- Traversal Detection (helpers) ----
-
-	/** Sphere-sweeps forward from capsule edge to find a wall or obstacle.
-	 *  @return true if an obstacle was hit */
-	bool TraceForwardForWall(FHitResult& OutHit) const;
-
-	/** Traces downward from above the wall hit to find the top surface.
-	 *  Validates height within [VaultMinHeight, MantleMaxHeight].
-	 *  @return true if a walkable surface was found within the valid height range */
-	bool TraceDownForSurface(const FHitResult& WallHit, FHitResult& OutSurfaceHit) const;
-
-	/** Capsule overlap test at a forward offset from the surface to verify the character fits.
-	 *  @param SurfaceLocation  Impact point on the surface top
-	 *  @param ForwardOffset    Distance past the surface edge to test (vault=past obstacle, climb/mantle=on top)
-	 *  @return true if there is room for the character */
-	bool CheckClearance(const FVector& SurfaceLocation, float ForwardOffset) const;
-
 	// ---- Traversal State ----
 
 	/** Traversal type waiting for uncrouch to finish before executing (None = no pending) */
 	ETraversalType PendingTraversalType;
-
-	/** Final position the character will move to after traversal (capsule center) */
-	FVector VaultTargetLocation;
-
-	/** Impact point on top of the detected surface */
-	FVector VaultSurfaceLocation;
-
-	/** Normal of the wall face (points away from wall, toward character) */
-	FVector VaultWallNormal;
-
-	/** Impact point on the wall face from the forward trace */
-	FVector VaultWallImpactPoint;
-
-	/** Height of the surface above the character's feet (cm) */
-	float VaultSurfaceHeight;
-
-	/** Position the character is interpolating toward at traversal start */
-	FVector VaultSnapTarget;
-
-	/** True while still interpolating to the snap position */
-	bool bIsSnappingToVault;
-
-	/** Time remaining for snap interpolation before root motion takes over */
-	float VaultSnapTimeRemaining;
-
-	/** Actor yaw locked at traversal entry so root motion stays on course */
-	FRotator VaultLockedRotation;
 
 };

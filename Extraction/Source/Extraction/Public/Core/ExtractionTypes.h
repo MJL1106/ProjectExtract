@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "NativeGameplayTags.h"
+#include "Movement/TraversalTypes.h"
 #include "ExtractionTypes.generated.h"
 
 // --- Gameplay Tags ---
@@ -34,19 +35,6 @@ enum class EProneTransitionType : uint8
 	FromWalk	UMETA(DisplayName = "From Walk"),
 	FromSprint	UMETA(DisplayName = "From Sprint"),
 	FromCrouch	UMETA(DisplayName = "From Crouch"),
-};
-
-/**
- * Active traversal action type.
- * Determines which montage plays and what clearance logic applies.
- */
-UENUM(BlueprintType)
-enum class ETraversalType : uint8
-{
-	None	UMETA(DisplayName = "None"),
-	Vault	UMETA(DisplayName = "Vault"),
-	Climb	UMETA(DisplayName = "Climb"),
-	Mantle	UMETA(DisplayName = "Mantle"),
 };
 
 /**

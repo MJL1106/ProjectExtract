@@ -20,7 +20,9 @@ EBTNodeResult::Type UBTTask_RevivePlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 		OwnerComp.GetBlackboardComponent()->GetValueAsObject(PlayerActorKey.SelectedKeyName));
 	if (!IsValid(Player) || !Player->GetIsDBNO()) return EBTNodeResult::Failed;
 
-	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(OwnerComp.GetAIOwner()->GetPawn());
+	AAIController* AIC = OwnerComp.GetAIOwner();
+	if (!AIC) return EBTNodeResult::Failed;
+	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(AIC->GetPawn());
 	if (!Companion) return EBTNodeResult::Failed;
 
 	// Stop any combat activity
@@ -81,12 +83,10 @@ void UBTTask_RevivePlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	if (ReviveElapsed >= Companion->ReviveDuration)
 	{
-		// Perform the revive
-		UHealthComponent* PlayerHealth = Player->GetHealthComponent();
-		if (PlayerHealth)
-			PlayerHealth->Revive(0.3f);
-
-		Player->ExitDBNO();
+		if (Companion->HasAuthority() && IsValid(Player))
+		{
+			Player->ExitDBNO();
+		}
 
 		UE_LOG(LogTemp, Log, TEXT("Companion revived %s"), *GetNameSafe(Player));
 		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
