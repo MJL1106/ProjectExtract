@@ -2,6 +2,7 @@
 
 #include "ExtractionAnimInstance.h"
 #include "ExtractionCharacter.h"
+#include "TraversalComponent.h"
 #include "ExtractionAnimDataAsset.h"
 #include "Extraction.h"
 #include "Animation/AnimMontage.h"
@@ -120,10 +121,20 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	// Capture previous prone state before updating — used to catch the exit frame
 	const bool bWasProne = bIsProne;
 	bIsProne = OwningCharacter->GetIsProne();
-	const ETraversalType Traversal = OwningCharacter->GetActiveTraversalType();
-	bIsVaulting  = (Traversal == ETraversalType::Vault);
-	bIsClimbing  = (Traversal == ETraversalType::Climb);
-	bIsMantling  = (Traversal == ETraversalType::Mantle);
+	const UTraversalComponent* TraversalComp = OwningCharacter->GetTraversalComponent();
+	if (IsValid(TraversalComp))
+	{
+		const ETraversalType Traversal = TraversalComp->GetActiveType();
+		bIsVaulting  = (Traversal == ETraversalType::Vault);
+		bIsClimbing  = (Traversal == ETraversalType::Climb);
+		bIsMantling  = (Traversal == ETraversalType::Mantle);
+	}
+	else
+	{
+		bIsVaulting  = false;
+		bIsClimbing  = false;
+		bIsMantling  = false;
+	}
 
 	// --- Prone transition flags (only check montages when prone-related) ---
 	if (bIsProne || bWasProne || bIsTransitioningToProne || bIsTransitioningFromProne)

@@ -3,8 +3,8 @@
 #include "BTTask_FollowPlayer.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
+#include "CompanionCharacter.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "GameFramework/Character.h"
 #include "Navigation/PathFollowingComponent.h"
 
 UBTTask_FollowPlayer::UBTTask_FollowPlayer()
@@ -33,7 +33,7 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	AActor* Player = Cast<AActor>(OwnerComp.GetBlackboardComponent()->GetValueAsObject(PlayerActorKey.SelectedKeyName));
 	if (!IsValid(Player)) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
-	ACharacter* Companion = Cast<ACharacter>(Controller->GetPawn());
+	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Controller->GetPawn());
 	if (!Companion) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
 	const FVector PlayerLocation = Player->GetActorLocation();
@@ -50,8 +50,7 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 		}
 
-		if (UCharacterMovementComponent* MoveComp = Companion->GetCharacterMovement())
-			MoveComp->MaxWalkSpeed = SprintSpeed;
+		Companion->SetSprinting(true);
 
 		// Only re-issue move if player has shifted significantly — avoids restarting the
 		// path every tick which can stutter-step the companion.
@@ -107,14 +106,7 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	LastMoveTarget = FormationDir;
 
-	// Set movement speed
-	if (UCharacterMovementComponent* MoveComp = Companion->GetCharacterMovement())
-	{
-		if (bSprintToTarget || DistToPlayer > SprintDistanceThreshold)
-			MoveComp->MaxWalkSpeed = SprintSpeed;
-		else
-			MoveComp->MaxWalkSpeed = WalkSpeed;
-	}
+	Companion->SetSprinting(bSprintToTarget || DistToPlayer > SprintDistanceThreshold);
 
 	Controller->MoveToLocation(FormationDir, AcceptableRadius * 0.5f, false, true, false, true);
 }

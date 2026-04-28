@@ -4,12 +4,12 @@
 #include "CompanionAIController.h"
 #include "HealthComponent.h"
 #include "WeaponBase.h"
+#include "TraversalComponent.h"
+#include "CompanionAnimInstance.h"
 #include "ExtractionTypes.h"
 #include "Components/CapsuleComponent.h"
-#include "Components/StaticMeshComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
-#include "UObject/ConstructorHelpers.h"
 
 DEFINE_LOG_CATEGORY(LogCompanion);
 
@@ -23,25 +23,11 @@ ACompanionCharacter::ACompanionCharacter()
 	GetCapsuleComponent()->SetCapsuleSize(34.0f, 88.0f);
 
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
 
-	// Visible placeholder mesh — blue cylinder to distinguish from red enemies
-	CompanionMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("CompanionMesh"));
-	CompanionMesh->SetupAttachment(GetCapsuleComponent());
-	CompanionMesh->SetRelativeLocation(FVector(0.0f, 0.0f, -88.0f));
-	CompanionMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
-	if (CylinderMesh.Succeeded())
-	{
-		CompanionMesh->SetStaticMesh(CylinderMesh.Object);
-		CompanionMesh->SetRelativeScale3D(FVector(0.68f, 0.68f, 1.76f));
-	}
-
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> BaseMaterial(TEXT("/Engine/BasicShapes/BasicShapeMaterial.BasicShapeMaterial"));
-	if (BaseMaterial.Succeeded())
-	{
-		CompanionMesh->SetMaterial(0, BaseMaterial.Object);
-	}
+	// Configure inherited skeletal mesh — designer assigns mesh + anim class on BP_Companion
+	GetMesh()->SetRelativeLocation(FVector(0.f, 0.f, -88.f));
+	GetMesh()->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
 
 	OwnedTags.AddTag(TAG_Character_Companion);
 
@@ -50,7 +36,7 @@ ACompanionCharacter::ACompanionCharacter()
 	{
 		MoveComp->bUseControllerDesiredRotation = true;
 		MoveComp->bOrientRotationToMovement = false;
-		MoveComp->MaxWalkSpeed = 600.0f;
+		MoveComp->MaxWalkSpeed = WalkSpeed;
 	}
 	bUseControllerRotationYaw = false;
 }
@@ -63,6 +49,12 @@ void ACompanionCharacter::PostInitializeComponents()
 	// Runs once on spawn, server only (weapon is server-spawned).
 	if (HasAuthority() && !WeaponClass)
 		UE_LOG(LogCompanionAI, Warning, TEXT("%s has no WeaponClass assigned - companion will never fire"), *GetName());
+
+	if (IsValid(TraversalComponent))
+	{
+		TraversalComponent->OnTraversalStarted.AddUObject(this, &ACompanionCharacter::HandleTraversalStarted);
+		TraversalComponent->OnTraversalEnded.AddUObject(this, &ACompanionCharacter::HandleTraversalEnded);
+	}
 }
 
 void ACompanionCharacter::BeginPlay()
@@ -71,16 +63,6 @@ void ACompanionCharacter::BeginPlay()
 
 	if (HealthComponent && !HealthComponent->OnDeath.IsAlreadyBound(this, &ACompanionCharacter::HandleDeath))
 		HealthComponent->OnDeath.AddDynamic(this, &ACompanionCharacter::HandleDeath);
-
-	// Create blue dynamic material for visibility
-	if (CompanionMesh)
-	{
-		UMaterialInstanceDynamic* DynMat = CompanionMesh->CreateDynamicMaterialInstance(0);
-		if (DynMat)
-		{
-			DynMat->SetVectorParameterValue(FName("Color"), FLinearColor(0.1f, 0.3f, 1.0f, 1.0f));
-		}
-	}
 
 	// Spawn and attach weapon (server only — weapon replicates to clients)
 	if (HasAuthority() && WeaponClass)
@@ -104,6 +86,12 @@ void ACompanionCharacter::BeginPlay()
 
 void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (IsValid(TraversalComponent))
+	{
+		TraversalComponent->OnTraversalStarted.RemoveAll(this);
+		TraversalComponent->OnTraversalEnded.RemoveAll(this);
+	}
+
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(DestroyTimerHandle);
 
@@ -136,6 +124,25 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 void ACompanionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME_CONDITION(ACompanionCharacter, bIsSprinting, COND_SkipOwner);
+}
+
+// --- Sprint API ---
+
+void ACompanionCharacter::SetSprinting(bool bSprint)
+{
+	if (!HasAuthority()) return;
+	if (bIsSprinting == bSprint) return;
+
+	bIsSprinting = bSprint;
+	OnRep_IsSprinting();
+}
+
+void ACompanionCharacter::OnRep_IsSprinting()
+{
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+		MoveComp->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
 }
 
 void ACompanionCharacter::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
@@ -220,4 +227,33 @@ void ACompanionCharacter::HandleDeath()
 void ACompanionCharacter::DestroyAfterDeath()
 {
 	Destroy();
+}
+
+// --- Traversal ---
+
+void ACompanionCharacter::HandleTraversalStarted(ETraversalType Type, float PlayRate)
+{
+	if (HasAuthority()) SetSprinting(false);
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!MeshComp) return;
+	if (UCompanionAnimInstance* Anim = Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()))
+	{
+		Anim->PlayTraversalMontage(Type, PlayRate);
+
+		FOnMontageEnded EndDelegate;
+		EndDelegate.BindUObject(this, &ACompanionCharacter::OnTraversalMontageEnded);
+		Anim->Montage_SetEndDelegate(EndDelegate, Anim->GetCurrentActiveMontage());
+	}
+}
+
+void ACompanionCharacter::OnTraversalMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	if (IsValid(TraversalComponent))
+		TraversalComponent->EndTraversal();
+}
+
+void ACompanionCharacter::HandleTraversalEnded()
+{
+	SetSprinting(false);
 }

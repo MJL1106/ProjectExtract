@@ -6,10 +6,13 @@
 #include "GameFramework/Character.h"
 #include "GameplayTagAssetInterface.h"
 #include "GameplayTagContainer.h"
+#include "Movement/TraversalTypes.h"
 #include "CompanionCharacter.generated.h"
 
 class UHealthComponent;
 class AWeaponBase;
+class UCompanionAnimInstance;
+class UTraversalComponent;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
 
@@ -70,6 +73,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	AActor* GetAimTarget() const { return CurrentAimTarget.Get(); }
 
+	// --- Sprint API ---
+
+	UFUNCTION(BlueprintCallable, Category = "Companion|Movement")
+	void SetSprinting(bool bSprint);
+
+	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
+	bool IsSprinting() const { return bIsSprinting; }
+
+	// --- Traversal ---
+
+	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
+	UTraversalComponent* GetTraversalComponent() const { return TraversalComponent; }
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -80,8 +96,8 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
 	TObjectPtr<UHealthComponent> HealthComponent;
 
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
-	TObjectPtr<UStaticMeshComponent> CompanionMesh;
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Movement")
+	TObjectPtr<UTraversalComponent> TraversalComponent;
 
 	// --- Config ---
 
@@ -115,9 +131,32 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Config", meta = (ClampMin = "0.0"))
 	float DestroyDelay = 3.0f;
 
+	// --- Movement ---
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
+	float WalkSpeed = 400.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
+	float SprintSpeed = 650.f;
+
 private:
+	UPROPERTY(ReplicatedUsing = OnRep_IsSprinting)
+	bool bIsSprinting = false;
+
+	UFUNCTION()
+	void OnRep_IsSprinting();
+
 	UFUNCTION()
 	void HandleDeath();
+
+	UFUNCTION()
+	void HandleTraversalStarted(ETraversalType Type, float PlayRate);
+
+	UFUNCTION()
+	void HandleTraversalEnded();
+
+	UFUNCTION()
+	void OnTraversalMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	void DestroyAfterDeath();
 

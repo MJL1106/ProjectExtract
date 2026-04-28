@@ -9,6 +9,7 @@
 
 class AExtractionCharacter;
 class UExtractionAnimDataAsset;
+class UTraversalComponent;
 class UCharacterMovementComponent;
 class UBlendSpace;
 class UAnimMontage;

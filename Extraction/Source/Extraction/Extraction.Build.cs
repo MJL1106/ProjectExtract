@@ -33,6 +33,7 @@ public class Extraction : ModuleRules
 			"Extraction/Public/Animation",
 			"Extraction/Public/Game",
 			"Extraction/Public/Components",
+			"Extraction/Public/Movement",
 			"Extraction/Public/UI",
 			"Extraction/Public/Data",
 			"Extraction/Public/Weapon",
@@ -40,6 +41,7 @@ public class Extraction : ModuleRules
 			"Extraction/Public/Companion",
 			"Extraction/Public/AI",
 			"Extraction/Public/AI/BTS",
+			"Extraction/Public/AI/Services",
 			"Extraction/Public/AI/Tasks",
 			"Extraction/Public/AI/EQS"
 		});
@@ -51,6 +53,7 @@ public class Extraction : ModuleRules
 			"Extraction/Private/Animation",
 			"Extraction/Private/Game",
 			"Extraction/Private/Components",
+			"Extraction/Private/Movement",
 			"Extraction/Private/UI",
 			"Extraction/Private/Data",
 			"Extraction/Private/Weapon",
@@ -58,6 +61,7 @@ public class Extraction : ModuleRules
 			"Extraction/Private/Companion",
 			"Extraction/Private/AI",
 			"Extraction/Private/AI/BTS",
+			"Extraction/Private/AI/Services",
 			"Extraction/Private/AI/Tasks",
 			"Extraction/Private/AI/EQS"
 		});
