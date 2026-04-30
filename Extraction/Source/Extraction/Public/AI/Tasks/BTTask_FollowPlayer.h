@@ -17,6 +17,7 @@ public:
 
 	virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 	virtual void TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds) override;
+	virtual void OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult) override;
 	virtual FString GetStaticDescription() const override;
 
 protected:
@@ -42,12 +43,6 @@ protected:
 	/** Always sprint (used for revive branch) */
 	UPROPERTY(EditAnywhere, Category = "Follow")
 	bool bSprintToTarget = false;
-
-	UPROPERTY(EditAnywhere, Category = "Follow", meta = (ClampMin = "100.0"))
-	float WalkSpeed = 400.0f;
-
-	UPROPERTY(EditAnywhere, Category = "Follow", meta = (ClampMin = "100.0"))
-	float SprintSpeed = 650.0f;
 
 private:
 	FVector LastMoveTarget = FVector::ZeroVector;
