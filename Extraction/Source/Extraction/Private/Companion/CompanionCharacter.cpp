@@ -61,6 +61,11 @@ void ACompanionCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// The constructor's `MaxWalkSpeed = WalkSpeed` runs with the C++ default value before
+	// BP CDO overrides apply. Re-apply once BP-overridden WalkSpeed/SprintSpeed are live so
+	// initial MaxWalkSpeed matches what OnRep_IsSprinting will set after the first toggle.
+	OnRep_IsSprinting();
+
 	if (HealthComponent && !HealthComponent->OnDeath.IsAlreadyBound(this, &ACompanionCharacter::HandleDeath))
 		HealthComponent->OnDeath.AddDynamic(this, &ACompanionCharacter::HandleDeath);
 
@@ -136,13 +141,24 @@ void ACompanionCharacter::SetSprinting(bool bSprint)
 	if (bIsSprinting == bSprint) return;
 
 	bIsSprinting = bSprint;
+	UE_LOG(LogCompanion, Log, TEXT("Companion sprint -> %s (MaxWalkSpeed will be %.0f)"),
+		bSprint ? TEXT("ON") : TEXT("OFF"),
+		bSprint ? SprintSpeed : WalkSpeed);
 	OnRep_IsSprinting();
 }
 
 void ACompanionCharacter::OnRep_IsSprinting()
 {
 	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
 		MoveComp->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
+		UE_LOG(LogCompanion, Log, TEXT("[Companion] OnRep_IsSprinting: bIsSprinting=%d -> MaxWalkSpeed now %.0f (HasAuth=%d)"),
+			bIsSprinting ? 1 : 0, MoveComp->MaxWalkSpeed, HasAuthority() ? 1 : 0);
+	}
+	else
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("[Companion] OnRep_IsSprinting: NO CharacterMovement component!"));
+	}
 }
 
 void ACompanionCharacter::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
