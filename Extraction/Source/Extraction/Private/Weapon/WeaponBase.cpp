@@ -15,6 +15,7 @@
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
 #include "Engine/DamageEvents.h"
+#include "EngineUtils.h"
 #include "DrawDebugHelpers.h"
 #include "Extraction.h"
 
@@ -251,6 +252,28 @@ void AWeaponBase::PerformHitscan()
 	QueryParams.AddIgnoredActor(this);
 	QueryParams.AddIgnoredActor(OwnerChar);
 	QueryParams.bReturnPhysicalMaterial = false;
+
+	// Friendly-fire prevention: AI-owned weapons ignore the player + all companions.
+	// (Player-fired shots still trace normally — only AI uses teammate filtering.)
+	const bool bAIOwned = !IsValid(PC);
+	if (bAIOwned)
+	{
+		if (UWorld* QueryWorld = GetWorld())
+		{
+			if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(QueryWorld, 0))
+			{
+				if (PlayerChar != OwnerChar)
+					QueryParams.AddIgnoredActor(PlayerChar);
+			}
+
+			for (TActorIterator<ACompanionCharacter> It(QueryWorld); It; ++It)
+			{
+				ACompanionCharacter* Teammate = *It;
+				if (IsValid(Teammate) && Teammate != OwnerChar)
+					QueryParams.AddIgnoredActor(Teammate);
+			}
+		}
+	}
 
 	if (UWorld* World = GetWorld())
 	{
