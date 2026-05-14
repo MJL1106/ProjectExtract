@@ -28,6 +28,8 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	if (!IsValid(OwningCompanion) || !IsValid(MovementComponent)) return;
 
+	CurrentPosture = OwningCompanion->GetPosture();
+
 	const FVector Velocity = MovementComponent->Velocity;
 	Speed = Velocity.Size2D();
 	bHasVelocity = Speed > 1.f;
@@ -148,4 +150,60 @@ bool UCompanionAnimInstance::HasMontageForType(ETraversalType Type) const
 	case ETraversalType::SprintJump: return IsValid(SprintJumpMontage);
 	default: return false;
 	}
+}
+
+namespace
+{
+	constexpr float CoverBlendOutTime = 0.15f;
+}
+
+void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide)
+{
+	// Stop any active cover/peek montage before switching pose.
+	if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage))
+		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage);
+	if (IsValid(CoverIdleRightMontage) && Montage_IsPlaying(CoverIdleRightMontage))
+		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage);
+	if (IsValid(CoverPeekLeftMontage) && Montage_IsPlaying(CoverPeekLeftMontage))
+		Montage_Stop(CoverBlendOutTime, CoverPeekLeftMontage);
+	if (IsValid(CoverPeekRightMontage) && Montage_IsPlaying(CoverPeekRightMontage))
+		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage);
+
+	UAnimMontage* IdleMontage = (DefaultSide == EPeekSide::Left) ? CoverIdleLeftMontage : CoverIdleRightMontage;
+	if (IsValid(IdleMontage))
+		Montage_Play(IdleMontage, 1.f);
+
+	bInCover = true;
+	ActivePeekSide = DefaultSide;
+}
+
+void UCompanionAnimInstance::ExitCoverPose()
+{
+	if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage))
+		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage);
+	if (IsValid(CoverIdleRightMontage) && Montage_IsPlaying(CoverIdleRightMontage))
+		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage);
+	if (IsValid(CoverPeekLeftMontage) && Montage_IsPlaying(CoverPeekLeftMontage))
+		Montage_Stop(CoverBlendOutTime, CoverPeekLeftMontage);
+	if (IsValid(CoverPeekRightMontage) && Montage_IsPlaying(CoverPeekRightMontage))
+		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage);
+
+	bInCover = false;
+}
+
+UAnimMontage* UCompanionAnimInstance::PlayPeekFire(EPeekSide Side, float PlayRate)
+{
+	// Stop cover-idle montages so the peek montage owns the body slot.
+	if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage))
+		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage);
+	if (IsValid(CoverIdleRightMontage) && Montage_IsPlaying(CoverIdleRightMontage))
+		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage);
+
+	UAnimMontage* PeekMontage = (Side == EPeekSide::Left) ? CoverPeekLeftMontage : CoverPeekRightMontage;
+	ActivePeekSide = Side;
+
+	if (!IsValid(PeekMontage)) return nullptr;
+
+	Montage_Play(PeekMontage, PlayRate);
+	return PeekMontage;
 }

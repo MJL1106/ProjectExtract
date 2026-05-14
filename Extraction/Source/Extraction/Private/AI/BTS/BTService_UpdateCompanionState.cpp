@@ -6,6 +6,8 @@
 #include "Perception/AISense_Sight.h"
 #include "CompanionAIController.h" // for LogCompanionAI
 #include "CompanionCharacter.h"
+#include "AI/CompanionTuningDataAsset.h"
+#include "Companion/CompanionTypes.h"
 #include "ExtractionCharacter.h"
 #include "HealthComponent.h"
 #include "ExtractionTypes.h"
@@ -135,6 +137,45 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		BB->ClearValue(CombatTargetKey.SelectedKeyName);
 		if (bDebugLogging)
 			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: no valid target in perception"), *Companion->GetName());
+	}
+
+	// --- Posture transitions (server-side; SetPosture gates on HasAuthority) ---
+	const ECompanionPosture CurrentPosture = Companion->GetPosture();
+	const AActor* TargetAfterUpdate = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName));
+	const bool bHasTarget = IsValid(TargetAfterUpdate);
+
+	if (bHasTarget && CurrentPosture != ECompanionPosture::Combat && CurrentPosture != ECompanionPosture::Stealth)
+	{
+		Companion->SetPosture(ECompanionPosture::Combat);
+		OutOfCombatTimer = 0.f;
+	}
+	else if (!bHasTarget && CurrentPosture == ECompanionPosture::Combat)
+	{
+		OutOfCombatTimer += DeltaSeconds;
+		if (OutOfCombatTimer >= ExploreReturnDelay)
+		{
+			Companion->SetPosture(ECompanionPosture::Exploration);
+			OutOfCombatTimer = 0.f;
+		}
+	}
+	else if (bHasTarget)
+	{
+		// Target re-acquired (either already in Combat or in Stealth which never auto-transitions).
+		OutOfCombatTimer = 0.f;
+	}
+
+	// --- Posture-driven scoring weights + posture mirror to BB ---
+	const ECompanionPosture SettledPosture = Companion->GetPosture();
+	BB->SetValueAsEnum(ACompanionAIController::BB_Posture, static_cast<uint8>(SettledPosture));
+
+	if (const UCompanionTuningDataAsset* Tuning = Controller->GetTuning())
+	{
+		if (const FCompanionPostureProfile* Profile = Tuning->PostureProfiles.Find(SettledPosture))
+		{
+			BB->SetValueAsFloat(ACompanionAIController::BB_ScoringWeight_LoSPlayer, Profile->ScoringWeight_LoSPlayer);
+			BB->SetValueAsFloat(ACompanionAIController::BB_ScoringWeight_AvoidEnemy, Profile->ScoringWeight_AvoidEnemy);
+			BB->SetValueAsFloat(ACompanionAIController::BB_ScoringWeight_CoverFromTarget, Profile->ScoringWeight_CoverFromTarget);
+		}
 	}
 }
 

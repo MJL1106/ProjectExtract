@@ -5,10 +5,12 @@
 #include "CoreMinimal.h"
 #include "Animation/AnimInstance.h"
 #include "Movement/TraversalTypes.h"
+#include "Companion/CompanionTypes.h"
 #include "CompanionAnimInstance.generated.h"
 
 class ACompanionCharacter;
 class UCharacterMovementComponent;
+class UAnimMontage;
 
 UCLASS()
 class EXTRACTION_API UCompanionAnimInstance : public UAnimInstance
@@ -39,6 +41,26 @@ public:
 	/** Returns true if a montage asset is configured for the given traversal type. Cheap — pointer check only. */
 	UFUNCTION(BlueprintPure, Category = "Animation|Actions")
 	bool HasMontageForType(ETraversalType Type) const;
+
+	// --- Cover Pose Interface ---
+
+	/** Enter cover idle pose on the given side. Stops any active cover/peek montage first. */
+	UFUNCTION(BlueprintCallable, Category = "Cover")
+	void EnterCoverPose(EPeekSide DefaultSide);
+
+	/** Stop active cover/peek montages with a short blend out. */
+	UFUNCTION(BlueprintCallable, Category = "Cover")
+	void ExitCoverPose();
+
+	/** Play the matching peek montage; returns it so caller can bind OnMontageEnded. */
+	UFUNCTION(BlueprintCallable, Category = "Cover")
+	UAnimMontage* PlayPeekFire(EPeekSide Side, float PlayRate = 1.f);
+
+	UFUNCTION(BlueprintPure, Category = "Cover")
+	bool IsInCover() const { return bInCover; }
+
+	UFUNCTION(BlueprintPure, Category = "Cover")
+	EPeekSide GetActivePeekSide() const { return ActivePeekSide; }
 
 protected:
 	// --- Cached Refs ---
@@ -138,4 +160,27 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Traversal")
 	TObjectPtr<UAnimMontage> SprintJumpMontage;
+
+	// --- Cover Montages (designer-assigned on ABP_Companion) ---
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverIdleLeftMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverIdleRightMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekLeftMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekRightMontage;
+
+	// --- Posture mirror (read each tick in NativeUpdateAnimation) ---
+
+	UPROPERTY(BlueprintReadOnly, Category = "Companion")
+	ECompanionPosture CurrentPosture = ECompanionPosture::Exploration;
+
+private:
+	bool bInCover = false;
+	EPeekSide ActivePeekSide = EPeekSide::Right;
 };

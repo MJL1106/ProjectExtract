@@ -7,6 +7,7 @@
 #include "GameplayTagAssetInterface.h"
 #include "GameplayTagContainer.h"
 #include "Movement/TraversalTypes.h"
+#include "Companion/CompanionTypes.h"
 #include "CompanionCharacter.generated.h"
 
 class UHealthComponent;
@@ -15,6 +16,8 @@ class UCompanionAnimInstance;
 class UTraversalComponent;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionPostureChanged, ECompanionPosture, NewPosture);
 
 UCLASS(Blueprintable)
 class EXTRACTION_API ACompanionCharacter : public ACharacter, public IGameplayTagAssetInterface
@@ -85,6 +88,25 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
 	UTraversalComponent* GetTraversalComponent() const { return TraversalComponent; }
+
+	// --- Posture ---
+
+	UFUNCTION(BlueprintPure, Category = "Companion")
+	ECompanionPosture GetPosture() const { return Posture; }
+
+	UFUNCTION(BlueprintCallable, Category = "Companion")
+	void SetPosture(ECompanionPosture NewPosture);
+
+	UPROPERTY(BlueprintAssignable, Category = "Companion")
+	FOnCompanionPostureChanged OnPostureChanged;
+
+protected:
+
+	UPROPERTY(ReplicatedUsing = OnRep_Posture)
+	ECompanionPosture Posture = ECompanionPosture::Exploration;
+
+	UFUNCTION()
+	void OnRep_Posture();
 
 protected:
 	virtual void BeginPlay() override;

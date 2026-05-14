@@ -33,6 +33,10 @@ public:
 	static const FName BB_PlayerTraversalObstacle;
 	static const FName BB_PlayerTraversalLanding;
 	static const FName BB_PlayerTraversalType;
+	static const FName BB_Posture;                       // enum: ECompanionPosture
+	static const FName BB_ScoringWeight_LoSPlayer;       // float
+	static const FName BB_ScoringWeight_AvoidEnemy;      // float
+	static const FName BB_ScoringWeight_CoverFromTarget; // float
 
 	UFUNCTION(BlueprintPure, Category = "Companion|AI")
 	AExtractionCharacter* GetPlayerCharacter() const { return CachedPlayerCharacter; }
