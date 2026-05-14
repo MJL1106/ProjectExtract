@@ -6,6 +6,9 @@
 #include "AI/CompanionAIController.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
+#include "EnvironmentQuery/EnvQuery.h"
+#include "EnvironmentQuery/EnvQueryManager.h"
+#include "EnvironmentQuery/EnvQueryTypes.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Navigation/PathFollowingComponent.h"
 
@@ -13,6 +16,7 @@ UBTTask_FollowPlayer::UBTTask_FollowPlayer()
 {
 	NodeName = TEXT("Follow Player");
 	bNotifyTick = true;
+	bNotifyTaskFinished = true; // REQUIRED — OnTaskFinished clears sprint latch (c62bdbf regression vector)
 	bCreateNodeInstance = true; // bIsIdling / LastMoveTarget are per-instance state — must stay true
 }
 
@@ -33,11 +37,19 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 
 	CachedController = AIC;
 	CachedCompanion = Companion;
+	CachedOwnerComp = &OwnerComp;
 
 	LastMoveTarget = FVector::ZeroVector;
 	bIsIdling = false;
 
-	UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] ExecuteTask START — bSprintToTarget=%d"), bSprintToTarget ? 1 : 0);
+	// Reset EQS slot state — stale slots from a previous run must not bleed into this one.
+	bEqsQueryInProgress = false;
+	bHasEqsTarget = false;
+	TimeSinceLastEqs = EqsQueryInterval; // allow an immediate query on first tick
+	EqsTarget = FVector::ZeroVector;
+
+	UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] ExecuteTask START — bSprintToTarget=%d EQS=%s"),
+		bSprintToTarget ? 1 : 0, FollowSlotQuery ? TEXT("set") : TEXT("none"));
 
 	// Clear any stale sprint flag from a prior abort (e.g. combat or revive re-entry).
 	// Skip for sprint-to-target so the revive branch keeps sprint speed on entry.
@@ -123,8 +135,7 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	bIsIdling = false;
 
-	// Calculate formation offset using player's movement direction when moving,
-	// or the vector from player to companion when stationary (keeps current side)
+	// Calculate formation offset (fallback when EQS slot is unavailable).
 	const ACharacter* PlayerChar = Cast<ACharacter>(Player);
 	FVector FormationDir;
 
@@ -142,19 +153,54 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		FormationDir = PlayerLocation + ToCompanion * T->FormationOffsetBack;
 	}
 
+	// Kick an async EQS request periodically when a query asset is set. EqsTarget overrides
+	// FormationDir when valid; otherwise we fall through to the formation target unchanged.
+	TimeSinceLastEqs += DeltaSeconds;
+	if (FollowSlotQuery && !bEqsQueryInProgress && TimeSinceLastEqs >= EqsQueryInterval)
+	{
+		bEqsQueryInProgress = true;
+		TimeSinceLastEqs = 0.f;
+		FEnvQueryRequest QueryRequest(FollowSlotQuery, Companion);
+		QueryRequest.Execute(EEnvQueryRunMode::SingleResult,
+			FQueryFinishedSignature::CreateUObject(this, &UBTTask_FollowPlayer::OnFollowQueryFinished));
+	}
+
+	const FVector MoveTarget = bHasEqsTarget ? EqsTarget : FormationDir;
+
+	// Sprint catch-up + idle hysteresis still keyed on DistToPlayer (not the slot).
+	// SetSprinting MUST stay before any early-return — preserves the c62bdbf sprint-latch fix.
 	const bool bWantSprint = DistToPlayer > T->SprintDistanceThreshold;
-	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f Thresh=%.0f -> SetSprinting(%d)"),
-		DistToPlayer, T->SprintDistanceThreshold, bWantSprint ? 1 : 0);
+	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f Thresh=%.0f EqsSlot=%d -> SetSprinting(%d)"),
+		DistToPlayer, T->SprintDistanceThreshold, bHasEqsTarget ? 1 : 0, bWantSprint ? 1 : 0);
 
 	Companion->SetSprinting(bWantSprint);
 
 	// Only re-issue move if target shifted significantly
-	if (FVector::Dist(FormationDir, LastMoveTarget) < 200.0f)
+	if (FVector::Dist(MoveTarget, LastMoveTarget) < 200.0f)
 		return;
 
-	LastMoveTarget = FormationDir;
+	LastMoveTarget = MoveTarget;
 
-	Controller->MoveToLocation(FormationDir, T->AcceptableRadius * 0.5f, false, true, false, true);
+	Controller->MoveToLocation(MoveTarget, T->AcceptableRadius * 0.5f, false, true, false, true);
+}
+
+void UBTTask_FollowPlayer::OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Result)
+{
+	bEqsQueryInProgress = false;
+
+	// Stale-callback guard — task may have been aborted/reset between dispatch and callback.
+	// CachedOwnerComp is cleared in OnTaskFinished, so its absence means a stale fire.
+	if (!CachedOwnerComp || !CachedCompanion.IsValid()) return;
+
+	if (Result.IsValid() && Result->IsSuccessful() && Result->Items.Num() > 0)
+	{
+		EqsTarget = Result->GetItemAsLocation(0);
+		bHasEqsTarget = true;
+	}
+	else
+	{
+		bHasEqsTarget = false;
+	}
 }
 
 void UBTTask_FollowPlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult)
@@ -164,6 +210,10 @@ void UBTTask_FollowPlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uin
 	if (ACompanionCharacter* Companion = CachedCompanion.Get())
 		Companion->SetSprinting(false);
 
+	bEqsQueryInProgress = false;
+	bHasEqsTarget = false;
+	EqsTarget = FVector::ZeroVector;
+	CachedOwnerComp = nullptr;
 	CachedController.Reset();
 	CachedCompanion.Reset();
 

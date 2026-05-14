@@ -4,7 +4,38 @@
 
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
+#include "Companion/CompanionTypes.h"
 #include "CompanionTuningDataAsset.generated.h"
+
+USTRUCT(BlueprintType)
+struct FCompanionPostureProfile
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category="Formation")
+	float FormationOffsetBack = 350.f;
+
+	UPROPERTY(EditAnywhere, Category="Formation")
+	float FormationOffsetRight = 200.f;
+
+	UPROPERTY(EditAnywhere, Category="Formation")
+	float AcceptableRadius = 250.f;
+
+	UPROPERTY(EditAnywhere, Category="Formation")
+	float SprintDistanceThreshold = 1000.f;
+
+	UPROPERTY(EditAnywhere, Category="Formation", meta=(ClampMin="0.1", ClampMax="2.0"))
+	float MaxFollowSpeedMultiplier = 1.f;
+
+	UPROPERTY(EditAnywhere, Category="Scoring")
+	float ScoringWeight_LoSPlayer = 1.f;
+
+	UPROPERTY(EditAnywhere, Category="Scoring")
+	float ScoringWeight_AvoidEnemy = 1.f;
+
+	UPROPERTY(EditAnywhere, Category="Scoring")
+	float ScoringWeight_CoverFromTarget = 1.f;
+};
 
 UCLASS(BlueprintType)
 class EXTRACTION_API UCompanionTuningDataAsset : public UDataAsset
@@ -12,6 +43,9 @@ class EXTRACTION_API UCompanionTuningDataAsset : public UDataAsset
 	GENERATED_BODY()
 
 public:
+	UPROPERTY(EditAnywhere, Category="Companion|Posture")
+	TMap<ECompanionPosture, FCompanionPostureProfile> PostureProfiles;
+
 	// --- Follow / formation (migrated from BTTask_FollowPlayer) ---
 
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation")

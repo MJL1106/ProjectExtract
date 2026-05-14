@@ -1,13 +1,50 @@
-// BT task — companion faces enemy, fires in bursts with settling inaccuracy, reloads.
+// BT task — cover-aware companion combat. State machine drives EngageFromOpen, EngageFromCover, PeekFire.
 
 #include "BTTask_CompanionCombat.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "CompanionAIController.h" // for LogCompanionAI
 #include "CompanionCharacter.h"
+#include "Animation/CompanionAnimInstance.h"
 #include "WeaponBase.h"
 #include "HealthComponent.h"
 #include "DrawDebugHelpers.h"
+
+namespace
+{
+	struct FCombatContext
+	{
+		ACompanionCharacter* Companion = nullptr;
+		AActor* Target = nullptr;
+		UBlackboardComponent* Blackboard = nullptr;
+	};
+
+	static EPeekSide ResolvePeekSide(const FVector& CoverLoc, const FVector& TargetLoc, const FVector& CompanionLoc)
+	{
+		FVector ApproachDir = (CoverLoc - CompanionLoc);
+		ApproachDir.Z = 0.f;
+		if (!ApproachDir.Normalize()) return EPeekSide::Right;
+
+		const FVector WallRight = FVector::CrossProduct(FVector::UpVector, ApproachDir).GetSafeNormal();
+		FVector TargetOffset = (TargetLoc - CoverLoc);
+		TargetOffset.Z = 0.f;
+		TargetOffset = TargetOffset.GetSafeNormal();
+
+		const float Dot = FVector::DotProduct(TargetOffset, WallRight);
+		return (Dot > 0.f) ? EPeekSide::Right : EPeekSide::Left;
+	}
+
+	static bool ReadCoverState(const UBlackboardComponent* BB,
+		const FBlackboardKeySelector& HasCoverKey,
+		const FBlackboardKeySelector& CoverLocKey,
+		FVector& OutCoverLoc)
+	{
+		if (!BB) return false;
+		if (!BB->GetValueAsBool(HasCoverKey.SelectedKeyName)) return false;
+		OutCoverLoc = BB->GetValueAsVector(CoverLocKey.SelectedKeyName);
+		return !OutCoverLoc.IsNearlyZero();
+	}
+}
 
 UBTTask_CompanionCombat::UBTTask_CompanionCombat()
 {
@@ -19,19 +56,37 @@ UBTTask_CompanionCombat::UBTTask_CompanionCombat()
 
 EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
-	AActor* Target = Cast<AActor>(OwnerComp.GetBlackboardComponent()->GetValueAsObject(CombatTargetKey.SelectedKeyName));
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	if (!BB) return EBTNodeResult::Failed;
+
+	AActor* Target = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName));
 	if (!IsValid(Target)) return EBTNodeResult::Failed;
 
-	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(OwnerComp.GetAIOwner()->GetPawn());
+	AAIController* AICtl = OwnerComp.GetAIOwner();
+	ACompanionCharacter* Companion = AICtl ? Cast<ACompanionCharacter>(AICtl->GetPawn()) : nullptr;
 	if (!Companion) return EBTNodeResult::Failed;
 
 	Companion->SetAimTarget(Target);
 	BurstTimer = 0.0f;
 	bIsFiringBurst = false;
+	TimeInCoverIdle = 0.f;
+	PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 
-	// Always warn (not gated) — a missing weapon means the task will silently do nothing forever.
+	// Reset peek-resolve cache so first tick always resolves.
+	LastPeekResolveCoverLoc = FVector::ZeroVector;
+	LastPeekResolveTargetLoc = FVector::ZeroVector;
+
 	if (!Companion->GetCurrentWeapon())
 		UE_LOG(LogCompanionAI, Warning, TEXT("%s: combat task started but CurrentWeapon is null"), *Companion->GetName());
+
+	// Choose initial state based on cover availability.
+	FVector CoverLoc;
+	if (ReadCoverState(BB, HasCoverPositionKey, CoverLocationKey, CoverLoc))
+	{
+		ResolvedPeekSide = ResolvePeekSide(CoverLoc, Target->GetActorLocation(), Companion->GetActorLocation());
+		if (UCompanionAnimInstance* Anim = Cast<UCompanionAnimInstance>(Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
+			Anim->EnterCoverPose(ResolvedPeekSide);
+	}
 
 	if (bDebugLogging)
 	{
@@ -43,145 +98,307 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	return EBTNodeResult::InProgress;
 }
 
-void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
+namespace
 {
-	AAIController* Controller = OwnerComp.GetAIOwner();
-	if (!Controller) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-
-	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Controller->GetPawn());
-	if (!Companion) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-
-	// Validate target
-	AActor* Target = Cast<AActor>(OwnerComp.GetBlackboardComponent()->GetValueAsObject(CombatTargetKey.SelectedKeyName));
-	if (!IsValid(Target))
+	// Helper — read companion + target from owner/BB. Returns false if either is invalid.
+	static bool ResolveCombatContext(UBehaviorTreeComponent& OwnerComp,
+		const FBlackboardKeySelector& CombatTargetKey,
+		FCombatContext& Out)
 	{
-		Companion->StopWeaponFire();
-		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		AAIController* Controller = OwnerComp.GetAIOwner();
+		if (!Controller) return false;
+
+		Out.Companion = Cast<ACompanionCharacter>(Controller->GetPawn());
+		if (!Out.Companion) return false;
+
+		Out.Blackboard = OwnerComp.GetBlackboardComponent();
+		if (!Out.Blackboard) return false;
+
+		Out.Target = Cast<AActor>(Out.Blackboard->GetValueAsObject(CombatTargetKey.SelectedKeyName));
+		if (!IsValid(Out.Target)) return false;
+
+		UHealthComponent* TargetHealth = Out.Target->FindComponentByClass<UHealthComponent>();
+		if (TargetHealth && TargetHealth->IsDead()) return false;
+
+		return true;
 	}
 
-	UHealthComponent* TargetHealth = Target->FindComponentByClass<UHealthComponent>();
-	if (TargetHealth && TargetHealth->IsDead())
+	static UCompanionAnimInstance* GetCompanionAnim(ACompanionCharacter* Companion)
 	{
-		Companion->StopWeaponFire();
-		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		if (!IsValid(Companion)) return nullptr;
+		USkeletalMeshComponent* Mesh = Companion->GetMesh();
+		if (!IsValid(Mesh)) return nullptr;
+		return Cast<UCompanionAnimInstance>(Mesh->GetAnimInstance());
 	}
 
-	Companion->SetAimTarget(Target);
-
-	const FVector MyLocation = Companion->GetActorLocation();
-	const FVector TargetLocation = Target->GetActorLocation();
-	const float Distance = FVector::Dist(MyLocation, TargetLocation);
-
-	// Range check
-	if (Distance > Companion->MaxEngageRange)
+	// Returns true if LOS from FromLoc to ToTarget is clear (ignoring Companion + its weapon).
+	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy)
 	{
-		Companion->StopWeaponFire();
-		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: OUT OF RANGE dist=%.0f > MaxRange=%.0f -> Failed"),
-				*Companion->GetName(), Distance, Companion->MaxEngageRange);
-#if ENABLE_DRAW_DEBUG
-		if (bDebugLogging)
-			DrawDebugLine(Companion->GetWorld(), MyLocation, TargetLocation, FColor::Yellow, false, 0.5f, 0, 2.0f);
-#endif
-		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-	}
+		OutBlockedBy = nullptr;
+		if (!World || !IsValid(ToTarget) || !IsValid(Companion)) return false;
 
-	// Rotate toward target
-	const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
-	const FRotator DesiredRot = FRotator(0.0f, LookAtRot.Yaw, 0.0f);
-	Companion->SetActorRotation(
-		FMath::RInterpTo(Companion->GetActorRotation(), DesiredRot, DeltaSeconds, Companion->RotationInterpSpeed));
-
-	// Reload if needed
-	if (Companion->NeedsReload() && !Companion->IsReloading())
-	{
-		Companion->StopWeaponFire();
-		Companion->ReloadWeapon();
-		bIsFiringBurst = false;
-		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: reloading"), *Companion->GetName());
-		return;
-	}
-
-	// Don't fire while reloading
-	if (Companion->IsReloading()) return;
-
-	// Line-of-sight check
-	const UWorld* World = Companion->GetWorld();
-	bool bLineOfSight = true;
-	AActor* BlockedBy = nullptr;
-	if (World)
-	{
 		FHitResult Hit;
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(Companion);
 		QueryParams.AddIgnoredActor(Companion->GetCurrentWeapon());
 
-		const bool bHit = World->LineTraceSingleByChannel(Hit, MyLocation, TargetLocation, ECC_Visibility, QueryParams);
-		if (bHit && Hit.GetActor() != Target)
+		const FVector ToLoc = ToTarget->GetActorLocation();
+		const bool bHit = World->LineTraceSingleByChannel(Hit, FromLoc, ToLoc, ECC_Visibility, QueryParams);
+		if (bHit && Hit.GetActor() != ToTarget)
 		{
-			bLineOfSight = false;
-			BlockedBy = Hit.GetActor();
-
-			// Blocked — stop firing, wait
-			if (bIsFiringBurst)
-			{
-				Companion->StopWeaponFire();
-				bIsFiringBurst = false;
-			}
-			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: LOS BLOCKED by %s"),
-					*Companion->GetName(), *GetNameSafe(BlockedBy));
-#if ENABLE_DRAW_DEBUG
-			if (bDebugLogging)
-				DrawDebugLine(World, MyLocation, Hit.ImpactPoint, FColor::Red, false, 0.25f, 0, 2.0f);
-#endif
-			return;
+			OutBlockedBy = Hit.GetActor();
+			return false;
 		}
+		return true;
+	}
+}
+
+void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
+{
+	FCombatContext Ctx;
+	if (!ResolveCombatContext(OwnerComp, CombatTargetKey, Ctx))
+	{
+		// Target invalid / dead / controller missing — clean up and exit.
+		if (Ctx.Companion) Ctx.Companion->StopWeaponFire();
+		// Succeed if the target died; fail otherwise. Match prior behaviour: if no controller/pawn -> Failed.
+		AAIController* Controller = OwnerComp.GetAIOwner();
+		ACompanionCharacter* Companion = Controller ? Cast<ACompanionCharacter>(Controller->GetPawn()) : nullptr;
+		if (!Companion) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+
+		AActor* Target = Cast<AActor>(OwnerComp.GetBlackboardComponent() ? OwnerComp.GetBlackboardComponent()->GetValueAsObject(CombatTargetKey.SelectedKeyName) : nullptr);
+		if (!IsValid(Target)) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+
+		UHealthComponent* TargetHealth = Target->FindComponentByClass<UHealthComponent>();
+		const EBTNodeResult::Type Result = (TargetHealth && TargetHealth->IsDead())
+			? EBTNodeResult::Succeeded : EBTNodeResult::Failed;
+		return FinishLatentTask(OwnerComp, Result);
 	}
 
-	// Burst fire logic
+	Ctx.Companion->SetAimTarget(Ctx.Target);
+
+	const FVector MyLocation = Ctx.Companion->GetActorLocation();
+	const FVector TargetLocation = Ctx.Target->GetActorLocation();
+	const float Distance = FVector::Dist(MyLocation, TargetLocation);
+
+	// Range check (applies to all states — out of range aborts the engagement).
+	if (Distance > Ctx.Companion->MaxEngageRange)
+	{
+		Ctx.Companion->StopWeaponFire();
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: OUT OF RANGE dist=%.0f > MaxRange=%.0f -> Failed"),
+				*Ctx.Companion->GetName(), Distance, Ctx.Companion->MaxEngageRange);
+#if ENABLE_DRAW_DEBUG
+		if (bDebugLogging)
+			DrawDebugLine(Ctx.Companion->GetWorld(), MyLocation, TargetLocation, FColor::Yellow, false, 0.5f, 0, 2.0f);
+#endif
+		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	}
+
+	// Decide state for this tick by reading the cover BB keys live each frame.
+	FVector CoverLoc;
+	const bool bHasCover = ReadCoverState(Ctx.Blackboard, HasCoverPositionKey, CoverLocationKey, CoverLoc);
+
+	UCompanionAnimInstance* Anim = GetCompanionAnim(Ctx.Companion);
+
+	// --- ENGAGE FROM COVER (cover-idle, no firing) ---
+	if (bHasCover && !bIsFiringBurst)
+	{
+		// Resolve / refresh peek side only when geometry has changed beyond threshold.
+		const float CoverDeltaSq = FVector::DistSquared(CoverLoc, LastPeekResolveCoverLoc);
+		const float TargetDeltaSq = FVector::DistSquared(TargetLocation, LastPeekResolveTargetLoc);
+		if (CoverDeltaSq > PeekResolveDistThresholdSq || TargetDeltaSq > PeekResolveDistThresholdSq)
+		{
+			ResolvedPeekSide = ResolvePeekSide(CoverLoc, TargetLocation, MyLocation);
+			LastPeekResolveCoverLoc = CoverLoc;
+			LastPeekResolveTargetLoc = TargetLocation;
+		}
+
+		// Rotate to face the cover line of approach (looks toward the target's general direction).
+		const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
+		const FRotator DesiredRot = FRotator(0.0f, LookAtRot.Yaw, 0.0f);
+		Ctx.Companion->SetActorRotation(
+			FMath::RInterpTo(Ctx.Companion->GetActorRotation(), DesiredRot, DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
+
+		// Idle dwell + peek cooldown gating.
+		TimeInCoverIdle += DeltaSeconds;
+		const bool bDwellReady = TimeInCoverIdle >= MinCoverIdleDwell;
+		const bool bCooldownReady = TimeInCoverIdle >= MinCoverIdleDwell + PeekCooldown;
+
+		if (!bDwellReady || !bCooldownReady) return;
+
+		// LOS-from-cover check: only peek if we can actually see the target from the cover slot.
+		AActor* BlockedBy = nullptr;
+		const bool bLosFromCover = HasLineOfSight(Ctx.Companion->GetWorld(), CoverLoc, Ctx.Target, Ctx.Companion, BlockedBy);
+		if (!bLosFromCover)
+		{
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: cover-LOS blocked by %s — holding idle"),
+					*Ctx.Companion->GetName(), *GetNameSafe(BlockedBy));
+			return;
+		}
+
+		// Begin peek-fire. Reload check before peeking — don't peek with an empty mag.
+		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
+		{
+			Ctx.Companion->ReloadWeapon();
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: reloading before peek"), *Ctx.Companion->GetName());
+			return;
+		}
+		if (Ctx.Companion->IsReloading()) return;
+
+		if (Anim) Anim->PlayPeekFire(ResolvedPeekSide);
+		Ctx.Companion->StartWeaponFire();
+		bIsFiringBurst = true;
+		BurstTimer = FireBurstDuration;
+		TimeInCoverIdle = 0.f;
+
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: PEEK-FIRE start side=%s"),
+				*Ctx.Companion->GetName(), ResolvedPeekSide == EPeekSide::Right ? TEXT("Right") : TEXT("Left"));
+		return;
+	}
+
+	// --- PEEK FIRE (mid-burst) ---
+	if (bIsFiringBurst && bHasCover)
+	{
+		BurstTimer -= DeltaSeconds;
+
+		// Reload mid-burst still applies — but stop fire first.
+		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
+		{
+			Ctx.Companion->StopWeaponFire();
+			Ctx.Companion->ReloadWeapon();
+			bIsFiringBurst = false;
+			if (Anim) Anim->EnterCoverPose(ResolvedPeekSide);
+			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
+			TimeInCoverIdle = 0.f;
+			return;
+		}
+
+		if (BurstTimer <= 0.f)
+		{
+			// Burst ended — return to cover-idle.
+			Ctx.Companion->StopWeaponFire();
+			bIsFiringBurst = false;
+			if (Anim) Anim->EnterCoverPose(ResolvedPeekSide);
+			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
+			TimeInCoverIdle = 0.f;
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: PEEK-FIRE end -> cover idle (next cooldown=%.2fs)"),
+					*Ctx.Companion->GetName(), PeekCooldown);
+		}
+		return;
+	}
+
+	// --- ENGAGE FROM OPEN (no cover available — preserved naive behaviour) ---
+	// Clean up any in-progress burst from cover/peek before falling through.
+	// (Cover invalidated mid-burst would otherwise leak bIsFiringBurst + BurstTimer.)
+	if (bIsFiringBurst)
+	{
+		Ctx.Companion->StopWeaponFire();
+		bIsFiringBurst = false;
+		BurstTimer = 0.f;
+	}
+
+	// If we were in cover this frame but bHasCover flipped false, leave cover pose first.
+	if (Anim && Anim->IsInCover() && !bHasCover)
+		Anim->ExitCoverPose();
+
+	// Rotate toward target
+	const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
+	const FRotator DesiredRot = FRotator(0.0f, LookAtRot.Yaw, 0.0f);
+	Ctx.Companion->SetActorRotation(
+		FMath::RInterpTo(Ctx.Companion->GetActorRotation(), DesiredRot, DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
+
+	// Reload if needed
+	if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
+	{
+		Ctx.Companion->StopWeaponFire();
+		Ctx.Companion->ReloadWeapon();
+		bIsFiringBurst = false;
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: reloading"), *Ctx.Companion->GetName());
+		return;
+	}
+
+	// Don't fire while reloading
+	if (Ctx.Companion->IsReloading()) return;
+
+	// Line-of-sight check — inlined here so the debug draw can reuse the same FHitResult.
+	FHitResult LosHit;
+	{
+		FCollisionQueryParams QueryParams;
+		QueryParams.AddIgnoredActor(Ctx.Companion);
+		QueryParams.AddIgnoredActor(Ctx.Companion->GetCurrentWeapon());
+		Ctx.Companion->GetWorld()->LineTraceSingleByChannel(LosHit, MyLocation, TargetLocation, ECC_Visibility, QueryParams);
+	}
+	const bool bLineOfSight = (!LosHit.bBlockingHit) || (LosHit.GetActor() == Ctx.Target);
+	if (!bLineOfSight)
+	{
+		AActor* BlockedBy = LosHit.GetActor();
+		if (bIsFiringBurst)
+		{
+			Ctx.Companion->StopWeaponFire();
+			bIsFiringBurst = false;
+		}
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: LOS BLOCKED by %s"),
+				*Ctx.Companion->GetName(), *GetNameSafe(BlockedBy));
+#if ENABLE_DRAW_DEBUG
+		if (bDebugLogging)
+			DrawDebugLine(Ctx.Companion->GetWorld(), MyLocation, LosHit.ImpactPoint, FColor::Red, false, 0.25f, 0, 2.0f);
+#endif
+		return;
+	}
+
+	// Burst fire logic (preserved)
 	BurstTimer -= DeltaSeconds;
 
 	if (bIsFiringBurst && BurstTimer <= 0.0f)
 	{
-		// End burst
-		Companion->StopWeaponFire();
+		Ctx.Companion->StopWeaponFire();
 		bIsFiringBurst = false;
 		BurstTimer = FirePauseDuration;
 		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: burst END"), *Companion->GetName());
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: burst END"), *Ctx.Companion->GetName());
 	}
 	else if (!bIsFiringBurst && BurstTimer <= 0.0f)
 	{
-		// Start new burst. Body stays on the smooth look-at interp above; the weapon applies
-		// spread to the fire direction via Companion->GetCurrentInaccuracy() in WeaponBase.
-		Companion->StartWeaponFire();
+		Ctx.Companion->StartWeaponFire();
 		bIsFiringBurst = true;
 		BurstTimer = FireBurstDuration;
 		if (bDebugLogging)
 			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: burst START (inaccuracy=%.1f deg)"),
-				*Companion->GetName(), Companion->GetCurrentInaccuracy());
+				*Ctx.Companion->GetName(), Ctx.Companion->GetCurrentInaccuracy());
 	}
 
 #if ENABLE_DRAW_DEBUG
-	// Green line while actively firing + LOS clear
-	if (bDebugLogging && bIsFiringBurst && bLineOfSight)
-		DrawDebugLine(World, MyLocation, TargetLocation, FColor::Green, false, 0.1f, 0, 1.5f);
+	if (bDebugLogging && bIsFiringBurst)
+		DrawDebugLine(Ctx.Companion->GetWorld(), MyLocation, TargetLocation, FColor::Green, false, 0.1f, 0, 1.5f);
 #endif
 }
 
 void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult)
 {
-	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(OwnerComp.GetAIOwner()->GetPawn());
+	AAIController* Controller = OwnerComp.GetAIOwner();
+	ACompanionCharacter* Companion = Controller ? Cast<ACompanionCharacter>(Controller->GetPawn()) : nullptr;
 	if (Companion)
 	{
 		Companion->StopWeaponFire();
 		Companion->SetAimTarget(nullptr);
+
+		if (UCompanionAnimInstance* Anim = GetCompanionAnim(Companion))
+			Anim->ExitCoverPose();
 	}
+
+	bIsFiringBurst = false;
+	BurstTimer = 0.f;
+	TimeInCoverIdle = 0.f;
 }
 
 FString UBTTask_CompanionCombat::GetStaticDescription() const
 {
-	return FString::Printf(TEXT("Combat (burst: %.1fs fire, %.1fs pause)"), FireBurstDuration, FirePauseDuration);
+	return FString::Printf(TEXT("Cover-aware Combat (burst: %.1fs fire, %.1fs pause; peek cd %.1f-%.1fs)"),
+		FireBurstDuration, FirePauseDuration, MinPeekCooldown, MaxPeekCooldown);
 }

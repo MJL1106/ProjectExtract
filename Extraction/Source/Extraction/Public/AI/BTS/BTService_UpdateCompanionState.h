@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "BehaviorTree/BTService.h"
 #include "BehaviorTree/BehaviorTreeTypes.h"
+#include "Companion/CompanionTypes.h"
 #include "BTService_UpdateCompanionState.generated.h"
 
 UCLASS()
@@ -35,4 +36,10 @@ protected:
 	/** Toggle verbose perception/target logs under LogCompanionAI. Enable per-instance in BT. */
 	UPROPERTY(EditAnywhere, Category = "Debug")
 	bool bDebugLogging = false;
+
+	UPROPERTY(EditAnywhere, Category = "Posture", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float ExploreReturnDelay = 3.f;
+
+private:
+	float OutOfCombatTimer = 0.f;
 };

@@ -48,7 +48,7 @@ void ACompanionCharacter::PostInitializeComponents()
 	// Catch the most common BP misconfiguration: no weapon class assigned.
 	// Runs once on spawn, server only (weapon is server-spawned).
 	if (HasAuthority() && !WeaponClass)
-		UE_LOG(LogCompanionAI, Warning, TEXT("%s has no WeaponClass assigned - companion will never fire"), *GetName());
+		UE_LOG(LogCompanion, Warning, TEXT("%s has no WeaponClass assigned - companion will never fire"), *GetName());
 
 	if (IsValid(TraversalComponent))
 	{
@@ -131,6 +131,28 @@ void ACompanionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, bIsSprinting, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(ACompanionCharacter, Posture, COND_SkipOwner);
+}
+
+// --- Posture API ---
+
+void ACompanionCharacter::SetPosture(ECompanionPosture NewPosture)
+{
+	if (!HasAuthority()) return;
+	if (NewPosture == Posture) return;
+
+	// Invariant: Posture MUST be assigned before OnRep_Posture broadcast.
+	// Handlers reading GetPosture() during the broadcast must see the new value.
+	// OnRep_Posture performs no state mutation — re-entry safe.
+	Posture = NewPosture;
+	UE_LOG(LogCompanion, Log, TEXT("Companion posture -> %s"), *UEnum::GetValueAsString(Posture));
+	OnRep_Posture();
+}
+
+void ACompanionCharacter::OnRep_Posture()
+{
+	// No state mutation — broadcast only. See SetPosture for ordering invariant.
+	OnPostureChanged.Broadcast(Posture);
 }
 
 // --- Sprint API ---

@@ -39,6 +39,10 @@ const FName ACompanionAIController::BB_PlayerTraversalActive(TEXT("PlayerTravers
 const FName ACompanionAIController::BB_PlayerTraversalObstacle(TEXT("PlayerTraversalObstacle"));
 const FName ACompanionAIController::BB_PlayerTraversalLanding(TEXT("PlayerTraversalLanding"));
 const FName ACompanionAIController::BB_PlayerTraversalType(TEXT("PlayerTraversalType"));
+const FName ACompanionAIController::BB_Posture(TEXT("Posture"));
+const FName ACompanionAIController::BB_ScoringWeight_LoSPlayer(TEXT("ScoringWeight_LoSPlayer"));
+const FName ACompanionAIController::BB_ScoringWeight_AvoidEnemy(TEXT("ScoringWeight_AvoidEnemy"));
+const FName ACompanionAIController::BB_ScoringWeight_CoverFromTarget(TEXT("ScoringWeight_CoverFromTarget"));
 
 ACompanionAIController::ACompanionAIController()
 {
