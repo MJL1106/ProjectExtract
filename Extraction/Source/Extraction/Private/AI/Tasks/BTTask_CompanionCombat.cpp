@@ -44,6 +44,47 @@ namespace
 		OutCoverLoc = BB->GetValueAsVector(CoverLocKey.SelectedKeyName);
 		return !OutCoverLoc.IsNearlyZero();
 	}
+
+	// Returns true if LOS from FromLoc to ToTarget is clear (ignoring Companion + its weapon).
+	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy)
+	{
+		OutBlockedBy = nullptr;
+		if (!World || !IsValid(ToTarget) || !IsValid(Companion)) return false;
+
+		FHitResult Hit;
+		FCollisionQueryParams QueryParams;
+		QueryParams.AddIgnoredActor(Companion);
+		QueryParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+
+		const FVector ToLoc = ToTarget->GetActorLocation();
+		const bool bHit = World->LineTraceSingleByChannel(Hit, FromLoc, ToLoc, ECC_Visibility, QueryParams);
+		if (bHit && Hit.GetActor() != ToTarget)
+		{
+			OutBlockedBy = Hit.GetActor();
+			return false;
+		}
+		return true;
+	}
+
+	// Returns true if a stand-height trace from cover to target's eye is BLOCKED — meaning the
+	// cover is too tall for the companion to fire over (would shoot the wall instead of the enemy).
+	static bool IsCoverTooTallToFireOver(UWorld* World, const FVector& CoverLoc, AActor* Target,
+		ACompanionCharacter* Companion, float StandFireHeightOffset, float TargetEyeHeightOffset)
+	{
+		if (!World || !IsValid(Target) || !IsValid(Companion)) return false;
+
+		const FVector StandOrigin = CoverLoc + FVector(0.f, 0.f, StandFireHeightOffset);
+		const FVector TargetEye = Target->GetActorLocation() + FVector(0.f, 0.f, TargetEyeHeightOffset);
+
+		FCollisionQueryParams Params;
+		Params.AddIgnoredActor(Companion);
+		Params.AddIgnoredActor(Companion->GetCurrentWeapon());
+		Params.AddIgnoredActor(Target);
+
+		FHitResult Hit;
+		const bool bBlocked = World->LineTraceSingleByChannel(Hit, StandOrigin, TargetEye, ECC_Visibility, Params);
+		return bBlocked && Hit.GetActor() != Target;
+	}
 }
 
 UBTTask_CompanionCombat::UBTTask_CompanionCombat()
@@ -142,47 +183,6 @@ namespace
 		USkeletalMeshComponent* Mesh = Companion->GetMesh();
 		if (!IsValid(Mesh)) return nullptr;
 		return Cast<UCompanionAnimInstance>(Mesh->GetAnimInstance());
-	}
-
-	// Returns true if LOS from FromLoc to ToTarget is clear (ignoring Companion + its weapon).
-	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy)
-	{
-		OutBlockedBy = nullptr;
-		if (!World || !IsValid(ToTarget) || !IsValid(Companion)) return false;
-
-		FHitResult Hit;
-		FCollisionQueryParams QueryParams;
-		QueryParams.AddIgnoredActor(Companion);
-		QueryParams.AddIgnoredActor(Companion->GetCurrentWeapon());
-
-		const FVector ToLoc = ToTarget->GetActorLocation();
-		const bool bHit = World->LineTraceSingleByChannel(Hit, FromLoc, ToLoc, ECC_Visibility, QueryParams);
-		if (bHit && Hit.GetActor() != ToTarget)
-		{
-			OutBlockedBy = Hit.GetActor();
-			return false;
-		}
-		return true;
-	}
-
-	// Returns true if a stand-height trace from cover to target's eye is BLOCKED — meaning the
-	// cover is too tall for the companion to fire over (would shoot the wall instead of the enemy).
-	static bool IsCoverTooTallToFireOver(UWorld* World, const FVector& CoverLoc, AActor* Target,
-		ACompanionCharacter* Companion, float StandFireHeightOffset, float TargetEyeHeightOffset)
-	{
-		if (!World || !IsValid(Target) || !IsValid(Companion)) return false;
-
-		const FVector StandOrigin = CoverLoc + FVector(0.f, 0.f, StandFireHeightOffset);
-		const FVector TargetEye = Target->GetActorLocation() + FVector(0.f, 0.f, TargetEyeHeightOffset);
-
-		FCollisionQueryParams Params;
-		Params.AddIgnoredActor(Companion);
-		Params.AddIgnoredActor(Companion->GetCurrentWeapon());
-		Params.AddIgnoredActor(Target);
-
-		FHitResult Hit;
-		const bool bBlocked = World->LineTraceSingleByChannel(Hit, StandOrigin, TargetEye, ECC_Visibility, Params);
-		return bBlocked && Hit.GetActor() != Target;
 	}
 }
 
