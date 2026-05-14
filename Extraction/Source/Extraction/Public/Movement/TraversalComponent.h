@@ -4,8 +4,11 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "Engine/EngineTypes.h"
 #include "TraversalTypes.h"
 #include "TraversalComponent.generated.h"
+
+struct FCollisionQueryParams;
 
 class ACharacter;
 class UCharacterMovementComponent;
@@ -13,7 +16,9 @@ class UCapsuleComponent;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogTraversal, Log, All);
 
-DECLARE_MULTICAST_DELEGATE_TwoParams(FOnTraversalStarted, ETraversalType, float /*PlayRate*/);
+DECLARE_MULTICAST_DELEGATE_FourParams(FOnTraversalStarted,
+	ETraversalType, float /*PlayRate*/,
+	FVector /*ObstacleLocation*/, FVector /*LandingLocation*/);
 DECLARE_MULTICAST_DELEGATE(FOnTraversalEnded);
 
 UCLASS(ClassGroup=(Movement), meta=(BlueprintSpawnableComponent))
@@ -26,6 +31,7 @@ public:
 	UTraversalComponent();
 
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
@@ -35,6 +41,17 @@ public:
 	bool DetectTraversalAhead(FVector& OutSnapTarget, ETraversalType& OutType);
 	void ExecuteByType(ETraversalType Type, bool bWasSprinting);
 	void CancelTraversal();
+
+	/**
+	 * Authored-traversal entry point — used by ATraversalNavLink smart-link callbacks.
+	 * Skips the trace-based obstacle detection because Start/End are supplied by the
+	 * nav-link. Still performs a short clearance check at End so we don't drop into
+	 * a wall, and broadcasts OnTraversalStarted so listeners (e.g. CompanionAIController
+	 * BB writes, owner's montage playback) fire identically to the trace-based path.
+	 * Returns false if the clearance check fails or no montage is configured for Type.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Movement|Traversal")
+	bool TryStartTraversalFromNavLink(ETraversalType Type, const FVector& Start, const FVector& End, float PlayRate = 1.f);
 
 	UFUNCTION(BlueprintPure, Category = "Movement|Traversal")
 	bool IsInTraversal() const { return ActiveTraversalType != ETraversalType::None; }
@@ -155,6 +172,13 @@ protected:
 		meta = (ClampMin = "0.5", ClampMax = "3.0"))
 	float MantleSprintPlayRate = 1.0f;
 
+	// ---- Safety ----
+
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Safety",
+		meta = (ClampMin = "0.5", ClampMax = "10.0",
+			ToolTip = "Worst-case time before the traversal is force-ended even if the montage end delegate never fires. Tune to longest expected montage + buffer."))
+	float WorstCaseTraversalDuration = 3.0f;
+
 	// ---- Debug ----
 
 	UPROPERTY(EditAnywhere, Category = "Movement|Debug",
@@ -171,9 +195,10 @@ private:
 	// ---- Detection Helpers ----
 
 	ETraversalType PerformTraversalDetection();
-	bool TraceForwardForWall(FHitResult& OutHit) const;
-	bool TraceDownForSurface(const FHitResult& WallHit, FHitResult& OutSurfaceHit) const;
-	bool CheckClearance(const FVector& SurfaceLocation, float ForwardOffset) const;
+	bool TraceForwardForWall(FHitResult& OutHit, const FCollisionQueryParams& IgnoreParams) const;
+	bool TraceDownForSurface(const FHitResult& WallHit, FHitResult& OutSurfaceHit, const FCollisionQueryParams& IgnoreParams) const;
+	bool CheckClearance(const FVector& SurfaceLocation, float ForwardOffset, const FCollisionQueryParams& IgnoreParams) const;
+	void BuildPawnIgnoreParams(FCollisionQueryParams& OutParams) const;
 
 	// ---- Traversal Execution ----
 
@@ -222,4 +247,7 @@ private:
 
 	/** Cached value of OwningCharacter->bUseControllerRotationYaw before traversal overrides it */
 	bool bSavedUseControllerRotationYaw = false;
+
+	/** Worst-case escape timer — force-ends traversal if the montage end delegate never fires. */
+	FTimerHandle WorstCaseTraversalEndHandle;
 };

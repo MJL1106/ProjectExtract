@@ -333,6 +333,19 @@ bool UExtractionAnimInstance::IsPlayingAnyTraversalMontage() const
 	return IsPlayingVaultMontage() || IsPlayingClimbMontage() || IsPlayingMantleMontage();
 }
 
+bool UExtractionAnimInstance::HasMontageForType(ETraversalType Type) const
+{
+	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
+	if (!IsValid(Data)) return false;
+	switch (Type)
+	{
+	case ETraversalType::Vault:  return IsValid(Data->VaultMontage);
+	case ETraversalType::Climb:  return IsValid(Data->ClimbMontage);
+	case ETraversalType::Mantle: return IsValid(Data->MantleMontage);
+	default: return false;
+	}
+}
+
 float UExtractionAnimInstance::PlaySprintJumpMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();

@@ -1,13 +1,25 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "TraversalComponent.h"
+#include "Animation/AnimInstance.h"
+#include "Animation/CompanionAnimInstance.h"
+#include "Animation/ExtractionAnimInstance.h"
+#include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "DrawDebugHelpers.h"
+#include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
-#include "Components/CapsuleComponent.h"
-#include "DrawDebugHelpers.h"
 #include "Net/UnrealNetwork.h"
+#include "TimerManager.h"
 
 DEFINE_LOG_CATEGORY(LogTraversal);
+
+static FString OwnerTag(const ACharacter* Char)
+{
+	return Char ? Char->GetName() : TEXT("(null)");
+}
 
 namespace TraversalConstants
 {
@@ -52,6 +64,14 @@ void UTraversalComponent::BeginPlay()
 	CachedCapsule = OwningCharacter->GetCapsuleComponent();
 }
 
+void UTraversalComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(WorstCaseTraversalEndHandle);
+
+	Super::EndPlay(EndPlayReason);
+}
+
 void UTraversalComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
@@ -75,11 +95,23 @@ void UTraversalComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 
 bool UTraversalComponent::TryStartTraversal(bool bWasSprinting)
 {
+	UE_LOG(LogTraversal, Verbose, TEXT("[TryStartTraversal] %s - start. Sprint=%d, IsInTraversal=%d, IsFalling=%d"),
+		*OwnerTag(OwningCharacter), bWasSprinting ? 1 : 0,
+		IsInTraversal() ? 1 : 0,
+		(CachedMovement && CachedMovement->IsFalling()) ? 1 : 0);
+
 	if (IsInTraversal()) return false;
 
 	const ETraversalType DetectedType = PerformTraversalDetection();
-	if (DetectedType == ETraversalType::None) return false;
 
+	if (DetectedType == ETraversalType::None)
+	{
+		UE_LOG(LogTraversal, Log, TEXT("[TryStartTraversal] %s - no traversal possible"), *OwnerTag(OwningCharacter));
+		return false;
+	}
+
+	UE_LOG(LogTraversal, Log, TEXT("[TryStartTraversal] %s - selected type=%d, starting"),
+		*OwnerTag(OwningCharacter), (int32)DetectedType);
 	bWasSprintingAtTraversalEntry = bWasSprinting;
 	ExecuteByType(DetectedType, bWasSprinting);
 	return true;
@@ -98,6 +130,91 @@ void UTraversalComponent::CancelTraversal()
 {
 	if (IsInTraversal())
 		EndTraversal();
+}
+
+bool UTraversalComponent::TryStartTraversalFromNavLink(ETraversalType Type, const FVector& Start, const FVector& End, float PlayRate)
+{
+	if (Type == ETraversalType::None)
+	{
+		UE_LOG(LogTraversal, Warning, TEXT("[NavLinkTraversal] %s - Type=None rejected"), *OwnerTag(OwningCharacter));
+		return false;
+	}
+
+	if (!IsValid(OwningCharacter) || !IsValid(CachedCapsule) || !IsValid(CachedMovement))
+	{
+		UE_LOG(LogTraversal, Warning, TEXT("[NavLinkTraversal] %s - missing owner/capsule/movement"), *OwnerTag(OwningCharacter));
+		return false;
+	}
+
+	if (IsInTraversal())
+	{
+		UE_LOG(LogTraversal, Log, TEXT("[NavLinkTraversal] %s - already in traversal, skip"), *OwnerTag(OwningCharacter));
+		return false;
+	}
+
+	// Verify the owning character has a montage for this traversal type — otherwise
+	// StartTraversal would put the character in MOVE_Flying / no-collision with no
+	// montage end delegate to fire EndTraversal. Caller relies on this returning false
+	// to fall back to teleport. DropDown intentionally has no montage today.
+	bool bHasMontage = false;
+	if (USkeletalMeshComponent* MeshComp = OwningCharacter->GetMesh())
+	{
+		if (UAnimInstance* AnimInst = MeshComp->GetAnimInstance())
+		{
+			if (const UCompanionAnimInstance* CompanionAnim = Cast<UCompanionAnimInstance>(AnimInst))
+				bHasMontage = CompanionAnim->HasMontageForType(Type);
+			else if (const UExtractionAnimInstance* ExtractionAnim = Cast<UExtractionAnimInstance>(AnimInst))
+				bHasMontage = ExtractionAnim->HasMontageForType(Type);
+		}
+	}
+	if (!bHasMontage)
+	{
+		UE_LOG(LogTraversal, Warning, TEXT("[NavLinkTraversal] %s - no montage configured for Type=%d, refusing — caller should teleport"),
+			*OwnerTag(OwningCharacter), (int32)Type);
+		return false;
+	}
+
+	// Build pawn-ignore list once for the clearance test below.
+	FCollisionQueryParams ClearParams;
+	BuildPawnIgnoreParams(ClearParams);
+
+	// Short clearance check at End so we don't drop into a wall.
+	const float CapsuleRadius = CachedCapsule->GetScaledCapsuleRadius();
+	const float CapsuleHalfHeight = CachedCapsule->GetScaledCapsuleHalfHeight();
+	const FVector ClearTest(End.X, End.Y, End.Z + CapsuleHalfHeight + TraversalConstants::SurfaceSkinOffset);
+	const FCollisionShape ClearShape = FCollisionShape::MakeCapsule(CapsuleRadius, CapsuleHalfHeight);
+
+	const bool bBlocked = GetWorld()->OverlapAnyTestByChannel(
+		ClearTest, FQuat::Identity, ECC_WorldStatic, ClearShape, ClearParams);
+	if (bBlocked)
+	{
+		UE_LOG(LogTraversal, Warning, TEXT("[NavLinkTraversal] %s - End clearance blocked at %s"),
+			*OwnerTag(OwningCharacter), *ClearTest.ToCompactString());
+		return false;
+	}
+
+	// Populate runtime state that StartTraversal / UpdateTraversal expect.
+	const FVector PathDir = (End - Start).GetSafeNormal();
+	VaultWallImpactPoint = Start;
+	VaultWallNormal = PathDir.IsNearlyZero() ? -OwningCharacter->GetActorForwardVector() : -PathDir;
+	VaultSurfaceLocation = Start;
+	VaultTargetLocation = End;
+	VaultSurfaceHeight = FMath::Abs(End.Z - Start.Z);
+
+	bWasSprintingAtTraversalEntry = false;
+
+	// StartTraversal sets ActiveTraversalType, switches to MOVE_Flying, disables capsule
+	// collision, and primes the snap interp — same setup the trace path uses.
+	StartTraversal(Type);
+
+	UE_LOG(LogTraversal, Log, TEXT("[NavLinkTraversal] %s - started Type=%d Start=%s End=%s PlayRate=%.2f"),
+		*OwnerTag(OwningCharacter), (int32)Type,
+		*Start.ToCompactString(), *End.ToCompactString(), PlayRate);
+
+	// Broadcast — owner's AnimInstance plays the montage and binds the end-delegate that
+	// eventually calls EndTraversal(); CompanionAIController writes BB keys.
+	OnTraversalStarted.Broadcast(Type, PlayRate, VaultSurfaceLocation, VaultTargetLocation);
+	return true;
 }
 
 void UTraversalComponent::ExecuteByType(ETraversalType Type, bool bWasSprinting)
@@ -120,43 +237,56 @@ void UTraversalComponent::ExecuteByType(ETraversalType Type, bool bWasSprinting)
 	case ETraversalType::Mantle:
 		PlayRate = bWasSprinting ? MantleSprintPlayRate : MantleWalkPlayRate;
 		break;
+	case ETraversalType::DropDown:
+	case ETraversalType::Jump:
+	case ETraversalType::SprintJump:
+		// Trace-detection never selects these — nav-link path uses TryStartTraversalFromNavLink.
+		break;
 	default:
 		break;
 	}
 
-	OnTraversalStarted.Broadcast(Type, PlayRate);
+	OnTraversalStarted.Broadcast(Type, PlayRate, VaultSurfaceLocation, VaultTargetLocation);
 }
 
 // ---- Detection ----
 
 ETraversalType UTraversalComponent::PerformTraversalDetection()
 {
-	if (!IsValid(OwningCharacter) || !IsValid(CachedCapsule)) return ETraversalType::None;
+	UE_LOG(LogTraversal, Verbose, TEXT("[Detection] %s - entering"), *OwnerTag(OwningCharacter));
+
+	if (!IsValid(OwningCharacter) || !IsValid(CachedCapsule))
+		return ETraversalType::None;
+
+	// Build the pawn-ignore list ONCE — the forward sweep, down trace, and clearance
+	// tests all need the same exclusions. Previously each call iterated TActorIterator<APawn>.
+	FCollisionQueryParams IgnoreParams;
+	BuildPawnIgnoreParams(IgnoreParams);
 
 	FHitResult WallHit;
-	if (!TraceForwardForWall(WallHit))
-	{
-		UE_LOG(LogTraversal, Verbose, TEXT("Traversal: No wall hit"));
-		return ETraversalType::None;
-	}
+	const bool bHitWall = TraceForwardForWall(WallHit, IgnoreParams);
+	UE_LOG(LogTraversal, Verbose, TEXT("[Detection] %s - forward wall trace: hit=%d"),
+		*OwnerTag(OwningCharacter), bHitWall ? 1 : 0);
+
+	if (!bHitWall) return ETraversalType::None;
 
 	if (IsValid(WallHit.GetActor()) && WallHit.GetActor()->IsA(APawn::StaticClass()))
 		return ETraversalType::None;
 
 	const FVector Forward = OwningCharacter->GetActorForwardVector();
 	const float FacingDot = FVector::DotProduct(WallHit.ImpactNormal, -Forward);
+	UE_LOG(LogTraversal, Verbose, TEXT("[Detection] %s - facing dot=%.2f (threshold=%.2f)"),
+		*OwnerTag(OwningCharacter), FacingDot, TraversalConstants::VaultWallFacingDotThreshold);
+
 	if (FacingDot < TraversalConstants::VaultWallFacingDotThreshold)
-	{
-		UE_LOG(LogTraversal, Verbose, TEXT("Traversal: Wall not facing us (dot=%.2f)"), FacingDot);
 		return ETraversalType::None;
-	}
 
 	FHitResult SurfaceHit;
-	if (!TraceDownForSurface(WallHit, SurfaceHit))
-	{
-		UE_LOG(LogTraversal, Verbose, TEXT("Traversal: No surface found above wall"));
-		return ETraversalType::None;
-	}
+	const bool bHitSurface = TraceDownForSurface(WallHit, SurfaceHit, IgnoreParams);
+	UE_LOG(LogTraversal, Verbose, TEXT("[Detection] %s - down surface trace: hit=%d"),
+		*OwnerTag(OwningCharacter), bHitSurface ? 1 : 0);
+
+	if (!bHitSurface) return ETraversalType::None;
 
 	const float CapsuleRadius = CachedCapsule->GetScaledCapsuleRadius();
 	const float CapsuleHalfHeight = CachedCapsule->GetScaledCapsuleHalfHeight();
@@ -166,6 +296,9 @@ ETraversalType UTraversalComponent::PerformTraversalDetection()
 	VaultWallImpactPoint = WallHit.ImpactPoint;
 	VaultSurfaceLocation = SurfaceHit.ImpactPoint;
 	VaultSurfaceHeight = SurfaceHit.ImpactPoint.Z - FeetZ;
+
+	UE_LOG(LogTraversal, Verbose, TEXT("[Detection] %s - height calc: feet=%.1f, surfaceTop=%.1f, height=%.1f"),
+		*OwnerTag(OwningCharacter), FeetZ, SurfaceHit.ImpactPoint.Z, VaultSurfaceHeight);
 
 	const float SurfOnTopOffset = CapsuleRadius + TraversalConstants::ClearanceBufferOffset;
 
@@ -178,15 +311,14 @@ ETraversalType UTraversalComponent::PerformTraversalDetection()
 	// Vault range
 	if (VaultSurfaceHeight >= VaultMinHeight && VaultSurfaceHeight <= VaultMaxHeight)
 	{
-		const bool bVaultClear = CheckClearance(SurfaceHit.ImpactPoint, VaultLandingForwardOffset);
+		const bool bVaultClear = CheckClearance(SurfaceHit.ImpactPoint, VaultLandingForwardOffset, IgnoreParams);
+		UE_LOG(LogTraversal, Verbose, TEXT("[Detection] %s - vault clearance ok=%d"),
+			*OwnerTag(OwningCharacter), bVaultClear ? 1 : 0);
 		if (bVaultClear)
 		{
 			bool bPreferClimb = false;
 			if (VaultSurfaceHeight >= ClimbMinHeight)
 			{
-				FCollisionQueryParams DropParams;
-				DropParams.AddIgnoredActor(OwningCharacter);
-
 				const FVector DropStart(
 					SurfaceHit.ImpactPoint.X + Forward.X * VaultLandingForwardOffset,
 					SurfaceHit.ImpactPoint.Y + Forward.Y * VaultLandingForwardOffset,
@@ -195,7 +327,7 @@ ETraversalType UTraversalComponent::PerformTraversalDetection()
 
 				FHitResult DropHit;
 				const bool bHitGround = GetWorld()->LineTraceSingleByChannel(
-					DropHit, DropStart, DropEnd, ECC_Visibility, DropParams);
+					DropHit, DropStart, DropEnd, ECC_Visibility, IgnoreParams);
 
 				bPreferClimb = bHitGround &&
 					(DropHit.ImpactPoint.Z > SurfaceHit.ImpactPoint.Z - TraversalConstants::DropThreshold);
@@ -203,6 +335,7 @@ ETraversalType UTraversalComponent::PerformTraversalDetection()
 
 			if (!bPreferClimb)
 			{
+				UE_LOG(LogTraversal, Log, TEXT("[Detection] %s - selected type=Vault"), *OwnerTag(OwningCharacter));
 				SetTargetLocation(VaultLandingForwardOffset);
 				return ETraversalType::Vault;
 			}
@@ -210,9 +343,10 @@ ETraversalType UTraversalComponent::PerformTraversalDetection()
 
 		if (VaultSurfaceHeight >= ClimbMinHeight)
 		{
-			const bool bClimbClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset);
+			const bool bClimbClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset, IgnoreParams);
 			if (bClimbClear)
 			{
+				UE_LOG(LogTraversal, Log, TEXT("[Detection] %s - selected type=Climb (vault-fallback)"), *OwnerTag(OwningCharacter));
 				SetTargetLocation(SurfOnTopOffset);
 				return ETraversalType::Climb;
 			}
@@ -222,9 +356,10 @@ ETraversalType UTraversalComponent::PerformTraversalDetection()
 	// Climb-only range
 	if (VaultSurfaceHeight > VaultMaxHeight && VaultSurfaceHeight <= ClimbMaxHeight)
 	{
-		const bool bClimbClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset);
+		const bool bClimbClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset, IgnoreParams);
 		if (bClimbClear)
 		{
+			UE_LOG(LogTraversal, Log, TEXT("[Detection] %s - selected type=Climb"), *OwnerTag(OwningCharacter));
 			SetTargetLocation(SurfOnTopOffset);
 			return ETraversalType::Climb;
 		}
@@ -233,18 +368,39 @@ ETraversalType UTraversalComponent::PerformTraversalDetection()
 	// Mantle range
 	if (VaultSurfaceHeight > ClimbMaxHeight && VaultSurfaceHeight <= MantleMaxHeight)
 	{
-		const bool bMantleClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset);
+		const bool bMantleClear = CheckClearance(SurfaceHit.ImpactPoint, SurfOnTopOffset, IgnoreParams);
 		if (bMantleClear)
 		{
+			UE_LOG(LogTraversal, Log, TEXT("[Detection] %s - selected type=Mantle"), *OwnerTag(OwningCharacter));
 			SetTargetLocation(SurfOnTopOffset);
 			return ETraversalType::Mantle;
 		}
 	}
 
+	UE_LOG(LogTraversal, Log, TEXT("[Detection] %s - no band matched (height=%.1f)"),
+		*OwnerTag(OwningCharacter), VaultSurfaceHeight);
 	return ETraversalType::None;
 }
 
-bool UTraversalComponent::TraceForwardForWall(FHitResult& OutHit) const
+void UTraversalComponent::BuildPawnIgnoreParams(FCollisionQueryParams& OutParams) const
+{
+	if (IsValid(OwningCharacter))
+		OutParams.AddIgnoredActor(OwningCharacter);
+
+	// Ignore all other pawns so player-on-obstacle / other AI bodies don't poison
+	// trace results (notably the down-trace finding a pawn capsule's top instead
+	// of the wall surface).
+	if (UWorld* TraceWorld = GetWorld())
+	{
+		for (TActorIterator<APawn> It(TraceWorld); It; ++It)
+		{
+			if (*It && *It != OwningCharacter)
+				OutParams.AddIgnoredActor(*It);
+		}
+	}
+}
+
+bool UTraversalComponent::TraceForwardForWall(FHitResult& OutHit, const FCollisionQueryParams& IgnoreParams) const
 {
 	if (!IsValid(CachedCapsule)) return false;
 
@@ -259,14 +415,14 @@ bool UTraversalComponent::TraceForwardForWall(FHitResult& OutHit) const
 	Start.Z = TraceHeight;
 	const FVector End = Start + Forward * VaultForwardTraceDistance;
 
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(OwningCharacter);
-
 	const FCollisionShape SweepShape = FCollisionShape::MakeSphere(VaultForwardTraceRadius);
 
 	const bool bHit = GetWorld()->SweepSingleByChannel(
 		OutHit, Start, End, FQuat::Identity,
-		ECC_Visibility, SweepShape, QueryParams);
+		ECC_Visibility, SweepShape, IgnoreParams);
+
+	UE_LOG(LogTraversal, Verbose, TEXT("[ForwardTrace] %s - Start=%s, End=%s, Radius=%.1f, ResultHit=%d"),
+		*OwnerTag(OwningCharacter), *Start.ToCompactString(), *End.ToCompactString(), VaultForwardTraceRadius, bHit ? 1 : 0);
 
 #if ENABLE_DRAW_DEBUG
 	if (bDrawDebugTraces)
@@ -283,7 +439,7 @@ bool UTraversalComponent::TraceForwardForWall(FHitResult& OutHit) const
 	return bHit;
 }
 
-bool UTraversalComponent::TraceDownForSurface(const FHitResult& WallHit, FHitResult& OutSurfaceHit) const
+bool UTraversalComponent::TraceDownForSurface(const FHitResult& WallHit, FHitResult& OutSurfaceHit, const FCollisionQueryParams& IgnoreParams) const
 {
 	if (!IsValid(CachedCapsule)) return false;
 
@@ -299,11 +455,12 @@ bool UTraversalComponent::TraceDownForSurface(const FHitResult& WallHit, FHitRes
 		FeetZ + MaxTraversalHeight + TraversalConstants::TraversalHeightTraceBuffer);
 	const FVector TraceEnd(LedgeOrigin.X, LedgeOrigin.Y, FeetZ);
 
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(OwningCharacter);
-
 	const bool bHit = GetWorld()->LineTraceSingleByChannel(
-		OutSurfaceHit, TraceStart, TraceEnd, ECC_Visibility, QueryParams);
+		OutSurfaceHit, TraceStart, TraceEnd, ECC_Visibility, IgnoreParams);
+
+	UE_LOG(LogTraversal, Verbose, TEXT("[DownTrace] %s - TraceStart=%s, TraceEnd=%s, ResultHit=%d, ImpactZ=%.1f"),
+		*OwnerTag(OwningCharacter), *TraceStart.ToCompactString(), *TraceEnd.ToCompactString(),
+		bHit ? 1 : 0, bHit ? OutSurfaceHit.ImpactPoint.Z : 0.f);
 
 #if ENABLE_DRAW_DEBUG
 	if (bDrawDebugTraces)
@@ -329,7 +486,7 @@ bool UTraversalComponent::TraceDownForSurface(const FHitResult& WallHit, FHitRes
 	return SurfaceHeight >= VaultMinHeight && SurfaceHeight <= MaxTraversalHeight;
 }
 
-bool UTraversalComponent::CheckClearance(const FVector& SurfaceLocation, float ForwardOffset) const
+bool UTraversalComponent::CheckClearance(const FVector& SurfaceLocation, float ForwardOffset, const FCollisionQueryParams& IgnoreParams) const
 {
 	if (!IsValid(CachedCapsule)) return false;
 
@@ -345,12 +502,13 @@ bool UTraversalComponent::CheckClearance(const FVector& SurfaceLocation, float F
 	const FCollisionShape TestShape = FCollisionShape::MakeCapsule(
 		CapsuleRadius, CapsuleHalfHeight);
 
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(OwningCharacter);
-
 	const bool bBlocked = GetWorld()->OverlapAnyTestByChannel(
 		TestLocation, FQuat::Identity,
-		ECC_WorldStatic, TestShape, QueryParams);
+		ECC_WorldStatic, TestShape, IgnoreParams);
+
+	UE_LOG(LogTraversal, Verbose, TEXT("[Clearance] %s - SurfaceLoc=%s, ForwardOffset=%.1f, TestLoc=%s, Blocked=%d"),
+		*OwnerTag(OwningCharacter), *SurfaceLocation.ToCompactString(), ForwardOffset,
+		*TestLocation.ToCompactString(), bBlocked ? 1 : 0);
 
 	return !bBlocked;
 }
@@ -389,6 +547,18 @@ void UTraversalComponent::StartTraversal(ETraversalType Type)
 
 	bIsSnappingToVault = true;
 	VaultSnapTimeRemaining = TraversalConstants::VaultSnapDuration;
+
+	// Worst-case escape timer — if the montage end delegate never fires (asset broken,
+	// montage interrupted by another animation, etc.), force-end the traversal so the
+	// character can't be stranded in MOVE_Flying + no-collision forever. Cleared in
+	// EndTraversal if the montage finishes normally first.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(WorstCaseTraversalEndHandle);
+		World->GetTimerManager().SetTimer(
+			WorstCaseTraversalEndHandle, this, &UTraversalComponent::EndTraversal,
+			WorstCaseTraversalDuration, false);
+	}
 }
 
 void UTraversalComponent::UpdateTraversal(float DeltaTime)
@@ -421,6 +591,9 @@ void UTraversalComponent::UpdateTraversal(float DeltaTime)
 void UTraversalComponent::EndTraversal()
 {
 	if (ActiveTraversalType == ETraversalType::None) return;
+
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(WorstCaseTraversalEndHandle);
 
 	ActiveTraversalType = ETraversalType::None;
 	bIsSnappingToVault = false;
@@ -459,5 +632,7 @@ void UTraversalComponent::OnRep_TraversalType()
 		break;
 	}
 
-	OnTraversalStarted.Broadcast(ActiveTraversalType, PlayRate);
+	// NOTE: VaultSurfaceLocation/VaultTargetLocation are not replicated; on remote clients these
+	// will be zero. Mirror feature binds to the locally-controlled player only (see plan §1).
+	OnTraversalStarted.Broadcast(ActiveTraversalType, PlayRate, VaultSurfaceLocation, VaultTargetLocation);
 }

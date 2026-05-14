@@ -300,7 +300,7 @@ protected:
 	void VaultStart(const FInputActionValue& Value);
 
 	/** Delegate handler: plays traversal montage on both 3P and 1P anim instances */
-	void HandleTraversalStarted(ETraversalType Type, float PlayRate);
+	void HandleTraversalStarted(ETraversalType Type, float PlayRate, FVector ObstacleLocation, FVector LandingLocation);
 
 	/** Delegate handler: post-traversal cleanup (sprint speed restore) */
 	void HandleTraversalEnded();

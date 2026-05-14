@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Animation/AnimInstance.h"
 #include "ExtractionTypes.h"
+#include "Movement/TraversalTypes.h"
 #include "ExtractionAnimInstance.generated.h"
 
 class AExtractionCharacter;
@@ -195,6 +196,10 @@ public:
 	/** Play the mantle/pull-up montage. Returns duration. */
 	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
 	float PlayMantleMontage(float PlayRate = 1.0f);
+
+	/** Returns true if a montage asset is configured for the given traversal type. Cheap — pointer check only. */
+	UFUNCTION(BlueprintPure, Category = "Animation|Actions")
+	bool HasMontageForType(ETraversalType Type) const;
 
 	/** Returns true if the mantle montage is currently playing. */
 	UFUNCTION(BlueprintPure, Category = "Animation|State")
