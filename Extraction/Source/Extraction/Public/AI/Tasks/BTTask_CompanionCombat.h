@@ -1,4 +1,4 @@
-// BT task — cover-aware companion combat. State machine drives EngageFromOpen, EngageFromCover, PeekFire.
+// BT task — cover-aware companion combat. State machine drives EngageFromOpen, EngageFromCover, StandUpFire.
 
 #pragma once
 
@@ -53,6 +53,18 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0"))
 	float MaxPeekCooldown = 1.4f;
 
+	/** Interval (seconds) between cover-validity LOS rechecks while in EngageFromCover. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.25", ClampMax = "5.0"))
+	float CoverValidityCheckInterval = 1.0f;
+
+	/** Minimum time at current cover before a failed re-eval can abandon the slot (prevents thrashing). */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float MinCoverDwellBeforeReEval = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category="Cover", meta=(ClampMin="0.0", ClampMax="200.0",
+		ToolTip="Z offset above target actor origin for the cover-validity LoS trace. ~60 for humanoids."))
+	float TargetEyeHeightOffset = 60.f;
+
 	/** Toggle verbose exit-gate logs + debug draw under LogCompanionAI. Enable per-instance in BT. */
 	UPROPERTY(EditAnywhere, Category = "Debug")
 	bool bDebugLogging = false;
@@ -64,6 +76,12 @@ private:
 	float TimeInCoverIdle = 0.f;
 	float PeekCooldown = 0.f;
 	EPeekSide ResolvedPeekSide = EPeekSide::Right;
+
+	/** Periodic cover-validity LOS accumulator (only ticks during EngageFromCover). */
+	float CoverValidityCheckTimer = 0.f;
+
+	/** How long companion has been at the current cover slot (only ticks during EngageFromCover). */
+	float TimeAtCurrentCover = 0.f;
 
 	/** Cached cover + target locations used for last peek-side resolution. Avoids per-tick recompute. */
 	FVector LastPeekResolveCoverLoc = FVector::ZeroVector;
