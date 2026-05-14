@@ -65,6 +65,14 @@ protected:
 		ToolTip="Z offset above target actor origin for the cover-validity LoS trace. ~60 for humanoids."))
 	float TargetEyeHeightOffset = 60.f;
 
+	UPROPERTY(EditAnywhere, Category="Cover", meta=(ClampMin="60.0", ClampMax="250.0",
+		ToolTip="Z offset above cover slot for the 'can fire over cover' trace. Standing height ~150."))
+	float StandFireHeightOffset = 150.f;
+
+	UPROPERTY(EditAnywhere, Category="Cover", meta=(ClampMin="0.0", ClampMax="100.0",
+		ToolTip="Z offset above cover slot for the 'still behind cover' validity trace. Crouching height ~30-60."))
+	float CrouchHideHeightOffset = 40.f;
+
 	/** Toggle verbose exit-gate logs + debug draw under LogCompanionAI. Enable per-instance in BT. */
 	UPROPERTY(EditAnywhere, Category = "Debug")
 	bool bDebugLogging = false;

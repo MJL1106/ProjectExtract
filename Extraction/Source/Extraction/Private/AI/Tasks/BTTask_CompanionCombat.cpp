@@ -85,9 +85,20 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	FVector CoverLoc;
 	if (ReadCoverState(BB, HasCoverPositionKey, CoverLocationKey, CoverLoc))
 	{
-		ResolvedPeekSide = ResolvePeekSide(CoverLoc, Target->GetActorLocation(), Companion->GetActorLocation());
-		if (UCompanionAnimInstance* Anim = Cast<UCompanionAnimInstance>(Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
-			Anim->EnterCoverPose(ResolvedPeekSide);
+		// Fast-fail: cover too tall to fire over -> invalidate now, drop into EngageFromOpen.
+		if (IsCoverTooTallToFireOver(Companion->GetWorld(), CoverLoc, Target, Companion,
+			StandFireHeightOffset, TargetEyeHeightOffset))
+		{
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: cover too tall to fire over — falling back to open"),
+				*Companion->GetName());
+			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+		}
+		else
+		{
+			ResolvedPeekSide = ResolvePeekSide(CoverLoc, Target->GetActorLocation(), Companion->GetActorLocation());
+			if (UCompanionAnimInstance* Anim = Cast<UCompanionAnimInstance>(Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
+				Anim->EnterCoverPose(ResolvedPeekSide);
+		}
 	}
 
 	if (bDebugLogging)
@@ -152,6 +163,26 @@ namespace
 			return false;
 		}
 		return true;
+	}
+
+	// Returns true if a stand-height trace from cover to target's eye is BLOCKED — meaning the
+	// cover is too tall for the companion to fire over (would shoot the wall instead of the enemy).
+	static bool IsCoverTooTallToFireOver(UWorld* World, const FVector& CoverLoc, AActor* Target,
+		ACompanionCharacter* Companion, float StandFireHeightOffset, float TargetEyeHeightOffset)
+	{
+		if (!World || !IsValid(Target) || !IsValid(Companion)) return false;
+
+		const FVector StandOrigin = CoverLoc + FVector(0.f, 0.f, StandFireHeightOffset);
+		const FVector TargetEye = Target->GetActorLocation() + FVector(0.f, 0.f, TargetEyeHeightOffset);
+
+		FCollisionQueryParams Params;
+		Params.AddIgnoredActor(Companion);
+		Params.AddIgnoredActor(Companion->GetCurrentWeapon());
+		Params.AddIgnoredActor(Target);
+
+		FHitResult Hit;
+		const bool bBlocked = World->LineTraceSingleByChannel(Hit, StandOrigin, TargetEye, ECC_Visibility, Params);
+		return bBlocked && Hit.GetActor() != Target;
 	}
 }
 
@@ -224,27 +255,49 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->SetActorRotation(
 			FMath::RInterpTo(Ctx.Companion->GetActorRotation(), DesiredRot, DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
 
-		// Periodic cover-validity recheck: if target now has clear LOS on our cover slot, re-eval.
+		// Periodic cover-validity recheck: two failure modes — target has LOS on cover (too short),
+		// or cover is too tall for companion to fire over. Both invalidate the slot.
 		CoverValidityCheckTimer += DeltaSeconds;
 		if (CoverValidityCheckTimer >= CoverValidityCheckInterval)
 		{
 			CoverValidityCheckTimer = 0.f;
+
 			const FVector TargetEye = TargetLocation + FVector(0.f, 0.f, TargetEyeHeightOffset);
 			FCollisionQueryParams ValidityParams;
 			ValidityParams.AddIgnoredActor(Ctx.Companion);
 			ValidityParams.AddIgnoredActor(Ctx.Companion->GetCurrentWeapon());
 			ValidityParams.AddIgnoredActor(Ctx.Target);
-			FHitResult ValidityHit;
-			const bool bBlocked = Ctx.Companion->GetWorld()->LineTraceSingleByChannel(
-				ValidityHit, CoverLoc, TargetEye, ECC_Visibility, ValidityParams);
 
-			if (!bBlocked && TimeAtCurrentCover >= MinCoverDwellBeforeReEval)
+			// Crouch trace: if target's eye sees the cover slot at crouch height, our cover is too short.
+			const FVector CrouchOrigin = CoverLoc + FVector(0.f, 0.f, CrouchHideHeightOffset);
+			FHitResult CrouchHit;
+			const bool bCrouchBlocked = Ctx.Companion->GetWorld()->LineTraceSingleByChannel(
+				CrouchHit, CrouchOrigin, TargetEye, ECC_Visibility, ValidityParams);
+
+			// Stand trace: if companion at stand height can't see target, cover is too tall to fire over.
+			const FVector StandOrigin = CoverLoc + FVector(0.f, 0.f, StandFireHeightOffset);
+			FHitResult StandHit;
+			const bool bStandBlocked = Ctx.Companion->GetWorld()->LineTraceSingleByChannel(
+				StandHit, StandOrigin, TargetEye, ECC_Visibility, ValidityParams);
+			const bool bTooTall = bStandBlocked && StandHit.GetActor() != Ctx.Target;
+
+			if (TimeAtCurrentCover >= MinCoverDwellBeforeReEval)
 			{
-				if (bDebugLogging)
-					UE_LOG(LogCompanionAI, Verbose, TEXT("%s: cover INVALID (target has LOS on cover) — re-evaluating"),
+				if (bTooTall)
+				{
+					UE_LOG(LogCompanionAI, Log, TEXT("%s: cover too tall to fire over — falling back to open"),
 						*Ctx.Companion->GetName());
-				Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
-				return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+					Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+					return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+				}
+				if (!bCrouchBlocked)
+				{
+					if (bDebugLogging)
+						UE_LOG(LogCompanionAI, Verbose, TEXT("%s: cover INVALID (target has LOS on cover) — re-evaluating"),
+							*Ctx.Companion->GetName());
+					Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+					return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+				}
 			}
 		}
 
