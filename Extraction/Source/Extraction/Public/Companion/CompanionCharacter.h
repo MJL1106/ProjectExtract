@@ -150,7 +150,7 @@ private:
 	void HandleDeath();
 
 	UFUNCTION()
-	void HandleTraversalStarted(ETraversalType Type, float PlayRate);
+	void HandleTraversalStarted(ETraversalType Type, float PlayRate, FVector ObstacleLocation, FVector LandingLocation);
 
 	UFUNCTION()
 	void HandleTraversalEnded();

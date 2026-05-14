@@ -247,7 +247,7 @@ void ACompanionCharacter::DestroyAfterDeath()
 
 // --- Traversal ---
 
-void ACompanionCharacter::HandleTraversalStarted(ETraversalType Type, float PlayRate)
+void ACompanionCharacter::HandleTraversalStarted(ETraversalType Type, float PlayRate, FVector /*ObstacleLocation*/, FVector /*LandingLocation*/)
 {
 	if (HasAuthority()) SetSprinting(false);
 

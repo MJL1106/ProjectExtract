@@ -122,13 +122,30 @@ float UCompanionAnimInstance::PlayTraversalMontage(ETraversalType Type, float Pl
 
 	switch (Type)
 	{
-	case ETraversalType::Vault:  Selected = VaultMontage;  break;
-	case ETraversalType::Climb:  Selected = ClimbMontage;  break;
-	case ETraversalType::Mantle: Selected = MantleMontage; break;
+	case ETraversalType::Vault:      Selected = VaultMontage;      break;
+	case ETraversalType::Climb:      Selected = ClimbMontage;      break;
+	case ETraversalType::Mantle:     Selected = MantleMontage;     break;
+	case ETraversalType::DropDown:   Selected = DropDownMontage;   break;
+	case ETraversalType::Jump:       Selected = JumpMontage;       break;
+	case ETraversalType::SprintJump: Selected = SprintJumpMontage; break;
 	default: return 0.f;
 	}
 
 	if (!IsValid(Selected)) return 0.f;
 
 	return Montage_Play(Selected, PlayRate);
+}
+
+bool UCompanionAnimInstance::HasMontageForType(ETraversalType Type) const
+{
+	switch (Type)
+	{
+	case ETraversalType::Vault:      return IsValid(VaultMontage);
+	case ETraversalType::Climb:      return IsValid(ClimbMontage);
+	case ETraversalType::Mantle:     return IsValid(MantleMontage);
+	case ETraversalType::DropDown:   return IsValid(DropDownMontage);
+	case ETraversalType::Jump:       return IsValid(JumpMontage);
+	case ETraversalType::SprintJump: return IsValid(SprintJumpMontage);
+	default: return false;
+	}
 }

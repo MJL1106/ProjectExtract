@@ -36,6 +36,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
 	float PlayTraversalMontage(ETraversalType Type, float PlayRate = 1.f);
 
+	/** Returns true if a montage asset is configured for the given traversal type. Cheap — pointer check only. */
+	UFUNCTION(BlueprintPure, Category = "Animation|Actions")
+	bool HasMontageForType(ETraversalType Type) const;
+
 protected:
 	// --- Cached Refs ---
 
@@ -125,4 +129,13 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Traversal")
 	TObjectPtr<UAnimMontage> MantleMontage;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Traversal")
+	TObjectPtr<UAnimMontage> DropDownMontage;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Traversal")
+	TObjectPtr<UAnimMontage> JumpMontage;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Animation|Traversal")
+	TObjectPtr<UAnimMontage> SprintJumpMontage;
 };

@@ -892,7 +892,7 @@ void AExtractionCharacter::VaultStart(const FInputActionValue& Value)
 	}
 }
 
-void AExtractionCharacter::HandleTraversalStarted(ETraversalType Type, float PlayRate)
+void AExtractionCharacter::HandleTraversalStarted(ETraversalType Type, float PlayRate, FVector /*ObstacleLocation*/, FVector /*LandingLocation*/)
 {
 	bIsSprinting = false;
 	bWantsToSprint = false;

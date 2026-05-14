@@ -12,8 +12,11 @@
 UENUM(BlueprintType)
 enum class ETraversalType : uint8
 {
-	None	UMETA(DisplayName = "None"),
-	Vault	UMETA(DisplayName = "Vault"),
-	Climb	UMETA(DisplayName = "Climb"),
-	Mantle	UMETA(DisplayName = "Mantle"),
+	None		UMETA(DisplayName = "None"),
+	Vault		UMETA(DisplayName = "Vault"),
+	Climb		UMETA(DisplayName = "Climb"),
+	Mantle		UMETA(DisplayName = "Mantle"),
+	DropDown	UMETA(DisplayName = "Drop Down"),
+	Jump		UMETA(DisplayName = "Jump"),
+	SprintJump	UMETA(DisplayName = "Sprint Jump"),
 };

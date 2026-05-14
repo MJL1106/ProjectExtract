@@ -3,6 +3,8 @@
 #include "BTTask_FollowPlayer.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
+#include "AI/CompanionAIController.h"
+#include "AI/CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Navigation/PathFollowingComponent.h"
@@ -16,11 +18,21 @@ UBTTask_FollowPlayer::UBTTask_FollowPlayer()
 
 EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
+	ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
+	const UCompanionTuningDataAsset* T = AIC ? AIC->GetTuning() : nullptr;
+	if (!T) return EBTNodeResult::Failed;
+
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	if (!BB) return EBTNodeResult::Failed;
 
 	AActor* Player = Cast<AActor>(BB->GetValueAsObject(PlayerActorKey.SelectedKeyName));
 	if (!IsValid(Player)) return EBTNodeResult::Failed;
+
+	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(AIC->GetPawn());
+	if (!Companion) return EBTNodeResult::Failed;
+
+	CachedController = AIC;
+	CachedCompanion = Companion;
 
 	LastMoveTarget = FVector::ZeroVector;
 	bIsIdling = false;
@@ -30,30 +42,25 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	// Clear any stale sprint flag from a prior abort (e.g. combat or revive re-entry).
 	// Skip for sprint-to-target so the revive branch keeps sprint speed on entry.
 	if (!bSprintToTarget)
-	{
-		if (AAIController* Controller = OwnerComp.GetAIOwner())
-		{
-			if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Controller->GetPawn()))
-				Companion->SetSprinting(false);
-		}
-	}
+		Companion->SetSprinting(false);
 
 	return EBTNodeResult::InProgress;
 }
 
 void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
-	AAIController* Controller = OwnerComp.GetAIOwner();
-	if (!Controller) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	ACompanionAIController* Controller = CachedController.Get();
+	ACompanionCharacter* Companion = CachedCompanion.Get();
+	if (!Controller || !Companion) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+
+	const UCompanionTuningDataAsset* T = Controller->GetTuning();
+	if (!T) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	if (!BB) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
 	AActor* Player = Cast<AActor>(BB->GetValueAsObject(PlayerActorKey.SelectedKeyName));
 	if (!IsValid(Player)) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-
-	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Controller->GetPawn());
-	if (!Companion) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
 	const FVector PlayerLocation = Player->GetActorLocation();
 	const FVector CompanionLocation = Companion->GetActorLocation();
@@ -69,7 +76,7 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	// (e.g. revive) can advance to the next task.
 	if (bSprintToTarget)
 	{
-		if (DistToPlayer <= AcceptableRadius)
+		if (DistToPlayer <= T->AcceptableRadius)
 		{
 			UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] SPRINT-TO-TARGET arrived (Dist=%.0f) — Succeed"), DistToPlayer);
 			Controller->StopMovement();
@@ -84,7 +91,7 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		if (FVector::Dist(PlayerLocation, LastMoveTarget) > 100.0f)
 		{
 			LastMoveTarget = PlayerLocation;
-			Controller->MoveToLocation(PlayerLocation, AcceptableRadius * 0.5f, false, true, false, true);
+			Controller->MoveToLocation(PlayerLocation, T->AcceptableRadius * 0.5f, false, true, false, true);
 		}
 		return;
 	}
@@ -92,7 +99,7 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	// --- Formation (non-sprint) mode: stay near the player indefinitely ---
 
 	// Close enough to player — stop and idle
-	if (DistToPlayer <= AcceptableRadius)
+	if (DistToPlayer <= T->AcceptableRadius)
 	{
 		if (!bIsIdling)
 		{
@@ -105,7 +112,7 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	}
 
 	// Hysteresis — don't re-engage movement until outside double the radius
-	if (bIsIdling && DistToPlayer < AcceptableRadius * 1.5f)
+	if (bIsIdling && DistToPlayer < T->AcceptableRadius * 1.5f)
 	{
 		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] HYSTERESIS return (Dist=%.0f, idling, no SetSprinting)"), DistToPlayer);
 		return;
@@ -126,18 +133,18 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		// Player is moving — formation behind their movement direction
 		const FVector MoveDir = PlayerChar->GetVelocity().GetSafeNormal2D();
 		const FVector MoveRight = FVector::CrossProduct(FVector::UpVector, MoveDir);
-		FormationDir = PlayerLocation - MoveDir * FormationOffsetBack + MoveRight * FormationOffsetRight;
+		FormationDir = PlayerLocation - MoveDir * T->FormationOffsetBack + MoveRight * T->FormationOffsetRight;
 	}
 	else
 	{
 		// Player stationary — just maintain distance, stay where we are relative to player
 		const FVector ToCompanion = (CompanionLocation - PlayerLocation).GetSafeNormal2D();
-		FormationDir = PlayerLocation + ToCompanion * FormationOffsetBack;
+		FormationDir = PlayerLocation + ToCompanion * T->FormationOffsetBack;
 	}
 
-	const bool bWantSprint = DistToPlayer > SprintDistanceThreshold;
+	const bool bWantSprint = DistToPlayer > T->SprintDistanceThreshold;
 	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f Thresh=%.0f -> SetSprinting(%d)"),
-		DistToPlayer, SprintDistanceThreshold, bWantSprint ? 1 : 0);
+		DistToPlayer, T->SprintDistanceThreshold, bWantSprint ? 1 : 0);
 
 	Companion->SetSprinting(bWantSprint);
 
@@ -147,25 +154,23 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	LastMoveTarget = FormationDir;
 
-	Controller->MoveToLocation(FormationDir, AcceptableRadius * 0.5f, false, true, false, true);
+	Controller->MoveToLocation(FormationDir, T->AcceptableRadius * 0.5f, false, true, false, true);
 }
 
 void UBTTask_FollowPlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult)
 {
 	UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] OnTaskFinished (result=%d) — clearing sprint"), (int32)TaskResult);
 
-	if (AAIController* Controller = OwnerComp.GetAIOwner())
-	{
-		if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Controller->GetPawn()))
-			Companion->SetSprinting(false);
-	}
+	if (ACompanionCharacter* Companion = CachedCompanion.Get())
+		Companion->SetSprinting(false);
+
+	CachedController.Reset();
+	CachedCompanion.Reset();
 
 	Super::OnTaskFinished(OwnerComp, NodeMemory, TaskResult);
 }
 
 FString UBTTask_FollowPlayer::GetStaticDescription() const
 {
-	return FString::Printf(TEXT("Follow player (offset: %.0f back, %.0f right)%s"),
-		FormationOffsetBack, FormationOffsetRight,
-		bSprintToTarget ? TEXT(" [SPRINT]") : TEXT(""));
+	return FString::Printf(TEXT("Follow Player%s"), bSprintToTarget ? TEXT(" [SPRINT]") : TEXT(""));
 }
