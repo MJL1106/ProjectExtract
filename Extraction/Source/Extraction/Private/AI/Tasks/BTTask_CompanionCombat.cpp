@@ -1,4 +1,4 @@
-// BT task — cover-aware companion combat. State machine drives EngageFromOpen, EngageFromCover, PeekFire.
+// BT task — cover-aware companion combat. State machine drives EngageFromOpen, EngageFromCover, StandUpFire.
 
 #include "BTTask_CompanionCombat.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -71,6 +71,8 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	bIsFiringBurst = false;
 	TimeInCoverIdle = 0.f;
 	PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
+	CoverValidityCheckTimer = 0.f;
+	TimeAtCurrentCover = 0.f;
 
 	// Reset peek-resolve cache so first tick always resolves.
 	LastPeekResolveCoverLoc = FVector::ZeroVector;
@@ -203,6 +205,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// --- ENGAGE FROM COVER (cover-idle, no firing) ---
 	if (bHasCover && !bIsFiringBurst)
 	{
+		// Accumulate dwell at this cover slot.
+		TimeAtCurrentCover += DeltaSeconds;
+
 		// Resolve / refresh peek side only when geometry has changed beyond threshold.
 		const float CoverDeltaSq = FVector::DistSquared(CoverLoc, LastPeekResolveCoverLoc);
 		const float TargetDeltaSq = FVector::DistSquared(TargetLocation, LastPeekResolveTargetLoc);
@@ -219,6 +224,30 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->SetActorRotation(
 			FMath::RInterpTo(Ctx.Companion->GetActorRotation(), DesiredRot, DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
 
+		// Periodic cover-validity recheck: if target now has clear LOS on our cover slot, re-eval.
+		CoverValidityCheckTimer += DeltaSeconds;
+		if (CoverValidityCheckTimer >= CoverValidityCheckInterval)
+		{
+			CoverValidityCheckTimer = 0.f;
+			const FVector TargetEye = TargetLocation + FVector(0.f, 0.f, TargetEyeHeightOffset);
+			FCollisionQueryParams ValidityParams;
+			ValidityParams.AddIgnoredActor(Ctx.Companion);
+			ValidityParams.AddIgnoredActor(Ctx.Companion->GetCurrentWeapon());
+			ValidityParams.AddIgnoredActor(Ctx.Target);
+			FHitResult ValidityHit;
+			const bool bBlocked = Ctx.Companion->GetWorld()->LineTraceSingleByChannel(
+				ValidityHit, CoverLoc, TargetEye, ECC_Visibility, ValidityParams);
+
+			if (!bBlocked && TimeAtCurrentCover >= MinCoverDwellBeforeReEval)
+			{
+				if (bDebugLogging)
+					UE_LOG(LogCompanionAI, Verbose, TEXT("%s: cover INVALID (target has LOS on cover) — re-evaluating"),
+						*Ctx.Companion->GetName());
+				Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+				return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+			}
+		}
+
 		// Idle dwell + peek cooldown gating.
 		TimeInCoverIdle += DeltaSeconds;
 		const bool bDwellReady = TimeInCoverIdle >= MinCoverIdleDwell;
@@ -226,7 +255,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		if (!bDwellReady || !bCooldownReady) return;
 
-		// LOS-from-cover check: only peek if we can actually see the target from the cover slot.
+		// LOS-from-cover check: only stand up if we can actually see the target from the cover slot.
 		AActor* BlockedBy = nullptr;
 		const bool bLosFromCover = HasLineOfSight(Ctx.Companion->GetWorld(), CoverLoc, Ctx.Target, Ctx.Companion, BlockedBy);
 		if (!bLosFromCover)
@@ -237,39 +266,51 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
-		// Begin peek-fire. Reload check before peeking — don't peek with an empty mag.
+		// Begin stand-up-fire. Reload check first — don't stand up with an empty mag.
 		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
 		{
 			Ctx.Companion->ReloadWeapon();
 			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: reloading before peek"), *Ctx.Companion->GetName());
+				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: reloading before stand-up"), *Ctx.Companion->GetName());
 			return;
 		}
 		if (Ctx.Companion->IsReloading()) return;
 
-		if (Anim) Anim->PlayPeekFire(ResolvedPeekSide);
+		// Exit cover pose -> standing locomotion; fire montage layers via UpperBody slot in AnimGraph.
+		if (Anim) Anim->ExitCoverPose();
 		Ctx.Companion->StartWeaponFire();
 		bIsFiringBurst = true;
 		BurstTimer = FireBurstDuration;
 		TimeInCoverIdle = 0.f;
+		TimeAtCurrentCover = 0.f;
+		CoverValidityCheckTimer = 0.f;
 
 		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: PEEK-FIRE start side=%s"),
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: STAND-UP-FIRE start side=%s"),
 				*Ctx.Companion->GetName(), ResolvedPeekSide == EPeekSide::Right ? TEXT("Right") : TEXT("Left"));
 		return;
 	}
 
-	// --- PEEK FIRE (mid-burst) ---
+	// --- STAND-UP FIRE (mid-burst, cover still tracked) ---
 	if (bIsFiringBurst && bHasCover)
 	{
 		BurstTimer -= DeltaSeconds;
 
-		// Reload mid-burst still applies — but stop fire first.
+		// Rotate toward target while standing (firing from standing locomotion).
+		const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
+		const FRotator DesiredRot = FRotator(0.0f, LookAtRot.Yaw, 0.0f);
+		Ctx.Companion->SetActorRotation(
+			FMath::RInterpTo(Ctx.Companion->GetActorRotation(), DesiredRot, DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
+
+		// Reload mid-burst still applies — but stop fire first, then re-enter cover.
 		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
 		{
 			Ctx.Companion->StopWeaponFire();
 			Ctx.Companion->ReloadWeapon();
 			bIsFiringBurst = false;
+			ResolvedPeekSide = ResolvePeekSide(CoverLoc, TargetLocation, MyLocation);
+			LastPeekResolveCoverLoc = FVector::ZeroVector;
+			LastPeekResolveTargetLoc = FVector::ZeroVector;
 			if (Anim) Anim->EnterCoverPose(ResolvedPeekSide);
 			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 			TimeInCoverIdle = 0.f;
@@ -278,21 +319,24 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		if (BurstTimer <= 0.f)
 		{
-			// Burst ended — return to cover-idle.
+			// Burst ended — return to cover-idle pose. Refresh peek side in case target circled during burst.
 			Ctx.Companion->StopWeaponFire();
 			bIsFiringBurst = false;
+			ResolvedPeekSide = ResolvePeekSide(CoverLoc, TargetLocation, MyLocation);
+			LastPeekResolveCoverLoc = CoverLoc;
+			LastPeekResolveTargetLoc = TargetLocation;
 			if (Anim) Anim->EnterCoverPose(ResolvedPeekSide);
 			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 			TimeInCoverIdle = 0.f;
 			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: PEEK-FIRE end -> cover idle (next cooldown=%.2fs)"),
+				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: STAND-UP-FIRE end -> cover idle (next cooldown=%.2fs)"),
 					*Ctx.Companion->GetName(), PeekCooldown);
 		}
 		return;
 	}
 
 	// --- ENGAGE FROM OPEN (no cover available — preserved naive behaviour) ---
-	// Clean up any in-progress burst from cover/peek before falling through.
+	// Clean up any in-progress burst from cover/stand-up before falling through.
 	// (Cover invalidated mid-burst would otherwise leak bIsFiringBurst + BurstTimer.)
 	if (bIsFiringBurst)
 	{
@@ -300,6 +344,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		bIsFiringBurst = false;
 		BurstTimer = 0.f;
 	}
+
+	// Cover-tracking only applies in EngageFromCover; reset when out of cover.
+	TimeAtCurrentCover = 0.f;
+	CoverValidityCheckTimer = 0.f;
 
 	// If we were in cover this frame but bHasCover flipped false, leave cover pose first.
 	if (Anim && Anim->IsInCover() && !bHasCover)
@@ -395,6 +443,8 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 	bIsFiringBurst = false;
 	BurstTimer = 0.f;
 	TimeInCoverIdle = 0.f;
+	CoverValidityCheckTimer = 0.f;
+	TimeAtCurrentCover = 0.f;
 }
 
 FString UBTTask_CompanionCombat::GetStaticDescription() const
