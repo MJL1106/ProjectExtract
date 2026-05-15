@@ -24,6 +24,12 @@ namespace WeaponConstants
 	static const FName MuzzleSocketName(TEXT("Muzzle"));
 }
 
+static TAutoConsoleVariable<int32> CVarAIWeaponTraceDebug(
+	TEXT("companion.WeaponTraceDebug"),
+	0,
+	TEXT("If non-zero, log AI weapon hitscan trace details (start, end, hit actor, distance)."),
+	ECVF_Cheat);
+
 AWeaponBase::AWeaponBase()
 	: CurrentState(EWeaponState::Idle)
 	, CurrentAmmo(0)
@@ -278,6 +284,19 @@ void AWeaponBase::PerformHitscan()
 	if (UWorld* World = GetWorld())
 	{
 		const bool bHit = World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, QueryParams);
+
+		if (bAIOwned && CVarAIWeaponTraceDebug.GetValueOnGameThread() != 0)
+		{
+			const AActor* AILogAimTarget = IsValid(Cast<ACompanionCharacter>(OwnerChar))
+				? Cast<ACompanionCharacter>(OwnerChar)->GetAimTarget()
+				: (IsValid(Cast<AEnemyBase>(OwnerChar)) ? Cast<AEnemyBase>(OwnerChar)->GetCurrentTarget() : nullptr);
+			UE_LOG(LogExtraction, Verbose,
+				TEXT("AI-FIRE owner=%s muzzle=%s end=%s aimTarget=%s bHit=%d hitActor=%s hitDist=%.0f"),
+				*GetNameSafe(OwnerChar), *TraceStart.ToCompactString(), *TraceEnd.ToCompactString(),
+				*GetNameSafe(AILogAimTarget), (int32)bHit,
+				*GetNameSafe(bHit ? HitResult.GetActor() : nullptr),
+				bHit ? HitResult.Distance : 0.f);
+		}
 
 #if ENABLE_DRAW_DEBUG
 		if (bHit)

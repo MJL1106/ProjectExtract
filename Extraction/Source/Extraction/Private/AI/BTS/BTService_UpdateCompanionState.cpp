@@ -6,6 +6,7 @@
 #include "Perception/AISense_Sight.h"
 #include "CompanionAIController.h" // for LogCompanionAI
 #include "CompanionCharacter.h"
+#include "WeaponBase.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "Companion/CompanionTypes.h"
 #include "ExtractionCharacter.h"
@@ -59,6 +60,10 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		UHealthComponent* TargetHealth = ExistingTarget->FindComponentByClass<UHealthComponent>();
 		if (!IsValid(ExistingTarget) || (TargetHealth && TargetHealth->IsDead()))
 		{
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target CLEARED (was %s, dead=%d)"),
+					*Companion->GetName(), *GetNameSafe(ExistingTarget),
+					(int32)(TargetHealth && TargetHealth->IsDead()));
 			BB->ClearValue(CombatTargetKey.SelectedKeyName);
 			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 			ExistingTarget = nullptr;
@@ -68,9 +73,6 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	// Find best target from perceived actors
 	TArray<AActor*> PerceivedActors;
 	Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), PerceivedActors);
-
-	if (bDebugLogging)
-		UE_LOG(LogCompanionAI, Verbose, TEXT("%s: perception returned %d actor(s)"), *Companion->GetName(), PerceivedActors.Num());
 
 	AActor* BestTarget = nullptr;
 	float BestDistSq = MAX_FLT;
@@ -82,40 +84,52 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 		// Must have enemy tag
 		const IGameplayTagAssetInterface* TagInterface = Cast<IGameplayTagAssetInterface>(Actor);
-		if (!TagInterface)
-		{
-			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Verbose, TEXT("  %s: no IGameplayTagAssetInterface - skip"), *Actor->GetName());
-			continue;
-		}
+		if (!TagInterface) continue;
 
 		FGameplayTagContainer ActorTags;
 		TagInterface->GetOwnedGameplayTags(ActorTags);
-		const bool bHasEnemyTag = ActorTags.HasTag(TAG_Character_Enemy);
-		if (!bHasEnemyTag)
-		{
-			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Verbose, TEXT("  %s: missing TAG_Character_Enemy - skip"), *Actor->GetName());
-			continue;
-		}
+		if (!ActorTags.HasTag(TAG_Character_Enemy)) continue;
 
 		// Must be alive
 		UHealthComponent* EnemyHealth = Actor->FindComponentByClass<UHealthComponent>();
-		if (EnemyHealth && EnemyHealth->IsDead())
-		{
-			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Verbose, TEXT("  %s: dead - skip"), *Actor->GetName());
-			continue;
-		}
+		if (EnemyHealth && EnemyHealth->IsDead()) continue;
 
 		const float DistSq = FVector::DistSquared(MyLocation, Actor->GetActorLocation());
-		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Verbose, TEXT("  %s: candidate, dist=%.0f"), *Actor->GetName(), FMath::Sqrt(DistSq));
 
 		if (DistSq < BestDistSq)
 		{
 			BestDistSq = DistSq;
 			BestTarget = Actor;
+		}
+	}
+
+	// LoS filter — treat blocked target as no engageable target this tick
+	if (BestTarget)
+	{
+		FCollisionQueryParams LosParams(SCENE_QUERY_STAT(CompanionServiceLoS), true);
+		LosParams.AddIgnoredActor(Companion);
+		LosParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+		FHitResult LosHit;
+		const bool bBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+			LosHit, MyLocation, BestTarget->GetActorLocation(), ECC_Visibility, LosParams);
+
+		if (bBlocked && LosHit.GetActor() != BestTarget)
+		{
+			if (bDebugLogging && !bWasLosBlocked)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target LOS blocked by %s — clearing (was %s)"),
+					*Companion->GetName(), *GetNameSafe(LosHit.GetActor()), *GetNameSafe(BestTarget));
+			bWasLosBlocked = true;
+			BestTarget = nullptr;
+			// Explicitly clear BB now — the existing fallthrough only clears when ExistingTarget is also
+			// null, which it isn't on the first LoS-block tick. Without this clear, the BB key value
+			// stays unchanged and the Combat decorator's LowerPriority abort never fires.
+			BB->ClearValue(CombatTargetKey.SelectedKeyName);
+			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+			ExistingTarget = nullptr;
+		}
+		else
+		{
+			bWasLosBlocked = false;
 		}
 	}
 
@@ -135,8 +149,6 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	else if (ExistingTarget == nullptr)
 	{
 		BB->ClearValue(CombatTargetKey.SelectedKeyName);
-		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: no valid target in perception"), *Companion->GetName());
 	}
 
 	// --- Posture transitions (server-side; SetPosture gates on HasAuthority) ---
@@ -144,8 +156,22 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	const AActor* TargetAfterUpdate = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName));
 	const bool bHasTarget = IsValid(TargetAfterUpdate);
 
+	auto PostureName = [](ECompanionPosture P) -> const TCHAR*
+	{
+		switch (P)
+		{
+		case ECompanionPosture::Exploration: return TEXT("Exploration");
+		case ECompanionPosture::Combat:      return TEXT("Combat");
+		case ECompanionPosture::Stealth:     return TEXT("Stealth");
+		default:                             return TEXT("Unknown");
+		}
+	};
+
 	if (bHasTarget && CurrentPosture != ECompanionPosture::Combat && CurrentPosture != ECompanionPosture::Stealth)
 	{
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
+				*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Combat));
 		Companion->SetPosture(ECompanionPosture::Combat);
 		OutOfCombatTimer = 0.f;
 	}
@@ -154,6 +180,9 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		OutOfCombatTimer += DeltaSeconds;
 		if (OutOfCombatTimer >= ExploreReturnDelay)
 		{
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
+					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Exploration));
 			Companion->SetPosture(ECompanionPosture::Exploration);
 			OutOfCombatTimer = 0.f;
 		}

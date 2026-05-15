@@ -8,6 +8,7 @@
 #include "Animation/AnimMontage.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "KismetAnimationLibrary.h"
+#include "CompanionAIController.h"
 
 void UCompanionAnimInstance::NativeInitializeAnimation()
 {
@@ -175,6 +176,12 @@ void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide)
 
 	bInCover = true;
 	ActivePeekSide = DefaultSide;
+
+	UE_LOG(LogCompanionAI, Log, TEXT("Cover ENTER side=%s montage=%s (valid=%d, playing=%d)"),
+		DefaultSide == EPeekSide::Left ? TEXT("Left") : TEXT("Right"),
+		*GetNameSafe(IdleMontage),
+		(int32)IsValid(IdleMontage),
+		(int32)Montage_IsPlaying(IdleMontage));
 }
 
 void UCompanionAnimInstance::ExitCoverPose()
@@ -189,6 +196,8 @@ void UCompanionAnimInstance::ExitCoverPose()
 		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage);
 
 	bInCover = false;
+
+	UE_LOG(LogCompanionAI, Log, TEXT("Cover EXIT"));
 }
 
 UAnimMontage* UCompanionAnimInstance::PlayPeekFire(EPeekSide Side, float PlayRate)
