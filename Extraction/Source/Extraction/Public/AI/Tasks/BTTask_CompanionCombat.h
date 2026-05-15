@@ -33,6 +33,9 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Blackboard")
 	FBlackboardKeySelector CoverLocationKey;
 
+	UPROPERTY(EditAnywhere, Category = "Blackboard")
+	FBlackboardKeySelector CoverSlotKey;
+
 	/** Seconds of continuous fire per burst */
 	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.1"))
 	float FireBurstDuration = 1.5f;
@@ -54,6 +57,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0"))
 	float MinCoverIdleDwell = 0.4f;
 
+	// Z offset above slot location used for the stand-up-fire LoS trace. Tune to match companion eye height.
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0"))
+	float StandFireEyeHeight = 150.f;
+
 	/** Min peek cooldown (randomised per cycle). */
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0"))
 	float MinPeekCooldown = 0.6f;
@@ -69,18 +76,6 @@ protected:
 	/** Minimum time at current cover before a failed re-eval can abandon the slot (prevents thrashing). */
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float MinCoverDwellBeforeReEval = 2.0f;
-
-	UPROPERTY(EditAnywhere, Category="Cover", meta=(ClampMin="0.0", ClampMax="200.0",
-		ToolTip="Z offset above target actor origin for the cover-validity LoS trace. ~60 for humanoids."))
-	float TargetEyeHeightOffset = 60.f;
-
-	UPROPERTY(EditAnywhere, Category="Cover", meta=(ClampMin="60.0", ClampMax="250.0",
-		ToolTip="Z offset above cover slot for the 'can fire over cover' trace. Standing height ~150."))
-	float StandFireHeightOffset = 150.f;
-
-	UPROPERTY(EditAnywhere, Category="Cover", meta=(ClampMin="0.0", ClampMax="100.0",
-		ToolTip="Z offset above cover slot for the 'still behind cover' validity trace. Crouching height ~30-60."))
-	float CrouchHideHeightOffset = 40.f;
 
 	/** Toggle verbose exit-gate logs + debug draw under LogCompanionAI. Enable per-instance in BT. */
 	UPROPERTY(EditAnywhere, Category = "Debug")

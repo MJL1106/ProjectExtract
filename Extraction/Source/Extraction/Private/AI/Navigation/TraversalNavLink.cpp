@@ -6,6 +6,9 @@
 #include "NavLinkCustomComponent.h"
 #include "Movement/TraversalComponent.h"
 #include "Companion/CompanionCharacter.h"
+#include "AI/CompanionAIController.h"
+#include "AI/Cover/AICoverSlot.h"
+#include "BehaviorTree/BlackboardComponent.h"
 
 ATraversalNavLink::ATraversalNavLink()
 {
@@ -27,6 +30,20 @@ void ATraversalNavLink::HandleSmartLinkReached(AActor* Agent, const FVector& Des
 	UTraversalComponent* Traversal = Companion->GetTraversalComponent();
 	if (!IsValid(Traversal))
 		return;
+
+	// Suppress nav-link traversal while the companion holds a claimed cover slot.
+	if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(Companion->GetController()))
+	{
+		if (UBlackboardComponent* BB = CompAIC->GetBlackboardComponent())
+		{
+			AAICoverSlot* ActiveSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(ACompanionAIController::BB_CoverSlot));
+			if (IsValid(ActiveSlot) && ActiveSlot->IsClaimedBy(Companion))
+			{
+				ResumePathFollowing(Agent);
+				return;
+			}
+		}
+	}
 
 	UNavLinkCustomComponent* SmartLink = GetSmartLinkComp();
 	if (!IsValid(SmartLink))

@@ -48,9 +48,6 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	TimeSinceLastEqs = EqsQueryInterval; // allow an immediate query on first tick
 	EqsTarget = FVector::ZeroVector;
 
-	UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] ExecuteTask START — bSprintToTarget=%d EQS=%s"),
-		bSprintToTarget ? 1 : 0, FollowSlotQuery ? TEXT("set") : TEXT("none"));
-
 	// Clear any stale sprint flag from a prior abort (e.g. combat or revive re-entry).
 	// Skip for sprint-to-target so the revive branch keeps sprint speed on entry.
 	if (!bSprintToTarget)
@@ -205,8 +202,6 @@ void UBTTask_FollowPlayer::OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Res
 
 void UBTTask_FollowPlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult)
 {
-	UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] OnTaskFinished (result=%d) — clearing sprint"), (int32)TaskResult);
-
 	if (ACompanionCharacter* Companion = CachedCompanion.Get())
 		Companion->SetSprinting(false);
 
