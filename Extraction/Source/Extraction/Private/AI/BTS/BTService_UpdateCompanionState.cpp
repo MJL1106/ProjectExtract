@@ -14,6 +14,7 @@
 #include "ExtractionTypes.h"
 #include "GameplayTagAssetInterface.h"
 #include "Kismet/GameplayStatics.h"
+#include "AI/Cover/AICoverSlot.h"
 
 UBTService_UpdateCompanionState::UBTService_UpdateCompanionState()
 {
@@ -115,17 +116,31 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 		if (bBlocked && LosHit.GetActor() != BestTarget)
 		{
-			if (bDebugLogging && !bWasLosBlocked)
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target LOS blocked by %s — clearing (was %s)"),
-					*Companion->GetName(), *GetNameSafe(LosHit.GetActor()), *GetNameSafe(BestTarget));
-			bWasLosBlocked = true;
-			BestTarget = nullptr;
-			// Explicitly clear BB now — the existing fallthrough only clears when ExistingTarget is also
-			// null, which it isn't on the first LoS-block tick. Without this clear, the BB key value
-			// stays unchanged and the Combat decorator's LowerPriority abort never fires.
-			BB->ClearValue(CombatTargetKey.SelectedKeyName);
-			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
-			ExistingTarget = nullptr;
+			AAICoverSlot* ActiveSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(ACompanionAIController::BB_CoverSlot));
+			const bool bCoverSlotActive = IsValid(ActiveSlot) && ActiveSlot->IsClaimedBy(Companion);
+
+			if (bCoverSlotActive)
+			{
+				if (bDebugLogging && !bWasLosBlocked)
+					UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target LOS blocked but cover slot active — keeping target"),
+						*Companion->GetName());
+				bWasLosBlocked = true;
+				// Do not clear BB — cover is the reason LoS is blocked; target remains valid.
+			}
+			else
+			{
+				if (bDebugLogging && !bWasLosBlocked)
+					UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target LOS blocked by %s — clearing (was %s)"),
+						*Companion->GetName(), *GetNameSafe(LosHit.GetActor()), *GetNameSafe(BestTarget));
+				bWasLosBlocked = true;
+				BestTarget = nullptr;
+				// Explicitly clear BB now — the existing fallthrough only clears when ExistingTarget is also
+				// null, which it isn't on the first LoS-block tick. Without this clear, the BB key value
+				// stays unchanged and the Combat decorator's LowerPriority abort never fires.
+				BB->ClearValue(CombatTargetKey.SelectedKeyName);
+				BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+				ExistingTarget = nullptr;
+			}
 		}
 		else
 		{

@@ -43,6 +43,7 @@ const FName ACompanionAIController::BB_Posture(TEXT("Posture"));
 const FName ACompanionAIController::BB_ScoringWeight_LoSPlayer(TEXT("ScoringWeight_LoSPlayer"));
 const FName ACompanionAIController::BB_ScoringWeight_AvoidEnemy(TEXT("ScoringWeight_AvoidEnemy"));
 const FName ACompanionAIController::BB_ScoringWeight_CoverFromTarget(TEXT("ScoringWeight_CoverFromTarget"));
+const FName ACompanionAIController::BB_CoverSlot(TEXT("CoverSlot"));
 
 ACompanionAIController::ACompanionAIController()
 {

@@ -37,6 +37,7 @@ public:
 	static const FName BB_ScoringWeight_LoSPlayer;       // float
 	static const FName BB_ScoringWeight_AvoidEnemy;      // float
 	static const FName BB_ScoringWeight_CoverFromTarget; // float
+	static const FName BB_CoverSlot;                     // Object (AAICoverSlot)
 
 	UFUNCTION(BlueprintPure, Category = "Companion|AI")
 	AExtractionCharacter* GetPlayerCharacter() const { return CachedPlayerCharacter; }

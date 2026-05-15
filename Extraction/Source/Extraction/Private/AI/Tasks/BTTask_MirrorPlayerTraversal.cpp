@@ -7,6 +7,7 @@
 #include "NavigationSystem.h"
 #include "AI/CompanionAIController.h"
 #include "AI/CompanionTuningDataAsset.h"
+#include "AI/Cover/AICoverSlot.h"
 #include "Companion/CompanionCharacter.h"
 #include "Movement/TraversalComponent.h"
 #include "Navigation/PathFollowingComponent.h"
@@ -71,6 +72,15 @@ EBTNodeResult::Type UBTTask_MirrorPlayerTraversal::ExecuteTask(UBehaviorTreeComp
 
 	UTraversalComponent* OwnTraversal = Companion->GetTraversalComponent();
 	if (!OwnTraversal) return EBTNodeResult::Failed;
+
+	// Suppress mirror while companion is occupying a cover slot — vaulting the cover
+	// wall mid-approach breaks the cover workflow. Matches BTService_TraversalProbe guard.
+	AAICoverSlot* CoverSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(ACompanionAIController::BB_CoverSlot));
+	if (IsValid(CoverSlot) && CoverSlot->IsClaimedBy(Companion))
+	{
+		UE_LOG(LogCompanionAI, Log, TEXT("[MirrorTraversal] Suppressed: cover slot active"));
+		return EBTNodeResult::Succeeded;
+	}
 
 	// All guards passed — safe to allocate per-instance memory.
 	FMirrorMemory* Mem = new (NodeMemory) FMirrorMemory();

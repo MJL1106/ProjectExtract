@@ -2,10 +2,13 @@
 
 #include "BTService_TraversalProbe.h"
 #include "AIController.h"
+#include "BehaviorTree/BlackboardComponent.h"
+#include "CompanionAIController.h"
 #include "CompanionCharacter.h"
 #include "TraversalComponent.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "AI/Cover/AICoverSlot.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogTraversalProbe, Log, All);
 
@@ -23,6 +26,17 @@ void UBTService_TraversalProbe::TickNode(UBehaviorTreeComponent& OwnerComp, uint
 	AAIController* AIC = OwnerComp.GetAIOwner();
 	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(AIC ? AIC->GetPawn() : nullptr);
 	if (!IsValid(Companion)) return;
+
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	if (BB)
+	{
+		AAICoverSlot* ActiveSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(ACompanionAIController::BB_CoverSlot));
+		if (IsValid(ActiveSlot) && ActiveSlot->IsClaimedBy(Companion))
+		{
+			UE_LOG(LogTraversalProbe, Log, TEXT("%s: Traversal suppressed: cover slot active"), *Companion->GetName());
+			return;
+		}
+	}
 
 	UTraversalComponent* TC = Companion->GetTraversalComponent();
 	if (!IsValid(TC) || TC->IsInTraversal()) return;
