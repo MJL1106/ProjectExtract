@@ -41,6 +41,15 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.1"))
 	float FirePauseDuration = 0.5f;
 
+	/** Seconds of continuous LoS-block before the open-engage branch abandons the engagement. 0 disables. */
+	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.0", ClampMax = "10.0",
+		ToolTip = "Seconds of continuous LoS-block before the open-engage branch abandons the engagement. 0 disables."))
+	float LosBlockedAbandonSeconds = 2.0f;
+
+	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.0", ClampMax = "5.0",
+		ToolTip = "Seconds of continuous LoS-block (open-engage) before the companion stops aim-tracking through the obstruction. Below this, brief LoS blips don't drop aim."))
+	float AimDropOnLosBlockedSeconds = 0.3f;
+
 	/** Minimum dwell in cover-idle before the first peek can fire. */
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0"))
 	float MinCoverIdleDwell = 0.4f;
@@ -95,4 +104,14 @@ private:
 	FVector LastPeekResolveCoverLoc = FVector::ZeroVector;
 	FVector LastPeekResolveTargetLoc = FVector::ZeroVector;
 	static constexpr float PeekResolveDistThresholdSq = 50.f * 50.f;
+
+	/** Accumulator (seconds) of continuous LoS-block in open-engage. Reset on LoS clear. */
+	float LosBlockedAccum = 0.f;
+
+	/** Branch index last tick: 0=CoverIdle, 1=StandUpFireBurst, 2=OpenEngage, -1=uninit. */
+	int8 LastTickBranch = -1;
+
+	/** LoS block state tracked across all branches for state-change logging. */
+	bool bLastLosBlocked = false;
+	TWeakObjectPtr<AActor> LastLosBlocker;
 };

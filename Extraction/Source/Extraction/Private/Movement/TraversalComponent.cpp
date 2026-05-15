@@ -106,7 +106,7 @@ bool UTraversalComponent::TryStartTraversal(bool bWasSprinting)
 
 	if (DetectedType == ETraversalType::None)
 	{
-		UE_LOG(LogTraversal, Log, TEXT("[TryStartTraversal] %s - no traversal possible"), *OwnerTag(OwningCharacter));
+		UE_LOG(LogTraversal, Verbose, TEXT("[TryStartTraversal] %s - no traversal possible"), *OwnerTag(OwningCharacter));
 		return false;
 	}
 
