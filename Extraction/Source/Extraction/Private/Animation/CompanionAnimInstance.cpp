@@ -58,11 +58,13 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		const FRotator Delta = (AimRot - ActorRot).GetNormalized();
 		AimPitch = Delta.Pitch;
 		AimYaw = Delta.Yaw;
+		bIsAiming = true;
 	}
 	else
 	{
 		AimPitch = 0.f;
 		AimYaw = 0.f;
+		bIsAiming = false;
 	}
 
 	// Traversal

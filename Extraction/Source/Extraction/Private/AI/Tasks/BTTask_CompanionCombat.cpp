@@ -11,6 +11,7 @@
 #include "AICoverSlot.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 
 namespace
 {
@@ -21,7 +22,6 @@ namespace
 		UBlackboardComponent* Blackboard = nullptr;
 	};
 
-	// Returns true if LOS from FromLoc to ToTarget is clear (ignoring Companion + its weapon).
 	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy)
 	{
 		OutBlockedBy = nullptr;
@@ -31,6 +31,9 @@ namespace
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(Companion);
 		QueryParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+		TArray<AActor*> Attached;
+		Companion->GetAttachedActors(Attached);
+		QueryParams.AddIgnoredActors(Attached);
 
 		const bool bHit = World->LineTraceSingleByChannel(Hit, FromLoc, ToTarget->GetActorLocation(), ECC_Visibility, QueryParams);
 		if (bHit && Hit.GetActor() != ToTarget)
@@ -83,6 +86,64 @@ namespace
 	}
 }
 
+// --- Static helpers ---
+
+UBTTask_CompanionCombat::EPeekAction UBTTask_CompanionCombat::RollPeekAction(float StandW, float QuickW, float HoldW)
+{
+	const float Total = StandW + QuickW + HoldW;
+	if (Total <= 0.f) return EPeekAction::Stand;
+
+	const float Roll = FMath::FRand() * Total;
+	if (Roll < StandW) return EPeekAction::Stand;
+	if (Roll < StandW + QuickW) return EPeekAction::Quick;
+	return EPeekAction::Hold;
+}
+
+void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
+	AAICoverSlot* Slot, bool bSuppressed, bool bLowHealth)
+{
+	if (IsValid(Companion)) Companion->StopWeaponFire();
+
+	bIsFiringBurst = false;
+
+	if (IsValid(Slot))
+	{
+		const ECoverPeekSide Pref = Slot->PeekPreference;
+		ResolvedPeekSide = (Pref == ECoverPeekSide::Left) ? EPeekSide::Left : EPeekSide::Right;
+		LastPeekResolveCoverLoc = FVector::ZeroVector;
+		LastPeekResolveTargetLoc = FVector::ZeroVector;
+
+		if (AAIController* AIC = IsValid(Companion) ? Cast<AAIController>(Companion->GetController()) : nullptr)
+			AIC->StopMovement();
+		if (UCharacterMovementComponent* CMC = IsValid(Companion) ? Companion->GetCharacterMovement() : nullptr)
+			CMC->StopMovementImmediately();
+
+		if (IsValid(Companion))
+		{
+			const FVector SlotLoc = Slot->GetActorLocation();
+			const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
+			const FVector SnapLoc(SlotLoc.X, SlotLoc.Y, Companion->GetActorLocation().Z);
+			Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
+		}
+	}
+
+	if (UAnimMontage* M = ActivePeekMontage.Get())
+	{
+		if (Anim) Anim->Montage_Stop(0.15f, M);
+	}
+	ActivePeekMontage.Reset();
+
+	if (Anim) Anim->EnterCoverPose(ResolvedPeekSide);
+
+	float CooldownMult = 1.f;
+	if (bSuppressed) CooldownMult *= SuppressionCooldownMultiplier;
+	if (bLowHealth)  CooldownMult *= LowHealthCooldownMultiplier;
+	PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown) * CooldownMult;
+	TimeInCoverIdle = 0.f;
+}
+
+// --- Constructor ---
+
 UBTTask_CompanionCombat::UBTTask_CompanionCombat()
 {
 	NodeName = TEXT("Companion Combat");
@@ -90,6 +151,8 @@ UBTTask_CompanionCombat::UBTTask_CompanionCombat()
 	bNotifyTaskFinished = true;
 	bCreateNodeInstance = true;
 }
+
+// --- ExecuteTask ---
 
 EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
@@ -116,6 +179,10 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	LastLosBlocker = nullptr;
 	LastPeekResolveCoverLoc = FVector::ZeroVector;
 	LastPeekResolveTargetLoc = FVector::ZeroVector;
+	ConsecutiveHolds = 0;
+	CurrentBurstAction = EPeekAction::Stand;
+	ActivePeekMontage.Reset();
+	DebugBurstLosCheckTimer = 0.f;
 
 	if (!Companion->GetCurrentWeapon())
 		UE_LOG(LogCompanionAI, Warning, TEXT("%s: combat task started but CurrentWeapon is null"), *Companion->GetName());
@@ -125,7 +192,6 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 
 	if (bHasCover)
 	{
-		// Use the slot's authored peek preference; default Either -> Right.
 		const ECoverPeekSide Pref = Slot->PeekPreference;
 		ResolvedPeekSide = (Pref == ECoverPeekSide::Left) ? EPeekSide::Left : EPeekSide::Right;
 
@@ -133,13 +199,12 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 			AIC->StopMovement();
 		if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
 			CMC->StopMovementImmediately();
-		if (Slot)
-		{
-			const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
-			Companion->SetActorRotation(SlotYawRot);
-			const FVector SlotLoc = Slot->GetActorLocation();
-			Companion->SetActorLocation(FVector(SlotLoc.X, SlotLoc.Y, Companion->GetActorLocation().Z));
-		}
+
+		const FVector SlotLoc = Slot->GetActorLocation();
+		const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
+		const FVector SnapLoc(SlotLoc.X, SlotLoc.Y, Companion->GetActorLocation().Z);
+		Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
+
 		if (UCompanionAnimInstance* Anim = GetCompanionAnim(Companion))
 			Anim->EnterCoverPose(ResolvedPeekSide);
 	}
@@ -153,6 +218,8 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 
 	return EBTNodeResult::InProgress;
 }
+
+// --- TickTask ---
 
 void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
@@ -218,7 +285,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 	UCompanionAnimInstance* Anim = GetCompanionAnim(Ctx.Companion);
 
-	// --- ENGAGE FROM COVER (cover-idle, no firing) ---
+	const bool bSuppressed = Ctx.Companion->IsSuppressed(SuppressionWindowSeconds);
+	const bool bLowHp = Ctx.Companion->GetHealthFraction() < LowHealthFraction;
+
+	// =========================================================================
+	// BRANCH 0: COVER IDLE
+	// =========================================================================
 	if (bHasCover && !bIsFiringBurst)
 	{
 		LosBlockedAccum = 0.f;
@@ -233,7 +305,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			const ECoverPeekSide Pref = Slot->PeekPreference;
 			if (Pref == ECoverPeekSide::Either)
 			{
-				// Derive from companion->target vector relative to slot forward.
 				FVector SlotFwd = Slot->GetActorForwardVector(); SlotFwd.Z = 0.f; SlotFwd = SlotFwd.GetSafeNormal();
 				const FVector WallRight = FVector::CrossProduct(FVector::UpVector, SlotFwd).GetSafeNormal();
 				FVector TargetOffset = (TargetLocation - CoverLoc); TargetOffset.Z = 0.f; TargetOffset = TargetOffset.GetSafeNormal();
@@ -251,13 +322,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
 			FRotator(0.f, LookAtRot.Yaw, 0.f), DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
 
-		// Periodic slot-validity check — no traces, reads slot data only.
+		// Periodic slot-validity check.
 		CoverValidityCheckTimer += DeltaSeconds;
 		if (CoverValidityCheckTimer >= CoverValidityCheckInterval && TimeAtCurrentCover >= MinCoverDwellBeforeReEval)
 		{
 			CoverValidityCheckTimer = 0.f;
 
-			// Check: slot still claimed by us.
 			if (!Slot->IsClaimed())
 			{
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: Cover INVALIDATE reason=slot-released slot=%s"), *Ctx.Companion->GetName(), *Slot->GetName());
@@ -267,7 +337,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 			}
 
-			// Check: target still in fire arc.
 			if (!Slot->IsTargetInFireArc(TargetLocation))
 			{
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: Cover INVALIDATE reason=fire-arc-violated slot=%s"), *Ctx.Companion->GetName(), *Slot->GetName());
@@ -281,9 +350,18 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		TimeInCoverIdle += DeltaSeconds;
 		if (TimeInCoverIdle < MinCoverIdleDwell + PeekCooldown) return;
 
-		// LOS-from-cover check: only stand up if we can see the target from the slot.
-		// Trace from a stand-eye position (slot base + eye height) — not crouch level — so the
-		// wall doesn't block the check before the companion has even risen.
+		// Gate 1: suppression.
+		if (bSuppressed)
+		{
+			float CooldownMult = SuppressionCooldownMultiplier;
+			if (bLowHp) CooldownMult *= LowHealthCooldownMultiplier;
+			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown) * CooldownMult;
+			TimeInCoverIdle = 0.f;
+			if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: STAY DOWN reason=suppressed"), *Ctx.Companion->GetName());
+			return;
+		}
+
+		// Gate 2: LoS from stand eye.
 		AActor* BlockedBy = nullptr;
 		const FVector StandEye = Slot->GetActorLocation() + FVector(0.f, 0.f, StandFireEyeHeight);
 		const bool bLosFromCover = HasLineOfSight(Ctx.Companion->GetWorld(), StandEye, Ctx.Target, Ctx.Companion, BlockedBy);
@@ -307,6 +385,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		if (!bLosFromCover) return;
 
+		// Gate 3: reload.
 		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
 		{
 			Ctx.Companion->ReloadWeapon();
@@ -316,7 +395,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		if (Ctx.Companion->IsReloading()) return;
 
-		// Only stand up if the slot supports it.
+		// Gate 4: slot supports standing.
 		if (!Slot->CanStandFireFrom())
 		{
 			if (bDebugLogging)
@@ -324,22 +403,61 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
-		if (Anim) Anim->ExitCoverPose();
-		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE START branch=CoverIdle->StandUp dist=%.0f"), *Ctx.Companion->GetName(), Distance);
+		// Gate 5: roll peek action.
+		const EPeekAction Action = bLowHp
+			? RollPeekAction(LowHpStandWeight, LowHpQuickWeight, LowHpHoldWeight)
+			: RollPeekAction(StandWeight, QuickWeight, HoldWeight);
+
+		if (Action == EPeekAction::Hold)
+		{
+			if (ConsecutiveHolds < MaxConsecutiveHolds)
+			{
+				++ConsecutiveHolds;
+				PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
+				TimeInCoverIdle = 0.f;
+				if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: HOLD this cycle (%d/%d)"), *Ctx.Companion->GetName(), ConsecutiveHolds, MaxConsecutiveHolds);
+				return;
+			}
+			// Hold cap reached — fall through as Stand.
+		}
+		else
+		{
+			ConsecutiveHolds = 0;
+		}
+
+		// Commit to peek.
+		CurrentBurstAction = (Action == EPeekAction::Hold) ? EPeekAction::Stand : Action;
+		BurstTimer = (CurrentBurstAction == EPeekAction::Quick)
+			? FMath::RandRange(MinQuickPeekBurst, MaxQuickPeekBurst)
+			: FMath::RandRange(MinFireBurst, MaxFireBurst);
+
+		if (Anim)
+		{
+			Anim->ExitCoverPose();
+			UAnimMontage* PeekMontage = Anim->PlayPeekFire(ResolvedPeekSide);
+			ActivePeekMontage = PeekMontage;
+		}
+
 		Ctx.Companion->StartWeaponFire();
 		bIsFiringBurst = true;
-		BurstTimer = FireBurstDuration;
+		DebugBurstLosCheckTimer = 0.f;
 		TimeInCoverIdle = 0.f;
 		TimeAtCurrentCover = 0.f;
 		CoverValidityCheckTimer = 0.f;
+
 		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: STAND-UP-FIRE start side=%s slot=%s"),
-				*Ctx.Companion->GetName(), ResolvedPeekSide == EPeekSide::Right ? TEXT("Right") : TEXT("Left"), *Slot->GetName());
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: STAND-UP-FIRE start action=%s burst=%.2fs side=%s slot=%s"),
+				*Ctx.Companion->GetName(),
+				(CurrentBurstAction == EPeekAction::Quick) ? TEXT("Quick") : TEXT("Stand"),
+				BurstTimer,
+				ResolvedPeekSide == EPeekSide::Right ? TEXT("Right") : TEXT("Left"),
+				*Slot->GetName());
 		return;
 	}
 
-	// --- STAND-UP FIRE (mid-burst, cover still tracked) ---
+	// =========================================================================
+	// BRANCH 1: STAND-UP FIRE BURST
+	// =========================================================================
 	if (bIsFiringBurst && bHasCover)
 	{
 		LosBlockedAccum = 0.f;
@@ -347,22 +465,27 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		if (bDebugLogging)
 		{
-			AActor* BurstBlocker = nullptr;
-			const bool bBurstLos = HasLineOfSight(Ctx.Companion->GetWorld(), MyLocation, Ctx.Target, Ctx.Companion, BurstBlocker);
-			const bool bNowBlocked = !bBurstLos;
-			const bool bBlockStateChanged = (bNowBlocked != bLastLosBlocked) || (BurstBlocker != LastLosBlocker.Get());
-			if (bBlockStateChanged)
+			DebugBurstLosCheckTimer -= DeltaSeconds;
+			if (DebugBurstLosCheckTimer <= 0.f)
 			{
-				if (bNowBlocked)
+				DebugBurstLosCheckTimer = 0.2f;
+				AActor* BurstBlocker = nullptr;
+				const bool bBurstLos = HasLineOfSight(Ctx.Companion->GetWorld(), MyLocation, Ctx.Target, Ctx.Companion, BurstBlocker);
+				const bool bNowBlocked = !bBurstLos;
+				const bool bBlockStateChanged = (bNowBlocked != bLastLosBlocked) || (BurstBlocker != LastLosBlocker.Get());
+				if (bBlockStateChanged)
 				{
-					UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst LoS BLOCKED by %s"), *Ctx.Companion->GetName(), *GetNameSafe(BurstBlocker));
+					if (bNowBlocked)
+					{
+						UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst LoS BLOCKED by %s"), *Ctx.Companion->GetName(), *GetNameSafe(BurstBlocker));
+					}
+					else
+					{
+						UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst LoS CLEAR"), *Ctx.Companion->GetName());
+					}
+					bLastLosBlocked = bNowBlocked;
+					LastLosBlocker = BurstBlocker;
 				}
-				else
-				{
-					UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst LoS CLEAR"), *Ctx.Companion->GetName());
-				}
-				bLastLosBlocked = bNowBlocked;
-				LastLosBlocker = BurstBlocker;
 			}
 		}
 
@@ -370,66 +493,35 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
 			FRotator(0.f, LookAtRot.Yaw, 0.f), DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
 
-		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
+		// Suppression abort — duck back down immediately.
+		if (bSuppressed)
 		{
-			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=reload"), *Ctx.Companion->GetName());
-			Ctx.Companion->StopWeaponFire();
-			Ctx.Companion->ReloadWeapon();
-			bIsFiringBurst = false;
-			const ECoverPeekSide Pref = Slot->PeekPreference;
-			ResolvedPeekSide = (Pref == ECoverPeekSide::Left) ? EPeekSide::Left : EPeekSide::Right;
-			LastPeekResolveCoverLoc = FVector::ZeroVector;
-			LastPeekResolveTargetLoc = FVector::ZeroVector;
-			if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
-				AIC->StopMovement();
-			if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
-				CMC->StopMovementImmediately();
-			if (Slot)
-			{
-				const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
-				Ctx.Companion->SetActorRotation(SlotYawRot);
-				const FVector SlotLoc = Slot->GetActorLocation();
-				Ctx.Companion->SetActorLocation(FVector(SlotLoc.X, SlotLoc.Y, Ctx.Companion->GetActorLocation().Z));
-			}
-			if (Anim) Anim->EnterCoverPose(ResolvedPeekSide);
-			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
-			TimeInCoverIdle = 0.f;
+			if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=suppressed-mid-burst"), *Ctx.Companion->GetName());
+			ReturnToCover(Ctx.Companion, Anim, Slot, true, bLowHp);
 			return;
 		}
 
+		// Reload mid-burst.
+		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
+		{
+			if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=reload"), *Ctx.Companion->GetName());
+			Ctx.Companion->ReloadWeapon();
+			ReturnToCover(Ctx.Companion, Anim, Slot, false, bLowHp);
+			return;
+		}
+
+		// Burst elapsed — return to cover.
 		if (BurstTimer <= 0.f)
 		{
-			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=burst-end-cover"), *Ctx.Companion->GetName());
-			Ctx.Companion->StopWeaponFire();
-			bIsFiringBurst = false;
-			const ECoverPeekSide Pref = Slot->PeekPreference;
-			ResolvedPeekSide = (Pref == ECoverPeekSide::Left) ? EPeekSide::Left : EPeekSide::Right;
-			LastPeekResolveCoverLoc = FVector::ZeroVector;
-			LastPeekResolveTargetLoc = FVector::ZeroVector;
-			if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
-				AIC->StopMovement();
-			if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
-				CMC->StopMovementImmediately();
-			if (Slot)
-			{
-				const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
-				Ctx.Companion->SetActorRotation(SlotYawRot);
-				const FVector SlotLoc = Slot->GetActorLocation();
-				Ctx.Companion->SetActorLocation(FVector(SlotLoc.X, SlotLoc.Y, Ctx.Companion->GetActorLocation().Z));
-			}
-			if (Anim) Anim->EnterCoverPose(ResolvedPeekSide);
-			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
-			TimeInCoverIdle = 0.f;
-			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: STAND-UP-FIRE end -> cover idle (next cooldown=%.2fs)"),
-					*Ctx.Companion->GetName(), PeekCooldown);
+			if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=burst-end-cover (next cd=%.2fs)"), *Ctx.Companion->GetName(), PeekCooldown);
+			ReturnToCover(Ctx.Companion, Anim, Slot, false, bLowHp);
 		}
 		return;
 	}
 
-	// --- ENGAGE FROM OPEN (no cover available) ---
+	// =========================================================================
+	// BRANCH 2: OPEN ENGAGE
+	// =========================================================================
 	const bool bWasInCover = (PrevBranch == 0 || PrevBranch == 1);
 	if (bIsFiringBurst && bWasInCover)
 	{
@@ -438,6 +530,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->StopWeaponFire();
 		bIsFiringBurst = false;
 		BurstTimer = 0.f;
+	}
+
+	// Stop any lingering peek montage.
+	if (UAnimMontage* M = ActivePeekMontage.Get())
+	{
+		if (Anim) Anim->Montage_Stop(0.15f, M);
+		ActivePeekMontage.Reset();
 	}
 
 	TimeAtCurrentCover = 0.f;
@@ -541,7 +640,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				*Ctx.Companion->GetName(), Distance, Ctx.Companion->GetCurrentInaccuracy());
 		Ctx.Companion->StartWeaponFire();
 		bIsFiringBurst = true;
-		BurstTimer = FireBurstDuration;
+		BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
 	}
 
 #if ENABLE_DRAW_DEBUG
@@ -549,6 +648,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		DrawDebugLine(Ctx.Companion->GetWorld(), MyLocation, TargetLocation, FColor::Green, false, 0.1f, 0, 1.5f);
 #endif
 }
+
+// --- OnTaskFinished ---
 
 void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult)
 {
@@ -588,17 +689,24 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 		Companion->StopWeaponFire();
 		Companion->SetAimTarget(nullptr);
 
-		if (UCompanionAnimInstance* Anim = GetCompanionAnim(Companion))
-			Anim->ExitCoverPose();
+		UCompanionAnimInstance* Anim = GetCompanionAnim(Companion);
+		if (UAnimMontage* M = ActivePeekMontage.Get())
+		{
+			if (Anim) Anim->Montage_Stop(0.15f, M);
+		}
+		ActivePeekMontage.Reset();
+
+		if (Anim) Anim->ExitCoverPose();
 	}
 
-	// Release cover slot claim on any non-success exit (success means MoveToCover loops back and re-validates the existing claim).
+	// Release cover slot claim on any non-success exit.
 	if (BB && TaskResult != EBTNodeResult::Succeeded)
 	{
 		AAICoverSlot* Slot = Cast<AAICoverSlot>(BB->GetValueAsObject(CoverSlotKey.SelectedKeyName));
 		if (IsValid(Slot))
 		{
-			Slot->Release(Companion);
+			if (IsValid(Companion) && Slot->IsClaimedBy(Companion))
+				Slot->Release(Companion);
 			BB->SetValueAsObject(CoverSlotKey.SelectedKeyName, nullptr);
 			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 		}
@@ -613,10 +721,11 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 	LastTickBranch = -1;
 	bLastLosBlocked = false;
 	LastLosBlocker = nullptr;
+	ConsecutiveHolds = 0;
 }
 
 FString UBTTask_CompanionCombat::GetStaticDescription() const
 {
-	return FString::Printf(TEXT("Cover-aware Combat (burst: %.1fs fire, %.1fs pause; peek cd %.1f-%.1fs)"),
-		FireBurstDuration, FirePauseDuration, MinPeekCooldown, MaxPeekCooldown);
+	return FString::Printf(TEXT("Cover-aware Combat (burst: %.1f-%.1fs / quick: %.1f-%.1fs; peek cd %.1f-%.1fs)"),
+		MinFireBurst, MaxFireBurst, MinQuickPeekBurst, MaxQuickPeekBurst, MinPeekCooldown, MaxPeekCooldown);
 }
