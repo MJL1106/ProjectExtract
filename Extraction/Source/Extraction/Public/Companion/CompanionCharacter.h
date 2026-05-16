@@ -54,6 +54,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	bool IsReloading() const;
 
+	/** True if the equipped weapon can currently be reloaded. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	bool CanReload() const;
+
+	/** Current ammo in the equipped weapon's magazine. Returns 0 if no weapon. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	int32 GetCurrentAmmo() const;
+
+	/** Returns the reload time of the equipped weapon. Returns 0 if no weapon or no data. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	float GetWeaponReloadTime() const;
+
 	// --- Aim Inaccuracy ---
 
 	void SetAimTarget(AActor* NewTarget);

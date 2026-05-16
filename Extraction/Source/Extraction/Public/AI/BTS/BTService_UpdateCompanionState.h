@@ -43,4 +43,5 @@ protected:
 private:
 	float OutOfCombatTimer = 0.f;
 	bool bWasLosBlocked = false;
+	TWeakObjectPtr<AActor> PrevCombatTarget;
 };

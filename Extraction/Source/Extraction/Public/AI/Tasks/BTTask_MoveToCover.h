@@ -47,11 +47,15 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "100.0"))
 	float SearchRadius = 1200.0f;
 
+	UPROPERTY(EditAnywhere, Category = "Debug")
+	bool bDebugLogging = true;
+
 private:
 	void StartMoveTo(const FVector& ArrivalPos, AAIController* Controller, APawn* Pawn);
 	void ReleaseClaim(UBlackboardComponent* BB, APawn* Pawn);
 
 	bool bMoveIssued = false;
+	float LastTickDist = 0.f;
 
 	UPROPERTY()
 	TObjectPtr<UBehaviorTreeComponent> CachedOwnerComp;

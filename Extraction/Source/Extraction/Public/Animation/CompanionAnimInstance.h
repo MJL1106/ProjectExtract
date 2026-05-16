@@ -19,6 +19,7 @@ class EXTRACTION_API UCompanionAnimInstance : public UAnimInstance
 
 public:
 	virtual void NativeInitializeAnimation() override;
+	virtual void NativeUninitializeAnimation() override;
 	virtual void NativeUpdateAnimation(float DeltaSeconds) override;
 
 	// --- Montage Helpers ---
@@ -184,6 +185,10 @@ protected:
 	ECompanionPosture CurrentPosture = ECompanionPosture::Exploration;
 
 private:
+	UFUNCTION()
+	void OnReloadMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
+
 	bool bInCover = false;
 	EPeekSide ActivePeekSide = EPeekSide::Right;
+	bool bPrevIsReloading = false;
 };

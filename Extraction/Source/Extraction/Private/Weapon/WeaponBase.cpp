@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WeaponBase.h"
+#include "AI/CompanionDiag.h"
 #include "WeaponDataAsset.h"
 #include "ExtractionCharacter.h"
 #include "CompanionCharacter.h"
@@ -74,6 +75,13 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 
 	Super::EndPlay(EndPlayReason);
+}
+
+FVector AWeaponBase::GetMuzzleLocation() const
+{
+	if (IsValid(WeaponMesh) && WeaponMesh->DoesSocketExist(WeaponConstants::MuzzleSocketName))
+		return WeaponMesh->GetSocketLocation(WeaponConstants::MuzzleSocketName);
+	return GetActorLocation();
 }
 
 // ---- Fire Control ----
@@ -352,6 +360,22 @@ void AWeaponBase::Reload()
 {
 	if (!CanReload()) return;
 
+	if (const UWorld* World = GetWorld())
+	{
+		ReloadStartTimeSeconds = World->GetTimeSeconds();
+		if (UE_LOG_ACTIVE(LogCompanionDiag, Log))
+		{
+			const float OwnerVel = IsValid(GetOwner()) ? GetOwner()->GetVelocity().Size() : 0.f;
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-START ammo=%d/%d reserve=%d vel=%.1f reloadTime=%.2f"),
+				IsValid(GetOwner()) ? *GetOwner()->GetName() : TEXT("Unknown"),
+				CurrentAmmo,
+				IsValid(WeaponData) ? WeaponData->MagazineSize : -1,
+				ReserveAmmo,
+				OwnerVel,
+				IsValid(WeaponData) ? WeaponData->ReloadTime : -1.f);
+		}
+	}
+
 	if (HasAuthority())
 		CurrentState = EWeaponState::Reloading;
 
@@ -385,6 +409,20 @@ void AWeaponBase::OnReloadFinished()
 		CurrentState = EWeaponState::Idle;
 
 		OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	}
+
+	if (HasAuthority() && UE_LOG_ACTIVE(LogCompanionDiag, Log))
+	{
+		const float ElapsedReal = GetWorld() ? (GetWorld()->GetTimeSeconds() - ReloadStartTimeSeconds) : -1.f;
+		const float OwnerVel = IsValid(GetOwner()) ? GetOwner()->GetVelocity().Size() : 0.f;
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-FINISH ammo=%d/%d reserve=%d elapsedReal=%.2f vel=%.1f bWantsToFire=%d"),
+			IsValid(GetOwner()) ? *GetOwner()->GetName() : TEXT("Unknown"),
+			CurrentAmmo,
+			IsValid(WeaponData) ? WeaponData->MagazineSize : -1,
+			ReserveAmmo,
+			ElapsedReal,
+			OwnerVel,
+			(int32)bWantsToFire);
 	}
 
 	OnReloadComplete.Broadcast();

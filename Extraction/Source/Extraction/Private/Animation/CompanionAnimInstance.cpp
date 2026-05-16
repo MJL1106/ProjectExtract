@@ -1,6 +1,7 @@
 // Anim instance for the AI companion — drives locomotion, aim offset, and combat montages.
 
 #include "CompanionAnimInstance.h"
+#include "AI/CompanionDiag.h"
 #include "CompanionCharacter.h"
 #include "WeaponBase.h"
 #include "HealthComponent.h"
@@ -21,6 +22,23 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 	if (!IsValid(OwningCompanion)) return;
 
 	MovementComponent = OwningCompanion->GetCharacterMovement();
+
+	OnMontageBlendingOut.AddDynamic(this, &UCompanionAnimInstance::OnReloadMontageBlendingOut);
+}
+
+void UCompanionAnimInstance::NativeUninitializeAnimation()
+{
+	OnMontageBlendingOut.RemoveDynamic(this, &UCompanionAnimInstance::OnReloadMontageBlendingOut);
+
+	Super::NativeUninitializeAnimation();
+}
+
+void UCompanionAnimInstance::OnReloadMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted)
+{
+	if (Montage != ReloadMontage) return;
+	UE_LOG(LogCompanionDiag, Log, TEXT("%s: MONTAGE-RELOAD-END reason=blend-out interrupted=%d"),
+		IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
+		(int32)bInterrupted);
 }
 
 void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
@@ -95,6 +113,18 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsFiring = false;
 		bIsReloading = false;
 	}
+
+	if (bIsReloading != bPrevIsReloading)
+	{
+		if (UE_LOG_ACTIVE(LogCompanionDiag, Log))
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: MONTAGE-RELOAD-TOGGLE isReloading=%d vel=%.1f"),
+				IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
+				(int32)bIsReloading,
+				IsValid(MovementComponent) ? MovementComponent->Velocity.Size() : 0.f);
+		}
+		bPrevIsReloading = bIsReloading;
+	}
 }
 
 void UCompanionAnimInstance::PlayFireMontage(float PlayRate)
@@ -105,8 +135,13 @@ void UCompanionAnimInstance::PlayFireMontage(float PlayRate)
 
 void UCompanionAnimInstance::PlayReloadMontage(float PlayRate)
 {
-	if (IsValid(ReloadMontage))
-		Montage_Play(ReloadMontage, PlayRate);
+	if (!IsValid(ReloadMontage)) return;
+
+	Montage_Play(ReloadMontage, PlayRate);
+	UE_LOG(LogCompanionDiag, Log, TEXT("%s: MONTAGE-RELOAD-START len=%.2f playRate=%.2f"),
+		IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
+		ReloadMontage->GetPlayLength(),
+		PlayRate);
 }
 
 void UCompanionAnimInstance::PlayHitReactMontage(float PlayRate)

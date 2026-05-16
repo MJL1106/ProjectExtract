@@ -1,6 +1,8 @@
 // BT task — cover-aware companion combat. State machine drives EngageFromOpen, EngageFromCover, StandUpFire.
 
 #include "BTTask_CompanionCombat.h"
+#include "AI/CompanionDiag.h"
+#include "WeaponDataAsset.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "CompanionAIController.h"
@@ -11,6 +13,7 @@
 #include "AICoverSlot.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Navigation/PathFollowingComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 
 namespace
@@ -81,6 +84,17 @@ namespace
 		USkeletalMeshComponent* Mesh = Companion->GetMesh();
 		if (!IsValid(Mesh)) return nullptr;
 		return Cast<UCompanionAnimInstance>(Mesh->GetAnimInstance());
+	}
+
+	// Returns the minimum ammo required before starting a peek action.
+	static int32 ComputeMinBurstAmmoCost(ACompanionCharacter* Companion)
+	{
+		if (!IsValid(Companion)) return 1;
+		AWeaponBase* W = Companion->GetCurrentWeapon();
+		if (!IsValid(W)) return 1;
+		const UWeaponDataAsset* Data = W->GetWeaponData();
+		if (!Data) return 1;
+		return FMath::Clamp(Data->BurstCount, 1, FMath::Max(1, Data->MagazineSize));
 	}
 }
 
@@ -166,12 +180,17 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 		const bool bCloserToTarget = FVector::DistSquared(Current, TargetLoc)
 			< FVector::DistSquared(Current, Slot->GetSubSlotLocation(CurrentSubSlotIndex));
 		if (bCloserToTarget) CurrentSubSlotIndex = RepositionTargetSubSlotIndex;
+		if (bDebugLogging && bRepositionStartLogged)
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
+				*Companion->GetName(), FVector::Dist(Current, TargetLoc), RepositionElapsed);
 		RepositionTargetSubSlotIndex = INDEX_NONE;
+		bRepositionStartLogged = false;
 		CurrentBurstAction = EPeekAction::Hold;
 		ReturnToCover(Companion, Anim, Slot, true, bLowHp);
 		return;
 	}
 
+	RepositionElapsed += DeltaSeconds;
 	const FVector Current = Companion->GetActorLocation();
 	const FVector RawTarget = Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex);
 	const FVector Target(RawTarget.X, RawTarget.Y, Current.Z);
@@ -179,10 +198,23 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 	const FVector Next = FMath::VInterpConstantTo(Current, Target, DeltaSeconds, RepositionWalkSpeed);
 	Companion->TeleportTo(Next, Companion->GetActorRotation(), false, false);
 
+	if (bDebugLogging && bRepositionStartLogged)
+	{
+		const float Dist = FVector::Dist(Next, Target);
+		const float Delta = LastRepositionDist - Dist;
+		LastRepositionDist = Dist;
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-TICK status=Moving dist=%.0f delta=%.1f elapsed=%.1f isReloading=%d"),
+			*Companion->GetName(), Dist, Delta, RepositionElapsed, (int32)Companion->IsReloading());
+	}
+
 	if (FVector::Dist(Next, Target) <= RepositionArrivalTolerance)
 	{
+		if (bDebugLogging && bRepositionStartLogged)
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=arrived dist=%.0f elapsed=%.2f"),
+				*Companion->GetName(), FVector::Dist(Next, Target), RepositionElapsed);
 		CurrentSubSlotIndex = RepositionTargetSubSlotIndex;
 		RepositionTargetSubSlotIndex = INDEX_NONE;
+		bRepositionStartLogged = false;
 		CurrentBurstAction = EPeekAction::Hold;
 		PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 		TimeInCoverIdle = 0.f;
@@ -197,13 +229,21 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 
 	if (bSuppressed)
 	{
+		if (bDebugLogging && bRepositionStartLogged)
+		{
+			const FVector RawAbortTarget = Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex);
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
+				*Companion->GetName(), FVector::Dist(Companion->GetActorLocation(), RawAbortTarget), RepositionElapsed);
+		}
 		ReturnToCover(Companion, Anim, Slot, true, bLowHp);
 		bRepositionStandPhase = false;
 		RepositionTargetSubSlotIndex = INDEX_NONE;
+		bRepositionStartLogged = false;
 		CurrentBurstAction = EPeekAction::Hold;
 		return;
 	}
 
+	RepositionElapsed += DeltaSeconds;
 	const FVector Current = Companion->GetActorLocation();
 	const FVector RawTarget = Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex);
 	const FVector Target(RawTarget.X, RawTarget.Y, Current.Z);
@@ -221,11 +261,24 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 		}
 	}
 
+	if (bDebugLogging && bRepositionStartLogged)
+	{
+		const float Dist = FVector::Dist(Next, Target);
+		const float Delta = LastRepositionDist - Dist;
+		LastRepositionDist = Dist;
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-TICK status=Moving dist=%.0f delta=%.1f elapsed=%.1f isReloading=%d"),
+			*Companion->GetName(), Dist, Delta, RepositionElapsed, (int32)Companion->IsReloading());
+	}
+
 	if (FVector::Dist(Next, Target) <= RepositionArrivalTolerance)
 	{
+		if (bDebugLogging && bRepositionStartLogged)
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=arrived dist=%.0f elapsed=%.2f"),
+				*Companion->GetName(), FVector::Dist(Next, Target), RepositionElapsed);
 		CurrentSubSlotIndex = RepositionTargetSubSlotIndex;
 		RepositionTargetSubSlotIndex = INDEX_NONE;
 		bRepositionStandPhase = false;
+		bRepositionStartLogged = false;
 		Companion->Crouch();
 		ReturnToCover(Companion, Anim, Slot, false, bLowHp);
 	}
@@ -325,6 +378,28 @@ int32 UBTTask_CompanionCombat::PickBestSubSlotByLos(AAICoverSlot* Slot, AActor* 
 	return INDEX_NONE;
 }
 
+bool UBTTask_CompanionCombat::TryPrePeekReloadGate(ACompanionCharacter* Companion, AAICoverSlot* Slot)
+{
+	if (!IsValid(Companion)) return false;
+	const int32 BurstCost = ComputeMinBurstAmmoCost(Companion);
+	if (Companion->GetCurrentAmmo() >= BurstCost) return false;
+	if (!Companion->CanReload()) return false;
+	if (!Companion->IsReloading())
+	{
+		if (UE_LOG_ACTIVE(LogCompanionDiag, Log))
+			UE_LOG(LogCompanionDiag, Log,
+				TEXT("%s: PRE-PEEK-RELOAD-GATE ammo=%d burstCost=%d hasCover=1 slot=%s"),
+				*Companion->GetName(),
+				Companion->GetCurrentAmmo(), BurstCost,
+				*GetNameSafe(Slot));
+		Companion->ReloadWeapon();
+	}
+	const float ReloadCooldownCap = MaxPeekCooldown * 2.f;
+	const float ReloadBump = FMath::Clamp(Companion->GetWeaponReloadTime(), 0.f, ReloadCooldownCap);
+	PeekCooldown = FMath::Max(PeekCooldown, ReloadBump);
+	return true;
+}
+
 // --- Constructor ---
 
 UBTTask_CompanionCombat::UBTTask_CompanionCombat()
@@ -373,6 +448,9 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	SubSlotLosRecheckInterval = FMath::Max(0.1f, SubSlotLosRecheckInterval);
 	RepositionTargetSubSlotIndex = INDEX_NONE;
 	bRepositionStandPhase = false;
+	LastRepositionDist = 0.f;
+	RepositionElapsed = 0.f;
+	bRepositionStartLogged = false;
 	CornerPeekHomeLocation = FVector::ZeroVector;
 	CornerPeekApexLocation = FVector::ZeroVector;
 	bCornerPeekReturning = false;
@@ -380,6 +458,7 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	bWaitingForFinalApproach = false;
 	FinalApproachTarget = FVector::ZeroVector;
 	FinalApproachElapsed = 0.f;
+	FinalApproachStalledTime = 0.f;
 
 	if (!Companion->GetCurrentWeapon())
 		UE_LOG(LogCompanionAI, Warning, TEXT("%s: combat task started but CurrentWeapon is null"), *Companion->GetName());
@@ -419,6 +498,8 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 
 			const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
 			const FVector SnapLoc(SubSlotLoc.X, SubSlotLoc.Y, ArrivalLoc.Z);
+			if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: ALREADY-CLOSE-SNAP distToSubSlot=%.1f acceptRadius=%.1f arrival=%s subSlot=%s"),
+				*Companion->GetName(), DistToSubSlot, FinalApproachAcceptRadius, *ArrivalLoc.ToString(), *SubSlotLoc.ToString());
 			Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
 
 			if (UCompanionAnimInstance* Anim = GetCompanionAnim(Companion))
@@ -430,9 +511,26 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 			bWaitingForFinalApproach = true;
 			FinalApproachTarget = SubSlotLoc;
 			FinalApproachElapsed = 0.f;
+			LastFinalApproachDist = DistToSubSlot;
 
 			if (AAIController* AIC = Cast<AAIController>(Companion->GetController()))
-				AIC->MoveToLocation(SubSlotLoc, FinalApproachAcceptRadius, false, true, false, true);
+			{
+				AIC->MoveToLocation(SubSlotLoc, FinalApproachAcceptRadius, false, true, true, true);
+				if (bDebugLogging)
+				{
+					const TCHAR* PFStatus = TEXT("Unknown");
+					if (UPathFollowingComponent* PF = AIC->GetPathFollowingComponent())
+					{
+						const EPathFollowingStatus::Type St = PF->GetStatus();
+						PFStatus = (St == EPathFollowingStatus::Moving)  ? TEXT("Moving")
+							: (St == EPathFollowingStatus::Idle)    ? TEXT("Idle")
+							: (St == EPathFollowingStatus::Waiting) ? TEXT("Waiting")
+							:                                          TEXT("Paused");
+					}
+					UE_LOG(LogCompanionDiag, Log, TEXT("%s: FINALAPPROACH-KICK target=%s current=%s dist=%.0f pathStatus=%s"),
+						*Companion->GetName(), *SubSlotLoc.ToString(), *ArrivalLoc.ToString(), DistToSubSlot, PFStatus);
+				}
+			}
 		}
 	}
 
@@ -441,6 +539,19 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 		const float Distance = FVector::Dist(Companion->GetActorLocation(), Target->GetActorLocation());
 		UE_LOG(LogCompanionAI, Log, TEXT("%s: TASK ENTER target=%s dist=%.0f hasCover=%d slot=%s"),
 			*Companion->GetName(), *Target->GetName(), Distance, (int32)bHasCover, *GetNameSafe(Slot));
+
+		if (bHasCover && IsValid(Slot))
+		{
+			const FVector SubSlotLoc = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
+			const float DistToSubSlot = FVector::Dist(Companion->GetActorLocation(), SubSlotLoc);
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=%d slot=%s nearestSubSlot=%d distToSubSlot=%.1f"),
+				*Companion->GetName(), *Target->GetName(), Distance, 1, *GetNameSafe(Slot), CurrentSubSlotIndex, DistToSubSlot);
+		}
+		else
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=0 slot=None nearestSubSlot=-1 distToSubSlot=-1"),
+				*Companion->GetName(), *Target->GetName(), Distance);
+		}
 	}
 
 	return EBTNodeResult::InProgress;
@@ -482,7 +593,33 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		const bool bArrived = Dist <= FinalApproachAcceptRadius;
 		const bool bTimedOut = FinalApproachElapsed >= FinalApproachTimeout;
 
-		if (!bArrived && !bTimedOut)
+		// Stall detection: accumulate time spent Idle without having arrived.
+		EPathFollowingStatus::Type PFStatusEnum = EPathFollowingStatus::Idle;
+		if (AAIController* PFAIC = Cast<AAIController>(Ctx.Companion->GetController()))
+		{
+			if (UPathFollowingComponent* PF = PFAIC->GetPathFollowingComponent())
+				PFStatusEnum = PF->GetStatus();
+		}
+		if (!bArrived && PFStatusEnum == EPathFollowingStatus::Idle)
+			FinalApproachStalledTime += DeltaSeconds;
+		else
+			FinalApproachStalledTime = 0.f;
+		const bool bStalled = FinalApproachStalledTime >= FinalApproachStalledGracePeriod;
+
+		if (bDebugLogging)
+		{
+			const float Delta = LastFinalApproachDist - Dist;
+			LastFinalApproachDist = Dist;
+			const float Vel = Ctx.Companion->GetVelocity().Size();
+			const TCHAR* PFStatus = (PFStatusEnum == EPathFollowingStatus::Moving)  ? TEXT("Moving")
+				: (PFStatusEnum == EPathFollowingStatus::Idle)    ? TEXT("Idle")
+				: (PFStatusEnum == EPathFollowingStatus::Waiting) ? TEXT("Waiting")
+				:                                                    TEXT("Paused");
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: FINALAPPROACH-WATCH elapsed=%.2f dist=%.0f delta=%.1f vel=%.1f pathStatus=%s stalled=%.2f"),
+				*Ctx.Companion->GetName(), FinalApproachElapsed, Dist, Delta, Vel, PFStatus, FinalApproachStalledTime);
+		}
+
+		if (!bArrived && !bTimedOut && !bStalled)
 			return;
 
 		if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
@@ -495,6 +632,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			const FRotator SlotYawRot(0.f, ApproachSlot->GetActorRotation().Yaw, 0.f);
 			const FVector SnapLoc(FinalApproachTarget.X, FinalApproachTarget.Y, Ctx.Companion->GetActorLocation().Z);
+			if (bDebugLogging)
+			{
+				const float WarpDist = FVector::Dist(Ctx.Companion->GetActorLocation(), SnapLoc);
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: FINALAPPROACH-SNAP arrived=%d timedOut=%d stalled=%d elapsed=%.2f dist=%.0f warped=%.0f"),
+					*Ctx.Companion->GetName(), (int32)bArrived, (int32)bTimedOut, (int32)bStalled, FinalApproachElapsed, Dist, WarpDist);
+			}
 			Ctx.Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
 			if (UCompanionAnimInstance* Anim = GetCompanionAnim(Ctx.Companion))
 				Anim->EnterCoverPose(ResolvedPeekSide);
@@ -502,6 +645,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		bWaitingForFinalApproach = false;
 		FinalApproachElapsed = 0.f;
+		LastFinalApproachDist = 0.f;
+		FinalApproachStalledTime = 0.f;
 		// Fall through to normal branch logic this tick.
 	}
 
@@ -677,10 +822,14 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					const int32 BestIndex = PickBestSubSlotByLos(Slot, Ctx.Target, Ctx.Companion, CurrentSubSlotIndex, TickIgnoredAttached);
 					if (BestIndex != INDEX_NONE)
 					{
+						const int32 PrevSubSlotIndex = CurrentSubSlotIndex;
 						CurrentSubSlotIndex = BestIndex;
 						const FVector NewSubSlotLoc = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
 						const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
-						Ctx.Companion->TeleportTo(FVector(NewSubSlotLoc.X, NewSubSlotLoc.Y, Ctx.Companion->GetActorLocation().Z), SlotYawRot, false, false);
+						const FVector TeleportDest(NewSubSlotLoc.X, NewSubSlotLoc.Y, Ctx.Companion->GetActorLocation().Z);
+						if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MID-COMBAT-SUBSLOT-TELEPORT fromIdx=%d toIdx=%d dist=%.0f isReloading=%d"),
+							*Ctx.Companion->GetName(), PrevSubSlotIndex, BestIndex, FVector::Dist(Ctx.Companion->GetActorLocation(), TeleportDest), (int32)Ctx.Companion->IsReloading());
+						Ctx.Companion->TeleportTo(TeleportDest, SlotYawRot, false, false);
 						LastPeekResolveCoverLoc = FVector::ZeroVector;
 						LastPeekResolveTargetLoc = FVector::ZeroVector;
 						BlockedRecheckHits = 0;
@@ -696,9 +845,22 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// Gate 3: reload.
 		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
 		{
-			Ctx.Companion->ReloadWeapon();
 			if (bDebugLogging)
+			{
+				AWeaponBase* W = Ctx.Companion->GetCurrentWeapon();
+				const float ReloadTime = (W && W->GetWeaponData()) ? W->GetWeaponData()->ReloadTime : -1.f;
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-START gate=697 ammo=%d/%d reserve=%d vel=%.1f hasCover=%d slot=%s reloadTime=%.2f"),
+					*Ctx.Companion->GetName(),
+					W ? W->GetCurrentAmmo() : -1,
+					W && W->GetWeaponData() ? W->GetWeaponData()->MagazineSize : -1,
+					W ? W->GetReserveAmmo() : -1,
+					Ctx.Companion->GetVelocity().Size(),
+					(int32)bHasCover,
+					*GetNameSafe(Slot),
+					ReloadTime);
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: reloading before stand-up"), *Ctx.Companion->GetName());
+			}
+			Ctx.Companion->ReloadWeapon();
 			return;
 		}
 		if (Ctx.Companion->IsReloading()) return;
@@ -723,6 +885,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: Cover REJECT stand-fire blocked by slot height slot=%s"), *Ctx.Companion->GetName(), *Slot->GetName());
+			return;
+		}
+
+		// Pre-peek ammo gate: never expose without enough ammo for a useful burst.
+		if (TryPrePeekReloadGate(Ctx.Companion, Slot))
+		{
+			TimeInCoverIdle = 0.f;
 			return;
 		}
 
@@ -809,8 +978,17 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				Ctx.Companion->StopWeaponFire();
 				CurrentBurstAction = EPeekAction::Reposition;
 				TimeInCoverIdle = 0.f;
+				LastRepositionDist = FVector::Dist(Ctx.Companion->GetActorLocation(), Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex));
+				RepositionElapsed = 0.f;
+				bRepositionStartLogged = true;
 				if (bDebugLogging)
+				{
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: REPOSITION sub-slot %d -> %d"), *Ctx.Companion->GetName(), CurrentSubSlotIndex, RepositionTargetSubSlotIndex);
+					UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=silent fromIdx=%d toIdx=%d fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
+						*Ctx.Companion->GetName(), CurrentSubSlotIndex, RepositionTargetSubSlotIndex,
+						*Ctx.Companion->GetActorLocation().ToString(), *Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex).ToString(),
+						LastRepositionDist, (int32)Ctx.Companion->IsReloading());
+				}
 				return;
 			}
 
@@ -825,8 +1003,17 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			TimeInCoverIdle = 0.f;
 			TimeAtCurrentCover = 0.f;
 			CoverValidityCheckTimer = 0.f;
+			LastRepositionDist = FVector::Dist(Ctx.Companion->GetActorLocation(), Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex));
+			RepositionElapsed = 0.f;
+			bRepositionStartLogged = true;
 			if (bDebugLogging)
+			{
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: STANDUP-REPOSITION sub-slot %d -> %d burst=%.2fs"), *Ctx.Companion->GetName(), CurrentSubSlotIndex, RepositionTargetSubSlotIndex, BurstTimer);
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=standup fromIdx=%d toIdx=%d fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
+					*Ctx.Companion->GetName(), CurrentSubSlotIndex, RepositionTargetSubSlotIndex,
+					*Ctx.Companion->GetActorLocation().ToString(), *Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex).ToString(),
+					LastRepositionDist, (int32)Ctx.Companion->IsReloading());
+			}
 			return;
 		}
 
@@ -906,6 +1093,28 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if (bNowBlocked)
 					{
 						UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst LoS BLOCKED by %s"), *Ctx.Companion->GetName(), *GetNameSafe(BurstBlocker));
+						if (UE_LOG_ACTIVE(LogCompanionDiag, Log))
+						{
+							if (IsValid(Ctx.Target))
+							{
+								if (AWeaponBase* W = Ctx.Companion->GetCurrentWeapon())
+								{
+									const FVector MuzzleLoc = W->GetMuzzleLocation();
+									FHitResult MuzzleHit;
+									FCollisionQueryParams MuzzleParams;
+									MuzzleParams.AddIgnoredActor(Ctx.Companion);
+									MuzzleParams.AddIgnoredActor(W);
+									Ctx.Companion->GetWorld()->LineTraceSingleByChannel(MuzzleHit, MuzzleLoc, Ctx.Target->GetActorLocation(), ECC_Visibility, MuzzleParams);
+									const bool bMuzzleClear = !MuzzleHit.bBlockingHit || (MuzzleHit.GetActor() == Ctx.Target);
+									if (bMuzzleClear)
+									{
+										UE_LOG(LogCompanionDiag, Log,
+											TEXT("%s: STAND-UP-FIRE-LOS-MISMATCH peekBlockedBy=%s muzzleLoc=%s muzzleClear=1"),
+											*Ctx.Companion->GetName(), *GetNameSafe(BurstBlocker), *MuzzleLoc.ToString());
+									}
+								}
+							}
+						}
 					}
 					else
 					{
@@ -944,7 +1153,26 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// Reload mid-burst.
 		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
 		{
-			if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=reload"), *Ctx.Companion->GetName());
+			if (bDebugLogging)
+			{
+				AWeaponBase* W = Ctx.Companion->GetCurrentWeapon();
+				const float ReloadTime = (W && W->GetWeaponData()) ? W->GetWeaponData()->ReloadTime : -1.f;
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-START gate=945 ammo=%d/%d reserve=%d vel=%.1f hasCover=%d slot=%s reloadTime=%.2f"),
+					*Ctx.Companion->GetName(),
+					W ? W->GetCurrentAmmo() : -1,
+					W && W->GetWeaponData() ? W->GetWeaponData()->MagazineSize : -1,
+					W ? W->GetReserveAmmo() : -1,
+					Ctx.Companion->GetVelocity().Size(),
+					(int32)bHasCover,
+					*GetNameSafe(Slot),
+					ReloadTime);
+				const FVector SubSlotLoc = IsValid(Slot) ? Slot->GetSubSlotLocation(CurrentSubSlotIndex) : FVector::ZeroVector;
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RETURN-TO-COVER reason=reload moveTarget=%s dist=%.0f isReloading=%d"),
+					*Ctx.Companion->GetName(), *SubSlotLoc.ToString(),
+					FVector::Dist(Ctx.Companion->GetActorLocation(), SubSlotLoc),
+					(int32)Ctx.Companion->IsReloading());
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=reload"), *Ctx.Companion->GetName());
+			}
 			Ctx.Companion->ReloadWeapon();
 			ReturnToCover(Ctx.Companion, Anim, Slot, false, bLowHp);
 			return;
@@ -953,7 +1181,15 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// Burst elapsed — return to cover.
 		if (BurstTimer <= 0.f)
 		{
-			if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=burst-end-cover (next cd=%.2fs)"), *Ctx.Companion->GetName(), PeekCooldown);
+			if (bDebugLogging)
+			{
+				const FVector SubSlotLoc = IsValid(Slot) ? Slot->GetSubSlotLocation(CurrentSubSlotIndex) : FVector::ZeroVector;
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RETURN-TO-COVER reason=burst-end moveTarget=%s dist=%.0f isReloading=%d"),
+					*Ctx.Companion->GetName(), *SubSlotLoc.ToString(),
+					FVector::Dist(Ctx.Companion->GetActorLocation(), SubSlotLoc),
+					(int32)Ctx.Companion->IsReloading());
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=burst-end-cover (next cd=%.2fs)"), *Ctx.Companion->GetName(), PeekCooldown);
+			}
 			ReturnToCover(Ctx.Companion, Anim, Slot, false, bLowHp);
 		}
 		return;
@@ -1063,7 +1299,20 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
 	{
 		if (bDebugLogging)
+		{
+			AWeaponBase* W = Ctx.Companion->GetCurrentWeapon();
+			const float ReloadTime = (W && W->GetWeaponData()) ? W->GetWeaponData()->ReloadTime : -1.f;
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-START gate=1063 ammo=%d/%d reserve=%d vel=%.1f hasCover=%d slot=%s reloadTime=%.2f"),
+				*Ctx.Companion->GetName(),
+				W ? W->GetCurrentAmmo() : -1,
+				W && W->GetWeaponData() ? W->GetWeaponData()->MagazineSize : -1,
+				W ? W->GetReserveAmmo() : -1,
+				Ctx.Companion->GetVelocity().Size(),
+				(int32)bHasCover,
+				*GetNameSafe(Slot),
+				ReloadTime);
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=reload"), *Ctx.Companion->GetName());
+		}
 		Ctx.Companion->StopWeaponFire();
 		Ctx.Companion->ReloadWeapon();
 		bIsFiringBurst = false;
@@ -1177,6 +1426,9 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 	BlockedRecheckHits = 0;
 	RepositionTargetSubSlotIndex = INDEX_NONE;
 	bRepositionStandPhase = false;
+	LastRepositionDist = 0.f;
+	RepositionElapsed = 0.f;
+	bRepositionStartLogged = false;
 	CornerPeekHomeLocation = FVector::ZeroVector;
 	CornerPeekApexLocation = FVector::ZeroVector;
 	bCornerPeekReturning = false;
@@ -1184,6 +1436,7 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 	bWaitingForFinalApproach = false;
 	FinalApproachTarget = FVector::ZeroVector;
 	FinalApproachElapsed = 0.f;
+	FinalApproachStalledTime = 0.f;
 }
 
 FString UBTTask_CompanionCombat::GetStaticDescription() const

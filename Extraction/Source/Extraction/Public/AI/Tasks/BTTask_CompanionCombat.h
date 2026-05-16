@@ -163,6 +163,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float FinalApproachTimeout = 3.0f;
 
+	/** Seconds the path-follower must be Idle (without arriving) before snapping early. */
+	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "0.05", ClampMax = "2.0"))
+	float FinalApproachStalledGracePeriod = 0.25f;
+
 	// --- New action weights (crouch cover) ---
 
 	/** Relative weight for standing, firing, and walking to an adjacent sub-slot. */
@@ -248,6 +252,9 @@ private:
 	// Reposition / StandUpAndReposition state
 	int32 RepositionTargetSubSlotIndex = INDEX_NONE;
 	bool bRepositionStandPhase = false;
+	float LastRepositionDist = 0.f;
+	float RepositionElapsed = 0.f;
+	bool bRepositionStartLogged = false;
 
 	// CornerPeek state
 	FVector CornerPeekHomeLocation = FVector::ZeroVector;
@@ -272,6 +279,11 @@ private:
 	bool bWaitingForFinalApproach = false;
 	FVector FinalApproachTarget = FVector::ZeroVector;
 	float FinalApproachElapsed = 0.f;
+	float LastFinalApproachDist = 0.f;
+	float FinalApproachStalledTime = 0.f;
 
 	int32 PickBestSubSlotByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, int32 ExcludeIndex, const TArray<AActor*>& IgnoredAttached) const;
+
+	/** Returns true and triggers reload if ammo is too low to start a peek action. Caller must return immediately when true. */
+	bool TryPrePeekReloadGate(ACompanionCharacter* Companion, AAICoverSlot* Slot);
 };
