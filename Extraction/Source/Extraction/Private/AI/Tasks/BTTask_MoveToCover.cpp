@@ -37,11 +37,21 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	AAICoverSlot* ExistingSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(CoverSlotKey.SelectedKeyName));
 	if (IsValid(ExistingSlot) && ExistingSlot->IsClaimed())
 	{
-		const FVector StandPos = ExistingSlot->GetStandPosition();
-		if (FVector::Dist(Pawn->GetActorLocation(), StandPos) <= AcceptableRadius)
+		const FVector PawnLoc = Pawn->GetActorLocation();
+		int32 BestIndex = 0;
+		float BestDistSq = FVector::DistSquared(PawnLoc, ExistingSlot->GetSubSlotLocation(0));
+		for (int32 i = 1; i < ExistingSlot->GetSubSlotCount(); ++i)
+		{
+			const float D = FVector::DistSquared(PawnLoc, ExistingSlot->GetSubSlotLocation(i));
+			if (D < BestDistSq) { BestDistSq = D; BestIndex = i; }
+		}
+		const FVector ArrivalPos = ExistingSlot->GetSubSlotLocation(BestIndex);
+		BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPos);
+
+		if (FVector::Dist(PawnLoc, ArrivalPos) <= AcceptableRadius)
 			return EBTNodeResult::Succeeded;
 
-		StartMoveTo(ExistingSlot, Controller, Pawn);
+		StartMoveTo(ArrivalPos, Controller, Pawn);
 		return EBTNodeResult::InProgress;
 	}
 
@@ -74,25 +84,33 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 		return EBTNodeResult::Succeeded;
 	}
 
-	const FVector StandPos = Slot->GetStandPosition();
+	const FVector PawnLoc = Pawn->GetActorLocation();
+	int32 BestIndex = 0;
+	float BestDistSq = FVector::DistSquared(PawnLoc, Slot->GetSubSlotLocation(0));
+	for (int32 i = 1; i < Slot->GetSubSlotCount(); ++i)
+	{
+		const float D = FVector::DistSquared(PawnLoc, Slot->GetSubSlotLocation(i));
+		if (D < BestDistSq) { BestDistSq = D; BestIndex = i; }
+	}
+	const FVector ArrivalPos = Slot->GetSubSlotLocation(BestIndex);
+
 	BB->SetValueAsObject(CoverSlotKey.SelectedKeyName, Slot);
-	BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, StandPos);
+	BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPos);
 	BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, true);
 
-	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover claimed slot=%s loc=%s"), *Pawn->GetName(), *Slot->GetName(), *StandPos.ToString());
+	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover claimed slot=%s subSlot=%d loc=%s"), *Pawn->GetName(), *Slot->GetName(), BestIndex, *ArrivalPos.ToString());
 
-	if (FVector::Dist(Pawn->GetActorLocation(), StandPos) <= AcceptableRadius)
+	if (FVector::Dist(PawnLoc, ArrivalPos) <= AcceptableRadius)
 		return EBTNodeResult::Succeeded;
 
-	StartMoveTo(Slot, Controller, Pawn);
+	StartMoveTo(ArrivalPos, Controller, Pawn);
 	return EBTNodeResult::InProgress;
 }
 
-void UBTTask_MoveToCover::StartMoveTo(AAICoverSlot* Slot, AAIController* Controller, APawn* Pawn)
+void UBTTask_MoveToCover::StartMoveTo(const FVector& ArrivalPos, AAIController* Controller, APawn* Pawn)
 {
-	const FVector StandPos = Slot->GetStandPosition();
-	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover GOTO slot=%s loc=%s"), *GetNameSafe(Pawn), *Slot->GetName(), *StandPos.ToString());
-	Controller->MoveToLocation(StandPos, AcceptableRadius, false, true, false, true);
+	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover GOTO loc=%s"), *GetNameSafe(Pawn), *ArrivalPos.ToString());
+	Controller->MoveToLocation(ArrivalPos, AcceptableRadius, false, true, false, true);
 	bMoveIssued = true;
 }
 
@@ -134,7 +152,8 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	if (MoveStatus == EPathFollowingStatus::Moving) return;
 
 	AAICoverSlot* Slot = Cast<AAICoverSlot>(BB->GetValueAsObject(CoverSlotKey.SelectedKeyName));
-	const FVector StandPos = IsValid(Slot) ? Slot->GetStandPosition() : BB->GetValueAsVector(CoverLocationKey.SelectedKeyName);
+	const FVector ArrivalPos = BB->GetValueAsVector(CoverLocationKey.SelectedKeyName);
+	const FVector StandPos = (ArrivalPos != FVector::ZeroVector) ? ArrivalPos : (IsValid(Slot) ? Slot->GetActorLocation() : Pawn->GetActorLocation());
 	const bool bArrived = FVector::Dist(Pawn->GetActorLocation(), StandPos) <= AcceptableRadius;
 
 	const float DistToCover = FVector::Dist(Pawn->GetActorLocation(), StandPos);

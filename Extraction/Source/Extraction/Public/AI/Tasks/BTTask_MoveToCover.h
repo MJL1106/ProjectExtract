@@ -48,7 +48,7 @@ protected:
 	float SearchRadius = 1200.0f;
 
 private:
-	void StartMoveTo(AAICoverSlot* Slot, AAIController* Controller, APawn* Pawn);
+	void StartMoveTo(const FVector& ArrivalPos, AAIController* Controller, APawn* Pawn);
 	void ReleaseClaim(UBlackboardComponent* BB, APawn* Pawn);
 
 	bool bMoveIssued = false;
