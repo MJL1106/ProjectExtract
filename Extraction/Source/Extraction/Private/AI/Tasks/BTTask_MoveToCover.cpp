@@ -1,6 +1,7 @@
 // BT task — queries the cover registry, claims a slot, and moves the companion to it.
 
 #include "BTTask_MoveToCover.h"
+#include "AI/CompanionDiag.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
@@ -30,6 +31,10 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 
 	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover ENTER querier=%s hasCoverPos=%d combatTarget=%s"),
 		*Pawn->GetName(), *Pawn->GetName(),
+		(int32)BB->GetValueAsBool(HasCoverPositionKey.SelectedKeyName),
+		*GetNameSafe(Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName))));
+	if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-ENTER hasCoverPos=%d combatTarget=%s"),
+		*Pawn->GetName(),
 		(int32)BB->GetValueAsBool(HasCoverPositionKey.SelectedKeyName),
 		*GetNameSafe(Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName))));
 
@@ -110,8 +115,11 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 void UBTTask_MoveToCover::StartMoveTo(const FVector& ArrivalPos, AAIController* Controller, APawn* Pawn)
 {
 	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover GOTO loc=%s"), *GetNameSafe(Pawn), *ArrivalPos.ToString());
+	LastTickDist = Pawn ? FVector::Dist(Pawn->GetActorLocation(), ArrivalPos) : 0.f;
 	Controller->MoveToLocation(ArrivalPos, AcceptableRadius, false, true, false, true);
 	bMoveIssued = true;
+	if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-GOTO loc=%s dist=%.0f"),
+		*GetNameSafe(Pawn), *ArrivalPos.ToString(), LastTickDist);
 }
 
 void UBTTask_MoveToCover::ReleaseClaim(UBlackboardComponent* BB, APawn* Pawn)
@@ -149,7 +157,27 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	if (!PF) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
 	const EPathFollowingStatus::Type MoveStatus = PF->GetStatus();
-	if (MoveStatus == EPathFollowingStatus::Moving) return;
+
+	const TCHAR* StatusStr =
+		(MoveStatus == EPathFollowingStatus::Moving)  ? TEXT("Moving") :
+		(MoveStatus == EPathFollowingStatus::Idle)    ? TEXT("Idle") :
+		(MoveStatus == EPathFollowingStatus::Waiting) ? TEXT("Waiting") :
+		                                                 TEXT("Paused");
+
+	if (MoveStatus == EPathFollowingStatus::Moving)
+	{
+		if (bDebugLogging)
+		{
+			const FVector ArrivalPosMoving = BB->GetValueAsVector(CoverLocationKey.SelectedKeyName);
+			const float DistMoving = FVector::Dist(Pawn->GetActorLocation(), ArrivalPosMoving);
+			const float Delta = LastTickDist - DistMoving;
+			LastTickDist = DistMoving;
+			const float Vel = Pawn->GetVelocity().Size();
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-TICK status=Moving dist=%.0f delta=%.1f vel=%.1f"),
+				*Pawn->GetName(), DistMoving, Delta, Vel);
+		}
+		return;
+	}
 
 	AAICoverSlot* Slot = Cast<AAICoverSlot>(BB->GetValueAsObject(CoverSlotKey.SelectedKeyName));
 	const FVector ArrivalPos = BB->GetValueAsVector(CoverLocationKey.SelectedKeyName);
@@ -162,6 +190,8 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	{
 		UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover ARRIVED result=S status=Idle dist=%.0f radius=%.0f reason=ReachedGoal"),
 			*Pawn->GetName(), DistToCover, AcceptableRadius);
+		if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=%s dist=%.0f reason=ReachedGoal"),
+			*Pawn->GetName(), StatusStr, DistToCover);
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
 
@@ -171,14 +201,11 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 		UE_LOG(LogCompanionAI, Log,
 			TEXT("%s: MoveToCover ARRIVED result=S status=Idle dist=%.0f radius=%.0f reason=StoppedShortAccepted"),
 			*Pawn->GetName(), DistToCover, AcceptableRadius);
+		if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=Idle dist=%.0f reason=StoppedShortAccepted"),
+			*Pawn->GetName(), DistToCover);
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
 
-	const TCHAR* StatusStr =
-		(MoveStatus == EPathFollowingStatus::Idle)    ? TEXT("Idle") :
-		(MoveStatus == EPathFollowingStatus::Waiting) ? TEXT("Waiting") :
-		(MoveStatus == EPathFollowingStatus::Paused)  ? TEXT("Paused") :
-		                                                 TEXT("Moving");
 	// Idle beyond tolerance = truly unreachable. Waiting/Paused = external interruption.
 	const TCHAR* ReasonStr =
 		(MoveStatus == EPathFollowingStatus::Idle)    ? TEXT("Unreachable") :
@@ -188,6 +215,8 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	UE_LOG(LogCompanionAI, Log,
 		TEXT("%s: MoveToCover ARRIVED result=S status=%s dist=%.0f radius=%.0f reason=%s"),
 		*Pawn->GetName(), StatusStr, DistToCover, AcceptableRadius, ReasonStr);
+	if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=%s dist=%.0f reason=%s"),
+		*Pawn->GetName(), StatusStr, DistToCover, ReasonStr);
 	ReleaseClaim(BB, Pawn);
 	return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 }

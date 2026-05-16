@@ -1,6 +1,7 @@
 // BT service — ticks to update all companion blackboard keys (DBNO, combat target, etc).
 
 #include "BTService_UpdateCompanionState.h"
+#include "AI/CompanionDiag.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
@@ -160,10 +161,26 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		}
 
 		BB->SetValueAsObject(CombatTargetKey.SelectedKeyName, BestTarget);
+
+		// Log first-acquisition (null -> valid) for diag.
+		if (!PrevCombatTarget.IsValid() && UE_LOG_ACTIVE(LogCompanionDiag, Log))
+		{
+			FCollisionQueryParams AcqLosParams(SCENE_QUERY_STAT(CompanionDiagAcqLoS), true);
+			AcqLosParams.AddIgnoredActor(Companion);
+			FHitResult AcqLosHit;
+			const bool bAcqBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+				AcqLosHit, Companion->GetActorLocation(), BestTarget->GetActorLocation(), ECC_Visibility, AcqLosParams);
+			const bool bAcqLos = !bAcqBlocked || (AcqLosHit.GetActor() == BestTarget);
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: COMBAT-TARGET-ACQUIRED from=null to=%s dist=%.0f los=%d"),
+				*Companion->GetName(), *BestTarget->GetName(), FMath::Sqrt(BestDistSq), (int32)bAcqLos);
+		}
+		PrevCombatTarget = BestTarget;
 	}
-	else if (ExistingTarget == nullptr)
+	else
 	{
-		BB->ClearValue(CombatTargetKey.SelectedKeyName);
+		PrevCombatTarget.Reset();
+		if (ExistingTarget == nullptr)
+			BB->ClearValue(CombatTargetKey.SelectedKeyName);
 	}
 
 	// --- Posture transitions (server-side; SetPosture gates on HasAuthority) ---

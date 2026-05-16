@@ -68,6 +68,10 @@ public:
 
 	UStaticMeshComponent* GetWeaponMesh() const { return WeaponMesh; }
 
+	/** World-space location of the muzzle. Returns the MuzzleSocket if the weapon mesh has one, else the actor location. */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	FVector GetMuzzleLocation() const;
+
 	/** Set by WeaponComponent when ADS state changes */
 	void SetOwnerIsAiming(bool bAiming) { bOwnerIsAiming = bAiming; }
 
@@ -170,4 +174,8 @@ private:
 
 	/** Yaw already recovered so far */
 	float RecoilRecoveryYawApplied;
+
+	/** World time when Reload() was last called (for RELOAD-FINISH elapsed diag). Server-only. */
+	UPROPERTY(Transient)
+	float ReloadStartTimeSeconds = 0.f;
 };

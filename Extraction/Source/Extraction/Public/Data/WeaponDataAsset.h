@@ -49,6 +49,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "1"))
 	int32 MagazineSize = 30;
 
+	/** Minimum ammo needed for a useful peek/burst. Companion reloads instead of peeking when current mag < this value. */
+	UPROPERTY(EditDefaultsOnly, Category = "Combat", meta = (ClampMin = 1, UIMin = 1))
+	int32 BurstCount = 3;
+
 	/** Starting reserve ammo (total extra rounds carried) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "0"))
 	int32 DefaultReserveAmmo = 120;

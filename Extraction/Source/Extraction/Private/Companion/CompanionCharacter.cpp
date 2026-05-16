@@ -1,9 +1,11 @@
 // AI companion character — follows player, engages enemies, revives downed teammates.
 
 #include "CompanionCharacter.h"
+#include "AI/CompanionDiag.h"
 #include "CompanionAIController.h"
 #include "HealthComponent.h"
 #include "WeaponBase.h"
+#include "WeaponDataAsset.h"
 #include "TraversalComponent.h"
 #include "CompanionAnimInstance.h"
 #include "ExtractionTypes.h"
@@ -208,6 +210,14 @@ void ACompanionCharacter::StopWeaponFire()
 
 void ACompanionCharacter::ReloadWeapon()
 {
+	if (UE_LOG_ACTIVE(LogCompanionDiag, Log))
+	{
+		const float Vel = GetVelocity().Size();
+		const bool bIsMoving = Vel > KINDA_SMALL_NUMBER;
+		const bool bAlreadyReloading = IsValid(CurrentWeapon) && CurrentWeapon->IsReloading();
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-CALL vel=%.1f isMoving=%d alreadyReloading=%d"),
+			*GetName(), Vel, (int32)bIsMoving, (int32)bAlreadyReloading);
+	}
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->Reload();
 }
@@ -226,6 +236,23 @@ bool ACompanionCharacter::NeedsReload() const
 bool ACompanionCharacter::IsReloading() const
 {
 	return IsValid(CurrentWeapon) && CurrentWeapon->IsReloading();
+}
+
+bool ACompanionCharacter::CanReload() const
+{
+	return IsValid(CurrentWeapon) && CurrentWeapon->CanReload();
+}
+
+int32 ACompanionCharacter::GetCurrentAmmo() const
+{
+	return IsValid(CurrentWeapon) ? CurrentWeapon->GetCurrentAmmo() : 0;
+}
+
+float ACompanionCharacter::GetWeaponReloadTime() const
+{
+	if (!IsValid(CurrentWeapon)) return 0.f;
+	const UWeaponDataAsset* Data = CurrentWeapon->GetWeaponData();
+	return Data ? Data->ReloadTime : 0.f;
 }
 
 // --- Aim Inaccuracy ---
