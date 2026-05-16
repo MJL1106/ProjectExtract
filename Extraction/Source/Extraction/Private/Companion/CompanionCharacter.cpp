@@ -79,7 +79,7 @@ void ACompanionCharacter::BeginPlay()
 		CurrentWeapon = GetWorld()->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
 		if (IsValid(CurrentWeapon))
 		{
-			CurrentWeapon->AttachToComponent(GetCapsuleComponent(), FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			CurrentWeapon->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, WeaponAttachSocket);
 			CurrentWeapon->InitializeAmmo();
 
 			UE_LOG(LogCompanion, Log, TEXT("%s equipped weapon %s"), *GetName(), *CurrentWeapon->GetName());
@@ -123,7 +123,21 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 		UE_LOG(LogCompanion, Log, TEXT("Companion took %.1f damage — HP: %.0f / Shield: %.0f"),
 			ActualDamage, HealthComponent->GetCurrentHealth(), HealthComponent->GetCurrentShield());
 	}
+	if (ActualDamage > 0.f && GetWorld())
+		LastDamageWorldTime = GetWorld()->GetTimeSeconds();
 	return ActualDamage;
+}
+
+bool ACompanionCharacter::IsSuppressed(float Window) const
+{
+	if (Window <= 0.f || !GetWorld()) return false;
+	return (GetWorld()->GetTimeSeconds() - LastDamageWorldTime) < Window;
+}
+
+float ACompanionCharacter::GetHealthFraction() const
+{
+	if (!IsValid(HealthComponent)) return 1.f;
+	return HealthComponent->GetHealthPercent();
 }
 
 void ACompanionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

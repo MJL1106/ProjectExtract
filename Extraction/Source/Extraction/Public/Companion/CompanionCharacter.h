@@ -89,6 +89,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
 	UTraversalComponent* GetTraversalComponent() const { return TraversalComponent; }
 
+	// --- Suppression / Health ---
+
+	/** True if damage was received within Window seconds. Window <= 0 always returns false. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	bool IsSuppressed(float Window) const;
+
+	/** Health fraction [0,1]. Returns 1 if HealthComponent missing. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	float GetHealthFraction() const;
+
 	// --- Posture ---
 
 	UFUNCTION(BlueprintPure, Category = "Companion")
@@ -125,6 +135,9 @@ protected:
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Combat")
 	TSubclassOf<AWeaponBase> WeaponClass;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon")
+	FName WeaponAttachSocket = TEXT("WeaponSocket");
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
 	float MaxInaccuracyDegrees = 8.0f;
@@ -192,6 +205,7 @@ private:
 	TWeakObjectPtr<AActor> CurrentAimTarget;
 
 	float TimeAimingAtCurrentTarget = 0.0f;
+	float LastDamageWorldTime = -1e9f;
 
 	FTimerHandle DestroyTimerHandle;
 };

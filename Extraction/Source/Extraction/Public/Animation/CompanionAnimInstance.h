@@ -108,6 +108,9 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|AimOffset")
 	float AimYaw = 0.f;
 
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|AimOffset")
+	bool bIsAiming = false;
+
 	// --- Combat ---
 
 	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Combat")
