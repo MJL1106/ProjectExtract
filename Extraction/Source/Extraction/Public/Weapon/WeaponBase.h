@@ -7,7 +7,7 @@
 #include "ExtractionTypes.h"
 #include "WeaponBase.generated.h"
 
-class USkeletalMeshComponent;
+class UStaticMeshComponent;
 class UWeaponDataAsset;
 class AExtractionCharacter;
 
@@ -66,7 +66,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsReloading() const { return CurrentState == EWeaponState::Reloading; }
 
-	USkeletalMeshComponent* GetWeaponMesh() const { return WeaponMesh; }
+	UStaticMeshComponent* GetWeaponMesh() const { return WeaponMesh; }
 
 	/** Set by WeaponComponent when ADS state changes */
 	void SetOwnerIsAiming(bool bAiming) { bOwnerIsAiming = bAiming; }
@@ -88,7 +88,7 @@ public:
 protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
-	TObjectPtr<USkeletalMeshComponent> WeaponMesh;
+	TObjectPtr<UStaticMeshComponent> WeaponMesh;
 
 	/** Data asset with all tuning values for this weapon */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Config")

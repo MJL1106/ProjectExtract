@@ -21,6 +21,7 @@ public:
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual void OnConstruction(const FTransform& Transform) override;
 
 public:
 	// --- Cover metadata (designer-authored) ---
@@ -37,6 +38,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Cover|Config")
 	float CoverRadius = 60.f;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Cover|Config")
+	bool bIsPeekableCornerStart = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Cover|Config")
+	bool bIsPeekableCornerEnd = false;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Cover|Config", meta = (ClampMin = "50.0"))
+	float SubSlotSpacing = 100.f;
+
 	// --- Claim API (server-only, non-replicated) ---
 
 	bool IsClaimed() const;
@@ -47,21 +57,27 @@ public:
 	// --- Geometry helpers ---
 
 	bool IsTargetInFireArc(const FVector& TargetLoc) const;
-	bool CanStandFireFrom() const;
+
+	// Crouch cover = chest-high wall, can fire over the top.
+	bool CanStandFireOver() const;
+
 	FVector GetStandPosition() const;
+
+	float GetCoverLineHalfLength() const;
+	int32 GetSubSlotCount() const;
+	FVector GetSubSlotLocation(int32 Index) const;
+	bool IsSubSlotPeekableCorner(int32 Index) const;
 
 private:
 	// Server-only — intentionally not replicated
 	TWeakObjectPtr<AActor> ClaimedBy;
 
-	// Debug viz (editor only)
+	// Debug viz — kept out of editor-only guard so extent is available at runtime
 	UPROPERTY(VisibleAnywhere, Category = "Cover|Debug")
 	TObjectPtr<UArrowComponent> ForwardArrow;
 
-#if WITH_EDITORONLY_DATA
 	UPROPERTY(VisibleAnywhere, Category = "Cover|Debug")
-	TObjectPtr<UBoxComponent> DebugBox;
-#endif
+	TObjectPtr<UBoxComponent> CoverBoundsBox;
 
 	void UpdateDebugViz();
 };

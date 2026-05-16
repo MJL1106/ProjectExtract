@@ -7,7 +7,7 @@
 #include "EnemyBase.h"
 #include "ExtractionDamageType.h"
 #include "HealthComponent.h"
-#include "Components/SkeletalMeshComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/PlayerController.h"
@@ -49,7 +49,7 @@ AWeaponBase::AWeaponBase()
 	bReplicates = true;
 	PrimaryActorTick.bCanEverTick = false;
 
-	WeaponMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("WeaponMesh"));
+	WeaponMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("WeaponMesh"));
 	SetRootComponent(WeaponMesh);
 	WeaponMesh->SetCollisionProfileName(FName("NoCollision"));
 }
@@ -217,7 +217,11 @@ void AWeaponBase::PerformHitscan()
 	{
 		// AI path: trace from muzzle socket. Aim directly at the AI's current target location
 		// (not ActorForward) so vertical offsets and yaw interp lag don't cause misses.
-		TraceStart = WeaponMesh->GetSocketLocation(WeaponConstants::MuzzleSocketName);
+		// BP-serialization can leave WeaponMesh null after C++ component type changes — fall back to any static mesh on the actor.
+		UStaticMeshComponent* EffectiveMesh = IsValid(WeaponMesh) ? WeaponMesh.Get() : FindComponentByClass<UStaticMeshComponent>();
+		TraceStart = IsValid(EffectiveMesh)
+			? EffectiveMesh->GetSocketLocation(WeaponConstants::MuzzleSocketName)
+			: OwnerChar->GetActorLocation();
 
 		FVector AimDirection = OwnerChar->GetActorForwardVector(); // fallback
 		float InaccuracyDeg = 0.0f;

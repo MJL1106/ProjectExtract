@@ -37,6 +37,7 @@ ACompanionCharacter::ACompanionCharacter()
 		MoveComp->bUseControllerDesiredRotation = true;
 		MoveComp->bOrientRotationToMovement = false;
 		MoveComp->MaxWalkSpeed = WalkSpeed;
+		MoveComp->GetNavAgentPropertiesRef().bCanCrouch = true;
 	}
 	bUseControllerRotationYaw = false;
 }

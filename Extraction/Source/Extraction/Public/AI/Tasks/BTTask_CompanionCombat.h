@@ -141,6 +141,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.25", ClampMax = "5.0"))
 	float CoverValidityCheckInterval = 1.0f;
 
+	/** Interval (seconds) between sub-slot LoS re-picks while in cover idle. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.1"))
+	float SubSlotLosRecheckInterval = 0.6f;
+
 	/** Minimum time at current cover before a failed re-eval can abandon the slot. */
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float MinCoverDwellBeforeReEval = 2.0f;
@@ -149,14 +153,74 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Debug")
 	bool bDebugLogging = false;
 
-private:
-	enum class EPeekAction : uint8 { Stand, Quick, Hold };
+	// --- Cover entry ---
 
-	static EPeekAction RollPeekAction(float StandW, float QuickW, float HoldW);
+	/** Companion is considered "at sub-slot" when within this distance (cm). */
+	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "5.0"))
+	float FinalApproachAcceptRadius = 30.f;
+
+	/** Max time to wait for the final-approach walk before forcing the snap (failsafe). */
+	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "0.5", ClampMax = "10.0"))
+	float FinalApproachTimeout = 3.0f;
+
+	// --- New action weights (crouch cover) ---
+
+	/** Relative weight for standing, firing, and walking to an adjacent sub-slot. */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0.0"))
+	float StandUpAndRepositionWeight = 20.f;
+
+	/** Relative weight for silent lateral repositioning within cover. */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0.0"))
+	float RepositionWeight = 15.f;
+
+	/** Low-health variant for Reposition. */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights|LowHealth", meta = (ClampMin = "0.0"))
+	float LowHpRepositionWeight = 25.f;
+
+	/** Low-health variant for StandUpAndReposition. */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights|LowHealth", meta = (ClampMin = "0.0"))
+	float LowHpStandUpAndRepositionWeight = 5.f;
+
+	// --- Stand-cover endpoint weights ---
+
+	/** Relative weight for stepping out past a corner, firing, then retreating (Stand cover endpoints only). */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0.0"))
+	float CornerPeekWeight = 60.f;
+
+	/** Low-health variant for CornerPeek. */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights|LowHealth", meta = (ClampMin = "0.0"))
+	float LowHpCornerPeekWeight = 25.f;
+
+	// --- Reposition / CornerPeek tunables ---
+
+	/** Lateral strafe distance past the cover edge during CornerPeek (cm). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "10.0"))
+	float CornerPeekStepDistance = 80.f;
+
+	/** Lateral interp speed for Reposition and StandUpAndReposition (cm/s). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
+	float RepositionWalkSpeed = 150.f;
+
+	/** Distance threshold to consider a reposition/corner-peek movement arrived (cm). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
+	float RepositionArrivalTolerance = 8.f;
+
+private:
+	enum class EPeekAction : uint8 { Stand, Quick, Hold, Reposition, StandUpAndReposition, CornerPeek };
+
+	static EPeekAction RollPeekActionMulti(TArrayView<const TPair<EPeekAction, float>> Weighted);
 
 	// Per-burst helpers
 	void ReturnToCover(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
 		class AAICoverSlot* Slot, bool bSuppressed, bool bLowHealth);
+
+	void TickRepositionAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
+		AAICoverSlot* Slot, bool bSuppressed, bool bLowHp, float DeltaSeconds);
+	void TickStandUpAndRepositionAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
+		AAICoverSlot* Slot, bool bSuppressed, bool bLowHp, float DeltaSeconds);
+	void TickCornerPeekAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
+		AAICoverSlot* Slot, AActor* Target, bool bSuppressed, bool bLowHp,
+		const TArray<AActor*>& IgnoredAttached, float DeltaSeconds);
 
 	float BurstTimer = 0.0f;
 	bool bIsFiringBurst = false;
@@ -181,9 +245,33 @@ private:
 	EPeekAction CurrentBurstAction = EPeekAction::Stand;
 	uint8 ConsecutiveHolds = 0;
 
+	// Reposition / StandUpAndReposition state
+	int32 RepositionTargetSubSlotIndex = INDEX_NONE;
+	bool bRepositionStandPhase = false;
+
+	// CornerPeek state
+	FVector CornerPeekHomeLocation = FVector::ZeroVector;
+	FVector CornerPeekApexLocation = FVector::ZeroVector;
+	bool bCornerPeekReturning = false;
+	bool bCornerPeekFiring = false;
+
 	// Debug-only rate limiter for stand-burst LoS trace
 	float DebugBurstLosCheckTimer = 0.f;
 
+	// Rate limiter for CornerPeek LoS checks (fire-start and fire-stop), 10 Hz.
+	float CornerPeekLosCheckTimer = 0.f;
+
 	// Active peek montage (weak — anim owns it)
 	TWeakObjectPtr<UAnimMontage> ActivePeekMontage;
+
+	int32 CurrentSubSlotIndex = 0;
+	float SubSlotLosRecheckTimer = 0.f;
+	TWeakObjectPtr<AAICoverSlot> LastTickSlot;
+	uint8 BlockedRecheckHits = 0;
+
+	bool bWaitingForFinalApproach = false;
+	FVector FinalApproachTarget = FVector::ZeroVector;
+	float FinalApproachElapsed = 0.f;
+
+	int32 PickBestSubSlotByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, int32 ExcludeIndex, const TArray<AActor*>& IgnoredAttached) const;
 };
