@@ -209,6 +209,14 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
 	float RepositionArrivalTolerance = 8.f;
 
+	/** Seconds the path-follower must be stalled (no dist progress) before snapping to destination. */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "2.0"))
+	float RepositionStalledGracePeriod = 0.5f;
+
+	/** Max total time allowed for a reposition walk before snap-warp fallback. */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0", ClampMax = "10.0"))
+	float RepositionTimeoutSeconds = 3.0f;
+
 private:
 	enum class EPeekAction : uint8 { Stand, Quick, Hold, Reposition, StandUpAndReposition, CornerPeek };
 
@@ -252,8 +260,10 @@ private:
 	// Reposition / StandUpAndReposition state
 	int32 RepositionTargetSubSlotIndex = INDEX_NONE;
 	bool bRepositionStandPhase = false;
+	bool bStandUpRepositionWalking = false;
 	float LastRepositionDist = 0.f;
 	float RepositionElapsed = 0.f;
+	float RepositionStalledTime = 0.f;
 	bool bRepositionStartLogged = false;
 
 	// CornerPeek state
@@ -286,4 +296,33 @@ private:
 
 	/** Returns true and triggers reload if ammo is too low to start a peek action. Caller must return immediately when true. */
 	bool TryPrePeekReloadGate(ACompanionCharacter* Companion, AAICoverSlot* Slot);
+
+	virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
+
+	void ResetTaskState(ACompanionCharacter* Companion, UBlackboardComponent* BB, AAICoverSlot* Slot, bool bReleaseSlot);
+
+	// --- Reload gate ---
+
+	/** True while a reload triggered by TryPrePeekReloadGate is in flight. */
+	bool bReloadGateActive = false;
+
+	/** World time when the reload gate was activated. */
+	float ReloadGateStartTime = 0.f;
+
+	/** Multiplier on weapon reload time before the gate is force-cleared (anti-latch). */
+	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "1.0", ClampMax = "3.0"))
+	float ReloadGateTimeoutMultiplier = 1.5f;
+
+	/** Grace seconds added on top of (ReloadTime * Multiplier) before force-clear. */
+	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float ReloadGateTimeoutGrace = 0.5f;
+
+	// --- Cover idle watchdog ---
+
+	/** World time of the last committed peek action in BRANCH 0. */
+	float LastDecisionTime = 0.f;
+
+	/** Seconds without a peek decision before the watchdog force-re-rolls. */
+	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "1.0", ClampMax = "30.0"))
+	float CoverIdleWatchdogSeconds = 8.0f;
 };

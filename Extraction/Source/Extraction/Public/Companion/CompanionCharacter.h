@@ -14,10 +14,13 @@ class UHealthComponent;
 class AWeaponBase;
 class UCompanionAnimInstance;
 class UTraversalComponent;
+class UWidgetComponent;
+class UUserWidget;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionPostureChanged, ECompanionPosture, NewPosture);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLowReadyAimChanged, bool, bIsLowReady);
 
 UCLASS(Blueprintable)
 class EXTRACTION_API ACompanionCharacter : public ACharacter, public IGameplayTagAssetInterface
@@ -88,6 +91,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	AActor* GetAimTarget() const { return CurrentAimTarget.Get(); }
 
+	// --- Low Ready Aim ---
+
+	UFUNCTION(BlueprintCallable, Category = "Companion|Combat")
+	void SetLowReadyAim(bool bNewLowReady);
+
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	bool IsLowReadyAim() const { return bLowReadyAim; }
+
+	UPROPERTY(BlueprintAssignable, Category = "Companion|Combat")
+	FOnLowReadyAimChanged OnLowReadyAimChanged;
+
 	// --- Sprint API ---
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Movement")
@@ -143,6 +157,12 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Movement")
 	TObjectPtr<UTraversalComponent> TraversalComponent;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|UI")
+	TObjectPtr<UWidgetComponent> HealthWidgetComponent;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|UI")
+	TSubclassOf<UUserWidget> HealthWidgetClass;
+
 	// --- Config ---
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Combat")
@@ -187,6 +207,12 @@ protected:
 	float SprintSpeed = 650.f;
 
 private:
+	UPROPERTY(ReplicatedUsing = OnRep_LowReadyAim)
+	bool bLowReadyAim = false;
+
+	UFUNCTION()
+	void OnRep_LowReadyAim();
+
 	UPROPERTY(ReplicatedUsing = OnRep_IsSprinting)
 	bool bIsSprinting = false;
 

@@ -10,6 +10,7 @@
 #include "CompanionAnimInstance.h"
 #include "ExtractionTypes.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/WidgetComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 
@@ -26,6 +27,16 @@ ACompanionCharacter::ACompanionCharacter()
 
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
+
+	HealthWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("HealthWidget"));
+	HealthWidgetComponent->SetupAttachment(GetMesh(), TEXT("head"));
+	HealthWidgetComponent->SetRelativeLocation(FVector(0.f, 0.f, 30.f));
+	HealthWidgetComponent->SetWidgetSpace(EWidgetSpace::Screen);
+	HealthWidgetComponent->SetDrawSize(FVector2D(150.f, 40.f));
+	HealthWidgetComponent->SetPivot(FVector2D(0.5f, 0.5f));
+	HealthWidgetComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	HealthWidgetComponent->SetTwoSided(false);
+	HealthWidgetComponent->SetVisibility(false);
 
 	// Configure inherited skeletal mesh — designer assigns mesh + anim class on BP_Companion
 	GetMesh()->SetRelativeLocation(FVector(0.f, 0.f, -88.f));
@@ -89,6 +100,12 @@ void ACompanionCharacter::BeginPlay()
 		}
 	}
 
+	if (HealthWidgetClass && HealthWidgetComponent)
+	{
+		HealthWidgetComponent->SetWidgetClass(HealthWidgetClass);
+		HealthWidgetComponent->SetVisibility(true);
+	}
+
 	UE_LOG(LogCompanion, Log, TEXT("%s spawned with tag Character.Companion"), *GetName());
 }
 
@@ -149,6 +166,7 @@ void ACompanionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, bIsSprinting, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, Posture, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(ACompanionCharacter, bLowReadyAim, COND_SkipOwner);
 }
 
 // --- Posture API ---
@@ -170,6 +188,21 @@ void ACompanionCharacter::OnRep_Posture()
 {
 	// No state mutation — broadcast only. See SetPosture for ordering invariant.
 	OnPostureChanged.Broadcast(Posture);
+}
+
+// --- Low Ready Aim ---
+
+void ACompanionCharacter::SetLowReadyAim(bool bNewLowReady)
+{
+	if (!HasAuthority()) return;
+	if (bLowReadyAim == bNewLowReady) return;
+	bLowReadyAim = bNewLowReady;
+	OnRep_LowReadyAim();
+}
+
+void ACompanionCharacter::OnRep_LowReadyAim()
+{
+	OnLowReadyAimChanged.Broadcast(bLowReadyAim);
 }
 
 // --- Sprint API ---
