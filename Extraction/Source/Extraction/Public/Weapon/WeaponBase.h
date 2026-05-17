@@ -160,6 +160,9 @@ private:
 	/** True while interpolating camera back after firing stops */
 	bool bIsRecoveringRecoil;
 
+	/** Prevents WEAPON-DRY spam — reset when reload completes or new fire cycle begins */
+	bool bDryFireLogged = false;
+
 	/** Time elapsed during recoil recovery */
 	float RecoilRecoveryElapsed;
 

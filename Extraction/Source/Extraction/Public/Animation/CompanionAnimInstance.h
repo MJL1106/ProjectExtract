@@ -47,7 +47,7 @@ public:
 
 	/** Enter cover idle pose on the given side. Stops any active cover/peek montage first. */
 	UFUNCTION(BlueprintCallable, Category = "Cover")
-	void EnterCoverPose(EPeekSide DefaultSide);
+	void EnterCoverPose(EPeekSide DefaultSide, bool bPlayEnterMontage = true);
 
 	/** Stop active cover/peek montages with a short blend out. */
 	UFUNCTION(BlueprintCallable, Category = "Cover")
@@ -59,6 +59,10 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Cover")
 	bool IsInCover() const { return bInCover; }
+
+	/** Returns true if the cover-idle montage for the given side is currently playing. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Cover")
+	bool IsCoverIdleMontagePlaying(EPeekSide Side) const;
 
 	UFUNCTION(BlueprintPure, Category = "Cover")
 	EPeekSide GetActivePeekSide() const { return ActivePeekSide; }

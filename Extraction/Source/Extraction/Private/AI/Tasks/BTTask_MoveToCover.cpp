@@ -173,7 +173,7 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 			const float Delta = LastTickDist - DistMoving;
 			LastTickDist = DistMoving;
 			const float Vel = Pawn->GetVelocity().Size();
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-TICK status=Moving dist=%.0f delta=%.1f vel=%.1f"),
+			UE_LOG(LogCompanionDiag, VeryVerbose, TEXT("%s: MOVE-TO-COVER-TICK status=Moving dist=%.0f delta=%.1f vel=%.1f"),
 				*Pawn->GetName(), DistMoving, Delta, Vel);
 		}
 		return;

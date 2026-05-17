@@ -95,7 +95,10 @@ bool AWeaponBase::CanFire() const
 
 void AWeaponBase::StartFiring()
 {
+	if (bWantsToFire) return;
+
 	bWantsToFire = true;
+	bDryFireLogged = false;
 
 	// Cancel recoil recovery when firing resumes
 	bIsRecoveringRecoil = false;
@@ -167,8 +170,16 @@ void AWeaponBase::OnAutoFireTimer()
 		if (HasAuthority())
 			CurrentState = EWeaponState::Idle;
 
-		if (bWantsToFire && CurrentAmmo <= 0 && CanReload())
-			Reload();
+		if (bWantsToFire && CurrentAmmo <= 0)
+		{
+			if (!bDryFireLogged)
+			{
+				bDryFireLogged = true;
+				UE_LOG(LogCompanionDiag, Warning, TEXT("%s: WEAPON-DRY ammo=%d reserve=%d"),
+					*GetNameSafe(GetOwner()), CurrentAmmo, ReserveAmmo);
+			}
+			if (CanReload()) Reload();
+		}
 		return;
 	}
 
@@ -398,6 +409,7 @@ void AWeaponBase::Reload()
 void AWeaponBase::OnReloadFinished()
 {
 	if (!IsValid(WeaponData)) return;
+	bDryFireLogged = false;
 
 	if (HasAuthority())
 	{

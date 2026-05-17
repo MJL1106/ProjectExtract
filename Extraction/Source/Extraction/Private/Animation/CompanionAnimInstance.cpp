@@ -195,7 +195,7 @@ namespace
 	constexpr float CoverBlendOutTime = 0.15f;
 }
 
-void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide)
+void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide, bool bPlayEnterMontage)
 {
 	// Stop any active cover/peek montage before switching pose.
 	if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage))
@@ -207,12 +207,14 @@ void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide)
 	if (IsValid(CoverPeekRightMontage) && Montage_IsPlaying(CoverPeekRightMontage))
 		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage);
 
+	bInCover = true;
+	ActivePeekSide = DefaultSide;
+
+	if (!bPlayEnterMontage) return;
+
 	UAnimMontage* IdleMontage = (DefaultSide == EPeekSide::Left) ? CoverIdleLeftMontage : CoverIdleRightMontage;
 	if (IsValid(IdleMontage))
 		Montage_Play(IdleMontage, 1.f);
-
-	bInCover = true;
-	ActivePeekSide = DefaultSide;
 
 	UE_LOG(LogCompanionAI, Log, TEXT("Cover ENTER side=%s montage=%s (valid=%d, playing=%d)"),
 		DefaultSide == EPeekSide::Left ? TEXT("Left") : TEXT("Right"),
@@ -235,6 +237,12 @@ void UCompanionAnimInstance::ExitCoverPose()
 	bInCover = false;
 
 	UE_LOG(LogCompanionAI, Log, TEXT("Cover EXIT"));
+}
+
+bool UCompanionAnimInstance::IsCoverIdleMontagePlaying(EPeekSide Side) const
+{
+	UAnimMontage* M = (Side == EPeekSide::Left) ? CoverIdleLeftMontage : CoverIdleRightMontage;
+	return IsValid(M) && Montage_IsPlaying(M);
 }
 
 UAnimMontage* UCompanionAnimInstance::PlayPeekFire(EPeekSide Side, float PlayRate)
