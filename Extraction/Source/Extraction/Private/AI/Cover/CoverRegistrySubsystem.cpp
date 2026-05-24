@@ -118,6 +118,46 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 			continue;
 		}
 
+		// New filter: slot must offer at least one position with LoS to target.
+		{
+			UWorld* World = GetWorld();
+			auto HasLosFrom = [World, Target, &TargetLoc](const FVector& EyePos) -> bool
+			{
+				if (!World) return false;
+				FHitResult Hit;
+				FCollisionQueryParams Params;
+				Params.AddIgnoredActor(Target);
+				const bool bBlocked = World->LineTraceSingleByChannel(Hit, EyePos, TargetLoc, ECC_Visibility, Params);
+				return !bBlocked || Hit.GetActor() == Target;
+			};
+
+			constexpr float EyeHeight = 150.f;
+			constexpr float ApexProbeDist = 100.f;
+			bool bHasAnyLos = HasLosFrom(Slot->GetActorLocation() + FVector(0.f, 0.f, EyeHeight));
+
+			if (!bHasAnyLos && Slot->Height == ECoverHeight::Stand)
+			{
+				const FVector RightVec = Slot->GetActorRightVector();
+				const int32 SubCount = Slot->GetSubSlotCount();
+				if (Slot->bIsPeekableCornerStart)
+				{
+					const FVector StartApex = Slot->GetSubSlotLocation(0) + (-RightVec) * ApexProbeDist;
+					if (HasLosFrom(StartApex + FVector(0.f, 0.f, EyeHeight))) bHasAnyLos = true;
+				}
+				if (!bHasAnyLos && Slot->bIsPeekableCornerEnd && SubCount > 0)
+				{
+					const FVector EndApex = Slot->GetSubSlotLocation(SubCount - 1) + RightVec * ApexProbeDist;
+					if (HasLosFrom(EndApex + FVector(0.f, 0.f, EyeHeight))) bHasAnyLos = true;
+				}
+			}
+
+			if (!bHasAnyLos)
+			{
+				UE_LOG(LogCompanionAI, Log, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-no-los"), *Slot->GetName(), DistToQuerier);
+				continue;
+			}
+		}
+
 		// Score the slot
 		const FVector StandPos = Slot->GetStandPosition();
 		const float ProximityScore = 1.f - FMath::Clamp(DistToQuerier / MaxRadius, 0.f, 1.f);

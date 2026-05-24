@@ -223,6 +223,9 @@ private:
 	void HandleDeath();
 
 	UFUNCTION()
+	void OnWeaponFiredCallback();
+
+	UFUNCTION()
 	void HandleTraversalStarted(ETraversalType Type, float PlayRate, FVector ObstacleLocation, FVector LandingLocation);
 
 	UFUNCTION()

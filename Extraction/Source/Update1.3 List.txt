@@ -1,0 +1,17 @@
+1) React Set
+_________________
+
+Add:
+
+Rifle_Act_Patrol_to_St01
+Rifle_Act_Patrol_to_St02
+Rifle_Act_Patrol_to_St03
+
+Rifle_Patrol_to_St01
+Rifle_Patrol_to_St02
+Rifle_Patrol_to_St03
+
+Riflel01_St_Turn180R
+Riflel02_St_Turn180R
+Riflel03_St_Turn180R
+Riflel_Cr_Turn180R

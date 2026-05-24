@@ -199,7 +199,7 @@ protected:
 
 	/** Lateral strafe distance past the cover edge during CornerPeek (cm). */
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "10.0"))
-	float CornerPeekStepDistance = 80.f;
+	float CornerPeekStepDistance = 100.f;
 
 	/** Lateral interp speed for Reposition and StandUpAndReposition (cm/s). */
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))

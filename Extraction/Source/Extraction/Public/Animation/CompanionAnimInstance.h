@@ -6,6 +6,7 @@
 #include "Animation/AnimInstance.h"
 #include "Movement/TraversalTypes.h"
 #include "Companion/CompanionTypes.h"
+#include "AI/Cover/CoverSlotTypes.h"
 #include "CompanionAnimInstance.generated.h"
 
 class ACompanionCharacter;
@@ -28,6 +29,9 @@ public:
 	void PlayFireMontage(float PlayRate = 1.f);
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Animation")
+	void StopFireMontage(float BlendOutTime = 0.2f);
+
+	UFUNCTION(BlueprintCallable, Category = "Companion|Animation")
 	void PlayReloadMontage(float PlayRate = 1.f);
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Animation")
@@ -45,9 +49,9 @@ public:
 
 	// --- Cover Pose Interface ---
 
-	/** Enter cover idle pose on the given side. Stops any active cover/peek montage first. */
+	/** Enter cover idle pose on the given side. For Stand height, plays no montage (companion stays in locomotion idle). */
 	UFUNCTION(BlueprintCallable, Category = "Cover")
-	void EnterCoverPose(EPeekSide DefaultSide, bool bPlayEnterMontage = true);
+	void EnterCoverPose(EPeekSide DefaultSide, ECoverHeight Height = ECoverHeight::Crouch, bool bPlayEnterMontage = true);
 
 	/** Stop active cover/peek montages with a short blend out. */
 	UFUNCTION(BlueprintCallable, Category = "Cover")
@@ -145,6 +149,10 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|Montages")
 	TObjectPtr<UAnimMontage> HitReactMontage;
+
+	/** Hit react played when companion is firing or aiming. Falls back to HitReactMontage if unset. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|Montages")
+	TObjectPtr<UAnimMontage> HitReactMontage_Aim;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|Montages")
 	TObjectPtr<UAnimMontage> DeathMontage;
