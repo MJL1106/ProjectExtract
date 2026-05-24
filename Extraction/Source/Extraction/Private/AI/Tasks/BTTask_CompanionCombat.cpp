@@ -25,7 +25,7 @@ namespace
 		UBlackboardComponent* Blackboard = nullptr;
 	};
 
-	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, const TArray<AActor*>& IgnoredAttached)
+	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredAttached)
 	{
 		OutBlockedBy = nullptr;
 		if (!World || !IsValid(ToTarget) || !IsValid(Companion)) return false;
@@ -34,7 +34,7 @@ namespace
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(Companion);
 		QueryParams.AddIgnoredActor(Companion->GetCurrentWeapon());
-		QueryParams.AddIgnoredActors(IgnoredAttached);
+		for (AActor* const A : IgnoredAttached) QueryParams.AddIgnoredActor(A);
 
 		const bool bHit = World->LineTraceSingleByChannel(Hit, FromLoc, ToTarget->GetActorLocation(), ECC_Visibility, QueryParams);
 		if (bHit && Hit.GetActor() != ToTarget)
@@ -373,7 +373,7 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 
 void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
 	AAICoverSlot* Slot, AActor* Target, bool bSuppressed, bool bLowHp,
-	const TArray<AActor*>& IgnoredAttached, float DeltaSeconds)
+	TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
 {
 	if (!IsValid(Companion) || !IsValid(Slot) || !IsValid(Target)) return;
 
@@ -448,7 +448,7 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 	}
 }
 
-int32 UBTTask_CompanionCombat::PickBestSubSlotByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, int32 ExcludeIndex, const TArray<AActor*>& IgnoredAttached) const
+int32 UBTTask_CompanionCombat::PickBestSubSlotByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, int32 ExcludeIndex, TArrayView<AActor* const> IgnoredAttached) const
 {
 	if (!IsValid(Slot) || !IsValid(Target) || !IsValid(Companion)) return INDEX_NONE;
 
@@ -840,8 +840,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	const bool bHasCover = IsValid(Slot) && Ctx.Blackboard->GetValueAsBool(HasCoverPositionKey.SelectedKeyName);
 
 	// Build ignored-actors list once per tick — passed to all HasLineOfSight calls below.
-	TArray<AActor*> TickIgnoredAttached;
-	Ctx.Companion->GetAttachedActors(TickIgnoredAttached);
+	// TInlineAllocator keeps up to 4 entries on the stack (weapons + accessories — no heap alloc in the common case).
+	TArray<AActor*, TInlineAllocator<4>> TickIgnoredAttached;
+	Ctx.Companion->ForEachAttachedActors([&TickIgnoredAttached](AActor* A) { TickIgnoredAttached.Add(A); return true; });
 
 	// Detect slot swap without ExecuteTask re-running; reset sub-slot index to stay in bounds.
 	if (IsValid(Slot) && Slot != LastTickSlot.Get())
@@ -1155,7 +1156,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				++ConsecutiveHolds;
 				PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 				TimeInCoverIdle = 0.f;
-				UE_LOG(LogCompanionAI, Warning, TEXT("%s: PEEK-ACTION=Hold ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=Hold ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
 				if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: HOLD this cycle (%d/%d)"), *Ctx.Companion->GetName(), ConsecutiveHolds, MaxConsecutiveHolds);
 				return;
 			}
@@ -1196,7 +1197,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				Ctx.Companion->SetAimTarget(nullptr);
 				Ctx.Companion->SetLowReadyAim(true);
 				// Stay crouched — do NOT UnCrouch here.
-				UE_LOG(LogCompanionAI, Warning, TEXT("%s: PEEK-ACTION=Reposition-Silent ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=Reposition-Silent ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
 				CurrentBurstAction = EPeekAction::Reposition;
 				LastDecisionTime = Now;
 				TimeInCoverIdle = 0.f;
@@ -1216,7 +1217,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 
 			// StandUpAndReposition: stand up, start burst in place (Phase A), then walk-and-fire (Phase B).
-			UE_LOG(LogCompanionAI, Warning, TEXT("%s: PEEK-ACTION=StandUpAndReposition ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=StandUpAndReposition ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
 			CurrentBurstAction = EPeekAction::StandUpAndReposition;
 			LastDecisionTime = Now;
 			bRepositionStandPhase = true;
@@ -1263,10 +1264,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			const FVector StrafeDir = (CurrentSubSlotIndex == 0)
 				? -Slot->GetActorRightVector()
 				: Slot->GetActorRightVector();
-			CornerPeekHomeLocation = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
+			CornerPeekHomeLocation = SubSlotLoc;
 			// CornerPeek apex captured at commit — assumes slot doesn't move mid-action.
 			CornerPeekApexLocation = CornerPeekHomeLocation + StrafeDir * CornerPeekStepDistance;
-			UE_LOG(LogCompanionAI, Warning, TEXT("%s: PEEK-ACTION=CornerPeek ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=CornerPeek ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
 			CurrentBurstAction = EPeekAction::CornerPeek;
 			LastDecisionTime = Now;
 			bCornerPeekReturning = false;
@@ -1283,7 +1284,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 
 		// Stand or Quick — existing fire flow.
-		UE_LOG(LogCompanionAI, Warning, TEXT("%s: PEEK-ACTION=%s ammo=%d"), *GetNameSafe(Ctx.Companion),
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=%s ammo=%d"), *GetNameSafe(Ctx.Companion),
 			(Action == EPeekAction::Quick) ? TEXT("Quick") : TEXT("Stand"),
 			Ctx.Companion->GetCurrentAmmo());
 		CurrentBurstAction = Action;

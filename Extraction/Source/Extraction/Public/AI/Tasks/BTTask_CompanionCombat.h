@@ -232,7 +232,7 @@ private:
 		AAICoverSlot* Slot, bool bSuppressed, bool bLowHp, float DeltaSeconds);
 	void TickCornerPeekAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
 		AAICoverSlot* Slot, AActor* Target, bool bSuppressed, bool bLowHp,
-		const TArray<AActor*>& IgnoredAttached, float DeltaSeconds);
+		TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
 
 	float BurstTimer = 0.0f;
 	bool bIsFiringBurst = false;
@@ -292,7 +292,7 @@ private:
 	float LastFinalApproachDist = 0.f;
 	float FinalApproachStalledTime = 0.f;
 
-	int32 PickBestSubSlotByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, int32 ExcludeIndex, const TArray<AActor*>& IgnoredAttached) const;
+	int32 PickBestSubSlotByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, int32 ExcludeIndex, TArrayView<AActor* const> IgnoredAttached) const;
 
 	/** Returns true and triggers reload if ammo is too low to start a peek action. Caller must return immediately when true. */
 	bool TryPrePeekReloadGate(ACompanionCharacter* Companion, AAICoverSlot* Slot);
