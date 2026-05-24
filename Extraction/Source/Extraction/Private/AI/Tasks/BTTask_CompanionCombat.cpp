@@ -15,6 +15,8 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/CapsuleComponent.h"
+#include "TimerManager.h"
 
 namespace
 {
@@ -96,6 +98,21 @@ namespace
 		if (!Data) return 1;
 		return FMath::Clamp(Data->BurstCount, 1, FMath::Max(1, Data->MagazineSize));
 	}
+
+	static void DeferCoverPosture(ACompanionCharacter* Companion, bool bShouldCrouch)
+	{
+		if (!IsValid(Companion)) return;
+		UWorld* World = Companion->GetWorld();
+		if (!World) return;
+		TWeakObjectPtr<ACompanionCharacter> WeakC(Companion);
+		World->GetTimerManager().SetTimerForNextTick([WeakC, bShouldCrouch]()
+		{
+			ACompanionCharacter* C = WeakC.Get();
+			if (!IsValid(C)) return;
+			if (bShouldCrouch && !C->bIsCrouched) C->Crouch();
+			else if (!bShouldCrouch && C->bIsCrouched) C->UnCrouch();
+		});
+	}
 }
 
 // --- Static helpers ---
@@ -142,13 +159,23 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 		{
 			const FVector SubSlotLoc = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
 			const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
-			const FVector SnapLoc(SubSlotLoc.X, SubSlotLoc.Y, Companion->GetActorLocation().Z);
+			// Ground-snap: nav-mesh-arrival Z is biased above the floor; trace down to find the real floor.
+			FVector SnapLoc(SubSlotLoc.X, SubSlotLoc.Y, Companion->GetActorLocation().Z);
+			if (UWorld* SnapWorld = Companion->GetWorld())
+			{
+				const FVector TraceStart = SnapLoc + FVector(0.f, 0.f, 80.f);
+				const FVector TraceEnd = SnapLoc - FVector(0.f, 0.f, 200.f);
+				FHitResult GroundHit;
+				FCollisionQueryParams Params;
+				Params.AddIgnoredActor(Companion);
+				if (SnapWorld->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_Visibility, Params))
+				{
+					const float CapsuleHalfHeight = Companion->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+					SnapLoc.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
+				}
+			}
 			Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
-
-			if (Slot->Height == ECoverHeight::Crouch)
-				Companion->Crouch();
-			else
-				Companion->UnCrouch();
+			DeferCoverPosture(Companion, Slot->Height == ECoverHeight::Crouch);
 		}
 	}
 
@@ -158,11 +185,7 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 	}
 	ActivePeekMontage.Reset();
 
-	if (IsValid(Slot) && IsValid(Companion))
-	{
-		if (Slot->Height == ECoverHeight::Crouch) Companion->Crouch(); else Companion->UnCrouch();
-	}
-	if (Anim) Anim->EnterCoverPose(ResolvedPeekSide);
+	if (Anim) Anim->EnterCoverPose(ResolvedPeekSide, IsValid(Slot) ? Slot->Height : ECoverHeight::Crouch);
 
 	float CooldownMult = 1.f;
 	if (bSuppressed) CooldownMult *= SuppressionCooldownMultiplier;
@@ -262,7 +285,7 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 		PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 		TimeInCoverIdle = 0.f;
 		// Silent reposition: companion never left cover pose — skip the enter montage to avoid the bobbing animation.
-		if (Anim) Anim->EnterCoverPose(ResolvedPeekSide, false);
+		if (Anim) Anim->EnterCoverPose(ResolvedPeekSide, Slot->Height, false);
 	}
 }
 
@@ -397,36 +420,48 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 
 	if (!bCornerPeekReturning)
 	{
-		BurstTimer -= DeltaSeconds;
 		const FVector ApexTarget(CornerPeekApexLocation.X, CornerPeekApexLocation.Y, Current.Z);
 		const FVector Next = FMath::VInterpConstantTo(Current, ApexTarget, DeltaSeconds, RepositionWalkSpeed);
-		Companion->TeleportTo(Next, Companion->GetActorRotation(), false, false);
+		Companion->TeleportTo(Next, Companion->GetActorRotation(), false, true);
 
 		if (bRunLosThisTick)
 		{
-			const FVector Eye = Next + FVector(0.f, 0.f, StandFireEyeHeight);
-			const bool bLos = HasLineOfSight(World, Eye, Target, Companion, Blocker, IgnoredAttached);
+			AWeaponBase* W = Companion->GetCurrentWeapon();
+			const FVector FireOrigin = IsValid(W) ? W->GetMuzzleLocation() : (Next + FVector(0.f, 0.f, StandFireEyeHeight));
+			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredAttached);
 			if (bLos && !bCornerPeekFiring)
 			{
 				Companion->StartWeaponFire();
 				bCornerPeekFiring = true;
+				UE_LOG(LogCompanionAI, Log,
+					TEXT("%s: CORNER-PEEK-FIRE-START muzzle=%s target=%s pos=%s apex=%s"),
+					*GetNameSafe(Companion),
+					IsValid(W) ? *W->GetMuzzleLocation().ToString() : TEXT("(no weapon)"),
+					IsValid(Target) ? *Target->GetActorLocation().ToString() : TEXT("(null)"),
+					*Next.ToString(), *CornerPeekApexLocation.ToString());
 			}
 		}
 
 		const bool bAtApex = FVector::Dist(Next, ApexTarget) <= RepositionArrivalTolerance;
-		if (bAtApex || BurstTimer <= 0.f)
-			bCornerPeekReturning = true;
+		if (bAtApex)
+		{
+			// At apex — burst timer now counts down "time firing at the corner".
+			BurstTimer -= DeltaSeconds;
+			if (BurstTimer <= 0.f)
+				bCornerPeekReturning = true;
+		}
 	}
 	else
 	{
 		const FVector HomeTarget(CornerPeekHomeLocation.X, CornerPeekHomeLocation.Y, Current.Z);
 		const FVector Next = FMath::VInterpConstantTo(Current, HomeTarget, DeltaSeconds, RepositionWalkSpeed);
-		Companion->TeleportTo(Next, Companion->GetActorRotation(), false, false);
+		Companion->TeleportTo(Next, Companion->GetActorRotation(), false, true);
 
 		if (bRunLosThisTick)
 		{
-			const FVector Eye = Next + FVector(0.f, 0.f, StandFireEyeHeight);
-			const bool bLos = HasLineOfSight(World, Eye, Target, Companion, Blocker, IgnoredAttached);
+			AWeaponBase* W = Companion->GetCurrentWeapon();
+			const FVector FireOrigin = IsValid(W) ? W->GetMuzzleLocation() : (Next + FVector(0.f, 0.f, StandFireEyeHeight));
+			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredAttached);
 			if (!bLos && bCornerPeekFiring)
 			{
 				Companion->StopWeaponFire();
@@ -677,14 +712,27 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 				CMC->StopMovementImmediately();
 
 			const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
-			const FVector SnapLoc(SubSlotLoc.X, SubSlotLoc.Y, ArrivalLoc.Z);
 			if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: ALREADY-CLOSE-SNAP distToSubSlot=%.1f acceptRadius=%.1f arrival=%s subSlot=%s"),
 				*Companion->GetName(), DistToSubSlot, FinalApproachAcceptRadius, *ArrivalLoc.ToString(), *SubSlotLoc.ToString());
+			// Ground-snap: nav-mesh-arrival Z is biased above the floor; trace down to find the real floor.
+			FVector SnapLoc(SubSlotLoc.X, SubSlotLoc.Y, ArrivalLoc.Z);
+			if (UWorld* SnapWorld = Companion->GetWorld())
+			{
+				const FVector TraceStart = SnapLoc + FVector(0.f, 0.f, 80.f);
+				const FVector TraceEnd = SnapLoc - FVector(0.f, 0.f, 200.f);
+				FHitResult GroundHit;
+				FCollisionQueryParams Params;
+				Params.AddIgnoredActor(Companion);
+				if (SnapWorld->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_Visibility, Params))
+				{
+					const float CapsuleHalfHeight = Companion->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+					SnapLoc.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
+				}
+			}
 			Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
-
-			if (Slot->Height == ECoverHeight::Crouch) Companion->Crouch(); else Companion->UnCrouch();
+			DeferCoverPosture(Companion, Slot->Height == ECoverHeight::Crouch);
 			if (UCompanionAnimInstance* Anim = GetCompanionAnim(Companion))
-				Anim->EnterCoverPose(ResolvedPeekSide);
+				Anim->EnterCoverPose(ResolvedPeekSide, Slot->Height);
 		}
 		else
 		{
@@ -713,6 +761,26 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 				}
 			}
 		}
+	}
+
+	if (bHasCover && IsValid(Slot))
+	{
+		// One-shot diagnostic so we can see cover-slot config without toggling bDebugLogging.
+		const bool bAnyPeekableCorner = Slot->bIsPeekableCornerStart || Slot->bIsPeekableCornerEnd;
+		if (Slot->Height == ECoverHeight::Stand && !bAnyPeekableCorner)
+		{
+			UE_LOG(LogCompanionAI, Warning,
+				TEXT("%s: STAND-COVER-CONFIG-WARN slot=%s has Height=Stand but NEITHER bIsPeekableCornerStart NOR bIsPeekableCornerEnd is ticked — companion cannot fire from this slot. Tick at least one in the slot's details panel."),
+				*Companion->GetName(), *Slot->GetName());
+		}
+		UE_LOG(LogCompanionAI, Log,
+			TEXT("%s: COVER-CLAIMED slot=%s height=%s subSlot=%d/%d cornerStart=%d cornerEnd=%d peekPref=%d canStandFireOver=%d"),
+			*Companion->GetName(), *Slot->GetName(),
+			Slot->Height == ECoverHeight::Crouch ? TEXT("Crouch") : TEXT("Stand"),
+			CurrentSubSlotIndex, Slot->GetSubSlotCount(),
+			(int32)Slot->bIsPeekableCornerStart, (int32)Slot->bIsPeekableCornerEnd,
+			(int32)Slot->PeekPreference,
+			(int32)Slot->CanStandFireOver());
 	}
 
 	if (bDebugLogging)
@@ -812,7 +880,21 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (IsValid(ApproachSlot))
 		{
 			const FRotator SlotYawRot(0.f, ApproachSlot->GetActorRotation().Yaw, 0.f);
-			const FVector SnapLoc(FinalApproachTarget.X, FinalApproachTarget.Y, Ctx.Companion->GetActorLocation().Z);
+			// Ground-snap: nav-mesh-arrival Z is biased above the floor; trace down to find the real floor.
+			FVector SnapLoc(FinalApproachTarget.X, FinalApproachTarget.Y, Ctx.Companion->GetActorLocation().Z);
+			if (UWorld* SnapWorld = Ctx.Companion->GetWorld())
+			{
+				const FVector TraceStart = SnapLoc + FVector(0.f, 0.f, 80.f);
+				const FVector TraceEnd = SnapLoc - FVector(0.f, 0.f, 200.f);
+				FHitResult GroundHit;
+				FCollisionQueryParams Params;
+				Params.AddIgnoredActor(Ctx.Companion);
+				if (SnapWorld->LineTraceSingleByChannel(GroundHit, TraceStart, TraceEnd, ECC_Visibility, Params))
+				{
+					const float CapsuleHalfHeight = Ctx.Companion->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+					SnapLoc.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
+				}
+			}
 			if (bDebugLogging)
 			{
 				const float WarpDist = FVector::Dist(Ctx.Companion->GetActorLocation(), SnapLoc);
@@ -820,9 +902,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					*Ctx.Companion->GetName(), (int32)bArrived, (int32)bTimedOut, (int32)bStalled, FinalApproachElapsed, Dist, WarpDist);
 			}
 			Ctx.Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
-			if (ApproachSlot->Height == ECoverHeight::Crouch) Ctx.Companion->Crouch(); else Ctx.Companion->UnCrouch();
+			DeferCoverPosture(Ctx.Companion, ApproachSlot->Height == ECoverHeight::Crouch);
 			if (UCompanionAnimInstance* Anim = GetCompanionAnim(Ctx.Companion))
-				Anim->EnterCoverPose(ResolvedPeekSide);
+				Anim->EnterCoverPose(ResolvedPeekSide, ApproachSlot->Height);
 		}
 
 		bWaitingForFinalApproach = false;
@@ -910,8 +992,47 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		// Defensive re-assert: if the cover-idle montage was evicted (e.g. by a fire/reload montage),
 		// restart it so the companion doesn't stand up visually through the reload window.
-		if (IsValid(Anim) && !Anim->IsCoverIdleMontagePlaying(ResolvedPeekSide))
-			Anim->EnterCoverPose(ResolvedPeekSide, true);
+		// Stand cover has no idle montage to re-play — skip the re-assert for Stand height.
+		if (Slot->Height == ECoverHeight::Crouch && IsValid(Anim) && !Anim->IsCoverIdleMontagePlaying(ResolvedPeekSide))
+			Anim->EnterCoverPose(ResolvedPeekSide, Slot->Height, true);
+
+#if ENABLE_DRAW_DEBUG
+		{
+			const int32 SubSlotCountForDraw = Slot->GetSubSlotCount();
+			const float HalfLenForDraw = Slot->GetCoverLineHalfLength();
+			const FVector RightForDraw = Slot->GetActorRightVector();
+			for (int32 i = 0; i < SubSlotCountForDraw; ++i)
+			{
+				const FVector P = Slot->GetSubSlotLocation(i) + FVector(0.f, 0.f, 10.f);
+				const bool bIsCorner = Slot->IsSubSlotPeekableCorner(i);
+				const FColor Color = bIsCorner ? FColor::Red : FColor::White;
+				const float Radius = (i == CurrentSubSlotIndex) ? 22.f : 14.f;
+				DrawDebugSphere(Ctx.Companion->GetWorld(), P, Radius, 8, Color, false, 0.f, 0, 1.5f);
+
+				// For peekable corner sub-slots: draw magenta apex ring + line showing peek trajectory.
+				if (bIsCorner)
+				{
+					const FVector StrafeDir = (i == 0) ? -RightForDraw : RightForDraw;
+					const FVector ApexPos = Slot->GetSubSlotLocation(i) + FVector(0.f, 0.f, 20.f) + StrafeDir * CornerPeekStepDistance;
+					const FVector CornerBase = Slot->GetSubSlotLocation(i) + FVector(0.f, 0.f, 20.f);
+					DrawDebugSphere(Ctx.Companion->GetWorld(), ApexPos, 14.f, 12, FColor::Magenta, false, 0.f, 0, 1.5f);
+					DrawDebugLine(Ctx.Companion->GetWorld(), CornerBase, ApexPos, FColor::Magenta, false, 0.f, 0, 2.5f);
+				}
+
+				// Yellow pip at the raw (un-inset) wall edge for the two corner sub-slots so designers
+				// can compare the inset home position (red sphere above) with the true wall edge.
+				if (SubSlotCountForDraw > 1 && (i == 0 || i == SubSlotCountForDraw - 1))
+				{
+					const float RawOffset = (i == 0) ? -HalfLenForDraw : HalfLenForDraw;
+					const FVector RawEdge = Slot->GetActorLocation() + RightForDraw * RawOffset + FVector(0.f, 0.f, 10.f);
+					DrawDebugSphere(Ctx.Companion->GetWorld(), RawEdge, 6.f, 6, FColor::Yellow, false, 0.f, 0, 1.f);
+				}
+			}
+			// Eye-height marker showing where stand-fire LoS trace originates.
+			const FVector EyeMarker = Slot->GetSubSlotLocation(CurrentSubSlotIndex) + FVector(0.f, 0.f, StandFireEyeHeight);
+			DrawDebugSphere(Ctx.Companion->GetWorld(), EyeMarker, 6.f, 6, FColor::Cyan, false, 0.f, 0, 1.f);
+		}
+#endif
 
 		CurrentSubSlotIndex = FMath::Clamp(CurrentSubSlotIndex, 0, Slot->GetSubSlotCount() - 1);
 		const FVector SubSlotLoc = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
@@ -998,10 +1119,22 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
-		// Gate 2: LoS from stand eye.
+		// Gate 2: LoS from stand eye (or apex for stand-cover corners).
 		AActor* BlockedBy = nullptr;
 		const FVector StandEye = SubSlotLoc + FVector(0.f, 0.f, StandFireEyeHeight);
-		const bool bLosFromCover = HasLineOfSight(Ctx.Companion->GetWorld(), StandEye, Ctx.Target, Ctx.Companion, BlockedBy, TickIgnoredAttached);
+		bool bLosFromCover = HasLineOfSight(Ctx.Companion->GetWorld(), StandEye, Ctx.Target, Ctx.Companion, BlockedBy, TickIgnoredAttached);
+
+		// Stand cover at a peekable corner can never see over the wall — check the would-be CornerPeek apex instead.
+		if (!bLosFromCover && Slot->Height == ECoverHeight::Stand && Slot->IsSubSlotPeekableCorner(CurrentSubSlotIndex))
+		{
+			const FVector StrafeDir = (CurrentSubSlotIndex == 0) ? -Slot->GetActorRightVector() : Slot->GetActorRightVector();
+			const FVector ApexLoc = SubSlotLoc + StrafeDir * CornerPeekStepDistance;
+			const FVector ApexEye = ApexLoc + FVector(0.f, 0.f, StandFireEyeHeight);
+			AActor* ApexBlocker = nullptr;
+			bLosFromCover = HasLineOfSight(Ctx.Companion->GetWorld(), ApexEye, Ctx.Target, Ctx.Companion, ApexBlocker, TickIgnoredAttached);
+			if (bLosFromCover)
+				BlockedBy = nullptr;
+		}
 		if (bDebugLogging)
 		{
 			const bool bNowBlocked = !bLosFromCover;
@@ -1053,7 +1186,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						LastPeekResolveTargetLoc = FVector::ZeroVector;
 						BlockedRecheckHits = 0;
 						if (Slot->Height == ECoverHeight::Crouch) Ctx.Companion->Crouch(); else Ctx.Companion->UnCrouch();
-						if (Anim) Anim->EnterCoverPose(ResolvedPeekSide);
+						if (Anim) Anim->EnterCoverPose(ResolvedPeekSide, Slot->Height);
 						return;
 					}
 				}
@@ -1095,12 +1228,15 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// StandUpAndReposition always runs in BRANCH 1 (bIsFiringBurst=true throughout).
 		// No silent-walk fallback needed here.
 
-		// Gate 4: slot supports standing.
+		// Gate 4: slot supports some form of peek (crouch fires over, stand corner-peeks).
+		// Stand-cover slots with no peekable corners are unusable for combat.
 		const bool bIsCrouchCover = (Slot->Height == ECoverHeight::Crouch);
-		if (!bIsCrouchCover && !Slot->CanStandFireOver())
+		const bool bAnyPeekableCorner = Slot->bIsPeekableCornerStart || Slot->bIsPeekableCornerEnd;
+		if (!bIsCrouchCover && !Slot->CanStandFireOver() && !bAnyPeekableCorner)
 		{
 			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: Cover REJECT stand-fire blocked by slot height slot=%s"), *Ctx.Companion->GetName(), *Slot->GetName());
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: Cover REJECT slot=%s is Stand height with no peekable corners — slot unusable for combat"),
+					*Ctx.Companion->GetName(), *Slot->GetName());
 			return;
 		}
 
@@ -1114,6 +1250,14 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// Gate 5: roll peek action.
 		const bool bAtPeekableEndpoint = Slot->IsSubSlotPeekableCorner(CurrentSubSlotIndex);
 		const int32 SubSlotCount = Slot->GetSubSlotCount();
+
+		UE_LOG(LogCompanionAI, Log,
+			TEXT("%s: PEEK-DECISION slot=%s height=%s subSlot=%d/%d atPeekableCorner=%d -> weightsPath=%s"),
+			*Ctx.Companion->GetName(), *Slot->GetName(),
+			bIsCrouchCover ? TEXT("Crouch") : TEXT("Stand"),
+			CurrentSubSlotIndex, SubSlotCount,
+			(int32)bAtPeekableEndpoint,
+			bIsCrouchCover ? TEXT("Crouch") : (bAtPeekableEndpoint ? TEXT("StandEndpoint") : TEXT("StandMidpoint-NoFire")));
 
 		EPeekAction Action = EPeekAction::Hold;
 		if (bIsCrouchCover)
@@ -1160,8 +1304,23 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: HOLD this cycle (%d/%d)"), *Ctx.Companion->GetName(), ConsecutiveHolds, MaxConsecutiveHolds);
 				return;
 			}
-			// Hold cap reached — promote to Stand (crouch) or Reposition (stand cover) if possible.
-			Action = bIsCrouchCover ? EPeekAction::Stand : EPeekAction::Hold;
+			// Hold cap reached — promote based on cover type and position.
+			if (bIsCrouchCover)
+			{
+				Action = EPeekAction::Stand;
+			}
+			else if (bAtPeekableEndpoint)
+			{
+				Action = EPeekAction::CornerPeek;
+			}
+			else
+			{
+				// Stand cover midpoint has no fire action — stay Hold, but force early return to avoid Stand/Quick fallthrough.
+				++ConsecutiveHolds;
+				PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
+				TimeInCoverIdle = 0.f;
+				return;
+			}
 		}
 		else
 		{
@@ -1267,12 +1426,22 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			CornerPeekHomeLocation = SubSlotLoc;
 			// CornerPeek apex captured at commit — assumes slot doesn't move mid-action.
 			CornerPeekApexLocation = CornerPeekHomeLocation + StrafeDir * CornerPeekStepDistance;
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=CornerPeek ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
 			CurrentBurstAction = EPeekAction::CornerPeek;
 			LastDecisionTime = Now;
 			bCornerPeekReturning = false;
 			bIsFiringBurst = true;
 			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
+			UE_LOG(LogCompanionAI, Warning,
+				TEXT("%s: PEEK-ACTION=CornerPeek slot=%s subSlot=%d home=%s apex=%s stepDist=%.0f burst=%.2fs ammo=%d"),
+				*GetNameSafe(Ctx.Companion), *Slot->GetName(),
+				CurrentSubSlotIndex, *CornerPeekHomeLocation.ToString(), *CornerPeekApexLocation.ToString(),
+				CornerPeekStepDistance, BurstTimer, Ctx.Companion->GetCurrentAmmo());
+#if ENABLE_DRAW_DEBUG
+			DrawDebugLine(Ctx.Companion->GetWorld(), CornerPeekHomeLocation + FVector(0, 0, 20.f),
+				CornerPeekApexLocation + FVector(0, 0, 20.f), FColor::Magenta, false, 3.f, 0, 4.f);
+			DrawDebugSphere(Ctx.Companion->GetWorld(), CornerPeekApexLocation + FVector(0, 0, 20.f),
+				18.f, 12, FColor::Magenta, false, 3.f, 0, 2.f);
+#endif
 			DebugBurstLosCheckTimer = 0.f;
 			CornerPeekLosCheckTimer = 0.f;
 			TimeInCoverIdle = 0.f;
@@ -1280,6 +1449,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			CoverValidityCheckTimer = 0.f;
 			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: CORNER-PEEK sub-slot %d apex=(%.0f,%.0f,%.0f) burst=%.2fs"), *Ctx.Companion->GetName(), CurrentSubSlotIndex, CornerPeekApexLocation.X, CornerPeekApexLocation.Y, CornerPeekApexLocation.Z, BurstTimer);
+			return;
+		}
+
+		// Safety net: Hold must never reach the fire path.
+		if (Action == EPeekAction::Hold)
+		{
+			UE_LOG(LogCompanionAI, Warning, TEXT("%s: PEEK-HOLD-FALLTHROUGH-GUARD — action still Hold at fire path, blocking"), *GetNameSafe(Ctx.Companion));
 			return;
 		}
 

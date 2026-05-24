@@ -96,6 +96,10 @@ void ACompanionCharacter::BeginPlay()
 			CurrentWeapon->AttachToComponent(GetMesh(), FAttachmentTransformRules::SnapToTargetNotIncludingScale, WeaponAttachSocket);
 			CurrentWeapon->InitializeAmmo();
 
+			// Drive the fire montage off the weapon's broadcast.
+			if (!CurrentWeapon->OnWeaponFired.IsAlreadyBound(this, &ACompanionCharacter::OnWeaponFiredCallback))
+				CurrentWeapon->OnWeaponFired.AddDynamic(this, &ACompanionCharacter::OnWeaponFiredCallback);
+
 			UE_LOG(LogCompanion, Log, TEXT("%s equipped weapon %s"), *GetName(), *CurrentWeapon->GetName());
 		}
 	}
@@ -145,6 +149,17 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 	}
 	if (ActualDamage > 0.f && GetWorld())
 		LastDamageWorldTime = GetWorld()->GetTimeSeconds();
+
+	// Hit react — skip if dying (death path takes over).
+	if (ActualDamage > 0.f && IsValid(HealthComponent) && HealthComponent->IsAlive())
+	{
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			if (UCompanionAnimInstance* AnimInst = Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()))
+				AnimInst->PlayHitReactMontage(1.0f);
+		}
+	}
+
 	return ActualDamage;
 }
 
@@ -233,12 +248,31 @@ void ACompanionCharacter::StartWeaponFire()
 {
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->StartFiring();
+
+	// Start the loop fire montage (idempotent — won't restart if already playing).
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		if (UCompanionAnimInstance* AnimInst = Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()))
+			AnimInst->PlayFireMontage(1.0f);
+	}
+}
+
+void ACompanionCharacter::OnWeaponFiredCallback()
+{
+	// Per-shot callback hook — reserved for future use (recoil kicks, casing ejection, etc.).
+	// Note: the loop fire montage is driven from StartWeaponFire / StopWeaponFire, not per-shot.
 }
 
 void ACompanionCharacter::StopWeaponFire()
 {
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->StopFiring();
+
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		if (UCompanionAnimInstance* AnimInst = Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()))
+			AnimInst->StopFireMontage(0.15f);
+	}
 }
 
 void ACompanionCharacter::ReloadWeapon()

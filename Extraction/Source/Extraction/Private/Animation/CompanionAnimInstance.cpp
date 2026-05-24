@@ -85,6 +85,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsAiming = false;
 	}
 
+
 	// Traversal
 	UTraversalComponent* TC = OwningCompanion->GetTraversalComponent();
 	if (IsValid(TC))
@@ -123,14 +124,27 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				(int32)bIsReloading,
 				IsValid(MovementComponent) ? MovementComponent->Velocity.Size() : 0.f);
 		}
+		// Fire the reload montage on the false→true transition.
+		if (bIsReloading)
+			PlayReloadMontage(1.f);
 		bPrevIsReloading = bIsReloading;
 	}
 }
 
 void UCompanionAnimInstance::PlayFireMontage(float PlayRate)
 {
+	if (!IsValid(FireMontage)) return;
+	// Don't restart if already playing (avoid hitching on every shot for loop montages).
+	if (Montage_IsPlaying(FireMontage)) return;
+	Montage_Play(FireMontage, PlayRate);
+	// Chain the Default section to itself so the montage loops until StopFireMontage is called.
+	Montage_SetNextSection(TEXT("Default"), TEXT("Default"), FireMontage);
+}
+
+void UCompanionAnimInstance::StopFireMontage(float BlendOutTime)
+{
 	if (IsValid(FireMontage))
-		Montage_Play(FireMontage, PlayRate);
+		Montage_Stop(BlendOutTime, FireMontage);
 }
 
 void UCompanionAnimInstance::PlayReloadMontage(float PlayRate)
@@ -146,8 +160,12 @@ void UCompanionAnimInstance::PlayReloadMontage(float PlayRate)
 
 void UCompanionAnimInstance::PlayHitReactMontage(float PlayRate)
 {
-	if (IsValid(HitReactMontage))
-		Montage_Play(HitReactMontage, PlayRate);
+	// Pick aim variant when in combat, fall back to default if aim variant not assigned.
+	UAnimMontage* MontageToPlay = ((bIsFiring || bIsAiming) && IsValid(HitReactMontage_Aim))
+		? HitReactMontage_Aim.Get()
+		: HitReactMontage.Get();
+	if (IsValid(MontageToPlay))
+		Montage_Play(MontageToPlay, PlayRate);
 }
 
 void UCompanionAnimInstance::PlayDeathMontage(float PlayRate)
@@ -195,7 +213,7 @@ namespace
 	constexpr float CoverBlendOutTime = 0.15f;
 }
 
-void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide, bool bPlayEnterMontage)
+void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide, ECoverHeight Height, bool bPlayEnterMontage)
 {
 	// Stop any active cover/peek montage before switching pose.
 	if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage))
@@ -209,6 +227,9 @@ void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide, bool bPlayEnt
 
 	bInCover = true;
 	ActivePeekSide = DefaultSide;
+
+	// Stand cover: companion stays in locomotion idle — no montage needed.
+	if (Height == ECoverHeight::Stand) return;
 
 	if (!bPlayEnterMontage) return;
 

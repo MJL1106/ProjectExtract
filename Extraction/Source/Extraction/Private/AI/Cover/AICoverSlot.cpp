@@ -137,7 +137,12 @@ FVector AAICoverSlot::GetSubSlotLocation(int32 Index) const
 	const FVector Right = GetActorRightVector();
 
 	const float T = (float)Index / (float)(Count - 1);
-	const float Offset = FMath::Lerp(-HalfLen, HalfLen, T);
+	float Offset = FMath::Lerp(-HalfLen, HalfLen, T);
+	// Inset corner endpoints inward by CornerInsetDistance so home position is behind the wall.
+	if (Index == 0)
+		Offset += CornerInsetDistance;
+	else if (Index == Count - 1)
+		Offset -= CornerInsetDistance;
 	return GetActorLocation() + Right * Offset;
 }
 
