@@ -985,6 +985,14 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		LosBlockedAccum = 0.f;
 		TimeAtCurrentCover += DeltaSeconds;
 
+		// Stand cover has no cover idle montage to mask the aim offset — drop the aim target so the
+		// companion doesn't visibly track the enemy through the wall while hiding. Restored on peek commit
+		// by the per-tick SetAimTarget at the top of TickTask once bIsFiringBurst flips true.
+		if (Slot->Height == ECoverHeight::Stand)
+		{
+			Ctx.Companion->SetAimTarget(nullptr);
+		}
+
 		// Idempotent posture sync — applies on first CoverIdle tick after entry, no-op afterward.
 		const bool bShouldCrouch = (Slot->Height == ECoverHeight::Crouch);
 		if (bShouldCrouch && !Ctx.Companion->bIsCrouched) Ctx.Companion->Crouch();
