@@ -22,6 +22,7 @@ UBTService_UpdateCompanionState::UBTService_UpdateCompanionState()
 	NodeName = TEXT("Update Companion State");
 	Interval = 0.25f;
 	RandomDeviation = 0.05f;
+	bCreateNodeInstance = true;
 }
 
 void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)

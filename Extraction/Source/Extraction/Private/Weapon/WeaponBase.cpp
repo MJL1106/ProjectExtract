@@ -9,6 +9,7 @@
 #include "ExtractionDamageType.h"
 #include "HealthComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/MeshComponent.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/PlayerController.h"
@@ -53,6 +54,22 @@ AWeaponBase::AWeaponBase()
 	WeaponMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("WeaponMesh"));
 	SetRootComponent(WeaponMesh);
 	WeaponMesh->SetCollisionProfileName(FName("NoCollision"));
+}
+
+void AWeaponBase::BeginPlay()
+{
+	Super::BeginPlay();
+
+	if (IsValid(WeaponMesh))
+	{
+		CachedEffectiveMesh = WeaponMesh.Get();
+	}
+	else
+	{
+		CachedEffectiveMesh = FindComponentByClass<UStaticMeshComponent>();
+		if (HasAuthority() && IsValid(WeaponData))
+			UE_LOG(LogTemp, Warning, TEXT("WeaponBase %s: WeaponMesh is null — BP misconfig, falling back to FindComponentByClass per shot"), *GetName());
+	}
 }
 
 void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -236,8 +253,8 @@ void AWeaponBase::PerformHitscan()
 	{
 		// AI path: trace from muzzle socket. Aim directly at the AI's current target location
 		// (not ActorForward) so vertical offsets and yaw interp lag don't cause misses.
-		// BP-serialization can leave WeaponMesh null after C++ component type changes — fall back to any static mesh on the actor.
-		UStaticMeshComponent* EffectiveMesh = IsValid(WeaponMesh) ? WeaponMesh.Get() : FindComponentByClass<UStaticMeshComponent>();
+		// CachedEffectiveMesh resolved in BeginPlay: WeaponMesh if valid, else FindComponentByClass result (avoids per-shot scan).
+		UMeshComponent* EffectiveMesh = CachedEffectiveMesh.Get();
 		TraceStart = IsValid(EffectiveMesh)
 			? EffectiveMesh->GetSocketLocation(WeaponConstants::MuzzleSocketName)
 			: OwnerChar->GetActorLocation();

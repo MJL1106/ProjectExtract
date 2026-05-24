@@ -27,7 +27,6 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	if (!Controller || !Pawn) return EBTNodeResult::Failed;
 
 	bMoveIssued = false;
-	CachedOwnerComp = &OwnerComp;
 
 	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover ENTER querier=%s hasCoverPos=%d combatTarget=%s"),
 		*Pawn->GetName(), *Pawn->GetName(),
@@ -231,7 +230,6 @@ EBTNodeResult::Type UBTTask_MoveToCover::AbortTask(UBehaviorTreeComponent& Owner
 	ReleaseClaim(BB, Pawn);
 
 	bMoveIssued = false;
-	CachedOwnerComp = nullptr;
 	return EBTNodeResult::Aborted;
 }
 
@@ -246,7 +244,6 @@ void UBTTask_MoveToCover::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint
 	}
 
 	bMoveIssued = false;
-	CachedOwnerComp = nullptr;
 }
 
 FString UBTTask_MoveToCover::GetStaticDescription() const

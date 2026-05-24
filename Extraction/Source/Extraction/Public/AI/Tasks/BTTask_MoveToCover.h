@@ -56,7 +56,4 @@ private:
 
 	bool bMoveIssued = false;
 	float LastTickDist = 0.f;
-
-	UPROPERTY()
-	TObjectPtr<UBehaviorTreeComponent> CachedOwnerComp;
 };

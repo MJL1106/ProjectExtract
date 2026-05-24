@@ -8,6 +8,7 @@
 #include "WeaponBase.generated.h"
 
 class UStaticMeshComponent;
+class UMeshComponent;
 class UWeaponDataAsset;
 class AExtractionCharacter;
 
@@ -24,6 +25,7 @@ public:
 
 	AWeaponBase();
 
+	virtual void BeginPlay() override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
@@ -181,4 +183,7 @@ private:
 	/** World time when Reload() was last called (for RELOAD-FINISH elapsed diag). Server-only. */
 	UPROPERTY(Transient)
 	float ReloadStartTimeSeconds = 0.f;
+
+	/** Resolved on BeginPlay: WeaponMesh if valid, else first UStaticMeshComponent found. Avoids per-shot FindComponentByClass. */
+	TWeakObjectPtr<UMeshComponent> CachedEffectiveMesh;
 };
