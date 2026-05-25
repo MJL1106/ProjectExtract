@@ -109,8 +109,18 @@ namespace
 		{
 			ACompanionCharacter* C = WeakC.Get();
 			if (!IsValid(C)) return;
-			if (bShouldCrouch && !C->bIsCrouched) C->Crouch();
-			else if (!bShouldCrouch && C->bIsCrouched) C->UnCrouch();
+			if (bShouldCrouch && !C->bIsCrouched)
+			{
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=DeferCoverPosture action=Crouch"),
+					*GetNameSafe(C), C->GetWorld() ? C->GetWorld()->GetTimeSeconds() : 0.f);
+				C->Crouch();
+			}
+			else if (!bShouldCrouch && C->bIsCrouched)
+			{
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=DeferCoverPosture action=UnCrouch"),
+					*GetNameSafe(C), C->GetWorld() ? C->GetWorld()->GetTimeSeconds() : 0.f);
+				C->UnCrouch();
+			}
 		});
 	}
 }
@@ -157,8 +167,8 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 
 		if (IsValid(Companion))
 		{
-			const FVector SubSlotLoc = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
-			const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
+			const FVector SubSlotLoc = Slot->GetLocationAtAlpha(CurrentAlpha);
+			const FRotator SlotYawRot(0.f, Slot->GetForwardDirection().Rotation().Yaw, 0.f);
 			// Ground-snap: nav-mesh-arrival Z is biased above the floor; trace down to find the real floor.
 			FVector SnapLoc(SubSlotLoc.X, SubSlotLoc.Y, Companion->GetActorLocation().Z);
 			if (UWorld* SnapWorld = Companion->GetWorld())
@@ -174,8 +184,7 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 					SnapLoc.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
 				}
 			}
-			Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
-			DeferCoverPosture(Companion, Slot->Height == ECoverHeight::Crouch);
+			BeginSmoothSnap(Companion, SnapLoc, SlotYawRot, Slot->Height == ECoverHeight::Crouch, TEXT("ReturnToCover"));
 		}
 	}
 
@@ -201,32 +210,51 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 
 	if (bSuppressed)
 	{
-		// Abort: snap to whichever sub-slot is closer.
+		// Abort: snap to whichever alpha position is closer.
 		const FVector Current = Companion->GetActorLocation();
-		const FVector TargetLoc = Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex);
+		const FVector TargetLoc = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
 		const bool bCloserToTarget = FVector::DistSquared(Current, TargetLoc)
-			< FVector::DistSquared(Current, Slot->GetSubSlotLocation(CurrentSubSlotIndex));
-		if (bCloserToTarget) CurrentSubSlotIndex = RepositionTargetSubSlotIndex;
+			< FVector::DistSquared(Current, Slot->GetLocationAtAlpha(CurrentAlpha));
+		if (bCloserToTarget) CurrentAlpha = *RepositionTargetAlpha;
 		if (bDebugLogging && bRepositionStartLogged)
 			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
 				*Companion->GetName(), FVector::Dist(Current, TargetLoc), RepositionElapsed);
 		Companion->SetLowReadyAim(false);
 		Companion->SetAimTarget(nullptr);
-		RepositionTargetSubSlotIndex = INDEX_NONE;
+		RepositionTargetAlpha.Reset();
 		RepositionStalledTime = 0.f;
 		bRepositionStartLogged = false;
 		CurrentBurstAction = EPeekAction::Hold;
+		bJustRepositioned = true;
+		if (Slot->Height == ECoverHeight::Stand)
+		{
+			if (UCompanionAnimInstance* CAI = Cast<UCompanionAnimInstance>(
+				Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
+				CAI->ClearCoverStrafeVelocity();
+		}
 		ReturnToCover(Companion, Anim, Slot, true, bLowHp);
 		return;
 	}
 
 	RepositionElapsed += DeltaSeconds;
 	const FVector Current = Companion->GetActorLocation();
-	const FVector RawTarget = Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex);
+	const FVector RawTarget = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
 	const FVector Target(RawTarget.X, RawTarget.Y, Current.Z);
 
 	const FVector Next = FMath::VInterpConstantTo(Current, Target, DeltaSeconds, RepositionWalkSpeed);
 	Companion->SetActorLocation(Next, false, nullptr, ETeleportType::TeleportPhysics);
+
+	if (Slot->Height == ECoverHeight::Stand)
+	{
+		if (UCompanionAnimInstance* CAI = Cast<UCompanionAnimInstance>(
+			Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
+		{
+			const FVector MoveDelta = Next - Current;
+			CAI->SetCoverStrafeVelocity((DeltaSeconds > KINDA_SMALL_NUMBER)
+				? (MoveDelta / DeltaSeconds)
+				: FVector::ZeroVector);
+		}
+	}
 
 	const float Dist = FVector::Dist(Next, Target);
 
@@ -275,15 +303,22 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 				*Companion->GetName(), Dist, RepositionElapsed);
 		Companion->SetLowReadyAim(false);
 		Companion->SetAimTarget(nullptr);
-		CurrentSubSlotIndex = RepositionTargetSubSlotIndex;
-		RepositionTargetSubSlotIndex = INDEX_NONE;
+		CurrentAlpha = *RepositionTargetAlpha;
+		RepositionTargetAlpha.Reset();
 		RepositionStalledTime = 0.f;
 		LastRepositionDist = 0.f;
 		RepositionElapsed = 0.f;
 		bRepositionStartLogged = false;
 		CurrentBurstAction = EPeekAction::Hold;
+		bJustRepositioned = true;
 		PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 		TimeInCoverIdle = 0.f;
+		if (Slot->Height == ECoverHeight::Stand)
+		{
+			if (UCompanionAnimInstance* CAI = Cast<UCompanionAnimInstance>(
+				Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
+				CAI->ClearCoverStrafeVelocity();
+		}
 		// Silent reposition: companion never left cover pose — skip the enter montage to avoid the bobbing animation.
 		if (Anim) Anim->EnterCoverPose(ResolvedPeekSide, Slot->Height, false);
 	}
@@ -298,17 +333,18 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 	{
 		if (bDebugLogging && bRepositionStartLogged)
 		{
-			const FVector RawAbortTarget = Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex);
+			const FVector RawAbortTarget = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
 			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
 				*Companion->GetName(), FVector::Dist(Companion->GetActorLocation(), RawAbortTarget), RepositionElapsed);
 		}
 		ReturnToCover(Companion, Anim, Slot, true, bLowHp);
 		bRepositionStandPhase = false;
 		bStandUpRepositionWalking = false;
-		RepositionTargetSubSlotIndex = INDEX_NONE;
+		RepositionTargetAlpha.Reset();
 		RepositionStalledTime = 0.f;
 		bRepositionStartLogged = false;
 		CurrentBurstAction = EPeekAction::Hold;
+		bJustRepositioned = true;
 		return;
 	}
 
@@ -326,19 +362,25 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 	if (!bStandUpRepositionWalking)
 	{
 		bStandUpRepositionWalking = true;
-		const FVector WalkTarget = Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex);
+		const FVector WalkTarget = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
 		UE_LOG(LogCompanionDiag, Warning, TEXT("%s: STANDUP-WALK-START burst-elapsed=%.2f dist=%.0f"),
 			*Companion->GetName(), FMath::RandRange(MinFireBurst, MaxFireBurst), FVector::Dist(Companion->GetActorLocation(), WalkTarget));
 	}
 
 	const FVector Current = Companion->GetActorLocation();
-	const FVector RawTarget = Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex);
+	const FVector RawTarget = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
 	const FVector Target(RawTarget.X, RawTarget.Y, Current.Z);
 	const FVector Next = FMath::VInterpConstantTo(Current, Target, DeltaSeconds, RepositionWalkSpeed);
 	Companion->SetActorLocation(Next, false, nullptr, ETeleportType::TeleportPhysics);
+	if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
+	{
+		const FVector MoveDelta = Next - Current;
+		CAI->SetCoverStrafeVelocity((DeltaSeconds > KINDA_SMALL_NUMBER) ? (MoveDelta / DeltaSeconds) : FVector::ZeroVector);
+	}
 
-	// Phase B: walk-and-fire. Keep weapon firing each tick.
-	if (bStandUpRepositionWalking)
+	// Phase B: walk-and-fire. Keep weapon firing each tick, but don't fire mid-reload — the
+	// fire montage would preempt the reload montage on the UpperBody slot.
+	if (bStandUpRepositionWalking && !Companion->IsReloading())
 	{
 		Companion->StartWeaponFire();
 		// Note: ammo-empty is handled naturally by the weapon; no auto-reload during walk.
@@ -381,14 +423,17 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 		if (bDebugLogging && bRepositionStartLogged)
 			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=arrived dist=%.0f elapsed=%.2f"),
 				*Companion->GetName(), Dist, RepositionElapsed);
-		CurrentSubSlotIndex = RepositionTargetSubSlotIndex;
-		RepositionTargetSubSlotIndex = INDEX_NONE;
+		CurrentAlpha = *RepositionTargetAlpha;
+		RepositionTargetAlpha.Reset();
 		bRepositionStandPhase = false;
 		bStandUpRepositionWalking = false;
 		RepositionStalledTime = 0.f;
 		LastRepositionDist = 0.f;
 		RepositionElapsed = 0.f;
 		bRepositionStartLogged = false;
+		bJustRepositioned = true;
+		if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
+			CAI->ClearCoverStrafeVelocity();
 		// Phase C: stay standing — let next BT decision pick posture.
 		ReturnToCover(Companion, Anim, Slot, false, bLowHp);
 	}
@@ -421,8 +466,13 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 	if (!bCornerPeekReturning)
 	{
 		const FVector ApexTarget(CornerPeekApexLocation.X, CornerPeekApexLocation.Y, Current.Z);
-		const FVector Next = FMath::VInterpConstantTo(Current, ApexTarget, DeltaSeconds, RepositionWalkSpeed);
+		const FVector Next = FMath::VInterpConstantTo(Current, ApexTarget, DeltaSeconds, CornerPeekOutSpeed);
 		Companion->TeleportTo(Next, Companion->GetActorRotation(), false, true);
+		if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
+		{
+			const FVector MoveDelta = Next - Current;
+			CAI->SetCoverStrafeVelocity((DeltaSeconds > KINDA_SMALL_NUMBER) ? (MoveDelta / DeltaSeconds) : FVector::ZeroVector);
+		}
 
 		if (bRunLosThisTick)
 		{
@@ -454,8 +504,13 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 	else
 	{
 		const FVector HomeTarget(CornerPeekHomeLocation.X, CornerPeekHomeLocation.Y, Current.Z);
-		const FVector Next = FMath::VInterpConstantTo(Current, HomeTarget, DeltaSeconds, RepositionWalkSpeed);
+		const FVector Next = FMath::VInterpConstantTo(Current, HomeTarget, DeltaSeconds, CornerPeekReturnSpeed);
 		Companion->TeleportTo(Next, Companion->GetActorRotation(), false, true);
+		if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
+		{
+			const FVector MoveDelta = Next - Current;
+			CAI->SetCoverStrafeVelocity((DeltaSeconds > KINDA_SMALL_NUMBER) ? (MoveDelta / DeltaSeconds) : FVector::ZeroVector);
+		}
 
 		if (bRunLosThisTick)
 		{
@@ -478,26 +533,29 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 			}
 			bIsFiringBurst = false;
 			bCornerPeekReturning = false;
+			if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
+				CAI->ClearCoverStrafeVelocity();
 			ReturnToCover(Companion, Anim, Slot, false, bLowHp);
 		}
 	}
 }
 
-int32 UBTTask_CompanionCombat::PickBestSubSlotByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, int32 ExcludeIndex, TArrayView<AActor* const> IgnoredAttached) const
+TOptional<float> UBTTask_CompanionCombat::PickBestAlphaByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, float ExcludeAlpha, TArrayView<AActor* const> IgnoredAttached) const
 {
-	if (!IsValid(Slot) || !IsValid(Target) || !IsValid(Companion)) return INDEX_NONE;
+	if (!IsValid(Slot) || !IsValid(Target) || !IsValid(Companion)) return {};
 
 	UWorld* World = Companion->GetWorld();
-	const int32 Count = Slot->GetSubSlotCount();
-	for (int32 i = 0; i < Count; ++i)
+	const int32 N = FMath::Max(2, LosSweepSampleCount);
+	for (int32 i = 0; i < N; ++i)
 	{
-		if (i == ExcludeIndex) continue;
-		const FVector Eye = Slot->GetSubSlotLocation(i) + FVector(0.f, 0.f, StandFireEyeHeight);
+		const float Alpha = (float)i / (float)(N - 1);
+		if (FMath::Abs(Alpha - ExcludeAlpha) < 0.1f) continue;
+		const FVector Eye = Slot->GetLocationAtAlpha(Alpha) + FVector(0.f, 0.f, StandFireEyeHeight);
 		AActor* Blocker = nullptr;
 		if (HasLineOfSight(World, Eye, Target, Companion, Blocker, IgnoredAttached))
-			return i;
+			return Alpha;
 	}
-	return INDEX_NONE;
+	return {};
 }
 
 bool UBTTask_CompanionCombat::TryPrePeekReloadGate(ACompanionCharacter* Companion, AAICoverSlot* Slot)
@@ -554,7 +612,11 @@ bool UBTTask_CompanionCombat::TryPrePeekReloadGate(ACompanionCharacter* Companio
 	// drive a standing-pose transition if the graph isn't guarded — Crouch() here counteracts
 	// any capsule stand-up that results, keeping the companion behind cover during the reload.
 	if (IsValid(Slot) && Slot->Height == ECoverHeight::Crouch && !Companion->bIsCrouched)
+	{
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=PrePeekReloadGate action=Crouch"),
+			*GetNameSafe(Companion), World ? World->GetTimeSeconds() : 0.f);
 		Companion->Crouch();
+	}
 
 	const float ReloadCooldownCap = MaxPeekCooldown * 2.f;
 	const float ReloadBump = FMath::Clamp(Companion->GetWeaponReloadTime(), 0.f, ReloadCooldownCap);
@@ -574,14 +636,28 @@ UBTTask_CompanionCombat::UBTTask_CompanionCombat()
 
 // --- ResetTaskState ---
 
-void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBlackboardComponent* BB, AAICoverSlot* Slot, bool bReleaseSlot)
+void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBlackboardComponent* BB, AAICoverSlot* Slot, bool bReleaseSlot, bool bResetPosture)
 {
 	if (IsValid(Companion))
 	{
 		Companion->StopWeaponFire();
 		Companion->SetAimTarget(nullptr);
 		Companion->SetLowReadyAim(false);
-		Companion->UnCrouch();
+		if (bSmoothSnapping)
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [SnapAborted] t=%.3f elapsed=%.3f reason=%s"),
+				*GetNameSafe(Companion),
+				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
+				SmoothSnapElapsed,
+				SmoothSnapReason);
+		}
+		if (bResetPosture)
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState action=UnCrouch"),
+				*GetNameSafe(Companion),
+				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Companion->UnCrouch();
+		}
 
 		UCompanionAnimInstance* Anim = GetCompanionAnim(Companion);
 		if (UAnimMontage* M = ActivePeekMontage.Get())
@@ -616,12 +692,13 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	LastPeekResolveCoverLoc = FVector::ZeroVector;
 	LastPeekResolveTargetLoc = FVector::ZeroVector;
 	ConsecutiveHolds = 0;
+	bJustRepositioned = false;
 	CurrentBurstAction = EPeekAction::Stand;
-	CurrentSubSlotIndex = 0;
+	CurrentAlpha = 0.5f;
 	SubSlotLosRecheckTimer = 0.f;
 	LastTickSlot = nullptr;
 	BlockedRecheckHits = 0;
-	RepositionTargetSubSlotIndex = INDEX_NONE;
+	RepositionTargetAlpha.Reset();
 	bRepositionStandPhase = false;
 	bStandUpRepositionWalking = false;
 	LastRepositionDist = 0.f;
@@ -636,9 +713,79 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	FinalApproachTarget = FVector::ZeroVector;
 	FinalApproachElapsed = 0.f;
 	FinalApproachStalledTime = 0.f;
+	bSmoothSnapping = false;
+	SmoothSnapElapsed = 0.f;
 	bReloadGateActive = false;
 	ReloadGateStartTime = 0.f;
 	LastDecisionTime = 0.f;
+}
+
+// --- Smooth-snap helpers ---
+
+void UBTTask_CompanionCombat::BeginSmoothSnap(ACompanionCharacter* Companion, const FVector& TargetLoc, const FRotator& TargetRot, bool bShouldCrouchAfter, const TCHAR* Reason)
+{
+	if (!IsValid(Companion)) return;
+	SmoothSnapStartLoc = Companion->GetActorLocation();
+	SmoothSnapStartRot = Companion->GetActorRotation();
+	SmoothSnapTargetLoc = TargetLoc;
+	SmoothSnapTargetRot = TargetRot;
+	SmoothSnapElapsed = 0.f;
+	bSmoothSnapping = true;
+	bPendingCrouchAfterSnap = bShouldCrouchAfter;
+	SmoothSnapReason = Reason;
+	UE_LOG(LogCompanionDiag, Log, TEXT("%s: [BeginSmoothSnap] t=%.3f dist=%.1f yawDelta=%.1f crouchAfter=%d reason=%s"),
+		*GetNameSafe(Companion),
+		Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
+		(SmoothSnapTargetLoc - SmoothSnapStartLoc).Size(),
+		FMath::FindDeltaAngleDegrees(SmoothSnapStartRot.Yaw, SmoothSnapTargetRot.Yaw),
+		(int32)bShouldCrouchAfter,
+		Reason);
+}
+
+bool UBTTask_CompanionCombat::TickSmoothSnap(ACompanionCharacter* Companion, float DeltaSeconds)
+{
+	if (!bSmoothSnapping || !IsValid(Companion)) return true;
+	SmoothSnapElapsed += DeltaSeconds;
+	const float Alpha = FMath::Clamp(SmoothSnapElapsed / FMath::Max(SmoothSnapDuration, 0.001f), 0.f, 1.f);
+	const float EaseAlpha = FMath::SmoothStep(0.f, 1.f, Alpha);
+	const FVector NextLoc = FMath::Lerp(SmoothSnapStartLoc, SmoothSnapTargetLoc, EaseAlpha);
+	const FRotator NextRot = FMath::Lerp(SmoothSnapStartRot, SmoothSnapTargetRot, EaseAlpha);
+	Companion->SetActorLocationAndRotation(NextLoc, NextRot, false, nullptr, ETeleportType::TeleportPhysics);
+	if (Alpha >= 1.f)
+	{
+		bSmoothSnapping = false;
+		const bool bWasCrouched = Companion->bIsCrouched;
+		const bool bWillCrouch = (bPendingCrouchAfterSnap && !Companion->bIsCrouched);
+		const bool bWillUncrouch = (!bPendingCrouchAfterSnap && Companion->bIsCrouched);
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [SnapComplete] t=%.3f elapsed=%.3f crouchPending=%d wasCrouched=%d willCrouch=%d willUncrouch=%d reason=%s"),
+			*GetNameSafe(Companion),
+			Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
+			SmoothSnapElapsed,
+			(int32)bPendingCrouchAfterSnap,
+			(int32)bWasCrouched,
+			(int32)bWillCrouch,
+			(int32)bWillUncrouch,
+			SmoothSnapReason);
+		SmoothSnapElapsed = 0.f;
+		// Apply pending posture change on snap completion (avoids crouch pop mid-snap).
+		if (bWillCrouch)
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=PostSnapApply action=Crouch"),
+				*GetNameSafe(Companion),
+				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Companion->Crouch();
+		}
+		else if (bWillUncrouch)
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=PostSnapApply action=UnCrouch"),
+				*GetNameSafe(Companion),
+				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Companion->UnCrouch();
+		}
+		bPendingCrouchAfterSnap = false;
+		return true;
+	}
+	return false;
 }
 
 // --- AbortTask ---
@@ -668,7 +815,8 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	if (!Companion) return EBTNodeResult::Failed;
 
 	// Full state reset without releasing the slot we're about to claim.
-	ResetTaskState(Companion, BB, nullptr, false);
+	// Don't reset posture — preserves anticipatory crouch from MoveToCover.
+	ResetTaskState(Companion, BB, nullptr, false, false);
 
 	Companion->SetAimTarget(Target);
 	PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
@@ -686,21 +834,26 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 		const ECoverPeekSide Pref = Slot->PeekPreference;
 		ResolvedPeekSide = (Pref == ECoverPeekSide::Left) ? EPeekSide::Left : EPeekSide::Right;
 
-		// Pick the nearest sub-slot to arrival position.
-		const int32 NumSubSlots = Slot->GetSubSlotCount();
 		const FVector ArrivalLoc = Companion->GetActorLocation();
-		float BestDistSq = FLT_MAX;
-		for (int32 i = 0; i < NumSubSlots; ++i)
+		float InitialAlpha = Slot->GetAlphaFromLocation(ArrivalLoc);
+		// Stand cover: snap to the nearest peekable endpoint; companion must never idle at a midpoint.
+		const bool bStandRestrictToCorners = (Slot->Height == ECoverHeight::Stand);
+		if (bStandRestrictToCorners)
 		{
-			const float DistSq = FVector::DistSquared(ArrivalLoc, Slot->GetSubSlotLocation(i));
-			if (DistSq < BestDistSq)
-			{
-				BestDistSq = DistSq;
-				CurrentSubSlotIndex = i;
-			}
+			const bool bStartPeekable = Slot->bIsPeekableCornerStart;
+			const bool bEndPeekable = Slot->bIsPeekableCornerEnd;
+			if (bStartPeekable && bEndPeekable)
+				InitialAlpha = (InitialAlpha < 0.5f) ? 0.f : 1.f;
+			else if (bStartPeekable)
+				InitialAlpha = 0.f;
+			else if (bEndPeekable)
+				InitialAlpha = 1.f;
+			else
+				InitialAlpha = 0.f; // warn fires below via STAND-COVER-CONFIG-WARN
 		}
+		CurrentAlpha = InitialAlpha;
 
-		const FVector SubSlotLoc = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
+		const FVector SubSlotLoc = Slot->GetLocationAtAlpha(CurrentAlpha);
 		const float DistToSubSlot = FVector::Dist(ArrivalLoc, SubSlotLoc);
 
 		if (DistToSubSlot <= FinalApproachAcceptRadius)
@@ -711,7 +864,7 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 			if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
 				CMC->StopMovementImmediately();
 
-			const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
+			const FRotator SlotYawRot(0.f, Slot->GetForwardDirection().Rotation().Yaw, 0.f);
 			if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: ALREADY-CLOSE-SNAP distToSubSlot=%.1f acceptRadius=%.1f arrival=%s subSlot=%s"),
 				*Companion->GetName(), DistToSubSlot, FinalApproachAcceptRadius, *ArrivalLoc.ToString(), *SubSlotLoc.ToString());
 			// Ground-snap: nav-mesh-arrival Z is biased above the floor; trace down to find the real floor.
@@ -729,8 +882,7 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 					SnapLoc.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
 				}
 			}
-			Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
-			DeferCoverPosture(Companion, Slot->Height == ECoverHeight::Crouch);
+			BeginSmoothSnap(Companion, SnapLoc, SlotYawRot, Slot->Height == ECoverHeight::Crouch, TEXT("AlreadyClose"));
 			if (UCompanionAnimInstance* Anim = GetCompanionAnim(Companion))
 				Anim->EnterCoverPose(ResolvedPeekSide, Slot->Height);
 		}
@@ -774,10 +926,10 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 				*Companion->GetName(), *Slot->GetName());
 		}
 		UE_LOG(LogCompanionAI, Log,
-			TEXT("%s: COVER-CLAIMED slot=%s height=%s subSlot=%d/%d cornerStart=%d cornerEnd=%d peekPref=%d canStandFireOver=%d"),
+			TEXT("%s: COVER-CLAIMED slot=%s height=%s alpha=%.2f lineLen=%.0f cornerStart=%d cornerEnd=%d peekPref=%d canStandFireOver=%d"),
 			*Companion->GetName(), *Slot->GetName(),
 			Slot->Height == ECoverHeight::Crouch ? TEXT("Crouch") : TEXT("Stand"),
-			CurrentSubSlotIndex, Slot->GetSubSlotCount(),
+			CurrentAlpha, Slot->GetLineLength(),
 			(int32)Slot->bIsPeekableCornerStart, (int32)Slot->bIsPeekableCornerEnd,
 			(int32)Slot->PeekPreference,
 			(int32)Slot->CanStandFireOver());
@@ -791,14 +943,14 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 
 		if (bHasCover && IsValid(Slot))
 		{
-			const FVector SubSlotLoc = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
-			const float DistToSubSlot = FVector::Dist(Companion->GetActorLocation(), SubSlotLoc);
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=%d slot=%s nearestSubSlot=%d distToSubSlot=%.1f"),
-				*Companion->GetName(), *Target->GetName(), Distance, 1, *GetNameSafe(Slot), CurrentSubSlotIndex, DistToSubSlot);
+			const FVector SlotLoc = Slot->GetLocationAtAlpha(CurrentAlpha);
+			const float DistToSlot = FVector::Dist(Companion->GetActorLocation(), SlotLoc);
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=%d slot=%s alpha=%.2f distToSlot=%.1f"),
+				*Companion->GetName(), *Target->GetName(), Distance, 1, *GetNameSafe(Slot), CurrentAlpha, DistToSlot);
 		}
 		else
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=0 slot=None nearestSubSlot=-1 distToSubSlot=-1"),
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=0 slot=None alpha=-1 distToSlot=-1"),
 				*Companion->GetName(), *Target->GetName(), Distance);
 		}
 	}
@@ -879,7 +1031,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		AAICoverSlot* ApproachSlot = Cast<AAICoverSlot>(Ctx.Blackboard->GetValueAsObject(CoverSlotKey.SelectedKeyName));
 		if (IsValid(ApproachSlot))
 		{
-			const FRotator SlotYawRot(0.f, ApproachSlot->GetActorRotation().Yaw, 0.f);
+			const FRotator SlotYawRot(0.f, ApproachSlot->GetForwardDirection().Rotation().Yaw, 0.f);
 			// Ground-snap: nav-mesh-arrival Z is biased above the floor; trace down to find the real floor.
 			FVector SnapLoc(FinalApproachTarget.X, FinalApproachTarget.Y, Ctx.Companion->GetActorLocation().Z);
 			if (UWorld* SnapWorld = Ctx.Companion->GetWorld())
@@ -901,8 +1053,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				UE_LOG(LogCompanionDiag, Log, TEXT("%s: FINALAPPROACH-SNAP arrived=%d timedOut=%d stalled=%d elapsed=%.2f dist=%.0f warped=%.0f"),
 					*Ctx.Companion->GetName(), (int32)bArrived, (int32)bTimedOut, (int32)bStalled, FinalApproachElapsed, Dist, WarpDist);
 			}
-			Ctx.Companion->TeleportTo(SnapLoc, SlotYawRot, false, false);
-			DeferCoverPosture(Ctx.Companion, ApproachSlot->Height == ECoverHeight::Crouch);
+			BeginSmoothSnap(Ctx.Companion, SnapLoc, SlotYawRot, ApproachSlot->Height == ECoverHeight::Crouch, TEXT("FinalApproach"));
 			if (UCompanionAnimInstance* Anim = GetCompanionAnim(Ctx.Companion))
 				Anim->EnterCoverPose(ResolvedPeekSide, ApproachSlot->Height);
 		}
@@ -912,6 +1063,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		LastFinalApproachDist = 0.f;
 		FinalApproachStalledTime = 0.f;
 		// Fall through to normal branch logic this tick.
+	}
+
+	if (bSmoothSnapping)
+	{
+		if (!TickSmoothSnap(Ctx.Companion, DeltaSeconds))
+			return; // snap not complete — pause branch logic this tick
+		// Snap just completed — fall through to normal tick.
 	}
 
 	const FVector MyLocation = Ctx.Companion->GetActorLocation();
@@ -926,10 +1084,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	TArray<AActor*, TInlineAllocator<4>> TickIgnoredAttached;
 	Ctx.Companion->ForEachAttachedActors([&TickIgnoredAttached](AActor* A) { TickIgnoredAttached.Add(A); return true; });
 
-	// Detect slot swap without ExecuteTask re-running; reset sub-slot index to stay in bounds.
+	// Detect slot swap without ExecuteTask re-running; reset alpha to midpoint of new slot.
 	if (IsValid(Slot) && Slot != LastTickSlot.Get())
 	{
-		CurrentSubSlotIndex = 0;
+		CurrentAlpha = 0.5f;
 		BlockedRecheckHits = 0;
 	}
 	LastTickSlot = Slot;
@@ -971,7 +1129,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// Prevents falling through to open-engage with stale crouch / firing state.
 	if (LastTickBranch == 0 && (!bHasCover || !IsValid(Slot)))
 	{
-		if (Ctx.Companion->bIsCrouched) Ctx.Companion->UnCrouch();
+		if (Ctx.Companion->bIsCrouched)
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=SlotLossGuard action=UnCrouch"),
+				*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Ctx.Companion->UnCrouch();
+		}
 		bIsFiringBurst = false;
 		UE_LOG(LogCompanionAI, Warning, TEXT("Slot lost mid-task on companion %s — aborting cleanly"), *GetNameSafe(Ctx.Companion));
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Aborted);
@@ -985,65 +1148,64 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		LosBlockedAccum = 0.f;
 		TimeAtCurrentCover += DeltaSeconds;
 
-		// Stand cover has no cover idle montage to mask the aim offset — drop the aim target so the
+		// Neither height has a cover idle montage to mask the aim offset — drop the aim target so the
 		// companion doesn't visibly track the enemy through the wall while hiding. Restored on peek commit
 		// by the per-tick SetAimTarget at the top of TickTask once bIsFiringBurst flips true.
-		if (Slot->Height == ECoverHeight::Stand)
-		{
-			Ctx.Companion->SetAimTarget(nullptr);
-		}
+		Ctx.Companion->SetAimTarget(nullptr);
 
 		// Idempotent posture sync — applies on first CoverIdle tick after entry, no-op afterward.
 		const bool bShouldCrouch = (Slot->Height == ECoverHeight::Crouch);
-		if (bShouldCrouch && !Ctx.Companion->bIsCrouched) Ctx.Companion->Crouch();
-		else if (!bShouldCrouch && Ctx.Companion->bIsCrouched) Ctx.Companion->UnCrouch();
+		if (bShouldCrouch && !Ctx.Companion->bIsCrouched)
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=CoverIdlePostureSync action=Crouch"),
+				*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Ctx.Companion->Crouch();
+		}
+		else if (!bShouldCrouch && Ctx.Companion->bIsCrouched)
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=CoverIdlePostureSync action=UnCrouch"),
+				*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Ctx.Companion->UnCrouch();
+		}
 
-		// Defensive re-assert: if the cover-idle montage was evicted (e.g. by a fire/reload montage),
-		// restart it so the companion doesn't stand up visually through the reload window.
-		// Stand cover has no idle montage to re-play — skip the re-assert for Stand height.
-		if (Slot->Height == ECoverHeight::Crouch && IsValid(Anim) && !Anim->IsCoverIdleMontagePlaying(ResolvedPeekSide))
-			Anim->EnterCoverPose(ResolvedPeekSide, Slot->Height, true);
+		const bool bRepoActive = (CurrentBurstAction == EPeekAction::Reposition && RepositionTargetAlpha.IsSet());
+
+		// Early Reposition dispatch — a committed Reposition must not wait on the action-roll cooldown gate.
+		if (bRepoActive)
+		{
+			TickRepositionAction(Ctx.Companion, Anim, Slot, bSuppressed, bLowHp, DeltaSeconds);
+			return;
+		}
 
 #if ENABLE_DRAW_DEBUG
 		{
-			const int32 SubSlotCountForDraw = Slot->GetSubSlotCount();
-			const float HalfLenForDraw = Slot->GetCoverLineHalfLength();
-			const FVector RightForDraw = Slot->GetActorRightVector();
-			for (int32 i = 0; i < SubSlotCountForDraw; ++i)
+			const FVector DrawLineDir = Slot->GetLineDirection();
+			const FVector LeftEdgePt  = Slot->GetLeftEdge()  + FVector(0.f, 0.f, 10.f);
+			const FVector RightEdgePt = Slot->GetRightEdge() + FVector(0.f, 0.f, 10.f);
+			const FVector CurrentPt   = Slot->GetLocationAtAlpha(CurrentAlpha) + FVector(0.f, 0.f, 10.f);
+			DrawDebugSphere(Ctx.Companion->GetWorld(), LeftEdgePt,  14.f, 8, FColor::White, false, 0.f, 0, 1.5f);
+			DrawDebugSphere(Ctx.Companion->GetWorld(), RightEdgePt, 14.f, 8, FColor::White, false, 0.f, 0, 1.5f);
+			DrawDebugSphere(Ctx.Companion->GetWorld(), CurrentPt,   22.f, 8, FColor::Red,   false, 0.f, 0, 1.5f);
+			// Magenta apex markers for peekable endpoint corners.
+			if (Slot->bIsPeekableCornerStart)
 			{
-				const FVector P = Slot->GetSubSlotLocation(i) + FVector(0.f, 0.f, 10.f);
-				const bool bIsCorner = Slot->IsSubSlotPeekableCorner(i);
-				const FColor Color = bIsCorner ? FColor::Red : FColor::White;
-				const float Radius = (i == CurrentSubSlotIndex) ? 22.f : 14.f;
-				DrawDebugSphere(Ctx.Companion->GetWorld(), P, Radius, 8, Color, false, 0.f, 0, 1.5f);
-
-				// For peekable corner sub-slots: draw magenta apex ring + line showing peek trajectory.
-				if (bIsCorner)
-				{
-					const FVector StrafeDir = (i == 0) ? -RightForDraw : RightForDraw;
-					const FVector ApexPos = Slot->GetSubSlotLocation(i) + FVector(0.f, 0.f, 20.f) + StrafeDir * CornerPeekStepDistance;
-					const FVector CornerBase = Slot->GetSubSlotLocation(i) + FVector(0.f, 0.f, 20.f);
-					DrawDebugSphere(Ctx.Companion->GetWorld(), ApexPos, 14.f, 12, FColor::Magenta, false, 0.f, 0, 1.5f);
-					DrawDebugLine(Ctx.Companion->GetWorld(), CornerBase, ApexPos, FColor::Magenta, false, 0.f, 0, 2.5f);
-				}
-
-				// Yellow pip at the raw (un-inset) wall edge for the two corner sub-slots so designers
-				// can compare the inset home position (red sphere above) with the true wall edge.
-				if (SubSlotCountForDraw > 1 && (i == 0 || i == SubSlotCountForDraw - 1))
-				{
-					const float RawOffset = (i == 0) ? -HalfLenForDraw : HalfLenForDraw;
-					const FVector RawEdge = Slot->GetActorLocation() + RightForDraw * RawOffset + FVector(0.f, 0.f, 10.f);
-					DrawDebugSphere(Ctx.Companion->GetWorld(), RawEdge, 6.f, 6, FColor::Yellow, false, 0.f, 0, 1.f);
-				}
+				const FVector ApexStart = Slot->GetLeftEdge() + FVector(0.f, 0.f, 20.f) + (-DrawLineDir) * CornerPeekStepDistance;
+				DrawDebugSphere(Ctx.Companion->GetWorld(), ApexStart, 14.f, 12, FColor::Magenta, false, 0.f, 0, 1.5f);
+				DrawDebugLine(Ctx.Companion->GetWorld(), Slot->GetLeftEdge() + FVector(0.f, 0.f, 20.f), ApexStart, FColor::Magenta, false, 0.f, 0, 2.5f);
+			}
+			if (Slot->bIsPeekableCornerEnd)
+			{
+				const FVector ApexEnd = Slot->GetRightEdge() + FVector(0.f, 0.f, 20.f) + DrawLineDir * CornerPeekStepDistance;
+				DrawDebugSphere(Ctx.Companion->GetWorld(), ApexEnd, 14.f, 12, FColor::Magenta, false, 0.f, 0, 1.5f);
+				DrawDebugLine(Ctx.Companion->GetWorld(), Slot->GetRightEdge() + FVector(0.f, 0.f, 20.f), ApexEnd, FColor::Magenta, false, 0.f, 0, 2.5f);
 			}
 			// Eye-height marker showing where stand-fire LoS trace originates.
-			const FVector EyeMarker = Slot->GetSubSlotLocation(CurrentSubSlotIndex) + FVector(0.f, 0.f, StandFireEyeHeight);
+			const FVector EyeMarker = Slot->GetLocationAtAlpha(CurrentAlpha) + FVector(0.f, 0.f, StandFireEyeHeight);
 			DrawDebugSphere(Ctx.Companion->GetWorld(), EyeMarker, 6.f, 6, FColor::Cyan, false, 0.f, 0, 1.f);
 		}
 #endif
 
-		CurrentSubSlotIndex = FMath::Clamp(CurrentSubSlotIndex, 0, Slot->GetSubSlotCount() - 1);
-		const FVector SubSlotLoc = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
+		const FVector SubSlotLoc = Slot->GetLocationAtAlpha(CurrentAlpha);
 
 		// Refresh peek side only when geometry has changed beyond threshold.
 		const FVector CoverLoc = SubSlotLoc;
@@ -1106,7 +1268,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			UE_LOG(LogCompanionAI, Warning, TEXT("COVER-IDLE-WATCHDOG-FIRED on companion %s — force re-roll"), *GetNameSafe(Ctx.Companion));
 			bIsFiringBurst = false;
 			CurrentBurstAction = EPeekAction::Hold;
-			RepositionTargetSubSlotIndex = INDEX_NONE;
+			RepositionTargetAlpha.Reset();
 			bRepositionStandPhase = false;
 			ConsecutiveHolds = 0;
 			PeekCooldown = 0.f;
@@ -1133,9 +1295,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		bool bLosFromCover = HasLineOfSight(Ctx.Companion->GetWorld(), StandEye, Ctx.Target, Ctx.Companion, BlockedBy, TickIgnoredAttached);
 
 		// Stand cover at a peekable corner can never see over the wall — check the would-be CornerPeek apex instead.
-		if (!bLosFromCover && Slot->Height == ECoverHeight::Stand && Slot->IsSubSlotPeekableCorner(CurrentSubSlotIndex))
+		if (!bLosFromCover && Slot->Height == ECoverHeight::Stand && Slot->IsAlphaAtPeekableCorner(CurrentAlpha))
 		{
-			const FVector StrafeDir = (CurrentSubSlotIndex == 0) ? -Slot->GetActorRightVector() : Slot->GetActorRightVector();
+			const FVector StrafeDir = (CurrentAlpha < 0.5f) ? -Slot->GetLineDirection() : Slot->GetLineDirection();
 			const FVector ApexLoc = SubSlotLoc + StrafeDir * CornerPeekStepDistance;
 			const FVector ApexEye = ApexLoc + FVector(0.f, 0.f, StandFireEyeHeight);
 			AActor* ApexBlocker = nullptr;
@@ -1171,7 +1333,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 			// Throttled sub-slot re-pick: only when unsuppressed and multiple sub-slots exist.
 			SubSlotLosRecheckTimer -= DeltaSeconds;
-			if (SubSlotLosRecheckTimer <= 0.f && !bSuppressed && Slot->GetSubSlotCount() > 1)
+			if (SubSlotLosRecheckTimer <= 0.f && !bSuppressed && Slot->GetLineLength() >= 50.f)
 			{
 				SubSlotLosRecheckTimer = SubSlotLosRecheckInterval;
 				BlockedRecheckHits = FMath::Min<uint8>(BlockedRecheckHits + 1, 255);
@@ -1179,21 +1341,32 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				// Require 2 consecutive gated blocked checks before teleporting (anti-thrash).
 				if (BlockedRecheckHits >= 2)
 				{
-					const int32 BestIndex = PickBestSubSlotByLos(Slot, Ctx.Target, Ctx.Companion, CurrentSubSlotIndex, TickIgnoredAttached);
-					if (BestIndex != INDEX_NONE)
+					const TOptional<float> BestAlpha = PickBestAlphaByLos(Slot, Ctx.Target, Ctx.Companion, CurrentAlpha, TickIgnoredAttached);
+					if (BestAlpha.IsSet())
 					{
-						const int32 PrevSubSlotIndex = CurrentSubSlotIndex;
-						CurrentSubSlotIndex = BestIndex;
-						const FVector NewSubSlotLoc = Slot->GetSubSlotLocation(CurrentSubSlotIndex);
-						const FRotator SlotYawRot(0.f, Slot->GetActorRotation().Yaw, 0.f);
+						const float PrevAlpha = CurrentAlpha;
+						CurrentAlpha = *BestAlpha;
+						const FVector NewSubSlotLoc = Slot->GetLocationAtAlpha(CurrentAlpha);
+						const FRotator SlotYawRot(0.f, Slot->GetForwardDirection().Rotation().Yaw, 0.f);
 						const FVector TeleportDest(NewSubSlotLoc.X, NewSubSlotLoc.Y, Ctx.Companion->GetActorLocation().Z);
-						if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MID-COMBAT-SUBSLOT-TELEPORT fromIdx=%d toIdx=%d dist=%.0f isReloading=%d"),
-							*Ctx.Companion->GetName(), PrevSubSlotIndex, BestIndex, FVector::Dist(Ctx.Companion->GetActorLocation(), TeleportDest), (int32)Ctx.Companion->IsReloading());
+						if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MID-COMBAT-ALPHA-TELEPORT fromAlpha=%.2f toAlpha=%.2f dist=%.0f isReloading=%d"),
+							*Ctx.Companion->GetName(), PrevAlpha, CurrentAlpha, FVector::Dist(Ctx.Companion->GetActorLocation(), TeleportDest), (int32)Ctx.Companion->IsReloading());
 						Ctx.Companion->TeleportTo(TeleportDest, SlotYawRot, false, false);
 						LastPeekResolveCoverLoc = FVector::ZeroVector;
 						LastPeekResolveTargetLoc = FVector::ZeroVector;
 						BlockedRecheckHits = 0;
-						if (Slot->Height == ECoverHeight::Crouch) Ctx.Companion->Crouch(); else Ctx.Companion->UnCrouch();
+						if (Slot->Height == ECoverHeight::Crouch)
+						{
+							UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=SubSlotTeleport action=Crouch"),
+								*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
+							Ctx.Companion->Crouch();
+						}
+						else
+						{
+							UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=SubSlotTeleport action=UnCrouch"),
+								*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
+							Ctx.Companion->UnCrouch();
+						}
 						if (Anim) Anim->EnterCoverPose(ResolvedPeekSide, Slot->Height);
 						return;
 					}
@@ -1226,13 +1399,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		if (Ctx.Companion->IsReloading()) return;
 
-		// Handle ongoing silent Reposition action (doesn't enter burst — processed here).
-		if (CurrentBurstAction == EPeekAction::Reposition && RepositionTargetSubSlotIndex != INDEX_NONE)
-		{
-			TickRepositionAction(Ctx.Companion, Anim, Slot, bSuppressed, bLowHp, DeltaSeconds);
-			return;
-		}
-
 		// StandUpAndReposition always runs in BRANCH 1 (bIsFiringBurst=true throughout).
 		// No silent-walk fallback needed here.
 
@@ -1256,23 +1422,23 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 
 		// Gate 5: roll peek action.
-		const bool bAtPeekableEndpoint = Slot->IsSubSlotPeekableCorner(CurrentSubSlotIndex);
-		const int32 SubSlotCount = Slot->GetSubSlotCount();
+		const bool bAtPeekableEndpoint = Slot->IsAlphaAtPeekableCorner(CurrentAlpha);
+		const bool bLineLongEnough = (Slot->GetLineLength() >= 50.f);
 
 		UE_LOG(LogCompanionAI, Log,
-			TEXT("%s: PEEK-DECISION slot=%s height=%s subSlot=%d/%d atPeekableCorner=%d -> weightsPath=%s"),
+			TEXT("%s: PEEK-DECISION slot=%s height=%s alpha=%.2f lineLen=%.0f atPeekableCorner=%d -> weightsPath=%s"),
 			*Ctx.Companion->GetName(), *Slot->GetName(),
 			bIsCrouchCover ? TEXT("Crouch") : TEXT("Stand"),
-			CurrentSubSlotIndex, SubSlotCount,
+			CurrentAlpha, Slot->GetLineLength(),
 			(int32)bAtPeekableEndpoint,
 			bIsCrouchCover ? TEXT("Crouch") : (bAtPeekableEndpoint ? TEXT("StandEndpoint") : TEXT("StandMidpoint-NoFire")));
 
 		EPeekAction Action = EPeekAction::Hold;
 		if (bIsCrouchCover)
 		{
-			// Disable Reposition/StandUpAndReposition when only one sub-slot exists.
-			const float RepoW        = (SubSlotCount > 1) ? (bLowHp ? LowHpRepositionWeight            : RepositionWeight)           : 0.f;
-			const float StandUpRepoW = (SubSlotCount > 1) ? (bLowHp ? LowHpStandUpAndRepositionWeight  : StandUpAndRepositionWeight)  : 0.f;
+			// Disable Reposition/StandUpAndReposition when line is too short, or when we just repositioned.
+			const float RepoW        = (bLineLongEnough && !bJustRepositioned) ? (bLowHp ? LowHpRepositionWeight            : RepositionWeight)           : 0.f;
+			const float StandUpRepoW = (bLineLongEnough && !bJustRepositioned) ? (bLowHp ? LowHpStandUpAndRepositionWeight  : StandUpAndRepositionWeight)  : 0.f;
 			const TPair<EPeekAction, float> CrouchWeights[] = {
 				{ EPeekAction::Stand,                bLowHp ? LowHpStandWeight  : StandWeight },
 				{ EPeekAction::Quick,                bLowHp ? LowHpQuickWeight  : QuickWeight },
@@ -1286,16 +1452,16 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			const TPair<EPeekAction, float> EndpointWeights[] = {
 				{ EPeekAction::CornerPeek,  bLowHp ? LowHpCornerPeekWeight  : CornerPeekWeight },
-				{ EPeekAction::Reposition,  (SubSlotCount > 1) ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f },
+				{ EPeekAction::Reposition,  (bLineLongEnough && !bJustRepositioned) ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f },
 				{ EPeekAction::Hold,        bLowHp ? LowHpHoldWeight        : HoldWeight },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(EndpointWeights));
 		}
 		else
 		{
-			// Stand cover, midpoint sub-slot — no fire option.
+			// Stand cover, midpoint alpha — no fire option.
 			const TPair<EPeekAction, float> MidpointWeights[] = {
-				{ EPeekAction::Reposition,  (SubSlotCount > 1) ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f },
+				{ EPeekAction::Reposition,  (bLineLongEnough && !bJustRepositioned) ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f },
 				{ EPeekAction::Hold,        bLowHp ? LowHpHoldWeight : HoldWeight },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(MidpointWeights));
@@ -1333,29 +1499,59 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		else
 		{
 			ConsecutiveHolds = 0;
+			if (Action != EPeekAction::Reposition && Action != EPeekAction::StandUpAndReposition)
+				bJustRepositioned = false;
 		}
 
 		// --- Commit to action ---
 
 		if (Action == EPeekAction::Reposition || Action == EPeekAction::StandUpAndReposition)
 		{
-			// Pick adjacent sub-slot. Random direction, clamp to valid range.
-			const int32 Direction = (FMath::RandBool() ? 1 : -1);
-			int32 Candidate = CurrentSubSlotIndex + Direction;
-			if (Candidate < 0) Candidate = CurrentSubSlotIndex + 1;
-			if (Candidate >= SubSlotCount) Candidate = CurrentSubSlotIndex - 1;
-			Candidate = FMath::Clamp(Candidate, 0, SubSlotCount - 1);
+			float NewAlpha;
+			const float Sign = FMath::RandBool() ? 1.f : -1.f;
+			const float DeltaFrac = FMath::RandRange(RepositionAlphaMin, RepositionAlphaMax);
 
-			if (Candidate == CurrentSubSlotIndex)
+			if (Slot->Height == ECoverHeight::Stand)
 			{
-				// Edge case: single sub-slot or endpoint with no valid neighbour — treat as Hold.
-				CurrentBurstAction = EPeekAction::Hold;
-				++ConsecutiveHolds;
-				PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
-				TimeInCoverIdle = 0.f;
-				return;
+				// Stand cover: jump to the opposite peekable corner if one exists.
+				const bool bStartPeekable = Slot->bIsPeekableCornerStart;
+				const bool bEndPeekable = Slot->bIsPeekableCornerEnd;
+				const bool bAtStart = (CurrentAlpha < 0.5f);
+				const bool bOppositeAvailable = bAtStart ? bEndPeekable : bStartPeekable;
+				if (!bOppositeAvailable)
+				{
+					// Only this corner is peekable — no Stand-cover reposition possible.
+					CurrentBurstAction = EPeekAction::Hold;
+					++ConsecutiveHolds;
+					PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
+					TimeInCoverIdle = 0.f;
+					return;
+				}
+				NewAlpha = bAtStart ? 1.f : 0.f;
 			}
-			RepositionTargetSubSlotIndex = Candidate;
+			else
+			{
+				// Crouch cover: continuous Alpha jump.
+				float Delta = DeltaFrac * Sign;
+				NewAlpha = FMath::Clamp(CurrentAlpha + Delta, 0.f, 1.f);
+				if (FMath::IsNearlyEqual(NewAlpha, CurrentAlpha, 0.01f))
+				{
+					// At the edge in the chosen direction — flip and try the other way.
+					Delta = -Delta;
+					NewAlpha = FMath::Clamp(CurrentAlpha + Delta, 0.f, 1.f);
+				}
+				if (FMath::IsNearlyEqual(NewAlpha, CurrentAlpha, 0.01f))
+				{
+					// Line too short for any reposition — Hold.
+					CurrentBurstAction = EPeekAction::Hold;
+					++ConsecutiveHolds;
+					PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
+					TimeInCoverIdle = 0.f;
+					return;
+				}
+			}
+
+			RepositionTargetAlpha = NewAlpha;
 
 			if (Action == EPeekAction::Reposition)
 			{
@@ -1363,21 +1559,25 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				Ctx.Companion->StopWeaponFire();
 				Ctx.Companion->SetAimTarget(nullptr);
 				Ctx.Companion->SetLowReadyAim(true);
+				if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
+					AIC->StopMovement();
+				if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
+					CMC->StopMovementImmediately();
 				// Stay crouched — do NOT UnCrouch here.
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=Reposition-Silent ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
 				CurrentBurstAction = EPeekAction::Reposition;
 				LastDecisionTime = Now;
 				TimeInCoverIdle = 0.f;
-				LastRepositionDist = FVector::Dist(Ctx.Companion->GetActorLocation(), Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex));
+				LastRepositionDist = FVector::Dist(Ctx.Companion->GetActorLocation(), Slot->GetLocationAtAlpha(*RepositionTargetAlpha));
 				RepositionElapsed = 0.f;
 				RepositionStalledTime = 0.f;
 				bRepositionStartLogged = true;
 				if (bDebugLogging)
 				{
-					UE_LOG(LogCompanionAI, Log, TEXT("%s: REPOSITION sub-slot %d -> %d"), *Ctx.Companion->GetName(), CurrentSubSlotIndex, RepositionTargetSubSlotIndex);
-					UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=silent fromIdx=%d toIdx=%d fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
-						*Ctx.Companion->GetName(), CurrentSubSlotIndex, RepositionTargetSubSlotIndex,
-						*Ctx.Companion->GetActorLocation().ToString(), *Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex).ToString(),
+					UE_LOG(LogCompanionAI, Log, TEXT("%s: REPOSITION alpha %.2f -> %.2f"), *Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha);
+					UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=silent fromAlpha=%.2f toAlpha=%.2f fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
+						*Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha,
+						*Ctx.Companion->GetActorLocation().ToString(), *Slot->GetLocationAtAlpha(*RepositionTargetAlpha).ToString(),
 						LastRepositionDist, (int32)Ctx.Companion->IsReloading());
 				}
 				return;
@@ -1395,6 +1595,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				AIC->StopMovement();
 			if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
 				CMC->StopMovementImmediately();
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=StandUpRepoCommit action=UnCrouch"),
+				*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Ctx.Companion->UnCrouch();
 			if (Anim)
 			{
@@ -1416,10 +1618,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					*Ctx.Companion->GetName(), BurstTimer,
 					ResolvedPeekSide == EPeekSide::Right ? TEXT("Right") : TEXT("Left"),
 					*Slot->GetName());
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: STANDUP-REPOSITION sub-slot %d -> %d burst=%.2fs"), *Ctx.Companion->GetName(), CurrentSubSlotIndex, RepositionTargetSubSlotIndex, BurstTimer);
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=standup fromIdx=%d toIdx=%d fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
-					*Ctx.Companion->GetName(), CurrentSubSlotIndex, RepositionTargetSubSlotIndex,
-					*Ctx.Companion->GetActorLocation().ToString(), *Slot->GetSubSlotLocation(RepositionTargetSubSlotIndex).ToString(),
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: STANDUP-REPOSITION alpha %.2f -> %.2f burst=%.2fs"), *Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha, BurstTimer);
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=standup fromAlpha=%.2f toAlpha=%.2f fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
+					*Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha,
+					*Ctx.Companion->GetActorLocation().ToString(), *Slot->GetLocationAtAlpha(*RepositionTargetAlpha).ToString(),
 					LastRepositionDist, (int32)Ctx.Companion->IsReloading());
 			}
 			return;
@@ -1427,10 +1629,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		if (Action == EPeekAction::CornerPeek)
 		{
-			const int32 LastIndex = SubSlotCount - 1;
-			const FVector StrafeDir = (CurrentSubSlotIndex == 0)
-				? -Slot->GetActorRightVector()
-				: Slot->GetActorRightVector();
+			const FVector StrafeDir = (CurrentAlpha < 0.5f) ? -Slot->GetLineDirection() : Slot->GetLineDirection();
 			CornerPeekHomeLocation = SubSlotLoc;
 			// CornerPeek apex captured at commit — assumes slot doesn't move mid-action.
 			CornerPeekApexLocation = CornerPeekHomeLocation + StrafeDir * CornerPeekStepDistance;
@@ -1440,9 +1639,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			bIsFiringBurst = true;
 			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
 			UE_LOG(LogCompanionAI, Warning,
-				TEXT("%s: PEEK-ACTION=CornerPeek slot=%s subSlot=%d home=%s apex=%s stepDist=%.0f burst=%.2fs ammo=%d"),
+				TEXT("%s: PEEK-ACTION=CornerPeek slot=%s alpha=%.2f home=%s apex=%s stepDist=%.0f burst=%.2fs ammo=%d"),
 				*GetNameSafe(Ctx.Companion), *Slot->GetName(),
-				CurrentSubSlotIndex, *CornerPeekHomeLocation.ToString(), *CornerPeekApexLocation.ToString(),
+				CurrentAlpha, *CornerPeekHomeLocation.ToString(), *CornerPeekApexLocation.ToString(),
 				CornerPeekStepDistance, BurstTimer, Ctx.Companion->GetCurrentAmmo());
 #if ENABLE_DRAW_DEBUG
 			DrawDebugLine(Ctx.Companion->GetWorld(), CornerPeekHomeLocation + FVector(0, 0, 20.f),
@@ -1456,7 +1655,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			TimeAtCurrentCover = 0.f;
 			CoverValidityCheckTimer = 0.f;
 			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: CORNER-PEEK sub-slot %d apex=(%.0f,%.0f,%.0f) burst=%.2fs"), *Ctx.Companion->GetName(), CurrentSubSlotIndex, CornerPeekApexLocation.X, CornerPeekApexLocation.Y, CornerPeekApexLocation.Z, BurstTimer);
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: CORNER-PEEK alpha=%.2f apex=(%.0f,%.0f,%.0f) burst=%.2fs"), *Ctx.Companion->GetName(), CurrentAlpha, CornerPeekApexLocation.X, CornerPeekApexLocation.Y, CornerPeekApexLocation.Z, BurstTimer);
 			return;
 		}
 
@@ -1484,6 +1683,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			ActivePeekMontage = PeekMontage;
 		}
 
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=StandQuickPeekCommit action=UnCrouch"),
+			*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
+		Ctx.Companion->UnCrouch();
 		Ctx.Companion->StartWeaponFire();
 		bIsFiringBurst = true;
 		DebugBurstLosCheckTimer = 0.f;
@@ -1557,9 +1759,16 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 		}
 
+		// Phase B of StandUpAndReposition: face slot forward so lateral strafe is pure ±90° relative
+		// to actor. Upper-body aim offset handles the visual tracking of the enemy.
+		const bool bUseSlotForward = (CurrentBurstAction == EPeekAction::StandUpAndReposition
+			&& bStandUpRepositionWalking && IsValid(Slot));
 		const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
+		const FRotator DesiredRot = bUseSlotForward
+			? FRotator(0.f, Slot->GetForwardDirection().Rotation().Yaw, 0.f)
+			: FRotator(0.f, LookAtRot.Yaw, 0.f);
 		Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
-			FRotator(0.f, LookAtRot.Yaw, 0.f), DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
+			DesiredRot, DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
 
 		// Dispatch new multi-phase actions before the shared burst logic.
 		if (CurrentBurstAction == EPeekAction::StandUpAndReposition)
@@ -1597,10 +1806,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					(int32)bHasCover,
 					*GetNameSafe(Slot),
 					ReloadTime);
-				const FVector SubSlotLoc = IsValid(Slot) ? Slot->GetSubSlotLocation(CurrentSubSlotIndex) : FVector::ZeroVector;
+				const FVector B1ReloadLoc = IsValid(Slot) ? Slot->GetLocationAtAlpha(CurrentAlpha) : FVector::ZeroVector;
 				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RETURN-TO-COVER reason=reload moveTarget=%s dist=%.0f isReloading=%d"),
-					*Ctx.Companion->GetName(), *SubSlotLoc.ToString(),
-					FVector::Dist(Ctx.Companion->GetActorLocation(), SubSlotLoc),
+					*Ctx.Companion->GetName(), *B1ReloadLoc.ToString(),
+					FVector::Dist(Ctx.Companion->GetActorLocation(), B1ReloadLoc),
 					(int32)Ctx.Companion->IsReloading());
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=reload"), *Ctx.Companion->GetName());
 			}
@@ -1614,10 +1823,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			if (bDebugLogging)
 			{
-				const FVector SubSlotLoc = IsValid(Slot) ? Slot->GetSubSlotLocation(CurrentSubSlotIndex) : FVector::ZeroVector;
+				const FVector B1BurstEndLoc = IsValid(Slot) ? Slot->GetLocationAtAlpha(CurrentAlpha) : FVector::ZeroVector;
 				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RETURN-TO-COVER reason=burst-end moveTarget=%s dist=%.0f isReloading=%d"),
-					*Ctx.Companion->GetName(), *SubSlotLoc.ToString(),
-					FVector::Dist(Ctx.Companion->GetActorLocation(), SubSlotLoc),
+					*Ctx.Companion->GetName(), *B1BurstEndLoc.ToString(),
+					FVector::Dist(Ctx.Companion->GetActorLocation(), B1BurstEndLoc),
 					(int32)Ctx.Companion->IsReloading());
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=burst-end-cover (next cd=%.2fs)"), *Ctx.Companion->GetName(), PeekCooldown);
 			}
@@ -1637,14 +1846,26 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->StopWeaponFire();
 		bIsFiringBurst = false;
 		BurstTimer = 0.f;
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=CoverFlippedMidBurst action=UnCrouch"),
+			*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 		Ctx.Companion->UnCrouch();
 		bCornerPeekFiring = false;
 		bCornerPeekReturning = false;
 		CornerPeekHomeLocation = FVector::ZeroVector;
 		CornerPeekApexLocation = FVector::ZeroVector;
 		CurrentBurstAction = EPeekAction::Hold;
-		RepositionTargetSubSlotIndex = INDEX_NONE;
+		RepositionTargetAlpha.Reset();
 		bRepositionStandPhase = false;
+	}
+
+	// Open-engage: defensively UnCrouch in case MoveToCover anticipated a crouch slot but ended
+	// without arrival, leaving the companion crouched while shooting in the open.
+	// Idempotent — UnCrouch is a no-op if not crouched.
+	if (Ctx.Companion->bIsCrouched)
+	{
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=OpenEngageDefensive action=UnCrouch"),
+			*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
+		Ctx.Companion->UnCrouch();
 	}
 
 	// Stop any lingering peek montage.

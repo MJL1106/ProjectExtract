@@ -8,6 +8,8 @@
 #include "CompanionAIController.h"
 #include "CoverRegistrySubsystem.h"
 #include "AICoverSlot.h"
+#include "CompanionCharacter.h"
+#include "TraversalComponent.h"
 
 UBTTask_MoveToCover::UBTTask_MoveToCover()
 {
@@ -42,14 +44,8 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	if (IsValid(ExistingSlot) && ExistingSlot->IsClaimed())
 	{
 		const FVector PawnLoc = Pawn->GetActorLocation();
-		int32 BestIndex = 0;
-		float BestDistSq = FVector::DistSquared(PawnLoc, ExistingSlot->GetSubSlotLocation(0));
-		for (int32 i = 1; i < ExistingSlot->GetSubSlotCount(); ++i)
-		{
-			const float D = FVector::DistSquared(PawnLoc, ExistingSlot->GetSubSlotLocation(i));
-			if (D < BestDistSq) { BestDistSq = D; BestIndex = i; }
-		}
-		const FVector ArrivalPos = ExistingSlot->GetSubSlotLocation(BestIndex);
+		const float Alpha = ExistingSlot->GetAlphaFromLocation(PawnLoc);
+		const FVector ArrivalPos = ExistingSlot->GetLocationAtAlpha(Alpha);
 		BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPos);
 
 		if (FVector::Dist(PawnLoc, ArrivalPos) <= AcceptableRadius)
@@ -89,20 +85,14 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	}
 
 	const FVector PawnLoc = Pawn->GetActorLocation();
-	int32 BestIndex = 0;
-	float BestDistSq = FVector::DistSquared(PawnLoc, Slot->GetSubSlotLocation(0));
-	for (int32 i = 1; i < Slot->GetSubSlotCount(); ++i)
-	{
-		const float D = FVector::DistSquared(PawnLoc, Slot->GetSubSlotLocation(i));
-		if (D < BestDistSq) { BestDistSq = D; BestIndex = i; }
-	}
-	const FVector ArrivalPos = Slot->GetSubSlotLocation(BestIndex);
+	const float Alpha = Slot->GetAlphaFromLocation(PawnLoc);
+	const FVector ArrivalPos = Slot->GetLocationAtAlpha(Alpha);
 
 	BB->SetValueAsObject(CoverSlotKey.SelectedKeyName, Slot);
 	BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPos);
 	BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, true);
 
-	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover claimed slot=%s subSlot=%d loc=%s"), *Pawn->GetName(), *Slot->GetName(), BestIndex, *ArrivalPos.ToString());
+	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover claimed slot=%s alpha=%.2f loc=%s"), *Pawn->GetName(), *Slot->GetName(), Alpha, *ArrivalPos.ToString());
 
 	if (FVector::Dist(PawnLoc, ArrivalPos) <= AcceptableRadius)
 		return EBTNodeResult::Succeeded;
@@ -165,16 +155,36 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 
 	if (MoveStatus == EPathFollowingStatus::Moving)
 	{
+		const FVector ArrivalPosMoving = BB->GetValueAsVector(CoverLocationKey.SelectedKeyName);
+		const float DistMoving = FVector::Dist(Pawn->GetActorLocation(), ArrivalPosMoving);
+
 		if (bDebugLogging)
 		{
-			const FVector ArrivalPosMoving = BB->GetValueAsVector(CoverLocationKey.SelectedKeyName);
-			const float DistMoving = FVector::Dist(Pawn->GetActorLocation(), ArrivalPosMoving);
 			const float Delta = LastTickDist - DistMoving;
 			LastTickDist = DistMoving;
 			const float Vel = Pawn->GetVelocity().Size();
 			UE_LOG(LogCompanionDiag, VeryVerbose, TEXT("%s: MOVE-TO-COVER-TICK status=Moving dist=%.0f delta=%.1f vel=%.1f"),
 				*Pawn->GetName(), DistMoving, Delta, Vel);
 		}
+
+		// Start crouching before arrival so the transition into crouch cover is smooth.
+		// Guard: skip if mid-traversal — capsule resize during root motion can clip the ground.
+		ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn);
+		AAICoverSlot* ApproachSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(CoverSlotKey.SelectedKeyName));
+		UTraversalComponent* TC = IsValid(Companion) ? Companion->GetTraversalComponent() : nullptr;
+		const bool bTraversing = IsValid(TC) && TC->GetActiveType() != ETraversalType::None;
+		if (IsValid(Companion) && IsValid(ApproachSlot) &&
+			ApproachSlot->Height == ECoverHeight::Crouch &&
+			DistMoving <= EarlyCrouchDistance &&
+			!Companion->bIsCrouched &&
+			!bTraversing)
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=MoveToCoverEarlyCrouch action=Crouch"),
+				*Companion->GetName(), Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Companion->Crouch();
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-EARLY-CROUCH dist=%.0f"), *Companion->GetName(), DistMoving);
+		}
+
 		return;
 	}
 

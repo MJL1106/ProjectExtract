@@ -5,7 +5,7 @@
 
 DEFINE_LOG_CATEGORY(LogCoverSlot);
 
-static constexpr float SubSlotEpsilon = 0.01f;
+static constexpr float DefaultEndpointInset = 40.f;
 
 AAICoverSlot::AAICoverSlot()
 {
@@ -37,7 +37,7 @@ void AAICoverSlot::OnConstruction(const FTransform& Transform)
 	// Auto-default edge arrows only when the designer hasn't moved them yet.
 	// Relative Y maps to the actor's local right axis (same as GetActorRightVector() in world space).
 	const float HalfLen = GetCoverLineHalfLength();
-	const float InsetOffset = HalfLen - CornerInsetDistance;
+	const float InsetOffset = HalfLen - DefaultEndpointInset;
 
 	if (IsValid(LeftEdgeArrow) && LeftEdgeArrow->GetRelativeLocation().IsNearlyZero())
 		LeftEdgeArrow->SetRelativeLocation(FVector(0.f, -InsetOffset, 0.f));
@@ -125,68 +125,6 @@ float AAICoverSlot::GetCoverLineHalfLength() const
 	return CoverBoundsBox->GetScaledBoxExtent().Y;
 }
 
-int32 AAICoverSlot::GetSubSlotCount() const
-{
-	const float HalfLen = GetCoverLineHalfLength();
-	if (HalfLen <= 0.f)
-		return 1;
-
-	// ClampMin meta only enforces in-editor; clamp here for runtime safety
-	const float Spacing = FMath::Max(SubSlotSpacing, 50.f);
-	const int32 Count = 2 + FMath::FloorToInt((2.f * HalfLen - SubSlotEpsilon) / Spacing);
-	return FMath::Max(Count, 1);
-}
-
-FVector AAICoverSlot::GetSubSlotLocation(int32 Index) const
-{
-	const int32 Count = GetSubSlotCount();
-
-	if (Index < 0 || Index >= Count)
-	{
-		UE_LOG(LogCoverSlot, Warning, TEXT("%s: GetSubSlotLocation out-of-range Index=%d Count=%d"), *GetName(), Index, Count);
-		return GetActorLocation();
-	}
-
-	if (Count == 1)
-		return GetActorLocation();
-
-	// Index 0 = left endpoint (-Right), Index Count-1 = right endpoint (+Right)
-	// Z is the slot's actor Z — sub-slots are coplanar with the slot; ground-snap requires a trace (Phase 2 if needed)
-	const float HalfLen = GetCoverLineHalfLength();
-	const FVector Right = GetActorRightVector();
-
-	const float T = (float)Index / (float)(Count - 1);
-	float Offset = FMath::Lerp(-HalfLen, HalfLen, T);
-	// Inset corner endpoints inward by CornerInsetDistance so home position is behind the wall.
-	if (Index == 0)
-		Offset += CornerInsetDistance;
-	else if (Index == Count - 1)
-		Offset -= CornerInsetDistance;
-	return GetActorLocation() + Right * Offset;
-}
-
-bool AAICoverSlot::IsSubSlotPeekableCorner(int32 Index) const
-{
-	const int32 Count = GetSubSlotCount();
-
-	if (Index < 0 || Index >= Count)
-	{
-		UE_LOG(LogCoverSlot, Warning, TEXT("%s: IsSubSlotPeekableCorner out-of-range Index=%d Count=%d"), *GetName(), Index, Count);
-		return false;
-	}
-
-	if (Count == 1)
-		return bIsPeekableCornerStart || bIsPeekableCornerEnd;
-
-	if (Index == 0)
-		return bIsPeekableCornerStart;
-
-	if (Index == Count - 1)
-		return bIsPeekableCornerEnd;
-
-	return false;
-}
-
 void AAICoverSlot::UpdateDebugViz()
 {
 	if (!IsValid(CoverBoundsBox))
@@ -199,7 +137,7 @@ void AAICoverSlot::UpdateDebugViz()
 	CoverBoundsBox->ShapeColor = SlotColor.ToFColor(true);
 }
 
-// --- Continuous endpoint API ---
+// --- Endpoint API ---
 
 FVector AAICoverSlot::GetLeftEdge() const
 {

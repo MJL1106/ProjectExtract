@@ -137,16 +137,15 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 
 			if (!bHasAnyLos && Slot->Height == ECoverHeight::Stand)
 			{
-				const FVector RightVec = Slot->GetActorRightVector();
-				const int32 SubCount = Slot->GetSubSlotCount();
+				const FVector LineDir = Slot->GetLineDirection();
 				if (Slot->bIsPeekableCornerStart)
 				{
-					const FVector StartApex = Slot->GetSubSlotLocation(0) + (-RightVec) * ApexProbeDist;
+					const FVector StartApex = Slot->GetLeftEdge() + (-LineDir) * ApexProbeDist;
 					if (HasLosFrom(StartApex + FVector(0.f, 0.f, EyeHeight))) bHasAnyLos = true;
 				}
-				if (!bHasAnyLos && Slot->bIsPeekableCornerEnd && SubCount > 0)
+				if (!bHasAnyLos && Slot->bIsPeekableCornerEnd)
 				{
-					const FVector EndApex = Slot->GetSubSlotLocation(SubCount - 1) + RightVec * ApexProbeDist;
+					const FVector EndApex = Slot->GetRightEdge() + LineDir * ApexProbeDist;
 					if (HasLosFrom(EndApex + FVector(0.f, 0.f, EyeHeight))) bHasAnyLos = true;
 				}
 			}
