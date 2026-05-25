@@ -37,7 +37,7 @@ void AAICoverSlot::OnConstruction(const FTransform& Transform)
 	// Auto-default edge arrows only when the designer hasn't moved them yet.
 	// Relative Y maps to the actor's local right axis (same as GetActorRightVector() in world space).
 	const float HalfLen = GetCoverLineHalfLength();
-	const float InsetOffset = HalfLen - DefaultEndpointInset;
+	const float InsetOffset = FMath::Max(HalfLen - DefaultEndpointInset, 0.f);
 
 	if (IsValid(LeftEdgeArrow) && LeftEdgeArrow->GetRelativeLocation().IsNearlyZero())
 		LeftEdgeArrow->SetRelativeLocation(FVector(0.f, -InsetOffset, 0.f));
@@ -171,9 +171,18 @@ FVector AAICoverSlot::GetForwardDirection() const
 	FVector Perp = FVector::CrossProduct(FVector::UpVector, LineDir);
 
 	if (Perp.IsNearlyZero())
-		return GetActorForwardVector();
+	{
+		FVector Fwd = GetActorForwardVector();
+		Fwd.Z = 0.f;
+		return Fwd.GetSafeNormal();
+	}
 
-	if (FVector::DotProduct(Perp, GetActorForwardVector()) < 0.f)
+	const float DotWithActorForward = FVector::DotProduct(Perp, GetActorForwardVector());
+	if (FMath::Abs(DotWithActorForward) < 0.01f)
+	{
+		UE_LOG(LogCoverSlot, Warning, TEXT("%s: GetForwardDirection 90deg-ambiguous — actor forward is perpendicular to endpoint line; sign-disambiguation is unstable. Rotate the slot actor toward the enemy half-space."), *GetName());
+	}
+	if (DotWithActorForward < 0.f)
 		Perp = -Perp;
 
 	return Perp.GetSafeNormal();

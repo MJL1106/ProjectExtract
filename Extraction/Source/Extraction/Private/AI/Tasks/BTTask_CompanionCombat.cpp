@@ -212,13 +212,13 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 	{
 		// Abort: snap to whichever alpha position is closer.
 		const FVector Current = Companion->GetActorLocation();
-		const FVector TargetLoc = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
-		const bool bCloserToTarget = FVector::DistSquared(Current, TargetLoc)
-			< FVector::DistSquared(Current, Slot->GetLocationAtAlpha(CurrentAlpha));
+		const FVector CurrentLoc = Slot->GetLocationAtAlpha(CurrentAlpha);
+		const bool bCloserToTarget = FVector::DistSquared(Current, RepositionTargetWorldLoc)
+			< FVector::DistSquared(Current, CurrentLoc);
 		if (bCloserToTarget) CurrentAlpha = *RepositionTargetAlpha;
 		if (bDebugLogging && bRepositionStartLogged)
 			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
-				*Companion->GetName(), FVector::Dist(Current, TargetLoc), RepositionElapsed);
+				*Companion->GetName(), FVector::Dist(Current, RepositionTargetWorldLoc), RepositionElapsed);
 		Companion->SetLowReadyAim(false);
 		Companion->SetAimTarget(nullptr);
 		RepositionTargetAlpha.Reset();
@@ -238,8 +238,7 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 
 	RepositionElapsed += DeltaSeconds;
 	const FVector Current = Companion->GetActorLocation();
-	const FVector RawTarget = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
-	const FVector Target(RawTarget.X, RawTarget.Y, Current.Z);
+	const FVector Target(RepositionTargetWorldLoc.X, RepositionTargetWorldLoc.Y, Current.Z);
 
 	const FVector Next = FMath::VInterpConstantTo(Current, Target, DeltaSeconds, RepositionWalkSpeed);
 	Companion->SetActorLocation(Next, false, nullptr, ETeleportType::TeleportPhysics);
@@ -333,9 +332,8 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 	{
 		if (bDebugLogging && bRepositionStartLogged)
 		{
-			const FVector RawAbortTarget = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
 			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
-				*Companion->GetName(), FVector::Dist(Companion->GetActorLocation(), RawAbortTarget), RepositionElapsed);
+				*Companion->GetName(), FVector::Dist(Companion->GetActorLocation(), RepositionTargetWorldLoc), RepositionElapsed);
 		}
 		ReturnToCover(Companion, Anim, Slot, true, bLowHp);
 		bRepositionStandPhase = false;
@@ -362,14 +360,12 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 	if (!bStandUpRepositionWalking)
 	{
 		bStandUpRepositionWalking = true;
-		const FVector WalkTarget = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
 		UE_LOG(LogCompanionDiag, Warning, TEXT("%s: STANDUP-WALK-START burst-elapsed=%.2f dist=%.0f"),
-			*Companion->GetName(), FMath::RandRange(MinFireBurst, MaxFireBurst), FVector::Dist(Companion->GetActorLocation(), WalkTarget));
+			*Companion->GetName(), FMath::RandRange(MinFireBurst, MaxFireBurst), FVector::Dist(Companion->GetActorLocation(), RepositionTargetWorldLoc));
 	}
 
 	const FVector Current = Companion->GetActorLocation();
-	const FVector RawTarget = Slot->GetLocationAtAlpha(*RepositionTargetAlpha);
-	const FVector Target(RawTarget.X, RawTarget.Y, Current.Z);
+	const FVector Target(RepositionTargetWorldLoc.X, RepositionTargetWorldLoc.Y, Current.Z);
 	const FVector Next = FMath::VInterpConstantTo(Current, Target, DeltaSeconds, RepositionWalkSpeed);
 	Companion->SetActorLocation(Next, false, nullptr, ETeleportType::TeleportPhysics);
 	if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
@@ -549,7 +545,8 @@ TOptional<float> UBTTask_CompanionCombat::PickBestAlphaByLos(AAICoverSlot* Slot,
 	for (int32 i = 0; i < N; ++i)
 	{
 		const float Alpha = (float)i / (float)(N - 1);
-		if (FMath::Abs(Alpha - ExcludeAlpha) < 0.1f) continue;
+		const float ExcludeEpsilon = 0.5f / float(N - 1);
+		if (FMath::Abs(Alpha - ExcludeAlpha) < ExcludeEpsilon) continue;
 		const FVector Eye = Slot->GetLocationAtAlpha(Alpha) + FVector(0.f, 0.f, StandFireEyeHeight);
 		AActor* Blocker = nullptr;
 		if (HasLineOfSight(World, Eye, Target, Companion, Blocker, IgnoredAttached))
@@ -695,10 +692,12 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	bJustRepositioned = false;
 	CurrentBurstAction = EPeekAction::Stand;
 	CurrentAlpha = 0.5f;
+	CachedSlotForwardYaw = 0.f;
 	SubSlotLosRecheckTimer = 0.f;
 	LastTickSlot = nullptr;
 	BlockedRecheckHits = 0;
 	RepositionTargetAlpha.Reset();
+	RepositionTargetWorldLoc = FVector::ZeroVector;
 	bRepositionStandPhase = false;
 	bStandUpRepositionWalking = false;
 	LastRepositionDist = 0.f;
@@ -933,6 +932,11 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 			(int32)Slot->bIsPeekableCornerStart, (int32)Slot->bIsPeekableCornerEnd,
 			(int32)Slot->PeekPreference,
 			(int32)Slot->CanStandFireOver());
+		if (Slot->GetLineLength() < 10.f)
+		{
+			UE_LOG(LogCompanionAI, Warning, TEXT("%s: COVER-LINE-DEGENERATE slot=%s lineLen=%.1fcm — endpoint arrows collapsed; forward-direction fix falls back to actor yaw"),
+				*Companion->GetName(), *Slot->GetName(), Slot->GetLineLength());
+		}
 	}
 
 	if (bDebugLogging)
@@ -1089,6 +1093,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	{
 		CurrentAlpha = 0.5f;
 		BlockedRecheckHits = 0;
+		RepositionTargetAlpha.Reset();
+		RepositionTargetWorldLoc = FVector::ZeroVector;
+		bRepositionStandPhase = false;
+		bStandUpRepositionWalking = false;
+		bRepositionStartLogged = false;
+		CurrentBurstAction = EPeekAction::Hold;
 	}
 	LastTickSlot = Slot;
 
@@ -1178,6 +1188,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 
 #if ENABLE_DRAW_DEBUG
+		if (bDebugLogging)
 		{
 			const FVector DrawLineDir = Slot->GetLineDirection();
 			const FVector LeftEdgePt  = Slot->GetLeftEdge()  + FVector(0.f, 0.f, 10.f);
@@ -1297,7 +1308,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// Stand cover at a peekable corner can never see over the wall — check the would-be CornerPeek apex instead.
 		if (!bLosFromCover && Slot->Height == ECoverHeight::Stand && Slot->IsAlphaAtPeekableCorner(CurrentAlpha))
 		{
-			const FVector StrafeDir = (CurrentAlpha < 0.5f) ? -Slot->GetLineDirection() : Slot->GetLineDirection();
+			const FVector LineDir = Slot->GetLineDirection();
+			const FVector StrafeDir = (CurrentAlpha < 0.5f) ? -LineDir : LineDir;
 			const FVector ApexLoc = SubSlotLoc + StrafeDir * CornerPeekStepDistance;
 			const FVector ApexEye = ApexLoc + FVector(0.f, 0.f, StandFireEyeHeight);
 			AActor* ApexBlocker = nullptr;
@@ -1544,6 +1556,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				{
 					// Line too short for any reposition — Hold.
 					CurrentBurstAction = EPeekAction::Hold;
+					bJustRepositioned = true;
 					++ConsecutiveHolds;
 					PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 					TimeInCoverIdle = 0.f;
@@ -1552,6 +1565,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 
 			RepositionTargetAlpha = NewAlpha;
+			RepositionTargetWorldLoc = Slot->GetLocationAtAlpha(NewAlpha);
+			CachedSlotForwardYaw = Slot->GetForwardDirection().Rotation().Yaw;
 
 			if (Action == EPeekAction::Reposition)
 			{
@@ -1568,7 +1583,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				CurrentBurstAction = EPeekAction::Reposition;
 				LastDecisionTime = Now;
 				TimeInCoverIdle = 0.f;
-				LastRepositionDist = FVector::Dist(Ctx.Companion->GetActorLocation(), Slot->GetLocationAtAlpha(*RepositionTargetAlpha));
+				LastRepositionDist = FVector::Dist(Ctx.Companion->GetActorLocation(), RepositionTargetWorldLoc);
 				RepositionElapsed = 0.f;
 				RepositionStalledTime = 0.f;
 				bRepositionStartLogged = true;
@@ -1577,7 +1592,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: REPOSITION alpha %.2f -> %.2f"), *Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha);
 					UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=silent fromAlpha=%.2f toAlpha=%.2f fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
 						*Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha,
-						*Ctx.Companion->GetActorLocation().ToString(), *Slot->GetLocationAtAlpha(*RepositionTargetAlpha).ToString(),
+						*Ctx.Companion->GetActorLocation().ToString(), *RepositionTargetWorldLoc.ToString(),
 						LastRepositionDist, (int32)Ctx.Companion->IsReloading());
 				}
 				return;
@@ -1621,7 +1636,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: STANDUP-REPOSITION alpha %.2f -> %.2f burst=%.2fs"), *Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha, BurstTimer);
 				UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=standup fromAlpha=%.2f toAlpha=%.2f fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
 					*Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha,
-					*Ctx.Companion->GetActorLocation().ToString(), *Slot->GetLocationAtAlpha(*RepositionTargetAlpha).ToString(),
+					*Ctx.Companion->GetActorLocation().ToString(), *RepositionTargetWorldLoc.ToString(),
 					LastRepositionDist, (int32)Ctx.Companion->IsReloading());
 			}
 			return;
@@ -1765,13 +1780,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			&& bStandUpRepositionWalking && IsValid(Slot));
 		const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
 		const FRotator DesiredRot = bUseSlotForward
-			? FRotator(0.f, Slot->GetForwardDirection().Rotation().Yaw, 0.f)
+			? FRotator(0.f, CachedSlotForwardYaw, 0.f)
 			: FRotator(0.f, LookAtRot.Yaw, 0.f);
 		Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
 			DesiredRot, DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
 
 		// Dispatch new multi-phase actions before the shared burst logic.
-		if (CurrentBurstAction == EPeekAction::StandUpAndReposition)
+		if (CurrentBurstAction == EPeekAction::StandUpAndReposition && RepositionTargetAlpha.IsSet())
 		{
 			TickStandUpAndRepositionAction(Ctx.Companion, Anim, Slot, bSuppressed, bLowHp, DeltaSeconds);
 			return;
@@ -1856,6 +1871,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		CurrentBurstAction = EPeekAction::Hold;
 		RepositionTargetAlpha.Reset();
 		bRepositionStandPhase = false;
+		bStandUpRepositionWalking = false;
+		bRepositionStartLogged = false;
 	}
 
 	// Open-engage: defensively UnCrouch in case MoveToCover anticipated a crouch slot but ended

@@ -45,7 +45,8 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	{
 		const FVector PawnLoc = Pawn->GetActorLocation();
 		const float Alpha = ExistingSlot->GetAlphaFromLocation(PawnLoc);
-		const FVector ArrivalPos = ExistingSlot->GetLocationAtAlpha(Alpha);
+		FVector ArrivalPos = ExistingSlot->GetLocationAtAlpha(Alpha);
+		ArrivalPos.Z = PawnLoc.Z;
 		BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPos);
 
 		if (FVector::Dist(PawnLoc, ArrivalPos) <= AcceptableRadius)
@@ -86,7 +87,8 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 
 	const FVector PawnLoc = Pawn->GetActorLocation();
 	const float Alpha = Slot->GetAlphaFromLocation(PawnLoc);
-	const FVector ArrivalPos = Slot->GetLocationAtAlpha(Alpha);
+	FVector ArrivalPos = Slot->GetLocationAtAlpha(Alpha);
+	ArrivalPos.Z = PawnLoc.Z;
 
 	BB->SetValueAsObject(CoverSlotKey.SelectedKeyName, Slot);
 	BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPos);
