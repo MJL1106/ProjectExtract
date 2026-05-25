@@ -226,12 +226,9 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 		bRepositionStartLogged = false;
 		CurrentBurstAction = EPeekAction::Hold;
 		bJustRepositioned = true;
-		if (Slot->Height == ECoverHeight::Stand)
-		{
-			if (UCompanionAnimInstance* CAI = Cast<UCompanionAnimInstance>(
-				Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
-				CAI->ClearCoverStrafeVelocity();
-		}
+		if (UCompanionAnimInstance* CAI = Cast<UCompanionAnimInstance>(
+			Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
+			CAI->ClearCoverStrafeVelocity();
 		ReturnToCover(Companion, Anim, Slot, true, bLowHp);
 		return;
 	}
@@ -243,16 +240,13 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 	const FVector Next = FMath::VInterpConstantTo(Current, Target, DeltaSeconds, RepositionWalkSpeed);
 	Companion->SetActorLocation(Next, false, nullptr, ETeleportType::TeleportPhysics);
 
-	if (Slot->Height == ECoverHeight::Stand)
+	if (UCompanionAnimInstance* CAI = Cast<UCompanionAnimInstance>(
+		Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
 	{
-		if (UCompanionAnimInstance* CAI = Cast<UCompanionAnimInstance>(
-			Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
-		{
-			const FVector MoveDelta = Next - Current;
-			CAI->SetCoverStrafeVelocity((DeltaSeconds > KINDA_SMALL_NUMBER)
-				? (MoveDelta / DeltaSeconds)
-				: FVector::ZeroVector);
-		}
+		const FVector MoveDelta = Next - Current;
+		CAI->SetCoverStrafeVelocity((DeltaSeconds > KINDA_SMALL_NUMBER)
+			? (MoveDelta / DeltaSeconds)
+			: FVector::ZeroVector);
 	}
 
 	const float Dist = FVector::Dist(Next, Target);
@@ -539,13 +533,37 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 TOptional<float> UBTTask_CompanionCombat::PickBestAlphaByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, float ExcludeAlpha, TArrayView<AActor* const> IgnoredAttached) const
 {
 	if (!IsValid(Slot) || !IsValid(Target) || !IsValid(Companion)) return {};
-
 	UWorld* World = Companion->GetWorld();
+
+	if (Slot->Height == ECoverHeight::Stand)
+	{
+		// Stand cover only fires from peekable corner apexes — test those, not arbitrary eye positions.
+		const FVector LineDir = Slot->GetLineDirection();
+		struct FCornerProbe { float Alpha; bool bFlag; FVector Dir; };
+		const FCornerProbe Probes[] = {
+			{ 0.f, Slot->bIsPeekableCornerStart, -LineDir },
+			{ 1.f, Slot->bIsPeekableCornerEnd,    LineDir },
+		};
+		for (const FCornerProbe& P : Probes)
+		{
+			if (!P.bFlag) continue;
+			if (FMath::Abs(P.Alpha - ExcludeAlpha) < 0.1f) continue;
+			const FVector CornerLoc = Slot->GetLocationAtAlpha(P.Alpha);
+			const FVector ApexLoc = CornerLoc + P.Dir * CornerPeekStepDistance;
+			const FVector ApexEye = ApexLoc + FVector(0.f, 0.f, StandFireEyeHeight);
+			AActor* Blocker = nullptr;
+			if (HasLineOfSight(World, ApexEye, Target, Companion, Blocker, IgnoredAttached))
+				return P.Alpha;
+		}
+		return {};
+	}
+
+	// Crouch cover: sweep N alphas evenly across the line, test eye-level LoS.
 	const int32 N = FMath::Max(2, LosSweepSampleCount);
+	const float ExcludeEpsilon = 0.5f / float(N - 1);
 	for (int32 i = 0; i < N; ++i)
 	{
 		const float Alpha = (float)i / (float)(N - 1);
-		const float ExcludeEpsilon = 0.5f / float(N - 1);
 		if (FMath::Abs(Alpha - ExcludeAlpha) < ExcludeEpsilon) continue;
 		const FVector Eye = Slot->GetLocationAtAlpha(Alpha) + FVector(0.f, 0.f, StandFireEyeHeight);
 		AActor* Blocker = nullptr;
@@ -650,10 +668,19 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 		}
 		if (bResetPosture)
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState action=UnCrouch"),
-				*GetNameSafe(Companion),
-				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
-			Companion->UnCrouch();
+			if (bSmoothSnapping && bPendingCrouchAfterSnap)
+			{
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState_SkippedForPendingCrouch action=NoOp"),
+					*GetNameSafe(Companion),
+					Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			}
+			else
+			{
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState action=UnCrouch"),
+					*GetNameSafe(Companion),
+					Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
+				Companion->UnCrouch();
+			}
 		}
 
 		UCompanionAnimInstance* Anim = GetCompanionAnim(Companion);
@@ -714,6 +741,9 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	FinalApproachStalledTime = 0.f;
 	bSmoothSnapping = false;
 	SmoothSnapElapsed = 0.f;
+	bPendingCrouchAfterSnap = false;
+	SmoothSnapInitialDist = 0.f;
+	SmoothSnapEffectiveDuration = 0.f;
 	bReloadGateActive = false;
 	ReloadGateStartTime = 0.f;
 	LastDecisionTime = 0.f;
@@ -732,10 +762,13 @@ void UBTTask_CompanionCombat::BeginSmoothSnap(ACompanionCharacter* Companion, co
 	bSmoothSnapping = true;
 	bPendingCrouchAfterSnap = bShouldCrouchAfter;
 	SmoothSnapReason = Reason;
-	UE_LOG(LogCompanionDiag, Log, TEXT("%s: [BeginSmoothSnap] t=%.3f dist=%.1f yawDelta=%.1f crouchAfter=%d reason=%s"),
+	SmoothSnapInitialDist = (SmoothSnapTargetLoc - SmoothSnapStartLoc).Size();
+	SmoothSnapEffectiveDuration = FMath::Clamp(SmoothSnapDuration * (SmoothSnapInitialDist / 30.f), SmoothSnapDuration, 1.0f);
+	UE_LOG(LogCompanionDiag, Log, TEXT("%s: [BeginSmoothSnap] t=%.3f initialDist=%.1f effectiveDur=%.3f yawDelta=%.1f crouchAfter=%d reason=%s"),
 		*GetNameSafe(Companion),
 		Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
-		(SmoothSnapTargetLoc - SmoothSnapStartLoc).Size(),
+		SmoothSnapInitialDist,
+		SmoothSnapEffectiveDuration,
 		FMath::FindDeltaAngleDegrees(SmoothSnapStartRot.Yaw, SmoothSnapTargetRot.Yaw),
 		(int32)bShouldCrouchAfter,
 		Reason);
@@ -745,10 +778,10 @@ bool UBTTask_CompanionCombat::TickSmoothSnap(ACompanionCharacter* Companion, flo
 {
 	if (!bSmoothSnapping || !IsValid(Companion)) return true;
 	SmoothSnapElapsed += DeltaSeconds;
-	const float Alpha = FMath::Clamp(SmoothSnapElapsed / FMath::Max(SmoothSnapDuration, 0.001f), 0.f, 1.f);
-	const float EaseAlpha = FMath::SmoothStep(0.f, 1.f, Alpha);
-	const FVector NextLoc = FMath::Lerp(SmoothSnapStartLoc, SmoothSnapTargetLoc, EaseAlpha);
-	const FRotator NextRot = FMath::Lerp(SmoothSnapStartRot, SmoothSnapTargetRot, EaseAlpha);
+	const float Alpha = FMath::Clamp(SmoothSnapElapsed / FMath::Max(SmoothSnapEffectiveDuration, 0.001f), 0.f, 1.f);
+	const float InterpAlpha = (SmoothSnapInitialDist > 30.f) ? Alpha : FMath::SmoothStep(0.f, 1.f, Alpha);
+	const FVector NextLoc = FMath::Lerp(SmoothSnapStartLoc, SmoothSnapTargetLoc, InterpAlpha);
+	const FRotator NextRot = FMath::Lerp(SmoothSnapStartRot, SmoothSnapTargetRot, InterpAlpha);
 	Companion->SetActorLocationAndRotation(NextLoc, NextRot, false, nullptr, ETeleportType::TeleportPhysics);
 	if (Alpha >= 1.f)
 	{
@@ -756,10 +789,13 @@ bool UBTTask_CompanionCombat::TickSmoothSnap(ACompanionCharacter* Companion, flo
 		const bool bWasCrouched = Companion->bIsCrouched;
 		const bool bWillCrouch = (bPendingCrouchAfterSnap && !Companion->bIsCrouched);
 		const bool bWillUncrouch = (!bPendingCrouchAfterSnap && Companion->bIsCrouched);
-		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [SnapComplete] t=%.3f elapsed=%.3f crouchPending=%d wasCrouched=%d willCrouch=%d willUncrouch=%d reason=%s"),
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [SnapComplete] t=%.3f elapsed=%.3f effectiveDur=%.3f initialDist=%.1f linear=%d crouchPending=%d wasCrouched=%d willCrouch=%d willUncrouch=%d reason=%s"),
 			*GetNameSafe(Companion),
 			Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
 			SmoothSnapElapsed,
+			SmoothSnapEffectiveDuration,
+			SmoothSnapInitialDist,
+			(SmoothSnapInitialDist > 30.f) ? 1 : 0,
 			(int32)bPendingCrouchAfterSnap,
 			(int32)bWasCrouched,
 			(int32)bWillCrouch,
@@ -1069,6 +1105,19 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// Fall through to normal branch logic this tick.
 	}
 
+	// Slot-loss guard: check before the snap early-return so a slot invalidated mid-warp
+	// doesn't let the snap complete and post-snap Crouch() fire before the loss is caught.
+	if (bSmoothSnapping)
+	{
+		AAICoverSlot* PreSnapSlot = Cast<AAICoverSlot>(Ctx.Blackboard->GetValueAsObject(CoverSlotKey.SelectedKeyName));
+		if (!IsValid(PreSnapSlot))
+		{
+			UE_LOG(LogCompanionAI, Warning, TEXT("%s: [SLOT-LOST-MID-SNAP] Slot invalidated during warp — aborting cleanly"), *GetNameSafe(Ctx.Companion));
+			ResetTaskState(Ctx.Companion, Ctx.Blackboard, nullptr, false, false);
+			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		}
+	}
+
 	if (bSmoothSnapping)
 	{
 		if (!TickSmoothSnap(Ctx.Companion, DeltaSeconds))
@@ -1262,6 +1311,25 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				Ctx.Blackboard->SetValueAsObject(CoverSlotKey.SelectedKeyName, nullptr);
 				Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 				return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+			}
+
+			// Stand cover: at least one peekable corner apex must be able to see the target.
+			if (Slot->Height == ECoverHeight::Stand)
+			{
+				const FVector LineDir = Slot->GetLineDirection();
+				const FVector StartApexEye = Slot->GetLocationAtAlpha(0.f) + (-LineDir) * CornerPeekStepDistance + FVector(0.f, 0.f, StandFireEyeHeight);
+				const FVector EndApexEye   = Slot->GetLocationAtAlpha(1.f) + ( LineDir) * CornerPeekStepDistance + FVector(0.f, 0.f, StandFireEyeHeight);
+				AActor* IgnoredBlocker = nullptr;
+				const bool bStartLos = Slot->bIsPeekableCornerStart && HasLineOfSight(Ctx.Companion->GetWorld(), StartApexEye, Ctx.Target, Ctx.Companion, IgnoredBlocker, TickIgnoredAttached);
+				const bool bEndLos   = Slot->bIsPeekableCornerEnd   && HasLineOfSight(Ctx.Companion->GetWorld(), EndApexEye,   Ctx.Target, Ctx.Companion, IgnoredBlocker, TickIgnoredAttached);
+				if (!bStartLos && !bEndLos)
+				{
+					UE_LOG(LogCompanionAI, Log, TEXT("%s: Cover INVALIDATE reason=no-corner-apex-los slot=%s"), *Ctx.Companion->GetName(), *Slot->GetName());
+					if (Slot->IsClaimedBy(Ctx.Companion)) Slot->Release(Ctx.Companion);
+					Ctx.Blackboard->SetValueAsObject(CoverSlotKey.SelectedKeyName, nullptr);
+					Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+					return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+				}
 			}
 		}
 
@@ -1520,8 +1588,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (Action == EPeekAction::Reposition || Action == EPeekAction::StandUpAndReposition)
 		{
 			float NewAlpha;
-			const float Sign = FMath::RandBool() ? 1.f : -1.f;
-			const float DeltaFrac = FMath::RandRange(RepositionAlphaMin, RepositionAlphaMax);
 
 			if (Slot->Height == ECoverHeight::Stand)
 			{
@@ -1543,25 +1609,34 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 			else
 			{
-				// Crouch cover: continuous Alpha jump.
-				float Delta = DeltaFrac * Sign;
-				NewAlpha = FMath::Clamp(CurrentAlpha + Delta, 0.f, 1.f);
-				if (FMath::IsNearlyEqual(NewAlpha, CurrentAlpha, 0.01f))
+				// Crouch cover: room-aware picker.
+				// Only sides with at least RepositionAlphaMin available are eligible.
+				const float RoomRight = 1.f - CurrentAlpha;  // headroom toward Alpha=1
+				const float RoomLeft  = CurrentAlpha;        // headroom toward Alpha=0
+				const bool bRightOk = RoomRight >= RepositionAlphaMin;
+				const bool bLeftOk  = RoomLeft  >= RepositionAlphaMin;
+
+				if (!bRightOk && !bLeftOk)
 				{
-					// At the edge in the chosen direction — flip and try the other way.
-					Delta = -Delta;
-					NewAlpha = FMath::Clamp(CurrentAlpha + Delta, 0.f, 1.f);
-				}
-				if (FMath::IsNearlyEqual(NewAlpha, CurrentAlpha, 0.01f))
-				{
-					// Line too short for any reposition — Hold.
+					// No side has enough room — line too narrow from this Alpha. Treat as Hold.
 					CurrentBurstAction = EPeekAction::Hold;
-					bJustRepositioned = true;
 					++ConsecutiveHolds;
 					PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 					TimeInCoverIdle = 0.f;
+					bJustRepositioned = true;
 					return;
 				}
+
+				// Pick direction: random if both sides ok, forced otherwise.
+				const float PickedSign = (bRightOk && bLeftOk)
+					? (FMath::RandBool() ? 1.f : -1.f)
+					: (bRightOk ? 1.f : -1.f);
+
+				// Clamp the random magnitude to the available room on the chosen side so the
+				// achieved delta is always at least RepositionAlphaMin.
+				const float MaxRoom = (PickedSign > 0.f) ? RoomRight : RoomLeft;
+				const float DeltaMag = FMath::RandRange(RepositionAlphaMin, FMath::Min(RepositionAlphaMax, MaxRoom));
+				NewAlpha = FMath::Clamp(CurrentAlpha + (PickedSign * DeltaMag), 0.f, 1.f);
 			}
 
 			RepositionTargetAlpha = NewAlpha;
