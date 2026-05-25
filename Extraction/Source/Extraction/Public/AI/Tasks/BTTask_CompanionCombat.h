@@ -286,6 +286,8 @@ private:
 
 	// Reposition / StandUpAndReposition state
 	TOptional<float> RepositionTargetAlpha;
+	/** World-space target for the in-progress reposition walk, snapshotted at commit so mid-walk arrow drag does not retarget. */
+	FVector RepositionTargetWorldLoc = FVector::ZeroVector;
 	bool bRepositionStandPhase = false;
 	bool bStandUpRepositionWalking = false;
 	float LastRepositionDist = 0.f;
@@ -309,6 +311,8 @@ private:
 	TWeakObjectPtr<UAnimMontage> ActivePeekMontage;
 
 	float CurrentAlpha = 0.5f;
+	/** Cached yaw of Slot->GetForwardDirection() at reposition commit; avoids per-tick cross+dot+atan2 in Phase B. */
+	float CachedSlotForwardYaw = 0.f;
 	float SubSlotLosRecheckTimer = 0.f;
 	TWeakObjectPtr<AAICoverSlot> LastTickSlot;
 	uint8 BlockedRecheckHits = 0;
