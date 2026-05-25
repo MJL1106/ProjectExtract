@@ -141,9 +141,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.25", ClampMax = "5.0"))
 	float CoverValidityCheckInterval = 1.0f;
 
-	/** Interval (seconds) between sub-slot LoS re-picks while in cover idle. */
+	/** Interval (seconds) between LoS re-picks while in cover idle. */
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.1"))
 	float SubSlotLosRecheckInterval = 0.6f;
+
+	/** Number of evenly-spaced Alpha samples swept along the cover line when picking the best LoS position. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "2", ClampMax = "20"))
+	int32 LosSweepSampleCount = 5;
 
 	/** Minimum time at current cover before a failed re-eval can abandon the slot. */
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.5", ClampMax = "10.0"))
@@ -166,6 +170,18 @@ protected:
 	/** Seconds the path-follower must be Idle (without arriving) before snapping early. */
 	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "0.05", ClampMax = "2.0"))
 	float FinalApproachStalledGracePeriod = 0.25f;
+
+	/** Duration of the smooth-snap tween that replaces cover entry / return teleport pops (seconds). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float SmoothSnapDuration = 0.2f;
+
+	/** Minimum Alpha delta for a reposition (as fraction of line length). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float RepositionAlphaMin = 0.2f;
+
+	/** Maximum Alpha delta for a reposition (as fraction of line length). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float RepositionAlphaMax = 0.6f;
 
 	// --- New action weights (crouch cover) ---
 
@@ -201,9 +217,17 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "10.0"))
 	float CornerPeekStepDistance = 100.f;
 
-	/** Lateral interp speed for Reposition and StandUpAndReposition (cm/s). */
+	/** Lateral interp speed for Reposition and StandUpAndReposition walk phase (cm/s). */
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
 	float RepositionWalkSpeed = 150.f;
+
+	/** Lateral interp speed for CornerPeek outbound strafe (apex side) (cm/s). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
+	float CornerPeekOutSpeed = 150.f;
+
+	/** Lateral interp speed for CornerPeek return strafe (back to home) (cm/s). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
+	float CornerPeekReturnSpeed = 150.f;
 
 	/** Distance threshold to consider a reposition/corner-peek movement arrived (cm). */
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
@@ -257,8 +281,11 @@ private:
 	EPeekAction CurrentBurstAction = EPeekAction::Stand;
 	uint8 ConsecutiveHolds = 0;
 
+	/** Set true when a Reposition (silent or StandUpAndReposition) action just completed; blocks Reposition from rolling on the next action roll. Cleared once any non-Reposition action commits. */
+	bool bJustRepositioned = false;
+
 	// Reposition / StandUpAndReposition state
-	int32 RepositionTargetSubSlotIndex = INDEX_NONE;
+	TOptional<float> RepositionTargetAlpha;
 	bool bRepositionStandPhase = false;
 	bool bStandUpRepositionWalking = false;
 	float LastRepositionDist = 0.f;
@@ -281,7 +308,7 @@ private:
 	// Active peek montage (weak — anim owns it)
 	TWeakObjectPtr<UAnimMontage> ActivePeekMontage;
 
-	int32 CurrentSubSlotIndex = 0;
+	float CurrentAlpha = 0.5f;
 	float SubSlotLosRecheckTimer = 0.f;
 	TWeakObjectPtr<AAICoverSlot> LastTickSlot;
 	uint8 BlockedRecheckHits = 0;
@@ -292,14 +319,30 @@ private:
 	float LastFinalApproachDist = 0.f;
 	float FinalApproachStalledTime = 0.f;
 
-	int32 PickBestSubSlotByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, int32 ExcludeIndex, TArrayView<AActor* const> IgnoredAttached) const;
+	// Smooth-snap tween state
+	bool bSmoothSnapping = false;
+	/** Applied by TickSmoothSnap on completion to avoid mid-snap crouch pop. */
+	bool bPendingCrouchAfterSnap = false;
+	FVector SmoothSnapStartLoc = FVector::ZeroVector;
+	FRotator SmoothSnapStartRot = FRotator::ZeroRotator;
+	FVector SmoothSnapTargetLoc = FVector::ZeroVector;
+	FRotator SmoothSnapTargetRot = FRotator::ZeroRotator;
+	float SmoothSnapElapsed = 0.f;
+	/** Static string identifying which call site initiated the active snap (diagnostic only). */
+	const TCHAR* SmoothSnapReason = TEXT("");
+
+	void BeginSmoothSnap(ACompanionCharacter* Companion, const FVector& TargetLoc, const FRotator& TargetRot, bool bShouldCrouchAfter, const TCHAR* Reason = TEXT(""));
+	/** Returns true when the snap completes this tick (or is not active). */
+	bool TickSmoothSnap(ACompanionCharacter* Companion, float DeltaSeconds);
+
+	TOptional<float> PickBestAlphaByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, float ExcludeAlpha, TArrayView<AActor* const> IgnoredAttached) const;
 
 	/** Returns true and triggers reload if ammo is too low to start a peek action. Caller must return immediately when true. */
 	bool TryPrePeekReloadGate(ACompanionCharacter* Companion, AAICoverSlot* Slot);
 
 	virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 
-	void ResetTaskState(ACompanionCharacter* Companion, UBlackboardComponent* BB, AAICoverSlot* Slot, bool bReleaseSlot);
+	void ResetTaskState(ACompanionCharacter* Companion, UBlackboardComponent* BB, AAICoverSlot* Slot, bool bReleaseSlot, bool bResetPosture = true);
 
 	// --- Reload gate ---
 

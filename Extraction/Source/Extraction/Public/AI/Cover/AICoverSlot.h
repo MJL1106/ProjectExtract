@@ -44,13 +44,6 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Cover|Config")
 	bool bIsPeekableCornerEnd = false;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Cover|Config", meta = (ClampMin = "50.0"))
-	float SubSlotSpacing = 100.f;
-
-	/** Endpoint sub-slots are inset inward by this distance so the companion's home is behind the wall, not on the edge. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Cover|Config", meta = (ClampMin = "0.0", ClampMax = "200.0"))
-	float CornerInsetDistance = 40.f;
-
 	// --- Claim API (server-only, non-replicated) ---
 
 	bool IsClaimed() const;
@@ -68,11 +61,8 @@ public:
 	FVector GetStandPosition() const;
 
 	float GetCoverLineHalfLength() const;
-	int32 GetSubSlotCount() const;
-	FVector GetSubSlotLocation(int32 Index) const;
-	bool IsSubSlotPeekableCorner(int32 Index) const;
 
-	// --- Continuous endpoint API (Phase 1) ---
+	// --- Continuous endpoint API ---
 
 	/** World-space location of the left edge of the cover line. */
 	FVector GetLeftEdge() const;
