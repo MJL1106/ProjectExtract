@@ -72,6 +72,39 @@ public:
 	FVector GetSubSlotLocation(int32 Index) const;
 	bool IsSubSlotPeekableCorner(int32 Index) const;
 
+	// --- Continuous endpoint API (Phase 1) ---
+
+	/** World-space location of the left edge of the cover line. */
+	FVector GetLeftEdge() const;
+
+	/** World-space location of the right edge of the cover line. */
+	FVector GetRightEdge() const;
+
+	/** Normalized 2D direction from LeftEdge to RightEdge. */
+	FVector GetLineDirection() const;
+
+	/** 2D distance between LeftEdge and RightEdge in cm. */
+	float GetLineLength() const;
+
+	/**
+	 * Perpendicular to the cover line, pointing away from the wall.
+	 * Sign is disambiguated by the actor's forward vector so a slightly mis-rotated
+	 * actor still yields the correct outward direction.
+	 */
+	FVector GetForwardDirection() const;
+
+	/** World-space position at the given Alpha [0,1] along the cover line. */
+	FVector GetLocationAtAlpha(float Alpha) const;
+
+	/** Projects WorldLoc onto the cover line and returns its Alpha [0,1]. */
+	float GetAlphaFromLocation(const FVector& WorldLoc) const;
+
+	/**
+	 * Returns true when Alpha is within Epsilon of an endpoint that is flagged as a peekable corner.
+	 * Alpha=0 tests bIsPeekableCornerStart; Alpha=1 tests bIsPeekableCornerEnd.
+	 */
+	bool IsAlphaAtPeekableCorner(float Alpha, float Epsilon = 0.05f) const;
+
 private:
 	// Server-only — intentionally not replicated
 	TWeakObjectPtr<AActor> ClaimedBy;
@@ -82,6 +115,12 @@ private:
 
 	UPROPERTY(VisibleAnywhere, Category = "Cover|Debug")
 	TObjectPtr<UBoxComponent> CoverBoundsBox;
+
+	UPROPERTY(VisibleAnywhere, Category = "Cover|Endpoints")
+	TObjectPtr<UArrowComponent> LeftEdgeArrow;
+
+	UPROPERTY(VisibleAnywhere, Category = "Cover|Endpoints")
+	TObjectPtr<UArrowComponent> RightEdgeArrow;
 
 	void UpdateDebugViz();
 };

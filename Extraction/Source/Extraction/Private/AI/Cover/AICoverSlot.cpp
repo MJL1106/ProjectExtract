@@ -19,12 +19,31 @@ AAICoverSlot::AAICoverSlot()
 	CoverBoundsBox->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	CoverBoundsBox->SetGenerateOverlapEvents(false);
 	CoverBoundsBox->SetBoxExtent(FVector(30.f, 30.f, 90.f));
+
+	LeftEdgeArrow = CreateDefaultSubobject<UArrowComponent>(TEXT("LeftEdgeArrow"));
+	LeftEdgeArrow->SetupAttachment(RootComponent);
+	LeftEdgeArrow->SetArrowColor(FLinearColor(0.f, 1.f, 1.f, 1.f)); // cyan
+
+	RightEdgeArrow = CreateDefaultSubobject<UArrowComponent>(TEXT("RightEdgeArrow"));
+	RightEdgeArrow->SetupAttachment(RootComponent);
+	RightEdgeArrow->SetArrowColor(FLinearColor(1.f, 0.f, 1.f, 1.f)); // magenta
 }
 
 void AAICoverSlot::OnConstruction(const FTransform& Transform)
 {
 	Super::OnConstruction(Transform);
 	UpdateDebugViz();
+
+	// Auto-default edge arrows only when the designer hasn't moved them yet.
+	// Relative Y maps to the actor's local right axis (same as GetActorRightVector() in world space).
+	const float HalfLen = GetCoverLineHalfLength();
+	const float InsetOffset = HalfLen - CornerInsetDistance;
+
+	if (IsValid(LeftEdgeArrow) && LeftEdgeArrow->GetRelativeLocation().IsNearlyZero())
+		LeftEdgeArrow->SetRelativeLocation(FVector(0.f, -InsetOffset, 0.f));
+
+	if (IsValid(RightEdgeArrow) && RightEdgeArrow->GetRelativeLocation().IsNearlyZero())
+		RightEdgeArrow->SetRelativeLocation(FVector(0.f, InsetOffset, 0.f));
 }
 
 void AAICoverSlot::BeginPlay()
@@ -178,4 +197,72 @@ void AAICoverSlot::UpdateDebugViz()
 		: FLinearColor(1.f, 1.f, 0.f, 0.4f);
 
 	CoverBoundsBox->ShapeColor = SlotColor.ToFColor(true);
+}
+
+// --- Continuous endpoint API ---
+
+FVector AAICoverSlot::GetLeftEdge() const
+{
+	if (!IsValid(LeftEdgeArrow))
+		return GetActorLocation();
+
+	return LeftEdgeArrow->GetComponentLocation();
+}
+
+FVector AAICoverSlot::GetRightEdge() const
+{
+	if (!IsValid(RightEdgeArrow))
+		return GetActorLocation();
+
+	return RightEdgeArrow->GetComponentLocation();
+}
+
+FVector AAICoverSlot::GetLineDirection() const
+{
+	return (GetRightEdge() - GetLeftEdge()).GetSafeNormal2D();
+}
+
+float AAICoverSlot::GetLineLength() const
+{
+	return (GetRightEdge() - GetLeftEdge()).Size2D();
+}
+
+FVector AAICoverSlot::GetForwardDirection() const
+{
+	const FVector LineDir = GetLineDirection();
+	FVector Perp = FVector::CrossProduct(FVector::UpVector, LineDir);
+
+	if (Perp.IsNearlyZero())
+		return GetActorForwardVector();
+
+	if (FVector::DotProduct(Perp, GetActorForwardVector()) < 0.f)
+		Perp = -Perp;
+
+	return Perp.GetSafeNormal();
+}
+
+FVector AAICoverSlot::GetLocationAtAlpha(float Alpha) const
+{
+	const float ClampedAlpha = FMath::Clamp(Alpha, 0.f, 1.f);
+	return FMath::Lerp(GetLeftEdge(), GetRightEdge(), ClampedAlpha);
+}
+
+float AAICoverSlot::GetAlphaFromLocation(const FVector& WorldLoc) const
+{
+	FVector Dir = GetRightEdge() - GetLeftEdge();
+	Dir.Z = 0.f;
+
+	if (Dir.IsNearlyZero())
+		return 0.5f;
+
+	FVector ToLoc = WorldLoc - GetLeftEdge();
+	ToLoc.Z = 0.f;
+
+	const float Alpha = FVector::DotProduct(ToLoc, Dir) / Dir.SizeSquared();
+	return FMath::Clamp(Alpha, 0.f, 1.f);
+}
+
+bool AAICoverSlot::IsAlphaAtPeekableCorner(float Alpha, float Epsilon) const
+{
+	return (Alpha <= Epsilon && bIsPeekableCornerStart) || (Alpha >= 1.f - Epsilon && bIsPeekableCornerEnd);
 }
