@@ -95,4 +95,18 @@ public:
 	// Seconds since last render; below this the companion is considered visible (suppresses warp).
 	UPROPERTY(EditAnywhere, Category = "Companion|Warp")
 	float RecentlyRenderedTolerance = 0.5f;
+
+	// --- Cover switching ---
+
+	// Minimum time the companion must be at a slot before a switch can commit. (G1)
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.1"))
+	float CoverSwitchMinDwell = 1.0f;
+
+	// How often (seconds) the service re-evaluates cover candidates. (T4)
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.25"))
+	float CoverSwitchReEvalInterval = 1.0f;
+
+	// New slot must beat current slot score by this multiplier to commit a switch. (P6)
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "1.0", ClampMax = "3.0"))
+	float CoverSwitchScoreMargin = 1.2f;
 };

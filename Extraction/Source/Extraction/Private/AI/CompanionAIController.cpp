@@ -2,6 +2,7 @@
 
 #include "CompanionAIController.h"
 #include "AI/CompanionTuningDataAsset.h"
+#include "AI/Cover/AICoverSlot.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Perception/AIPerceptionComponent.h"
@@ -44,6 +45,7 @@ const FName ACompanionAIController::BB_ScoringWeight_LoSPlayer(TEXT("ScoringWeig
 const FName ACompanionAIController::BB_ScoringWeight_AvoidEnemy(TEXT("ScoringWeight_AvoidEnemy"));
 const FName ACompanionAIController::BB_ScoringWeight_CoverFromTarget(TEXT("ScoringWeight_CoverFromTarget"));
 const FName ACompanionAIController::BB_CoverSlot(TEXT("CoverSlot"));
+const FName ACompanionAIController::BB_NextCoverSlot(TEXT("NextCoverSlot"));
 
 ACompanionAIController::ACompanionAIController()
 {
@@ -132,6 +134,9 @@ void ACompanionAIController::OnPossess(APawn* InPawn)
 
 void ACompanionAIController::OnUnPossess()
 {
+	// Must run before StopLogic/BB teardown — BB still valid here.
+	ReleaseNextCoverSlotIfClaimed();
+
 	if (BrainComponent)
 		BrainComponent->StopLogic(TEXT("Unpossessed"));
 
@@ -154,6 +159,8 @@ void ACompanionAIController::OnUnPossess()
 
 void ACompanionAIController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	ReleaseNextCoverSlotIfClaimed();
+
 	if (PlayerTraversalComp.IsValid())
 	{
 		PlayerTraversalComp->OnTraversalStarted.Remove(TraversalStartedHandle);
@@ -345,6 +352,23 @@ void ACompanionAIController::ExecuteWarpBehindPlayer()
 
 	TimeSinceClosedToPlayer = 0.f;
 	TimeOnDifferentLevel = 0.f;
+}
+
+void ACompanionAIController::ReleaseNextCoverSlotIfClaimed()
+{
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	APawn* ControlledPawn = GetPawn();
+	AAICoverSlot* PendingSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(BB_NextCoverSlot));
+	if (IsValid(PendingSlot) && IsValid(ControlledPawn) && PendingSlot->IsClaimedBy(ControlledPawn))
+	{
+		PendingSlot->Release(ControlledPawn);
+		UE_LOG(LogCompanionAI, Log,
+			TEXT("%s: released stale NextCoverSlot claim on %s (controller teardown)"),
+			*GetName(), *PendingSlot->GetName());
+	}
+	BB->SetValueAsObject(BB_NextCoverSlot, nullptr);
 }
 
 void ACompanionAIController::ClearTraversalBlackboard()

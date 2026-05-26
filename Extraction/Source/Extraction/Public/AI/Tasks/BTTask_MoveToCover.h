@@ -36,6 +36,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Blackboard")
 	FBlackboardKeySelector CoverSlotKey;
 
+	// Pre-claimed slot set by BTService_CoverSwitchMonitor — bypasses the picker on cover-switch re-flows.
+	UPROPERTY(EditAnywhere, Category = "Blackboard")
+	FBlackboardKeySelector NextCoverSlotKey;
+
 	// Generous — path-follower may stop short of exact slot when slot is near geometry.
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "50.0"))
 	float AcceptableRadius = 200.0f;

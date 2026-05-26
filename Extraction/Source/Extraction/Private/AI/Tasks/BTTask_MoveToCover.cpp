@@ -39,21 +39,61 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 		(int32)BB->GetValueAsBool(HasCoverPositionKey.SelectedKeyName),
 		*GetNameSafe(Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName))));
 
+	// Cover-switch re-flow: the service pre-claimed a better slot and wrote it to BB_NextCoverSlot.
+	// Take it directly — skip the picker to prevent proximity-bias re-selecting the old slot.
+	AAICoverSlot* NextSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(NextCoverSlotKey.SelectedKeyName));
+	if (IsValid(NextSlot))
+	{
+		if (NextSlot->IsClaimedBy(Pawn))
+		{
+			const FVector PawnLocNext = Pawn->GetActorLocation();
+			const float AlphaNext = NextSlot->GetAlphaFromLocation(PawnLocNext);
+			FVector ArrivalPosNext = NextSlot->GetLocationAtAlpha(AlphaNext);
+			ArrivalPosNext.Z = PawnLocNext.Z;
+
+			BB->SetValueAsObject(CoverSlotKey.SelectedKeyName, NextSlot);
+			BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPosNext);
+			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, true);
+			BB->SetValueAsObject(NextCoverSlotKey.SelectedKeyName, nullptr);
+
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover using pre-claimed slot=%s from CoverSwitchMonitor"), *Pawn->GetName(), *NextSlot->GetName());
+
+			if (FVector::Dist(PawnLocNext, ArrivalPosNext) <= AcceptableRadius)
+				return EBTNodeResult::Succeeded;
+
+			StartMoveTo(ArrivalPosNext, Controller, Pawn);
+			return EBTNodeResult::InProgress;
+		}
+
+		// Stale hint (e.g. someone else claimed it between service write and task execute) — clear and fall through.
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover NextCoverSlot=%s not claimed by us — discarding hint"), *Pawn->GetName(), *NextSlot->GetName());
+		BB->SetValueAsObject(NextCoverSlotKey.SelectedKeyName, nullptr);
+	}
+
 	// If we already have a claimed slot, check if we can just use it.
 	AAICoverSlot* ExistingSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(CoverSlotKey.SelectedKeyName));
-	if (IsValid(ExistingSlot) && ExistingSlot->IsClaimed())
+	if (IsValid(ExistingSlot))
 	{
-		const FVector PawnLoc = Pawn->GetActorLocation();
-		const float Alpha = ExistingSlot->GetAlphaFromLocation(PawnLoc);
-		FVector ArrivalPos = ExistingSlot->GetLocationAtAlpha(Alpha);
-		ArrivalPos.Z = PawnLoc.Z;
-		BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPos);
+		if (ExistingSlot->IsClaimedBy(Pawn))
+		{
+			const FVector PawnLoc = Pawn->GetActorLocation();
+			const float Alpha = ExistingSlot->GetAlphaFromLocation(PawnLoc);
+			FVector ArrivalPos = ExistingSlot->GetLocationAtAlpha(Alpha);
+			ArrivalPos.Z = PawnLoc.Z;
+			BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPos);
 
-		if (FVector::Dist(PawnLoc, ArrivalPos) <= AcceptableRadius)
-			return EBTNodeResult::Succeeded;
+			if (FVector::Dist(PawnLoc, ArrivalPos) <= AcceptableRadius)
+				return EBTNodeResult::Succeeded;
 
-		StartMoveTo(ArrivalPos, Controller, Pawn);
-		return EBTNodeResult::InProgress;
+			StartMoveTo(ArrivalPos, Controller, Pawn);
+			return EBTNodeResult::InProgress;
+		}
+
+		// Slot exists but is claimed by someone else — clear stale state and fall through to picker.
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover ExistingSlot=%s claimed by other — discarding"),
+			*Pawn->GetName(), *ExistingSlot->GetName());
+		BB->SetValueAsObject(CoverSlotKey.SelectedKeyName, nullptr);
+		BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 	}
 
 	// No target — no need for cover; fall through to open-engage.
