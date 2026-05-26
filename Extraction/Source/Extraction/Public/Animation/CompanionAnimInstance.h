@@ -71,6 +71,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Cover")
 	EPeekSide GetActivePeekSide() const { return ActivePeekSide; }
 
+	/** Called by the cover BT each tick during a lateral strafe; overrides locomotion Speed/Direction so the blend space animates. */
+	UFUNCTION(BlueprintCallable, Category = "Cover")
+	void SetCoverStrafeVelocity(const FVector& Velocity);
+
+	UFUNCTION(BlueprintCallable, Category = "Cover")
+	void ClearCoverStrafeVelocity();
+
 protected:
 	// --- Cached Refs ---
 
@@ -105,6 +112,9 @@ protected:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Locomotion")
 	bool bIsSprinting = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Locomotion")
+	bool bIsCrouched = false;
 
 	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Locomotion")
 	bool bIsAlive = true;
@@ -146,6 +156,9 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|Montages")
 	TObjectPtr<UAnimMontage> ReloadMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|Montages")
+	TObjectPtr<UAnimMontage> ReloadMontage_Crouch;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|Montages")
 	TObjectPtr<UAnimMontage> HitReactMontage;
@@ -191,6 +204,17 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	TObjectPtr<UAnimMontage> CoverPeekRightMontage;
 
+	// --- Cover strafe override ---
+
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	bool bInCover = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	bool bCoverStrafeActive = false;
+
+	FVector CoverStrafeVelocity = FVector::ZeroVector;
+	float CoverStrafeStaleTimer = 0.f;
+
 	// --- Posture mirror (read each tick in NativeUpdateAnimation) ---
 
 	UPROPERTY(BlueprintReadOnly, Category = "Companion")
@@ -200,7 +224,6 @@ private:
 	UFUNCTION()
 	void OnReloadMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
 
-	bool bInCover = false;
 	EPeekSide ActivePeekSide = EPeekSide::Right;
 	bool bPrevIsReloading = false;
 };

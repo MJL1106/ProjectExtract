@@ -33,6 +33,8 @@ public:
 	virtual void Tick(float DeltaTime) override;
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+	virtual void OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+	virtual void OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
 
 	// --- IGameplayTagAssetInterface ---
 	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
@@ -205,6 +207,9 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
 	float SprintSpeed = 650.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
+	float CrouchedWalkSpeed = 150.f;
 
 private:
 	UPROPERTY(ReplicatedUsing = OnRep_LowReadyAim)
