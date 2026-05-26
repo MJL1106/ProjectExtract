@@ -189,13 +189,21 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0.0"))
 	float StandUpAndRepositionWeight = 20.f;
 
-	/** Relative weight for silent lateral repositioning within cover. */
+	/** Relative weight for silent lateral repositioning within Crouch cover. */
 	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0.0"))
 	float RepositionWeight = 15.f;
 
-	/** Low-health variant for Reposition. */
+	/** Relative weight for silent lateral repositioning within Stand cover. */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0.0"))
+	float RepositionWeightStand = 0.f;
+
+	/** Low-health variant for Reposition in Crouch cover. */
 	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights|LowHealth", meta = (ClampMin = "0.0"))
 	float LowHpRepositionWeight = 25.f;
+
+	/** Low-health variant for Reposition in Stand cover. */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights|LowHealth", meta = (ClampMin = "0.0"))
+	float LowHpRepositionWeightStand = 0.f;
 
 	/** Low-health variant for StandUpAndReposition. */
 	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights|LowHealth", meta = (ClampMin = "0.0"))
@@ -327,6 +335,8 @@ private:
 	bool bSmoothSnapping = false;
 	/** Applied by TickSmoothSnap on completion to avoid mid-snap crouch pop. */
 	bool bPendingCrouchAfterSnap = false;
+	/** Set by gate=945 so reload fires after the return-to-cover snap completes and Crouch fires. */
+	bool bPendingReloadAfterSnap = false;
 	FVector SmoothSnapStartLoc = FVector::ZeroVector;
 	FRotator SmoothSnapStartRot = FRotator::ZeroRotator;
 	FVector SmoothSnapTargetLoc = FVector::ZeroVector;
@@ -334,6 +344,10 @@ private:
 	float SmoothSnapElapsed = 0.f;
 	/** Static string identifying which call site initiated the active snap (diagnostic only). */
 	const TCHAR* SmoothSnapReason = TEXT("");
+	/** Euclidean distance at snap start — drives linear vs eased selection and duration scaling. */
+	float SmoothSnapInitialDist = 0.f;
+	/** Effective tween duration after distance scaling; clamped to [SmoothSnapDuration, 1.0s]. */
+	float SmoothSnapEffectiveDuration = 0.f;
 
 	void BeginSmoothSnap(ACompanionCharacter* Companion, const FVector& TargetLoc, const FRotator& TargetRot, bool bShouldCrouchAfter, const TCHAR* Reason = TEXT(""));
 	/** Returns true when the snap completes this tick (or is not active). */

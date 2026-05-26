@@ -172,8 +172,8 @@ void AWeaponBase::StopFiring()
 		RecoilRecoveryYawApplied = 0.f;
 	}
 
-	// Auto-reload if magazine empty and we have reserve
-	if (CurrentAmmo <= 0 && CanReload())
+	// Auto-reload if magazine empty and we have reserve (player UX — AI weapons set bAutoReloadOnEmpty=false to defer to BT).
+	if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
 		Reload();
 }
 
@@ -195,7 +195,7 @@ void AWeaponBase::OnAutoFireTimer()
 				UE_LOG(LogCompanionDiag, Warning, TEXT("%s: WEAPON-DRY ammo=%d reserve=%d"),
 					*GetNameSafe(GetOwner()), CurrentAmmo, ReserveAmmo);
 			}
-			if (CanReload()) Reload();
+			if (bAutoReloadOnEmpty && CanReload()) Reload();
 		}
 		return;
 	}

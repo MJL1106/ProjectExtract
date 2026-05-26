@@ -50,6 +50,7 @@ ACompanionCharacter::ACompanionCharacter()
 		MoveComp->bUseControllerDesiredRotation = true;
 		MoveComp->bOrientRotationToMovement = false;
 		MoveComp->MaxWalkSpeed = WalkSpeed;
+		MoveComp->MaxWalkSpeedCrouched = CrouchedWalkSpeed;
 		MoveComp->GetNavAgentPropertiesRef().bCanCrouch = true;
 	}
 	bUseControllerRotationYaw = false;
@@ -75,10 +76,13 @@ void ACompanionCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// The constructor's `MaxWalkSpeed = WalkSpeed` runs with the C++ default value before
-	// BP CDO overrides apply. Re-apply once BP-overridden WalkSpeed/SprintSpeed are live so
-	// initial MaxWalkSpeed matches what OnRep_IsSprinting will set after the first toggle.
+	// The constructor's movement defaults run with C++ default values before BP CDO overrides
+	// apply. Re-apply once BP-overridden values are live so speeds match what designers set.
+	// WalkSpeed/SprintSpeed: re-applied via OnRep_IsSprinting below.
+	// CrouchedWalkSpeed: must be pushed directly since no OnRep covers it.
 	OnRep_IsSprinting();
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+		MoveComp->MaxWalkSpeedCrouched = CrouchedWalkSpeed;
 
 	if (HealthComponent && !HealthComponent->OnDeath.IsAlreadyBound(this, &ACompanionCharacter::HandleDeath))
 		HealthComponent->OnDeath.AddDynamic(this, &ACompanionCharacter::HandleDeath);
@@ -182,6 +186,34 @@ void ACompanionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, bIsSprinting, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, Posture, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, bLowReadyAim, COND_SkipOwner);
+}
+
+// --- Crouch diagnostics ---
+
+void ACompanionCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	if (HasAuthority())
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [OnStartCrouch] t=%.3f halfAdj=%.1f capsHalfH=%.1f meshRelZ=%.1f worldZ=%.1f"),
+			*GetName(),
+			GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f,
+			HalfHeightAdjust,
+			GetCapsuleComponent() ? GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 0.f,
+			GetMesh() ? GetMesh()->GetRelativeLocation().Z : 0.f,
+			GetActorLocation().Z);
+}
+
+void ACompanionCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	if (HasAuthority())
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [OnEndCrouch] t=%.3f halfAdj=%.1f capsHalfH=%.1f meshRelZ=%.1f worldZ=%.1f"),
+			*GetName(),
+			GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f,
+			HalfHeightAdjust,
+			GetCapsuleComponent() ? GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight() : 0.f,
+			GetMesh() ? GetMesh()->GetRelativeLocation().Z : 0.f,
+			GetActorLocation().Z);
 }
 
 // --- Posture API ---

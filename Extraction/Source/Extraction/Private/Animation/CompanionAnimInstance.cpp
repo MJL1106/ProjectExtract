@@ -35,7 +35,7 @@ void UCompanionAnimInstance::NativeUninitializeAnimation()
 
 void UCompanionAnimInstance::OnReloadMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted)
 {
-	if (Montage != ReloadMontage) return;
+	if (Montage != ReloadMontage && Montage != ReloadMontage_Crouch) return;
 	UE_LOG(LogCompanionDiag, Log, TEXT("%s: MONTAGE-RELOAD-END reason=blend-out interrupted=%d"),
 		IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
 		(int32)bInterrupted);
@@ -49,18 +49,72 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	CurrentPosture = OwningCompanion->GetPosture();
 
-	const FVector Velocity = MovementComponent->Velocity;
-	Speed = Velocity.Size2D();
+	const FVector RawVelocity = MovementComponent->Velocity;
+	FVector EffectiveVelocity = RawVelocity;
+
+	if (bCoverStrafeActive)
+	{
+		EffectiveVelocity = CoverStrafeVelocity;
+
+		static float LastApplyLogTime = 0.f;
+		if (UWorld* W = GetWorld())
+		{
+			const float Now = W->GetTimeSeconds();
+			if (Now - LastApplyLogTime > 0.25f)
+			{
+				const float DiagDir = UKismetAnimationLibrary::CalculateDirection(EffectiveVelocity, OwningCompanion->GetActorRotation());
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: COVERSTRAFE-APPLY effSpeed=%.0f effDir=%.1f rawCmcSpeed=%.0f"),
+					IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("?"),
+					EffectiveVelocity.Size2D(),
+					DiagDir,
+					RawVelocity.Size2D());
+				LastApplyLogTime = Now;
+			}
+		}
+
+		CoverStrafeStaleTimer -= DeltaSeconds;
+		if (CoverStrafeStaleTimer <= 0.f)
+		{
+			bCoverStrafeActive = false;
+			EffectiveVelocity = RawVelocity;
+		}
+	}
+
+	Speed = EffectiveVelocity.Size2D();
 	bHasVelocity = Speed > 1.f;
-	Direction = UKismetAnimationLibrary::CalculateDirection(Velocity, OwningCompanion->GetActorRotation());
+	Direction = UKismetAnimationLibrary::CalculateDirection(EffectiveVelocity, OwningCompanion->GetActorRotation());
 
 	const float MaxSpeed = MovementComponent->MaxWalkSpeed;
 	NormalizedSpeed = MaxSpeed > 0.f ? Speed / MaxSpeed : 0.f;
 
+	// Throttled speed diag — only logs while actually moving (>20) so it's not idle spam.
+	if (Speed > 20.f)
+	{
+		static float LastSpeedLogTime = 0.f;
+		if (UWorld* W = GetWorld())
+		{
+			const float Now = W->GetTimeSeconds();
+			if (Now - LastSpeedLogTime > 0.25f)
+			{
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: SPEED speed=%.0f maxWalk=%.0f norm=%.2f dir=%.1f sprint=%d coverStrafe=%d"),
+					IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("?"),
+					Speed, MaxSpeed, NormalizedSpeed, Direction,
+					(int32)OwningCompanion->IsSprinting(),
+					(int32)bCoverStrafeActive);
+				LastSpeedLogTime = Now;
+			}
+		}
+	}
+
 	bIsInAir = MovementComponent->IsFalling();
 	bIsFalling = bIsInAir;
-	bIsAccelerating = MovementComponent->GetCurrentAcceleration().SizeSquared() > 0.f;
+
+	bIsAccelerating = bCoverStrafeActive
+		? (Speed > 1.f)
+		: (MovementComponent->GetCurrentAcceleration().SizeSquared() > 0.f);
+
 	bIsSprinting = OwningCompanion->IsSprinting();
+	bIsCrouched = OwningCompanion->bIsCrouched;
 
 	// Health
 	UHealthComponent* Health = OwningCompanion->GetHealthComponent();
@@ -149,12 +203,15 @@ void UCompanionAnimInstance::StopFireMontage(float BlendOutTime)
 
 void UCompanionAnimInstance::PlayReloadMontage(float PlayRate)
 {
-	if (!IsValid(ReloadMontage)) return;
+	UAnimMontage* MontageToPlay = (bIsCrouched && IsValid(ReloadMontage_Crouch))
+		? ReloadMontage_Crouch.Get()
+		: ReloadMontage.Get();
+	if (!IsValid(MontageToPlay)) return;
 
-	Montage_Play(ReloadMontage, PlayRate);
+	Montage_Play(MontageToPlay, PlayRate);
 	UE_LOG(LogCompanionDiag, Log, TEXT("%s: MONTAGE-RELOAD-START len=%.2f playRate=%.2f"),
 		IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
-		ReloadMontage->GetPlayLength(),
+		MontageToPlay->GetPlayLength(),
 		PlayRate);
 }
 
@@ -208,6 +265,34 @@ bool UCompanionAnimInstance::HasMontageForType(ETraversalType Type) const
 	}
 }
 
+void UCompanionAnimInstance::SetCoverStrafeVelocity(const FVector& Velocity)
+{
+	static float LastSetLogTime = 0.f;
+	if (UWorld* W = GetWorld())
+	{
+		const float Now = W->GetTimeSeconds();
+		if (Now - LastSetLogTime > 0.25f)
+		{
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: COVERSTRAFE-SET vel=%s speed=%.0f"),
+				IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("?"),
+				*Velocity.ToString(), Velocity.Size2D());
+			LastSetLogTime = Now;
+		}
+	}
+	CoverStrafeVelocity = Velocity;
+	bCoverStrafeActive = true;
+	CoverStrafeStaleTimer = 0.1f;
+}
+
+void UCompanionAnimInstance::ClearCoverStrafeVelocity()
+{
+	UE_LOG(LogCompanionAI, Log, TEXT("%s: COVERSTRAFE-CLEAR"),
+		IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("?"));
+	CoverStrafeVelocity = FVector::ZeroVector;
+	bCoverStrafeActive = false;
+	CoverStrafeStaleTimer = 0.f;
+}
+
 namespace
 {
 	constexpr float CoverBlendOutTime = 0.15f;
@@ -228,20 +313,7 @@ void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide, ECoverHeight 
 	bInCover = true;
 	ActivePeekSide = DefaultSide;
 
-	// Stand cover: companion stays in locomotion idle — no montage needed.
-	if (Height == ECoverHeight::Stand) return;
-
-	if (!bPlayEnterMontage) return;
-
-	UAnimMontage* IdleMontage = (DefaultSide == EPeekSide::Left) ? CoverIdleLeftMontage : CoverIdleRightMontage;
-	if (IsValid(IdleMontage))
-		Montage_Play(IdleMontage, 1.f);
-
-	UE_LOG(LogCompanionAI, Log, TEXT("Cover ENTER side=%s montage=%s (valid=%d, playing=%d)"),
-		DefaultSide == EPeekSide::Left ? TEXT("Left") : TEXT("Right"),
-		*GetNameSafe(IdleMontage),
-		(int32)IsValid(IdleMontage),
-		(int32)Montage_IsPlaying(IdleMontage));
+	// Cover idle is driven by the AnimBP locomotion state machine via bIsCrouched + bInCover — no montage needed for any height.
 }
 
 void UCompanionAnimInstance::ExitCoverPose()

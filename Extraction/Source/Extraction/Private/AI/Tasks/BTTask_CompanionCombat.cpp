@@ -1583,9 +1583,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		else if (bAtPeekableEndpoint)
 		{
 			const TPair<EPeekAction, float> EndpointWeights[] = {
-				{ EPeekAction::CornerPeek,  bLowHp ? LowHpCornerPeekWeight  : CornerPeekWeight },
-				{ EPeekAction::Reposition,  (bLineLongEnough && !bJustRepositioned) ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f },
-				{ EPeekAction::Hold,        bLowHp ? LowHpHoldWeight        : HoldWeight },
+				{ EPeekAction::CornerPeek,  bLowHp ? LowHpCornerPeekWeight      : CornerPeekWeight },
+				{ EPeekAction::Reposition,  (bLineLongEnough && !bJustRepositioned) ? (bLowHp ? LowHpRepositionWeightStand : RepositionWeightStand) : 0.f },
+				{ EPeekAction::Hold,        bLowHp ? LowHpHoldWeight            : HoldWeight },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(EndpointWeights));
 		}
@@ -1593,7 +1593,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			// Stand cover, midpoint alpha — no fire option.
 			const TPair<EPeekAction, float> MidpointWeights[] = {
-				{ EPeekAction::Reposition,  (bLineLongEnough && !bJustRepositioned) ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f },
+				{ EPeekAction::Reposition,  (bLineLongEnough && !bJustRepositioned) ? (bLowHp ? LowHpRepositionWeightStand : RepositionWeightStand) : 0.f },
 				{ EPeekAction::Hold,        bLowHp ? LowHpHoldWeight : HoldWeight },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(MidpointWeights));

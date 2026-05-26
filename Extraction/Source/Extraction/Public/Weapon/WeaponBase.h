@@ -100,6 +100,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Config")
 	TObjectPtr<UWeaponDataAsset> WeaponData;
 
+	/** When true, the weapon auto-reloads on empty (suitable for player UX).
+	 *  AI-controlled weapons should set this false so the BT task drives reload timing —
+	 *  the companion's reload-while-cover-returning flow needs BT control to avoid
+	 *  capsule-resize-mid-reload-anim glitches. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Reload")
+	bool bAutoReloadOnEmpty = true;
+
 	// ---- Replicated State ----
 
 	UPROPERTY(ReplicatedUsing = OnRep_CurrentState, BlueprintReadOnly, Category = "Weapon|State")

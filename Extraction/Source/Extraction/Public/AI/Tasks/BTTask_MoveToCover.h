@@ -47,6 +47,9 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "100.0"))
 	float SearchRadius = 1200.0f;
 
+	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "0.0"))
+	float EarlyCrouchDistance = 300.f;
+
 	UPROPERTY(EditAnywhere, Category = "Debug")
 	bool bDebugLogging = true;
 
