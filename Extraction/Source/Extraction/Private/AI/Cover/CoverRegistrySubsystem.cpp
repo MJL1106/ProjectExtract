@@ -61,7 +61,7 @@ void UCoverRegistrySubsystem::GetSlotsInRadius(const FVector& Origin, float Radi
 	}
 }
 
-AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLoc, AActor* Target, float MaxRadius) const
+AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLoc, AActor* Target, float MaxRadius, float* OutScore) const
 {
 	if (!IsValid(Target))
 		return nullptr;
@@ -74,6 +74,19 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 	float BestDistSq = FLT_MAX;
 
 	int32 SlotCount = 0;
+
+	// Build trace params once — identical across all slots, rebuilding per-slot is pure waste.
+	UWorld* World = GetWorld();
+	FCollisionQueryParams LoSParams(SCENE_QUERY_STAT(CompanionCoverLoS), false);
+	LoSParams.AddIgnoredActor(Target);
+
+	auto HasLosFrom = [World, Target, &TargetLoc, &LoSParams](const FVector& EyePos) -> bool
+	{
+		if (!World) return false;
+		FHitResult Hit;
+		const bool bBlocked = World->LineTraceSingleByChannel(Hit, EyePos, TargetLoc, ECC_Visibility, LoSParams);
+		return !bBlocked || Hit.GetActor() == Target;
+	};
 
 	for (const TWeakObjectPtr<AAICoverSlot>& WeakSlot : RegisteredSlots)
 	{
@@ -92,21 +105,21 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 		// Stand cover with no peekable corners = hide-only; useless for combat.
 		if (Slot->Height == ECoverHeight::Stand && !Slot->bIsPeekableCornerStart && !Slot->bIsPeekableCornerEnd)
 		{
-			UE_LOG(LogCompanionAI, Log, TEXT("CoverRegistry: slot=%s -> REJECT-hide-only"), *Slot->GetName());
+			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s -> REJECT-hide-only"), *Slot->GetName());
 			continue;
 		}
 
 		// Must be unclaimed (or claimed by the querier's actor — handled via TryClaim being idempotent)
 		if (bClaimed)
 		{
-			UE_LOG(LogCompanionAI, Log, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=1 inArc=0 -> REJECT-claimed"), *Slot->GetName(), DistToQuerier);
+			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=1 inArc=0 -> REJECT-claimed"), *Slot->GetName(), DistToQuerier);
 			continue;
 		}
 
 		// Must be within search radius
 		if (DistToQuerierSq > MaxRadiusSq)
 		{
-			UE_LOG(LogCompanionAI, Log, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=0 inArc=0 -> REJECT-radius"), *Slot->GetName(), DistToQuerier);
+			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=0 inArc=0 -> REJECT-radius"), *Slot->GetName(), DistToQuerier);
 			continue;
 		}
 
@@ -114,23 +127,12 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 		const bool bInArc = Slot->IsTargetInFireArc(TargetLoc);
 		if (!bInArc)
 		{
-			UE_LOG(LogCompanionAI, Log, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=0 inArc=0 -> REJECT-arc"), *Slot->GetName(), DistToQuerier);
+			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=0 inArc=0 -> REJECT-arc"), *Slot->GetName(), DistToQuerier);
 			continue;
 		}
 
-		// New filter: slot must offer at least one position with LoS to target.
+		// Slot must offer at least one position with LoS to target.
 		{
-			UWorld* World = GetWorld();
-			auto HasLosFrom = [World, Target, &TargetLoc](const FVector& EyePos) -> bool
-			{
-				if (!World) return false;
-				FHitResult Hit;
-				FCollisionQueryParams Params;
-				Params.AddIgnoredActor(Target);
-				const bool bBlocked = World->LineTraceSingleByChannel(Hit, EyePos, TargetLoc, ECC_Visibility, Params);
-				return !bBlocked || Hit.GetActor() == Target;
-			};
-
 			constexpr float EyeHeight = 150.f;
 			constexpr float ApexProbeDist = 100.f;
 			bool bHasAnyLos = HasLosFrom(Slot->GetActorLocation() + FVector(0.f, 0.f, EyeHeight));
@@ -152,25 +154,15 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 
 			if (!bHasAnyLos)
 			{
-				UE_LOG(LogCompanionAI, Log, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-no-los"), *Slot->GetName(), DistToQuerier);
+				UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-no-los"), *Slot->GetName(), DistToQuerier);
 				continue;
 			}
 		}
 
-		// Score the slot
-		const FVector StandPos = Slot->GetStandPosition();
-		const float ProximityScore = 1.f - FMath::Clamp(DistToQuerier / MaxRadius, 0.f, 1.f);
+		// Score the slot — pass DistToQuerier so ScoreSlotFor skips the recompute.
+		const float TotalScore = UCoverRegistrySubsystem::ScoreSlotFor(Slot, QuerierLoc, Target, MaxRadius, DistToQuerier);
 
-		const float DistToTarget = FVector::Dist(StandPos, TargetLoc);
-		const float DistanceScore = FMath::Clamp((DistToTarget - IdealDistMin) / IdealDistRange, 0.f, 1.f);
-
-		const float StandScore = Slot->CanStandFireOver() ? 1.f : 0.5f;
-
-		const float TotalScore = Weight_Proximity * ProximityScore
-			+ Weight_Distance * DistanceScore
-			+ Weight_StandFire * StandScore;
-
-		UE_LOG(LogCompanionAI, Log, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=0 inArc=1 -> SCORE=%.2f"), *Slot->GetName(), DistToQuerier, TotalScore);
+		UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=0 inArc=1 -> SCORE=%.2f"), *Slot->GetName(), DistToQuerier, TotalScore);
 
 		const bool bBetter = TotalScore > BestScore;
 		const bool bTie = FMath::IsNearlyEqual(TotalScore, BestScore) && DistToQuerierSq < BestDistSq;
@@ -184,7 +176,27 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 
 	UE_LOG(LogCompanionAI, Log, TEXT("CoverRegistry: queried %d slots, best=%s score=%.2f"), SlotCount, *GetNameSafe(BestSlot), BestScore);
 
+	if (OutScore) *OutScore = BestScore;
 	return BestSlot;
+}
+
+float UCoverRegistrySubsystem::ScoreSlotFor(const AAICoverSlot* Slot, const FVector& QuerierLoc, const AActor* Target, float MaxRadius, float PrecomputedDist)
+{
+	if (!IsValid(Slot) || !IsValid(Target))
+		return -1.f;
+
+	const FVector StandPos = Slot->GetStandPosition();
+	const float DistToQuerier = PrecomputedDist >= 0.f ? PrecomputedDist : FVector::Dist(QuerierLoc, Slot->GetActorLocation());
+	const float ProximityScore = 1.f - FMath::Clamp(DistToQuerier / MaxRadius, 0.f, 1.f);
+
+	const float DistToTarget = FVector::Dist(StandPos, Target->GetActorLocation());
+	const float DistanceScore = FMath::Clamp((DistToTarget - IdealDistMin) / IdealDistRange, 0.f, 1.f);
+
+	const float StandScore = Slot->CanStandFireOver() ? 1.f : 0.5f;
+
+	return Weight_Proximity * ProximityScore
+		+ Weight_Distance * DistanceScore
+		+ Weight_StandFire * StandScore;
 }
 
 void UCoverRegistrySubsystem::PruneStaleSlots()

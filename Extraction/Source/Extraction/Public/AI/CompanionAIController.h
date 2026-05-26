@@ -38,6 +38,7 @@ public:
 	static const FName BB_ScoringWeight_AvoidEnemy;      // float
 	static const FName BB_ScoringWeight_CoverFromTarget; // float
 	static const FName BB_CoverSlot;                     // Object (AAICoverSlot)
+	static const FName BB_NextCoverSlot;                 // Object (AAICoverSlot) — set by CoverSwitchMonitor, consumed by MoveToCover
 
 	UFUNCTION(BlueprintPure, Category = "Companion|AI")
 	AExtractionCharacter* GetPlayerCharacter() const { return CachedPlayerCharacter; }
@@ -89,4 +90,7 @@ private:
 	bool IsCompanionRecentlyRendered() const;
 	bool ShouldWarp() const;
 	void ExecuteWarpBehindPlayer();
+
+	/** Releases any pending NextCoverSlot claim and clears the BB key. Belt-and-braces for AI teardown paths. */
+	void ReleaseNextCoverSlotIfClaimed();
 };
