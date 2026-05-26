@@ -346,6 +346,40 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 		if (BurstTimer > 0.f) return;
 		// Burst elapsed — transition to walk phase. Do NOT stop fire.
 		bRepositionStandPhase = false;
+
+		// Dry-abort: Phase A left us empty — skip Phase B walk, crouch in place and reload.
+		if (Companion->NeedsReload() && !Companion->IsReloading())
+		{
+			if (IsValid(Slot))
+				CurrentAlpha = Slot->GetAlphaFromLocation(Companion->GetActorLocation());
+
+			RepositionTargetAlpha.Reset();
+			bStandUpRepositionWalking = false;
+			RepositionStalledTime   = 0.f;
+			LastRepositionDist      = 0.f;
+			RepositionElapsed       = 0.f;
+			bRepositionStartLogged  = false;
+			bJustRepositioned       = true;
+			CurrentBurstAction      = EPeekAction::Hold;
+
+			if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
+				CAI->ClearCoverStrafeVelocity();
+			if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
+				CMC->StopMovementImmediately();
+
+			if (bDebugLogging)
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: STANDUP-REPOSITION-DRY-ABORT alpha=%.2f"),
+					*Companion->GetName(), CurrentAlpha);
+
+			// Defer reload until after the snap completes so the reload montage doesn't start
+			// while the actor is still gliding to the slot location (visible reload-while-gliding).
+			// The crouch-vs-stand distinction doesn't matter for reload timing -- what matters is
+			// being at the slot location before the reload anim plays.
+			bPendingReloadAfterSnap = true;
+
+			ReturnToCover(Companion, Anim, Slot, false, bLowHp);
+			return;
+		}
 	}
 
 	RepositionElapsed += DeltaSeconds;
@@ -742,6 +776,7 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	bSmoothSnapping = false;
 	SmoothSnapElapsed = 0.f;
 	bPendingCrouchAfterSnap = false;
+	bPendingReloadAfterSnap = false;
 	SmoothSnapInitialDist = 0.f;
 	SmoothSnapEffectiveDuration = 0.f;
 	bReloadGateActive = false;
@@ -818,6 +853,14 @@ bool UBTTask_CompanionCombat::TickSmoothSnap(ACompanionCharacter* Companion, flo
 			Companion->UnCrouch();
 		}
 		bPendingCrouchAfterSnap = false;
+		if (bPendingReloadAfterSnap && IsValid(Companion))
+		{
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [ReloadAfterSnap] t=%.3f"),
+				*GetNameSafe(Companion),
+				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Companion->ReloadWeapon();
+			bPendingReloadAfterSnap = false;
+		}
 		return true;
 	}
 	return false;
@@ -1113,6 +1156,15 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (!IsValid(PreSnapSlot))
 		{
 			UE_LOG(LogCompanionAI, Warning, TEXT("%s: [SLOT-LOST-MID-SNAP] Slot invalidated during warp — aborting cleanly"), *GetNameSafe(Ctx.Companion));
+			// If a reload was deferred for this snap, fire it now so the dry companion
+			// isn't stranded clicking-on-empty until a new slot is acquired.
+			if (bPendingReloadAfterSnap && IsValid(Ctx.Companion))
+			{
+				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [ReloadAfterSlotLoss] t=%.3f"),
+					*GetNameSafe(Ctx.Companion),
+					Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
+				Ctx.Companion->ReloadWeapon();
+			}
 			ResetTaskState(Ctx.Companion, Ctx.Blackboard, nullptr, false, false);
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 		}
@@ -1728,6 +1780,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			bCornerPeekReturning = false;
 			bIsFiringBurst = true;
 			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
+			if (Anim)
+			{
+				Anim->ExitCoverPose();
+				ActivePeekMontage = Anim->PlayPeekFire(ResolvedPeekSide);
+			}
 			UE_LOG(LogCompanionAI, Warning,
 				TEXT("%s: PEEK-ACTION=CornerPeek slot=%s alpha=%.2f home=%s apex=%s stepDist=%.0f burst=%.2fs ammo=%d"),
 				*GetNameSafe(Ctx.Companion), *Slot->GetName(),
@@ -1903,7 +1960,16 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					(int32)Ctx.Companion->IsReloading());
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=reload"), *Ctx.Companion->GetName());
 			}
-			Ctx.Companion->ReloadWeapon();
+			// Only defer the reload if we're actually returning to crouch cover (where the
+			// capsule resize would otherwise pop mid-reload-anim). Stand cover has no resize.
+			if (IsValid(Slot) && Slot->Height == ECoverHeight::Crouch)
+			{
+				bPendingReloadAfterSnap = true;
+			}
+			else
+			{
+				Ctx.Companion->ReloadWeapon();
+			}
 			ReturnToCover(Ctx.Companion, Anim, Slot, false, bLowHp);
 			return;
 		}
