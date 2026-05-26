@@ -795,10 +795,59 @@ void UBTTask_CompanionCombat::BeginSmoothSnap(ACompanionCharacter* Companion, co
 	SmoothSnapTargetRot = TargetRot;
 	SmoothSnapElapsed = 0.f;
 	bSmoothSnapping = true;
-	bPendingCrouchAfterSnap = bShouldCrouchAfter;
 	SmoothSnapReason = Reason;
 	SmoothSnapInitialDist = (SmoothSnapTargetLoc - SmoothSnapStartLoc).Size();
 	SmoothSnapEffectiveDuration = FMath::Clamp(SmoothSnapDuration * (SmoothSnapInitialDist / 30.f), SmoothSnapDuration, 1.0f);
+
+	// Short snaps (<=30 cm): fire crouch/uncrouch immediately so the AnimBP pose blend
+	// runs in parallel with the position glide — companion crouches WHILE gliding into cover.
+	// Long snaps defer to snap completion to avoid visible capsule resize mid-glide.
+	const float DistThreshold = 30.f;
+	if (SmoothSnapInitialDist <= DistThreshold)
+	{
+		if (bShouldCrouchAfter && !Companion->bIsCrouched)
+		{
+			// Adjust target Z for the upcoming capsule shrink so the crouched actor sits on the floor.
+			const float StandingHalfH = Companion->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+			float CrouchedHalfH = StandingHalfH;
+			if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
+				CrouchedHalfH = CMC->GetCrouchedHalfHeight();
+			SmoothSnapTargetLoc.Z -= (StandingHalfH - CrouchedHalfH);
+
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ImmediateOnShortSnap action=Crouch"),
+				*GetNameSafe(Companion),
+				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Companion->Crouch();
+			bPendingCrouchAfterSnap = bShouldCrouchAfter;
+		}
+		else if (!bShouldCrouchAfter && Companion->bIsCrouched)
+		{
+			// Adjust target Z for the upcoming capsule grow so the standing actor sits on the floor.
+			const float CrouchedHalfH_Now = Companion->GetCapsuleComponent()->GetUnscaledCapsuleHalfHeight();
+			float StandingHalfH_Target = CrouchedHalfH_Now;
+			if (ACharacter* DefaultChar = Cast<ACharacter>(Companion->GetClass()->GetDefaultObject()))
+			{
+				if (UCapsuleComponent* DefaultCapsule = DefaultChar->GetCapsuleComponent())
+					StandingHalfH_Target = DefaultCapsule->GetUnscaledCapsuleHalfHeight();
+			}
+			SmoothSnapTargetLoc.Z += (StandingHalfH_Target - CrouchedHalfH_Now);
+
+			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ImmediateOnShortSnap action=UnCrouch"),
+				*GetNameSafe(Companion),
+				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
+			Companion->UnCrouch();
+			bPendingCrouchAfterSnap = bShouldCrouchAfter;
+		}
+		else
+		{
+			bPendingCrouchAfterSnap = bShouldCrouchAfter;
+		}
+	}
+	else
+	{
+		bPendingCrouchAfterSnap = bShouldCrouchAfter;
+	}
+
 	UE_LOG(LogCompanionDiag, Log, TEXT("%s: [BeginSmoothSnap] t=%.3f initialDist=%.1f effectiveDur=%.3f yawDelta=%.1f crouchAfter=%d reason=%s"),
 		*GetNameSafe(Companion),
 		Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
