@@ -6,6 +6,8 @@
 #include "ExtractionCharacter.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
+#include "Components/SceneComponent.h"
+#include "Components/StaticMeshComponent.h"
 #include "Extraction.h"
 
 UWeaponComponent::UWeaponComponent()
@@ -29,6 +31,10 @@ void UWeaponComponent::BeginPlay()
 
 	OwnerCharacter = Cast<AExtractionCharacter>(GetOwner());
 	if (!IsValid(OwnerCharacter)) return;
+
+	// Warn loudly if the WeaponSpawn component is missing — weapon attachment will silently fail otherwise
+	if (IsValid(OwnerCharacter) && !IsValid(OwnerCharacter->GetWeaponSpawn()))
+		UE_LOG(LogExtraction, Warning, TEXT("WeaponComponent: OwnerCharacter has no WeaponSpawn component — weapons will not attach. Ensure the BP child class exposes one."));
 
 	// Server spawns default weapon
 	if (OwnerCharacter->HasAuthority() && DefaultWeaponClass)
@@ -70,14 +76,14 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	CurrentWeapon = World->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
 	if (!IsValid(CurrentWeapon)) return;
 
-	// Attach to first-person mesh weapon socket
-	USkeletalMeshComponent* FPMesh = OwnerCharacter->GetFirstPersonMesh();
-	if (IsValid(FPMesh))
+	// Attach to camera-space weapon spawn point (kit procedural anim drives hand IK from here)
+	USceneComponent* WeaponSpawn = OwnerCharacter->GetWeaponSpawn();
+	if (IsValid(WeaponSpawn))
 	{
 		CurrentWeapon->AttachToComponent(
-			FPMesh,
+			WeaponSpawn,
 			FAttachmentTransformRules::SnapToTargetNotIncludingScale,
-			FName("HandGrip_R")
+			NAME_None
 		);
 	}
 
@@ -175,17 +181,43 @@ void UWeaponComponent::Multicast_OnFired_Implementation()
 
 void UWeaponComponent::OnRep_CurrentWeapon()
 {
-	// Proxies: attach weapon mesh to 3P skeleton
+	// Late-joiner safety: OwnerCharacter may not have been set if replication ordering delivered
+	// CurrentWeapon before BeginPlay ran on this component.
+	if (!IsValid(OwnerCharacter))
+		OwnerCharacter = Cast<AExtractionCharacter>(GetOwner());
+
 	if (!IsValid(CurrentWeapon) || !IsValid(OwnerCharacter)) return;
 
-	USkeletalMeshComponent* Mesh3P = OwnerCharacter->GetMesh();
-	if (IsValid(Mesh3P))
+	// Fix 3: detach the previous weapon if the server swapped without destroying the old one
+	if (IsValid(PreviousWeapon) && PreviousWeapon != CurrentWeapon)
+		PreviousWeapon->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+	PreviousWeapon = CurrentWeapon;
+
+	if (OwnerCharacter->IsLocallyControlled())
 	{
-		CurrentWeapon->AttachToComponent(
-			Mesh3P,
-			FAttachmentTransformRules::SnapToTargetNotIncludingScale,
-			FName("HandGrip_R")
-		);
+		// Owner path: attach to camera-space weapon spawn point (kit procedural anim drives hand IK from here)
+		USceneComponent* WeaponSpawn = OwnerCharacter->GetWeaponSpawn();
+		if (IsValid(WeaponSpawn))
+		{
+			CurrentWeapon->AttachToComponent(
+				WeaponSpawn,
+				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+				NAME_None
+			);
+		}
+	}
+	else
+	{
+		// Proxy path: attach to 3P skeleton
+		USkeletalMeshComponent* Mesh3P = OwnerCharacter->GetMesh();
+		if (IsValid(Mesh3P))
+		{
+			CurrentWeapon->AttachToComponent(
+				Mesh3P,
+				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+				FName("HandGrip_R")
+			);
+		}
 	}
 }
 

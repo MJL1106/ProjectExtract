@@ -8,6 +8,8 @@
 #include "Camera/CameraComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Components/SphereComponent.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "EnhancedInputComponent.h"
 #include "InputActionValue.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -39,9 +41,6 @@ AExtractionCharacter::AExtractionCharacter()
 	, bIsSliding(false)
 	, bIsProne(false)
 	, bWantsToSprint(false)
-	, CrouchCameraCurrentOffset(0.f)
-	, CrouchCameraTargetOffset(0.f)
-	, StandingBaseEyeHeight(0.f)
 	, SlideElapsed(0.f)
 	, SlideStartSpeed(0.f)
 	, SlideDirection(FVector::ZeroVector)
@@ -68,29 +67,35 @@ AExtractionCharacter::AExtractionCharacter()
 	// Capsule
 	GetCapsuleComponent()->SetCapsuleSize(34.0f, 96.0f);
 
-	// First-person arms mesh (owner only)
-	FirstPersonMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("FirstPersonMesh"));
-	FirstPersonMesh->SetupAttachment(GetMesh());
-	FirstPersonMesh->SetOnlyOwnerSee(true);
-	FirstPersonMesh->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::FirstPerson;
-	FirstPersonMesh->SetCollisionProfileName(FName("NoCollision"));
+	// SpringArm anchored to head bone — camera at eye height, controller drives rotation
+	SpringArm = CreateDefaultSubobject<USpringArmComponent>(TEXT("SpringArm"));
+	SpringArm->SetupAttachment(GetMesh(), FName("head"));
+	SpringArm->TargetArmLength = 0.0f;
+	SpringArm->bDoCollisionTest = false;
+	SpringArm->bUsePawnControlRotation = true;
+	SpringArm->bInheritPitch = false;
+	SpringArm->bInheritYaw = false;
+	SpringArm->bInheritRoll = false;
+	SpringArm->PrimaryComponentTick.bCanEverTick = false;
 
-	// Camera attached to FP mesh head socket
+	// Camera on the SpringArm tip
 	FirstPersonCameraComponent = CreateDefaultSubobject<UCameraComponent>(TEXT("FirstPersonCamera"));
-	FirstPersonCameraComponent->SetupAttachment(FirstPersonMesh, FName("head"));
-	FirstPersonCameraComponent->SetRelativeLocationAndRotation(
-		FVector(-2.8f, 5.89f, 0.0f),
-		FRotator(0.0f, 90.0f, -90.0f)
-	);
-	FirstPersonCameraComponent->bUsePawnControlRotation = true;
-	FirstPersonCameraComponent->bEnableFirstPersonFieldOfView = true;
-	FirstPersonCameraComponent->bEnableFirstPersonScale = true;
-	FirstPersonCameraComponent->FirstPersonFieldOfView = 70.0f;
-	FirstPersonCameraComponent->FirstPersonScale = 0.6f;
+	FirstPersonCameraComponent->SetupAttachment(SpringArm);
+	FirstPersonCameraComponent->bUsePawnControlRotation = false;
 
-	// Third-person mesh config
-	GetMesh()->SetOwnerNoSee(true);
-	GetMesh()->FirstPersonPrimitiveType = EFirstPersonPrimitiveType::WorldSpaceRepresentation;
+	// WeaponSpawn — weapons attach here in camera-space; hands follow procedurally
+	WeaponSpawn = CreateDefaultSubobject<USceneComponent>(TEXT("WeaponSpawn"));
+	WeaponSpawn->SetupAttachment(FirstPersonCameraComponent);
+	WeaponSpawn->SetRelativeLocation(FVector(90.0f, 0.0f, 0.0f));
+
+	// Effector — proc-anim IK/collision target
+	Effector = CreateDefaultSubobject<USphereComponent>(TEXT("Effector"));
+	Effector->SetupAttachment(GetMesh());
+	Effector->SetSphereRadius(0.0f);
+	Effector->SetHiddenInGame(true);
+	Effector->SetCastShadow(false);
+	Effector->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	Effector->SetCollisionResponseToAllChannels(ECR_Ignore);
 
 	// Character movement
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
@@ -144,7 +149,6 @@ AExtractionCharacter::AExtractionCharacter()
 	BoneToHitRegionMap.Add(FName("ball_l"), EHitRegion::Legs);
 	BoneToHitRegionMap.Add(FName("ball_r"), EHitRegion::Legs);
 
-	StandingBaseEyeHeight = BaseEyeHeight;
 }
 
 void AExtractionCharacter::PostInitializeComponents()
@@ -161,6 +165,10 @@ void AExtractionCharacter::PostInitializeComponents()
 void AExtractionCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Apply WeaponSpawnOffset so BP subclasses can override the camera-space weapon position
+	if (IsValid(WeaponSpawn))
+		WeaponSpawn->SetRelativeLocation(WeaponSpawnOffset);
 
 	// Re-apply movement speeds with BP-overridden values
 	// (constructor uses C++ defaults which may differ from BP instance values)
@@ -184,10 +192,11 @@ void AExtractionCharacter::BeginPlay()
 	if (!IsValid(CachedAnimInstance))
 		UE_LOG(LogExtraction, Warning, TEXT("'%s': 3P AnimInstance is not UExtractionAnimInstance — check ABP parent class."), *GetNameSafe(this));
 
-	CachedFPAnimInstance = Cast<UExtractionAnimInstance>(FirstPersonMesh->GetAnimInstance());
+	// Single-mesh body awareness: FP and TP anim instance are the same component now
+	CachedFPAnimInstance = CachedAnimInstance;
 
 	if (IsValid(FirstPersonCameraComponent))
-		BaseFOV = FirstPersonCameraComponent->FirstPersonFieldOfView;
+		BaseFOV = FirstPersonCameraComponent->FieldOfView;
 }
 
 void AExtractionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -236,8 +245,9 @@ void AExtractionCharacter::Tick(float DeltaTime)
 				EndSprintJump();
 		}
 
-		// Deferred traversal: execute as soon as uncrouch camera interp finishes
-		if (PendingTraversalType != ETraversalType::None && FMath::IsNearlyEqual(CrouchCameraCurrentOffset, 0.f, 1.f))
+		// Deferred traversal: execute once CMC has actually uncrouched the capsule
+		UCharacterMovementComponent* DeferredMoveComp = GetCharacterMovement();
+		if (PendingTraversalType != ETraversalType::None && IsValid(DeferredMoveComp) && !DeferredMoveComp->IsCrouching())
 		{
 			const ETraversalType Type = PendingTraversalType;
 			PendingTraversalType = ETraversalType::None;
@@ -259,27 +269,6 @@ void AExtractionCharacter::Tick(float DeltaTime)
 				Weapon->UpdateRecoilRecovery(DeltaTime);
 		}
 
-		// Smooth camera height interpolation during crouch transitions (local player only)
-		const UCharacterMovementComponent* CameraComp = GetCharacterMovement();
-		if (IsValid(CameraComp))
-		{
-			const float HalfHeightDelta = CameraComp->GetCrouchedHalfHeight() - GetDefaultHalfHeight();
-			CrouchCameraTargetOffset = CameraComp->IsCrouching() ? HalfHeightDelta : 0.f;
-
-			if (!FMath::IsNearlyEqual(CrouchCameraCurrentOffset, CrouchCameraTargetOffset, 0.1f))
-			{
-				CrouchCameraCurrentOffset = FMath::FInterpTo(
-					CrouchCameraCurrentOffset, CrouchCameraTargetOffset,
-					DeltaTime, CrouchCameraInterpSpeed);
-
-				BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
-			}
-			else
-			{
-				CrouchCameraCurrentOffset = CrouchCameraTargetOffset;
-				BaseEyeHeight = StandingBaseEyeHeight + CrouchCameraCurrentOffset;
-			}
-		}
 	}
 }
 
@@ -611,6 +600,13 @@ void AExtractionCharacter::EnterSlide()
 
 	// Set initial velocity to slide direction at entry speed (no instant impulse)
 	MoveComp->Velocity = SlideDirection * SlideStartSpeed + FVector(0.f, 0.f, MoveComp->Velocity.Z);
+
+	if (SlideMontage)
+	{
+		if (UAnimInstance* AnimInst = GetMesh()->GetAnimInstance())
+			AnimInst->Montage_Play(SlideMontage);
+	}
+	OnSlideStarted();
 }
 
 void AExtractionCharacter::UpdateSlide(float DeltaTime)
@@ -662,12 +658,17 @@ void AExtractionCharacter::EndSlide()
 		MoveComp->Velocity = SlideDirection * ExitSpeed + FVector(0.f, 0.f, MoveComp->Velocity.Z);
 	}
 
-	// Stand back up — snap camera offset so there's no interp jolt
-	CrouchCameraCurrentOffset = 0.f;
-	CrouchCameraTargetOffset = 0.f;
-	BaseEyeHeight = StandingBaseEyeHeight;
-
 	UnCrouch();
+
+	if (SlideMontage)
+	{
+		if (UAnimInstance* AnimInst = GetMesh()->GetAnimInstance())
+		{
+			if (AnimInst->Montage_IsPlaying(SlideMontage))
+				AnimInst->Montage_Stop(0.2f, SlideMontage);
+		}
+	}
+	OnSlideEnded();
 }
 
 void AExtractionCharacter::OnRep_IsSliding()
@@ -731,7 +732,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 		bIsProne = false;
 		ApplySprintSpeed();
 		AnimInst->PlayProneExitMontage();
-		if (IsValid(CachedFPAnimInstance)) CachedFPAnimInstance->PlayProneExitMontage();
+		if (IsValid(CachedFPAnimInstance) && CachedFPAnimInstance != AnimInst) CachedFPAnimInstance->PlayProneExitMontage();
 	}
 	else
 	{
@@ -762,7 +763,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 			// Capture montage duration so the decel curve matches the animation length
 			const float MontageDuration = AnimInst->PlayProneTransitionMontage(TransitionType);
 			ProneMomentumDuration = FMath::Max(MontageDuration, 0.1f);
-			if (IsValid(CachedFPAnimInstance)) CachedFPAnimInstance->PlayProneTransitionMontage(TransitionType);
+			if (IsValid(CachedFPAnimInstance) && CachedFPAnimInstance != AnimInst) CachedFPAnimInstance->PlayProneTransitionMontage(TransitionType);
 
 			if (IsValid(MoveComp))
 			{
@@ -786,7 +787,7 @@ void AExtractionCharacter::ToggleProne(const FInputActionValue& Value)
 			ApplySprintSpeed();
 			Crouch();
 			AnimInst->PlayProneTransitionMontage(TransitionType);
-			if (IsValid(CachedFPAnimInstance)) CachedFPAnimInstance->PlayProneTransitionMontage(TransitionType);
+			if (IsValid(CachedFPAnimInstance) && CachedFPAnimInstance != AnimInst) CachedFPAnimInstance->PlayProneTransitionMontage(TransitionType);
 		}
 	}
 }
@@ -913,7 +914,7 @@ void AExtractionCharacter::HandleTraversalStarted(ETraversalType Type, float Pla
 		AnimInst->Montage_SetEndDelegate(EndDelegate, AnimInst->GetCurrentActiveMontage());
 	}
 
-	if (IsValid(CachedFPAnimInstance))
+	if (IsValid(CachedFPAnimInstance) && CachedFPAnimInstance != AnimInst)
 	{
 		switch (Type)
 		{
@@ -983,7 +984,7 @@ void AExtractionCharacter::StartSprintJump()
 		AnimInst->Montage_SetEndDelegate(EndDelegate, AnimInst->GetCurrentActiveMontage());
 	}
 
-	if (IsValid(CachedFPAnimInstance))
+	if (IsValid(CachedFPAnimInstance) && CachedFPAnimInstance != AnimInst)
 		CachedFPAnimInstance->PlaySprintJumpMontage(SprintJumpPlayRate);
 
 	// Normal jump — CMC handles gravity, velocity, landing
@@ -1185,6 +1186,8 @@ void AExtractionCharacter::OnBleedoutExpired()
 
 void AExtractionCharacter::FullDeath()
 {
+	if (bIsSliding) EndSlide();
+
 	bIsDBNO = false;
 	BleedoutTimeRemaining = 0.f;
 
@@ -1421,15 +1424,15 @@ void AExtractionCharacter::UpdateWeaponFOV(float DeltaTime)
 		? 1.0f / Data->ADSTransitionTime
 		: 10.0f;
 
-	const float CurrentFOV = FirstPersonCameraComponent->FirstPersonFieldOfView;
+	const float CurrentFOV = FirstPersonCameraComponent->FieldOfView;
 	if (!FMath::IsNearlyEqual(CurrentFOV, TargetFOV, 0.1f))
 	{
-		FirstPersonCameraComponent->FirstPersonFieldOfView = FMath::FInterpTo(
-			CurrentFOV, TargetFOV, DeltaTime, InterpSpeed);
+		FirstPersonCameraComponent->SetFieldOfView(FMath::FInterpTo(
+			CurrentFOV, TargetFOV, DeltaTime, InterpSpeed));
 	}
 	else
 	{
-		FirstPersonCameraComponent->FirstPersonFieldOfView = TargetFOV;
+		FirstPersonCameraComponent->SetFieldOfView(TargetFOV);
 	}
 }
 

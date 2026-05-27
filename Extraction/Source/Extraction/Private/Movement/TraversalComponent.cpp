@@ -548,6 +548,23 @@ void UTraversalComponent::StartTraversal(ETraversalType Type)
 	bIsSnappingToVault = true;
 	VaultSnapTimeRemaining = TraversalConstants::VaultSnapDuration;
 
+	{
+		UAnimInstance* AnimInst = IsValid(OwningCharacter) && IsValid(OwningCharacter->GetMesh())
+			? OwningCharacter->GetMesh()->GetAnimInstance() : nullptr;
+		UAnimMontage* ActiveMontage = IsValid(AnimInst) ? AnimInst->GetCurrentActiveMontage() : nullptr;
+		UE_LOG(LogTraversal, Log,
+			TEXT("[StartTraversal] %s Type=%d | ActorLoc=%s | SnapTarget=%s | SurfaceH=%.1f | MoveMode=%d | Velocity=%s | ActiveMontage=%s | RootMotionReady=%d"),
+			*OwnerTag(OwningCharacter),
+			(int32)Type,
+			*OwningCharacter->GetActorLocation().ToCompactString(),
+			*VaultSnapTarget.ToCompactString(),
+			VaultSurfaceHeight,
+			IsValid(CachedMovement) ? (int32)CachedMovement->MovementMode : -1,
+			IsValid(CachedMovement) ? *CachedMovement->Velocity.ToCompactString() : TEXT("(null)"),
+			*GetNameSafe(ActiveMontage),
+			(IsValid(CachedMovement) && CachedMovement->RootMotionParams.bHasRootMotion) ? 1 : 0);
+	}
+
 	// Worst-case escape timer — if the montage end delegate never fires (asset broken,
 	// montage interrupted by another animation, etc.), force-end the traversal so the
 	// character can't be stranded in MOVE_Flying + no-collision forever. Cleared in
@@ -586,11 +603,38 @@ void UTraversalComponent::UpdateTraversal(float DeltaTime)
 	// Owner is responsible for calling EndTraversal() when the traversal montage finishes.
 	// See AExtractionCharacter::OnTraversalMontageEnded and ACompanionCharacter::OnTraversalMontageEnded
 	// — both bind a per-montage Montage_SetEndDelegate after playing the traversal montage.
+
+	{
+		UAnimInstance* AnimInst = IsValid(OwningCharacter) && IsValid(OwningCharacter->GetMesh())
+			? OwningCharacter->GetMesh()->GetAnimInstance() : nullptr;
+		UAnimMontage* ActiveMontage = IsValid(AnimInst) ? AnimInst->GetCurrentActiveMontage() : nullptr;
+		float MontagePos = (IsValid(AnimInst) && IsValid(ActiveMontage))
+			? AnimInst->Montage_GetPosition(ActiveMontage) : -1.f;
+		UE_LOG(LogTraversal, Log,
+			TEXT("[UpdateTraversal] %s | ActorLoc=%s | Snapping=%d | Speed=%.1f | RootMotion=%d | Montage=%s | MontagePos=%.3f"),
+			*OwnerTag(OwningCharacter),
+			*OwningCharacter->GetActorLocation().ToCompactString(),
+			bIsSnappingToVault ? 1 : 0,
+			IsValid(CachedMovement) ? CachedMovement->Velocity.Size() : 0.f,
+			(IsValid(CachedMovement) && CachedMovement->RootMotionParams.bHasRootMotion) ? 1 : 0,
+			*GetNameSafe(ActiveMontage),
+			MontagePos);
+	}
 }
 
 void UTraversalComponent::EndTraversal()
 {
 	if (ActiveTraversalType == ETraversalType::None) return;
+
+	{
+		const bool bWorstCasePending = (GetWorld() != nullptr)
+			&& GetWorld()->GetTimerManager().IsTimerActive(WorstCaseTraversalEndHandle);
+		UE_LOG(LogTraversal, Log,
+			TEXT("[EndTraversal] %s | ActorLoc=%s | WorstCaseTimerStillActive=%d (1=montage ended first, 0=timer fired)"),
+			*OwnerTag(OwningCharacter),
+			IsValid(OwningCharacter) ? *OwningCharacter->GetActorLocation().ToCompactString() : TEXT("(null)"),
+			bWorstCasePending ? 1 : 0);
+	}
 
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(WorstCaseTraversalEndHandle);

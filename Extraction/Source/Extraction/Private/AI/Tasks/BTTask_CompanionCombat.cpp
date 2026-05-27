@@ -1688,6 +1688,18 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		if (Action == EPeekAction::Reposition || Action == EPeekAction::StandUpAndReposition)
 		{
+			// Block within-slot reposition if the player is overlapping this cover slot.
+			AActor* Player = Cast<AActor>(Ctx.Blackboard->GetValueAsObject(ACompanionAIController::BB_PlayerActor));
+			if (IsValid(Player) && Slot->IsLocationOverlappingCoverLine(Player->GetActorLocation()))
+			{
+				CurrentBurstAction = EPeekAction::Hold;
+				++ConsecutiveHolds;
+				PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
+				TimeInCoverIdle = 0.f;
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=Hold (player-overlap-cover) alpha=%.2f"), *GetNameSafe(Ctx.Companion), CurrentAlpha);
+				return;
+			}
+
 			float NewAlpha;
 
 			if (Slot->Height == ECoverHeight::Stand)

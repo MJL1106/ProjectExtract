@@ -63,3 +63,13 @@ Extraction/Config/DefaultAgentIntegrationKit.ini
 Extraction/Plugins/
 # Added by code-review-graph
 .code-review-graph/
+
+# ----------------------------------------------------------------------------
+# Local diagnostic build logs (not for tracking)
+# ----------------------------------------------------------------------------
+build_*.log
+
+# ----------------------------------------------------------------------------
+# Oversized kit assets (over GitHub's 100MB limit, no LFS configured)
+# ----------------------------------------------------------------------------
+Extraction/Content/ProceduralFPSKIT/Demo/Lyra_Content/Effects/Textures/Flipbooks/T_SmokeSwirl_3_Flipbook_CHANNELPACK.uasset

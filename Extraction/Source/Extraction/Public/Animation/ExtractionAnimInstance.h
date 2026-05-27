@@ -233,7 +233,7 @@ private:
 
 	/** Cached movement component */
 	UPROPERTY()
-	TObjectPtr<UCharacterMovementComponent> MovementComponent;
+	TObjectPtr<UCharacterMovementComponent> CachedMovementComp;
 
 	/** Play a single montage. Returns duration / PlayRate, or 0 on failure. */
 	float PlayMontageInternal(UAnimMontage* Montage, float PlayRate);
