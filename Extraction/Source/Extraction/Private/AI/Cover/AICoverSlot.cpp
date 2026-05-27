@@ -6,6 +6,7 @@
 DEFINE_LOG_CATEGORY(LogCoverSlot);
 
 static constexpr float DefaultEndpointInset = 40.f;
+static constexpr float OverlapPerpThreshold = 120.f;
 
 AAICoverSlot::AAICoverSlot()
 {
@@ -207,6 +208,13 @@ float AAICoverSlot::GetAlphaFromLocation(const FVector& WorldLoc) const
 
 	const float Alpha = FVector::DotProduct(ToLoc, Dir) / Dir.SizeSquared();
 	return FMath::Clamp(Alpha, 0.f, 1.f);
+}
+
+bool AAICoverSlot::IsLocationOverlappingCoverLine(const FVector& WorldLoc) const
+{
+	const float Alpha = GetAlphaFromLocation(WorldLoc);
+	const FVector Projected = GetLocationAtAlpha(Alpha);
+	return FVector::Dist2D(WorldLoc, Projected) <= OverlapPerpThreshold;
 }
 
 bool AAICoverSlot::IsAlphaAtPeekableCorner(float Alpha, float Epsilon) const

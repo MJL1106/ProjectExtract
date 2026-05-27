@@ -8,6 +8,8 @@
 #include "Animation/AnimMontage.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/KismetMathLibrary.h"
+#include "Engine/SkeletalMesh.h"
+#include "Animation/Skeleton.h"
 
 DEFINE_LOG_CATEGORY(LogExtractionAnim);
 
@@ -65,8 +67,8 @@ void UExtractionAnimInstance::NativeInitializeAnimation()
 		return;
 	}
 
-	MovementComponent = OwningCharacter->GetCharacterMovement();
-	if (!IsValid(MovementComponent))
+	CachedMovementComp = OwningCharacter->GetCharacterMovement();
+	if (!IsValid(CachedMovementComp))
 	{
 		UE_LOG(LogExtractionAnim, Warning,
 			TEXT("No CharacterMovementComponent found on '%s'."),
@@ -78,15 +80,15 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 {
 	Super::NativeUpdateAnimation(DeltaSeconds);
 
-	if (!IsValid(OwningCharacter) || !IsValid(MovementComponent)) return;
+	if (!IsValid(OwningCharacter) || !IsValid(CachedMovementComp)) return;
 
 	// --- Velocity / Speed (no allocations) ---
-	const FVector Velocity = MovementComponent->Velocity;
+	const FVector Velocity = CachedMovementComp->Velocity;
 	const FVector GroundVelocity(Velocity.X, Velocity.Y, 0.f);
 	Speed = GroundVelocity.Size();
 	bHasVelocity = Speed > ExtractionAnimConstants::MinVelocityThreshold;
 
-	const float MaxSpeed = MovementComponent->MaxWalkSpeed;
+	const float MaxSpeed = CachedMovementComp->MaxWalkSpeed;
 	NormalizedSpeed = (MaxSpeed > UE_KINDA_SMALL_NUMBER)
 		? FMath::Clamp(Speed / MaxSpeed, 0.f, 1.f)
 		: 0.f;
@@ -103,10 +105,10 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	Direction = FMath::FInterpTo(Direction, TargetDirection, DeltaSeconds, ExtractionAnimConstants::DirectionInterpSpeed);
 
 	// --- Movement state flags ---
-	bIsInAir = MovementComponent->IsFalling();
+	bIsInAir = CachedMovementComp->IsFalling();
 	bIsFalling = bIsInAir && (Velocity.Z < 0.f);
-	bIsCrouching = MovementComponent->IsCrouching();
-	bIsAccelerating = MovementComponent->GetCurrentAcceleration().SizeSquared() > UE_KINDA_SMALL_NUMBER;
+	bIsCrouching = CachedMovementComp->IsCrouching();
+	bIsAccelerating = CachedMovementComp->GetCurrentAcceleration().SizeSquared() > UE_KINDA_SMALL_NUMBER;
 
 	// --- Aim offset ---
 	const FRotator AimRotation = OwningCharacter->GetBaseAimRotation();
@@ -208,28 +210,80 @@ UAnimSequence* UExtractionAnimInstance::GetActiveLandAnim() const
 float UExtractionAnimInstance::PlayFireMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayFireMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (!IsValid(Data->FireMontage))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayFireMontage: Data->FireMontage is null on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayMontageInternal(Data->FireMontage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayReloadMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayReloadMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (!IsValid(Data->ReloadMontage))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayReloadMontage: Data->ReloadMontage is null on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayMontageInternal(Data->ReloadMontage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayEquipMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayEquipMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (!IsValid(Data->EquipMontage))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayEquipMontage: Data->EquipMontage is null on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayMontageInternal(Data->EquipMontage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayHitReactMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayHitReactMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (Data->HitReactMontages.Num() == 0)
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayHitReactMontage: Data->HitReactMontages is empty on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayRandomMontage(Data->HitReactMontages, PlayRate);
 }
 
@@ -238,14 +292,33 @@ float UExtractionAnimInstance::PlayDeathMontage(float PlayRate)
 	bIsAlive = false;
 
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayDeathMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (Data->DeathMontages.Num() == 0)
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayDeathMontage: Data->DeathMontages is empty on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayRandomMontage(Data->DeathMontages, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType TransitionType, float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayProneTransitionMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
 
 	UAnimMontage* Montage = nullptr;
 	switch (TransitionType)
@@ -266,13 +339,34 @@ float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType T
 		return 0.f;
 	}
 
+	if (!IsValid(Montage))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayProneTransitionMontage: Montage for TransitionType=%d is null on '%s'"),
+			static_cast<int32>(TransitionType), *GetNameSafe(Data));
+		return 0.f;
+	}
+
 	return PlayMontageInternal(Montage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayProneExitMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayProneExitMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (!IsValid(Data->ProneToStandTransition))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayProneExitMontage: Data->ProneToStandTransition is null on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayMontageInternal(Data->ProneToStandTransition, PlayRate);
 }
 
@@ -289,7 +383,20 @@ bool UExtractionAnimInstance::IsPlayingProneEntryMontage() const
 float UExtractionAnimInstance::PlayVaultMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayVaultMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (!IsValid(Data->VaultMontage))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayVaultMontage: Data->VaultMontage is null on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayMontageInternal(Data->VaultMontage, PlayRate);
 }
 
@@ -303,7 +410,20 @@ bool UExtractionAnimInstance::IsPlayingVaultMontage() const
 float UExtractionAnimInstance::PlayClimbMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayClimbMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (!IsValid(Data->ClimbMontage))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayClimbMontage: Data->ClimbMontage is null on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayMontageInternal(Data->ClimbMontage, PlayRate);
 }
 
@@ -317,7 +437,20 @@ bool UExtractionAnimInstance::IsPlayingClimbMontage() const
 float UExtractionAnimInstance::PlayMantleMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayMantleMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (!IsValid(Data->MantleMontage))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlayMantleMontage: Data->MantleMontage is null on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayMontageInternal(Data->MantleMontage, PlayRate);
 }
 
@@ -349,7 +482,20 @@ bool UExtractionAnimInstance::HasMontageForType(ETraversalType Type) const
 float UExtractionAnimInstance::PlaySprintJumpMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlaySprintJumpMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
+			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
+		return 0.f;
+	}
+	if (!IsValid(Data->SprintJumpMontage))
+	{
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("PlaySprintJumpMontage: Data->SprintJumpMontage is null on '%s'"),
+			*GetNameSafe(Data));
+		return 0.f;
+	}
 	return PlayMontageInternal(Data->SprintJumpMontage, PlayRate);
 }
 
@@ -380,7 +526,22 @@ float UExtractionAnimInstance::PlayMontageInternal(UAnimMontage* Montage, float 
 	if (!IsValid(Montage)) return 0.f;
 
 	const float SafePlayRate = (FMath::Abs(PlayRate) < UE_KINDA_SMALL_NUMBER) ? 1.0f : PlayRate;
-	Montage_Play(Montage, SafePlayRate);
+	const float PlayedAt = Montage_Play(Montage, SafePlayRate);
+	if (PlayedAt <= 0.f)
+	{
+		FString MeshSkeleton = TEXT("(null)");
+		if (USkeletalMeshComponent* MeshComp = GetSkelMeshComponent())
+			if (USkeletalMesh* Mesh = MeshComp->GetSkeletalMeshAsset())
+				if (USkeleton* Skel = Mesh->GetSkeleton())
+					MeshSkeleton = Skel->GetPathName();
+
+		UE_LOG(LogExtractionAnim, Warning,
+			TEXT("Montage_Play returned %.2f for '%s' — likely skeleton incompatibility. Mesh skeleton: %s, Montage skeleton: %s"),
+			PlayedAt,
+			*GetNameSafe(Montage),
+			*MeshSkeleton,
+			Montage->GetSkeleton() ? *Montage->GetSkeleton()->GetPathName() : TEXT("(null)"));
+	}
 	return Montage->GetPlayLength() / FMath::Abs(SafePlayRate);
 }
 

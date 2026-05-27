@@ -11,6 +11,8 @@
 class UInputComponent;
 class USkeletalMeshComponent;
 class UCameraComponent;
+class USpringArmComponent;
+class USphereComponent;
 class UInputAction;
 class UExtractionAnimInstance;
 class UHealthComponent;
@@ -30,13 +32,21 @@ class EXTRACTION_API AExtractionCharacter : public ACharacter
 {
 	GENERATED_BODY()
 
-	/** Pawn mesh: first person view (arms; seen only by self) */
+	/** SpringArm on the body mesh — zero-length pivot, proc-anim drives rotation */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
-	TObjectPtr<USkeletalMeshComponent> FirstPersonMesh;
+	TObjectPtr<USpringArmComponent> SpringArm;
 
-	/** First person camera */
+	/** First person camera attached to SpringArm tip */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UCameraComponent> FirstPersonCameraComponent;
+
+	/** WeaponSpawn — weapons attach here in camera-space; hands follow procedurally */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<USceneComponent> WeaponSpawn;
+
+	/** Effector — proc-anim IK/collision target */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<USphereComponent> Effector;
 
 	/** Health and shield management */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
@@ -123,10 +133,6 @@ protected:
 			ToolTip = "Controls how sprint-to-prone momentum decays.\n1.0 = Linear (constant deceleration)\n2.0 = Holds speed longer, then drops off\n3.0+ = Even more hang time at peak before a sharp decel"))
 	float ProneMomentumDecelerationExponent = 2.0f;
 
-	/** How fast the camera interpolates between standing and crouched height (units/s) */
-	UPROPERTY(EditDefaultsOnly, Category = "Movement|Config")
-	float CrouchCameraInterpSpeed = 12.0f;
-
 	/** Peak speed at the start of the slide in cm/s */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Slide",
 		meta = (ToolTip = "The fastest the character moves during the slide. Reached immediately at slide entry. Higher = faster initial burst."))
@@ -153,6 +159,16 @@ protected:
 		meta = (ClampMin = "0.1", ClampMax = "1.0",
 			ToolTip = "Max time between two crouch presses to trigger a slide while sprinting.\nLower = tighter timing required."))
 	float SlideDoubleTapWindow = 0.3f;
+
+	/** Assign in BP child class — played on slide entry, stopped on slide exit */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Slide")
+	TObjectPtr<UAnimMontage> SlideMontage;
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Movement|Slide")
+	void OnSlideStarted();
+
+	UFUNCTION(BlueprintImplementableEvent, Category = "Movement|Slide")
+	void OnSlideEnded();
 
 	// ---- Sprint Jump Config ----
 
@@ -322,10 +338,16 @@ public:
 
 	// ---- Getters ----
 
-	USkeletalMeshComponent* GetFirstPersonMesh() const { return FirstPersonMesh; }
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
 	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
 	UWeaponComponent* GetWeaponComponent() const { return WeaponComponent; }
+
+	/** Camera-space offset applied to the WeaponSpawn scene component. Tune per-BP to adjust weapon position. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Components")
+	FVector WeaponSpawnOffset = FVector(90.0f, 0.0f, 0.0f);
+
+	UFUNCTION(BlueprintPure, Category = "Components")
+	USceneComponent* GetWeaponSpawn() const { return WeaponSpawn; }
 
 	UFUNCTION(BlueprintPure, Category = "Health")
 	bool GetIsDBNO() const { return bIsDBNO; }
@@ -413,15 +435,6 @@ private:
 
 	/** Tracks whether the sprint input is currently held */
 	bool bWantsToSprint;
-
-	/** Current camera Z offset driven by crouch interpolation */
-	float CrouchCameraCurrentOffset;
-
-	/** Target camera Z offset (0 when standing, negative when crouched) */
-	float CrouchCameraTargetOffset;
-
-	/** Standing BaseEyeHeight cached from constructor, used as interp baseline */
-	float StandingBaseEyeHeight;
 
 	/** Time elapsed since slide started */
 	float SlideElapsed;

@@ -89,6 +89,9 @@ public:
 	/** Projects WorldLoc onto the cover line and returns its Alpha [0,1]. */
 	float GetAlphaFromLocation(const FVector& WorldLoc) const;
 
+	/** Returns true if WorldLoc projects onto this slot's cover line with perpendicular distance under the overlap threshold. */
+	bool IsLocationOverlappingCoverLine(const FVector& WorldLoc) const;
+
 	/**
 	 * Returns true when Alpha is within Epsilon of an endpoint that is flagged as a peekable corner.
 	 * Alpha=0 tests bIsPeekableCornerStart; Alpha=1 tests bIsPeekableCornerEnd.

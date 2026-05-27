@@ -54,6 +54,10 @@ private:
 	UPROPERTY(ReplicatedUsing = OnRep_CurrentWeapon)
 	TObjectPtr<AWeaponBase> CurrentWeapon;
 
+	/** Previous weapon — cached in OnRep so we can detach it if a swap occurs without destroy */
+	UPROPERTY()
+	TObjectPtr<AWeaponBase> PreviousWeapon;
+
 	UPROPERTY(ReplicatedUsing = OnRep_IsAiming)
 	bool bIsAiming;
 
