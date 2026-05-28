@@ -8,7 +8,8 @@
 #include "Movement/TraversalTypes.h"
 #include "ExtractionAnimInstance.generated.h"
 
-class AExtractionCharacter;
+class APawn;
+class IExtractionPlayerInterface;
 class UExtractionAnimDataAsset;
 class UTraversalComponent;
 class UCharacterMovementComponent;
@@ -32,6 +33,7 @@ public:
 	UExtractionAnimInstance();
 
 	virtual void NativeInitializeAnimation() override;
+	virtual void NativeUninitializeAnimation() override;
 	virtual void NativeUpdateAnimation(float DeltaSeconds) override;
 
 	// ---- Data Asset Configuration ----
@@ -227,13 +229,19 @@ public:
 
 private:
 
-	/** Cached owning character */
+	/** Cached owning pawn (GC-safe UPROPERTY anchor) */
 	UPROPERTY()
-	TObjectPtr<AExtractionCharacter> OwningCharacter;
+	TObjectPtr<APawn> OwningPawn;
+
+	/** Interface into OwningPawn — valid as long as OwningPawn is alive */
+	IExtractionPlayerInterface* OwningPlayerIface = nullptr;
 
 	/** Cached movement component */
 	UPROPERTY()
 	TObjectPtr<UCharacterMovementComponent> CachedMovementComp;
+
+	/** Rebind all owner pointers from TryGetPawnOwner(). Called on init and whenever owner changes. */
+	void RebindOwner();
 
 	/** Play a single montage. Returns duration / PlayRate, or 0 on failure. */
 	float PlayMontageInternal(UAnimMontage* Montage, float PlayRate);

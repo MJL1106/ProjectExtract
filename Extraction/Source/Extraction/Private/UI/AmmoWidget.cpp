@@ -6,7 +6,7 @@
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
-#include "ExtractionCharacter.h"
+#include "Character/ExtractionPlayerInterface.h"
 
 void UAmmoWidget::NativeConstruct()
 {
@@ -89,10 +89,10 @@ bool UAmmoWidget::BindToWeaponComponent()
 	const APlayerController* PC = GetOwningPlayer();
 	if (!IsValid(PC)) return false;
 
-	const AExtractionCharacter* Character = Cast<AExtractionCharacter>(PC->GetPawn());
-	if (!IsValid(Character)) return false;
+	const IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PC->GetPawn());
+	if (!PlayerIface) return false;
 
-	UWeaponComponent* WC = Character->GetWeaponComponent();
+	UWeaponComponent* WC = PlayerIface->GetWeaponComponent();
 	if (!IsValid(WC)) return false;
 
 	CachedWeaponComponent = WC;

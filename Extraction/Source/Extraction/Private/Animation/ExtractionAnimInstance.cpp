@@ -1,8 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionAnimInstance.h"
-#include "ExtractionCharacter.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "TraversalComponent.h"
+#include "GameFramework/Character.h"
 #include "ExtractionAnimDataAsset.h"
 #include "Extraction.h"
 #include "Animation/AnimMontage.h"
@@ -54,25 +55,43 @@ UExtractionAnimInstance::UExtractionAnimInstance()
 void UExtractionAnimInstance::NativeInitializeAnimation()
 {
 	Super::NativeInitializeAnimation();
+	RebindOwner();
+}
+
+void UExtractionAnimInstance::NativeUninitializeAnimation()
+{
+	OwningPawn = nullptr;
+	OwningPlayerIface = nullptr;
+	Super::NativeUninitializeAnimation();
+}
+
+void UExtractionAnimInstance::RebindOwner()
+{
+	OwningPawn = nullptr;
+	OwningPlayerIface = nullptr;
+	CachedMovementComp = nullptr;
 
 	APawn* PawnOwner = TryGetPawnOwner();
 	if (!IsValid(PawnOwner)) return;
 
-	OwningCharacter = Cast<AExtractionCharacter>(PawnOwner);
-	if (!IsValid(OwningCharacter))
+	OwningPlayerIface = Cast<IExtractionPlayerInterface>(PawnOwner);
+	if (!OwningPlayerIface)
 	{
 		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("AnimInstance owner '%s' is not an AExtractionCharacter."),
+			TEXT("AnimInstance owner '%s' does not implement IExtractionPlayerInterface."),
 			*GetNameSafe(PawnOwner));
 		return;
 	}
 
-	CachedMovementComp = OwningCharacter->GetCharacterMovement();
+	OwningPawn = PawnOwner;
+
+	ACharacter* OwnerChar = Cast<ACharacter>(PawnOwner);
+	CachedMovementComp = IsValid(OwnerChar) ? OwnerChar->GetCharacterMovement() : nullptr;
 	if (!IsValid(CachedMovementComp))
 	{
 		UE_LOG(LogExtractionAnim, Warning,
 			TEXT("No CharacterMovementComponent found on '%s'."),
-			*GetNameSafe(OwningCharacter));
+			*GetNameSafe(PawnOwner));
 	}
 }
 
@@ -80,7 +99,10 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 {
 	Super::NativeUpdateAnimation(DeltaSeconds);
 
-	if (!IsValid(OwningCharacter) || !IsValid(CachedMovementComp)) return;
+	APawn* CurrentPawn = TryGetPawnOwner();
+	if (CurrentPawn != OwningPawn) RebindOwner();
+
+	if (!IsValid(OwningPawn) || !OwningPlayerIface || !IsValid(CachedMovementComp)) return;
 
 	// --- Velocity / Speed (no allocations) ---
 	const FVector Velocity = CachedMovementComp->Velocity;
@@ -98,7 +120,7 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	float TargetDirection = 0.f;
 	if (bHasVelocity)
 	{
-		const FRotator ActorRotation = OwningCharacter->GetActorRotation();
+		const FRotator ActorRotation = OwningPawn->GetActorRotation();
 		TargetDirection = UKismetMathLibrary::NormalizedDeltaRotator(
 			GroundVelocity.Rotation(), ActorRotation).Yaw;
 	}
@@ -111,19 +133,22 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	bIsAccelerating = CachedMovementComp->GetCurrentAcceleration().SizeSquared() > UE_KINDA_SMALL_NUMBER;
 
 	// --- Aim offset ---
-	const FRotator AimRotation = OwningCharacter->GetBaseAimRotation();
-	const FRotator ActorRotation = OwningCharacter->GetActorRotation();
+	const FRotator AimRotation = OwningPawn->GetBaseAimRotation();
+	const FRotator ActorRotation = OwningPawn->GetActorRotation();
 	const FRotator AimDelta = UKismetMathLibrary::NormalizedDeltaRotator(AimRotation, ActorRotation);
 	AimPitch = FMath::ClampAngle(AimDelta.Pitch, -90.f, 90.f);
 	AimYaw = FMath::ClampAngle(AimDelta.Yaw, -180.f, 180.f);
 
-	// Sprint, slide, prone, and vault read from character's replicated state
-	bIsSprinting = OwningCharacter->GetIsSprinting();
-	bIsSliding = OwningCharacter->GetIsSliding();
+	// Sprint, slide, prone via interface. AExtractionCharacter returns replicated state;
+	// AExtractionPlayer returns default false (kit BP owns these on the new player).
+	bIsSprinting = OwningPlayerIface->GetIsSprinting();
+	bIsSliding   = OwningPlayerIface->GetIsSliding();
+
 	// Capture previous prone state before updating — used to catch the exit frame
 	const bool bWasProne = bIsProne;
-	bIsProne = OwningCharacter->GetIsProne();
-	const UTraversalComponent* TraversalComp = OwningCharacter->GetTraversalComponent();
+	bIsProne = OwningPlayerIface->GetIsProne();
+
+	const UTraversalComponent* TraversalComp = OwningPlayerIface->GetTraversalComponent();
 	if (IsValid(TraversalComp))
 	{
 		const ETraversalType Traversal = TraversalComp->GetActiveType();
@@ -210,80 +235,32 @@ UAnimSequence* UExtractionAnimInstance::GetActiveLandAnim() const
 float UExtractionAnimInstance::PlayFireMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayFireMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (!IsValid(Data->FireMontage))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayFireMontage: Data->FireMontage is null on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data->FireMontage)) return 0.f;
 	return PlayMontageInternal(Data->FireMontage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayReloadMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayReloadMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (!IsValid(Data->ReloadMontage))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayReloadMontage: Data->ReloadMontage is null on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data->ReloadMontage)) return 0.f;
 	return PlayMontageInternal(Data->ReloadMontage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayEquipMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayEquipMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (!IsValid(Data->EquipMontage))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayEquipMontage: Data->EquipMontage is null on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data->EquipMontage)) return 0.f;
 	return PlayMontageInternal(Data->EquipMontage, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayHitReactMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayHitReactMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (Data->HitReactMontages.Num() == 0)
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayHitReactMontage: Data->HitReactMontages is empty on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
+	if (Data->HitReactMontages.Num() == 0) return 0.f;
 	return PlayRandomMontage(Data->HitReactMontages, PlayRate);
 }
 
@@ -292,33 +269,15 @@ float UExtractionAnimInstance::PlayDeathMontage(float PlayRate)
 	bIsAlive = false;
 
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayDeathMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (Data->DeathMontages.Num() == 0)
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayDeathMontage: Data->DeathMontages is empty on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
+	if (Data->DeathMontages.Num() == 0) return 0.f;
 	return PlayRandomMontage(Data->DeathMontages, PlayRate);
 }
 
 float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType TransitionType, float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayProneTransitionMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
 
 	UAnimMontage* Montage = nullptr;
 	switch (TransitionType)
@@ -339,13 +298,7 @@ float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType T
 		return 0.f;
 	}
 
-	if (!IsValid(Montage))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayProneTransitionMontage: Montage for TransitionType=%d is null on '%s'"),
-			static_cast<int32>(TransitionType), *GetNameSafe(Data));
-		return 0.f;
-	}
+	if (!IsValid(Montage)) return 0.f;
 
 	return PlayMontageInternal(Montage, PlayRate);
 }
@@ -353,20 +306,8 @@ float UExtractionAnimInstance::PlayProneTransitionMontage(EProneTransitionType T
 float UExtractionAnimInstance::PlayProneExitMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayProneExitMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (!IsValid(Data->ProneToStandTransition))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayProneExitMontage: Data->ProneToStandTransition is null on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data->ProneToStandTransition)) return 0.f;
 	return PlayMontageInternal(Data->ProneToStandTransition, PlayRate);
 }
 
@@ -382,22 +323,20 @@ bool UExtractionAnimInstance::IsPlayingProneEntryMontage() const
 
 float UExtractionAnimInstance::PlayVaultMontage(float PlayRate)
 {
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayVaultMontage entered"));
+
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayVaultMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (!IsValid(Data->VaultMontage))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayVaultMontage: Data->VaultMontage is null on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
-	return PlayMontageInternal(Data->VaultMontage, PlayRate);
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] AnimData=%s (CurrentWeaponType=%d)"),
+		*GetNameSafe(Data), (int32)CurrentWeaponType);
+	if (!IsValid(Data)) return 0.f;
+
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] VaultMontage on data=%s"),
+		*GetNameSafe(Data->VaultMontage));
+	if (!IsValid(Data->VaultMontage)) return 0.f;
+
+	const float Duration = PlayMontageInternal(Data->VaultMontage, PlayRate);
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayMontageInternal returned duration=%.2f"), Duration);
+	return Duration;
 }
 
 bool UExtractionAnimInstance::IsPlayingVaultMontage() const
@@ -409,22 +348,20 @@ bool UExtractionAnimInstance::IsPlayingVaultMontage() const
 
 float UExtractionAnimInstance::PlayClimbMontage(float PlayRate)
 {
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayClimbMontage entered"));
+
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayClimbMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (!IsValid(Data->ClimbMontage))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayClimbMontage: Data->ClimbMontage is null on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
-	return PlayMontageInternal(Data->ClimbMontage, PlayRate);
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] AnimData=%s (CurrentWeaponType=%d)"),
+		*GetNameSafe(Data), (int32)CurrentWeaponType);
+	if (!IsValid(Data)) return 0.f;
+
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] ClimbMontage on data=%s"),
+		*GetNameSafe(Data->ClimbMontage));
+	if (!IsValid(Data->ClimbMontage)) return 0.f;
+
+	const float Duration = PlayMontageInternal(Data->ClimbMontage, PlayRate);
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayMontageInternal returned duration=%.2f"), Duration);
+	return Duration;
 }
 
 bool UExtractionAnimInstance::IsPlayingClimbMontage() const
@@ -436,22 +373,20 @@ bool UExtractionAnimInstance::IsPlayingClimbMontage() const
 
 float UExtractionAnimInstance::PlayMantleMontage(float PlayRate)
 {
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayMantleMontage entered"));
+
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayMantleMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (!IsValid(Data->MantleMontage))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlayMantleMontage: Data->MantleMontage is null on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
-	return PlayMontageInternal(Data->MantleMontage, PlayRate);
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] AnimData=%s (CurrentWeaponType=%d)"),
+		*GetNameSafe(Data), (int32)CurrentWeaponType);
+	if (!IsValid(Data)) return 0.f;
+
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] MantleMontage on data=%s"),
+		*GetNameSafe(Data->MantleMontage));
+	if (!IsValid(Data->MantleMontage)) return 0.f;
+
+	const float Duration = PlayMontageInternal(Data->MantleMontage, PlayRate);
+	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayMontageInternal returned duration=%.2f"), Duration);
+	return Duration;
 }
 
 bool UExtractionAnimInstance::IsPlayingMantleMontage() const
@@ -482,20 +417,8 @@ bool UExtractionAnimInstance::HasMontageForType(ETraversalType Type) const
 float UExtractionAnimInstance::PlaySprintJumpMontage(float PlayRate)
 {
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	if (!IsValid(Data))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlaySprintJumpMontage: GetActiveAnimData() returned null. CurrentWeaponType=%d, WeaponAnimSets.Num()=%d"),
-			static_cast<int32>(CurrentWeaponType), WeaponAnimSets.Num());
-		return 0.f;
-	}
-	if (!IsValid(Data->SprintJumpMontage))
-	{
-		UE_LOG(LogExtractionAnim, Warning,
-			TEXT("PlaySprintJumpMontage: Data->SprintJumpMontage is null on '%s'"),
-			*GetNameSafe(Data));
-		return 0.f;
-	}
+	if (!IsValid(Data)) return 0.f;
+	if (!IsValid(Data->SprintJumpMontage)) return 0.f;
 	return PlayMontageInternal(Data->SprintJumpMontage, PlayRate);
 }
 

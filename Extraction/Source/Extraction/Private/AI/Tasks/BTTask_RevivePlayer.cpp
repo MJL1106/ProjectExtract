@@ -3,7 +3,7 @@
 #include "BTTask_RevivePlayer.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
-#include "ExtractionCharacter.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.h"
 #include "HealthComponent.h"
 
@@ -16,9 +16,12 @@ UBTTask_RevivePlayer::UBTTask_RevivePlayer()
 
 EBTNodeResult::Type UBTTask_RevivePlayer::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
-	AExtractionCharacter* Player = Cast<AExtractionCharacter>(
-		OwnerComp.GetBlackboardComponent()->GetValueAsObject(PlayerActorKey.SelectedKeyName));
-	if (!IsValid(Player) || !Player->GetIsDBNO()) return EBTNodeResult::Failed;
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	if (!BB) return EBTNodeResult::Failed;
+
+	IExtractionPlayerInterface* Player = Cast<IExtractionPlayerInterface>(
+		BB->GetValueAsObject(PlayerActorKey.SelectedKeyName));
+	if (!Player || !Player->GetIsDBNO()) return EBTNodeResult::Failed;
 
 	AAIController* AIC = OwnerComp.GetAIOwner();
 	if (!AIC) return EBTNodeResult::Failed;
@@ -31,7 +34,8 @@ EBTNodeResult::Type UBTTask_RevivePlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	ReviveElapsed = 0.0f;
 	bIsHoldingRevive = false;
 
-	UE_LOG(LogTemp, Log, TEXT("Companion starting revive sequence for %s"), *GetNameSafe(Player));
+	UE_LOG(LogTemp, Log, TEXT("Companion starting revive sequence for %s"),
+		*GetNameSafe(Cast<AActor>(BB->GetValueAsObject(PlayerActorKey.SelectedKeyName))));
 
 	return EBTNodeResult::InProgress;
 }
@@ -44,20 +48,24 @@ void UBTTask_RevivePlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Controller->GetPawn());
 	if (!Companion) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
-	AExtractionCharacter* Player = Cast<AExtractionCharacter>(
-		OwnerComp.GetBlackboardComponent()->GetValueAsObject(PlayerActorKey.SelectedKeyName));
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	if (!BB) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
-	if (!IsValid(Player))
+	UObject* PlayerObj = BB->GetValueAsObject(PlayerActorKey.SelectedKeyName);
+	IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PlayerObj);
+	AActor* PlayerActor = Cast<AActor>(PlayerObj);
+
+	if (!PlayerIface || !IsValid(PlayerActor))
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
 	// Player already revived or died — done
-	if (!Player->GetIsDBNO())
+	if (!PlayerIface->GetIsDBNO())
 	{
 		UE_LOG(LogTemp, Log, TEXT("Companion revive cancelled — player no longer DBNO"));
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
 
-	const float DistToPlayer = FVector::Dist(Companion->GetActorLocation(), Player->GetActorLocation());
+	const float DistToPlayer = FVector::Dist(Companion->GetActorLocation(), PlayerActor->GetActorLocation());
 
 	// Not close enough yet — keep moving (FollowPlayer task in revive sequence handles this,
 	// but if we somehow get here while far, fail so the sequence re-runs the follow task)
@@ -75,7 +83,7 @@ void UBTTask_RevivePlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		bIsHoldingRevive = true;
 
 		// Face the player
-		const FRotator LookAt = (Player->GetActorLocation() - Companion->GetActorLocation()).Rotation();
+		const FRotator LookAt = (PlayerActor->GetActorLocation() - Companion->GetActorLocation()).Rotation();
 		Companion->SetActorRotation(FRotator(0.0f, LookAt.Yaw, 0.0f));
 	}
 
@@ -83,12 +91,10 @@ void UBTTask_RevivePlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	if (ReviveElapsed >= Companion->ReviveDuration)
 	{
-		if (Companion->HasAuthority() && IsValid(Player))
-		{
-			Player->ExitDBNO();
-		}
+		if (Companion->HasAuthority())
+			PlayerIface->ExitDBNO();
 
-		UE_LOG(LogTemp, Log, TEXT("Companion revived %s"), *GetNameSafe(Player));
+		UE_LOG(LogTemp, Log, TEXT("Companion revived %s"), *GetNameSafe(PlayerActor));
 		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
 }

@@ -3,7 +3,7 @@
 #include "PlayerHealthWidget.h"
 #include "Components/ProgressBar.h"
 #include "HealthComponent.h"
-#include "ExtractionCharacter.h"
+#include "Character/ExtractionPlayerInterface.h"
 
 void UPlayerHealthWidget::NativeConstruct()
 {
@@ -36,10 +36,10 @@ bool UPlayerHealthWidget::BindHealthComponent()
 	const APlayerController* PC = GetOwningPlayer();
 	if (!IsValid(PC)) return false;
 
-	const AExtractionCharacter* Character = Cast<AExtractionCharacter>(PC->GetPawn());
-	if (!IsValid(Character)) return false;
+	const IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PC->GetPawn());
+	if (!PlayerIface) return false;
 
-	UHealthComponent* HC = Character->GetHealthComponent();
+	UHealthComponent* HC = PlayerIface->GetHealthComponent();
 	if (!IsValid(HC)) return false;
 
 	CachedHealthComponent = HC;

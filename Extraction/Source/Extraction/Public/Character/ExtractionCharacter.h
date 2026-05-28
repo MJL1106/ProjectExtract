@@ -6,8 +6,10 @@
 #include "GameFramework/Character.h"
 #include "ExtractionTypes.h"
 #include "Logging/LogMacros.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "ExtractionCharacter.generated.h"
 
+class AWeaponBase;
 class UInputComponent;
 class USkeletalMeshComponent;
 class UCameraComponent;
@@ -28,7 +30,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDBNOStateChanged, bool, bNewIsDB
  * Handles movement, input binding, sprint, and replication setup.
  */
 UCLASS()
-class EXTRACTION_API AExtractionCharacter : public ACharacter
+class EXTRACTION_API AExtractionCharacter : public ACharacter, public IExtractionPlayerInterface
 {
 	GENERATED_BODY()
 
@@ -242,13 +244,32 @@ public:
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 
+	/** Catch-up path: fires OnWeaponEquipped when the controller arrives after replication
+	 *  already delivered CurrentWeapon (late-join race). */
+	virtual void NotifyControllerChanged() override;
+
 	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
 	FOnDBNOStateChanged OnDBNOStateChanged;
+
+	/** Fired locally after the owning client receives the equipped weapon (or on server after equip).
+	 *  BP implements this to call AC_ProceduralAnimation->NewHandPose using
+	 *  KitWeaponPoseAsset on the weapon's data asset. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
+	void OnWeaponEquipped(AWeaponBase* EquippedWeapon);
+
+	/**
+	 * Fired locally when ADS state changes (input down = true, input up = false).
+	 * BP implements this to call AC_ProceduralAnimation->NewHandPose with
+	 * SelectedPose=Aim (when bIsADS) or SelectedPose=Base, passing the current
+	 * weapon's procedural struct from its UWeaponDataAsset.
+	 */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
+	void OnADSChanged(bool bIsADS);
 
 public:
 
 	UFUNCTION(BlueprintCallable, Category = "Input")
-	virtual void DoAim(float Yaw, float Pitch);
+	virtual void DoAim(float Yaw, float Pitch) override;
 
 protected:
 
@@ -339,52 +360,60 @@ public:
 	// ---- Getters ----
 
 	UCameraComponent* GetFirstPersonCameraComponent() const { return FirstPersonCameraComponent; }
-	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
-	UWeaponComponent* GetWeaponComponent() const { return WeaponComponent; }
 
 	/** Camera-space offset applied to the WeaponSpawn scene component. Tune per-BP to adjust weapon position. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadWrite, Category = "Components")
 	FVector WeaponSpawnOffset = FVector(90.0f, 0.0f, 0.0f);
 
+	// ---- IExtractionPlayerInterface ----
+
+	virtual UHealthComponent* GetHealthComponent() const override { return HealthComponent; }
+	virtual UWeaponComponent* GetWeaponComponent() const override { return WeaponComponent; }
+
 	UFUNCTION(BlueprintPure, Category = "Components")
-	USceneComponent* GetWeaponSpawn() const { return WeaponSpawn; }
+	virtual USceneComponent* GetWeaponSpawn() const override { return WeaponSpawn; }
 
 	UFUNCTION(BlueprintPure, Category = "Health")
-	bool GetIsDBNO() const { return bIsDBNO; }
+	virtual bool GetIsDBNO() const override { return bIsDBNO; }
 
 	/** Exit DBNO state and restore health/movement.
 	 *  Called by server authority (revive system, companion AI). */
-	void ExitDBNO();
+	virtual void ExitDBNO() override;
 
 	UFUNCTION(BlueprintPure, Category = "Animation")
-	UExtractionAnimInstance* GetExtractionAnimInstance() const;
+	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const override;
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool GetIsSprinting() const { return bIsSprinting; }
+	virtual UTraversalComponent* GetTraversalComponent() const override { return TraversalComponent; }
+
+	virtual ETraversalType GetActiveTraversalType() const override;
+	virtual bool IsInTraversal() const override;
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool GetIsSliding() const { return bIsSliding; }
+	virtual bool GetIsVaulting() const override;
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool GetIsProne() const { return bIsProne; }
+	virtual FVector GetVaultTargetLocation() const override;
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	UTraversalComponent* GetTraversalComponent() const { return TraversalComponent; }
+	virtual float GetVaultSurfaceHeight() const override;
 
-	ETraversalType GetActiveTraversalType() const;
-	bool IsInTraversal() const;
+	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
+	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }
+
+	// ---- Non-interface getters (AExtractionCharacter-specific) ----
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	virtual bool GetIsSprinting() const override { return bIsSprinting; }
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	virtual bool GetIsSliding() const override { return bIsSliding; }
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	virtual bool GetIsProne() const override { return bIsProne; }
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	bool GetIsSprintJumping() const { return bIsSprintJumping; }
-
-	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool GetIsVaulting() const;
-
-	UFUNCTION(BlueprintPure, Category = "Movement")
-	FVector GetVaultTargetLocation() const;
-
-	UFUNCTION(BlueprintPure, Category = "Movement")
-	float GetVaultSurfaceHeight() const;
 
 private:
 
