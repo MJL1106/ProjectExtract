@@ -10,7 +10,7 @@
 #include "WeaponBase.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "Companion/CompanionTypes.h"
-#include "ExtractionCharacter.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "HealthComponent.h"
 #include "ExtractionTypes.h"
 #include "GameplayTagAssetInterface.h"
@@ -39,17 +39,18 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	if (!Companion) return;
 
 	// --- Ensure PlayerActor key is set (handles spawn order race) ---
-	AExtractionCharacter* Player = Controller->GetPlayerCharacter();
-	if (!Player)
+	APawn* PlayerPawn = Controller->GetPlayerCharacter();
+	if (!PlayerPawn)
 	{
-		Player = Cast<AExtractionCharacter>(UGameplayStatics::GetPlayerCharacter(Companion->GetWorld(), 0));
-		if (Player) Controller->SetPlayerCharacter(Player);
+		PlayerPawn = Cast<APawn>(UGameplayStatics::GetPlayerCharacter(Companion->GetWorld(), 0));
+		if (PlayerPawn) Controller->SetPlayerCharacter(PlayerPawn);
 	}
 
-	if (Player)
+	IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PlayerPawn);
+	if (PlayerPawn && PlayerIface)
 	{
-		BB->SetValueAsObject(PlayerActorKey.SelectedKeyName, Player);
-		BB->SetValueAsBool(PlayerNeedsReviveKey.SelectedKeyName, Player->GetIsDBNO());
+		BB->SetValueAsObject(PlayerActorKey.SelectedKeyName, PlayerPawn);
+		BB->SetValueAsBool(PlayerNeedsReviveKey.SelectedKeyName, PlayerIface->GetIsDBNO());
 	}
 
 	// --- Update CombatTarget ---

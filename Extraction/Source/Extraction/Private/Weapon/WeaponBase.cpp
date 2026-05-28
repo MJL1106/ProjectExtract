@@ -3,7 +3,7 @@
 #include "WeaponBase.h"
 #include "AI/CompanionDiag.h"
 #include "WeaponDataAsset.h"
-#include "ExtractionCharacter.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.h"
 #include "EnemyBase.h"
 #include "ExtractionDamageType.h"
@@ -219,10 +219,11 @@ void AWeaponBase::FireShot()
 		PerformHitscan();
 
 	// Recoil on owning client
-	AExtractionCharacter* OwnerChar = Cast<AExtractionCharacter>(GetOwner());
-	if (IsValid(OwnerChar) && OwnerChar->IsLocallyControlled())
+	IExtractionPlayerInterface* OwnerIface = IsValid(GetOwner()) ? Cast<IExtractionPlayerInterface>(GetOwner()) : nullptr;
+	APawn* OwnerPawn = Cast<APawn>(GetOwner());
+	if (OwnerIface && IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled())
 	{
-		if (IsValid(Cast<APlayerController>(OwnerChar->GetController())))
+		if (IsValid(Cast<APlayerController>(OwnerPawn->GetController())))
 			ApplyRecoil();
 	}
 
@@ -469,8 +470,8 @@ void AWeaponBase::ApplyRecoil()
 	const FRecoilPattern& Pattern = WeaponData->RecoilPattern;
 	if (Pattern.Points.Num() == 0) return;
 
-	AExtractionCharacter* OwnerChar = Cast<AExtractionCharacter>(GetOwner());
-	if (!IsValid(OwnerChar)) return;
+	IExtractionPlayerInterface* OwnerIface = IsValid(GetOwner()) ? Cast<IExtractionPlayerInterface>(GetOwner()) : nullptr;
+	if (!OwnerIface) return;
 
 	// Get current recoil point
 	const int32 PatternIndex = FMath::Min(RecoilIndex, Pattern.Points.Num() - 1);
@@ -479,7 +480,7 @@ void AWeaponBase::ApplyRecoil()
 	RecoilOffset *= (bOwnerIsAiming ? Pattern.ADSMultiplier : 1.0f);
 
 	// Apply to camera
-	OwnerChar->DoAim(RecoilOffset.X, RecoilOffset.Y);
+	OwnerIface->DoAim(RecoilOffset.X, RecoilOffset.Y);
 
 	// Track accumulated recoil for recovery
 	AccumulatedRecoilPitch += RecoilOffset.Y;
@@ -530,9 +531,9 @@ void AWeaponBase::UpdateRecoilRecovery(float DeltaTime)
 	const float DeltaPitch = TargetPitch - RecoilRecoveryPitchApplied;
 	const float DeltaYaw = TargetYaw - RecoilRecoveryYawApplied;
 
-	AExtractionCharacter* OwnerChar = Cast<AExtractionCharacter>(GetOwner());
-	if (IsValid(OwnerChar))
-		OwnerChar->DoAim(-DeltaYaw, -DeltaPitch);
+	IExtractionPlayerInterface* OwnerIface = IsValid(GetOwner()) ? Cast<IExtractionPlayerInterface>(GetOwner()) : nullptr;
+	if (OwnerIface)
+		OwnerIface->DoAim(-DeltaYaw, -DeltaPitch);
 
 	RecoilRecoveryPitchApplied = TargetPitch;
 	RecoilRecoveryYawApplied = TargetYaw;

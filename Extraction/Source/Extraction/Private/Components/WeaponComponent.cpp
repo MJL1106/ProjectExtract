@@ -3,12 +3,18 @@
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
-#include "ExtractionCharacter.h"
+#include "Character/ExtractionPlayerInterface.h"
+#include "GameFramework/Character.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
 #include "Components/SceneComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Extraction.h"
+
+namespace
+{
+	static const FName KitWeaponAttachSocket(TEXT("weapon_r"));
+}
 
 UWeaponComponent::UWeaponComponent()
 	: bIsAiming(false)
@@ -29,15 +35,13 @@ void UWeaponComponent::BeginPlay()
 {
 	Super::BeginPlay();
 
-	OwnerCharacter = Cast<AExtractionCharacter>(GetOwner());
-	if (!IsValid(OwnerCharacter)) return;
-
-	// Warn loudly if the WeaponSpawn component is missing — weapon attachment will silently fail otherwise
-	if (IsValid(OwnerCharacter) && !IsValid(OwnerCharacter->GetWeaponSpawn()))
-		UE_LOG(LogExtraction, Warning, TEXT("WeaponComponent: OwnerCharacter has no WeaponSpawn component — weapons will not attach. Ensure the BP child class exposes one."));
+	OwnerActor = GetOwner();
+	if (!IsValid(OwnerActor)) return;
+	OwnerIface = Cast<IExtractionPlayerInterface>(OwnerActor);
+	if (!OwnerIface) return;
 
 	// Server spawns default weapon
-	if (OwnerCharacter->HasAuthority() && DefaultWeaponClass)
+	if (OwnerActor->HasAuthority() && DefaultWeaponClass)
 		EquipWeapon(DefaultWeaponClass);
 }
 
@@ -46,6 +50,8 @@ void UWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->OnWeaponFired.RemoveAll(this);
 
+	OwnerIface = nullptr;
+
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -53,8 +59,8 @@ void UWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 {
-	if (!IsValid(OwnerCharacter)) return;
-	if (!OwnerCharacter->HasAuthority()) return;
+	if (!OwnerIface) return;
+	if (!IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return;
 
 	// Destroy existing weapon
 	if (IsValid(CurrentWeapon))
@@ -68,23 +74,28 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 
+	ACharacter* OwnerChar = Cast<ACharacter>(OwnerActor);
+
 	FActorSpawnParameters SpawnParams;
-	SpawnParams.Owner = GetOwner();
-	SpawnParams.Instigator = OwnerCharacter;
+	SpawnParams.Owner = OwnerActor;
+	SpawnParams.Instigator = Cast<APawn>(OwnerActor);
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	CurrentWeapon = World->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
 	if (!IsValid(CurrentWeapon)) return;
 
-	// Attach to camera-space weapon spawn point (kit procedural anim drives hand IK from here)
-	USceneComponent* WeaponSpawn = OwnerCharacter->GetWeaponSpawn();
-	if (IsValid(WeaponSpawn))
+	// Attach to body mesh weapon_r bone so AC_ProceduralAnimation can drive the weapon transform
+	if (IsValid(OwnerChar))
 	{
-		CurrentWeapon->AttachToComponent(
-			WeaponSpawn,
-			FAttachmentTransformRules::SnapToTargetNotIncludingScale,
-			NAME_None
-		);
+		USkeletalMeshComponent* BodyMesh = OwnerChar->GetMesh();
+		if (IsValid(BodyMesh))
+		{
+			CurrentWeapon->AttachToComponent(
+				BodyMesh,
+				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+				KitWeaponAttachSocket
+			);
+		}
 	}
 
 	CurrentWeapon->InitializeAmmo();
@@ -92,13 +103,19 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	// Bind weapon fire delegate to multicast for 3P effects
 	if (!CurrentWeapon->OnWeaponFired.IsAlreadyBound(this, &UWeaponComponent::OnWeaponFiredCallback))
 		CurrentWeapon->OnWeaponFired.AddDynamic(this, &UWeaponComponent::OnWeaponFiredCallback);
+
+	// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose.
+	// Skip on dedicated server (no visuals) and when downed.
+	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
+	if (IsValid(CurrentWeapon) && IsValid(OwnerActor) && OwnerIface && IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled() && !OwnerIface->GetIsDBNO())
+		OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
 }
 
 void UWeaponComponent::StartFire()
 {
 	// Local prediction (skip if we're the server — RPC will execute locally)
-	if (!IsValid(OwnerCharacter)) return;
-	if (!OwnerCharacter->HasAuthority() && IsValid(CurrentWeapon))
+	if (!IsValid(OwnerActor)) return;
+	if (!OwnerActor->HasAuthority() && IsValid(CurrentWeapon))
 		CurrentWeapon->StartFiring();
 
 	Server_StartFire();
@@ -106,8 +123,8 @@ void UWeaponComponent::StartFire()
 
 void UWeaponComponent::StopFire()
 {
-	if (!IsValid(OwnerCharacter)) return;
-	if (!OwnerCharacter->HasAuthority() && IsValid(CurrentWeapon))
+	if (!IsValid(OwnerActor)) return;
+	if (!OwnerActor->HasAuthority() && IsValid(CurrentWeapon))
 		CurrentWeapon->StopFiring();
 
 	Server_StopFire();
@@ -115,8 +132,8 @@ void UWeaponComponent::StopFire()
 
 void UWeaponComponent::StartReload()
 {
-	if (!IsValid(OwnerCharacter)) return;
-	if (!OwnerCharacter->HasAuthority() && IsValid(CurrentWeapon))
+	if (!IsValid(OwnerActor)) return;
+	if (!OwnerActor->HasAuthority() && IsValid(CurrentWeapon))
 		CurrentWeapon->Reload();
 
 	Server_Reload();
@@ -164,7 +181,7 @@ void UWeaponComponent::Server_SetAiming_Implementation(bool bNewAiming)
 void UWeaponComponent::OnWeaponFiredCallback()
 {
 	// Only the server should multicast
-	if (IsValid(OwnerCharacter) && OwnerCharacter->HasAuthority())
+	if (IsValid(OwnerActor) && OwnerActor->HasAuthority())
 		Multicast_OnFired();
 }
 
@@ -174,42 +191,57 @@ void UWeaponComponent::Multicast_OnFired_Implementation()
 {
 	// 3P effects (muzzle flash, sound) go here
 	// Skip on owning client (already handled locally)
-	if (IsValid(OwnerCharacter) && OwnerCharacter->IsLocallyControlled()) return;
+	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
+	if (IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled()) return;
 }
 
 // ---- RepNotify ----
 
 void UWeaponComponent::OnRep_CurrentWeapon()
 {
-	// Late-joiner safety: OwnerCharacter may not have been set if replication ordering delivered
-	// CurrentWeapon before BeginPlay ran on this component.
-	if (!IsValid(OwnerCharacter))
-		OwnerCharacter = Cast<AExtractionCharacter>(GetOwner());
+	// Late-joiner safety: OwnerActor/OwnerIface may not have been set if replication
+	// delivered CurrentWeapon before BeginPlay ran on this component.
+	if (!IsValid(OwnerActor))
+	{
+		OwnerActor = GetOwner();
+		OwnerIface = Cast<IExtractionPlayerInterface>(OwnerActor);
+	}
 
-	if (!IsValid(CurrentWeapon) || !IsValid(OwnerCharacter)) return;
+	if (!IsValid(CurrentWeapon) || !IsValid(OwnerActor) || !OwnerIface) return;
 
-	// Fix 3: detach the previous weapon if the server swapped without destroying the old one
+	// Detach previous weapon if the server swapped without destroying the old one
 	if (IsValid(PreviousWeapon) && PreviousWeapon != CurrentWeapon)
 		PreviousWeapon->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
 	PreviousWeapon = CurrentWeapon;
 
-	if (OwnerCharacter->IsLocallyControlled())
+	ACharacter* OwnerChar = Cast<ACharacter>(OwnerActor);
+	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
+
+	if (IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled())
 	{
-		// Owner path: attach to camera-space weapon spawn point (kit procedural anim drives hand IK from here)
-		USceneComponent* WeaponSpawn = OwnerCharacter->GetWeaponSpawn();
-		if (IsValid(WeaponSpawn))
+		// Owner path: attach to body mesh weapon_r bone so AC_ProceduralAnimation can drive the weapon transform
+		if (IsValid(OwnerChar))
 		{
-			CurrentWeapon->AttachToComponent(
-				WeaponSpawn,
-				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
-				NAME_None
-			);
+			USkeletalMeshComponent* BodyMesh = OwnerChar->GetMesh();
+			if (IsValid(BodyMesh))
+			{
+				CurrentWeapon->AttachToComponent(
+					BodyMesh,
+					FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+					KitWeaponAttachSocket
+				);
+			}
 		}
+
+		// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose.
+		// Skip when downed — arms aren't visible and the pose system may not be ready.
+		if (IsValid(OwnerActor) && OwnerIface && !OwnerIface->GetIsDBNO())
+			OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
 	}
-	else
+	else if (IsValid(OwnerChar))
 	{
 		// Proxy path: attach to 3P skeleton
-		USkeletalMeshComponent* Mesh3P = OwnerCharacter->GetMesh();
+		USkeletalMeshComponent* Mesh3P = OwnerChar->GetMesh();
 		if (IsValid(Mesh3P))
 		{
 			CurrentWeapon->AttachToComponent(

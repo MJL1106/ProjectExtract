@@ -7,7 +7,7 @@
 #include "WeaponComponent.generated.h"
 
 class AWeaponBase;
-class AExtractionCharacter;
+class IExtractionPlayerInterface;
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class EXTRACTION_API UWeaponComponent : public UActorComponent
@@ -92,7 +92,10 @@ private:
 	UFUNCTION()
 	void OnWeaponFiredCallback();
 
-	/** Cached owner character */
+	/** Cached owner actor (GC-safe UPROPERTY anchor) */
 	UPROPERTY()
-	TObjectPtr<AExtractionCharacter> OwnerCharacter;
+	TObjectPtr<AActor> OwnerActor;
+
+	/** Interface pointer into the same UObject — valid as long as OwnerActor is alive */
+	IExtractionPlayerInterface* OwnerIface = nullptr;
 };

@@ -80,4 +80,5 @@ public:
 	/** Recoil pattern data for this weapon */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Recoil")
 	FRecoilPattern RecoilPattern;
+
 };

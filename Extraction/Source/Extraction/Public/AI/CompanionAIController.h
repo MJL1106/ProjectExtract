@@ -9,7 +9,6 @@
 
 class UAISenseConfig_Sight;
 class UAISenseConfig_Hearing;
-class AExtractionCharacter;
 class UCompanionTuningDataAsset;
 class UTraversalComponent;
 
@@ -41,9 +40,9 @@ public:
 	static const FName BB_NextCoverSlot;                 // Object (AAICoverSlot) — set by CoverSwitchMonitor, consumed by MoveToCover
 
 	UFUNCTION(BlueprintPure, Category = "Companion|AI")
-	AExtractionCharacter* GetPlayerCharacter() const { return CachedPlayerCharacter; }
+	APawn* GetPlayerCharacter() const { return CachedPlayerCharacter.Get(); }
 
-	void SetPlayerCharacter(AExtractionCharacter* InPlayer) { CachedPlayerCharacter = InPlayer; }
+	void SetPlayerCharacter(APawn* InPlayer) { CachedPlayerCharacter = InPlayer; }
 
 	const UCompanionTuningDataAsset* GetTuning() const { return Tuning; }
 
@@ -68,8 +67,7 @@ private:
 	UPROPERTY()
 	TObjectPtr<UAISenseConfig_Hearing> HearingConfig;
 
-	UPROPERTY()
-	TObjectPtr<AExtractionCharacter> CachedPlayerCharacter;
+	TWeakObjectPtr<APawn> CachedPlayerCharacter;
 
 	// Traversal mirror coupling
 	TWeakObjectPtr<UTraversalComponent> PlayerTraversalComp;

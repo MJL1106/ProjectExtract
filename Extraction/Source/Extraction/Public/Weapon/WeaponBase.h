@@ -10,7 +10,6 @@
 class UStaticMeshComponent;
 class UMeshComponent;
 class UWeaponDataAsset;
-class AExtractionCharacter;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponFired);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnReloadComplete);

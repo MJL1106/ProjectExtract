@@ -9,7 +9,7 @@
 #include "Perception/AISenseConfig_Sight.h"
 #include "Perception/AISenseConfig_Hearing.h"
 #include "Kismet/GameplayStatics.h"
-#include "ExtractionCharacter.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.h"
 #include "WeaponBase.h"
 #include "Movement/TraversalComponent.h"
@@ -84,7 +84,7 @@ void ACompanionAIController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);
 
-	CachedPlayerCharacter = Cast<AExtractionCharacter>(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0));
+	CachedPlayerCharacter = Cast<APawn>(UGameplayStatics::GetPlayerCharacter(GetWorld(), 0));
 
 	if (!CompanionBehaviorTree)
 	{
@@ -95,8 +95,8 @@ void ACompanionAIController::OnPossess(APawn* InPawn)
 	UBlackboardComponent* BBComp = nullptr;
 	UseBlackboard(CompanionBehaviorTree->BlackboardAsset, BBComp);
 
-	if (BBComp && CachedPlayerCharacter)
-		BBComp->SetValueAsObject(BB_PlayerActor, CachedPlayerCharacter);
+	if (BBComp && CachedPlayerCharacter.IsValid())
+		BBComp->SetValueAsObject(BB_PlayerActor, CachedPlayerCharacter.Get());
 
 	RunBehaviorTree(CompanionBehaviorTree);
 
@@ -245,7 +245,7 @@ void ACompanionAIController::OnPlayerTraversalEnded()
 void ACompanionAIController::TickWarpFallback()
 {
 	const APawn* MyPawn = GetPawn();
-	const AExtractionCharacter* Player = CachedPlayerCharacter.Get();
+	const APawn* Player = CachedPlayerCharacter.Get();
 	const UCompanionTuningDataAsset* T = Tuning;
 	if (!MyPawn || !Player || !T) return;
 
@@ -298,7 +298,7 @@ bool ACompanionAIController::ShouldWarp() const
 {
 	const UCompanionTuningDataAsset* T = Tuning;
 	const APawn* MyPawn = GetPawn();
-	const AExtractionCharacter* Player = CachedPlayerCharacter.Get();
+	const APawn* Player = CachedPlayerCharacter.Get();
 	if (!T || !MyPawn || !Player) return false;
 
 	if (TimeSinceClosedToPlayer <= T->WarpStuckTimeout) return false;
@@ -318,7 +318,7 @@ bool ACompanionAIController::ShouldWarp() const
 void ACompanionAIController::ExecuteWarpBehindPlayer()
 {
 	APawn* MyPawn = GetPawn();
-	const AExtractionCharacter* Player = CachedPlayerCharacter.Get();
+	const APawn* Player = CachedPlayerCharacter.Get();
 	const UCompanionTuningDataAsset* T = Tuning;
 	UWorld* World = GetWorld();
 	if (!MyPawn || !Player || !T || !World) return;

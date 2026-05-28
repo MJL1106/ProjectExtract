@@ -197,6 +197,35 @@ void AExtractionCharacter::BeginPlay()
 
 	if (IsValid(FirstPersonCameraComponent))
 		BaseFOV = FirstPersonCameraComponent->FieldOfView;
+
+	// Standalone / listen-server catch-up: WeaponComponent::EquipWeapon may have fired the BIE
+	// before the character's BP BeginPlay finished. Re-fire now that BeginPlay is fully settled.
+	if (IsLocallyControlled() && !GetIsDBNO() && IsValid(WeaponComponent))
+	{
+		AWeaponBase* ExistingWeapon = WeaponComponent->GetCurrentWeapon();
+		if (IsValid(ExistingWeapon))
+		{
+			UE_LOG(LogExtraction, Verbose, TEXT("'%s': BeginPlay catch-up fired OnWeaponEquipped for '%s'."),
+				*GetNameSafe(this), *GetNameSafe(ExistingWeapon));
+			OnWeaponEquipped(ExistingWeapon);
+		}
+	}
+}
+
+void AExtractionCharacter::NotifyControllerChanged()
+{
+	Super::NotifyControllerChanged();
+
+	// Late-join catch-up: controller may arrive after OnRep_CurrentWeapon already fired,
+	// causing IsLocallyControlled() to return false at that moment and skip the BIE.
+	if (!IsLocallyControlled() || GetIsDBNO() || !IsValid(WeaponComponent)) return;
+
+	AWeaponBase* CurrentWeapon = WeaponComponent->GetCurrentWeapon();
+	if (!IsValid(CurrentWeapon)) return;
+
+	UE_LOG(LogExtraction, Verbose, TEXT("'%s': NotifyControllerChanged catch-up fired OnWeaponEquipped for '%s'."),
+		*GetNameSafe(this), *GetNameSafe(CurrentWeapon));
+	OnWeaponEquipped(CurrentWeapon);
 }
 
 void AExtractionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -1398,6 +1427,7 @@ void AExtractionCharacter::ADSStart(const FInputActionValue& Value)
 
 	WeaponComponent->SetAiming(true);
 	UpdateADSMovementSpeed();
+	OnADSChanged(true);
 }
 
 void AExtractionCharacter::ADSStop(const FInputActionValue& Value)
@@ -1406,6 +1436,7 @@ void AExtractionCharacter::ADSStop(const FInputActionValue& Value)
 
 	WeaponComponent->SetAiming(false);
 	UpdateADSMovementSpeed();
+	OnADSChanged(false);
 }
 
 void AExtractionCharacter::UpdateWeaponFOV(float DeltaTime)
