@@ -81,4 +81,14 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Recoil")
 	FRecoilPattern RecoilPattern;
 
+	// ---- Kit Weapon Bridge ----
+
+	/** Kit-side procedural animation values asset (BP-derived DataAsset, e.g. DT_ProceduralAnimValues / DA_Anim_Rifle). Read at runtime via IKitWeaponInterface::GetKitProceduralValues. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kit Weapon Bridge")
+	TObjectPtr<UDataAsset> KitWeaponPoseAsset;
+
+	/** The kit BP_Item_Base weapon spawned for the first-person visual + arm posing (the kit's procedural animation drives the arms for this weapon). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kit Weapon Bridge")
+	TSubclassOf<AActor> KitVisualWeaponClass;
+
 };

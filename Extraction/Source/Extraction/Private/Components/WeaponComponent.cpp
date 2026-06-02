@@ -8,12 +8,12 @@
 #include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
 #include "Components/SceneComponent.h"
-#include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Extraction.h"
 
 namespace
 {
-	static const FName KitWeaponAttachSocket(TEXT("weapon_r"));
+	static const FName KitWeaponAttachSocket(TEXT("ik_hand_gun"));
 }
 
 UWeaponComponent::UWeaponComponent()
@@ -84,7 +84,7 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	CurrentWeapon = World->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
 	if (!IsValid(CurrentWeapon)) return;
 
-	// Attach to body mesh weapon_r bone so AC_ProceduralAnimation can drive the weapon transform
+	// Attach to the kit IK-rig gun bone (ik_hand_gun) so AC_ProceduralAnimation drives the weapon transform
 	if (IsValid(OwnerChar))
 	{
 		USkeletalMeshComponent* BodyMesh = OwnerChar->GetMesh();
@@ -95,6 +95,7 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
 				KitWeaponAttachSocket
 			);
+			SeatWeaponGripSocket();
 		}
 	}
 
@@ -219,7 +220,7 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 
 	if (IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled())
 	{
-		// Owner path: attach to body mesh weapon_r bone so AC_ProceduralAnimation can drive the weapon transform
+		// Owner path: attach to the kit IK-rig gun bone (ik_hand_gun) so AC_ProceduralAnimation drives the weapon transform
 		if (IsValid(OwnerChar))
 		{
 			USkeletalMeshComponent* BodyMesh = OwnerChar->GetMesh();
@@ -230,6 +231,7 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 					FAttachmentTransformRules::SnapToTargetNotIncludingScale,
 					KitWeaponAttachSocket
 				);
+				SeatWeaponGripSocket();
 			}
 		}
 
@@ -256,4 +258,27 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 void UWeaponComponent::OnRep_IsAiming()
 {
 	// Proxies can blend to ADS pose here
+}
+
+// ---- Grip Re-seat ----
+
+void UWeaponComponent::SeatWeaponGripSocket()
+{
+	if (!IsValid(CurrentWeapon)) return;
+
+	USkeletalMeshComponent* Mesh = CurrentWeapon->GetWeaponMesh();
+	if (!IsValid(Mesh)) return;
+
+	static const FName GripSocketName(TEXT("GripSocket"));
+	if (!Mesh->DoesSocketExist(GripSocketName)) return; // No grip socket authored — leave snapped at mesh origin (current behavior).
+
+	// After SnapToTarget, the mesh origin sits on ik_hand_gun (relative transform = Identity).
+	// Re-seat so GripSocket coincides with ik_hand_gun instead.
+	// socketWorld = socketLocal * (relative * parentWorld); want socketWorld == parentWorld
+	//   => socketLocal * relative = Identity  => relative = socketLocal.Inverse()
+	// Preserve the weapon's existing relative scale (only set location + rotation).
+	const FTransform GripLocal = Mesh->GetSocketTransform(GripSocketName, RTS_Component);
+	const FTransform Inv = GripLocal.Inverse();
+	CurrentWeapon->SetActorRelativeLocation(Inv.GetLocation());
+	CurrentWeapon->SetActorRelativeRotation(Inv.GetRotation());
 }
