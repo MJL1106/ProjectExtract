@@ -92,6 +92,9 @@ private:
 	UFUNCTION()
 	void OnWeaponFiredCallback();
 
+	/** Re-seats the weapon after SnapToTarget so GripSocket coincides with ik_hand_gun. */
+	void SeatWeaponGripSocket();
+
 	/** Cached owner actor (GC-safe UPROPERTY anchor) */
 	UPROPERTY()
 	TObjectPtr<AActor> OwnerActor;

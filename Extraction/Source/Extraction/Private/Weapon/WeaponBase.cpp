@@ -8,7 +8,7 @@
 #include "EnemyBase.h"
 #include "ExtractionDamageType.h"
 #include "HealthComponent.h"
-#include "Components/StaticMeshComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/MeshComponent.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Character.h"
@@ -51,9 +51,19 @@ AWeaponBase::AWeaponBase()
 	bReplicates = true;
 	PrimaryActorTick.bCanEverTick = false;
 
-	WeaponMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("WeaponMesh"));
+	WeaponMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("WeaponMesh"));
 	SetRootComponent(WeaponMesh);
 	WeaponMesh->SetCollisionProfileName(FName("NoCollision"));
+	// Kit spawns a BP_Item_Base FP visual weapon for the owning player — hide this mesh on
+	// the owner to prevent a double-weapon. Third-person clients still see it.
+	WeaponMesh->SetOwnerNoSee(true);
+
+	// Weapon follows the hand via attachment to ik_hand_gun; its own skeletal pose only needs
+	// to evaluate when on-screen (e.g. weapon-local reload/bolt anim). Avoids per-frame off-screen
+	// pose refresh for every armed pawn's weapon.
+	WeaponMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+	// NoCollision weapon must never simulate, even if a designer-assigned skeletal asset ships a physics asset.
+	WeaponMesh->SetSimulatePhysics(false);
 }
 
 void AWeaponBase::BeginPlay()
@@ -66,10 +76,13 @@ void AWeaponBase::BeginPlay()
 	}
 	else
 	{
-		CachedEffectiveMesh = FindComponentByClass<UStaticMeshComponent>();
+		CachedEffectiveMesh = FindComponentByClass<USkeletalMeshComponent>();
 		if (HasAuthority() && IsValid(WeaponData))
 			UE_LOG(LogTemp, Warning, TEXT("WeaponBase %s: WeaponMesh is null — BP misconfig, falling back to FindComponentByClass per shot"), *GetName());
 	}
+
+	if (IsValid(WeaponData) && !WeaponData->KitWeaponPoseAsset)
+		UE_LOG(LogExtraction, Warning, TEXT("[KitWeapon] %s shipping without KitWeaponPoseAsset — kit procedural arms will receive nullptr"), *GetNameSafe(this));
 }
 
 void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -576,5 +589,182 @@ void AWeaponBase::OnRep_CurrentState()
 
 void AWeaponBase::OnRep_CurrentAmmo()
 {
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+}
+
+// ---- IKitWeaponInterface ----
+// Bridge dispatch from kit's BP_FPCharacter into AWeaponBase. Methods we have map
+// to existing logic; gameplay surfaces we don't yet implement are Verbose no-op stubs.
+
+void AWeaponBase::KitReload_Implementation()
+{
+	if (!CanReload()) return;
+	Reload();
+}
+
+void AWeaponBase::KitBeginFire_Implementation()
+{
+	// Kit owns fire cadence — do NOT arm AutoFireTimer here. Just clear the stop-fire
+	// flag so the subsequent KitFire_HitScan dispatches succeed via CanFire().
+	bWantsToFire = true;
+	bDryFireLogged = false;
+	bIsRecoveringRecoil = false;
+}
+
+void AWeaponBase::KitStopFire_Implementation()
+{
+	// Kit drives cadence — no AutoFireTimer was armed by KitBeginFire, so just clear
+	// fire intent. Avoid StopFiring()'s timer-clear path which would also run recoil
+	// recovery setup on every release.
+	bWantsToFire = false;
+	if (HasAuthority() && CurrentState == EWeaponState::Firing)
+		CurrentState = EWeaponState::Idle;
+}
+
+void AWeaponBase::KitFire_HitScan_Implementation()
+{
+	// One shot per kit dispatch — kit calls this on its own fire-rate cadence.
+	if (!CanFire()) return;
+
+	if (HasAuthority())
+		CurrentState = EWeaponState::Firing;
+
+	FireShot();
+
+	if (HasAuthority())
+		CurrentState = EWeaponState::Idle;
+}
+
+void AWeaponBase::KitInspect_Implementation()
+{
+	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitInspect — no-op stub"), *GetNameSafe(this));
+}
+
+void AWeaponBase::KitMelee_Implementation()
+{
+	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitMelee — no-op stub"), *GetNameSafe(this));
+}
+
+void AWeaponBase::KitChangeFireMode_Implementation()
+{
+	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitChangeFireMode — no-op stub"), *GetNameSafe(this));
+}
+
+void AWeaponBase::KitBurstFire_Implementation()
+{
+	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitBurstFire — no-op stub"), *GetNameSafe(this));
+}
+
+void AWeaponBase::KitFinishFire_Implementation()
+{
+	bWantsToFire = false;
+	if (HasAuthority() && CurrentState == EWeaponState::Firing)
+		CurrentState = EWeaponState::Idle;
+}
+
+void AWeaponBase::KitTrigger_Implementation()
+{
+	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitTrigger — no-op stub"), *GetNameSafe(this));
+}
+
+void AWeaponBase::KitSpawnAttachments_Implementation()
+{
+	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitSpawnAttachments — no-op stub"), *GetNameSafe(this));
+}
+
+void AWeaponBase::KitUnequip_Implementation()
+{
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+	CancelRecoilRecovery();
+	if (HasAuthority())
+		CurrentState = EWeaponState::Idle;
+	bWantsToFire = false;
+	StopFiring();
+}
+
+UDataAsset* AWeaponBase::GetKitProceduralValues_Implementation() const
+{
+	if (!IsValid(WeaponData))
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("[KitWeapon] %s has no WeaponData — returning nullptr"), *GetNameSafe(this));
+		return nullptr;
+	}
+	if (!WeaponData->KitWeaponPoseAsset)
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("[KitWeapon] %s WeaponData->KitWeaponPoseAsset is unassigned — kit IK will receive nullptr"), *GetNameSafe(this));
+		return nullptr;
+	}
+	return WeaponData->KitWeaponPoseAsset;
+}
+
+FTransform AWeaponBase::GetKitIK_HandGunSocketOffset_Implementation() const
+{
+	return FTransform::Identity;
+}
+
+FTransform AWeaponBase::GetKitIK_HandRSocketOffset_Implementation() const
+{
+	return FTransform::Identity;
+}
+
+FTransform AWeaponBase::GetKitIK_HandLSocketOffset_Implementation() const
+{
+	return FTransform::Identity;
+}
+
+TSubclassOf<AActor> AWeaponBase::GetKitVisualWeaponClass_Implementation() const
+{
+	return IsValid(WeaponData) ? WeaponData->KitVisualWeaponClass : nullptr;
+}
+
+float AWeaponBase::GetKitAimDistanceFromCamera_Implementation() const
+{
+	return 30.f;
+}
+
+FVector AWeaponBase::GetKitMuzzleRingScale_Implementation() const
+{
+	return FVector(1.f);
+}
+
+bool AWeaponBase::GetKitReloading_Implementation() const
+{
+	return IsReloading();
+}
+
+bool AWeaponBase::GetKitIsFire_Implementation() const
+{
+	return IsFiring();
+}
+
+void AWeaponBase::KitSetAmmo_Implementation(int32 AmmoCount, int32 MaxAmmo)
+{
+	if (!HasAuthority()) return;
+
+	// (0,0) sentinel: no loadout override — use the weapon's own data-driven defaults.
+	if (MaxAmmo <= 0)
+	{
+		InitializeAmmo();
+		return;
+	}
+
+	// Cancel an in-flight reload so OnReloadFinished can't stack ammo on top of what we set.
+	if (CurrentState == EWeaponState::Reloading)
+	{
+		if (const UWorld* World = GetWorld())
+			World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+		CurrentState = EWeaponState::Idle;
+	}
+
+	// ST_Item carries no reserve figure, so seed reserve from our data — otherwise the
+	// loadout weapon spawns with 0 reserve and CanReload() is false forever.
+	if (IsValid(WeaponData)) ReserveAmmo = WeaponData->DefaultReserveAmmo;
+
+	// Clamp to our real magazine size (data-driven), not the caller's MaxAmmo hint.
+	const int32 MagCeiling = IsValid(WeaponData) ? WeaponData->MagazineSize : MaxAmmo;
+	CurrentAmmo = FMath::Clamp(AmmoCount, 0, MagCeiling);
+
+	bDryFireLogged = false;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
 }

@@ -74,7 +74,7 @@ EBTNodeResult::Type UBTTask_MirrorPlayerTraversal::ExecuteTask(UBehaviorTreeComp
 	if (!OwnTraversal) return EBTNodeResult::Failed;
 
 	// Suppress mirror while companion is occupying a cover slot — vaulting the cover
-	// wall mid-approach breaks the cover workflow. Matches BTService_TraversalProbe guard.
+	// wall mid-approach breaks the cover workflow.
 	AAICoverSlot* CoverSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(ACompanionAIController::BB_CoverSlot));
 	if (IsValid(CoverSlot) && CoverSlot->IsClaimedBy(Companion))
 	{
@@ -118,8 +118,8 @@ EBTNodeResult::Type UBTTask_MirrorPlayerTraversal::ExecuteTask(UBehaviorTreeComp
 	// component so a late broadcast (after the BT component is GC'd / level-transitioned)
 	// can't dereference invalid memory. We also unbind in OnTaskFinished.
 	// Capture MemPtr and gate on Phase==WaitForTraversalEnd so a stale TraversalEnded
-	// broadcast from a traversal we did NOT start (e.g. one kicked off by the probe
-	// service in the same frame the BT switched to this branch) can't finish us early.
+	// broadcast from a traversal we did NOT start (e.g. one kicked off by a designer-placed
+	// nav-link traversal that completed during the approach phase) can't finish us early.
 	FMirrorMemory* MemPtr = Mem;
 	TWeakObjectPtr<UBehaviorTreeComponent> WeakOwner(&OwnerComp);
 	Mem->EndedHandle = OwnTraversal->OnTraversalEnded.AddLambda([WeakOwner, this, MemPtr]()

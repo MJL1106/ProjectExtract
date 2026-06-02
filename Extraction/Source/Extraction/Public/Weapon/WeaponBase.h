@@ -5,9 +5,10 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ExtractionTypes.h"
+#include "Weapon/KitWeaponInterface.h"
 #include "WeaponBase.generated.h"
 
-class UStaticMeshComponent;
+class USkeletalMeshComponent;
 class UMeshComponent;
 class UWeaponDataAsset;
 
@@ -16,7 +17,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnReloadComplete);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAmmoChanged, int32, CurrentAmmo, int32, ReserveAmmo);
 
 UCLASS(Blueprintable)
-class EXTRACTION_API AWeaponBase : public AActor
+class EXTRACTION_API AWeaponBase : public AActor, public IKitWeaponInterface
 {
 	GENERATED_BODY()
 
@@ -67,7 +68,7 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsReloading() const { return CurrentState == EWeaponState::Reloading; }
 
-	UStaticMeshComponent* GetWeaponMesh() const { return WeaponMesh; }
+	USkeletalMeshComponent* GetWeaponMesh() const { return WeaponMesh; }
 
 	/** World-space location of the muzzle. Returns the MuzzleSocket if the weapon mesh has one, else the actor location. */
 	UFUNCTION(BlueprintPure, Category = "Weapon")
@@ -90,10 +91,35 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FOnAmmoChanged OnAmmoChanged;
 
+	// ---- IKitWeaponInterface (bridge for kit BP_FPCharacter dispatch) ----
+
+	virtual void KitReload_Implementation() override;
+	virtual void KitBeginFire_Implementation() override;
+	virtual void KitStopFire_Implementation() override;
+	virtual void KitFire_HitScan_Implementation() override;
+	virtual void KitInspect_Implementation() override;
+	virtual void KitMelee_Implementation() override;
+	virtual void KitChangeFireMode_Implementation() override;
+	virtual void KitBurstFire_Implementation() override;
+	virtual void KitFinishFire_Implementation() override;
+	virtual void KitTrigger_Implementation() override;
+	virtual void KitSpawnAttachments_Implementation() override;
+	virtual void KitUnequip_Implementation() override;
+	virtual UDataAsset* GetKitProceduralValues_Implementation() const override;
+	virtual FTransform GetKitIK_HandGunSocketOffset_Implementation() const override;
+	virtual FTransform GetKitIK_HandRSocketOffset_Implementation() const override;
+	virtual FTransform GetKitIK_HandLSocketOffset_Implementation() const override;
+	virtual float GetKitAimDistanceFromCamera_Implementation() const override;
+	virtual FVector GetKitMuzzleRingScale_Implementation() const override;
+	virtual bool GetKitReloading_Implementation() const override;
+	virtual bool GetKitIsFire_Implementation() const override;
+	virtual void KitSetAmmo_Implementation(int32 AmmoCount, int32 MaxAmmo) override;
+	virtual TSubclassOf<AActor> GetKitVisualWeaponClass_Implementation() const override;
+
 protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
-	TObjectPtr<UStaticMeshComponent> WeaponMesh;
+	TObjectPtr<USkeletalMeshComponent> WeaponMesh;
 
 	/** Data asset with all tuning values for this weapon */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Config")
@@ -190,6 +216,6 @@ private:
 	UPROPERTY(Transient)
 	float ReloadStartTimeSeconds = 0.f;
 
-	/** Resolved on BeginPlay: WeaponMesh if valid, else first UStaticMeshComponent found. Avoids per-shot FindComponentByClass. */
+	/** Resolved on BeginPlay: WeaponMesh if valid, else first USkeletalMeshComponent found. Avoids per-shot FindComponentByClass. */
 	TWeakObjectPtr<UMeshComponent> CachedEffectiveMesh;
 };
