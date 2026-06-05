@@ -40,8 +40,14 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Posture", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float ExploreReturnDelay = 3.f;
 
+	/** Grace before clearing a no-cover combat target on sustained LoS block — lets the companion reposition to regain a shot instead of thrashing on brief occlusion. */
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
+	float CombatTargetLosGraceSeconds = 3.0f;
+
 private:
 	float OutOfCombatTimer = 0.f;
 	bool bWasLosBlocked = false;
+	/** Accumulated time the no-cover combat target has been LoS-blocked; cleared on LoS-clear or active cover slot. */
+	float OpenLosBlockedTime = 0.f;
 	TWeakObjectPtr<AActor> PrevCombatTarget;
 };

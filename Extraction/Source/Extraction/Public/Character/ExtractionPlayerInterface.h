@@ -64,4 +64,8 @@ public:
 
 	/** Notify the implementing character that ADS state changed. Default no-op. */
 	virtual void NotifyADSChanged(bool /*bIsADS*/) {}
+
+	/** Normalized auto-lean suggestion: -1 = lean left, 0 = none, +1 = lean right.
+	 *  Cosmetic, local-only. Default 0 for classes that don't implement auto-lean. */
+	virtual float GetAutoLeanAlpha() const { return 0.f; }
 };

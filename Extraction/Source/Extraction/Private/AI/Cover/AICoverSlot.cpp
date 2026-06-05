@@ -97,6 +97,31 @@ void AAICoverSlot::Release(AActor* Claimer)
 	ClaimedBy = nullptr;
 }
 
+void AAICoverSlot::MarkVacatedForSwitch(AActor* Vacater)
+{
+	if (!IsValid(Vacater))
+		return;
+
+	const UWorld* W = GetWorld();
+	if (!W)
+		return;
+
+	LastVacatedBy   = Vacater;
+	LastVacatedTime = W->GetTimeSeconds();
+}
+
+bool AAICoverSlot::IsOnPostVacateCooldownFor(const AActor* Pawn, float Cooldown) const
+{
+	if (Cooldown <= 0.f || !IsValid(Pawn) || LastVacatedBy.Get() != Pawn)
+		return false;
+
+	const UWorld* W = GetWorld();
+	if (!W)
+		return false;
+
+	return (W->GetTimeSeconds() - LastVacatedTime) < Cooldown;
+}
+
 bool AAICoverSlot::IsTargetInFireArc(const FVector& TargetLoc) const
 {
 	const FVector ToTarget = (TargetLoc - GetActorLocation()).GetSafeNormal2D();

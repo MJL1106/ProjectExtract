@@ -12,6 +12,8 @@ class UAnimMontage;
 class AAICoverSlot;
 class ACompanionCharacter;
 class UCompanionAnimInstance;
+class UCharacterMovementComponent;
+class AAIController;
 
 UCLASS()
 class EXTRACTION_API UBTTask_CompanionCombat : public UBTTaskNode
@@ -114,10 +116,90 @@ protected:
 	// --- Open-engage LoS abandon ---
 
 	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.0", ClampMax = "10.0"))
-	float LosBlockedAbandonSeconds = 2.0f;
+	float LosBlockedAbandonSeconds = 3.0f;
 
 	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.0", ClampMax = "5.0"))
 	float AimDropOnLosBlockedSeconds = 0.3f;
+
+	// --- Open-area move-and-shoot ---
+
+	/** Master toggle. When false, open-engage falls back to today's stand-still burst-fire. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot")
+	bool bEnableOpenAreaMoveAndShoot = true;
+
+	/** Movement speed (cm/s) while aiming + firing in the open — tactical pace, below WalkSpeed. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1.0"))
+	float CombatMoveSpeed = 300.f;
+
+	/** Below this range (cm) the companion retreats from the target. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.0"))
+	float MoveShootIdealRangeMin = 300.f;
+
+	/** Above this range (cm) the companion advances on the target. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.0"))
+	float MoveShootIdealRangeMax = 900.f;
+
+	/** Max lateral step magnitude (cm) for the LoS-blocked regain fan (TickRegainLosReposition). Not used by the clear-LoS jiggle. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1.0"))
+	float MoveShootStrafeDistance = 130.f;
+
+	/** Seconds between re-picks for the LoS-blocked regain fan (TickRegainLosReposition's MoveToLocation gate). */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.1"))
+	float MoveShootRepositionInterval = 1.2f;
+
+	/** Accept radius (cm) for the LoS-blocked regain fan's MoveToLocation. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1.0"))
+	float MoveShootAcceptRadius = 60.f;
+
+	/** Half-extents (cm) for projecting a candidate point onto the navmesh (regain fan + jiggle drift). */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1.0"))
+	float MoveShootNavProjectExtent = 200.f;
+
+	// --- Combat jiggle (clear-LoS restless micro-motion) ---
+
+	/** Radius (cm) of the tight circle the companion jiggles within while it has LoS. THE main intensity dial — bigger = more movement. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.0"))
+	float JiggleRadius = 220.f;
+
+	/** Seconds between re-aiming within the jiggle circle. Lower = faster, jitterier jiggle. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.05"))
+	float JiggleRetargetInterval = 1.0f;
+
+	/** Within this horizontal distance (cm) of the jiggle micro-target, the offset re-rolls. Bigger = longer committed steps. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1.0"))
+	float JiggleReachThreshold = 70.f;
+
+	/** Max turn rate (deg/s) of the move-shoot strafe heading. Lower = smoother, more deliberate steps; very high ≈ today's snap. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1.0"))
+	float CombatMoveTurnRate = 200.f;
+
+	/** MaxAcceleration (cm/s^2) while move-shooting — below the engine default so the companion eases into strafe steps instead of darting. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1.0"))
+	float CombatMoveAcceleration = 1000.f;
+
+	/** Seconds between considering a closer/farther drift of the jiggle home anchor. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.1"))
+	float JiggleDriftInterval = 1.5f;
+
+	/** Distance (cm) the jiggle home anchor nudges per closer/farther drift. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.0"))
+	float JiggleDriftStep = 120.f;
+
+	/** Relative weight of drifting the home anchor toward the target. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.0"))
+	float JiggleDriftCloserWeight = 20.f;
+
+	/** Relative weight of drifting the home anchor away from the target. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.0"))
+	float JiggleDriftFartherWeight = 20.f;
+
+	/** Relative weight of holding the home anchor (no drift) — default = mostly jiggle in place. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.0"))
+	float JiggleDriftHoldWeight = 60.f;
+
+	/** Re-roll attempts to find a jiggle micro-target with clear LoS to the target before falling back to sitting on the anchor. */
+	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1", ClampMax = "16"))
+	int32 JiggleLosRetryCount = 4;
 
 	// --- Cover timing ---
 
@@ -252,6 +334,9 @@ protected:
 private:
 	enum class EPeekAction : uint8 { Stand, Quick, Hold, Reposition, StandUpAndReposition, CornerPeek };
 
+	/** Jiggle home drift direction relative to the target each drift cycle. */
+	enum class EJiggleDrift : uint8 { Closer, Farther, Hold };
+
 	static EPeekAction RollPeekActionMulti(TArrayView<const TPair<EPeekAction, float>> Weighted);
 
 	// Per-burst helpers
@@ -265,6 +350,42 @@ private:
 	void TickCornerPeekAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
 		AAICoverSlot* Slot, AActor* Target, bool bSuppressed, bool bLowHp,
 		TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+
+	/** Shared move-shoot entry: caches + lowers walk speed and focuses the target (single-source for the MaxWalkSpeed override). No-op if already active. */
+	void EnterMoveShootIfNeeded(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, UCharacterMovementComponent* CMC, const TCHAR* Reason);
+
+	/** Shared move-shoot re-pick gate: decrements the reposition timer and returns true when a new destination should be chosen this tick. */
+	bool ShouldRepickMoveShoot(ACompanionCharacter* Companion, AAIController* AIC, float DeltaSeconds);
+
+	/** Open-area combat jiggle: continuous restless micro-motion (AddMovementInput) within JiggleRadius of JiggleHome while LoS is clear. SetFocus already faces the enemy; firing runs after this call. */
+	void TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+
+	/** Re-rolls JiggleOffset up to JiggleLosRetryCount times to find a micro-target with LoS; falls back to ZeroVector (sit on anchor) if none pass. Resets the retarget timer. */
+	void RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached);
+
+	/** Drift cycle: weighted-rolls Closer/Farther/Hold and nudges JiggleHome by JiggleDriftStep along the horizontal companion->target axis, clamped to [MoveShootIdealRangeMin, MoveShootIdealRangeMax] and nav-projected. LoS-gates the Closer drift. No-op on Hold or failed projection. */
+	void TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+
+	/** Player-pull move-and-shoot: when the player is too far, close the gap while keeping the enemy focused. Prefers player proximity over jiggle position. */
+	void TickMoveShootTowardPlayer(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, float DeltaSeconds);
+
+	/** Weighted-random jiggle drift direction from the Closer/Farther/Hold weights. Returns Hold if all weights are zero. */
+	EJiggleDrift RollJiggleDrift() const;
+
+	/** LoS-blocked reposition: keep facing the target, sidestep laterally to a nav point that has LoS. Holds (no thrash) if no side works. */
+	void TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+
+	/** Shared LoS test: does Point (raised to eye height) have a clear ECC_Visibility line to the target? Ignores self + weapon + attached. */
+	bool PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredAttached) const;
+
+	/** Projects MyLoc+LateralOffset onto the navmesh and returns true only if the projected point has LoS to the target. */
+	bool TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, const FVector& LateralOffset, FVector& OutDest) const;
+
+	/** Regain-LoS fan: tests right/left/back/back-right/back-left offsets at StepDistance, nav-projects + LoS-verifies each, returns the NEAREST valid point (smallest displacement). Biases toward a small back-step over a big swing. Returns false if none clear. */
+	bool PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest) const;
+
+	/** Symmetric teardown for move-and-shoot: stop movement, clear focus, restore walk speed, reset state. */
+	void EndOpenAreaMoveShoot(ACompanionCharacter* Companion);
 
 	float BurstTimer = 0.0f;
 	bool bIsFiringBurst = false;
@@ -284,6 +405,37 @@ private:
 	int8 LastTickBranch = -1;
 	bool bLastLosBlocked = false;
 	TWeakObjectPtr<AActor> LastLosBlocker;
+
+	// Open-area move-and-shoot state (shared entry/speed/focus + the LoS-blocked regain fan)
+	FVector MoveShootDestination = FVector::ZeroVector;
+	bool bMoveShootMoveActive = false;
+	float MoveShootRepositionTimer = 0.f;
+	/** True while holding after a failed nav projection — gate must wait the full interval (ignore bIdle) before re-picking. */
+	bool bMoveShootHolding = false;
+	/** CMC->MaxWalkSpeed captured on entry so it can be restored on exit. 0 = not captured. */
+	float CachedDefaultWalkSpeed = 0.f;
+
+	/** Latched leash bool with hysteresis — trips at LeashDist, releases only once back inside the dead-band. */
+	bool bPlayerPullLatched = false;
+	/** True while TickMoveShootTowardPlayer owns movement; cleared by jiggle/regain paths to edge-detect re-entry and reset the shared pick gate. */
+	bool bPlayerPullActive = false;
+
+	// Combat jiggle state (clear-LoS restless micro-motion; per-instance, server-only)
+	/** True while the jiggle micro-motion owns movement. Cleared by EndOpenAreaMoveShoot and on a LoS-blocked stretch so JiggleHome re-anchors on resume. */
+	bool bJiggleActive = false;
+	/** World anchor the jiggle circles around — re-anchored to current location on each (re)activation, nudged by drift. */
+	FVector JiggleHome = FVector::ZeroVector;
+	/** Current ground-plane offset from JiggleHome defining the micro-target; magnitude in [0, JiggleRadius]. */
+	FVector JiggleOffset = FVector::ZeroVector;
+	/** Counts down to the next JiggleOffset re-roll. */
+	float JiggleRetargetTimer = 0.f;
+	/** Counts down to the next closer/farther drift consideration. */
+	float JiggleDriftTimer = 0.f;
+	/** Smoothed movement direction for the jiggle strafe walk — interpolated toward the desired heading each tick. Reset in EndOpenAreaMoveShoot. */
+	FVector SmoothedMoveDir = FVector::ZeroVector;
+
+	/** CMC->MaxAcceleration captured on move-shoot entry so it can be restored on exit. 0 = not captured. */
+	float CachedDefaultAcceleration = 0.f;
 
 	// Peek action state
 	EPeekAction CurrentBurstAction = EPeekAction::Stand;

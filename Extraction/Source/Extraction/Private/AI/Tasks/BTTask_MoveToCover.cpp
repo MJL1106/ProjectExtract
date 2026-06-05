@@ -6,10 +6,12 @@
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "CompanionAIController.h"
+#include "AI/CompanionTuningDataAsset.h"
 #include "CoverRegistrySubsystem.h"
 #include "AICoverSlot.h"
 #include "CompanionCharacter.h"
 #include "TraversalComponent.h"
+#include "DrawDebugHelpers.h"
 
 UBTTask_MoveToCover::UBTTask_MoveToCover()
 {
@@ -29,6 +31,12 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	if (!Controller || !Pawn) return EBTNodeResult::Failed;
 
 	bMoveIssued = false;
+
+#if ENABLE_DRAW_DEBUG
+	if (bDrawCoverSearchRadius)
+		DrawDebugCircle(Pawn->GetWorld(), Pawn->GetActorLocation(), SearchRadius, 48, FColor::Cyan, false, 3.0f, 0, 3.0f,
+			FVector(1.f, 0.f, 0.f), FVector(0.f, 1.f, 0.f), false);
+#endif
 
 	UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover ENTER querier=%s hasCoverPos=%d combatTarget=%s"),
 		*Pawn->GetName(), *Pawn->GetName(),
@@ -108,7 +116,14 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	UCoverRegistrySubsystem* Registry = Pawn->GetWorld()->GetSubsystem<UCoverRegistrySubsystem>();
 	if (!Registry) return EBTNodeResult::Failed;
 
-	AAICoverSlot* Slot = Registry->FindBestCoverFor(Pawn->GetActorLocation(), Target, SearchRadius);
+	// P4 — honor the post-vacate cooldown here too: this fresh-picker path is the abort re-entry that
+	// would otherwise proximity-bias straight back to the just-vacated slot. Cast for the tunable; if the
+	// controller/tuning is absent, cooldown defaults to 0 (no exclusion) and behaviour is unchanged.
+	const ACompanionAIController* CompanionController = Cast<ACompanionAIController>(Controller);
+	const UCompanionTuningDataAsset* Tuning = CompanionController ? CompanionController->GetTuning() : nullptr;
+	const float PostVacateCooldown = Tuning ? Tuning->CoverSwitchPostVacateCooldown : 0.f;
+
+	AAICoverSlot* Slot = Registry->FindBestCoverFor(Pawn->GetActorLocation(), Target, SearchRadius, nullptr, Pawn, PostVacateCooldown);
 	if (!Slot)
 	{
 		UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover no slot found within radius=%.0f"), *Pawn->GetName(), SearchRadius);

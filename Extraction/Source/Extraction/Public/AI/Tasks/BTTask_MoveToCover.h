@@ -57,6 +57,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Debug")
 	bool bDebugLogging = true;
 
+	// Debug-only: draw a cyan ground circle of SearchRadius at the querier each time cover is searched.
+	UPROPERTY(EditAnywhere, Category = "Debug")
+	bool bDrawCoverSearchRadius = true;
+
 private:
 	void StartMoveTo(const FVector& ArrivalPos, AAIController* Controller, APawn* Pawn);
 	void ReleaseClaim(UBlackboardComponent* BB, APawn* Pawn);

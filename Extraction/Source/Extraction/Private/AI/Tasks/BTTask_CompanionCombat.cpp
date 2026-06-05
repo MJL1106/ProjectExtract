@@ -6,6 +6,7 @@
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "CompanionAIController.h"
+#include "CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
 #include "Animation/CompanionAnimInstance.h"
 #include "WeaponBase.h"
@@ -13,6 +14,7 @@
 #include "AICoverSlot.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "NavigationSystem.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
@@ -122,6 +124,46 @@ namespace
 				C->UnCrouch();
 			}
 		});
+	}
+
+	// Fallback leash distance (cm) when no tuning asset is assigned — mirrors SprintDistanceThreshold default.
+	static constexpr float DefaultCombatPlayerLeash = 1000.f;
+
+	// Fallback stop distance (cm) for the player-pull dead-band — mirrors AcceptableRadius default.
+	static constexpr float DefaultPlayerPullStopDist = 250.f;
+
+	// Projects a candidate onto the navmesh. Returns true + fills OutLoc on success.
+	static bool ProjectToNav(UWorld* World, const FVector& Candidate, float Extent, FVector& OutLoc)
+	{
+		UNavigationSystemV1* NavSys = World ? UNavigationSystemV1::GetCurrent(World) : nullptr;
+		if (!NavSys) return false;
+		FNavLocation NavLoc;
+		if (!NavSys->ProjectPointToNavigation(Candidate, NavLoc, FVector(Extent))) return false;
+		OutLoc = NavLoc.Location;
+		return true;
+	}
+
+	// Resolves the player pawn + keep-out radius (AcceptableRadius) from the companion's controller.
+	// OutMinDist defaults to the existing DefaultPlayerPullStopDist fallback when tuning is absent.
+	static APawn* ResolvePlayerKeepOut(ACompanionCharacter* Companion, float& OutMinDist)
+	{
+		OutMinDist = DefaultPlayerPullStopDist;
+		ACompanionAIController* CompAIC = Companion ? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
+		if (!CompAIC) return nullptr;
+		if (const UCompanionTuningDataAsset* T = CompAIC->GetTuning()) OutMinDist = FMath::Min(T->AcceptableRadius, T->SprintDistanceThreshold * 0.5f);
+		return CompAIC->GetPlayerCharacter();
+	}
+
+	// Pushes a horizontal point out to the player keep-out circle edge if inside MinDist (preserves Z).
+	static FVector ClampOutsidePlayerCircle(const FVector& Point, const FVector& PlayerLoc, float MinDist)
+	{
+		FVector ToPoint = Point - PlayerLoc;
+		ToPoint.Z = 0.f;
+		const float Dist = ToPoint.Size();
+		if (Dist >= MinDist) return Point;
+		const FVector Dir = (Dist > KINDA_SMALL_NUMBER) ? (ToPoint / Dist) : FVector(1.f, 0.f, 0.f);
+		const FVector Out = PlayerLoc + Dir * MinDist;
+		return FVector(Out.X, Out.Y, Point.Z);
 	}
 }
 
@@ -673,6 +715,417 @@ bool UBTTask_CompanionCombat::TryPrePeekReloadGate(ACompanionCharacter* Companio
 	return true;
 }
 
+// --- Open-area move-and-shoot ---
+
+bool UBTTask_CompanionCombat::PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredAttached) const
+{
+	if (!IsValid(Companion) || !IsValid(Target)) return false;
+	AActor* BlockedBy = nullptr;
+	const FVector Eye = Point + FVector(0.f, 0.f, StandFireEyeHeight);
+	return HasLineOfSight(Companion->GetWorld(), Eye, Target, Companion, BlockedBy, IgnoredAttached);
+}
+
+void UBTTask_CompanionCombat::EnterMoveShootIfNeeded(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, UCharacterMovementComponent* CMC, const TCHAR* Reason)
+{
+	if (bMoveShootMoveActive) return;
+	// Single source for the MaxWalkSpeed + MaxAcceleration override + focus; EndOpenAreaMoveShoot is the matching restore.
+	CachedDefaultWalkSpeed = CMC->MaxWalkSpeed;
+	CMC->MaxWalkSpeed = CombatMoveSpeed;
+	CachedDefaultAcceleration = CMC->MaxAcceleration;
+	AIC->SetFocus(Target, EAIFocusPriority::Gameplay);
+	bMoveShootMoveActive = true;
+	MoveShootRepositionTimer = 0.f;
+	if (bDebugLogging)
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: MOVESHOOT enter %s speed=%.0f"), *Companion->GetName(), Reason, CombatMoveSpeed);
+}
+
+bool UBTTask_CompanionCombat::ShouldRepickMoveShoot(ACompanionCharacter* Companion, AAIController* AIC, float DeltaSeconds)
+{
+	// Re-pick on timer expiry or on arrival; otherwise let the current move run. While holding (last
+	// pick failed), ignore the bIdle shortcut — StopMovement forced Idle, so honouring it would re-pick
+	// every frame and thrash the nav query. Wait the full interval before re-picking.
+	MoveShootRepositionTimer -= DeltaSeconds;
+	const bool bArrived =
+		FVector::DistSquared(Companion->GetActorLocation(), MoveShootDestination) <= FMath::Square(MoveShootAcceptRadius);
+	const bool bIdle = AIC->GetMoveStatus() == EPathFollowingStatus::Idle;
+	if (bMoveShootHolding)
+	{
+		if (MoveShootRepositionTimer > 0.f) return false;
+	}
+	else if (MoveShootRepositionTimer > 0.f && !bArrived && !bIdle)
+	{
+		return false;
+	}
+	MoveShootRepositionTimer = MoveShootRepositionInterval;
+	return true;
+}
+
+void UBTTask_CompanionCombat::RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached)
+{
+	// Try up to JiggleLosRetryCount random ground-plane offsets; accept the first whose micro-target has LoS.
+	// Falls back to ZeroVector (sit on the already-LoS-safe anchor) if none pass.
+	const int32 MaxTries = FMath::Max(1, JiggleLosRetryCount);
+	for (int32 i = 0; i < MaxTries; ++i)
+	{
+		const float Angle = FMath::FRandRange(0.f, 2.f * PI);
+		const float Radius = FMath::FRandRange(0.f, JiggleRadius);
+		const FVector Candidate(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius, 0.f);
+		if (PointHasLosToTarget(Companion, JiggleHome + Candidate, Target, IgnoredAttached))
+		{
+			JiggleOffset = Candidate;
+			JiggleRetargetTimer = JiggleRetargetInterval;
+			return;
+		}
+	}
+	JiggleOffset = FVector::ZeroVector;
+	JiggleRetargetTimer = JiggleRetargetInterval;
+}
+
+UBTTask_CompanionCombat::EJiggleDrift UBTTask_CompanionCombat::RollJiggleDrift() const
+{
+	// Roll against the running total — mirrors RollPeekActionMulti. All-zero degrades to Hold.
+	const TPair<EJiggleDrift, float> Weighted[] = {
+		{ EJiggleDrift::Closer,  JiggleDriftCloserWeight },
+		{ EJiggleDrift::Farther, JiggleDriftFartherWeight },
+		{ EJiggleDrift::Hold,    JiggleDriftHoldWeight },
+	};
+	float Total = 0.f;
+	for (const TPair<EJiggleDrift, float>& Entry : Weighted)
+	{
+		if (Entry.Value > 0.f) Total += Entry.Value;
+	}
+	if (Total <= 0.f) return EJiggleDrift::Hold;
+
+	float Roll = FMath::FRand() * Total;
+	for (const TPair<EJiggleDrift, float>& Entry : Weighted)
+	{
+		if (Entry.Value <= 0.f) continue;
+		Roll -= Entry.Value;
+		if (Roll <= 0.f) return Entry.Key;
+	}
+	return EJiggleDrift::Hold;
+}
+
+void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+{
+	JiggleDriftTimer -= DeltaSeconds;
+	if (JiggleDriftTimer > 0.f) return;
+	JiggleDriftTimer = JiggleDriftInterval;
+
+	const EJiggleDrift Drift = RollJiggleDrift();
+	if (Drift == EJiggleDrift::Hold) return;
+
+	// Horizontal home->target axis; nudge JiggleHome toward (Closer) or away (Farther) along it.
+	FVector ToTarget = Target->GetActorLocation() - JiggleHome;
+	ToTarget.Z = 0.f;
+	if (ToTarget.SizeSquared() <= KINDA_SMALL_NUMBER) return;
+	const FVector ToTargetDir = ToTarget.GetSafeNormal();
+	const float Sign = (Drift == EJiggleDrift::Closer) ? 1.f : -1.f;
+
+	FVector Nudged = JiggleHome + ToTargetDir * (JiggleDriftStep * Sign);
+
+	// Clamp the nudged anchor's horizontal distance to the target into the ideal range band.
+	FVector NudgedToTarget = Target->GetActorLocation() - Nudged;
+	NudgedToTarget.Z = 0.f;
+	const float NudgedDist = NudgedToTarget.Size();
+	if (NudgedDist <= KINDA_SMALL_NUMBER) return;
+	const float ClampedDist = FMath::Clamp(NudgedDist, MoveShootIdealRangeMin, MoveShootIdealRangeMax);
+	const FVector NudgedTargetLoc(Target->GetActorLocation().X, Target->GetActorLocation().Y, JiggleHome.Z);
+	Nudged = NudgedTargetLoc - NudgedToTarget.GetSafeNormal() * ClampedDist;
+
+	// Project onto navmesh; skip the drift this cycle if it fails rather than anchoring off-mesh.
+	FVector Projected;
+	if (!ProjectToNav(Companion->GetWorld(), Nudged, MoveShootNavProjectExtent, Projected)) return;
+
+	// LoS-gate the Closer drift: don't creep into the occluded zone near an elevated enemy.
+	if (Drift == EJiggleDrift::Closer && !PointHasLosToTarget(Companion, Projected, Target, IgnoredAttached)) return;
+
+	float KeepOut = 0.f;
+	if (APawn* KOPlayer = ResolvePlayerKeepOut(Companion, KeepOut))
+	{
+		const FVector ClampedHome = ClampOutsidePlayerCircle(Projected, KOPlayer->GetActorLocation(), KeepOut);
+		if (!ClampedHome.Equals(Projected))
+		{
+			FVector Reproj;
+			if (!ProjectToNav(Companion->GetWorld(), ClampedHome, MoveShootNavProjectExtent, Reproj)) return;
+			Projected = Reproj;
+		}
+	}
+
+	JiggleHome = Projected;
+}
+
+static FVector SeedMoveDir(const FVector& MicroTarget, const FVector& CompanionLoc, const FVector& CompanionForward)
+{
+	FVector Dir = MicroTarget - CompanionLoc;
+	Dir.Z = 0.f;
+	return Dir.SizeSquared() > KINDA_SMALL_NUMBER ? Dir.GetSafeNormal() : CompanionForward;
+}
+
+void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+{
+	if (!IsValid(Companion) || !IsValid(AIC) || !IsValid(Target)) return;
+	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
+	if (!IsValid(CMC)) return;
+
+	// Jiggle owns movement now — mark player-pull inactive so re-entry resets the pick gate.
+	bPlayerPullActive = false;
+
+	// Shares the speed/focus entry with the regain fan (single-source MaxWalkSpeed + SetFocus facing).
+	EnterMoveShootIfNeeded(Companion, AIC, Target, CMC, TEXT("(jiggle)"));
+	CMC->MaxAcceleration = CombatMoveAcceleration;
+
+	// (Re)anchor on activation — also fires when resuming after a LoS-blocked stretch (bJiggleActive cleared there),
+	// so it jiggles around wherever it ended up. StopMovement() once cancels the regain fan's MoveToLocation path
+	// so it doesn't fight AddMovementInput.
+	if (!bJiggleActive)
+	{
+		AIC->StopMovement();
+		JiggleHome = Companion->GetActorLocation();
+		float KeepOut = 0.f;
+		if (APawn* KOPlayer = ResolvePlayerKeepOut(Companion, KeepOut))
+			JiggleHome = ClampOutsidePlayerCircle(JiggleHome, KOPlayer->GetActorLocation(), KeepOut);
+		JiggleDriftTimer = JiggleDriftInterval;
+		RerollJiggleOffset(Companion, Target, IgnoredAttached);
+		SmoothedMoveDir = SeedMoveDir(JiggleHome + JiggleOffset, JiggleHome, Companion->GetActorForwardVector());
+		bJiggleActive = true;
+	}
+
+	TickJiggleDrift(Companion, Target, IgnoredAttached, DeltaSeconds);
+
+	// Re-roll the micro-target on the timer or on reach, so the companion never settles.
+	const FVector CompanionLoc = Companion->GetActorLocation();
+	const FVector MicroTarget = JiggleHome + JiggleOffset;
+	JiggleRetargetTimer -= DeltaSeconds;
+	const bool bReached = FVector::DistSquared2D(CompanionLoc, MicroTarget) <= FMath::Square(JiggleReachThreshold);
+	if (JiggleRetargetTimer <= 0.f || bReached) RerollJiggleOffset(Companion, Target, IgnoredAttached);
+
+	// Bounded-turn-rate input toward the micro-target — smoothly rotates the heading rather than snapping,
+	// so legs commit to full deliberate strafe steps instead of half-steps.
+	FVector DesiredDir = (JiggleHome + JiggleOffset) - CompanionLoc;
+	DesiredDir.Z = 0.f;
+	if (DesiredDir.SizeSquared() <= KINDA_SMALL_NUMBER) return;
+	const FVector TargetDir = DesiredDir.GetSafeNormal();
+	if (SmoothedMoveDir.IsNearlyZero()) SmoothedMoveDir = TargetDir;
+	SmoothedMoveDir = FMath::VInterpNormalRotationTo(SmoothedMoveDir, TargetDir, DeltaSeconds, CombatMoveTurnRate);
+
+	// Player keep-out: never drive within the circle — push straight out if inside, slide tangentially if approaching.
+	float KeepOut = 0.f;
+	if (APawn* KOPlayer = ResolvePlayerKeepOut(Companion, KeepOut))
+	{
+		FVector ToPlayer = KOPlayer->GetActorLocation() - CompanionLoc;
+		ToPlayer.Z = 0.f;
+		const float DistToPlayer = ToPlayer.Size();
+		if (DistToPlayer > KINDA_SMALL_NUMBER)
+		{
+			const FVector ToPlayerDir = ToPlayer / DistToPlayer;
+			if (DistToPlayer < KeepOut)
+			{
+				FVector Tangent = FVector::CrossProduct(FVector::UpVector, ToPlayerDir);
+				if (FVector::DotProduct(SmoothedMoveDir, Tangent) < 0.f) Tangent = -Tangent;
+				SmoothedMoveDir = (-ToPlayerDir + Tangent).GetSafeNormal();
+			}
+			else if (DistToPlayer < KeepOut + JiggleRadius)
+			{
+				const float Inward = FVector::DotProduct(SmoothedMoveDir, ToPlayerDir);
+				if (Inward > 0.f)
+				{
+					const FVector Slide = SmoothedMoveDir - ToPlayerDir * Inward;
+					if (Slide.SizeSquared() > KINDA_SMALL_NUMBER) SmoothedMoveDir = Slide.GetSafeNormal();
+				}
+			}
+		}
+	}
+
+	Companion->AddMovementInput(SmoothedMoveDir, 1.0f);
+}
+
+void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+{
+	if (!IsValid(Companion) || !IsValid(AIC) || !IsValid(Target)) return;
+	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
+	if (!IsValid(CMC)) return;
+
+	// Regain-LoS fan owns movement now — mark player-pull inactive so re-entry resets the pick gate.
+	bPlayerPullActive = false;
+
+	// Shares entry/speed/focus + re-pick gate with the clear path: MaxWalkSpeed restore stays single-source
+	// (EndOpenAreaMoveShoot) and the body keeps facing the enemy (focus) while we sidestep.
+	EnterMoveShootIfNeeded(Companion, AIC, Target, CMC, TEXT("(regain-los)"));
+	if (CachedDefaultAcceleration > 0.f) CMC->MaxAcceleration = CachedDefaultAcceleration;
+	if (!ShouldRepickMoveShoot(Companion, AIC, DeltaSeconds)) return;
+
+	// Fan of offsets from CURRENT location (right/left/back/back-right/back-left), nearest LoS-valid wins.
+	// For an enemy above on a ramp, lateral steps rarely clear the lip — backing up lowers the look-up
+	// angle past it, so the fan includes the back directions. Try base distance, then 2x, else hold.
+	constexpr float WideStepFactor = 2.0f;
+	FVector Dest;
+	const bool bHaveDest =
+		PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance, Dest)
+		|| PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance * WideStepFactor, Dest);
+
+	// No LoS-clear fan point at either distance — hold (respect the reposition timer, don't thrash the nav query).
+	if (!bHaveDest)
+	{
+		bMoveShootHolding = true;
+		AIC->StopMovement();
+		return;
+	}
+
+	bMoveShootHolding = false;
+	MoveShootDestination = Dest;
+	AIC->MoveToLocation(MoveShootDestination, MoveShootAcceptRadius, false, true, false, true);
+}
+
+bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest) const
+{
+	if (!IsValid(Companion) || !IsValid(Target)) return false;
+
+	const FVector MyLoc = Companion->GetActorLocation();
+	FVector ToTarget = Target->GetActorLocation() - MyLoc;
+	ToTarget.Z = 0.f;
+	if (ToTarget.SizeSquared() <= KINDA_SMALL_NUMBER) return false;
+
+	const FVector ToTargetDir = ToTarget.GetSafeNormal();
+	const FVector RightOfTarget = FVector::CrossProduct(FVector::UpVector, ToTargetDir).GetSafeNormal();
+	const FVector Back = -ToTargetDir; // horizontal target->companion: lowers the look-up angle past a ramp lip
+	const FVector Offsets[] = { RightOfTarget, -RightOfTarget, Back, Back + RightOfTarget, Back - RightOfTarget };
+
+	// Nearest valid candidate (smallest displacement from current location that regains LoS) — biases a
+	// small back-step over a big lateral swing. Project + LoS-verify each, track the closest hit.
+	bool bFound = false;
+	float BestDistSq = TNumericLimits<float>::Max();
+	for (const FVector& Dir : Offsets)
+	{
+		FVector Candidate;
+		if (!TryLateralLosDestination(Companion, Target, IgnoredAttached, Dir.GetSafeNormal() * StepDistance, Candidate)) continue;
+		const float DistSq = FVector::DistSquared(Candidate, MyLoc);
+		if (DistSq >= BestDistSq) continue;
+		BestDistSq = DistSq;
+		OutDest = Candidate;
+		bFound = true;
+	}
+	return bFound;
+}
+
+bool UBTTask_CompanionCombat::TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, const FVector& LateralOffset, FVector& OutDest) const
+{
+	const FVector Candidate = Companion->GetActorLocation() + LateralOffset;
+	if (!ProjectToNav(Companion->GetWorld(), Candidate, MoveShootNavProjectExtent, OutDest)) return false;
+	float KeepOut = 0.f;
+	if (APawn* KOPlayer = ResolvePlayerKeepOut(Companion, KeepOut))
+	{
+		FVector ToPlayer = KOPlayer->GetActorLocation() - OutDest;
+		ToPlayer.Z = 0.f;
+		if (ToPlayer.SizeSquared() < FMath::Square(KeepOut)) return false;
+	}
+	return PointHasLosToTarget(Companion, OutDest, Target, IgnoredAttached);
+}
+
+void UBTTask_CompanionCombat::EndOpenAreaMoveShoot(ACompanionCharacter* Companion)
+{
+	if (!bMoveShootMoveActive) return;
+
+	// Restore speed first (so it's attempted even if the controller is gone), then stop/clear focus.
+	if (IsValid(Companion))
+	{
+		if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
+		{
+			if (CachedDefaultWalkSpeed > 0.f)
+				CMC->MaxWalkSpeed = CachedDefaultWalkSpeed;
+			if (CachedDefaultAcceleration > 0.f)
+				CMC->MaxAcceleration = CachedDefaultAcceleration;
+		}
+		if (AAIController* AIC = Cast<AAIController>(Companion->GetController()))
+		{
+			AIC->ClearFocus(EAIFocusPriority::Gameplay);
+			AIC->StopMovement();
+		}
+	}
+
+	// Always clear state — flags can never survive without the restore having been attempted,
+	// and a recycled node instance can't carry stale move-shoot state.
+	bMoveShootMoveActive = false;
+	MoveShootRepositionTimer = 0.f;
+	MoveShootDestination = FVector::ZeroVector;
+	bMoveShootHolding = false;
+	CachedDefaultWalkSpeed = 0.f;
+	CachedDefaultAcceleration = 0.f;
+
+	// Jiggle teardown — reset anchor/offset + timers so a resumed engagement re-anchors fresh.
+	bJiggleActive = false;
+	JiggleHome = FVector::ZeroVector;
+	JiggleOffset = FVector::ZeroVector;
+	JiggleRetargetTimer = 0.f;
+	JiggleDriftTimer = 0.f;
+	SmoothedMoveDir = FVector::ZeroVector;
+
+	// Player-pull hysteresis + entry-detection — both start unlatched so a fresh engagement is clean.
+	bPlayerPullLatched = false;
+	bPlayerPullActive = false;
+}
+
+void UBTTask_CompanionCombat::TickMoveShootTowardPlayer(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, float DeltaSeconds)
+{
+	if (!IsValid(Companion) || !IsValid(AIC) || !IsValid(Target)) return;
+	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
+	if (!IsValid(CMC)) return;
+
+	APawn* Player = nullptr;
+	float StopDist = DefaultPlayerPullStopDist;
+	if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(AIC))
+	{
+		Player = CompAIC->GetPlayerCharacter();
+		if (const UCompanionTuningDataAsset* T = CompAIC->GetTuning())
+		{
+			const float LeashDist = T->SprintDistanceThreshold > 0.f ? T->SprintDistanceThreshold : DefaultCombatPlayerLeash;
+			StopDist = FMath::Min(T->AcceptableRadius, LeashDist * 0.5f);
+		}
+	}
+	if (!IsValid(Player)) return;
+
+	// Edge-detect first entry into player-pull: flush any stale "hold" from the regain fan so the
+	// first MoveToLocation fires immediately rather than waiting up to MoveShootRepositionInterval.
+	if (!bPlayerPullActive)
+	{
+		bMoveShootHolding = false;
+		MoveShootRepositionTimer = 0.f;
+		bPlayerPullActive = true;
+	}
+
+	// Keep body facing the enemy via focus while closing the gap; re-anchor jiggle when we switch back.
+	EnterMoveShootIfNeeded(Companion, AIC, Target, CMC, TEXT("(player-pull)"));
+	if (CachedDefaultAcceleration > 0.f) CMC->MaxAcceleration = CachedDefaultAcceleration;
+	bJiggleActive = false;
+
+	if (!ShouldRepickMoveShoot(Companion, AIC, DeltaSeconds)) return;
+
+	// Desired point: StopDist behind the player along the companion->player axis.
+	const FVector PlayerLoc = Player->GetActorLocation();
+	const FVector CompLoc   = Companion->GetActorLocation();
+	FVector FromPlayer = CompLoc - PlayerLoc;
+	FromPlayer.Z = 0.f;
+	if (FromPlayer.SizeSquared() <= KINDA_SMALL_NUMBER)
+	{
+		// Companion is essentially on the player — hold rather than picking a degenerate direction.
+		bMoveShootHolding = true;
+		AIC->StopMovement();
+		return;
+	}
+	const FVector Desired = PlayerLoc + FromPlayer.GetSafeNormal() * StopDist;
+
+	FVector Projected;
+	if (!ProjectToNav(Companion->GetWorld(), Desired, MoveShootNavProjectExtent, Projected))
+	{
+		bMoveShootHolding = true;
+		AIC->StopMovement();
+		return;
+	}
+	bMoveShootHolding = false;
+	MoveShootDestination = Projected;
+	AIC->MoveToLocation(MoveShootDestination, MoveShootAcceptRadius, false, true, false, true);
+}
+
 // --- Constructor ---
 
 UBTTask_CompanionCombat::UBTTask_CompanionCombat()
@@ -687,6 +1140,11 @@ UBTTask_CompanionCombat::UBTTask_CompanionCombat()
 
 void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBlackboardComponent* BB, AAICoverSlot* Slot, bool bReleaseSlot, bool bResetPosture)
 {
+	// Sole move-and-shoot teardown owner: restores walk speed, clears focus, stops movement, and
+	// always clears the latch/cache. Tolerates a null/invalid Companion and is idempotent, so the
+	// branch-transition / LoS-lost / toggle-off call sites are unaffected.
+	EndOpenAreaMoveShoot(Companion);
+
 	if (IsValid(Companion))
 	{
 		Companion->StopWeaponFire();
@@ -747,6 +1205,9 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	LastTickBranch = -1;
 	bLastLosBlocked = false;
 	LastLosBlocker = nullptr;
+	// Move-and-shoot teardown is owned solely by EndOpenAreaMoveShoot (called above) — do not
+	// duplicate the member resets here, or an invalid-Companion path would clear the latch flag
+	// and cached speed without restoring MaxWalkSpeed.
 	LastPeekResolveCoverLoc = FVector::ZeroVector;
 	LastPeekResolveTargetLoc = FVector::ZeroVector;
 	ConsecutiveHolds = 0;
@@ -1263,6 +1724,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: BRANCH %s -> %s (cover=%d firing=%d dist=%.0f)"),
 					*Ctx.Companion->GetName(), BranchName(LastTickBranch), BranchName(CurrentBranch),
 					(int32)bHasCover, (int32)bIsFiringBurst, Distance);
+			// Leaving OpenEngage (e.g. cover gained): tear down move-and-shoot symmetrically.
+			if (LastTickBranch == 2 && CurrentBranch != 2)
+				EndOpenAreaMoveShoot(Ctx.Companion);
 			LastTickBranch = CurrentBranch;
 		}
 	}
@@ -1926,7 +2390,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				DebugBurstLosCheckTimer = 0.2f;
 				AActor* BurstBlocker = nullptr;
-				const bool bBurstLos = HasLineOfSight(Ctx.Companion->GetWorld(), MyLocation, Ctx.Target, Ctx.Companion, BurstBlocker, TickIgnoredAttached);
+				const bool bBurstLos = HasLineOfSight(Ctx.Companion->GetWorld(), Ctx.Companion->GetPawnViewLocation(), Ctx.Target, Ctx.Companion, BurstBlocker, TickIgnoredAttached);
 				const bool bNowBlocked = !bBurstLos;
 				const bool bBlockStateChanged = (bNowBlocked != bLastLosBlocked) || (BurstBlocker != LastLosBlocker.Get());
 				if (bBlockStateChanged)
@@ -2105,9 +2569,44 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(Ctx.Companion);
 		QueryParams.AddIgnoredActor(Ctx.Companion->GetCurrentWeapon());
-		Ctx.Companion->GetWorld()->LineTraceSingleByChannel(LosHit, MyLocation, TargetLocation, ECC_Visibility, QueryParams);
+		// Trace from the eyeline (GetPawnViewLocation ~= head height), not the actor centre — the lowered-barrel
+		// height falsely reports blocked LoS against elevated enemies / low geometry.
+		const FVector AimOrigin = Ctx.Companion->GetPawnViewLocation();
+		Ctx.Companion->GetWorld()->LineTraceSingleByChannel(LosHit, AimOrigin, TargetLocation, ECC_Visibility, QueryParams);
 	}
 	const bool bLineOfSight = (!LosHit.bBlockingHit) || (LosHit.GetActor() == Ctx.Target);
+
+	bool bPlayerTooFar = false;
+	{
+		APawn* LeashPlayer = nullptr;
+		float LeashDist = DefaultCombatPlayerLeash;
+		float StopDist = DefaultPlayerPullStopDist;
+		if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(Ctx.Companion->GetController()))
+		{
+			LeashPlayer = CompAIC->GetPlayerCharacter();
+			if (const UCompanionTuningDataAsset* T = CompAIC->GetTuning())
+			{
+				LeashDist = T->SprintDistanceThreshold;
+				StopDist = T->AcceptableRadius;
+			}
+		}
+		if (IsValid(LeashPlayer))
+		{
+			const float CurDist = FVector::Dist(MyLocation, LeashPlayer->GetActorLocation());
+			// Dead-band: release only once the companion is well back inside the leash radius.
+			// Floor to LeashDist * 0.5 guards against a misconfig where AcceptableRadius >= LeashDist.
+			const float ReleaseDist = FMath::Max(LeashDist * 0.5f, LeashDist - StopDist);
+			if (bPlayerPullLatched)
+				bPlayerPullLatched = (CurDist > ReleaseDist);   // release once well back inside
+			else
+				bPlayerPullLatched = (CurDist > LeashDist);      // trip when crossing the leash
+		}
+		else
+		{
+			bPlayerPullLatched = false; // no valid player — never pull
+		}
+		bPlayerTooFar = bPlayerPullLatched;
+	}
 
 	if (bDebugLogging)
 	{
@@ -2131,6 +2630,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 	if (!bLineOfSight)
 	{
+		// Never fire through a wall, regardless of branch.
 		if (bIsFiringBurst)
 		{
 			if (bDebugLogging)
@@ -2143,19 +2643,40 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			DrawDebugLine(Ctx.Companion->GetWorld(), MyLocation, LosHit.ImpactPoint, FColor::Red, false, 0.25f, 0, 2.0f);
 #endif
 		LosBlockedAccum += DeltaSeconds;
-		if (LosBlockedAccum > AimDropOnLosBlockedSeconds)
-			Ctx.Companion->SetAimTarget(nullptr);
+
+		if (bEnableOpenAreaMoveAndShoot)
+		{
+			// Drop the jiggle latch so the clear-LoS path re-anchors JiggleHome when LoS returns.
+			bJiggleActive = false;
+			Ctx.Companion->SetAimTarget(Ctx.Target);
+			if (AAIController* RegainAIC = Cast<AAIController>(Ctx.Companion->GetController()))
+			{
+				if (bPlayerTooFar)
+					TickMoveShootTowardPlayer(Ctx.Companion, RegainAIC, Ctx.Target, DeltaSeconds);
+				else
+					TickRegainLosReposition(Ctx.Companion, RegainAIC, Ctx.Target, TickIgnoredAttached, DeltaSeconds);
+			}
+		}
 		else
 		{
-			const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
-			Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
-				FRotator(0.f, LookAtRot.Yaw, 0.f), DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
+			// Toggle off: today's exact behaviour — stop move-and-shoot, drop aim or manually face, abandon.
+			EndOpenAreaMoveShoot(Ctx.Companion);
+			if (LosBlockedAccum > AimDropOnLosBlockedSeconds)
+				Ctx.Companion->SetAimTarget(nullptr);
+			else
+			{
+				const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
+				Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
+					FRotator(0.f, LookAtRot.Yaw, 0.f), DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
+			}
 		}
+
 		if (LosBlockedAbandonSeconds > 0.f && LosBlockedAccum >= LosBlockedAbandonSeconds)
 		{
 			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=los-block-abandon"), *Ctx.Companion->GetName());
 			Ctx.Companion->StopWeaponFire();
+			EndOpenAreaMoveShoot(Ctx.Companion);
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 		}
 		return;
@@ -2163,9 +2684,17 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 	LosBlockedAccum = 0.f;
 	Ctx.Companion->SetAimTarget(Ctx.Target);
-	const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
-	Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
-		FRotator(0.f, LookAtRot.Yaw, 0.f), DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
+
+	// Facing: when move-and-shoot is enabled, AIController focus (set in EnterMoveShootIfNeeded)
+	// drives body yaw toward the target while the jiggle strafes — so skip the manual rotation here,
+	// which would fight bUseControllerDesiredRotation. When disabled, fall back to today's manual face-the-target.
+	if (!bEnableOpenAreaMoveAndShoot)
+	{
+		EndOpenAreaMoveShoot(Ctx.Companion);
+		const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
+		Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
+			FRotator(0.f, LookAtRot.Yaw, 0.f), DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
+	}
 
 	if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
 	{
@@ -2187,28 +2716,48 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->StopWeaponFire();
 		Ctx.Companion->ReloadWeapon();
 		bIsFiringBurst = false;
-		return;
+		BurstTimer = 0.f; // resume firing on the first tick after reload completes — don't wait out a frozen leftover burst timer
+		// No return — keep moving (strafe-walk / player-pull) while the reload montage plays.
 	}
-	if (Ctx.Companion->IsReloading()) return;
+	const bool bReloadingNow = Ctx.Companion->IsReloading();
 
-	BurstTimer -= DeltaSeconds;
-
-	if (bIsFiringBurst && BurstTimer <= 0.0f)
+	// Combat jiggle (or player-pull): continuous restless micro-motion while firing continues below.
+	// bMoveShootMoveActive may already be true (carried over from a regain-LoS sidestep) — the shared speed/focus
+	// entry stays active; TickCombatJiggle re-anchors JiggleHome + StopMovement's the fan on the first jiggle tick
+	// because the regain branch cleared bJiggleActive. Player-pull wins when staying near the player is urgent;
+	// the firing-burst logic below still fires at the enemy because LoS is clear.
+	if (bEnableOpenAreaMoveAndShoot)
 	{
-		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=burst-end-open"), *Ctx.Companion->GetName());
-		Ctx.Companion->StopWeaponFire();
-		bIsFiringBurst = false;
-		BurstTimer = FirePauseDuration;
+		if (AAIController* MoveAIC = Cast<AAIController>(Ctx.Companion->GetController()))
+		{
+			if (bPlayerTooFar)
+				TickMoveShootTowardPlayer(Ctx.Companion, MoveAIC, Ctx.Target, DeltaSeconds);
+			else
+				TickCombatJiggle(Ctx.Companion, MoveAIC, Ctx.Target, TickIgnoredAttached, DeltaSeconds);
+		}
 	}
-	else if (!bIsFiringBurst && BurstTimer <= 0.0f)
+
+	if (!bReloadingNow)
 	{
-		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE START branch=OpenEngage dist=%.0f (inaccuracy=%.1f deg)"),
-				*Ctx.Companion->GetName(), Distance, Ctx.Companion->GetCurrentInaccuracy());
-		Ctx.Companion->StartWeaponFire();
-		bIsFiringBurst = true;
-		BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
+		BurstTimer -= DeltaSeconds;
+
+		if (bIsFiringBurst && BurstTimer <= 0.0f)
+		{
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=burst-end-open"), *Ctx.Companion->GetName());
+			Ctx.Companion->StopWeaponFire();
+			bIsFiringBurst = false;
+			BurstTimer = FirePauseDuration;
+		}
+		else if (!bIsFiringBurst && BurstTimer <= 0.0f)
+		{
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE START branch=OpenEngage dist=%.0f (inaccuracy=%.1f deg)"),
+					*Ctx.Companion->GetName(), Distance, Ctx.Companion->GetCurrentInaccuracy());
+			Ctx.Companion->StartWeaponFire();
+			bIsFiringBurst = true;
+			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
+		}
 	}
 
 #if ENABLE_DRAW_DEBUG

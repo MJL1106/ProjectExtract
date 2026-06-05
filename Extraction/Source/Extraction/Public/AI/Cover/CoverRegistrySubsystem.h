@@ -19,8 +19,13 @@ public:
 
 	void GetSlotsInRadius(const FVector& Origin, float Radius, TArray<AAICoverSlot*>& OutSlots) const;
 
-	/** OutScore receives the best slot's score; pass nullptr to ignore. */
-	AAICoverSlot* FindBestCoverFor(const FVector& QuerierLoc, AActor* Target, float MaxRadius, float* OutScore = nullptr) const;
+	/**
+	 * OutScore receives the best slot's score; pass nullptr to ignore.
+	 * QuerierPawn + PostVacateCooldown (P4): if both are set, any slot that QuerierPawn just
+	 * vacated via MarkVacatedForSwitch is excluded until the cooldown elapses (prevents snap-back).
+	 */
+	AAICoverSlot* FindBestCoverFor(const FVector& QuerierLoc, AActor* Target, float MaxRadius, float* OutScore = nullptr,
+		const AActor* QuerierPawn = nullptr, float PostVacateCooldown = 0.f) const;
 
 	/**
 	 * Scores a single slot using the same formula as FindBestCoverFor.

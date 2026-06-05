@@ -11,6 +11,7 @@
 #include "TraversalNavLink.generated.h"
 
 class UTraversalComponent;
+struct FNavigationRelevantData;
 
 UCLASS()
 class EXTRACTION_API ATraversalNavLink : public ANavLinkProxy
@@ -32,7 +33,21 @@ public:
 		meta = (ToolTip = "If the traversal component refuses (e.g. blocked clearance), teleport the agent to End so pathfinding still completes."))
 	bool bFallbackTeleportOnFailure = true;
 
+	// INavRelevantInterface — suppress the simple PointLink from nav data for up-types so only
+	// the smart link contributes. Prevents duplicate off-mesh connections in baked AND runtime nav.
+	virtual void GetNavigationData(FNavigationRelevantData& Data) const override;
+
+	// INavLinkHostInterface — same suppression for the runtime nav octree query path.
+	virtual bool GetNavigationLinksArray(TArray<FNavigationLink>& OutLink, TArray<FNavigationSegmentLink>& OutSegments) const override;
+
 protected:
+	virtual void OnConstruction(const FTransform& Transform) override;
+
 	UFUNCTION()
 	void HandleSmartLinkReached(AActor* Agent, const FVector& Destination);
+
+private:
+	// Returns true for traversal types that use the smart-link montage path (Vault, Climb, Mantle).
+	// Returns false for types that rely on native fall / simple off-mesh behaviour (DropDown, Jump, SprintJump).
+	bool UsesSmartLinkTraversal() const;
 };
