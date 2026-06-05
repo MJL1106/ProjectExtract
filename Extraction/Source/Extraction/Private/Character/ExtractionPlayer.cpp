@@ -20,6 +20,7 @@
 #include "Engine/DamageEvents.h"
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
+#include "DrawDebugHelpers.h"
 #include "Extraction.h"
 
 AExtractionPlayer::AExtractionPlayer()
@@ -130,6 +131,29 @@ void AExtractionPlayer::Tick(float DeltaTime)
 		AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
 		if (IsValid(Weapon))
 			Weapon->UpdateRecoilRecovery(DeltaTime);
+	}
+
+	if (IsLocallyControlled())
+	{
+		if (bIsDBNO)
+		{
+			AutoLeanTargetAlpha = 0.f;
+		}
+		else if (bAutoLeanActive)
+		{
+			LeanProbeAccumulator += DeltaTime;
+			if (LeanProbeAccumulator >= LeanProbeInterval)
+			{
+				UpdateAutoLean(DeltaTime);
+				LeanProbeAccumulator = 0.f;
+			}
+		}
+		else
+		{
+			AutoLeanTargetAlpha = 0.f;
+		}
+
+		AutoLeanAlpha = FMath::FInterpTo(AutoLeanAlpha, AutoLeanTargetAlpha, DeltaTime, AutoLeanInterpSpeed);
 	}
 }
 
@@ -279,6 +303,7 @@ void AExtractionPlayer::ADSStart(const FInputActionValue& Value)
 
 	WeaponComponent->SetAiming(true);
 	OnADSChanged(true);
+	bAutoLeanActive = true;
 }
 
 void AExtractionPlayer::ADSStop(const FInputActionValue& Value)
@@ -287,6 +312,7 @@ void AExtractionPlayer::ADSStop(const FInputActionValue& Value)
 
 	WeaponComponent->SetAiming(false);
 	OnADSChanged(false);
+	bAutoLeanActive = false;
 }
 
 // ---- Traversal Input ----
@@ -392,6 +418,60 @@ float AExtractionPlayer::GetVaultSurfaceHeight() const
 	return TraversalComponent->GetVaultSurfaceHeight();
 }
 
+// ---- Auto-Lean ----
+
+void AExtractionPlayer::UpdateAutoLean(float DeltaTime)
+{
+	const APlayerCameraManager* CamManager = UGameplayStatics::GetPlayerCameraManager(this, 0);
+	if (!IsValid(CamManager)) return;
+
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	const FVector Origin = CamManager->GetCameraLocation() + FVector(0.f, 0.f, LeanProbeVerticalOffset);
+	const FVector Right = GetActorRightVector();
+
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(this);
+	const FCollisionShape ProbeShape = FCollisionShape::MakeSphere(LeanProbeRadius);
+
+	// One sweep per side, both of length LeanGapClearance from the camera origin.
+	// A side is a WALL you're hugging if the sweep hits within LeanProbeDistance.
+	// A side is OPEN if the sweep finds nothing within LeanGapClearance (a miss).
+	FHitResult RightHit, LeftHit;
+	const bool bRightHit = World->SweepSingleByChannel(
+		RightHit, Origin, Origin + Right * LeanGapClearance,
+		FQuat::Identity, ECC_Visibility, ProbeShape, Params);
+
+	const bool bLeftHit = World->SweepSingleByChannel(
+		LeftHit, Origin, Origin - Right * LeanGapClearance,
+		FQuat::Identity, ECC_Visibility, ProbeShape, Params);
+
+	const bool bRightWall = bRightHit && RightHit.Distance <= LeanProbeDistance;
+	const bool bLeftWall  = bLeftHit  && LeftHit.Distance  <= LeanProbeDistance;
+	const bool bRightOpen = !bRightHit;
+	const bool bLeftOpen  = !bLeftHit;
+
+	if (bRightWall && bLeftOpen)
+		AutoLeanTargetAlpha = -MaxAutoLeanMagnitude;  // wall on right → lean left toward the open side
+	else if (bLeftWall && bRightOpen)
+		AutoLeanTargetAlpha = MaxAutoLeanMagnitude;   // wall on left → lean right toward the open side
+	else
+		AutoLeanTargetAlpha = 0.f;
+
+#if ENABLE_DRAW_DEBUG
+	if (bDrawLeanDebug)
+	{
+		const FVector RightEnd = Origin + Right * LeanGapClearance;
+		const FVector LeftEnd  = Origin - Right * LeanGapClearance;
+		DrawDebugLine(World, Origin, RightEnd, bRightWall ? FColor::Red   : FColor::Green, false, LeanProbeInterval * 2.f, 0, 1.f);
+		DrawDebugLine(World, Origin, LeftEnd,  bLeftWall  ? FColor::Red   : FColor::Green, false, LeanProbeInterval * 2.f, 0, 1.f);
+		DrawDebugSphere(World, RightEnd, LeanProbeRadius, 8, bRightWall ? FColor::Red : FColor::Green, false, LeanProbeInterval * 2.f, 0, 1.f);
+		DrawDebugSphere(World, LeftEnd,  LeanProbeRadius, 8, bLeftWall  ? FColor::Red : FColor::Green, false, LeanProbeInterval * 2.f, 0, 1.f);
+	}
+#endif
+}
+
 // ---- Interaction / Revive Input ----
 
 void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
@@ -476,6 +556,11 @@ void AExtractionPlayer::EnterDBNO()
 	if (bIsDBNO) return;
 	bIsDBNO = true;
 
+	// Stop auto-lean: ADSStop may never fire if the player is downed mid-ADS, which would leave the probe
+	// driving lean on a downed pawn. The per-frame FInterpTo eases AutoLeanAlpha back to 0.
+	bAutoLeanActive = false;
+	AutoLeanTargetAlpha = 0.f;
+
 	// Cancel active revive (downed player can't finish reviving someone)
 	if (bIsReviving) CancelRevive();
 
@@ -541,6 +626,9 @@ void AExtractionPlayer::FullDeath()
 {
 	bIsDBNO = false;
 	BleedoutTimeRemaining = 0.f;
+
+	bAutoLeanActive = false;
+	AutoLeanTargetAlpha = 0.f;
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);

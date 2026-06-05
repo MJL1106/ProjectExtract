@@ -70,6 +70,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Mirror")
 	float MirrorEdgeApproachOffset = 60.f;
 
+	// Lateral (sideways) offset so the companion lands beside the player, not inside them.
+	// Companion stays on whichever side it was already on relative to the traversal axis.
+	UPROPERTY(EditAnywhere, Category = "Companion|Mirror", meta = (ClampMin = "0.0"))
+	float MirrorLandingLateralOffset = 75.f;
+
 	// Close-enough XY distance to the approach point to trigger the companion's own traversal.
 	UPROPERTY(EditAnywhere, Category = "Companion|Mirror")
 	float MirrorReachToleranceXY = 90.f;
@@ -109,4 +114,13 @@ public:
 	// New slot must beat current slot score by this multiplier to commit a switch. (P6)
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "1.0", ClampMax = "3.0"))
 	float CoverSwitchScoreMargin = 1.2f;
+
+	// (P4) seconds a just-vacated slot is excluded from re-selection by the pawn that left it.
+	// 0.5 s is the practical floor for the anti-snap-back guard; below that the guard is effectively disabled.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.5"))
+	float CoverSwitchPostVacateCooldown = 3.0f;
+
+	// (G2) consecutive agreeing re-evals before a switch commits; 1 = most responsive, higher = more stable (anti-oscillation).
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "1"))
+	int32 CoverSwitchRequiredAgreeingReEvals = 2;
 };

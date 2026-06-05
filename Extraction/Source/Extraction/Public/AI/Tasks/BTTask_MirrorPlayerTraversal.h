@@ -23,6 +23,11 @@ struct FMirrorMemory
 	float Elapsed = 0.f;
 	float DebugLogAccumulator = 0.f;
 	FVector ApproachPoint = FVector::ZeroVector;
+	// Traversal axis and lateral side — stored in ExecuteTask for use in TickTask / TryTeleportToLanding.
+	FVector PathDir = FVector::ZeroVector;
+	float LateralSign = 1.f;
+	// False when the narrow-obstacle fallback zeroed the offset (approach is on the axis, not offset).
+	bool bUseLateralOffset = true;
 	TWeakObjectPtr<UTraversalComponent> OwnTraversalComp;
 	FDelegateHandle EndedHandle;
 };

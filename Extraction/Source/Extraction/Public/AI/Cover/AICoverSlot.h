@@ -51,6 +51,14 @@ public:
 	bool TryClaim(AActor* Claimer);
 	void Release(AActor* Claimer);
 
+	// --- Post-vacate cooldown (P4, server-only, non-replicated) ---
+
+	/** Stamps this slot as deliberately vacated by Vacater (used by the cover-switch path, NOT by normal Release). */
+	void MarkVacatedForSwitch(AActor* Vacater);
+
+	/** True if Pawn is the actor that just vacated this slot and Cooldown seconds have not yet elapsed. */
+	bool IsOnPostVacateCooldownFor(const AActor* Pawn, float Cooldown) const;
+
 	// --- Geometry helpers ---
 
 	bool IsTargetInFireArc(const FVector& TargetLoc) const;
@@ -101,6 +109,10 @@ public:
 private:
 	// Server-only — intentionally not replicated
 	TWeakObjectPtr<AActor> ClaimedBy;
+
+	// Post-vacate cooldown (P4) — server-only, non-replicated. Stamped by MarkVacatedForSwitch.
+	TWeakObjectPtr<AActor> LastVacatedBy;
+	double LastVacatedTime = -1.0e9;
 
 	// Debug viz — kept out of editor-only guard so extent is available at runtime
 	UPROPERTY(VisibleAnywhere, Category = "Cover|Debug")

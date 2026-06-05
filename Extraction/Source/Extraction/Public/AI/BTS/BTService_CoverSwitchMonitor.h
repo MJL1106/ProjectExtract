@@ -7,11 +7,20 @@
 #include "BehaviorTree/BTService.h"
 #include "BTService_CoverSwitchMonitor.generated.h"
 
+class AAICoverSlot;
+
 struct FCoverSwitchMonitorMemory
 {
 	float TimeSinceArrival  = 0.f;
 	float TimeSinceReEval   = 0.f;
 	bool  bWasInCoverLastTick = false;
+
+	// Dwell-from-arrival: only accrue TimeSinceArrival once physically at the slot (fixes claim-time start).
+	bool  bHasArrived = false;
+
+	// G2 debounce — a candidate must win two consecutive re-evals before the switch commits.
+	TWeakObjectPtr<AAICoverSlot> PendingBestSlot;
+	int32 ConsecutiveBetterCount = 0;
 };
 
 UCLASS()
@@ -47,5 +56,10 @@ protected:
 	// Search radius passed to FindBestCoverFor. Matches BTTask_MoveToCover default.
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "100.0"))
 	float SearchRadius = 1200.f;
+
+	// Pawn must be within this 2D distance of its projection onto the cover line before dwell accrues
+	// (matches the arrival point BTTask_MoveToCover moves the pawn to).
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "1.0"))
+	float ArrivalRadius = 100.f;
 
 };

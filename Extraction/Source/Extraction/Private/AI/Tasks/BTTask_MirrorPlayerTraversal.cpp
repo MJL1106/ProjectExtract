@@ -23,13 +23,25 @@ namespace
 		UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 		if (!Pawn || !BB) return false;
 
+		// OnPlayerTraversalEnded deliberately does NOT clear BB_PlayerTraversalLanding — this
+		// function relies on that invariant to read a valid landing point after traversal ends.
 		const FVector Landing = BB->GetValueAsVector(ACompanionAIController::BB_PlayerTraversalLanding);
 		if (Landing.IsNearlyZero()) return false;
 
-		// Use the raw Landing — that's where the player actually ended their traversal,
-		// so it's a guaranteed-valid spot. Projection has been observed to drag the
-		// destination to the floor beside the obstacle and then fail TeleportTo.
+		// Use the raw Landing, then apply the same lateral offset used during approach so the
+		// companion still ends up beside the player, not on top. If the narrow-obstacle fallback
+		// zeroed the offset (bUseLateralOffset == false), the shift is zero and we land on the
+		// player's exact spot — matching legacy behaviour.
 		FVector Destination = Landing;
+		if (Mem->bUseLateralOffset && !Mem->PathDir.IsNearlyZero())
+		{
+			const UCompanionTuningDataAsset* T = AIC->GetTuning();
+			if (T)
+			{
+				const FVector Right = FVector::CrossProduct(FVector::UpVector, Mem->PathDir).GetSafeNormal();
+				Destination += Right * Mem->LateralSign * T->MirrorLandingLateralOffset;
+			}
+		}
 
 		// Cancel any in-flight traversal first (defence — usually not in one here).
 		if (UTraversalComponent* OwnTrav = Pawn->FindComponentByClass<UTraversalComponent>())
@@ -108,7 +120,23 @@ EBTNodeResult::Type UBTTask_MirrorPlayerTraversal::ExecuteTask(UBehaviorTreeComp
 		}
 	}
 
-	FVector ApproachPoint = Obstacle - PathDir * T->MirrorEdgeApproachOffset;
+	// Compute the perpendicular (right) vector relative to the traversal axis.
+	// PathDir points in the direction the player traveled (away from the obstacle);
+	// Right = Cross(Up, PathDir) points to the actor's left when facing the obstacle.
+	const FVector Right = FVector::CrossProduct(FVector::UpVector, PathDir).GetSafeNormal();
+
+	// Determine which side the companion is already on relative to the obstacle centerline.
+	// This keeps the companion on its natural side rather than forcing a fixed direction.
+	const float Dot = FVector::DotProduct(PawnLoc - Obstacle, Right);
+	const float LateralSign = (Dot >= 0.f) ? 1.f : -1.f;
+
+	// Store traversal axis and side for use in TickTask facing and TryTeleportToLanding.
+	Mem->PathDir = PathDir;
+	Mem->LateralSign = LateralSign;
+	Mem->bUseLateralOffset = true;
+
+	FVector ApproachPoint = Obstacle - PathDir * T->MirrorEdgeApproachOffset
+		+ Right * LateralSign * T->MirrorLandingLateralOffset;
 	ApproachPoint.Z = PawnLoc.Z;
 	Mem->ApproachPoint = ApproachPoint;
 	Mem->Phase = FMirrorMemory::EPhase::Approach;
@@ -133,20 +161,54 @@ EBTNodeResult::Type UBTTask_MirrorPlayerTraversal::ExecuteTask(UBehaviorTreeComp
 	// Sprint to catch up — mirrors BTTask_FollowPlayer's pattern.
 	Companion->SetSprinting(true);
 
-	UE_LOG(LogCompanionAI, Log, TEXT("[MirrorTraversal] task started — Obstacle=%s ApproachPoint=%s"),
-		*Obstacle.ToCompactString(), *Mem->ApproachPoint.ToCompactString());
+	UE_LOG(LogCompanionAI, Log, TEXT("[MirrorTraversal] task started — Obstacle=%s ApproachPoint=%s LateralSign=%.0f"),
+		*Obstacle.ToCompactString(), *Mem->ApproachPoint.ToCompactString(), LateralSign);
 
-	// Pre-project to navmesh with generous extent so the mantle goal (which is at the wall
-	// base where navmesh ends) doesn't silently fail to compute a path.
+	// Pre-project the offset approach point to navmesh with a TIGHT extent matching the
+	// lateral offset. Using a generous (500) extent here would allow projection to pull the
+	// point back to the obstacle centerline, defeating the purpose of the offset.
+	// If projection yanks the point back to within half the lateral offset of the centerline,
+	// the offset was effectively cancelled (narrow/edge obstacle) — fall back to a zero-offset
+	// approach (on the traversal axis) and re-project that with a generous extent instead.
+	// Worst case equals legacy behaviour (land on player spot) rather than teleporting off-nav.
 	if (UWorld* World = GetWorld())
 	{
 		if (UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(World))
 		{
 			FNavLocation OutLoc;
-			if (NavSys->ProjectPointToNavigation(Mem->ApproachPoint, OutLoc, FVector(500.f, 500.f, 500.f)))
+			const float TightExtentXY = T->MirrorLandingLateralOffset;
+			constexpr float TightExtentZ = 200.f;
+			if (NavSys->ProjectPointToNavigation(Mem->ApproachPoint, OutLoc, FVector(TightExtentXY, TightExtentXY, TightExtentZ)))
 			{
-				Mem->ApproachPoint = OutLoc.Location;
-				UE_LOG(LogCompanionAI, Verbose, TEXT("[MirrorTraversal] ApproachPoint projected to nav: %s"), *Mem->ApproachPoint.ToCompactString());
+				// Check if projection pulled the point back toward the obstacle centerline.
+				// If the lateral clearance is less than half the intended offset, the obstacle
+				// is too narrow for the offset to be useful — zero it out.
+				const float LateralDist = FMath::Abs(FVector::DotProduct(OutLoc.Location - Obstacle, Right));
+				if (LateralDist < T->MirrorLandingLateralOffset * 0.5f)
+				{
+					// Narrow obstacle: recompute a zero-offset approach point on the axis.
+					UE_LOG(LogCompanionAI, Verbose, TEXT("[MirrorTraversal] Narrow obstacle detected (LateralDist=%.0f < %.0f) — zeroing lateral offset."),
+						LateralDist, T->MirrorLandingLateralOffset * 0.5f);
+					Mem->bUseLateralOffset = false;
+					FVector FallbackApproach = Obstacle - PathDir * T->MirrorEdgeApproachOffset;
+					FallbackApproach.Z = PawnLoc.Z;
+					FNavLocation FallbackLoc;
+					if (NavSys->ProjectPointToNavigation(FallbackApproach, FallbackLoc, FVector(500.f, 500.f, 500.f)))
+					{
+						Mem->ApproachPoint = FallbackLoc.Location;
+						UE_LOG(LogCompanionAI, Verbose, TEXT("[MirrorTraversal] Fallback ApproachPoint (no offset) projected to nav: %s"), *Mem->ApproachPoint.ToCompactString());
+					}
+					else
+					{
+						Mem->ApproachPoint = FallbackApproach;
+						UE_LOG(LogCompanionAI, Warning, TEXT("[MirrorTraversal] Fallback ApproachPoint failed nav projection — trying anyway."));
+					}
+				}
+				else
+				{
+					Mem->ApproachPoint = OutLoc.Location;
+					UE_LOG(LogCompanionAI, Verbose, TEXT("[MirrorTraversal] ApproachPoint projected to nav: %s"), *Mem->ApproachPoint.ToCompactString());
+				}
 			}
 			else
 			{
@@ -201,15 +263,17 @@ void UBTTask_MirrorPlayerTraversal::TickTask(UBehaviorTreeComponent& OwnerComp, 
 	if (Mem->DebugLogAccumulator >= 1.0f)
 	{
 		Mem->DebugLogAccumulator = 0.f;
-		const FVector PawnLocNow = Pawn->GetActorLocation();
-		const float DistToApproach = FVector::Dist2D(PawnLocNow, Mem->ApproachPoint);
-		const FVector Velocity = Pawn->GetVelocity();
-		const float Speed = Velocity.Size2D();
-		const FString PathState = AIC->GetMoveStatus() == EPathFollowingStatus::Moving ? TEXT("Moving")
-			: AIC->GetMoveStatus() == EPathFollowingStatus::Idle ? TEXT("Idle")
-			: AIC->GetMoveStatus() == EPathFollowingStatus::Paused ? TEXT("Paused") : TEXT("Waiting");
-		UE_LOG(LogCompanionAI, Verbose, TEXT("[MirrorTraversal] Heartbeat: Elapsed=%.1f Phase=%d DistToApproach=%.0f Speed=%.0f Path=%s"),
-			Mem->Elapsed, (int32)Mem->Phase, DistToApproach, Speed, *PathState);
+		if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
+		{
+			const FVector PawnLocNow = Pawn->GetActorLocation();
+			const float DistToApproach = FVector::Dist2D(PawnLocNow, Mem->ApproachPoint);
+			const float Speed = Pawn->GetVelocity().Size2D();
+			const FString PathState = AIC->GetMoveStatus() == EPathFollowingStatus::Moving ? TEXT("Moving")
+				: AIC->GetMoveStatus() == EPathFollowingStatus::Idle ? TEXT("Idle")
+				: AIC->GetMoveStatus() == EPathFollowingStatus::Paused ? TEXT("Paused") : TEXT("Waiting");
+			UE_LOG(LogCompanionAI, Verbose, TEXT("[MirrorTraversal] Heartbeat: Elapsed=%.1f Phase=%d DistToApproach=%.0f Speed=%.0f Path=%s"),
+				Mem->Elapsed, (int32)Mem->Phase, DistToApproach, Speed, *PathState);
+		}
 	}
 
 	// Catch-up timeout — fail and let warp safety net recover.
@@ -242,19 +306,28 @@ void UBTTask_MirrorPlayerTraversal::TickTask(UBehaviorTreeComponent& OwnerComp, 
 	UTraversalComponent* OwnTraversal = Mem->OwnTraversalComp.Get();
 	if (!OwnTraversal) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
-	// Face the obstacle so the forward-wall trace inside TryStartTraversal hits it.
-	// SetFocalPoint > SetActorRotation because CMC's bOrientRotationToMovement
-	// overrides direct actor rotation when the character is settling.
+	// Face a laterally-shifted point on the wall so the actor's FORWARD stays perpendicular
+	// to the obstacle surface. TryStartTraversal's detection uses GetActorForwardVector() and
+	// requires FacingDot >= 0.5 — facing the raw obstacle from an offset position would angle
+	// the trace relative to the wall and could miss. The shifted aim point keeps the actor
+	// square-on while still facing the correct part of the wall.
+	// If the narrow-obstacle fallback zeroed the offset (bUseLateralOffset == false), Right *
+	// LateralSign * 0 = 0 and AimPoint collapses to ObstacleNow — identical to legacy.
 	if (UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent())
 	{
 		const FVector ObstacleNow = BB->GetValueAsVector(ACompanionAIController::BB_PlayerTraversalObstacle);
-		AIC->SetFocalPoint(ObstacleNow, EAIFocusPriority::Move);
+
+		const float EffectiveLateralOffset = Mem->bUseLateralOffset ? T->MirrorLandingLateralOffset : 0.f;
+		const FVector WallRight = FVector::CrossProduct(FVector::UpVector, Mem->PathDir).GetSafeNormal();
+		const FVector AimPoint = ObstacleNow + WallRight * Mem->LateralSign * EffectiveLateralOffset;
+
+		AIC->SetFocalPoint(AimPoint, EAIFocusPriority::Move);
 		// Also snap actor rotation as backup — covers the same-frame trace before focus pulls.
-		FVector ToObstacle = ObstacleNow - Pawn->GetActorLocation();
-		ToObstacle.Z = 0.f;
-		if (!ToObstacle.IsNearlyZero())
+		FVector ToAim = AimPoint - Pawn->GetActorLocation();
+		ToAim.Z = 0.f;
+		if (!ToAim.IsNearlyZero())
 		{
-			const FRotator FaceRot(0.f, ToObstacle.Rotation().Yaw, 0.f);
+			const FRotator FaceRot(0.f, ToAim.Rotation().Yaw, 0.f);
 			Pawn->SetActorRotation(FaceRot);
 		}
 	}
@@ -272,6 +345,13 @@ void UBTTask_MirrorPlayerTraversal::TickTask(UBehaviorTreeComponent& OwnerComp, 
 	}
 
 	Mem->Phase = FMirrorMemory::EPhase::WaitForTraversalEnd;
+
+	// Guard against a synchronous traversal end: if TryStartTraversal completed immediately
+	// (e.g. a zero-length montage or an internal early-exit), OnTraversalEnded may have already
+	// fired before Phase was set to WaitForTraversalEnd — the lambda gated on that phase would
+	// have silently skipped it. Finish the task here instead of riding to CatchUpTimeout.
+	if (!OwnTraversal->IsInTraversal())
+		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 }
 
 void UBTTask_MirrorPlayerTraversal::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult)

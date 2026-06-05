@@ -107,6 +107,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	virtual float GetVaultSurfaceHeight() const override;
 
+	/** Normalized auto-lean output: -1 = lean left, 0 = none, +1 = lean right.
+	 *  Smoothed each frame; set by UpdateAutoLean when ADS and a wall is detected. */
+	UPROPERTY(BlueprintReadOnly, Category = "Movement|Lean")
+	float AutoLeanAlpha = 0.f;
+
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	virtual float GetAutoLeanAlpha() const override { return AutoLeanAlpha; }
+
 	/**
 	 * Try to start a traversal at the player's current location. Intended to be called
 	 * from the kit BP's Jump handler before invoking Jump() — if this returns true,
@@ -184,6 +192,42 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "5.0"))
 	float ReviveTraceSphereRadius = 30.f;
 
+	// ---- Auto-Lean Config ----
+
+	/** Sideways distance (cm) from probe origin to test for a wall. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean", meta = (ClampMin = "10.0"))
+	float LeanProbeDistance = 70.f;
+
+	/** Sphere radius for each lateral wall probe — matches traversal trace sizing. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean", meta = (ClampMin = "1.0"))
+	float LeanProbeRadius = 15.f;
+
+	/** Z offset from camera/eye position for the probe origin. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean")
+	float LeanProbeVerticalOffset = 0.f;
+
+	/** The open side must be clear at least this far (cm) before leaning toward it.
+	 *  Must exceed LeanProbeDistance — the open-side sweep is this long, and a side only counts as a wall
+	 *  when its hit is within LeanProbeDistance, so values <= LeanProbeDistance make the open test inert. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean", meta = (ClampMin = "10.0"))
+	float LeanGapClearance = 120.f;
+
+	/** FInterpTo speed used to smooth AutoLeanAlpha toward the target each frame. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean", meta = (ClampMin = "0.1"))
+	float AutoLeanInterpSpeed = 8.f;
+
+	/** How often (seconds) the lateral wall probes are fired — ~20 Hz default. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean", meta = (ClampMin = "0.01"))
+	float LeanProbeInterval = 0.05f;
+
+	/** Maximum magnitude of AutoLeanAlpha (0..1). Reduce to limit lean strength. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MaxAutoLeanMagnitude = 1.f;
+
+	/** Draw debug spheres and lines for the lateral wall probes in editor/dev builds. */
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean")
+	bool bDrawLeanDebug = false;
+
 	// ---- Hitbox Config ----
 
 	/** Maps skeleton bone names to hit regions for damage multiplier lookup.
@@ -200,6 +244,20 @@ protected:
 	float BleedoutTimeRemaining = 0.f;
 
 private:
+
+	// ---- Auto-Lean State ----
+
+	/** True while ADS is active; gates lean probe accumulation. */
+	bool bAutoLeanActive = false;
+
+	/** Last computed lean direction fed into the per-frame interp. */
+	float AutoLeanTargetAlpha = 0.f;
+
+	/** Accumulates DeltaTime; fires UpdateAutoLean once per LeanProbeInterval. */
+	float LeanProbeAccumulator = 0.f;
+
+	/** Fire two lateral sphere sweeps and write AutoLeanTargetAlpha. */
+	void UpdateAutoLean(float DeltaTime);
 
 	// ---- Input Handlers ----
 

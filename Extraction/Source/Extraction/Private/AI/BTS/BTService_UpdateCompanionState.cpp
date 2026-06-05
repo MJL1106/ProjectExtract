@@ -114,8 +114,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		LosParams.AddIgnoredActor(Companion);
 		LosParams.AddIgnoredActor(Companion->GetCurrentWeapon());
 		FHitResult LosHit;
+		// Spot from the eyeline (GetPawnViewLocation ~= head height), not the actor centre — keeps acquisition
+		// consistent with the move-shoot fire gate so the companion doesn't acquire low but fail to fire.
+		const FVector AimOrigin = Companion->GetPawnViewLocation();
 		const bool bBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
-			LosHit, MyLocation, BestTarget->GetActorLocation(), ECC_Visibility, LosParams);
+			LosHit, AimOrigin, BestTarget->GetActorLocation(), ECC_Visibility, LosParams);
 
 		if (bBlocked && LosHit.GetActor() != BestTarget)
 		{
@@ -128,39 +131,54 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target LOS blocked but cover slot active — keeping target"),
 						*Companion->GetName());
 				bWasLosBlocked = true;
+				OpenLosBlockedTime = 0.f;
 				// Do not clear BB — cover is the reason LoS is blocked; target remains valid.
 			}
 			else
 			{
-				if (bDebugLogging && !bWasLosBlocked)
-					UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target LOS blocked by %s — clearing (was %s)"),
-						*Companion->GetName(), *GetNameSafe(LosHit.GetActor()), *GetNameSafe(BestTarget));
-				bWasLosBlocked = true;
-				BestTarget = nullptr;
-				// Explicitly clear BB now — the existing fallthrough only clears when ExistingTarget is also
-				// null, which it isn't on the first LoS-block tick. Without this clear, the BB key value
-				// stays unchanged and the Combat decorator's LowerPriority abort never fires.
-				BB->ClearValue(CombatTargetKey.SelectedKeyName);
-				BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
-				ExistingTarget = nullptr;
+				// Debounce the no-cover clear: brief occlusion (a static mesh between us and the enemy)
+				// should drive a sidestep in the combat task, not a target drop + re-acquire thrash.
+				// Keep the target set through the grace window so the task keeps engaging (repositioning
+				// to regain LoS). Only a sustained block past the grace clears.
+				OpenLosBlockedTime += DeltaSeconds;
+				if (OpenLosBlockedTime < CombatTargetLosGraceSeconds)
+				{
+					if (bDebugLogging && !bWasLosBlocked)
+						UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target LOS blocked by %s — within grace, keeping target (was %s)"),
+							*Companion->GetName(), *GetNameSafe(LosHit.GetActor()), *GetNameSafe(BestTarget));
+					bWasLosBlocked = true;
+				}
+				else
+				{
+					if (bDebugLogging)
+						UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target LOS blocked by %s — grace expired, clearing (was %s)"),
+							*Companion->GetName(), *GetNameSafe(LosHit.GetActor()), *GetNameSafe(BestTarget));
+					bWasLosBlocked = true;
+					BestTarget = nullptr;
+					// Explicitly clear BB now — the existing fallthrough only clears when ExistingTarget is also
+					// null, which it isn't on the first LoS-block tick. Without this clear, the BB key value
+					// stays unchanged and the Combat decorator's LowerPriority abort never fires.
+					BB->ClearValue(CombatTargetKey.SelectedKeyName);
+					BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+					ExistingTarget = nullptr;
+				}
 			}
 		}
 		else
 		{
 			bWasLosBlocked = false;
+			OpenLosBlockedTime = 0.f;
 		}
 	}
 
 	if (BestTarget)
 	{
-		// Only clear cover if target changed
-		if (BestTarget != ExistingTarget)
-		{
-			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
-			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target -> %s (dist=%.0f)"),
-					*Companion->GetName(), *BestTarget->GetName(), FMath::Sqrt(BestDistSq));
-		}
+		// Target-change no longer clears HasCoverPosition: CoverSwitchMonitor already re-scores against
+		// the current combat target every re-eval, so this clear was redundant — and it aborted in-progress
+		// switch moves (MoveToCover InProgress -> AbortTask released the freshly-claimed slot -> snap-back).
+		if (BestTarget != ExistingTarget && bDebugLogging)
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target -> %s (dist=%.0f)"),
+				*Companion->GetName(), *BestTarget->GetName(), FMath::Sqrt(BestDistSq));
 
 		BB->SetValueAsObject(CombatTargetKey.SelectedKeyName, BestTarget);
 
@@ -171,7 +189,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			AcqLosParams.AddIgnoredActor(Companion);
 			FHitResult AcqLosHit;
 			const bool bAcqBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
-				AcqLosHit, Companion->GetActorLocation(), BestTarget->GetActorLocation(), ECC_Visibility, AcqLosParams);
+				AcqLosHit, Companion->GetPawnViewLocation(), BestTarget->GetActorLocation(), ECC_Visibility, AcqLosParams);
 			const bool bAcqLos = !bAcqBlocked || (AcqLosHit.GetActor() == BestTarget);
 			UE_LOG(LogCompanionDiag, Log, TEXT("%s: COMBAT-TARGET-ACQUIRED from=null to=%s dist=%.0f los=%d"),
 				*Companion->GetName(), *BestTarget->GetName(), FMath::Sqrt(BestDistSq), (int32)bAcqLos);

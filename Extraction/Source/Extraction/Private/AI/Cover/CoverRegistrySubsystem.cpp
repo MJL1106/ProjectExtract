@@ -61,7 +61,8 @@ void UCoverRegistrySubsystem::GetSlotsInRadius(const FVector& Origin, float Radi
 	}
 }
 
-AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLoc, AActor* Target, float MaxRadius, float* OutScore) const
+AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLoc, AActor* Target, float MaxRadius, float* OutScore,
+	const AActor* QuerierPawn, float PostVacateCooldown) const
 {
 	if (!IsValid(Target))
 		return nullptr;
@@ -113,6 +114,13 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 		if (bClaimed)
 		{
 			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=1 inArc=0 -> REJECT-claimed"), *Slot->GetName(), DistToQuerier);
+			continue;
+		}
+
+		// P4 — exclude a slot the querier just deliberately vacated, until the cooldown elapses (anti snap-back).
+		if (Slot->IsOnPostVacateCooldownFor(QuerierPawn, PostVacateCooldown))
+		{
+			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-post-vacate-cooldown"), *Slot->GetName(), DistToQuerier);
 			continue;
 		}
 
