@@ -123,4 +123,9 @@ public:
 	// (G2) consecutive agreeing re-evals before a switch commits; 1 = most responsive, higher = more stable (anti-oscillation).
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "1"))
 	int32 CoverSwitchRequiredAgreeingReEvals = 2;
+
+	// Radius (cm) for companion cover searches — shared by the MoveToCover picker and the open-engage
+	// re-seek so the two can't desync into a re-seek/can't-reach thrash.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
+	float CoverSearchRadius = 1200.f;
 };

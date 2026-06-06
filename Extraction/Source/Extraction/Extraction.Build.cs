@@ -44,7 +44,8 @@ public class Extraction : ModuleRules
 			"Extraction/Public/AI/Tasks",
 			"Extraction/Public/AI/EQS",
 			"Extraction/Public/AI/Navigation",
-			"Extraction/Public/AI/Cover"
+			"Extraction/Public/AI/Cover",
+			"Extraction/Public/World"
 		});
 
 		// Private subfolder include paths
@@ -65,7 +66,8 @@ public class Extraction : ModuleRules
 			"Extraction/Private/AI/Tasks",
 			"Extraction/Private/AI/EQS",
 			"Extraction/Private/AI/Navigation",
-			"Extraction/Private/AI/Cover"
+			"Extraction/Private/AI/Cover",
+			"Extraction/Private/World"
 		});
 	}
 }

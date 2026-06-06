@@ -315,13 +315,13 @@ bool ACompanionAIController::ShouldWarp() const
 	return !IsCompanionRecentlyRendered();
 }
 
-void ACompanionAIController::ExecuteWarpBehindPlayer()
+bool ACompanionAIController::TeleportToLocation(const FVector& Location, const FRotator& Rotation)
 {
+	static constexpr float DefaultNavProjectExtent = 500.f;
+
 	APawn* MyPawn = GetPawn();
-	const APawn* Player = CachedPlayerCharacter.Get();
-	const UCompanionTuningDataAsset* T = Tuning;
 	UWorld* World = GetWorld();
-	if (!MyPawn || !Player || !T || !World) return;
+	if (!MyPawn || !World) return false;
 
 	if (UTraversalComponent* OwnTrav = MyPawn->FindComponentByClass<UTraversalComponent>())
 	{
@@ -329,29 +329,43 @@ void ACompanionAIController::ExecuteWarpBehindPlayer()
 			OwnTrav->CancelTraversal();
 	}
 
+	StopMovement();
+
+	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(World);
+	if (!NavSys) return false;
+
+	const float ProjectExtent = IsValid(Tuning) ? Tuning->WarpNavProjectExtent : DefaultNavProjectExtent;
+	FNavLocation OutLoc;
+	if (!NavSys->ProjectPointToNavigation(Location, OutLoc, FVector(ProjectExtent)))
+	{
+		UE_LOG(LogCompanionAI, Verbose, TEXT("TeleportToLocation: navmesh project failed near %s"), *Location.ToString());
+		return false;
+	}
+
+	MyPawn->TeleportTo(OutLoc.Location, Rotation);
+	return true;
+}
+
+void ACompanionAIController::ExecuteWarpBehindPlayer()
+{
+	const APawn* Player = CachedPlayerCharacter.Get();
+	const UCompanionTuningDataAsset* T = Tuning;
+	if (!Player || !T) return;
+
 	const FVector PlayerLoc = Player->GetActorLocation();
 	const FVector PlayerFwd = Player->GetActorForwardVector();
 	const FVector Goal = PlayerLoc - PlayerFwd * T->WarpBehindOffset;
 
-	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(World);
-	if (!NavSys) return;
-
-	FNavLocation OutLoc;
-	const FVector Extents(T->WarpNavProjectExtent);
-	if (!NavSys->ProjectPointToNavigation(Goal, OutLoc, Extents))
-	{
-		UE_LOG(LogCompanionAI, Verbose, TEXT("Warp aborted — navmesh project failed near %s"), *Goal.ToString());
-		return;
-	}
-
-	MyPawn->TeleportTo(OutLoc.Location, Player->GetActorRotation());
+	const bool bWarped = TeleportToLocation(Goal, Player->GetActorRotation());
 
 	const bool bHardWarp = TimeSinceClosedToPlayer > T->WarpStuckTimeout * 2.f;
-	UE_LOG(LogCompanionAI, Log, TEXT("Warped companion to %s (behind player, %s threshold, stuck=%.1fs)"),
-		*OutLoc.Location.ToString(), bHardWarp ? TEXT("HARD") : TEXT("SOFT"), TimeSinceClosedToPlayer);
-
-	TimeSinceClosedToPlayer = 0.f;
-	TimeOnDifferentLevel = 0.f;
+	if (bWarped)
+	{
+		UE_LOG(LogCompanionAI, Log, TEXT("Warped companion to %s (behind player, %s threshold, stuck=%.1fs)"),
+			*Goal.ToString(), bHardWarp ? TEXT("HARD") : TEXT("SOFT"), TimeSinceClosedToPlayer);
+		TimeSinceClosedToPlayer = 0.f;
+		TimeOnDifferentLevel = 0.f;
+	}
 }
 
 void ACompanionAIController::ReleaseNextCoverSlotIfClaimed()

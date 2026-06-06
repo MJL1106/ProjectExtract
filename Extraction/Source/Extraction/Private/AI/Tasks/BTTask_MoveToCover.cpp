@@ -123,10 +123,11 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	const UCompanionTuningDataAsset* Tuning = CompanionController ? CompanionController->GetTuning() : nullptr;
 	const float PostVacateCooldown = Tuning ? Tuning->CoverSwitchPostVacateCooldown : 0.f;
 
-	AAICoverSlot* Slot = Registry->FindBestCoverFor(Pawn->GetActorLocation(), Target, SearchRadius, nullptr, Pawn, PostVacateCooldown);
+	const float EffectiveRadius = Tuning ? Tuning->CoverSearchRadius : SearchRadius;
+	AAICoverSlot* Slot = Registry->FindBestCoverFor(Pawn->GetActorLocation(), Target, EffectiveRadius, nullptr, Pawn, PostVacateCooldown);
 	if (!Slot)
 	{
-		UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover no slot found within radius=%.0f"), *Pawn->GetName(), SearchRadius);
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover no slot found within radius=%.0f"), *Pawn->GetName(), EffectiveRadius);
 		BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 		BB->SetValueAsObject(CoverSlotKey.SelectedKeyName, nullptr);
 		return EBTNodeResult::Succeeded;
@@ -283,6 +284,11 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 		*Pawn->GetName(), StatusStr, DistToCover, AcceptableRadius, ReasonStr);
 	if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=%s dist=%.0f reason=%s"),
 		*Pawn->GetName(), StatusStr, DistToCover, ReasonStr);
+	// Path couldn't reach this slot — stamp the post-vacate cooldown so the open-engage re-seek and the
+	// picker stop re-selecting an unreachable slot every interval (anti-thrash). Idle-only: Waiting/Paused
+	// are transient interruptions, not unreachability.
+	if (MoveStatus == EPathFollowingStatus::Idle && IsValid(Slot))
+		Slot->MarkVacatedForSwitch(Pawn);
 	ReleaseClaim(BB, Pawn);
 	return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 }

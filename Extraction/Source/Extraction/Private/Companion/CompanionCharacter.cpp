@@ -87,6 +87,9 @@ void ACompanionCharacter::BeginPlay()
 	if (HealthComponent && !HealthComponent->OnDeath.IsAlreadyBound(this, &ACompanionCharacter::HandleDeath))
 		HealthComponent->OnDeath.AddDynamic(this, &ACompanionCharacter::HandleDeath);
 
+	if (HealthComponent && !HealthComponent->OnRevive.IsAlreadyBound(this, &ACompanionCharacter::HandleRevive))
+		HealthComponent->OnRevive.AddDynamic(this, &ACompanionCharacter::HandleRevive);
+
 	// Spawn and attach weapon (server only — weapon replicates to clients)
 	if (HasAuthority() && WeaponClass)
 	{
@@ -129,7 +132,10 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		World->GetTimerManager().ClearTimer(DestroyTimerHandle);
 
 	if (HealthComponent)
+	{
 		HealthComponent->OnDeath.RemoveDynamic(this, &ACompanionCharacter::HandleDeath);
+		HealthComponent->OnRevive.RemoveDynamic(this, &ACompanionCharacter::HandleRevive);
+	}
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -395,6 +401,21 @@ void ACompanionCharacter::HandleDeath()
 void ACompanionCharacter::DestroyAfterDeath()
 {
 	Destroy();
+}
+
+void ACompanionCharacter::HandleRevive()
+{
+	UE_LOG(LogCompanion, Log, TEXT("%s revived"), *GetName());
+
+	GetWorldTimerManager().ClearTimer(DestroyTimerHandle);
+
+	SetActorTickEnabled(true);
+
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+		Movement->SetMovementMode(MOVE_Walking);
 }
 
 // --- Traversal ---

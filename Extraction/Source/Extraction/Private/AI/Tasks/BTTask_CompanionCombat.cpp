@@ -12,6 +12,7 @@
 #include "WeaponBase.h"
 #include "HealthComponent.h"
 #include "AICoverSlot.h"
+#include "CoverRegistrySubsystem.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "NavigationSystem.h"
@@ -1202,6 +1203,7 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	CoverValidityCheckTimer = 0.f;
 	TimeAtCurrentCover = 0.f;
 	LosBlockedAccum = 0.f;
+	TimeInOpenEngageNoCover = 0.f;
 	LastTickBranch = -1;
 	bLastLosBlocked = false;
 	LastLosBlocker = nullptr;
@@ -1770,6 +1772,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	if (bHasCover && !bIsFiringBurst)
 	{
 		LosBlockedAccum = 0.f;
+		TimeInOpenEngageNoCover = 0.f;
 		TimeAtCurrentCover += DeltaSeconds;
 
 		// Neither height has a cover idle montage to mask the aim offset — drop the aim target so the
@@ -2381,6 +2384,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	if (bIsFiringBurst && bHasCover)
 	{
 		LosBlockedAccum = 0.f;
+		TimeInOpenEngageNoCover = 0.f;
 		BurstTimer -= DeltaSeconds;
 
 		if (bDebugLogging)
@@ -2625,6 +2629,36 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 			bLastLosBlocked = bNowBlocked;
 			LastLosBlocker = OpenBlocker;
+		}
+	}
+
+	// Cover priority: while move-shooting in the open, periodically check for reachable cover and,
+	// if any exists, finish the task so the BT re-runs MoveToCover and routes us into cover.
+	// Suppressed while catching up to a distant player (player-pull wins per design).
+	TimeInOpenEngageNoCover += DeltaSeconds;
+	if (OpenEngageCoverReseekInterval > 0.f && !bPlayerTooFar
+		&& TimeInOpenEngageNoCover >= OpenEngageCoverReseekInterval)
+	{
+		TimeInOpenEngageNoCover = 0.f;
+		const ACompanionAIController* CoverCtrl = Cast<ACompanionAIController>(Ctx.Companion->GetController());
+		const UCompanionTuningDataAsset* CoverTuning = CoverCtrl ? CoverCtrl->GetTuning() : nullptr;
+		UWorld* CoverWorld = Ctx.Companion->GetWorld();
+		if (CoverTuning && CoverWorld)
+		{
+			if (UCoverRegistrySubsystem* Reg = CoverWorld->GetSubsystem<UCoverRegistrySubsystem>())
+			{
+				AAICoverSlot* Avail = Reg->FindBestCoverFor(MyLocation, Ctx.Target,
+					CoverTuning->CoverSearchRadius, nullptr, Ctx.Companion, CoverTuning->CoverSwitchPostVacateCooldown);
+				if (IsValid(Avail))
+				{
+					if (bDebugLogging)
+						UE_LOG(LogCompanionAI, Log, TEXT("%s: open-engage cover re-seek -> reachable slot %s, finishing to MoveToCover"),
+							*Ctx.Companion->GetName(), *Avail->GetName());
+					Ctx.Companion->StopWeaponFire();
+					EndOpenAreaMoveShoot(Ctx.Companion);
+					return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+				}
+			}
 		}
 	}
 
