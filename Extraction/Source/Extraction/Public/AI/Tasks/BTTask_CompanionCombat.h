@@ -121,6 +121,12 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.0", ClampMax = "5.0"))
 	float AimDropOnLosBlockedSeconds = 0.3f;
 
+	// --- Open-engage cover re-seek (restores cover priority while move-shooting in the open) ---
+
+	/** While move-shooting with no cover, re-check for reachable cover this often (s). 0 disables. */
+	UPROPERTY(EditAnywhere, Category = "Combat", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float OpenEngageCoverReseekInterval = 1.0f;
+
 	// --- Open-area move-and-shoot ---
 
 	/** Master toggle. When false, open-engage falls back to today's stand-still burst-fire. */
@@ -402,6 +408,7 @@ private:
 	static constexpr float PeekResolveDistThresholdSq = 50.f * 50.f;
 
 	float LosBlockedAccum = 0.f;
+	float TimeInOpenEngageNoCover = 0.f;
 	int8 LastTickBranch = -1;
 	bool bLastLosBlocked = false;
 	TWeakObjectPtr<AActor> LastLosBlocker;

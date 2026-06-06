@@ -49,6 +49,13 @@ public:
 	/** Resets the BB_PlayerTraversal* keys. Public so BT tasks can call on early-finish paths. */
 	void ClearTraversalBlackboard();
 
+	/**
+	 * AI-safe teleport: cancels any active traversal, stops movement, projects the
+	 * destination onto the NavMesh, then TeleportTo's the possessed pawn.
+	 * Returns false if the pawn is missing or NavMesh projection fails.
+	 */
+	bool TeleportToLocation(const FVector& Location, const FRotator& Rotation);
+
 protected:
 	virtual void OnPossess(APawn* InPawn) override;
 	virtual void OnUnPossess() override;

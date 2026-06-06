@@ -228,6 +228,9 @@ private:
 	void HandleDeath();
 
 	UFUNCTION()
+	void HandleRevive();
+
+	UFUNCTION()
 	void OnWeaponFiredCallback();
 
 	UFUNCTION()
