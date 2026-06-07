@@ -114,6 +114,12 @@ void AEnemyBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (HealthComponent)
 		HealthComponent->OnDeath.RemoveDynamic(this, &AEnemyBase::HandleDeath);
 
+	if (HasAuthority() && IsValid(CurrentWeapon))
+	{
+		CurrentWeapon->Destroy();
+		CurrentWeapon = nullptr;
+	}
+
 	Super::EndPlay(EndPlayReason);
 }
 

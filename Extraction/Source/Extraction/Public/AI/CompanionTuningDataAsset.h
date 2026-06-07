@@ -128,4 +128,10 @@ public:
 	// re-seek so the two can't desync into a re-seek/can't-reach thrash.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
 	float CoverSearchRadius = 1200.f;
+
+	// Detection radius (cm) for 360° close-range threat awareness, independent of the sight cone.
+	// Any enemy within this sphere with clear LoS is treated as a valid combat target even if
+	// outside the forward 180° perception angle. Set to 0 to disable.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
+	float ProximityAwarenessRadius = 700.f;
 };

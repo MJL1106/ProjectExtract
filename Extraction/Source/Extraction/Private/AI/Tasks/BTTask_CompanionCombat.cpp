@@ -729,15 +729,30 @@ bool UBTTask_CompanionCombat::PointHasLosToTarget(ACompanionCharacter* Companion
 void UBTTask_CompanionCombat::EnterMoveShootIfNeeded(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, UCharacterMovementComponent* CMC, const TCHAR* Reason)
 {
 	if (bMoveShootMoveActive) return;
-	// Single source for the MaxWalkSpeed + MaxAcceleration override + focus; EndOpenAreaMoveShoot is the matching restore.
+	// Single source for the MaxWalkSpeed + MaxAcceleration override; EndOpenAreaMoveShoot is the matching restore.
+	// Focus/facing is owned by UpdateMoveShootFacing, called each tick from the LoS-clear and LoS-blocked branches.
 	CachedDefaultWalkSpeed = CMC->MaxWalkSpeed;
 	CMC->MaxWalkSpeed = CombatMoveSpeed;
 	CachedDefaultAcceleration = CMC->MaxAcceleration;
-	AIC->SetFocus(Target, EAIFocusPriority::Gameplay);
 	bMoveShootMoveActive = true;
 	MoveShootRepositionTimer = 0.f;
 	if (bDebugLogging)
 		UE_LOG(LogCompanionAI, Log, TEXT("%s: MOVESHOOT enter %s speed=%.0f"), *Companion->GetName(), Reason, CombatMoveSpeed);
+}
+
+void UBTTask_CompanionCombat::UpdateMoveShootFacing(AAIController* AIC, AActor* Target, bool bLosClear)
+{
+	if (!IsValid(AIC)) return;
+	if (bLosClear)
+	{
+		if (IsValid(Target))
+			AIC->SetFocus(Target, EAIFocusPriority::Gameplay);
+	}
+	else if (bHasLastKnownTargetLocation)
+	{
+		AIC->SetFocalPoint(LastKnownTargetLocation, EAIFocusPriority::Gameplay);
+	}
+	// If no last-known location yet, hold current facing — do not snap to live position.
 }
 
 bool UBTTask_CompanionCombat::ShouldRepickMoveShoot(ACompanionCharacter* Companion, AAIController* AIC, float DeltaSeconds)
@@ -1245,6 +1260,8 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	bReloadGateActive = false;
 	ReloadGateStartTime = 0.f;
 	LastDecisionTime = 0.f;
+	bHasLastKnownTargetLocation = false;
+	LastKnownTargetLocation = FVector::ZeroVector;
 }
 
 // --- Smooth-snap helpers ---
@@ -2682,13 +2699,17 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			// Drop the jiggle latch so the clear-LoS path re-anchors JiggleHome when LoS returns.
 			bJiggleActive = false;
-			Ctx.Companion->SetAimTarget(Ctx.Target);
+			// Weapon down while LoS is blocked — no precise aim offset through the wall.
+			Ctx.Companion->SetAimTarget(nullptr);
+			Ctx.Companion->SetLowReadyAim(true);
 			if (AAIController* RegainAIC = Cast<AAIController>(Ctx.Companion->GetController()))
 			{
 				if (bPlayerTooFar)
 					TickMoveShootTowardPlayer(Ctx.Companion, RegainAIC, Ctx.Target, DeltaSeconds);
 				else
 					TickRegainLosReposition(Ctx.Companion, RegainAIC, Ctx.Target, TickIgnoredAttached, DeltaSeconds);
+				// Face the frozen last-seen position (not the live actor) while repositioning.
+				UpdateMoveShootFacing(RegainAIC, Ctx.Target, false);
 			}
 		}
 		else
@@ -2717,12 +2738,24 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	}
 
 	LosBlockedAccum = 0.f;
+
+	// Snapshot the last confirmed LoS position so the blocked path has a frozen facing anchor.
+	LastKnownTargetLocation = TargetLocation;
+	bHasLastKnownTargetLocation = true;
+
+	// Restore full aim — low-ready raised during a blocked stretch is cleared here.
+	Ctx.Companion->SetLowReadyAim(false);
 	Ctx.Companion->SetAimTarget(Ctx.Target);
 
-	// Facing: when move-and-shoot is enabled, AIController focus (set in EnterMoveShootIfNeeded)
-	// drives body yaw toward the target while the jiggle strafes — so skip the manual rotation here,
-	// which would fight bUseControllerDesiredRotation. When disabled, fall back to today's manual face-the-target.
-	if (!bEnableOpenAreaMoveAndShoot)
+	// Facing: when move-and-shoot is enabled, UpdateMoveShootFacing drives body yaw via AIController focus
+	// toward the live target — so skip the manual rotation here, which would fight bUseControllerDesiredRotation.
+	// When disabled, fall back to today's manual face-the-target.
+	if (bEnableOpenAreaMoveAndShoot)
+	{
+		if (AAIController* ClearAIC = Cast<AAIController>(Ctx.Companion->GetController()))
+			UpdateMoveShootFacing(ClearAIC, Ctx.Target, true);
+	}
+	else
 	{
 		EndOpenAreaMoveShoot(Ctx.Companion);
 		const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
