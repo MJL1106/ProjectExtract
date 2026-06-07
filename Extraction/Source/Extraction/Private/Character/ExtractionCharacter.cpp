@@ -1127,8 +1127,8 @@ void AExtractionCharacter::EnterDBNO()
 	// Cancel active revive (C2: downed player can't finish reviving someone)
 	if (bIsReviving) CancelRevive();
 
-	// Cancel active movement states
-	if (IsValid(TraversalComponent) && TraversalComponent->IsInTraversal())
+	// Cancel active movement states (IsBusy covers approach phase + mid-vault)
+	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy())
 		TraversalComponent->CancelTraversal();
 	if (bIsSliding) EndSlide();
 	if (bIsSprintJumping) EndSprintJump();

@@ -265,6 +265,20 @@ bool UCompanionAnimInstance::HasMontageForType(ETraversalType Type) const
 	}
 }
 
+UAnimMontage* UCompanionAnimInstance::GetMontageForType(ETraversalType Type) const
+{
+	switch (Type)
+	{
+	case ETraversalType::Vault:      return VaultMontage;
+	case ETraversalType::Climb:      return ClimbMontage;
+	case ETraversalType::Mantle:     return MantleMontage;
+	case ETraversalType::DropDown:   return DropDownMontage;
+	case ETraversalType::Jump:       return JumpMontage;
+	case ETraversalType::SprintJump: return SprintJumpMontage;
+	default:                         return nullptr;
+	}
+}
+
 void UCompanionAnimInstance::SetCoverStrafeVelocity(const FVector& Velocity)
 {
 	static float LastSetLogTime = 0.f;

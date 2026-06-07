@@ -73,7 +73,12 @@ public:
 	// Lateral (sideways) offset so the companion lands beside the player, not inside them.
 	// Companion stays on whichever side it was already on relative to the traversal axis.
 	UPROPERTY(EditAnywhere, Category = "Companion|Mirror", meta = (ClampMin = "0.0"))
-	float MirrorLandingLateralOffset = 75.f;
+	float MirrorLandingLateralOffset = 95.f;
+
+	// Minimum centre-to-centre separation between companion and player after a mirrored traversal.
+	// Overridden by the sum of both capsule radii if that is larger.
+	UPROPERTY(EditAnywhere, Category = "Companion|Mirror", meta = (ClampMin = "0.0"))
+	float MirrorPlayerClearance = 70.f;
 
 	// Close-enough XY distance to the approach point to trigger the companion's own traversal.
 	UPROPERTY(EditAnywhere, Category = "Companion|Mirror")
@@ -84,6 +89,10 @@ public:
 	float CatchUpTimeout = 4.0f;
 
 	// --- Warp safety net ---
+
+	// Master on/off for the teleport-to-player safety net. When false the companion never warps to the player.
+	UPROPERTY(EditAnywhere, Category = "Companion|Warp")
+	bool bWarpToPlayerEnabled = true;
 
 	UPROPERTY(EditAnywhere, Category = "Companion|Warp")
 	float WarpStuckTimeout = 6.0f;

@@ -9,11 +9,79 @@
 #include "AI/CompanionTuningDataAsset.h"
 #include "AI/Cover/AICoverSlot.h"
 #include "Companion/CompanionCharacter.h"
+#include "Components/CapsuleComponent.h"
+#include "GameFramework/Character.h"
 #include "Movement/TraversalComponent.h"
 #include "Navigation/PathFollowingComponent.h"
 
 namespace
 {
+	// DepenetrateFromPlayer must be defined before TryTeleportToLanding which calls it.
+	void DepenetrateFromPlayer(ACompanionAIController* AIC, FMirrorMemory* Mem)
+	{
+		if (!AIC || !Mem) return;
+
+		ACompanionCharacter* Companion = Cast<ACompanionCharacter>(AIC->GetPawn());
+		APawn* PlayerPawn = AIC->GetPlayerCharacter();
+		if (!IsValid(Companion) || !IsValid(PlayerPawn)) return;
+
+		const UCapsuleComponent* CompanionCapsule = Companion->GetCapsuleComponent();
+		const ACharacter* PlayerCharacter = Cast<ACharacter>(PlayerPawn);
+		const UCapsuleComponent* PlayerCapsule = PlayerCharacter ? PlayerCharacter->GetCapsuleComponent() : nullptr;
+		if (!IsValid(CompanionCapsule) || !IsValid(PlayerCapsule)) return;
+
+		const UCompanionTuningDataAsset* T = AIC->GetTuning();
+		if (!T) return;
+
+		const FVector CompanionLoc = Companion->GetActorLocation();
+		const FVector PlayerLoc    = PlayerPawn->GetActorLocation();
+
+		const float CompanionRadius = CompanionCapsule->GetScaledCapsuleRadius();
+		const float PlayerRadius    = PlayerCapsule->GetScaledCapsuleRadius();
+		const float MinSep          = FMath::Max(T->MirrorPlayerClearance, CompanionRadius + PlayerRadius);
+
+		const float Dist2D = FVector::Dist2D(CompanionLoc, PlayerLoc);
+		if (Dist2D >= MinSep) return;
+
+		FVector PushDir = FVector(CompanionLoc.X - PlayerLoc.X, CompanionLoc.Y - PlayerLoc.Y, 0.f).GetSafeNormal();
+		if (PushDir.IsNearlyZero())
+		{
+			// Companion is exactly on top of player — pick a perpendicular push along the path axis.
+			PushDir = FVector::CrossProduct(FVector::UpVector, Mem->PathDir).GetSafeNormal() * Mem->LateralSign;
+		}
+
+		// Final guard: if PushDir is still zero (e.g. PathDir was also near-zero), use a
+		// stable fallback axis so NewLoc doesn't collapse onto the player's centre.
+		if (PushDir.IsNearlyZero())
+		{
+			PushDir = Companion->GetActorRightVector();
+			PushDir.Z = 0.f;
+			PushDir = PushDir.GetSafeNormal();
+			if (PushDir.IsNearlyZero())
+				PushDir = FVector::RightVector;
+		}
+
+		FVector NewLoc = PlayerLoc + PushDir * MinSep;
+		NewLoc.Z       = CompanionLoc.Z;
+
+		if (UWorld* World = AIC->GetWorld())
+		{
+			if (UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(World))
+			{
+				FNavLocation NavLoc;
+				if (NavSys->ProjectPointToNavigation(NewLoc, NavLoc, FVector(150.f, 150.f, 200.f)))
+					NewLoc = NavLoc.Location;
+			}
+		}
+
+		bool bMoved = Companion->TeleportTo(NewLoc, Companion->GetActorRotation());
+		if (!bMoved)
+			bMoved = Companion->TeleportTo(NewLoc, Companion->GetActorRotation(), /*bIsATest=*/false, /*bNoCheck=*/true);
+
+		UE_LOG(LogCompanionAI, Log, TEXT("[MirrorTraversal] DepenetrateFromPlayer: dist=%.0f minSep=%.0f pushDir=%s newLoc=%s -> %s"),
+			Dist2D, MinSep, *PushDir.ToCompactString(), *NewLoc.ToCompactString(), bMoved ? TEXT("OK") : TEXT("FAIL"));
+	}
+
 	bool TryTeleportToLanding(UBehaviorTreeComponent& OwnerComp, FMirrorMemory* Mem)
 	{
 		if (!Mem) return false;
@@ -43,10 +111,10 @@ namespace
 			}
 		}
 
-		// Cancel any in-flight traversal first (defence — usually not in one here).
+		// Cancel any in-flight traversal or approach first (defence — usually not in one here).
 		if (UTraversalComponent* OwnTrav = Pawn->FindComponentByClass<UTraversalComponent>())
 		{
-			if (OwnTrav->IsInTraversal())
+			if (OwnTrav->IsBusy())
 				OwnTrav->CancelTraversal();
 		}
 
@@ -56,6 +124,7 @@ namespace
 		const bool bTeleported = Pawn->TeleportTo(Destination, Pawn->GetActorRotation());
 		UE_LOG(LogCompanionAI, Log, TEXT("[MirrorTraversal] Per-obstacle fallback teleport: landing=%s dest=%s -> %s"),
 			*Landing.ToCompactString(), *Destination.ToCompactString(), bTeleported ? TEXT("OK") : TEXT("FAIL"));
+		DepenetrateFromPlayer(AIC, Mem);
 		return bTeleported;
 	}
 }
@@ -154,8 +223,10 @@ EBTNodeResult::Type UBTTask_MirrorPlayerTraversal::ExecuteTask(UBehaviorTreeComp
 	{
 		if (!MemPtr || MemPtr->Phase != FMirrorMemory::EPhase::WaitForTraversalEnd)
 			return;
-		if (UBehaviorTreeComponent* SafeOwner = WeakOwner.Get())
-			FinishLatentTask(*SafeOwner, EBTNodeResult::Succeeded);
+		UBehaviorTreeComponent* SafeOwner = WeakOwner.Get();
+		if (!SafeOwner) return;
+		DepenetrateFromPlayer(Cast<ACompanionAIController>(SafeOwner->GetAIOwner()), MemPtr);
+		FinishLatentTask(*SafeOwner, EBTNodeResult::Succeeded);
 	});
 
 	// Sprint to catch up — mirrors BTTask_FollowPlayer's pattern.

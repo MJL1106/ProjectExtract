@@ -47,6 +47,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Animation|Actions")
 	bool HasMontageForType(ETraversalType Type) const;
 
+	/** Returns the montage asset for the given traversal type, or nullptr if unset. Used to bind the
+	 *  end-delegate to the correct montage even when another montage (e.g. fire) is currently active. */
+	UFUNCTION(BlueprintPure, Category = "Animation|Actions")
+	UAnimMontage* GetMontageForType(ETraversalType Type) const;
+
 	// --- Cover Pose Interface ---
 
 	/** Enter cover idle pose on the given side. For Stand height, plays no montage (companion stays in locomotion idle). */

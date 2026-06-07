@@ -76,14 +76,19 @@ void ATraversalNavLink::GetNavigationData(FNavigationRelevantData& Data) const
 
 bool ATraversalNavLink::GetNavigationLinksArray(TArray<FNavigationLink>& OutLink, TArray<FNavigationSegmentLink>& OutSegments) const
 {
-	// For up-types, suppress the simple PointLink from the runtime nav octree query.
-	// Return false with empty arrays so the nav system sees no simple connection here;
-	// the SmartLinkComp provides the only connection (appended by the engine via the component path).
-	// For down-types, delegate to Super which appends PointLinks and the smart link modifier if active.
-	if (UsesSmartLinkTraversal())
-		return false;
+	// Down-types keep stock behaviour (simple PointLink + native fall).
+	if (!UsesSmartLinkTraversal())
+		return Super::GetNavigationLinksArray(OutLink, OutSegments);
 
-	return Super::GetNavigationLinksArray(OutLink, OutSegments);
+	// Up-types: contribute ONLY the smart link — a single off-mesh connection that carries the
+	// OnSmartLinkReached callback. Adding the modifier here (instead of returning empty) is also
+	// what the editor's FNavLinkRenderingProxy reads to DRAW the connection, so the link is visible
+	// again. The simple PointLink is intentionally omitted to avoid a duplicate coincident connection.
+	UNavLinkCustomComponent* SmartLink = GetSmartLinkComp();
+	const bool bSmartActive = IsValid(SmartLink) && SmartLink->IsNavigationRelevant();
+	if (bSmartActive)
+		OutLink.Add(SmartLink->GetLinkModifier());
+	return bSmartActive;
 }
 
 void ATraversalNavLink::HandleSmartLinkReached(AActor* Agent, const FVector& Destination)
@@ -146,7 +151,7 @@ void ATraversalNavLink::HandleSmartLinkReached(AActor* Agent, const FVector& Des
 	const FVector FinalStart = bDestIsLinkEnd ? LinkStart : LinkEnd;
 	const FVector FinalEnd = bDestIsLinkEnd ? LinkEnd : LinkStart;
 
-	const bool bStarted = Traversal->TryStartTraversalFromNavLink(TraversalType, FinalStart, FinalEnd, PlayRate);
+	const bool bStarted = Traversal->TryStartTraversalFromNavLink(TraversalType, FinalStart, FinalEnd, PlayRate, bFallbackTeleportOnFailure);
 
 	if (bStarted)
 	{

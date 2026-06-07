@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "TraversalComponent.h"
+#include "AIController.h"
 #include "Animation/AnimInstance.h"
 #include "Animation/CompanionAnimInstance.h"
 #include "Animation/ExtractionAnimInstance.h"
@@ -30,6 +31,15 @@ namespace TraversalConstants
 	static constexpr float ClearanceBufferOffset = 5.f;
 	static constexpr float SurfaceSkinOffset = 2.f;
 	static constexpr float DropThreshold = 30.f;
+	/** Max 2D distance between the forward-trace hit and the nav-link Start point.
+	 *  Hits beyond this are from a different obstacle/prop and trigger the endpoint fallback. */
+	static constexpr float NavLinkWallMatchTolerance = 120.f;
+	/** Seconds between wall-detection polls during the approach phase. */
+	static constexpr float NavLinkPollInterval = 0.1f;
+	/** Seconds after a teleport-abort before this link can re-enter the approach phase. */
+	static constexpr float NavLinkReentryCooldown = 1.0f;
+	/** Max downward distance (cm) the floor-snap searches for a surface below the landing position. */
+	static constexpr float FloorSnapMaxDrop = 150.f;
 }
 
 UTraversalComponent::UTraversalComponent()
@@ -66,6 +76,8 @@ void UTraversalComponent::BeginPlay()
 
 void UTraversalComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	bNavLinkApproaching = false;
+
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(WorstCaseTraversalEndHandle);
 
@@ -79,6 +91,7 @@ void UTraversalComponent::TickComponent(float DeltaTime, ELevelTick TickType, FA
 	if (!IsValid(OwningCharacter)) return;
 	if (!OwningCharacter->IsLocallyControlled() && !OwningCharacter->HasAuthority()) return;
 
+	if (bNavLinkApproaching) { UpdateNavLinkApproach(DeltaTime); return; }
 	if (IsInTraversal())
 		UpdateTraversal(DeltaTime);
 }
@@ -133,11 +146,26 @@ bool UTraversalComponent::DetectTraversalAhead(FVector& OutSnapTarget, ETraversa
 
 void UTraversalComponent::CancelTraversal()
 {
+	if (bNavLinkApproaching) { EndNavLinkApproach(false); return; }
 	if (IsInTraversal())
 		EndTraversal();
 }
 
-bool UTraversalComponent::TryStartTraversalFromNavLink(ETraversalType Type, const FVector& Start, const FVector& End, float PlayRate)
+bool UTraversalComponent::OwnerHasMontageForType(ETraversalType Type) const
+{
+	if (!IsValid(OwningCharacter)) return false;
+	USkeletalMeshComponent* MeshComp = OwningCharacter->GetMesh();
+	if (!MeshComp) return false;
+	UAnimInstance* AnimInst = MeshComp->GetAnimInstance();
+	if (!AnimInst) return false;
+	if (const UCompanionAnimInstance* CompAnim = Cast<UCompanionAnimInstance>(AnimInst))
+		return CompAnim->HasMontageForType(Type);
+	if (const UExtractionAnimInstance* ExtrAnim = Cast<UExtractionAnimInstance>(AnimInst))
+		return ExtrAnim->HasMontageForType(Type);
+	return false;
+}
+
+bool UTraversalComponent::TryStartTraversalFromNavLink(ETraversalType Type, const FVector& Start, const FVector& End, float PlayRate, bool bTeleportOnTimeout)
 {
 	if (Type == ETraversalType::None)
 	{
@@ -151,28 +179,30 @@ bool UTraversalComponent::TryStartTraversalFromNavLink(ETraversalType Type, cons
 		return false;
 	}
 
-	if (IsInTraversal())
+	if (IsBusy())
 	{
-		UE_LOG(LogTraversal, Log, TEXT("[NavLinkTraversal] %s - already in traversal, skip"), *OwnerTag(OwningCharacter));
+		UE_LOG(LogTraversal, Log, TEXT("[NavLinkTraversal] %s - already busy (approach or traversal), skip"), *OwnerTag(OwningCharacter));
 		return false;
+	}
+
+	// Re-entry cooldown: if the last approach ended via teleport, refuse re-entry for a short window
+	// to prevent a busy-loop on a chronically-failing link.
+	if (UWorld* ReentryWorld = GetWorld())
+	{
+		const float Now = ReentryWorld->GetTimeSeconds();
+		if (Now - NavLinkLastAbortTime < TraversalConstants::NavLinkReentryCooldown)
+		{
+			UE_LOG(LogTraversal, Verbose, TEXT("[NavLinkTraversal] %s - re-entry cooldown (%.2fs remaining), skip"),
+				*OwnerTag(OwningCharacter), TraversalConstants::NavLinkReentryCooldown - (Now - NavLinkLastAbortTime));
+			return false;
+		}
 	}
 
 	// Verify the owning character has a montage for this traversal type — otherwise
 	// StartTraversal would put the character in MOVE_Flying / no-collision with no
 	// montage end delegate to fire EndTraversal. Caller relies on this returning false
 	// to fall back to teleport. DropDown intentionally has no montage today.
-	bool bHasMontage = false;
-	if (USkeletalMeshComponent* MeshComp = OwningCharacter->GetMesh())
-	{
-		if (UAnimInstance* AnimInst = MeshComp->GetAnimInstance())
-		{
-			if (const UCompanionAnimInstance* CompanionAnim = Cast<UCompanionAnimInstance>(AnimInst))
-				bHasMontage = CompanionAnim->HasMontageForType(Type);
-			else if (const UExtractionAnimInstance* ExtractionAnim = Cast<UExtractionAnimInstance>(AnimInst))
-				bHasMontage = ExtractionAnim->HasMontageForType(Type);
-		}
-	}
-	if (!bHasMontage)
+	if (!OwnerHasMontageForType(Type))
 	{
 		UE_LOG(LogTraversal, Warning, TEXT("[NavLinkTraversal] %s - no montage configured for Type=%d, refusing — caller should teleport"),
 			*OwnerTag(OwningCharacter), (int32)Type);
@@ -198,28 +228,126 @@ bool UTraversalComponent::TryStartTraversalFromNavLink(ETraversalType Type, cons
 		return false;
 	}
 
-	// Populate runtime state that StartTraversal / UpdateTraversal expect.
-	const FVector PathDir = (End - Start).GetSafeNormal();
-	VaultWallImpactPoint = Start;
-	VaultWallNormal = PathDir.IsNearlyZero() ? -OwningCharacter->GetActorForwardVector() : -PathDir;
-	VaultSurfaceLocation = Start;
-	VaultTargetLocation = End;
-	VaultSurfaceHeight = FMath::Abs(End.Z - Start.Z);
+	// Pre-flight guards passed — enter the approach phase.
+	// The companion walks toward the wall via raw movement input each tick until the wall
+	// enters forward-trace range, then we commit the vault (StartTraversal + broadcast).
+	// We do NOT vault here — StartTraversal will fire from UpdateNavLinkApproach once the wall is detected.
+	NavLinkStart = Start;
+	NavLinkEnd = End;
+	NavLinkApproachType = Type;
+	NavLinkApproachPlayRate = PlayRate;
+	bNavLinkTeleportOnTimeout = bTeleportOnTimeout;
+	NavLinkApproachElapsed = 0.f;
+	NavLinkPollAccumulator = 0.f;
 
-	bWasSprintingAtTraversalEntry = false;
+	// Build pawn-ignore params once — reused every poll tick to avoid per-frame TActorIterator.
+	NavLinkApproachIgnoreParams = FCollisionQueryParams();
+	BuildPawnIgnoreParams(NavLinkApproachIgnoreParams);
 
-	// StartTraversal sets ActiveTraversalType, switches to MOVE_Flying, disables capsule
-	// collision, and primes the snap interp — same setup the trace path uses.
-	StartTraversal(Type);
+	FVector Dir = FVector(End.X - Start.X, End.Y - Start.Y, 0.f).GetSafeNormal();
+	if (Dir.IsNearlyZero())
+		Dir = OwningCharacter->GetActorForwardVector().GetSafeNormal2D();
+	NavLinkApproachDir = Dir;
 
-	UE_LOG(LogTraversal, Log, TEXT("[NavLinkTraversal] %s - started Type=%d Start=%s End=%s PlayRate=%.2f"),
-		*OwnerTag(OwningCharacter), (int32)Type,
-		*Start.ToCompactString(), *End.ToCompactString(), PlayRate);
+	if (!Dir.IsNearlyZero())
+		OwningCharacter->SetActorRotation(FRotator(0.f, Dir.Rotation().Yaw, 0.f));
 
-	// Broadcast — owner's AnimInstance plays the montage and binds the end-delegate that
-	// eventually calls EndTraversal(); CompanionAIController writes BB keys.
-	OnTraversalStarted.Broadcast(Type, PlayRate, VaultSurfaceLocation, VaultTargetLocation);
+	// Suppress the AI controller's desired-rotation so our per-tick SetActorRotation doesn't fight it.
+	if (IsValid(CachedMovement))
+	{
+		bSavedUseControllerDesiredRotation = CachedMovement->bUseControllerDesiredRotation;
+		CachedMovement->bUseControllerDesiredRotation = false;
+	}
+	if (AAIController* AIC = Cast<AAIController>(OwningCharacter->GetController()))
+		AIC->ClearFocus(EAIFocusPriority::Gameplay);
+
+	bNavLinkApproaching = true;
+	SetComponentTickEnabled(true);
+
+	UE_LOG(LogTraversal, Log, TEXT("[NavLinkTraversal] %s - approach phase started toward wall (Type=%d Start=%s End=%s)"),
+		*OwnerTag(OwningCharacter), (int32)Type, *Start.ToCompactString(), *End.ToCompactString());
 	return true;
+}
+
+void UTraversalComponent::UpdateNavLinkApproach(float DeltaTime)
+{
+	if (!IsValid(OwningCharacter)) { EndNavLinkApproach(false); return; }
+
+	// Timeout check runs first so a persistently-airborne companion still progresses toward abort.
+	NavLinkApproachElapsed += DeltaTime;
+	if (NavLinkApproachElapsed > NavLinkApproachTimeout)
+	{
+		UE_LOG(LogTraversal, Warning, TEXT("[NavLinkTraversal] %s - approach timed out after %.1fs"),
+			*OwnerTag(OwningCharacter), NavLinkApproachElapsed);
+		EndNavLinkApproach(bNavLinkTeleportOnTimeout);
+		return;
+	}
+
+	// Movement input runs every frame regardless of poll rate.
+	if (!NavLinkApproachDir.IsNearlyZero())
+	{
+		OwningCharacter->SetActorRotation(FRotator(0.f, NavLinkApproachDir.Rotation().Yaw, 0.f));
+		OwningCharacter->AddMovementInput(NavLinkApproachDir, 1.0f);
+	}
+
+	// Skip wall detection while airborne — FeetZ math is meaningless mid-fall.
+	// A persistently-airborne companion hits the timeout and teleports.
+	if (CachedMovement && CachedMovement->IsFalling()) return;
+
+	// Throttle the wall-detection poll to avoid per-frame sphere sweeps.
+	NavLinkPollAccumulator += DeltaTime;
+	if (NavLinkPollAccumulator < TraversalConstants::NavLinkPollInterval) return;
+	NavLinkPollAccumulator = 0.f;
+
+	if (!ResolveNavLinkWallData(NavLinkApproachType, NavLinkStart, NavLinkEnd, NavLinkApproachIgnoreParams))
+		return;
+
+	// Re-verify the montage right before committing — it may have been unassigned since
+	// the approach started (up to NavLinkApproachTimeout seconds ago).
+	if (!OwnerHasMontageForType(NavLinkApproachType))
+	{
+		UE_LOG(LogTraversal, Warning,
+			TEXT("[NavLinkTraversal] %s - montage gone for Type=%d at commit time, aborting to teleport"),
+			*OwnerTag(OwningCharacter), (int32)NavLinkApproachType);
+		EndNavLinkApproach(bNavLinkTeleportOnTimeout);
+		return;
+	}
+
+	// Restore the movement rotation flag before StartTraversal takes over its own save/restore.
+	if (IsValid(CachedMovement))
+		CachedMovement->bUseControllerDesiredRotation = bSavedUseControllerDesiredRotation;
+
+	VaultTargetLocation = NavLinkEnd;
+	bWasSprintingAtTraversalEntry = false;
+	bNavLinkApproaching = false;
+	bCurrentTraversalFromNavLink = true;
+	StartTraversal(NavLinkApproachType);
+	OnTraversalStarted.Broadcast(NavLinkApproachType, NavLinkApproachPlayRate, VaultSurfaceLocation, VaultTargetLocation);
+}
+
+void UTraversalComponent::EndNavLinkApproach(bool bTeleportToEnd)
+{
+	bNavLinkApproaching = false;
+
+	// Restore the movement rotation flag that was suppressed at approach entry.
+	if (IsValid(CachedMovement))
+		CachedMovement->bUseControllerDesiredRotation = bSavedUseControllerDesiredRotation;
+
+	if (!IsInTraversal())
+		SetComponentTickEnabled(false);
+
+	if (bTeleportToEnd && IsValid(OwningCharacter))
+	{
+		NavLinkLastAbortTime = GetWorld() ? GetWorld()->GetTimeSeconds() : NavLinkLastAbortTime;
+		const bool bTeleportOk = OwningCharacter->TeleportTo(NavLinkEnd, OwningCharacter->GetActorRotation(), false, false);
+		if (!bTeleportOk)
+			UE_LOG(LogTraversal, Warning, TEXT("[NavLinkTraversal] %s - TeleportTo(%s) failed (destination blocked)"),
+				*OwnerTag(OwningCharacter), *NavLinkEnd.ToCompactString());
+	}
+
+	// Signal the nav-link callback (bound to OnTraversalEnded) to ResumePathFollowing,
+	// even though no montage played in the timeout/abort case.
+	OnTraversalEnded.Broadcast();
 }
 
 void UTraversalComponent::ExecuteByType(ETraversalType Type, bool bWasSprinting)
@@ -230,6 +358,7 @@ void UTraversalComponent::ExecuteByType(ETraversalType Type, bool bWasSprinting)
 	if (Type == ETraversalType::None) return;
 
 	bWasSprintingAtTraversalEntry = bWasSprinting;
+	bCurrentTraversalFromNavLink = false;
 
 	StartTraversal(Type);
 
@@ -522,6 +651,97 @@ bool UTraversalComponent::CheckClearance(const FVector& SurfaceLocation, float F
 	return !bBlocked;
 }
 
+bool UTraversalComponent::ResolveNavLinkWallData(ETraversalType Type, const FVector& Start, const FVector& End, const FCollisionQueryParams& IgnoreParams)
+{
+	if (!IsValid(OwningCharacter) || !IsValid(CachedCapsule)) return false;
+
+	// Step 1: Align facing to the link's horizontal travel direction BEFORE tracing so that
+	// TraceForwardForWall (which uses GetActorForwardVector() internally) shoots perpendicular
+	// to the obstacle.  StartTraversal then snapshots VaultLockedRotation from this orientation,
+	// which locks root motion in the correct world direction for the entire traversal.
+	const FVector HorizDelta = FVector(End.X - Start.X, End.Y - Start.Y, 0.f);
+	if (!HorizDelta.IsNearlyZero())
+	{
+		const FRotator FaceDir(0.f, HorizDelta.Rotation().Yaw, 0.f);
+		OwningCharacter->SetActorRotation(FaceDir);
+	}
+
+	// Step 2: Run the standard forward wall trace.
+	FHitResult WallHit;
+	if (!TraceForwardForWall(WallHit, IgnoreParams))
+	{
+		UE_LOG(LogTraversal, Verbose, TEXT("[NavLinkTraversal] %s - forward trace missed — using endpoint fallback"), *OwnerTag(OwningCharacter));
+		return false;
+	}
+
+	// Reject the hit if it belongs to a different obstacle/prop — a mismatched hit would
+	// re-face the actor toward the wrong wall and corrupt the snap basis.
+	// We validate against the companion's current position (it has walked up to the wall
+	// during the approach phase), not the original link Start which may be far back.
+	if (FVector::Dist2D(WallHit.ImpactPoint, OwningCharacter->GetActorLocation()) > TraversalConstants::NavLinkWallMatchTolerance)
+	{
+		UE_LOG(LogTraversal, Verbose,
+			TEXT("[NavLinkTraversal] %s - forward hit (%.0f) too far from current position (tol=%.0f) — using endpoint fallback"),
+			*OwnerTag(OwningCharacter),
+			FVector::Dist2D(WallHit.ImpactPoint, OwningCharacter->GetActorLocation()),
+			TraversalConstants::NavLinkWallMatchTolerance);
+		return false;
+	}
+
+	// Re-face precisely square to the actual wall normal so root motion starts flush.
+	// This second rotation overrides the rough travel-dir facing from Step 1.
+	const FVector WallFlatNormal = FVector(WallHit.ImpactNormal.X, WallHit.ImpactNormal.Y, 0.f).GetSafeNormal();
+	if (!WallFlatNormal.IsNearlyZero())
+	{
+		const FRotator SquareToWall(0.f, (-WallFlatNormal).Rotation().Yaw, 0.f);
+		OwningCharacter->SetActorRotation(SquareToWall);
+	}
+
+	FHitResult SurfaceHit;
+	if (!TraceDownForSurface(WallHit, SurfaceHit, IgnoreParams))
+	{
+		UE_LOG(LogTraversal, Verbose, TEXT("[NavLinkTraversal] %s - down trace missed — using endpoint fallback"), *OwnerTag(OwningCharacter));
+		return false;
+	}
+
+	// Populate from real geometry — identical to PerformTraversalDetection.
+	VaultWallNormal      = WallHit.ImpactNormal;
+	VaultWallImpactPoint = WallHit.ImpactPoint;
+	VaultSurfaceLocation = SurfaceHit.ImpactPoint;
+	const float FeetZ    = OwningCharacter->GetActorLocation().Z - CachedCapsule->GetScaledCapsuleHalfHeight();
+	VaultSurfaceHeight   = SurfaceHit.ImpactPoint.Z - FeetZ;
+
+	UE_LOG(LogTraversal, Log, TEXT("[NavLinkTraversal] %s - real geometry resolved: wallNorm=%s surfZ=%.1f height=%.1f"),
+		*OwnerTag(OwningCharacter), *VaultWallNormal.ToCompactString(), SurfaceHit.ImpactPoint.Z, VaultSurfaceHeight);
+
+	// Warn the designer if the resolved height falls outside the authored type's expected band.
+	// This is a data-quality warning only — the authored type remains authoritative.
+	bool bHeightInBand = false;
+	switch (Type)
+	{
+	case ETraversalType::Vault:
+		bHeightInBand = (VaultSurfaceHeight >= VaultMinHeight && VaultSurfaceHeight <= VaultMaxHeight);
+		break;
+	case ETraversalType::Climb:
+		bHeightInBand = (VaultSurfaceHeight > VaultMaxHeight && VaultSurfaceHeight <= ClimbMaxHeight);
+		break;
+	case ETraversalType::Mantle:
+		bHeightInBand = (VaultSurfaceHeight > ClimbMaxHeight && VaultSurfaceHeight <= MantleMaxHeight);
+		break;
+	default:
+		bHeightInBand = true;
+		break;
+	}
+	if (!bHeightInBand)
+	{
+		UE_LOG(LogTraversal, Warning,
+			TEXT("[NavLinkTraversal] %s - authored Type=%d height band mismatch: resolved height=%.1f — check nav-link placement or band tuning values"),
+			*OwnerTag(OwningCharacter), (int32)Type, VaultSurfaceHeight);
+	}
+
+	return true;
+}
+
 // ---- Traversal Execution ----
 
 void UTraversalComponent::StartTraversal(ETraversalType Type)
@@ -604,9 +824,16 @@ void UTraversalComponent::EndTraversal()
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(WorstCaseTraversalEndHandle);
 
+	const ETraversalType EndingType = ActiveTraversalType;
+	const bool bWasNavLinkTraversal = bCurrentTraversalFromNavLink;
+	bCurrentTraversalFromNavLink = false;
+
 	ActiveTraversalType = ETraversalType::None;
 	bIsSnappingToVault = false;
 	SetComponentTickEnabled(false);
+
+	// Guard all owner dereferences — the worst-case timer can fire after the companion is destroyed.
+	if (!IsValid(OwningCharacter)) return;
 
 	OwningCharacter->bUseControllerRotationYaw = bSavedUseControllerRotationYaw;
 
@@ -617,6 +844,9 @@ void UTraversalComponent::EndTraversal()
 
 	if (IsValid(CachedMovement))
 		CachedMovement->SetMovementMode(MOVE_Walking);
+
+	if (IsValid(CachedCapsule) && bWasNavLinkTraversal && EndingType == ETraversalType::Vault)
+		SnapToFloorAfterNavLink();
 
 	OnTraversalEnded.Broadcast();
 }
@@ -644,4 +874,35 @@ void UTraversalComponent::OnRep_TraversalType()
 	// NOTE: VaultSurfaceLocation/VaultTargetLocation are not replicated; on remote clients these
 	// will be zero. Mirror feature binds to the locally-controlled player only (see plan §1).
 	OnTraversalStarted.Broadcast(ActiveTraversalType, PlayRate, VaultSurfaceLocation, VaultTargetLocation);
+}
+
+void UTraversalComponent::SnapToFloorAfterNavLink()
+{
+	const FVector Loc = OwningCharacter->GetActorLocation();
+	const float CapsuleHalfHeight = CachedCapsule->GetScaledCapsuleHalfHeight();
+
+	FCollisionQueryParams SnapParams;
+	BuildPawnIgnoreParams(SnapParams);
+
+	FVector Start = Loc;
+	Start.Z += CapsuleHalfHeight;
+	FVector End = Loc;
+	End.Z -= (CapsuleHalfHeight + TraversalConstants::FloorSnapMaxDrop);
+
+	FHitResult Hit;
+	const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, SnapParams);
+
+	if (bHit)
+	{
+		FVector NewLoc = Loc;
+		NewLoc.Z = Hit.ImpactPoint.Z + CapsuleHalfHeight + NavLinkLandingZOffset;
+		OwningCharacter->SetActorLocation(NewLoc, /*bSweep*/ true);
+		UE_LOG(LogTraversal, Verbose, TEXT("[NavLinkSnap] %s - snapped to floor at Z=%.1f (impact=%.1f offset=%.1f)"),
+			*OwnerTag(OwningCharacter), NewLoc.Z, Hit.ImpactPoint.Z, NavLinkLandingZOffset);
+	}
+	else
+	{
+		UE_LOG(LogTraversal, Verbose, TEXT("[NavLinkSnap] %s - no floor found within %.0fcm, position unchanged"),
+			*OwnerTag(OwningCharacter), TraversalConstants::FloorSnapMaxDrop);
+	}
 }
