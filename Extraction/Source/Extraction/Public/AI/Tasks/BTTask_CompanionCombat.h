@@ -384,6 +384,9 @@ private:
 	/** Shared LoS test: does Point (raised to eye height) have a clear ECC_Visibility line to the target? Ignores self + weapon + attached. */
 	bool PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredAttached) const;
 
+	/** Move-shoot facing: live focus on actor when LoS is clear; frozen focal point at LastKnownTargetLocation when blocked. No-op if blocked and no last-known location yet. */
+	void UpdateMoveShootFacing(AAIController* AIC, AActor* Target, bool bLosClear);
+
 	/** Projects MyLoc+LateralOffset onto the navmesh and returns true only if the projected point has LoS to the target. */
 	bool TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, const FVector& LateralOffset, FVector& OutDest) const;
 
@@ -414,6 +417,12 @@ private:
 	TWeakObjectPtr<AActor> LastLosBlocker;
 
 	// Open-area move-and-shoot state (shared entry/speed/focus + the LoS-blocked regain fan)
+
+	/** Last target location where open-area LoS was confirmed clear; frozen at the moment LoS is lost. */
+	FVector LastKnownTargetLocation = FVector::ZeroVector;
+	/** True once LastKnownTargetLocation has been written at least once during the current engagement. */
+	bool bHasLastKnownTargetLocation = false;
+
 	FVector MoveShootDestination = FVector::ZeroVector;
 	bool bMoveShootMoveActive = false;
 	float MoveShootRepositionTimer = 0.f;

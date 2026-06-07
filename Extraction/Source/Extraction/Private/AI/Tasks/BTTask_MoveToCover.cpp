@@ -89,6 +89,9 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 			FVector ArrivalPos = ExistingSlot->GetLocationAtAlpha(Alpha);
 			ArrivalPos.Z = PawnLoc.Z;
 			BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, ArrivalPos);
+			// Re-assert HasCoverPosition — can be false after a target-death cycle while the slot
+			// is still claimed (Fix 2: target death no longer blanket-clears cover in the service).
+			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, true);
 
 			if (FVector::Dist(PawnLoc, ArrivalPos) <= AcceptableRadius)
 				return EBTNodeResult::Succeeded;

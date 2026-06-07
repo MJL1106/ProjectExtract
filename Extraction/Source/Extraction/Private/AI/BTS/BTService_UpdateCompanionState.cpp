@@ -16,6 +16,7 @@
 #include "GameplayTagAssetInterface.h"
 #include "Kismet/GameplayStatics.h"
 #include "AI/Cover/AICoverSlot.h"
+#include "Engine/OverlapResult.h" // FOverlapResult full definition for the proximity overlap scan
 
 UBTService_UpdateCompanionState::UBTService_UpdateCompanionState()
 {
@@ -65,11 +66,15 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		if (!IsValid(ExistingTarget) || (TargetHealth && TargetHealth->IsDead()))
 		{
 			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target CLEARED (was %s, dead=%d)"),
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target CLEARED (was %s, dead=%d) — cover slot retained for re-score"),
 					*Companion->GetName(), *GetNameSafe(ExistingTarget),
 					(int32)(TargetHealth && TargetHealth->IsDead()));
 			BB->ClearValue(CombatTargetKey.SelectedKeyName);
-			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+			// Do NOT clear HasCoverPosition here: if the companion holds a claimed slot, the
+			// CoverSwitchMonitor will re-score it against the new target this service tick.
+			// Clearing cover on every target death caused a drop into open move-shoot when
+			// additional enemies were still present. Cover is cleared only when the last enemy
+			// is gone (see no-target branch below) or when LoS-grace expires with no slot.
 			ExistingTarget = nullptr;
 		}
 	}
@@ -104,6 +109,74 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		{
 			BestDistSq = DistSq;
 			BestTarget = Actor;
+		}
+	}
+
+	// --- Proximity 360° awareness: detect enemies in any direction at close range ---
+	// Supplements the sight cone (180° forward). Runs at the same 0.25s service cadence; one
+	// small-radius sphere overlap per tick is negligible cost.
+	{
+		const UCompanionTuningDataAsset* ProxTuning = Controller->GetTuning();
+		const float ProxRadius = ProxTuning ? ProxTuning->ProximityAwarenessRadius : 700.f;
+		if (ProxRadius > 0.f)
+		{
+			TArray<FOverlapResult> ProxOverlaps;
+			ProxOverlaps.Reserve(8);
+			FCollisionObjectQueryParams ObjParams(ECC_Pawn);
+			FCollisionQueryParams ProxParams(SCENE_QUERY_STAT(CompanionProximityAwareness), false);
+			ProxParams.AddIgnoredActor(Companion);
+			ProxParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+
+			Companion->GetWorld()->OverlapMultiByObjectType(
+				ProxOverlaps, MyLocation, FQuat::Identity,
+				ObjParams, FCollisionShape::MakeSphere(ProxRadius), ProxParams);
+
+			// Fix C: skip enemies already evaluated by the sight pass — no point re-tracing them.
+			TSet<AActor*> PerceivedSet;
+			PerceivedSet.Reserve(PerceivedActors.Num());
+			for (AActor* A : PerceivedActors)
+				PerceivedSet.Add(A);
+
+			// Fix B: match the combat task's LoS ignore list (self + weapon + attached actors).
+			TArray<AActor*, TInlineAllocator<4>> ProxIgnoredAttached;
+			Companion->ForEachAttachedActors([&](AActor* A) { ProxIgnoredAttached.Add(A); return true; });
+
+			const FVector ProxAimOrigin = Companion->GetPawnViewLocation();
+			for (const FOverlapResult& Overlap : ProxOverlaps)
+			{
+				AActor* ProxActor = Overlap.GetActor();
+				if (!IsValid(ProxActor) || ProxActor == Companion) continue;
+				// Fix C: already a sight-pass candidate — skip redundant LoS trace.
+				if (PerceivedSet.Contains(ProxActor)) continue;
+
+				const IGameplayTagAssetInterface* ProxTagIface = Cast<IGameplayTagAssetInterface>(ProxActor);
+				if (!ProxTagIface) continue;
+				FGameplayTagContainer ProxTags;
+				ProxTagIface->GetOwnedGameplayTags(ProxTags);
+				if (!ProxTags.HasTag(TAG_Character_Enemy)) continue;
+
+				UHealthComponent* ProxHealth = ProxActor->FindComponentByClass<UHealthComponent>();
+				if (ProxHealth && ProxHealth->IsDead()) continue;
+
+				// LoS check from eye height — must be unobstructed or hit the candidate directly.
+				// Fix B: ignore list mirrors the combat task (self + weapon + attached actors).
+				FHitResult ProxLosHit;
+				FCollisionQueryParams ProxLosParams(SCENE_QUERY_STAT(CompanionProximityLoS), true);
+				ProxLosParams.AddIgnoredActor(Companion);
+				ProxLosParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+				for (AActor* Attached : ProxIgnoredAttached)
+					ProxLosParams.AddIgnoredActor(Attached);
+				const bool bProxBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+					ProxLosHit, ProxAimOrigin, ProxActor->GetActorLocation(), ECC_Visibility, ProxLosParams);
+				if (bProxBlocked && ProxLosHit.GetActor() != ProxActor) continue;
+
+				const float ProxDistSq = FVector::DistSquared(MyLocation, ProxActor->GetActorLocation());
+				if (ProxDistSq < BestDistSq)
+				{
+					BestDistSq = ProxDistSq;
+					BestTarget = ProxActor;
+				}
+			}
 		}
 	}
 
@@ -200,7 +273,14 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	{
 		PrevCombatTarget.Reset();
 		if (ExistingTarget == nullptr)
+		{
 			BB->ClearValue(CombatTargetKey.SelectedKeyName);
+			// No enemies at all — combat is ending. Release cover so the companion stands up and
+			// the cover slot becomes available for the next engagement. Cover is cleared only when
+			// no target remains (combat ending); a live-but-temporarily-unperceived target retains
+			// both the BB target and the cover slot so the CoverSwitchMonitor stays active.
+			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+		}
 	}
 
 	// --- Posture transitions (server-side; SetPosture gates on HasAuthority) ---
