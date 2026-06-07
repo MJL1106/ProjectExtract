@@ -249,6 +249,13 @@ void ACompanionAIController::TickWarpFallback()
 	const UCompanionTuningDataAsset* T = Tuning;
 	if (!MyPawn || !Player || !T) return;
 
+	if (!T->bWarpToPlayerEnabled)
+	{
+		TimeSinceClosedToPlayer = 0.f;
+		TimeOnDifferentLevel = 0.f;
+		return;
+	}
+
 	const float DistToPlayer = FVector::Dist(MyPawn->GetActorLocation(), Player->GetActorLocation());
 	if (DistToPlayer < T->WarpMinDistance)
 	{
@@ -325,7 +332,7 @@ bool ACompanionAIController::TeleportToLocation(const FVector& Location, const F
 
 	if (UTraversalComponent* OwnTrav = MyPawn->FindComponentByClass<UTraversalComponent>())
 	{
-		if (OwnTrav->IsInTraversal())
+		if (OwnTrav->IsBusy())
 			OwnTrav->CancelTraversal();
 	}
 

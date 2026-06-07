@@ -385,6 +385,9 @@ void ACompanionCharacter::HandleDeath()
 
 	SetActorTickEnabled(false);
 
+	if (IsValid(TraversalComponent))
+		TraversalComponent->CancelTraversal();
+
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->StopFiring();
 
@@ -426,13 +429,27 @@ void ACompanionCharacter::HandleTraversalStarted(ETraversalType Type, float Play
 
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	if (!MeshComp) return;
-	if (UCompanionAnimInstance* Anim = Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()))
-	{
-		Anim->PlayTraversalMontage(Type, PlayRate);
+	UCompanionAnimInstance* Anim = Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance());
+	if (!Anim) return;
 
+	// Resolve the exact montage asset BEFORE playing it so the end-delegate is bound to
+	// the correct montage even when another montage (e.g. fire loop) is currently active.
+	// Binding to GetCurrentActiveMontage() after Play would race against any montage that
+	// the play call itself interrupted or that was already occupying the slot.
+	UAnimMontage* Played = Anim->GetMontageForType(Type);
+	Anim->PlayTraversalMontage(Type, PlayRate);
+
+	if (IsValid(Played))
+	{
 		FOnMontageEnded EndDelegate;
 		EndDelegate.BindUObject(this, &ACompanionCharacter::OnTraversalMontageEnded);
-		Anim->Montage_SetEndDelegate(EndDelegate, Anim->GetCurrentActiveMontage());
+		Anim->Montage_SetEndDelegate(EndDelegate, Played);
+	}
+	else if (IsValid(TraversalComponent))
+	{
+		// No montage configured — end traversal immediately so the companion is never
+		// stranded in MOVE_Flying + no collision waiting for a delegate that won't fire.
+		TraversalComponent->EndTraversal();
 	}
 }
 
