@@ -62,6 +62,11 @@ public:
 
 	// --- Mirror traversal ---
 
+	// Master on/off for mirroring the player's climb/vault traversal. When false the companion
+	// ignores the player's OnTraversalStarted events and relies solely on nav-link traversal.
+	UPROPERTY(EditAnywhere, Category = "Companion|Mirror")
+	bool bMirrorPlayerTraversalEnabled = false;
+
 	// Ignore the player's traversal event if the companion is more than this far from the obstacle.
 	UPROPERTY(EditAnywhere, Category = "Companion|Mirror")
 	float MirrorTriggerRange = 1500.f;

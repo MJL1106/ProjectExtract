@@ -1756,10 +1756,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=out-of-range dist=%.0f > MaxRange=%.0f"),
 				*Ctx.Companion->GetName(), Distance, Ctx.Companion->MaxEngageRange);
 		Ctx.Companion->StopWeaponFire();
-#if ENABLE_DRAW_DEBUG
-		if (bDebugLogging)
-			DrawDebugLine(Ctx.Companion->GetWorld(), MyLocation, TargetLocation, FColor::Yellow, false, 0.5f, 0, 2.0f);
-#endif
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
@@ -2689,10 +2685,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			Ctx.Companion->StopWeaponFire();
 			bIsFiringBurst = false;
 		}
-#if ENABLE_DRAW_DEBUG
-		if (bDebugLogging)
-			DrawDebugLine(Ctx.Companion->GetWorld(), MyLocation, LosHit.ImpactPoint, FColor::Red, false, 0.25f, 0, 2.0f);
-#endif
 		LosBlockedAccum += DeltaSeconds;
 
 		if (bEnableOpenAreaMoveAndShoot)
@@ -2827,10 +2819,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 	}
 
-#if ENABLE_DRAW_DEBUG
-	if (bDebugLogging && bIsFiringBurst)
-		DrawDebugLine(Ctx.Companion->GetWorld(), MyLocation, TargetLocation, FColor::Green, false, 0.1f, 0, 1.5f);
-#endif
 }
 
 // --- OnTaskFinished ---

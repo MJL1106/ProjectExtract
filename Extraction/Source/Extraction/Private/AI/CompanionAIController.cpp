@@ -222,6 +222,8 @@ void ACompanionAIController::OnPlayerTraversalStarted(ETraversalType Type, float
 	UBlackboardComponent* BB = GetBlackboardComponent();
 	if (!MyPawn || !T || !BB) return;
 
+	if (!T->bMirrorPlayerTraversalEnabled) return;
+
 	const float DistToObstacle = FVector::Dist(MyPawn->GetActorLocation(), ObstacleLocation);
 	if (DistToObstacle > T->MirrorTriggerRange)
 	{

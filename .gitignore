@@ -10,6 +10,10 @@ Extraction/Intermediate/
 Extraction/DerivedDataCache/
 Extraction/Build/
 
+# Packaged builds (large local artifacts — never tracked)
+Extraction/Package/
+Extraction/PAckage/
+
 # ----------------------------------------------------------------------------
 # Saved / local data
 # ----------------------------------------------------------------------------
