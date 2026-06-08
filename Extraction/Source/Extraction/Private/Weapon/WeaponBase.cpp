@@ -17,14 +17,20 @@
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
 #include "Engine/DamageEvents.h"
-#include "EngineUtils.h"
 #include "DrawDebugHelpers.h"
+#include "EngineUtils.h"
 #include "Extraction.h"
 
 namespace WeaponConstants
 {
 	static const FName MuzzleSocketName(TEXT("Muzzle"));
 }
+
+static TAutoConsoleVariable<int32> CVarShowBulletTracers(
+	TEXT("weapon.ShowTracers"),
+	1,
+	TEXT("If non-zero, draw a tracer from muzzle to impact and an impact marker for every shot (player + AI)."),
+	ECVF_Cheat);
 
 static TAutoConsoleVariable<int32> CVarAIWeaponTraceDebug(
 	TEXT("companion.WeaponTraceDebug"),
@@ -313,24 +319,38 @@ void AWeaponBase::PerformHitscan()
 	QueryParams.AddIgnoredActor(OwnerChar);
 	QueryParams.bReturnPhysicalMaterial = false;
 
-	// Friendly-fire prevention: AI-owned weapons ignore the player + all companions.
+	// Friendly-fire prevention: AI-owned weapons ignore their own team only.
+	// Enemy weapons skip other enemies; companion weapons skip the player + companions.
 	// (Player-fired shots still trace normally — only AI uses teammate filtering.)
 	const bool bAIOwned = !IsValid(PC);
 	if (bAIOwned)
 	{
 		if (UWorld* QueryWorld = GetWorld())
 		{
-			if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(QueryWorld, 0))
+			if (IsValid(Cast<AEnemyBase>(OwnerChar)))
 			{
-				if (PlayerChar != OwnerChar)
-					QueryParams.AddIgnoredActor(PlayerChar);
+				// Enemy weapon: ignore fellow enemies only — player + companions are valid targets.
+				for (TActorIterator<AEnemyBase> It(QueryWorld); It; ++It)
+				{
+					AEnemyBase* OtherEnemy = *It;
+					if (IsValid(OtherEnemy) && OtherEnemy != OwnerChar)
+						QueryParams.AddIgnoredActor(OtherEnemy);
+				}
 			}
-
-			for (TActorIterator<ACompanionCharacter> It(QueryWorld); It; ++It)
+			else
 			{
-				ACompanionCharacter* Teammate = *It;
-				if (IsValid(Teammate) && Teammate != OwnerChar)
-					QueryParams.AddIgnoredActor(Teammate);
+				// Companion (or other team-0 AI) weapon: ignore the player + all companions.
+				if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(QueryWorld, 0))
+				{
+					if (PlayerChar != OwnerChar)
+						QueryParams.AddIgnoredActor(PlayerChar);
+				}
+				for (TActorIterator<ACompanionCharacter> It(QueryWorld); It; ++It)
+				{
+					ACompanionCharacter* Teammate = *It;
+					if (IsValid(Teammate) && Teammate != OwnerChar)
+						QueryParams.AddIgnoredActor(Teammate);
+				}
 			}
 		}
 	}
@@ -351,13 +371,6 @@ void AWeaponBase::PerformHitscan()
 				*GetNameSafe(bHit ? HitResult.GetActor() : nullptr),
 				bHit ? HitResult.Distance : 0.f);
 		}
-
-#if ENABLE_DRAW_DEBUG
-		if (bHit)
-			DrawDebugLine(World, TraceStart, HitResult.ImpactPoint, FColor::Red, false, 0.5f, 0, 1.0f);
-		else
-			DrawDebugLine(World, TraceStart, TraceEnd, FColor::Yellow, false, 0.5f, 0, 1.0f);
-#endif
 
 		if (bHit)
 		{
@@ -385,7 +398,26 @@ void AWeaponBase::PerformHitscan()
 				);
 			}
 		}
+
+		Multicast_PlayFireFX(GetMuzzleLocation(), bHit ? HitResult.ImpactPoint : TraceEnd, bHit);
 	}
+}
+
+// ---- FX RPCs ----
+
+void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocation, const FVector& EndPoint, bool bHit)
+{
+#if ENABLE_DRAW_DEBUG
+	if (CVarShowBulletTracers.GetValueOnGameThread() == 0) return;
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	static constexpr float TracerLifetime = 0.4f;
+	static constexpr float TracerThickness = 1.5f;
+	DrawDebugLine(World, MuzzleLocation, EndPoint, FColor::Yellow, false, TracerLifetime, 0, TracerThickness);
+	if (bHit)
+		DrawDebugPoint(World, EndPoint, 10.f, FColor::Red, false, TracerLifetime, 0);
+#endif
 }
 
 // ---- Reload ----

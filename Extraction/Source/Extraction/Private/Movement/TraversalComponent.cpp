@@ -835,18 +835,35 @@ void UTraversalComponent::EndTraversal()
 	// Guard all owner dereferences — the worst-case timer can fire after the companion is destroyed.
 	if (!IsValid(OwningCharacter)) return;
 
+	// a) Restore rotation yaw flag.
 	OwningCharacter->bUseControllerRotationYaw = bSavedUseControllerRotationYaw;
 
-	OwningCharacter->SetActorLocation(OwningCharacter->GetActorLocation(), true);
-
+	// b) Re-enable collision so the depenetration sweep that follows is effective.
 	if (IsValid(CachedCapsule))
 		CachedCapsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 
+	// c) Zero residual root-motion velocity before placement.
+	if (IsValid(CachedMovement))
+		CachedMovement->StopMovementImmediately();
+
+	// d) In-place depenetrate — now that collision is restored, the sweep can push out of geometry.
+	//    Covers the non-nav-link (player) path and is a cheap no-op when not embedded.
+	OwningCharacter->SetActorLocation(OwningCharacter->GetActorLocation(), true);
+
+	// e) Z-only floor correction for nav-link landings — keeps companion XY where root motion
+	//    left it and corrects Z to the actual surface so it doesn't slip off or hover.
+	if (IsValid(CachedCapsule) && bWasNavLinkTraversal)
+	{
+		const bool bSnapType = (EndingType == ETraversalType::Climb
+			|| EndingType == ETraversalType::Mantle
+			|| EndingType == ETraversalType::Vault);
+		if (bSnapType)
+			SnapToFloorAfterNavLink();
+	}
+
+	// f) Enter walking mode from rest at the correct position.
 	if (IsValid(CachedMovement))
 		CachedMovement->SetMovementMode(MOVE_Walking);
-
-	if (IsValid(CachedCapsule) && bWasNavLinkTraversal && EndingType == ETraversalType::Vault)
-		SnapToFloorAfterNavLink();
 
 	OnTraversalEnded.Broadcast();
 }
@@ -878,6 +895,12 @@ void UTraversalComponent::OnRep_TraversalType()
 
 void UTraversalComponent::SnapToFloorAfterNavLink()
 {
+	if (!IsValid(OwningCharacter)) return;
+	if (!IsValid(CachedCapsule)) return;
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
 	const FVector Loc = OwningCharacter->GetActorLocation();
 	const float CapsuleHalfHeight = CachedCapsule->GetScaledCapsuleHalfHeight();
 
@@ -890,7 +913,7 @@ void UTraversalComponent::SnapToFloorAfterNavLink()
 	End.Z -= (CapsuleHalfHeight + TraversalConstants::FloorSnapMaxDrop);
 
 	FHitResult Hit;
-	const bool bHit = GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, SnapParams);
+	const bool bHit = World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, SnapParams);
 
 	if (bHit)
 	{

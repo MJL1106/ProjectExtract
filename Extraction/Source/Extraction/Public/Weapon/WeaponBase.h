@@ -160,6 +160,11 @@ private:
 	void ApplyRecoil();
 	void OnRecoilResetTimer();
 
+	// ---- RPCs ----
+
+	UFUNCTION(NetMulticast, Unreliable)
+	void Multicast_PlayFireFX(const FVector& MuzzleLocation, const FVector& EndPoint, bool bHit);
+
 	// ---- RepNotify ----
 
 	UFUNCTION()
