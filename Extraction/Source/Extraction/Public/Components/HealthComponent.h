@@ -25,6 +25,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Health")
 	void TakeDamage(float Damage);
 
+	/** Authority-only: sets max AND current health/shield from DA values. Safe to call before or after BeginPlay. */
+	void InitializeHealth(float NewMaxHealth, float NewMaxShield);
+
 	UFUNCTION(BlueprintCallable, Category = "Health")
 	void Heal(float Amount);
 

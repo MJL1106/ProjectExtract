@@ -15,12 +15,16 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "HealthComponent.h"
+#include "FootstepNoiseComponent.h"
+#include "EnemyCharacter.h"
+#include "EngineUtils.h"
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
 #include "ExtractionDamageType.h"
 #include "TimerManager.h"
 #include "Engine/DamageEvents.h"
+#include "ExtractionTypes.h"
 #include "Extraction.h"
 
 namespace ExtractionCharacterConstants
@@ -115,6 +119,9 @@ AExtractionCharacter::AExtractionCharacter()
 	// Health component
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 
+	// Footstep noise (AI hearing)
+	FootstepNoiseComponent = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepNoiseComponent"));
+
 	// Weapon component
 	WeaponComponent = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
 
@@ -149,6 +156,12 @@ AExtractionCharacter::AExtractionCharacter()
 	BoneToHitRegionMap.Add(FName("ball_l"), EHitRegion::Legs);
 	BoneToHitRegionMap.Add(FName("ball_r"), EHitRegion::Legs);
 
+	OwnedTags.AddTag(TAG_Character_Player);
+}
+
+void AExtractionCharacter::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
+{
+	TagContainer.AppendTags(OwnedTags);
 }
 
 void AExtractionCharacter::PostInitializeComponents()
@@ -341,6 +354,9 @@ void AExtractionCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 	// Interact (hold for revive)
 	EnhancedInput->BindAction(InteractAction, ETriggerEvent::Started, this, &AExtractionCharacter::InteractStart);
 	EnhancedInput->BindAction(InteractAction, ETriggerEvent::Completed, this, &AExtractionCharacter::InteractStop);
+
+	if (TakedownAction)
+		EnhancedInput->BindAction(TakedownAction, ETriggerEvent::Started, this, &AExtractionCharacter::TakedownInput);
 
 	// Fire
 	if (FireAction)
@@ -1285,6 +1301,29 @@ void AExtractionCharacter::InteractStart(const FInputActionValue& Value)
 void AExtractionCharacter::InteractStop(const FInputActionValue& Value)
 {
 	if (bIsReviving) CancelRevive();
+}
+
+void AExtractionCharacter::TakedownInput(const FInputActionValue& Value)
+{
+	if (!HasAuthority()) return;
+
+	static constexpr float FacingDotMin = 0.3f;
+	AEnemyCharacter* Best = nullptr;
+	float BestDistSq = MAX_FLT;
+
+	for (TActorIterator<AEnemyCharacter> It(GetWorld()); It; ++It)
+	{
+		AEnemyCharacter* Enemy = *It;
+		if (!IsValid(Enemy) || !Enemy->CanBeTakenDown(this)) continue;
+
+		const FVector ToEnemy = Enemy->GetActorLocation() - GetActorLocation();
+		if (FVector::DotProduct(GetActorForwardVector(), ToEnemy.GetSafeNormal2D()) < FacingDotMin) continue;
+
+		const float DistSq = ToEnemy.SizeSquared();
+		if (DistSq < BestDistSq) { BestDistSq = DistSq; Best = Enemy; }
+	}
+
+	if (Best) Best->ExecuteTakedown(this);
 }
 
 AExtractionCharacter* AExtractionCharacter::FindReviveTarget() const

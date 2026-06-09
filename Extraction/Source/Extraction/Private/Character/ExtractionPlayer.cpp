@@ -13,6 +13,9 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "HealthComponent.h"
+#include "FootstepNoiseComponent.h"
+#include "EnemyCharacter.h"
+#include "EngineUtils.h"
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
 #include "ExtractionDamageType.h"
@@ -21,6 +24,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Camera/PlayerCameraManager.h"
 #include "DrawDebugHelpers.h"
+#include "ExtractionTypes.h"
 #include "Extraction.h"
 
 AExtractionPlayer::AExtractionPlayer()
@@ -33,6 +37,7 @@ AExtractionPlayer::AExtractionPlayer()
 	PrimaryActorTick.bCanEverTick = true;
 
 	HealthComponent   = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+	FootstepNoiseComponent = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepNoiseComponent"));
 	WeaponComponent   = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
 
@@ -63,6 +68,13 @@ AExtractionPlayer::AExtractionPlayer()
 	BoneToHitRegionMap.Add(FName("foot_r"),      EHitRegion::Legs);
 	BoneToHitRegionMap.Add(FName("ball_l"),      EHitRegion::Legs);
 	BoneToHitRegionMap.Add(FName("ball_r"),      EHitRegion::Legs);
+
+	OwnedTags.AddTag(TAG_Character_Player);
+}
+
+void AExtractionPlayer::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
+{
+	TagContainer.AppendTags(OwnedTags);
 }
 
 void AExtractionPlayer::PostInitializeComponents()
@@ -221,6 +233,9 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	{
 		UE_LOG(LogExtraction, Warning, TEXT("'%s': InteractAction is null — assign in BP child class."), *GetNameSafe(this));
 	}
+
+	if (TakedownAction)
+		EnhancedInput->BindAction(TakedownAction, ETriggerEvent::Started, this, &AExtractionPlayer::TakedownInput);
 
 	// Temp debug: H key applies 25 damage
 	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionPlayer::DebugApplyDamage);
@@ -493,6 +508,29 @@ void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 {
 	if (!IsLocallyControlled()) return;
 	if (bIsReviving) CancelRevive();
+}
+
+void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
+{
+	if (!HasAuthority()) return;
+
+	static constexpr float FacingDotMin = 0.3f;
+	AEnemyCharacter* Best = nullptr;
+	float BestDistSq = MAX_FLT;
+
+	for (TActorIterator<AEnemyCharacter> It(GetWorld()); It; ++It)
+	{
+		AEnemyCharacter* Enemy = *It;
+		if (!IsValid(Enemy) || !Enemy->CanBeTakenDown(this)) continue;
+
+		const FVector ToEnemy = Enemy->GetActorLocation() - GetActorLocation();
+		if (FVector::DotProduct(GetActorForwardVector(), ToEnemy.GetSafeNormal2D()) < FacingDotMin) continue;
+
+		const float DistSq = ToEnemy.SizeSquared();
+		if (DistSq < BestDistSq) { BestDistSq = DistSq; Best = Enemy; }
+	}
+
+	if (Best) Best->ExecuteTakedown(this);
 }
 
 // ---- Controller Changed ----

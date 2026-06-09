@@ -7,6 +7,9 @@
 #include "ExtractionTypes.h"
 #include "Logging/LogMacros.h"
 #include "Character/ExtractionPlayerInterface.h"
+#include "GameplayTagAssetInterface.h"
+#include "GameplayTagContainer.h"
+#include "GenericTeamAgentInterface.h"
 #include "ExtractionPlayer.generated.h"
 
 class AWeaponBase;
@@ -14,6 +17,7 @@ class UInputComponent;
 class UInputAction;
 class UExtractionAnimInstance;
 class UHealthComponent;
+class UFootstepNoiseComponent;
 class UWeaponComponent;
 class UTraversalComponent;
 class UAnimMontage;
@@ -31,7 +35,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPlayerDBNOStateChanged, bool, bN
  * damage routing, and the input handlers the kit doesn't provide.
  */
 UCLASS()
-class EXTRACTION_API AExtractionPlayer : public ACharacter, public IExtractionPlayerInterface
+class EXTRACTION_API AExtractionPlayer : public ACharacter, public IExtractionPlayerInterface, public IGameplayTagAssetInterface, public IGenericTeamAgentInterface
 {
 	GENERATED_BODY()
 
@@ -40,6 +44,12 @@ public:
 	AExtractionPlayer();
 
 	virtual void PostInitializeComponents() override;
+
+	// --- IGameplayTagAssetInterface ---
+	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
+
+	// --- IGenericTeamAgentInterface ---
+	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(0); }
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
@@ -141,6 +151,9 @@ protected:
 	TObjectPtr<UHealthComponent> HealthComponent;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UFootstepNoiseComponent> FootstepNoiseComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UWeaponComponent> WeaponComponent;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
@@ -171,6 +184,9 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> InteractAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> TakedownAction;
 
 	// ---- DBNO / Revive Config ----
 
@@ -275,6 +291,8 @@ private:
 	void InteractStart(const FInputActionValue& Value);
 	void InteractStop(const FInputActionValue& Value);
 
+	void TakedownInput(const FInputActionValue& Value);
+
 	// ---- Traversal ----
 
 	void HandleTraversalStarted(ETraversalType Type, float PlayRate, FVector ObstacleLocation, FVector LandingLocation);
@@ -301,6 +319,9 @@ private:
 	void DebugApplyDamage();
 
 	FTimerHandle BleedoutTimerHandle;
+
+	UPROPERTY(VisibleInstanceOnly, Category = "Tags")
+	FGameplayTagContainer OwnedTags;
 
 	UPROPERTY()
 	TObjectPtr<UExtractionAnimInstance> CachedAnimInstance;
