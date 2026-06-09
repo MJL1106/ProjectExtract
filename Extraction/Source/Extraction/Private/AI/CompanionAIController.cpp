@@ -52,6 +52,8 @@ ACompanionAIController::ACompanionAIController()
 	// CompanionBehaviorTree is assigned by the designer on BP_CompanionAIController
 	// (UPROPERTY EditDefaultsOnly). Do NOT hardcode /Game/ paths in C++.
 
+	SetGenericTeamId(FGenericTeamId(0));
+
 	// Perception component
 	PerceptionComponent = CreateDefaultSubobject<UAIPerceptionComponent>(TEXT("AIPerception"));
 	SetPerceptionComponent(*PerceptionComponent);

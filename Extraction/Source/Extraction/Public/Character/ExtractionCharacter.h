@@ -7,6 +7,9 @@
 #include "ExtractionTypes.h"
 #include "Logging/LogMacros.h"
 #include "Character/ExtractionPlayerInterface.h"
+#include "GameplayTagAssetInterface.h"
+#include "GameplayTagContainer.h"
+#include "GenericTeamAgentInterface.h"
 #include "ExtractionCharacter.generated.h"
 
 class AWeaponBase;
@@ -18,6 +21,7 @@ class USphereComponent;
 class UInputAction;
 class UExtractionAnimInstance;
 class UHealthComponent;
+class UFootstepNoiseComponent;
 class UWeaponComponent;
 class UTraversalComponent;
 class UAnimMontage;
@@ -30,7 +34,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDBNOStateChanged, bool, bNewIsDB
  * Handles movement, input binding, sprint, and replication setup.
  */
 UCLASS()
-class EXTRACTION_API AExtractionCharacter : public ACharacter, public IExtractionPlayerInterface
+class EXTRACTION_API AExtractionCharacter : public ACharacter, public IExtractionPlayerInterface, public IGameplayTagAssetInterface, public IGenericTeamAgentInterface
 {
 	GENERATED_BODY()
 
@@ -53,6 +57,10 @@ class EXTRACTION_API AExtractionCharacter : public ACharacter, public IExtractio
 	/** Health and shield management */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
 	TObjectPtr<UHealthComponent> HealthComponent;
+
+	/** AI-hearing footstep noise emission */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
+	TObjectPtr<UFootstepNoiseComponent> FootstepNoiseComponent;
 
 	/** Weapon equip, ADS, and fire management */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components", meta = (AllowPrivateAccess = "true"))
@@ -90,6 +98,9 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> InteractAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> TakedownAction;
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> ProneAction;
@@ -238,6 +249,12 @@ public:
 	AExtractionCharacter();
 
 	virtual void PostInitializeComponents() override;
+
+	// --- IGameplayTagAssetInterface ---
+	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
+
+	// --- IGenericTeamAgentInterface ---
+	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(0); }
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
@@ -351,6 +368,8 @@ protected:
 	void InteractStart(const FInputActionValue& Value);
 	void InteractStop(const FInputActionValue& Value);
 
+	void TakedownInput(const FInputActionValue& Value);
+
 	// ---- Input Binding ----
 
 	virtual void SetupPlayerInputComponent(UInputComponent* InputComponent) override;
@@ -437,6 +456,9 @@ private:
 	void DebugApplyDamage();
 
 	FTimerHandle BleedoutTimerHandle;
+
+	UPROPERTY(VisibleInstanceOnly, Category = "Tags")
+	FGameplayTagContainer OwnedTags;
 
 	/** Cached 3P anim instance (populated in BeginPlay — avoids Cast per call) */
 	UPROPERTY()

@@ -13,6 +13,7 @@
 #include "GameFramework/Character.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "Perception/AISense_Hearing.h"
 #include "TimerManager.h"
 
 DEFINE_LOG_CATEGORY(LogTraversal);
@@ -746,6 +747,9 @@ bool UTraversalComponent::ResolveNavLinkWallData(ETraversalType Type, const FVec
 
 void UTraversalComponent::StartTraversal(ETraversalType Type)
 {
+	if (OwningCharacter->HasAuthority() && TraversalNoiseRange > 0.f)
+		UAISense_Hearing::ReportNoiseEvent(GetWorld(), OwningCharacter->GetActorLocation(), TraversalNoiseLoudness, OwningCharacter, TraversalNoiseRange, TEXT("Traversal"));
+
 	VaultLockedRotation = OwningCharacter->GetActorRotation();
 	bSavedUseControllerRotationYaw = OwningCharacter->bUseControllerRotationYaw;
 	OwningCharacter->bUseControllerRotationYaw = false;

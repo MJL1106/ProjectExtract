@@ -6,8 +6,10 @@
 #include "GameFramework/Character.h"
 #include "GameplayTagAssetInterface.h"
 #include "GameplayTagContainer.h"
+#include "GenericTeamAgentInterface.h"
 #include "Movement/TraversalTypes.h"
 #include "Companion/CompanionTypes.h"
+#include "AIShooterInterface.h"
 #include "CompanionCharacter.generated.h"
 
 class UHealthComponent;
@@ -23,7 +25,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionPostureChanged, ECompani
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLowReadyAimChanged, bool, bIsLowReady);
 
 UCLASS(Blueprintable)
-class EXTRACTION_API ACompanionCharacter : public ACharacter, public IGameplayTagAssetInterface
+class EXTRACTION_API ACompanionCharacter : public ACharacter, public IGameplayTagAssetInterface, public IAIShooterInterface, public IGenericTeamAgentInterface
 {
 	GENERATED_BODY()
 
@@ -38,6 +40,13 @@ public:
 
 	// --- IGameplayTagAssetInterface ---
 	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
+
+	// --- IAIShooterInterface ---
+	virtual AActor* GetAIAimTarget() const override { return CurrentAimTarget.Get(); }
+	virtual float GetAIAimSpreadDegrees() const override { return GetCurrentInaccuracy(); }
+
+	// --- IGenericTeamAgentInterface ---
+	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(0); }
 
 	// --- Weapon Interface ---
 

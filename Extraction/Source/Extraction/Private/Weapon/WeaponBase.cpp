@@ -4,8 +4,7 @@
 #include "AI/CompanionDiag.h"
 #include "WeaponDataAsset.h"
 #include "Character/ExtractionPlayerInterface.h"
-#include "CompanionCharacter.h"
-#include "EnemyBase.h"
+#include "AIShooterInterface.h"
 #include "ExtractionDamageType.h"
 #include "HealthComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -13,6 +12,9 @@
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/Pawn.h"
+#include "GenericTeamAgentInterface.h"
+#include "Perception/AISense_Hearing.h"
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
@@ -283,15 +285,10 @@ void AWeaponBase::PerformHitscan()
 		float InaccuracyDeg = 0.0f;
 		AActor* AimTarget = nullptr;
 
-		if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(OwnerChar))
+		if (const IAIShooterInterface* Shooter = Cast<IAIShooterInterface>(OwnerChar))
 		{
-			AimTarget = Companion->GetAimTarget();
-			InaccuracyDeg = Companion->GetCurrentInaccuracy();
-		}
-		else if (const AEnemyBase* Enemy = Cast<AEnemyBase>(OwnerChar))
-		{
-			AimTarget = Enemy->GetCurrentTarget();
-			InaccuracyDeg = Enemy->GetAimInaccuracyDegrees();
+			AimTarget = Shooter->GetAIAimTarget();
+			InaccuracyDeg = Shooter->GetAIAimSpreadDegrees();
 		}
 
 		if (IsValid(AimTarget))
@@ -319,37 +316,25 @@ void AWeaponBase::PerformHitscan()
 	QueryParams.AddIgnoredActor(OwnerChar);
 	QueryParams.bReturnPhysicalMaterial = false;
 
-	// Friendly-fire prevention: AI-owned weapons ignore their own team only.
-	// Enemy weapons skip other enemies; companion weapons skip the player + companions.
-	// (Player-fired shots still trace normally — only AI uses teammate filtering.)
+	// Friendly-fire prevention: AI-owned weapons ignore pawns on the same team (via IGenericTeamAgentInterface).
+	// Team is resolved from the owner pawn; if the owner has no team interface, no extra ignores are added.
+	// Player-fired shots (bAIOwned false) remain untouched.
 	const bool bAIOwned = !IsValid(PC);
 	if (bAIOwned)
 	{
 		if (UWorld* QueryWorld = GetWorld())
 		{
-			if (IsValid(Cast<AEnemyBase>(OwnerChar)))
+			const IGenericTeamAgentInterface* TeamAgent = Cast<IGenericTeamAgentInterface>(OwnerChar);
+			if (TeamAgent)
 			{
-				// Enemy weapon: ignore fellow enemies only — player + companions are valid targets.
-				for (TActorIterator<AEnemyBase> It(QueryWorld); It; ++It)
+				const FGenericTeamId OwnerTeam = TeamAgent->GetGenericTeamId();
+				for (TActorIterator<APawn> It(QueryWorld); It; ++It)
 				{
-					AEnemyBase* OtherEnemy = *It;
-					if (IsValid(OtherEnemy) && OtherEnemy != OwnerChar)
-						QueryParams.AddIgnoredActor(OtherEnemy);
-				}
-			}
-			else
-			{
-				// Companion (or other team-0 AI) weapon: ignore the player + all companions.
-				if (ACharacter* PlayerChar = UGameplayStatics::GetPlayerCharacter(QueryWorld, 0))
-				{
-					if (PlayerChar != OwnerChar)
-						QueryParams.AddIgnoredActor(PlayerChar);
-				}
-				for (TActorIterator<ACompanionCharacter> It(QueryWorld); It; ++It)
-				{
-					ACompanionCharacter* Teammate = *It;
-					if (IsValid(Teammate) && Teammate != OwnerChar)
-						QueryParams.AddIgnoredActor(Teammate);
+					APawn* OtherPawn = *It;
+					if (!IsValid(OtherPawn) || OtherPawn == OwnerChar) continue;
+					const IGenericTeamAgentInterface* OtherTeam = Cast<IGenericTeamAgentInterface>(OtherPawn);
+					if (OtherTeam && OtherTeam->GetGenericTeamId() == OwnerTeam)
+						QueryParams.AddIgnoredActor(OtherPawn);
 				}
 			}
 		}
@@ -361,9 +346,8 @@ void AWeaponBase::PerformHitscan()
 
 		if (bAIOwned && CVarAIWeaponTraceDebug.GetValueOnGameThread() != 0)
 		{
-			const AActor* AILogAimTarget = IsValid(Cast<ACompanionCharacter>(OwnerChar))
-				? Cast<ACompanionCharacter>(OwnerChar)->GetAimTarget()
-				: (IsValid(Cast<AEnemyBase>(OwnerChar)) ? Cast<AEnemyBase>(OwnerChar)->GetCurrentTarget() : nullptr);
+			const IAIShooterInterface* DebugShooter = Cast<IAIShooterInterface>(OwnerChar);
+			const AActor* AILogAimTarget = DebugShooter ? DebugShooter->GetAIAimTarget() : nullptr;
 			UE_LOG(LogExtraction, Verbose,
 				TEXT("AI-FIRE owner=%s muzzle=%s end=%s aimTarget=%s bHit=%d hitActor=%s hitDist=%.0f"),
 				*GetNameSafe(OwnerChar), *TraceStart.ToCompactString(), *TraceEnd.ToCompactString(),
@@ -400,6 +384,10 @@ void AWeaponBase::PerformHitscan()
 		}
 
 		Multicast_PlayFireFX(GetMuzzleLocation(), bHit ? HitResult.ImpactPoint : TraceEnd, bHit);
+
+		// AI hearing: every shot is a noise event (suppressed weapons set low loudness/range on their data asset)
+		if (WeaponData->NoiseRange > 0.f)
+			UAISense_Hearing::ReportNoiseEvent(World, GetMuzzleLocation(), WeaponData->NoiseLoudness, OwnerChar, WeaponData->NoiseRange, TEXT("WeaponFire"));
 	}
 }
 
@@ -451,7 +439,12 @@ void AWeaponBase::Reload()
 	}
 
 	if (HasAuthority())
+	{
 		CurrentState = EWeaponState::Reloading;
+
+		if (IsValid(WeaponData) && WeaponData->ReloadNoiseRange > 0.f)
+			UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetActorLocation(), WeaponData->ReloadNoiseLoudness, GetOwner(), WeaponData->ReloadNoiseRange, TEXT("Reload"));
+	}
 
 	// Stop firing
 	bWantsToFire = false;

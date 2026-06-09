@@ -41,6 +41,19 @@ void UHealthComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME(UHealthComponent, bIsDead);
 }
 
+void UHealthComponent::InitializeHealth(float NewMaxHealth, float NewMaxShield)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority()) return;
+
+	MaxHealth = FMath::Max(NewMaxHealth, 0.f);
+	MaxShield = FMath::Max(NewMaxShield, 0.f);
+	CurrentHealth = MaxHealth;
+	CurrentShield = MaxShield;
+
+	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+	OnShieldChanged.Broadcast(CurrentShield, MaxShield);
+}
+
 void UHealthComponent::TakeDamage(float Damage)
 {
 	if (bIsDead || Damage <= 0.f) return;

@@ -79,6 +79,18 @@ public:
 
 protected:
 
+	// ---- Noise Config ----
+
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Noise",
+		meta = (ClampMin = "0.0",
+			ToolTip = "AI-hearing loudness of starting a vault/climb/mantle."))
+	float TraversalNoiseLoudness = 0.5f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Noise",
+		meta = (ClampMin = "0.0",
+			ToolTip = "Max range (cm) at which AI hearing registers a traversal. 0 disables."))
+	float TraversalNoiseRange = 700.f;
+
 	// ---- Vault Config ----
 
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Vault",

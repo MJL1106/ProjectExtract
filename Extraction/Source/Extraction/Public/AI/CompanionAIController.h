@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "AIController.h"
+#include "GenericTeamAgentInterface.h"
 #include "Movement/TraversalTypes.h"
 #include "CompanionAIController.generated.h"
 

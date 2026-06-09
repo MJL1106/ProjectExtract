@@ -81,6 +81,28 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Recoil")
 	FRecoilPattern RecoilPattern;
 
+	// ---- AI Noise ----
+
+	/** Loudness of each shot for AI hearing (1 = unsuppressed rifle reference). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise", meta = (ClampMin = "0.0"))
+	float NoiseLoudness = 1.0f;
+
+	/** Max range (cm) at which AI hearing can register a shot. Suppressed weapon assets set this low. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise", meta = (ClampMin = "0.0"))
+	float NoiseRange = 3000.f;
+
+	/** Loudness of a reload for AI hearing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise", meta = (ClampMin = "0.0"))
+	float ReloadNoiseLoudness = 0.3f;
+
+	/** Max range (cm) at which AI hearing can register a reload. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise", meta = (ClampMin = "0.0"))
+	float ReloadNoiseRange = 600.f;
+
+	/** Marks this weapon as suppressed (stealth-kill semantics; pair with low NoiseLoudness/NoiseRange). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise")
+	bool bSuppressed = false;
+
 	// ---- Kit Weapon Bridge ----
 
 	/** Kit-side procedural animation values asset (BP-derived DataAsset, e.g. DT_ProceduralAnimValues / DA_Anim_Rifle). Read at runtime via IKitWeaponInterface::GetKitProceduralValues. */

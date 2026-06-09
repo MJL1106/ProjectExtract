@@ -1,0 +1,202 @@
+// AI controller for enemy characters — perception, team 1, blackboard, behaviour tree.
+
+#include "EnemyAIController.h"
+#include "EnemyCharacter.h"
+#include "EnemyAwarenessComponent.h"
+#include "EnemyArchetypeData.h"
+#include "PatrolRoute.h"
+#include "HealthComponent.h"
+#include "AICoverSlot.h"
+#include "GameFramework/Character.h"
+#include "BehaviorTree/BehaviorTree.h"
+#include "BehaviorTree/BehaviorTreeComponent.h"
+#include "BehaviorTree/BlackboardComponent.h"
+#include "Perception/AIPerceptionComponent.h"
+#include "Perception/AISenseConfig_Sight.h"
+#include "Perception/AISenseConfig_Hearing.h"
+#include "ExtractionTypes.h"
+#include "TimerManager.h"
+#include "Engine/World.h"
+
+DEFINE_LOG_CATEGORY(LogEnemyAI);
+
+const FName AEnemyAIController::BB_CombatTarget(TEXT("CombatTarget"));
+const FName AEnemyAIController::BB_LastKnownLocation(TEXT("LastKnownLocation"));
+const FName AEnemyAIController::BB_InvestigateLocation(TEXT("InvestigateLocation"));
+const FName AEnemyAIController::BB_AwarenessState(TEXT("AwarenessState"));
+const FName AEnemyAIController::BB_HasLineOfSight(TEXT("HasLineOfSight"));
+const FName AEnemyAIController::BB_TargetInRange(TEXT("TargetInRange"));
+const FName AEnemyAIController::BB_CoverSlot(TEXT("CoverSlot"));
+const FName AEnemyAIController::BB_HasCover(TEXT("HasCover"));
+const FName AEnemyAIController::BB_PatrolRoute(TEXT("PatrolRoute"));
+
+AEnemyAIController::AEnemyAIController()
+{
+	SetGenericTeamId(FGenericTeamId(1));
+
+	PerceptionComponent = CreateDefaultSubobject<UAIPerceptionComponent>(TEXT("AIPerception"));
+	SetPerceptionComponent(*PerceptionComponent);
+
+	SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
+	SightConfig->SightRadius = 2500.f;
+	SightConfig->LoseSightRadius = 3000.f;
+	SightConfig->PeripheralVisionAngleDegrees = 110.f;
+	SightConfig->SetMaxAge(5.f);
+	SightConfig->DetectionByAffiliation.bDetectEnemies = true;
+	// Neutrals are perceivable: corpses drop to NoTeam on death so allies can discover bodies.
+	SightConfig->DetectionByAffiliation.bDetectNeutrals = true;
+	SightConfig->DetectionByAffiliation.bDetectFriendlies = false;
+
+	HearingConfig = CreateDefaultSubobject<UAISenseConfig_Hearing>(TEXT("HearingConfig"));
+	HearingConfig->HearingRange = 2000.f;
+	HearingConfig->SetMaxAge(3.f);
+	HearingConfig->DetectionByAffiliation.bDetectEnemies = true;
+	HearingConfig->DetectionByAffiliation.bDetectNeutrals = true;
+	HearingConfig->DetectionByAffiliation.bDetectFriendlies = false;
+
+	PerceptionComponent->ConfigureSense(*SightConfig);
+	PerceptionComponent->ConfigureSense(*HearingConfig);
+	PerceptionComponent->SetDominantSense(UAISense_Sight::StaticClass());
+
+	AwarenessComponent = CreateDefaultSubobject<UEnemyAwarenessComponent>(TEXT("AwarenessComponent"));
+}
+
+void AEnemyAIController::OnPossess(APawn* InPawn)
+{
+	Super::OnPossess(InPawn);
+
+	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(InPawn);
+	if (!IsValid(Enemy))
+	{
+		UE_LOG(LogEnemyAI, Error, TEXT("%s: possessed pawn is not AEnemyCharacter"), *GetName());
+		return;
+	}
+
+	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+
+	// Override perception configs from DA if set
+	if (IsValid(DA))
+	{
+		SightConfig->SightRadius                  = DA->SightRadius;
+		SightConfig->LoseSightRadius              = DA->LoseSightRadius;
+		SightConfig->PeripheralVisionAngleDegrees = DA->PeripheralVisionDeg;
+		SightConfig->SetMaxAge(DA->SightMaxAge);
+		HearingConfig->HearingRange               = DA->HearingRange;
+		HearingConfig->SetMaxAge(DA->HearingMaxAge);
+		PerceptionComponent->RequestStimuliListenerUpdate();
+	}
+
+	Enemy->ApplyArchetypeData();
+
+	if (!EnemyBehaviorTree)
+	{
+		UE_LOG(LogEnemyAI, Error, TEXT("%s: no BehaviorTree assigned — AI will be inactive"), *GetName());
+		return;
+	}
+
+	UBlackboardComponent* BBComp = nullptr;
+	UseBlackboard(EnemyBehaviorTree->BlackboardAsset, BBComp);
+	RunBehaviorTree(EnemyBehaviorTree);
+
+	// Inject archetype combat subtree
+	UBehaviorTreeComponent* BTComp = Cast<UBehaviorTreeComponent>(BrainComponent);
+	if (IsValid(BTComp))
+	{
+		if (IsValid(DA) && IsValid(DA->CombatSubtree))
+			BTComp->SetDynamicSubtree(TAG_BT_EnemyCombat, DA->CombatSubtree);
+		else
+			UE_LOG(LogEnemyAI, Warning, TEXT("%s: no CombatSubtree set on ArchetypeData"), *GetName());
+	}
+
+	// Write patrol route to BB
+	if (IsValid(BBComp) && IsValid(Enemy->PatrolRoute))
+		BBComp->SetValueAsObject(BB_PatrolRoute, Enemy->PatrolRoute);
+
+	// Wire awareness component
+	if (IsValid(AwarenessComponent) && IsValid(BBComp))
+	{
+		AwarenessComponent->Initialize(BBComp, DA);
+		PerceptionComponent->OnTargetPerceptionUpdated.AddUniqueDynamic(
+			AwarenessComponent, &UEnemyAwarenessComponent::OnTargetPerceptionUpdated);
+		AwarenessComponent->OnAwarenessStateChanged.AddUniqueDynamic(
+			this, &AEnemyAIController::HandleAwarenessStateChanged);
+	}
+
+	// Bind pawn death for controller teardown
+	if (IsValid(Enemy->GetHealthComponent()))
+		Enemy->GetHealthComponent()->OnDeath.AddUniqueDynamic(this, &AEnemyAIController::HandlePawnDeath);
+}
+
+void AEnemyAIController::OnUnPossess()
+{
+	ReleaseCoverSlotIfClaimed();
+
+	if (BrainComponent)
+		BrainComponent->StopLogic(TEXT("Unpossessed"));
+
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearAllTimersForObject(this);
+
+	Super::OnUnPossess();
+}
+
+void AEnemyAIController::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	ReleaseCoverSlotIfClaimed();
+
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearAllTimersForObject(this);
+
+	Super::EndPlay(EndPlayReason);
+}
+
+void AEnemyAIController::HandlePawnDeath()
+{
+	if (BrainComponent)
+		BrainComponent->StopLogic(TEXT("Dead"));
+
+	ClearFocus(EAIFocusPriority::Gameplay);
+
+	if (IsValid(AwarenessComponent))
+		AwarenessComponent->HandlePawnDeath();
+
+	if (IsValid(PerceptionComponent))
+		PerceptionComponent->Deactivate();
+
+	ReleaseCoverSlotIfClaimed();
+
+	// The corpse persists for body discovery but needs no controller — destroy self to avoid
+	// orphaned controllers (and their perception cost) accumulating across a long session.
+	UnPossess();
+	Destroy();
+}
+
+void AEnemyAIController::HandleAwarenessStateChanged(EEnemyAwarenessState OldState, EEnemyAwarenessState NewState)
+{
+	if (OldState != EEnemyAwarenessState::Combat) return;
+
+	// Leaving Combat — clear aim focus and cover so the BT can re-evaluate
+	ClearFocus(EAIFocusPriority::Gameplay);
+	ReleaseCoverSlotIfClaimed();
+
+	// Un-crouch the pawn if it was crouching in cover
+	if (APawn* ControlledPawn = GetPawn())
+		if (ACharacter* Char = Cast<ACharacter>(ControlledPawn)) Char->UnCrouch();
+}
+
+void AEnemyAIController::ReleaseCoverSlotIfClaimed()
+{
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	APawn* ControlledPawn = GetPawn();
+	AAICoverSlot* Slot = Cast<AAICoverSlot>(BB->GetValueAsObject(BB_CoverSlot));
+	if (IsValid(Slot) && IsValid(ControlledPawn) && Slot->IsClaimedBy(ControlledPawn))
+	{
+		Slot->Release(ControlledPawn);
+		UE_LOG(LogEnemyAI, Log, TEXT("%s: released cover slot %s on teardown"), *GetName(), *Slot->GetName());
+	}
+
+	BB->SetValueAsObject(BB_CoverSlot, nullptr);
+	BB->SetValueAsBool(BB_HasCover, false);
+}
