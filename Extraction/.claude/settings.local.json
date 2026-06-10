@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__unreal-editor__edit_blueprint",
+      "mcp__unreal-editor__read_asset",
+      "mcp__unreal-editor__execute_python",
+      "mcp__unreal-editor__read_logs",
+      "Bash(\"C:\\\\Program Files\\\\Epic Games\\\\UE_5.5\\\\Engine\\\\Build\\\\BatchFiles\\\\Build.bat\" ExtractionEditor Win64 Development \"C:\\\\Users\\\\matth\\\\Documents\\\\Github\\\\ProjectExtract\\\\Extraction\\\\Extraction.uproject\" -waitmutex)",
+      "mcp__unreal-editor__screenshot",
+      "mcp__unreal-editor__configure_asset",
+      "Bash(dotnet build:*)",
+      "Bash(ls:*)",
+      "Bash(\"C:\\\\Program Files\\\\Epic Games\\\\UE_5.5\\\\Engine\\\\Build\\\\BatchFiles\\\\Build.bat\" ExtractionEditor Win64 Development -Project=\"C:\\\\Users\\\\matth\\\\Documents\\\\Github\\\\ProjectExtract\\\\Extraction\\\\Extraction.uproject\" -WaitMutex -FromMsBuild)",
+      "Bash(\"C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Build\\\\BatchFiles\\\\Build.bat\" ExtractionEditor Win64 Development -Project=\"C:\\\\Users\\\\matth\\\\Documents\\\\Github\\\\ProjectExtract\\\\Extraction\\\\Extraction.uproject\" -WaitMutex -FromMsBuild)",
+      "Bash(\"C:\\\\Program Files\\\\Epic Games\\\\UE_5.7\\\\Engine\\\\Binaries\\\\Win64\\\\LiveCodingConsole.exe\" -Build)",
+      "mcp__unreal-editor__execute_script"
+    ]
+  }
+}
