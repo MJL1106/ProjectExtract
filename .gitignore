@@ -52,13 +52,11 @@ Desktop.ini
 Extraction/Config/DefaultEditorPerProjectUserSettings.ini
 
 # ----------------------------------------------------------------------------
-# Claude Code local settings
+# Claude Code — shared config & docs are committed for cross-machine parity;
+# only transient agent-team worktrees stay local
 # ----------------------------------------------------------------------------
-.claude/
+.claude/worktrees/
 .omc/
-agent_docs/
-CLAUDE.md
-.mcp.json
 Extraction/Config/DefaultAgentIntegrationKit.ini
 
 # ----------------------------------------------------------------------------

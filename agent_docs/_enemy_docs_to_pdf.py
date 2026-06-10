@@ -23,6 +23,10 @@ JOBS = [
      "Extraction - Enemy AI: As-Built Gameplay Doc"),
     (BASE / "enemy_gaps_and_setup.md", BASE / "enemy_gaps_and_setup.pdf",
      "Extraction - Enemy AI: Gap Closure & In-Engine Setup"),
+    (BASE / "enemy_gameplay_overview.md", BASE / "enemy_gameplay_overview.pdf",
+     "Extraction - Enemy AI: How It Plays (Overview)"),
+    (BASE / "enemy_inengine_setup_manual.md", BASE / "enemy_inengine_setup_manual.pdf",
+     "Extraction - Enemy AI: In-Engine Setup & Testing Manual"),
 ]
 
 # Glyphs the PDF base-14 fonts can't draw -> ASCII/WinAnsi stand-ins
@@ -65,7 +69,8 @@ def inline_format(text: str) -> str:
     text = xml_escape(text)
     text = re.sub(r'`([^`]+)`', r'<font name="Courier" backColor="#f4f4f4">\1</font>', text)
     text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', text)
-    text = re.sub(r'(?<!\*)\*([^*\n]+)\*(?!\*)', r'<i>\1</i>', text)
+    # italic must not span tags inserted above (e.g. two `*` wildcards in separate code spans)
+    text = re.sub(r'(?<!\*)\*([^*<>\n]+)\*(?!\*)', r'<i>\1</i>', text)
     return text
 
 
@@ -173,5 +178,9 @@ def build(src: Path, out: Path, title: str):
 
 
 if __name__ == '__main__':
+    import sys
+    only = sys.argv[1] if len(sys.argv) > 1 else None
     for src, out, title in JOBS:
+        if only and only not in src.stem:
+            continue
         build(src, out, title)

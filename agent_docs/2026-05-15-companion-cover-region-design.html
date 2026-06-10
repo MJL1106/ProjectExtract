@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Companion Cover Region — Design Spec (2026-05-15)</title>
+<style>
+  :root { color-scheme: dark light; }
+  body { font: 15px/1.55 -apple-system, "Segoe UI", system-ui, sans-serif;
+         max-width: 880px; margin: 2rem auto; padding: 0 1.25rem;
+         background: #14161a; color: #d8dde3; }
+  h1 { font-size: 1.6rem; border-bottom: 1px solid #2a2f37; padding-bottom: .4rem; }
+  h2 { font-size: 1.2rem; margin-top: 2rem; border-bottom: 1px solid #2a2f37; padding-bottom: .25rem; }
+  h3 { font-size: 1.0rem; margin-top: 1.4rem; color: #c1d2e5; }
+  code, kbd { font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace;
+              background: #1f242c; border: 1px solid #2a2f37; padding: 1px 5px; border-radius: 3px; }
+  pre { background: #1f242c; border: 1px solid #2a2f37; padding: .8rem 1rem;
+        border-radius: 4px; overflow-x: auto; }
+  table { border-collapse: collapse; margin: .8rem 0; width: 100%; }
+  th, td { border: 1px solid #2a2f37; padding: .45rem .65rem; text-align: left; vertical-align: top; }
+  th { background: #1f242c; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .25rem 0; }
+  .meta { color: #8a93a0; font-size: .9rem; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 10px;
+         font-size: .8rem; background: #2a2f37; color: #c1d2e5; margin-right: .3rem; }
+  .tag.scope-in { background: #1f3a25; color: #b6e7c0; }
+  .tag.scope-out { background: #3a1f1f; color: #e7b6b6; }
+  blockquote { border-left: 3px solid #4a5260; margin: .8rem 0; padding: .2rem 1rem; color: #b3bcc7; background: #1a1d22; }
+  hr { border: none; border-top: 1px solid #2a2f37; margin: 2rem 0; }
+</style>
+</head>
+<body>
+
+<h1>Companion Cover Region — Design Spec</h1>
+<p class="meta">Date: 2026-05-15 · Branch: AI-Companion-Prototype · Scope: A + B + C (cover-switching D deferred)</p>
+
+<h2>Context</h2>
+<p>The companion currently snaps to a single point-based <code>AICoverSlot</code>, sits there, peeks over, and only leaves when the target dies. Reads as static. This pass turns the slot into a designer-authored region, lets the companion shift positions within it, adds corner-peek as a step-out action for tall cover, and chains stand-up-fire into walk-fire-to-new-position transitions for visual polish.</p>
+
+<h2>Scope</h2>
+<p><span class="tag scope-in">In</span>cover region (A), reposition / crouch-walk along cover (B), corner peek with continuous walk-and-shoot (C).</p>
+<p><span class="tag scope-out">Out</span>cover-switching triggers between separate slots (D — separate brainstorm), lean-on-wall idle montage (no anim authored yet — placeholder is stand-against-wall), crouch-corner-peek (not authored).</p>
+
+<h2>Cover region data model</h2>
+<p><code>AICoverSlot</code> remains a single actor. Designer drags the existing <code>UBoxComponent</code> to define a linear region; the <em>right-axis</em> extent (perpendicular to slot forward, along the cover face) becomes the line length. Other extents are visual only.</p>
+
+<h3>New / changed fields</h3>
+<ul>
+  <li><code>Height</code> — existing <code>ECoverHeight::Stand / Crouch</code>, no semantic change.</li>
+  <li><code>bIsPeekableCornerStart</code> — designer-set bool, true if the line's leftmost endpoint is an exposed corner (e.g. side of a car) where corner-peek is allowed.</li>
+  <li><code>bIsPeekableCornerEnd</code> — same for rightmost endpoint.</li>
+  <li><code>CoverLineHalfLength</code> — derived from the <code>UBoxComponent</code> right-axis extent at <code>PostInitializeComponents</code>. Designer doesn't edit this directly; they drag the box.</li>
+</ul>
+
+<h3>Helpers</h3>
+<ul>
+  <li><code>FVector GetSubSlotLocation(int32 Index) const</code> — returns world position of a sub-slot.</li>
+  <li><code>int32 GetSubSlotCount() const</code> — endpoints + midpoints every ~1m (designer-tunable spacing constant).</li>
+  <li><code>bool IsSubSlotPeekableCorner(int32 Index) const</code> — true only for endpoints flagged peek-able.</li>
+  <li><code>bool CanStandFireOver() const</code> — replaces <code>CanStandFireFrom()</code>; true for <code>Crouch</code> cover, false for <code>Stand</code>. Same behaviour as today, renamed for clarity.</li>
+</ul>
+
+<h2>Sub-slot system</h2>
+<p>Discrete sub-slots are computed at runtime from line length. Always includes both endpoints; midpoints inserted every ~1m. A 3m line → 4 sub-slots; a 0.5m line → 2 sub-slots (just endpoints); a 0m line (legacy point-slot) → 1 sub-slot at origin (backwards-compatible).</p>
+<p><strong>Claim:</strong> the whole line is claimed by one companion at a time. No intra-line sharing.</p>
+<p><strong>Locomotion between sub-slots:</strong> direct lateral interp along the line vector (cover lines are straight by construction — no navmesh pathfind needed). Speed driven by walk/crouch-walk locomotion blendspace.</p>
+
+<h2>Posture</h2>
+<p>Height-driven from existing <code>ECoverHeight</code>:</p>
+<ul>
+  <li><code>Crouch</code> cover → companion crouches in cover region. Uses existing crouch blendspace for idle and lateral movement.</li>
+  <li><code>Stand</code> cover → companion stands. Cover-idle placeholder is stand-against-wall using existing stand-idle (lean-on-wall montage is future polish).</li>
+</ul>
+
+<h2>Picker matrix</h2>
+<p>Extends the existing peek-action picker. Available actions depend on cover type + current sub-slot.</p>
+
+<table>
+  <thead><tr><th>Cover / position</th><th>Picker actions</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>Crouch</code> cover (any sub-slot)</td>
+      <td><strong>StandUp</strong>, <strong>StandUpAndReposition</strong>, <strong>Quick</strong>, <strong>Reposition</strong>, <strong>Hold</strong></td>
+    </tr>
+    <tr>
+      <td><code>Stand</code> cover — midpoint sub-slot</td>
+      <td><strong>Reposition</strong>, <strong>Hold</strong> (no fire action available)</td>
+    </tr>
+    <tr>
+      <td><code>Stand</code> cover — peek-able endpoint</td>
+      <td><strong>CornerPeek</strong>, <strong>Reposition</strong>, <strong>Hold</strong></td>
+    </tr>
+  </tbody>
+</table>
+<p>Picker reuses existing weight-driven roll, consecutive-Hold cap, suppression and low-health bias. Action weights become per-cover-type tunables on the BT task.</p>
+
+<h2>Per-action behaviour</h2>
+
+<h3>StandUp (existing, unchanged)</h3>
+<p>Companion stands at current sub-slot, fires randomised burst, drops back to crouch at same sub-slot.</p>
+
+<h3>StandUpAndReposition (new, Crouch cover only)</h3>
+<p>Companion stands at current sub-slot, fires briefly, then begins lateral walk-while-firing toward a chosen other sub-slot. Continues firing through the transit (companion is standing, muzzle is over cover line). On arrival, stops firing and crouches at destination.</p>
+<p>Low-weight roll by default (15-25%) — most stand-fires stay put. Designer-tunable.</p>
+<p>Burst-end vs arrival race: if burst timer expires mid-transit, stops firing, continues walking silent, crouches on arrival. If arrival happens before burst end, stops firing on crouch (can't fire over cover while crouched).</p>
+
+<h3>Quick (existing, unchanged)</h3>
+<p>Short burst at current sub-slot. Crouch cover only (Stand cover has no fire option from midpoints; peek-able endpoints use CornerPeek instead).</p>
+
+<h3>Reposition (new, both cover types)</h3>
+<p>Silent lateral move to another sub-slot along the line. Crouch cover: uses crouch-walk blendspace. Stand cover: uses stand side-step. No firing during transit (companion is hidden behind cover the whole time). Cooldown-gated like the existing peek picker.</p>
+
+<h3>Hold (existing, unchanged)</h3>
+<p>Skip this cycle, reset cooldown. Consecutive-Hold cap applies as today.</p>
+
+<h3>CornerPeek (new, Stand cover peek-able endpoint only)</h3>
+<p>Companion strafes out past the cover edge (designer-tunable distance, default ~80cm in the slot's right or left direction depending on which endpoint), entering open ground. Begins firing the moment it clears cover. Continues firing through step-out → apex → step-back loop. Stops firing the moment the cover wall blocks LoS to target on the way back. Settles at endpoint, returns to stand-against-wall idle.</p>
+<p>Suppression abort: if companion takes damage during corner-peek, retreat fires immediately (cancel forward motion, walk back to cover, stop firing once wall blocks LoS).</p>
+<p>Burst duration applies as today; companion can return to cover early if burst expires before the apex.</p>
+
+<h2>EQS rejection rule</h2>
+<p>The cover-finding EQS scoring rejects <code>Stand</code> cover slots where neither endpoint is peek-able. These slots are hide-only and offer no firing solution. Designer can still author them (e.g. for stealth retreat in a future feature), but the companion won't claim them for combat.</p>
+<p><code>Crouch</code> cover is always accepted (fire-over works from any sub-slot, peek-able endpoints just add optional alternatives).</p>
+
+<h2>Triggers — sub-slot position picker</h2>
+<p>The choice of WHICH sub-slot the companion sits at is driven by:</p>
+<ul>
+  <li><strong>LoS-driven (primary)</strong> — if current sub-slot loses LoS to combat target, evaluate other sub-slots, pick one with LoS. Same logic as today, scoped per sub-slot instead of per slot.</li>
+  <li><strong>Periodic randomised cadence (secondary)</strong> — every 8-15s, low probability, if not currently firing and not suppressed, roll a Reposition action.</li>
+  <li><strong>Locked out</strong> during suppression (recent damage) and active firing.</li>
+</ul>
+
+<h2>Animation integration</h2>
+<p>Uses existing player-shared assets:</p>
+<ul>
+  <li>Crouch blendspace — for crouched idle and crouch-walk along Crouch cover.</li>
+  <li>Stand walk blendspace — for stand side-step along Stand cover and CornerPeek step-out / step-back.</li>
+  <li>AimOffset blendspace — when authored, drives gun direction during fire. <strong>Still missing</strong> — see open question below.</li>
+</ul>
+<p>No new montages required for this pass. Future polish (post A+B+C):</p>
+<ul>
+  <li>Lean-on-wall idle montage for <code>Stand</code> cover (replaces stand-idle placeholder).</li>
+  <li>Cover-lean-fire montage (for in-place corner peek without step-out).</li>
+  <li>Dedicated crouch-corner-peek montage (currently skipped — Crouch cover endpoints just stand-up-fire over).</li>
+</ul>
+
+<h2>Migration</h2>
+<p>Existing slot assets keep their <code>Height</code> enum unchanged. New fields default to:</p>
+<ul>
+  <li><code>bIsPeekableCornerStart = false</code></li>
+  <li><code>bIsPeekableCornerEnd = false</code></li>
+  <li><code>UBoxComponent</code> extent unchanged from authored value (legacy slots will compute a small line length from their existing box; if extent is ~0 they collapse to 1 sub-slot at origin — same behaviour as today).</li>
+</ul>
+<p>Designer opts in by:</p>
+<ol>
+  <li>Dragging the box to add line length along the slot's right axis.</li>
+  <li>Ticking <code>bIsPeekableCornerStart</code> / <code>End</code> for endpoints that expose open ground.</li>
+  <li>Optionally tuning per-slot picker weights on the BT task (instance properties).</li>
+</ol>
+<p><code>CanStandFireFrom()</code> renamed to <code>CanStandFireOver()</code> — call-site update in <code>BTTask_CompanionCombat</code> only.</p>
+
+<h2>Open implementation questions</h2>
+<ul>
+  <li><strong>AimOffset BlendSpace authoring</strong> — gun direction during fire depends on this being present. Functionally bullets land regardless (weapon traces toward AimTarget), but visually the gun stays in its hand pose without it. Not a blocker for this pass; visual fidelity improves once authored.</li>
+  <li><strong>Mid-CornerPeek LoS interruption</strong> — if an obstacle (e.g. a teammate) crosses the companion's LoS during the apex, should it abort? Current proposal: continue firing through brief blips (LosBlockedAccum already handles this for open-engage). Reuse same threshold.</li>
+  <li><strong>StandUpAndReposition target sub-slot picking</strong> — pick adjacent sub-slot only (one step away), or pick any sub-slot on the line? Adjacent is simpler and shorter transit; "any" allows more dramatic moves. Recommend adjacent-only for prototype.</li>
+</ul>
+
+<h2>Files likely touched</h2>
+<p><code>Extraction/Source/Extraction/Public/AI/Cover/AICoverSlot.h</code> + <code>Private/AI/Cover/AICoverSlot.cpp</code> (region fields, sub-slot helpers, rename), <code>Public/AI/Cover/CoverSlotTypes.h</code> (no enum changes expected), <code>Public/AI/Tasks/BTTask_CompanionCombat.h</code> + <code>Private/AI/Tasks/BTTask_CompanionCombat.cpp</code> (picker matrix, new actions, sub-slot position tracking), <code>Private/AI/EQS/EnvQueryContext_CurrentCover.cpp</code> (rejection rule), <code>Private/AI/Tasks/BTTask_MoveToCover.cpp</code> (move-to-line-claim semantics).</p>
+
+</body>
+</html>
