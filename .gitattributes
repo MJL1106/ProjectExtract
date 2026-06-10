@@ -1,5 +1,10 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Binary assets - never line-ending normalize
+*.uasset binary
+*.umap binary
+*.pdf binary
 *.uasset filter=lfs diff=lfs merge=lfs -text
 *.umap filter=lfs diff=lfs merge=lfs -text
 *.fbx filter=lfs diff=lfs merge=lfs -text
