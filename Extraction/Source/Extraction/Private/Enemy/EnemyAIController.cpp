@@ -31,6 +31,7 @@ const FName AEnemyAIController::BB_CoverSlot(TEXT("CoverSlot"));
 const FName AEnemyAIController::BB_HasCover(TEXT("HasCover"));
 const FName AEnemyAIController::BB_PatrolRoute(TEXT("PatrolRoute"));
 const FName AEnemyAIController::BB_MoraleState(TEXT("MoraleState"));
+const FName AEnemyAIController::BB_ManeuverRole(TEXT("ManeuverRole"));
 
 AEnemyAIController::AEnemyAIController()
 {
@@ -185,6 +186,7 @@ void AEnemyAIController::HandlePawnDeath()
 		PerceptionComponent->Deactivate();
 
 	ReleaseCoverSlotIfClaimed();
+	SetManeuverRole(EEnemyManeuverRole::None);
 
 	// The corpse persists for body discovery but needs no controller — destroy self to avoid
 	// orphaned controllers (and their perception cost) accumulating across a long session.
@@ -212,6 +214,14 @@ void AEnemyAIController::HandleMoraleStateChanged(EMoraleState OldState, EMorale
 
 	BB->SetValueAsEnum(BB_MoraleState, static_cast<uint8>(NewState));
 	UE_LOG(LogEnemyAI, Log, TEXT("%s: morale %d -> %d"), *GetName(), static_cast<int32>(OldState), static_cast<int32>(NewState));
+}
+
+void AEnemyAIController::SetManeuverRole(EEnemyManeuverRole NewRole)
+{
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	BB->SetValueAsEnum(BB_ManeuverRole, static_cast<uint8>(NewRole));
 }
 
 void AEnemyAIController::ReleaseCoverSlotIfClaimed()

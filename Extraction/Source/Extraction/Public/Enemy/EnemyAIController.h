@@ -34,9 +34,13 @@ public:
 	static const FName BB_HasCover;
 	static const FName BB_PatrolRoute;
 	static const FName BB_MoraleState;
+	static const FName BB_ManeuverRole;
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|AI")
 	UEnemyAwarenessComponent* GetAwarenessComponent() const { return AwarenessComponent; }
+
+	/** Writes the maneuver role to the blackboard as an enum int. Called by squad coordinator. */
+	void SetManeuverRole(EEnemyManeuverRole NewRole);
 
 protected:
 	virtual void OnPossess(APawn* InPawn) override;

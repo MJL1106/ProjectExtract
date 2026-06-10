@@ -8,7 +8,9 @@
 #include "EnemySquad.generated.h"
 
 class AEnemyCharacter;
+class AEnemyAIController;
 class UEnemyAwarenessComponent;
+class UBarkSubsystem;
 
 UENUM(BlueprintType)
 enum class EEnemySquadRole : uint8
@@ -66,6 +68,45 @@ public:
 	/** Records the current world time as this member's last flank attempt. */
 	void RecordFlankAttempt(const AEnemyCharacter* Member);
 
+	// --- Bounding overwatch (Phase 7, officer-gated) ---
+
+	/** Starts a bounding overwatch maneuver. Officer must be alive with bHasCommandAura, squad
+	 *  must have a valid target and enough grunt members. Returns true if the maneuver started. */
+	bool StartBounding(AEnemyCharacter* Officer);
+
+	/** Stops any active bounding overwatch. Idempotent; clears roles and BB on both participants. */
+	void StopBounding(const TCHAR* Reason);
+
+	/** True if a bounding overwatch maneuver is currently active. Lazily validates stale state. */
+	bool IsBoundingActive();
+
+	/** True if the suppressor is actively engaged (task flag set), alive, and not reloading.
+	 *  The flanker's decorator polls this. */
+	bool IsSuppressionLive() const;
+
+	/** True if suppressor is engaged, alive, and weapon is reloading. The flanker holds position
+	 *  during reloads rather than aborting — suppression resumes when the mag refills. */
+	bool IsSuppressionHolding() const;
+
+	/** Called by BTTask_EnemySuppressFire: true in ExecuteTask, false in CleanUp.
+	 *  Identity-gated: ignored when Who != current BoundingSuppressor (prevents stale CleanUp
+	 *  from clearing the new suppressor's flag after a swap). */
+	void SetSuppressorEngaged(AEnemyCharacter* Who, bool bEngaged);
+
+	/** Called by the flanker on arrival: swaps suppressor and flanker roles, barks CoveringGo. */
+	void NotifyFlankerArrived(AEnemyCharacter* Flanker);
+
+	/** Called when the flanker aborts (suppressed, low HP, no path): stops the entire maneuver. */
+	void NotifyManeuverMemberBlocked(AEnemyCharacter* Member);
+
+	// --- Bounding attempt cooldown ---
+
+	/** World time of the last bounding attempt (success or failure). -1e9 if never attempted. */
+	float GetLastBoundingAttemptTime() const { return LastBoundingAttemptTime; }
+
+	/** Records the current world time as the last bounding attempt. Called by BTTask_OfficerCommand. */
+	void RecordBoundingAttempt();
+
 	// --- Bark dedup ---
 
 	/** Squad-level bark rate limiter. Returns true if the bark is allowed. */
@@ -93,6 +134,27 @@ private:
 
 	// Bark dedup
 	TMap<EBarkType, float> LastSquadBarkTime;
+
+	// --- Bounding overwatch state ---
+
+	bool bBoundingActive = false;
+	bool bSuppressorEngaged = false;
+	bool bSwapInProgress = false;
+	float LastSwapTime = -1e9f;
+	float LastBoundingAttemptTime = -1e9f;
+	static constexpr float MinSwapInterval = 2.f;
+	TWeakObjectPtr<AEnemyCharacter> BoundingOfficer;
+	TWeakObjectPtr<AEnemyCharacter> BoundingSuppressor;
+	TWeakObjectPtr<AEnemyCharacter> BoundingFlanker;
+
+	/** Pushes ManeuverRole onto a member's BB via its controller. Null-safe. */
+	void PushManeuverRoleToBB(AEnemyCharacter* Member, EEnemyManeuverRole Role);
+
+	/** Picks the best grunt member for a role. Suppressor prefers LOS to target; flanker prefers health > 0.5. */
+	AEnemyCharacter* PickBoundingCandidate(bool bPreferLOS, AEnemyCharacter* Exclude) const;
+
+	/** Returns true if Member is a living grunt archetype (eligible for maneuver roles). */
+	bool IsEligibleForManeuver(const TWeakObjectPtr<AEnemyCharacter>& Member) const;
 
 	/** Returns true if the member is valid and alive. */
 	static bool IsMemberAlive(const TWeakObjectPtr<AEnemyCharacter>& Member);
