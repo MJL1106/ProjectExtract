@@ -47,11 +47,25 @@ void UEnemyAwarenessComponent::Initialize(UBlackboardComponent* InBB, const UEne
 
 	Director = World->GetSubsystem<UEnemyDirectorSubsystem>();
 	if (UEnemyDirectorSubsystem* Dir = Director.Get())
+	{
 		Dir->OnGlobalAlertChanged.AddUniqueDynamic(this, &UEnemyAwarenessComponent::HandleGlobalAlertChanged);
+
+		if (Dir->GetAlertLevel() == EGlobalAlertLevel::Loud && CurrentState == EEnemyAwarenessState::Unaware)
+		{
+			const AAIController* MyController = Cast<AAIController>(GetOwner());
+			const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+			if (IsValid(MyPawn))
+			{
+				Bark(EBarkType::SearchArea);
+				SetInvestigateLocation(MyPawn->GetActorLocation());
+				TimeSpentSearching = 0.f;
+				SetState(EEnemyAwarenessState::Searching);
+			}
+		}
+	}
 
 	SquadSubsystem = World->GetSubsystem<UEnemySquadSubsystem>();
 
-	// Stagger the repeating update timer with a random initial delay to avoid all enemies ticking together
 	const float InitialDelay = FMath::RandRange(0.f, UpdateInterval);
 	World->GetTimerManager().SetTimer(
 		UpdateTimerHandle,

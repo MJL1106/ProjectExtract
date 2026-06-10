@@ -42,6 +42,15 @@ enum class EMoraleState : uint8
 	Broken		UMETA(DisplayName = "Broken"),
 };
 
+/** Mission phase — set by level scripting, consumed by the director for pacing and composition. */
+UENUM(BlueprintType)
+enum class EMissionPhase : uint8
+{
+	Infiltration	UMETA(DisplayName = "Infiltration"),
+	Objective		UMETA(DisplayName = "Objective"),
+	Extraction		UMETA(DisplayName = "Extraction"),
+};
+
 /** Level-wide alert state. One-way ladder until the director (Phase 6) owns de-escalation. */
 UENUM(BlueprintType)
 enum class EGlobalAlertLevel : uint8
