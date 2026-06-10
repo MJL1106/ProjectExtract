@@ -13,6 +13,7 @@
 #include "CompanionCharacter.generated.h"
 
 class UHealthComponent;
+class USuppressionComponent;
 class AWeaponBase;
 class UCompanionAnimInstance;
 class UTraversalComponent;
@@ -93,6 +94,9 @@ public:
 	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
 
 	UFUNCTION(BlueprintPure, Category = "Companion")
+	USuppressionComponent* GetSuppressionComponent() const { return SuppressionComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Companion")
 	AWeaponBase* GetCurrentWeapon() const { return CurrentWeapon; }
 
 	UFUNCTION(BlueprintPure, Category = "Companion")
@@ -164,6 +168,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
 	TObjectPtr<UHealthComponent> HealthComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
+	TObjectPtr<USuppressionComponent> SuppressionComponent;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Movement")
 	TObjectPtr<UTraversalComponent> TraversalComponent;

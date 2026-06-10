@@ -358,4 +358,63 @@ public:
 	 *  0 = no clamp (default for all non-heavy archetypes). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Heavy", meta = (ClampMin = "0.0"))
 	float TurnRateDegPerSec = 0.f;
+
+	// --- Suppression (Phase 4) ---
+
+	/** Divisor for incoming suppression — higher = harder to suppress (heavy ~3, sniper ~0.5). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suppression", meta = (ClampMin = "0.1"))
+	float SuppressionResistance = 1.f;
+
+	/** Extra spread (degrees) added at full suppression (SuppressionComponent 1.0). Applied by character spread calc. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suppression", meta = (ClampMin = "0.0"))
+	float SuppressionSpreadPenaltyDeg = 4.f;
+
+	// --- Morale (Phase 4) ---
+
+	/** If true, morale events are ignored and the enemy stays Confident permanently (rusher, shield-up). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale")
+	bool bFearless = false;
+
+	/** Morale can never drop below this (0-100). Officer aura raises allies' floor in P5. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale", meta = (ClampMin = "0.0", ClampMax = "100.0"))
+	float MoraleFloor = 0.f;
+
+	/** Divisor for morale event deltas — higher = events hit softer (heavy high, sniper < 1 = brittle). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale", meta = (ClampMin = "0.1"))
+	float MoraleEventResistance = 1.f;
+
+	/** Morale at or below which the enemy becomes Shaken (0-100). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale", meta = (ClampMin = "1.0", ClampMax = "99.0"))
+	float ShakenThreshold = 60.f;
+
+	/** Morale at or below which the enemy becomes Broken (0-100). Must be < ShakenThreshold. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale", meta = (ClampMin = "1.0", ClampMax = "99.0"))
+	float BrokenThreshold = 30.f;
+
+	/** Morale points recovered per second when no loss event has occurred recently. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale", meta = (ClampMin = "0.0"))
+	float MoraleRecoveryPerSecond = 2.f;
+
+	// --- Morale event weights (design §7 — positive = morale loss, negative = morale gain) ---
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale|Events", meta = (ClampMin = "0.0"))
+	float MoraleLossAllyDied = 15.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale|Events", meta = (ClampMin = "0.0"))
+	float MoraleLossOfficerDied = 30.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale|Events", meta = (ClampMin = "0.0"))
+	float MoraleLossSustainedSuppression = 10.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale|Events", meta = (ClampMin = "0.0"))
+	float MoraleLossLowHealth = 20.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale|Events", meta = (ClampMin = "0.0"))
+	float MoraleLossFlanked = 10.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale|Events", meta = (ClampMin = "0.0"))
+	float MoraleGainDamagedTarget = 5.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale|Events", meta = (ClampMin = "0.0"))
+	float MoraleGainTargetDowned = 15.f;
 };

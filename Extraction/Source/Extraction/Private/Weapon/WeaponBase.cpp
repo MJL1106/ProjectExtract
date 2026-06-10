@@ -7,6 +7,9 @@
 #include "AIShooterInterface.h"
 #include "ExtractionDamageType.h"
 #include "HealthComponent.h"
+#include "SuppressionComponent.h"
+#include "EnemyCharacter.h"
+#include "EnemyMoraleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/MeshComponent.h"
 #include "Camera/CameraComponent.h"
@@ -141,11 +144,16 @@ void AWeaponBase::StartFiring()
 	// Cancel recoil recovery when firing resumes
 	bIsRecoveringRecoil = false;
 
+	const ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
+
 	// AI path: rebuild the friendly-fire ignore list once per burst so PerformHitscan doesn't
 	// iterate all pawns every shot. Player-owned weapons skip this (PC check in PerformHitscan).
-	const ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
 	if (IsValid(OwnerChar) && !IsValid(Cast<APlayerController>(OwnerChar->GetController())))
 		RebuildFFIgnoreList();
+
+	// All shooters: rebuild the suppression-target cache for near-miss reporting.
+	if (IsValid(OwnerChar))
+		RebuildSuppressionTargets();
 
 	if (!CanFire()) return;
 
@@ -245,16 +253,7 @@ void AWeaponBase::RebuildFFIgnoreList()
 	UWorld* World = GetWorld();
 	if (!World) return;
 
-	// Count first so we can Reserve before filling.
-	int32 TeamCount = 0;
-	for (TActorIterator<APawn> It(World); It; ++It)
-	{
-		const IGenericTeamAgentInterface* OtherTeam = Cast<IGenericTeamAgentInterface>(*It);
-		if (OtherTeam && IsValid(*It) && *It != OwnerChar && OtherTeam->GetGenericTeamId() == OwnerTeam)
-			++TeamCount;
-	}
-
-	CachedFFIgnoreList.Reserve(TeamCount + 2); // +2 for self + weapon
+	CachedFFIgnoreList.Reserve(32);
 	for (TActorIterator<APawn> It(World); It; ++It)
 	{
 		APawn* OtherPawn = *It;
@@ -265,6 +264,71 @@ void AWeaponBase::RebuildFFIgnoreList()
 	}
 
 	FFIgnoreListBuiltTime = World->GetTimeSeconds();
+}
+
+void AWeaponBase::RebuildSuppressionTargets()
+{
+	CachedSuppressionTargets.Reset();
+
+	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
+	if (!IsValid(OwnerChar)) return;
+
+	const IGenericTeamAgentInterface* TeamAgent = Cast<IGenericTeamAgentInterface>(OwnerChar);
+	if (!TeamAgent) return;
+
+	const FGenericTeamId OwnerTeam = TeamAgent->GetGenericTeamId();
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	CachedSuppressionTargets.Reserve(32);
+	for (TActorIterator<APawn> It(World); It; ++It)
+	{
+		APawn* OtherPawn = *It;
+		if (!IsValid(OtherPawn) || OtherPawn == OwnerChar) continue;
+		const IGenericTeamAgentInterface* OtherTeam = Cast<IGenericTeamAgentInterface>(OtherPawn);
+		if (!OtherTeam) continue;
+		const FGenericTeamId OtherTeamId = OtherTeam->GetGenericTeamId();
+		if (OtherTeamId == OwnerTeam || OtherTeamId == FGenericTeamId::NoTeam) continue;
+		USuppressionComponent* SuppComp = OtherPawn->FindComponentByClass<USuppressionComponent>();
+		if (!SuppComp) continue;
+		CachedSuppressionTargets.Add({ OtherPawn, SuppComp });
+	}
+
+	SuppressionTargetsBuiltTime = World->GetTimeSeconds();
+}
+
+void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& TraceEnd, AActor* HitActor)
+{
+	if (NearMissRadius <= 0.f) return;
+
+	const UWorld* World = GetWorld();
+	if (!World) return;
+
+	if ((World->GetTimeSeconds() - SuppressionTargetsBuiltTime) > 1.f)
+		RebuildSuppressionTargets();
+
+	const FVector Segment = TraceEnd - TraceStart;
+	const float SegmentLenSq = Segment.SizeSquared();
+	if (SegmentLenSq < 1.f) return;
+
+	const float NearMissRadiusSq = NearMissRadius * NearMissRadius;
+
+	for (const FSuppressionTarget& Target : CachedSuppressionTargets)
+	{
+		APawn* Pawn = Target.Pawn.Get();
+		USuppressionComponent* Comp = Target.Component.Get();
+		if (!IsValid(Pawn) || !IsValid(Comp)) continue;
+		if (Pawn == HitActor) continue;
+
+		const FVector ToPawn = Pawn->GetActorLocation() - TraceStart;
+		const float T = FMath::Clamp(FVector::DotProduct(ToPawn, Segment) / SegmentLenSq, 0.f, 1.f);
+		const FVector ClosestPoint = TraceStart + Segment * T;
+		const float DistSq = FVector::DistSquared(ClosestPoint, Pawn->GetActorLocation());
+
+		if (DistSq <= NearMissRadiusSq)
+			Comp->RegisterNearMiss();
+	}
 }
 
 void AWeaponBase::FireShot()
@@ -420,14 +484,34 @@ void AWeaponBase::PerformHitscan()
 				UE_LOG(LogExtraction, Log, TEXT("%s hit %s for %.1f damage"),
 					*GetNameSafe(OwnerChar), *GetNameSafe(HitActor), WeaponData->BaseDamage);
 
+				UHealthComponent* VictimHealth = HitActor->FindComponentByClass<UHealthComponent>();
+				const bool bVictimWasAlive = VictimHealth && VictimHealth->IsAlive();
+
 				HitActor->TakeDamage(
 					WeaponData->BaseDamage,
 					DamageEvent,
 					OwnerChar->GetController(),
 					this
 				);
+
+				if (bVictimWasAlive)
+				{
+					AEnemyCharacter* OwnerEnemy = Cast<AEnemyCharacter>(OwnerChar);
+					if (IsValid(OwnerEnemy))
+					{
+						if (UEnemyMoraleComponent* Morale = OwnerEnemy->GetMoraleComponent())
+						{
+							Morale->NotifyDamagedTarget();
+							if (VictimHealth->IsDead())
+								Morale->NotifyTargetDowned();
+						}
+					}
+				}
 			}
 		}
+
+		// Near-miss suppression: report to hostile AI pawns close to the bullet segment.
+		ReportNearMisses(TraceStart, bHit ? HitResult.ImpactPoint : TraceEnd, bHit ? HitResult.GetActor() : nullptr);
 
 		Multicast_PlayFireFX(GetMuzzleLocation(), bHit ? HitResult.ImpactPoint : TraceEnd, bHit);
 
@@ -680,6 +764,9 @@ void AWeaponBase::KitBeginFire_Implementation()
 	bWantsToFire = true;
 	bDryFireLogged = false;
 	bIsRecoveringRecoil = false;
+
+	if (IsValid(Cast<ACharacter>(GetOwner())))
+		RebuildSuppressionTargets();
 }
 
 void AWeaponBase::KitStopFire_Implementation()

@@ -33,6 +33,15 @@ enum class EEnemyMoveSpeedMode : uint8
 	Combat	UMETA(DisplayName = "Combat"),
 };
 
+/** Per-enemy morale state (Phase 4). Floor = Broken — enemies never rout (design §7). */
+UENUM(BlueprintType)
+enum class EMoraleState : uint8
+{
+	Confident	UMETA(DisplayName = "Confident"),
+	Shaken		UMETA(DisplayName = "Shaken"),
+	Broken		UMETA(DisplayName = "Broken"),
+};
+
 /** Level-wide alert state. One-way ladder until the director (Phase 6) owns de-escalation. */
 UENUM(BlueprintType)
 enum class EGlobalAlertLevel : uint8
@@ -52,4 +61,7 @@ enum class EBarkType : uint8
 	LostTarget		UMETA(DisplayName = "Lost Target"),
 	BodyFound		UMETA(DisplayName = "Body Found"),
 	GrenadeOut		UMETA(DisplayName = "Grenade Out"),
+	ManDown			UMETA(DisplayName = "Man Down"),
+	Pinned			UMETA(DisplayName = "Pinned"),
+	FallingBack		UMETA(DisplayName = "Falling Back"),
 };

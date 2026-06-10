@@ -4,6 +4,7 @@
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
+#include "SuppressionComponent.h"
 #include "WeaponBase.h"
 #include "AICoverSlot.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -82,7 +83,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// Abort if target lost or out of range with no LOS
 	if (!IsValid(Target))
 	{
-		StopFireAndCleanUp(OwnerComp);
+		StopFireAndCleanUp(OwnerComp, Mem);
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
@@ -92,17 +93,43 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// Fail out to let the selector re-seek cover if far and no LOS
 	if (!bInRange && !bHasLOS && Mem->Phase != EFireTaskPhase::Fire)
 	{
-		StopFireAndCleanUp(OwnerComp);
+		StopFireAndCleanUp(OwnerComp, Mem);
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
 	Mem->PhaseTimer -= DeltaSeconds;
+
+	// Phase 4: fetch suppression state once per tick
+	USuppressionComponent* SupprComp = Enemy->GetSuppressionComponent();
+	const bool bSuppressed = IsValid(SupprComp) && SupprComp->IsSuppressed();
 
 	switch (Mem->Phase)
 	{
 	case EFireTaskPhase::Acquire:
 		if (Mem->PhaseTimer <= 0.f)
 		{
+			// Suppression gate: stay in cover, extend into Pause instead of exposing
+			if (bSuppressed)
+			{
+				const bool bHasCoverAcq = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+				if (!bHasCoverAcq)
+				{
+					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+					Mem->bSuppressCrouchedNoCover = true;
+				}
+				Mem->Phase = EFireTaskPhase::Pause;
+				Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin, DA->BurstPauseMax);
+				Mem->PhaseTimer = Mem->PauseDuration;
+				break;
+			}
+
+			// Un-crouch if we previously crouched without cover due to suppression
+			if (Mem->bSuppressCrouchedNoCover)
+			{
+				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+				Mem->bSuppressCrouchedNoCover = false;
+			}
+
 			// Expose: un-crouch if in crouch cover; step sideways otherwise
 			AAICoverSlot* Slot = Cast<AAICoverSlot>(BB->GetValueAsObject(AEnemyAIController::BB_CoverSlot));
 			const bool bHasCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
@@ -116,6 +143,17 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		break;
 
 	case EFireTaskPhase::Expose:
+		// Suppression interrupt: duck back to Recover immediately
+		if (bSuppressed)
+		{
+			AAICoverSlot* SuppSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(AEnemyAIController::BB_CoverSlot));
+			const bool bSuppCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+			if (bSuppCover && IsValid(SuppSlot) && SuppSlot->Height == ECoverHeight::Crouch)
+				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+			Mem->Phase = EFireTaskPhase::Recover;
+			Mem->PhaseTimer = RecoverPhaseDuration;
+			break;
+		}
 		if (Mem->PhaseTimer <= 0.f)
 		{
 			// For stand-height slots, step sideways toward the peekable corner.
@@ -162,6 +200,22 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		break;
 
 	case EFireTaskPhase::Fire:
+		// Suppression interrupt: stop firing and duck back
+		if (bSuppressed)
+		{
+			AWeaponBase* SuppWeapon = Enemy->GetCurrentWeapon();
+			if (IsValid(SuppWeapon))
+				SuppWeapon->StopFiring();
+
+			AAICoverSlot* SuppSlot = Cast<AAICoverSlot>(BB->GetValueAsObject(AEnemyAIController::BB_CoverSlot));
+			const bool bSuppCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+			if (bSuppCover && IsValid(SuppSlot) && SuppSlot->Height == ECoverHeight::Crouch)
+				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+
+			Mem->Phase = EFireTaskPhase::Recover;
+			Mem->PhaseTimer = RecoverPhaseDuration;
+			break;
+		}
 		if (Mem->PhaseTimer <= 0.f)
 		{
 			AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
@@ -203,11 +257,12 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 EBTNodeResult::Type UBTTask_EnemyCombatFire::AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
-	StopFireAndCleanUp(OwnerComp);
+	FFireMemory* Mem = reinterpret_cast<FFireMemory*>(NodeMemory);
+	StopFireAndCleanUp(OwnerComp, Mem);
 	return EBTNodeResult::Aborted;
 }
 
-void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerComp) const
+void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem) const
 {
 	AAIController* Controller = OwnerComp.GetAIOwner();
 	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
@@ -219,6 +274,12 @@ void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerCo
 		Weapon->StopFiring();
 
 	Enemy->SetAimTarget(nullptr);
+
+	if (Mem && Mem->bSuppressCrouchedNoCover)
+	{
+		if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+		Mem->bSuppressCrouchedNoCover = false;
+	}
 
 	if (Controller)
 		Controller->ClearFocus(EAIFocusPriority::Gameplay);

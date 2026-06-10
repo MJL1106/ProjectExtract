@@ -10,6 +10,8 @@
 class UAISenseConfig_Sight;
 class UAISenseConfig_Hearing;
 class UEnemyAwarenessComponent;
+class UEnemyMoraleComponent;
+enum class EMoraleState : uint8;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogEnemyAI, Log, All);
 
@@ -31,6 +33,7 @@ public:
 	static const FName BB_CoverSlot;
 	static const FName BB_HasCover;
 	static const FName BB_PatrolRoute;
+	static const FName BB_MoraleState;
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|AI")
 	UEnemyAwarenessComponent* GetAwarenessComponent() const { return AwarenessComponent; }
@@ -61,4 +64,7 @@ private:
 	/** Called when the awareness component broadcasts a state change. Releases cover and clears focus on Combat exit. */
 	UFUNCTION()
 	void HandleAwarenessStateChanged(EEnemyAwarenessState OldState, EEnemyAwarenessState NewState);
+
+	UFUNCTION()
+	void HandleMoraleStateChanged(EMoraleState OldState, EMoraleState NewState);
 };

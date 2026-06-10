@@ -1,4 +1,5 @@
 // BT task — peek-fire loop: Acquire → Expose → Fire → Recover → Pause → repeat.
+// Phase 4: suppression gating — suppressed enemies skip Expose and duck back from Fire.
 
 #pragma once
 
@@ -38,11 +39,12 @@ private:
 		float PhaseTimer = 0.f;
 		float BurstDuration = 0.f;
 		float PauseDuration = 0.f;
+		bool bSuppressCrouchedNoCover = false;
 	};
 
 	/** How far (cm) to step sideways when exposing from a stand-height cover slot. */
 	UPROPERTY(EditAnywhere, Category = "Combat|Cover", meta = (ClampMin = "0.0"))
 	float PeekLateralOffset = 60.f;
 
-	void StopFireAndCleanUp(UBehaviorTreeComponent& OwnerComp) const;
+	void StopFireAndCleanUp(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem = nullptr) const;
 };

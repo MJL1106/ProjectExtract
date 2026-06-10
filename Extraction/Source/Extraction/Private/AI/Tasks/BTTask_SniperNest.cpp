@@ -4,6 +4,7 @@
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
+#include "SuppressionComponent.h"
 #include "WeaponBase.h"
 #include "AICoverSlot.h"
 #include "CoverRegistrySubsystem.h"
@@ -77,6 +78,10 @@ void UBTTask_SniperNest::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 	// Fetch sniper component
 	UEnemySniperTelegraphComponent* SniperComp = Enemy->GetSniperTelegraphComponent();
 
+	// Fetch suppression state once per tick
+	USuppressionComponent* SupprComp = Enemy->GetSuppressionComponent();
+	const bool bSuppressed = IsValid(SupprComp) && SupprComp->IsSuppressed();
+
 	switch (Mem->Phase)
 	{
 	case ESniperNestPhase::Evaluate:
@@ -86,7 +91,9 @@ void UBTTask_SniperNest::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 
 		if (!bNeedsReloc && bHasLOS)
 		{
-			// Already in a good spot — start telegraphing if weapon can fire
+			// Suppressed snipers do not begin telegraph
+			if (bSuppressed) return;
+
 			AWeaponBase* EvalWeapon = Enemy->GetCurrentWeapon();
 			if (IsValid(SniperComp) && SniperComp->CanBeginTelegraph() && IsValid(EvalWeapon) && EvalWeapon->CanFire())
 			{
@@ -177,9 +184,9 @@ void UBTTask_SniperNest::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 		}
 
-		// Arrived — try to begin telegraph if weapon can fire
+		// Arrived — try to begin telegraph if weapon can fire and not suppressed
 		AWeaponBase* ArrivalWeapon = Enemy->GetCurrentWeapon();
-		if (IsValid(SniperComp) && SniperComp->CanBeginTelegraph() && bHasLOS
+		if (!bSuppressed && IsValid(SniperComp) && SniperComp->CanBeginTelegraph() && bHasLOS
 			&& IsValid(ArrivalWeapon) && ArrivalWeapon->CanFire())
 		{
 			Enemy->SetAimTarget(Target);
@@ -197,7 +204,7 @@ void UBTTask_SniperNest::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 
 	case ESniperNestPhase::Telegraph:
 	{
-		if (!bHasLOS)
+		if (!bHasLOS || bSuppressed)
 		{
 			if (IsValid(SniperComp))
 				SniperComp->CancelTelegraph();
@@ -260,6 +267,10 @@ bool UBTTask_SniperNest::NeedsRelocation(UBehaviorTreeComponent& OwnerComp, cons
 	if (!bHasLOS) return true;
 	if (SniperComp->GetShotsSinceRelocate() >= DA->SniperRelocateAfterShots) return true;
 	if (DA->bSniperRelocateWhenDamaged && Enemy->WasDamagedRecently(2.f)) return true;
+
+	// Phase 4: suppression forces relocation (sniper relocates under pressure)
+	USuppressionComponent* SupprComp = Enemy->GetSuppressionComponent();
+	if (IsValid(SupprComp) && SupprComp->IsSuppressed()) return true;
 
 	return false;
 }

@@ -25,8 +25,13 @@ class UEnemyGrenadierComponent;
 class USquadAuraComponent;
 class UEnemySniperTelegraphComponent;
 
+// Phase 4 — suppression & morale (default subobjects, not bolt-ons)
+class USuppressionComponent;
+class UEnemyMoraleComponent;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTakedownExecuted, AActor*, Instigator);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleePerformed);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyHitReact, EHitRegion, Region);
 
 UCLASS(Blueprintable)
 class EXTRACTION_API AEnemyCharacter : public ACharacter,
@@ -106,6 +111,18 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
 	UEnemySniperTelegraphComponent* GetSniperTelegraphComponent() const { return SniperTelegraphComp.Get(); }
+
+	// --- Phase 4: suppression & morale accessors (default subobjects — always present) ---
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	USuppressionComponent* GetSuppressionComponent() const { return SuppressionComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	UEnemyMoraleComponent* GetMoraleComponent() const { return MoraleComponent; }
+
+	/** Broadcast when alive and taking damage — region resolved from the damage event. BP/ABP binds for flinch montages. */
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Combat")
+	FOnEnemyHitReact OnHitReact;
 
 	/** Fired after ApplyArchetypeData finishes registering all bolt-on components.
 	 *  Called at possess time, before BP BeginPlay fires on placed pawns. BP can bind here for init FX. */
@@ -213,16 +230,30 @@ private:
 	UPROPERTY()
 	TObjectPtr<UEnemySniperTelegraphComponent> SniperTelegraphComp;
 
+	// Phase 4 — default subobjects (every enemy gets both)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
+	TObjectPtr<USuppressionComponent> SuppressionComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
+	TObjectPtr<UEnemyMoraleComponent> MoraleComponent;
+
 	UPROPERTY(VisibleInstanceOnly, Category = "Enemy|Tags")
 	FGameplayTagContainer OwnedTags;
 
 	/** Set once when an enemy first reports this corpse to the director. */
 	bool bBodyReported = false;
 
+	bool bPendingTakedownDeath = false;
+
 	/** Generic damage amount guaranteed to kill through any shield (takedown path). */
 	static constexpr float TakedownDamage = 1.e6f;
 
+	/** Seconds to delay ragdoll after a takedown kill so the BP takedown animation can play. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Takedown")
+	float TakedownRagdollDelay = 0.8f;
+
 	FTimerHandle DestroyTimerHandle;
+	FTimerHandle TakedownRagdollTimerHandle;
 
 	/** Resolves hitbox multiplier from the damage event's bone + damage type. */
 	float GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const;
@@ -230,5 +261,6 @@ private:
 	UFUNCTION()
 	void HandleDeath();
 
+	void ApplyRagdoll();
 	void DestroyAfterDeath();
 };
