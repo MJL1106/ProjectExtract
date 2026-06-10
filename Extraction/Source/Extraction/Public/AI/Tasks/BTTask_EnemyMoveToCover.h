@@ -29,4 +29,7 @@ private:
 	};
 
 	void ReleaseClaim(UBlackboardComponent* BB, APawn* Pawn) const;
+
+	class AAICoverSlot* ScoreSlotsWithSpacing(APawn* Pawn, const class AEnemyCharacter* Enemy,
+		AActor* Target, const class UEnemyArchetypeData* DA, class UCoverRegistrySubsystem* Registry) const;
 };

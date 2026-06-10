@@ -37,9 +37,11 @@ private:
 	struct FOfficerCommandMemory
 	{
 		float RepositionTimer = 0.f;
+		float FocusCooldownTimer = 0.f;
+		float RallyCooldownTimer = 0.f;
 		bool bFiring = false;
 	};
 
 	void CleanUp(UBehaviorTreeComponent& OwnerComp, FOfficerCommandMemory* Mem) const;
-	bool ComputeHoldPosition(APawn* Pawn, AActor* Target, FVector& OutPos) const;
+	bool ComputeHoldPosition(APawn* Pawn, AActor* Target, class UEnemySquad* Squad, FVector& OutPos) const;
 };

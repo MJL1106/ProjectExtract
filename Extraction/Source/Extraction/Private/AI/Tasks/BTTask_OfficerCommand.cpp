@@ -4,8 +4,12 @@
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
+#include "EnemyMoraleComponent.h"
+#include "EnemySquad.h"
+#include "EnemySquadSubsystem.h"
 #include "HealthComponent.h"
 #include "WeaponBase.h"
+#include "BarkSubsystem.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "GameFramework/Pawn.h"
@@ -42,9 +46,12 @@ EBTNodeResult::Type UBTTask_OfficerCommand::ExecuteTask(UBehaviorTreeComponent& 
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 	Controller->SetFocus(Target);
 
-	// Immediately compute and move to hold position
+	// Resolve squad for hold position and command duties
+	UEnemySquadSubsystem* SquadSub = Pawn->GetWorld()->GetSubsystem<UEnemySquadSubsystem>();
+	UEnemySquad* Squad = SquadSub ? SquadSub->GetSquadFor(Enemy) : nullptr;
+
 	FVector HoldPos;
-	if (ComputeHoldPosition(Pawn, Target, HoldPos))
+	if (ComputeHoldPosition(Pawn, Target, Squad, HoldPos))
 		Controller->MoveToLocation(HoldPos, 80.f, false, true, false, true);
 
 	Mem->RepositionTimer = RepositionInterval;
@@ -94,15 +101,65 @@ void UBTTask_OfficerCommand::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* 
 		Enemy->SetAimTarget(nullptr);
 	}
 
+	// Tick cooldown timers
+	Mem->FocusCooldownTimer = FMath::Max(0.f, Mem->FocusCooldownTimer - DeltaSeconds);
+	Mem->RallyCooldownTimer = FMath::Max(0.f, Mem->RallyCooldownTimer - DeltaSeconds);
+
 	// Re-evaluate hold position on interval
 	Mem->RepositionTimer -= DeltaSeconds;
 	if (Mem->RepositionTimer <= 0.f)
 	{
+		UEnemySquadSubsystem* SquadSub = Pawn->GetWorld()->GetSubsystem<UEnemySquadSubsystem>();
+		UEnemySquad* Squad = SquadSub ? SquadSub->GetSquadFor(Enemy) : nullptr;
+
 		FVector HoldPos;
-		if (ComputeHoldPosition(Pawn, Target, HoldPos))
+		if (ComputeHoldPosition(Pawn, Target, Squad, HoldPos))
 			Controller->MoveToLocation(HoldPos, 80.f, false, true, false, true);
 
 		Mem->RepositionTimer = RepositionInterval;
+
+		const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+
+		if (IsValid(DA) && Squad)
+		{
+			// Focus-fire: re-call on cooldown (officer always overrides)
+			if (Mem->FocusCooldownTimer <= 0.f && IsValid(Target))
+			{
+				Squad->SetFocusTarget(Target, Enemy, true);
+				Mem->FocusCooldownTimer = DA->FocusCallCooldown;
+
+				UBarkSubsystem* Barks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
+				if (Barks && Squad->TryClaimSquadBark(EBarkType::FocusTarget))
+					Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::FocusTarget, DA->DisplayName);
+			}
+
+			// Rally: if any living (non-dead) member is Broken and rally cooldown elapsed
+			if (Mem->RallyCooldownTimer <= 0.f)
+			{
+				bool bNeedsRally = false;
+				const TArray<TWeakObjectPtr<AEnemyCharacter>>& Members = Squad->GetMembers();
+				for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
+				{
+					AEnemyCharacter* Ally = M.Get();
+					if (!IsValid(Ally) || Ally == Enemy) continue;
+					UHealthComponent* AllyHP = Ally->GetHealthComponent();
+					if (IsValid(AllyHP) && AllyHP->IsDead()) continue;
+					UEnemyMoraleComponent* Morale = Ally->GetMoraleComponent();
+					if (!IsValid(Morale)) continue;
+					if (Morale->GetMoraleState() == EMoraleState::Broken)
+					{
+						bNeedsRally = true;
+						break;
+					}
+				}
+
+				if (bNeedsRally)
+				{
+					Squad->Rally(Enemy);
+					Mem->RallyCooldownTimer = DA->RallyCooldown;
+				}
+			}
+		}
 	}
 }
 
@@ -133,45 +190,57 @@ void UBTTask_OfficerCommand::CleanUp(UBehaviorTreeComponent& OwnerComp, FOfficer
 	}
 }
 
-bool UBTTask_OfficerCommand::ComputeHoldPosition(APawn* Pawn, AActor* Target, FVector& OutPos) const
+bool UBTTask_OfficerCommand::ComputeHoldPosition(APawn* Pawn, AActor* Target, UEnemySquad* Squad, FVector& OutPos) const
 {
 	if (!IsValid(Pawn) || !IsValid(Target)) return false;
 
-	// Gather allied team-1 pawns within scan radius
 	TArray<FVector> AllyLocations;
 	AllyLocations.Reserve(8);
+	const FVector PawnLoc = Pawn->GetActorLocation();
 
-	for (TActorIterator<AEnemyCharacter> It(Pawn->GetWorld()); It; ++It)
+	// Primary path: use squad members (cheap — no world scan)
+	if (Squad)
 	{
-		AEnemyCharacter* Ally = *It;
-		if (!IsValid(Ally) || Ally == Pawn) continue;
-		if (FVector::Dist(Pawn->GetActorLocation(), Ally->GetActorLocation()) > AllyScanRadius) continue;
-		UHealthComponent* AllyHealth = Ally->GetHealthComponent();
-		if (IsValid(AllyHealth) && AllyHealth->IsDead()) continue;
-		AllyLocations.Add(Ally->GetActorLocation());
+		const TArray<TWeakObjectPtr<AEnemyCharacter>>& Members = Squad->GetMembers();
+		for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
+		{
+			AEnemyCharacter* Ally = M.Get();
+			if (!IsValid(Ally) || Ally == Pawn) continue;
+			UHealthComponent* AllyHP = Ally->GetHealthComponent();
+			if (IsValid(AllyHP) && AllyHP->IsDead()) continue;
+			if (FVector::Dist(PawnLoc, Ally->GetActorLocation()) > AllyScanRadius) continue;
+			AllyLocations.Add(Ally->GetActorLocation());
+		}
+	}
+	else
+	{
+		// Squadless officer fallback: world scan
+		for (TActorIterator<AEnemyCharacter> It(Pawn->GetWorld()); It; ++It)
+		{
+			AEnemyCharacter* Ally = *It;
+			if (!IsValid(Ally) || Ally == Pawn) continue;
+			if (FVector::Dist(PawnLoc, Ally->GetActorLocation()) > AllyScanRadius) continue;
+			UHealthComponent* AllyHP = Ally->GetHealthComponent();
+			if (IsValid(AllyHP) && AllyHP->IsDead()) continue;
+			AllyLocations.Add(Ally->GetActorLocation());
+		}
 	}
 
-	// No living allies in range — hold current position rather than retreating indefinitely
 	if (AllyLocations.Num() == 0) return false;
 
-	FVector Centroid = FVector::ZeroVector;
-	{
-		FVector Sum = FVector::ZeroVector;
-		for (const FVector& Loc : AllyLocations)
-			Sum += Loc;
-		Centroid = Sum / static_cast<float>(AllyLocations.Num());
-	}
+	FVector Sum = FVector::ZeroVector;
+	for (const FVector& Loc : AllyLocations)
+		Sum += Loc;
+	const FVector Centroid = Sum / static_cast<float>(AllyLocations.Num());
 
 	const FVector AwayDir = (Centroid - Target->GetActorLocation()).GetSafeNormal2D();
 	const FVector Candidate = Centroid + AwayDir * HoldOffset;
 
-	// Project onto navmesh
 	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(Pawn->GetWorld());
 	if (!NavSys) return false;
 
 	FNavLocation NavLoc;
-	const bool bProjected = NavSys->ProjectPointToNavigation(Candidate, NavLoc, FVector(200.f, 200.f, 200.f));
-	if (bProjected)
+	if (NavSys->ProjectPointToNavigation(Candidate, NavLoc, FVector(200.f, 200.f, 200.f)))
 		OutPos = NavLoc.Location;
 	else
 		OutPos = Candidate;

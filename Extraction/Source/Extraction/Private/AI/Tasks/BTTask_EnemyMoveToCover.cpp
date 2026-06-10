@@ -6,6 +6,9 @@
 #include "EnemyCharacter.h"
 #include "AICoverSlot.h"
 #include "CoverRegistrySubsystem.h"
+#include "EnemySquad.h"
+#include "EnemySquadSubsystem.h"
+#include "HealthComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "GameFramework/Pawn.h"
@@ -67,7 +70,7 @@ EBTNodeResult::Type UBTTask_EnemyMoveToCover::ExecuteTask(UBehaviorTreeComponent
 	UCoverRegistrySubsystem* Registry = Pawn->GetWorld()->GetSubsystem<UCoverRegistrySubsystem>();
 	if (!Registry) return EBTNodeResult::Failed;
 
-	AAICoverSlot* Slot = Registry->FindBestCoverFor(Pawn->GetActorLocation(), Target, DA->CoverSearchRadius, nullptr, Pawn);
+	AAICoverSlot* Slot = ScoreSlotsWithSpacing(Pawn, Enemy, Target, DA, Registry);
 	if (!Slot || !Slot->TryClaim(Pawn))
 	{
 		BB->SetValueAsBool(AEnemyAIController::BB_HasCover, false);
@@ -159,6 +162,124 @@ void UBTTask_EnemyMoveToCover::ReleaseClaim(UBlackboardComponent* BB, APawn* Paw
 
 	BB->SetValueAsObject(AEnemyAIController::BB_CoverSlot, nullptr);
 	BB->SetValueAsBool(AEnemyAIController::BB_HasCover, false);
+}
+
+AAICoverSlot* UBTTask_EnemyMoveToCover::ScoreSlotsWithSpacing(APawn* Pawn, const AEnemyCharacter* Enemy,
+	AActor* Target, const UEnemyArchetypeData* DA, UCoverRegistrySubsystem* Registry) const
+{
+	const FVector PawnLoc = Pawn->GetActorLocation();
+	const FVector TargetLoc = Target->GetActorLocation();
+
+	TArray<AAICoverSlot*> Candidates;
+	Candidates.Reserve(16);
+	Registry->GetSlotsInRadius(PawnLoc, DA->CoverSearchRadius, Candidates);
+
+	// Gather living squadmate claimed-slot positions (or pawn positions as fallback) for spacing
+	TArray<FVector> AllyPositions;
+	UEnemySquadSubsystem* SquadSub = Pawn->GetWorld()->GetSubsystem<UEnemySquadSubsystem>();
+	UEnemySquad* Squad = SquadSub ? SquadSub->GetSquadFor(Enemy) : nullptr;
+
+	if (Squad)
+	{
+		const TArray<TWeakObjectPtr<AEnemyCharacter>>& Members = Squad->GetMembers();
+		AllyPositions.Reserve(Members.Num());
+		for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
+		{
+			AEnemyCharacter* Ally = M.Get();
+			if (!IsValid(Ally) || Ally == Pawn) continue;
+			UHealthComponent* AllyHP = Ally->GetHealthComponent();
+			if (IsValid(AllyHP) && AllyHP->IsDead()) continue;
+
+			// Prefer claimed cover slot position over pawn position
+			FVector Pos = Ally->GetActorLocation();
+			AEnemyAIController* AllyAIC = Cast<AEnemyAIController>(Ally->GetController());
+			if (AllyAIC)
+			{
+				UBlackboardComponent* AllyBB = AllyAIC->GetBlackboardComponent();
+				AAICoverSlot* AllySlot = AllyBB ? Cast<AAICoverSlot>(AllyBB->GetValueAsObject(AEnemyAIController::BB_CoverSlot)) : nullptr;
+				if (IsValid(AllySlot)) Pos = AllySlot->GetActorLocation();
+			}
+			AllyPositions.Add(Pos);
+		}
+	}
+
+	// LOS trace setup (matches FindBestCoverFor)
+	UWorld* World = Pawn->GetWorld();
+	FCollisionQueryParams LoSParams(SCENE_QUERY_STAT(EnemyCoverLoS), false);
+	LoSParams.AddIgnoredActor(Target);
+
+	const float MinSpacing = DA->MinAllySpacing;
+	AAICoverSlot* BestSlot = nullptr;
+	float BestScore = -1.f;
+
+	for (AAICoverSlot* Slot : Candidates)
+	{
+		if (!IsValid(Slot) || Slot->IsClaimed()) continue;
+
+		// Post-vacate cooldown (anti snap-back)
+		if (Slot->IsOnPostVacateCooldownFor(Pawn, 0.f)) continue;
+
+		// Hide-only stand cover reject
+		if (Slot->Height == ECoverHeight::Stand && !Slot->bIsPeekableCornerStart && !Slot->bIsPeekableCornerEnd)
+			continue;
+
+		// Target must be within fire arc
+		if (!Slot->IsTargetInFireArc(TargetLoc)) continue;
+
+		// LOS check — at least one position must see the target
+		{
+			constexpr float EyeHeight = 150.f;
+			constexpr float ApexProbeDist = 100.f;
+			const FVector SlotEye = Slot->GetActorLocation() + FVector(0.f, 0.f, EyeHeight);
+			FHitResult Hit;
+			bool bHasLOS = !World->LineTraceSingleByChannel(Hit, SlotEye, TargetLoc, ECC_Visibility, LoSParams)
+				|| Hit.GetActor() == Target;
+
+			if (!bHasLOS && Slot->Height == ECoverHeight::Stand)
+			{
+				const FVector LineDir = Slot->GetLineDirection();
+				if (Slot->bIsPeekableCornerStart)
+				{
+					const FVector Apex = Slot->GetLeftEdge() + (-LineDir) * ApexProbeDist + FVector(0.f, 0.f, EyeHeight);
+					bHasLOS = !World->LineTraceSingleByChannel(Hit, Apex, TargetLoc, ECC_Visibility, LoSParams)
+						|| Hit.GetActor() == Target;
+				}
+				if (!bHasLOS && Slot->bIsPeekableCornerEnd)
+				{
+					const FVector Apex = Slot->GetRightEdge() + LineDir * ApexProbeDist + FVector(0.f, 0.f, EyeHeight);
+					bHasLOS = !World->LineTraceSingleByChannel(Hit, Apex, TargetLoc, ECC_Visibility, LoSParams)
+						|| Hit.GetActor() == Target;
+				}
+			}
+
+			if (!bHasLOS) continue;
+		}
+
+		float Score = UCoverRegistrySubsystem::ScoreSlotFor(Slot, PawnLoc, Target, DA->CoverSearchRadius);
+		if (Score < 0.f) continue;
+
+		// Penalize slots too close to living squadmates' claimed positions
+		if (MinSpacing > 0.f)
+		{
+			const FVector SlotLoc = Slot->GetActorLocation();
+			for (const FVector& AllyPos : AllyPositions)
+			{
+				if (FVector::Dist(SlotLoc, AllyPos) < MinSpacing)
+				{
+					Score *= 0.2f;
+					break;
+				}
+			}
+		}
+
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			BestSlot = Slot;
+		}
+	}
+
+	return BestSlot;
 }
 
 FString UBTTask_EnemyMoveToCover::GetStaticDescription() const
