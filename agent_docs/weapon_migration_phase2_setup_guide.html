@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Weapon Migration Phase 2 — In-Engine Setup</title>
+<style>
+:root {
+  --bg: #1a1d23;
+  --bg-elev: #242830;
+  --bg-card: #2a2e38;
+  --border: #3a3f4b;
+  --text: #d6dae3;
+  --text-dim: #8d94a3;
+  --accent: #6aa9ff;
+  --accent-2: #a37bff;
+  --ok: #4ec07a;
+  --warn: #f0b250;
+  --bad: #e25c5c;
+  --code-bg: #14171c;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.5; margin: 0; }
+.wrap { max-width: 920px; margin: 0 auto; padding: 32px 24px 80px; }
+h1 { font-size: 28px; margin: 0 0 8px; font-weight: 600; }
+h2 { font-size: 22px; margin: 36px 0 12px; padding-bottom: 8px; border-bottom: 1px solid var(--border); font-weight: 600; }
+h3 { font-size: 16px; margin: 20px 0 8px; color: var(--accent); font-weight: 600; }
+p { margin: 0 0 12px; }
+code { background: var(--code-bg); color: #e3e6ec; padding: 2px 6px; border-radius: 3px; font-family: var(--mono); font-size: 13px; }
+.section-tag { display: inline-block; background: var(--bg-elev); border: 1px solid var(--border); color: var(--text-dim); padding: 2px 10px; border-radius: 12px; font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase; margin-right: 8px; }
+.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 18px 20px; margin: 12px 0; }
+.gotcha { background: rgba(240, 178, 80, 0.08); border-left: 3px solid var(--warn); padding: 12px 16px; margin: 12px 0; border-radius: 0 6px 6px 0; }
+.gotcha-title { color: var(--warn); font-weight: 600; font-size: 13px; letter-spacing: 0.4px; text-transform: uppercase; margin-bottom: 6px; }
+.diagram { background: var(--bg-elev); border-radius: 8px; padding: 16px; margin: 16px 0; border: 1px solid var(--border); }
+.diagram svg { display: block; max-width: 100%; height: auto; }
+ol.steps { padding-left: 0; list-style: none; counter-reset: step; }
+ol.steps > li { counter-increment: step; padding: 10px 14px 10px 48px; margin: 6px 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; position: relative; cursor: pointer; transition: all 0.15s; }
+ol.steps > li::before { content: counter(step); position: absolute; left: 14px; top: 10px; width: 22px; height: 22px; border-radius: 50%; background: var(--bg-elev); border: 1px solid var(--border); color: var(--text-dim); font-family: var(--mono); font-size: 12px; display: flex; align-items: center; justify-content: center; font-weight: 600; }
+ol.steps > li.done { opacity: 0.55; text-decoration: line-through; text-decoration-color: var(--ok); }
+ol.steps > li.done::before { background: var(--ok); border-color: var(--ok); color: #0a1a0e; content: "✓"; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+th, td { padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 14px; }
+th { background: var(--bg-elev); color: var(--text-dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+tr:last-child td { border-bottom: none; }
+td code { font-size: 12px; }
+.compare { display: grid; grid-template-columns: 1fr auto 1fr; gap: 12px; align-items: center; margin: 12px 0; }
+.compare-card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 6px; padding: 12px; }
+.compare-card.before { border-color: rgba(226, 92, 92, 0.4); }
+.compare-card.after { border-color: rgba(78, 192, 122, 0.4); }
+.compare-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); margin-bottom: 6px; }
+.compare-label.before { color: var(--bad); }
+.compare-label.after { color: var(--ok); }
+.arrow { color: var(--text-dim); font-size: 20px; text-align: center; }
+.verify { background: rgba(78, 192, 122, 0.07); border-left: 3px solid var(--ok); padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0; font-size: 14px; }
+.verify-title { color: var(--ok); font-weight: 600; font-size: 13px; letter-spacing: 0.4px; text-transform: uppercase; margin-bottom: 6px; }
+.intro { color: var(--text-dim); font-size: 15px; }
+.toc { background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 14px 18px; margin: 24px 0; }
+.toc-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--text-dim); margin-bottom: 8px; }
+.toc a { color: var(--accent); text-decoration: none; display: inline-block; margin-right: 16px; font-size: 14px; }
+.toc a:hover { text-decoration: underline; }
+.progress { position: fixed; top: 0; left: 0; height: 3px; background: linear-gradient(90deg, var(--accent), var(--accent-2)); width: 0%; transition: width 0.2s; z-index: 100; }
+.reset { background: transparent; border: 1px solid var(--border); color: var(--text-dim); padding: 6px 14px; border-radius: 4px; font-size: 12px; cursor: pointer; margin-top: 16px; }
+.reset:hover { color: var(--text); border-color: var(--text-dim); }
+.kit-method { color: var(--accent-2); }
+.our-method { color: var(--ok); }
+@media print {
+  body { background: white; color: black; }
+  .card, .diagram, table, .toc { background: white; border-color: #ccc; }
+  ol.steps > li { background: white; border-color: #ccc; }
+  ol.steps > li.done { opacity: 1; }
+  .progress, .reset { display: none; }
+  a { color: black; }
+}
+</style>
+</head>
+<body>
+<div class="progress" id="progress"></div>
+<div class="wrap">
+
+<h1>Weapon Migration Phase 2 — In-Engine Setup</h1>
+<p class="intro">Bridge plumbing so the kit's BP_FPCharacter can dispatch to any weapon (kit OR ours) via interface message sends. Existing kit weapons keep their own logic; future <code>AWeaponBase</code> weapons can now be slotted into BP_FPCharacter and equip cleanly.</p>
+
+<div class="toc">
+<div class="toc-title">Sections</div>
+<a href="#picture">The bridge in one picture</a>
+<a href="#a">A. BP_Item_Base interface</a>
+<a href="#b">B. Slot retypes</a>
+<a href="#c">C. Direct calls → messages</a>
+<a href="#d">D. AC_ProceduralAnimation</a>
+<a href="#f">F. PIE verify</a>
+<a href="#next">Next: our weapon</a>
+</div>
+
+<h2 id="picture">The bridge in one picture</h2>
+<div class="diagram">
+<svg viewBox="0 0 720 380" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L8,3 z" fill="#d6dae3"/>
+    </marker>
+  </defs>
+  <!-- BP_FPCharacter -->
+  <rect x="260" y="20" width="200" height="60" fill="#2a4d7e" stroke="#4d7eb8" stroke-width="1.5" rx="8"/>
+  <text x="360" y="48" fill="#fff" font-family="ui-monospace, monospace" font-size="13" text-anchor="middle" font-weight="600">BP_FPCharacter</text>
+  <text x="360" y="65" fill="#9bb6d4" font-size="11" text-anchor="middle">calls Kit&lt;Method&gt; (Message)</text>
+  <!-- arrow down -->
+  <path d="M360,80 L360,135" stroke="#d6dae3" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="370" y="115" fill="#8d94a3" font-size="11">interface dispatch</text>
+  <!-- Interface -->
+  <rect x="200" y="140" width="320" height="60" fill="#5e2a4d" stroke="#a04d8c" stroke-width="1.5" rx="8"/>
+  <text x="360" y="168" fill="#fff" font-family="ui-monospace, monospace" font-size="13" text-anchor="middle" font-weight="600">IKitWeaponInterface</text>
+  <text x="360" y="185" fill="#d4a3c4" font-size="11" text-anchor="middle">18 methods — Kit-prefixed dispatch surface</text>
+  <!-- arrows to impls -->
+  <path d="M280,200 L150,275" stroke="#d6dae3" stroke-width="2" marker-end="url(#arrow)"/>
+  <path d="M440,200 L570,275" stroke="#d6dae3" stroke-width="2" marker-end="url(#arrow)"/>
+  <!-- BP_Item_Base -->
+  <rect x="20" y="280" width="260" height="80" fill="#2a5e3a" stroke="#4dac6a" stroke-width="1.5" rx="8"/>
+  <text x="150" y="306" fill="#fff" font-family="ui-monospace, monospace" font-size="13" text-anchor="middle" font-weight="600">BP_Item_Base (kit)</text>
+  <text x="150" y="325" fill="#a3d4b3" font-size="11" text-anchor="middle">Kit* → existing BeginFire, Reload, etc.</text>
+  <text x="150" y="342" fill="#a3d4b3" font-size="11" text-anchor="middle">BP_Weapon_AmericanRifle inherits this</text>
+  <!-- AWeaponBase -->
+  <rect x="440" y="280" width="260" height="80" fill="#5e552a" stroke="#a09a4d" stroke-width="1.5" rx="8"/>
+  <text x="570" y="306" fill="#fff" font-family="ui-monospace, monospace" font-size="13" text-anchor="middle" font-weight="600">AWeaponBase (ours)</text>
+  <text x="570" y="325" fill="#d4cd9b" font-size="11" text-anchor="middle">Kit* → our FireShot, Reload, etc.</text>
+  <text x="570" y="342" fill="#d4cd9b" font-size="11" text-anchor="middle">your future weapon BPs inherit this</text>
+</svg>
+</div>
+
+<div class="gotcha">
+<div class="gotcha-title">The non-obvious bit</div>
+Adding the interface to BP_Item_Base in section A creates 18 empty stub methods. You also have to wire each one to call the kit's existing unprefixed twin (e.g. <code>KitBeginFire</code> calls existing <code>BeginFire</code>). Without this, kit weapons silent-fail.
+</div>
+
+<h2 id="a"><span class="section-tag">A</span>Add IKitWeaponInterface to BP_Item_Base</h2>
+<div class="card">
+<h3>Add the interface</h3>
+<ol class="steps" data-section="a-add">
+<li><code>Content Browser → /Game/ProceduralFPSKIT/Blueprints/Interactables/BP_Item_Base</code> → double-click</li>
+<li><code>Class Settings → Details → Interfaces → Implemented Interfaces → + Add</code> → search <code>KitWeaponInterface</code> → click</li>
+<li>Compile</li>
+</ol>
+</div>
+
+<div class="card">
+<h3>Implement the 18 Kit* methods</h3>
+<p>For each row: <code>My Blueprint panel → Interfaces → right-click method → Implement event</code> (events) or <code>Implement function</code> (getters). Add one node, wire it, then move on.</p>
+<table>
+<thead><tr><th>Interface method</th><th>Type</th><th>Body</th></tr></thead>
+<tbody>
+<tr><td><code class="kit-method">KitReload</code></td><td>event</td><td>Call existing <code>Reload</code></td></tr>
+<tr><td><code class="kit-method">KitBeginFire</code></td><td>event</td><td>Call existing <code>BeginFire</code></td></tr>
+<tr><td><code class="kit-method">KitStopFire</code></td><td>event</td><td>Call existing <code>StopFire</code></td></tr>
+<tr><td><code class="kit-method">KitFire_HitScan</code></td><td>event</td><td>Call existing <code>Fire_HitScan</code></td></tr>
+<tr><td><code class="kit-method">KitInspect</code></td><td>event</td><td>Call existing <code>Inspect</code></td></tr>
+<tr><td><code class="kit-method">KitMelee</code></td><td>event</td><td>Call existing <code>Melee</code></td></tr>
+<tr><td><code class="kit-method">KitChangeFireMode</code></td><td>event</td><td>Call existing <code>ChangeFireMode</code></td></tr>
+<tr><td><code class="kit-method">KitBurstFire</code></td><td>event</td><td>Call existing <code>BurstFire</code></td></tr>
+<tr><td><code class="kit-method">KitFinishFire</code></td><td>event</td><td>Call existing <code>FinishFire</code></td></tr>
+<tr><td><code class="kit-method">KitTrigger</code></td><td>event</td><td>Call existing <code>Trigger</code></td></tr>
+<tr><td><code class="kit-method">KitSpawnAttachments</code></td><td>event</td><td>Call existing <code>SpawnAttachments</code></td></tr>
+<tr><td><code class="kit-method">KitUnequip</code></td><td>event</td><td>Call existing <code>Unequip</code></td></tr>
+<tr><td><code class="kit-method">GetKitProceduralValues</code></td><td>function</td><td>Return <code>ProceduralValues</code></td></tr>
+<tr><td><code class="kit-method">GetKitIK_HandGunSocketOffset</code></td><td>function</td><td>Return <code>ik_hand_gun_SocketOffset</code></td></tr>
+<tr><td><code class="kit-method">GetKitIK_HandRSocketOffset</code></td><td>function</td><td>Return <code>Hand_R_SocketOffset</code></td></tr>
+<tr><td><code class="kit-method">GetKitIK_HandLSocketOffset</code></td><td>function</td><td>Return <code>Hand_L_SocketOffset</code></td></tr>
+<tr><td><code class="kit-method">GetKitAimDistanceFromCamera</code></td><td>function</td><td>Return <code>AimDistanceFromCamera</code></td></tr>
+<tr><td><code class="kit-method">GetKitMuzzleRingScale</code></td><td>function</td><td>Return <code>MuzzleRingScale</code></td></tr>
+</tbody>
+</table>
+<ol class="steps" data-section="a-finish">
+<li>All 18 wired</li>
+<li>Compile</li>
+<li><code>File → Save All</code></li>
+</ol>
+</div>
+
+<h2 id="b"><span class="section-tag">B</span>Retype slot variables on BP_FPCharacter</h2>
+<div class="card">
+<ol class="steps" data-section="b-open">
+<li><code>Content Browser → /Game/ProceduralFPSKIT/Blueprints/BP_FPCharacter</code> → double-click</li>
+</ol>
+<p>For each row: <code>My Blueprint → Variables → click variable → Details → Variable Type</code> → set as below.</p>
+<table>
+<thead><tr><th>Variable</th><th>New type</th></tr></thead>
+<tbody>
+<tr><td><code>PrimarySlot</code></td><td>Actor (Class Reference)</td></tr>
+<tr><td><code>SecondarySlot</code></td><td>Actor (Class Reference)</td></tr>
+<tr><td><code>HandsSlot</code></td><td>Actor (Class Reference)</td></tr>
+<tr><td><code>MeleeSlot</code></td><td>Actor (Class Reference)</td></tr>
+<tr><td><code>ThrowableSlot</code></td><td>Actor (Class Reference)</td></tr>
+<tr><td><code>SpawnedItem</code></td><td>Actor (Object Reference)</td></tr>
+<tr><td><code>SpawnedItemRef</code></td><td>Actor (Object Reference)</td></tr>
+</tbody>
+</table>
+<ol class="steps" data-section="b-compile">
+<li>All 7 retyped</li>
+<li>Compile (red errors on direct-call nodes expected — fixed in section C)</li>
+</ol>
+</div>
+
+<h2 id="c"><span class="section-tag">C</span>Convert direct calls to interface message sends</h2>
+<p>In <code>BP_FPCharacter</code> event graphs, every direct call on <code>SpawnedItem</code> / <code>SpawnedItemRef</code> now broken. Replace each one.</p>
+
+<div class="compare">
+<div class="compare-card before">
+<div class="compare-label before">Before — broken</div>
+<svg viewBox="0 0 300 130" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="20" width="260" height="90" fill="#3a1a1a" stroke="#e25c5c" stroke-width="1.5" rx="4"/>
+<text x="150" y="42" fill="#ff9090" font-family="ui-monospace, monospace" font-size="12" text-anchor="middle" font-weight="600">Reload</text>
+<text x="150" y="56" fill="#cc6666" font-size="10" text-anchor="middle">(Call Function)</text>
+<line x1="30" y1="76" x2="40" y2="76" stroke="#fff" stroke-width="1.5"/>
+<polygon points="40,73 46,76 40,79" fill="#fff"/>
+<text x="52" y="80" fill="#aaa" font-size="10">▶ in</text>
+<circle cx="30" cy="95" r="3" fill="#7eb6ff"/>
+<text x="40" y="98" fill="#aaa" font-size="10">SpawnedItem</text>
+<line x1="260" y1="76" x2="270" y2="76" stroke="#fff" stroke-width="1.5"/>
+<polygon points="270,73 276,76 270,79" fill="#fff"/>
+</svg>
+</div>
+<div class="arrow">→</div>
+<div class="compare-card after">
+<div class="compare-label after">After — works on Actor</div>
+<svg viewBox="0 0 300 130" xmlns="http://www.w3.org/2000/svg">
+<rect x="20" y="20" width="260" height="90" fill="#1a3a1a" stroke="#4ec07a" stroke-width="1.5" rx="4"/>
+<text x="150" y="42" fill="#90ff90" font-family="ui-monospace, monospace" font-size="12" text-anchor="middle" font-weight="600">Kit Reload</text>
+<text x="150" y="56" fill="#66cc66" font-size="10" text-anchor="middle">(Message)</text>
+<line x1="30" y1="76" x2="40" y2="76" stroke="#fff" stroke-width="1.5"/>
+<polygon points="40,73 46,76 40,79" fill="#fff"/>
+<text x="52" y="80" fill="#aaa" font-size="10">▶ in</text>
+<circle cx="30" cy="95" r="3" fill="#7eb6ff"/>
+<text x="40" y="98" fill="#aaa" font-size="10">Target = SpawnedItem</text>
+<line x1="260" y1="76" x2="270" y2="76" stroke="#fff" stroke-width="1.5"/>
+<polygon points="270,73 276,76 270,79" fill="#fff"/>
+</svg>
+</div>
+</div>
+
+<div class="card">
+<h3>For each broken call node</h3>
+<p>Targets: <code>Reload</code>, <code>BeginFire</code>, <code>StopFire</code>, <code>Fire_HitScan</code>, <code>Inspect</code>, <code>Melee</code>, <code>ChangeFireMode</code>, <code>BurstFire</code>, <code>FinishFire</code>, <code>Trigger</code>, <code>SpawnAttachments</code>, <code>Unequip</code></p>
+<ol class="steps" data-section="c-fix">
+<li>Right-click the broken node → <code>Convert Call to Message</code></li>
+<li>If <code>Convert Call to Message</code> not available: delete the node → drag from the actor pin → search <code>Kit&lt;MethodName&gt;</code> → pick the <strong>(Message)</strong> variant → place</li>
+<li>Wire the actor ref (<code>SpawnedItem</code> or <code>SpawnedItemRef</code>) into the <strong>Target</strong> pin</li>
+<li>Reconnect input + exec pins on the new node</li>
+<li>Repeat for all ~8-12 broken nodes</li>
+<li>Compile clean</li>
+<li><code>File → Save</code></li>
+</ol>
+</div>
+
+<h2 id="d"><span class="section-tag">D</span>Rewire AC_ProceduralAnimation pose read</h2>
+<div class="card">
+<ol class="steps" data-section="d-fix">
+<li><code>Content Browser → /Game/ProceduralFPSKIT/Blueprints/Components/AC_ProceduralAnimation</code> → double-click</li>
+<li>Open the <code>Equip</code> custom event graph</li>
+<li>Find the node reading <code>WeaponActorRef → ProceduralValues</code> → delete it</li>
+<li>Drag from <code>WeaponActorRef</code> → search <code>Get Kit Procedural Values</code> → pick the <strong>(Message)</strong> variant → place</li>
+<li>Wire <code>WeaponActorRef</code> into the <strong>Target</strong> pin</li>
+<li>Connect the returned <code>DataAsset</code> output to the existing <code>Set ProceduralValues</code> node input</li>
+<li>Compile</li>
+<li><code>File → Save</code></li>
+</ol>
+</div>
+
+<h2 id="f"><span class="section-tag">F</span>PIE verification</h2>
+<div class="card">
+<ol class="steps" data-section="f-test">
+<li>Open or create a test map</li>
+<li><code>Place Actors panel → search "BP_FPCharacter"</code> → drag into level</li>
+<li>Selected actor → <code>Details → Pawn → Auto Possess Player → Player 0</code></li>
+<li><code>Details → Class Defaults → PrimarySlot → BP_Weapon_AmericanRifle</code></li>
+<li><code>File → Save Current Level</code></li>
+<li>Play (Alt+P)</li>
+<li>Equip — procedural arm pose loads</li>
+<li>Fire — single tap (semi behavior) + hold (auto behavior)</li>
+<li>Reload — animation + ammo refill</li>
+<li>Swap weapons mid-fire — state cleans up</li>
+<li>Swap weapons mid-reload — state cleans up</li>
+</ol>
+<div class="verify">
+<div class="verify-title">Pass criteria</div>
+Kit American Rifle behaves identically to pre-bridge. Output Log shows zero <code>[KitWeapon]</code> Warning lines. If you see <code>"[KitWeapon] X has no WeaponData"</code> or <code>"KitWeaponPoseAsset is unassigned"</code>, the C++ safety net is firing — kit weapons should never hit that path unless their interface wrappers in section A are missing.
+</div>
+</div>
+
+<h2 id="next">Next: equip our own weapon</h2>
+<p class="intro">After the bridge passes verification, this is how you slot a project-side weapon. The kit's character will drive it; our C++ runs the fire/reload/damage; kit's procedural arms animate it.</p>
+<div class="card">
+<ol class="steps" data-section="next-make">
+<li><code>Content Browser → right-click → Blueprint Class</code> → search <code>WeaponBase</code> → pick → name <code>BP_OurWeapon_Rifle</code> (or similar)</li>
+<li>Open it → <code>Class Defaults → WeaponData</code> → assign or create a <code>UWeaponDataAsset</code></li>
+<li>On the WeaponDataAsset → <code>Kit Weapon Bridge → KitWeaponPoseAsset</code> → assign <code>/Game/ProceduralFPSKIT/Blueprints/Interactables/AmericanRifle/DT_RifleAnimationValues</code> (free reuse of kit's existing rifle pose data)</li>
+<li>Assign the weapon skeletal mesh — kit's <code>ik_hand_gun_N</code> / <code>ik_hand_l_N</code> socket convention if you want iron sights working (skip if not)</li>
+<li>Compile + Save</li>
+</ol>
+</div>
+<div class="card">
+<h3>Slot it into the character</h3>
+<ol class="steps" data-section="next-slot">
+<li>Open the test map's <code>BP_FPCharacter</code> instance</li>
+<li><code>Details → Class Defaults → PrimarySlot → BP_OurWeapon_Rifle</code> (replace the kit rifle)</li>
+<li><code>File → Save Current Level</code></li>
+<li>PIE → equip → fire → confirm: ours fires (trace + damage + ammo via our code), arms animate via kit</li>
+</ol>
+</div>
+
+<button class="reset" onclick="resetProgress()">Reset checkboxes</button>
+
+</div>
+
+<script>
+const STORAGE_KEY = "weapon-phase2-progress-v1";
+function loadProgress() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); } catch (e) { return {}; }
+}
+function saveProgress(state) { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+function updateBar() {
+  const all = document.querySelectorAll("ol.steps > li");
+  const done = document.querySelectorAll("ol.steps > li.done");
+  const pct = all.length ? (done.length / all.length) * 100 : 0;
+  document.getElementById("progress").style.width = pct + "%";
+}
+function resetProgress() {
+  localStorage.removeItem(STORAGE_KEY);
+  document.querySelectorAll("ol.steps > li.done").forEach(li => li.classList.remove("done"));
+  updateBar();
+}
+document.querySelectorAll("ol.steps").forEach((ol, oIdx) => {
+  const section = ol.dataset.section || ("section-" + oIdx);
+  ol.querySelectorAll("li").forEach((li, idx) => {
+    const key = section + ":" + idx;
+    const state = loadProgress();
+    if (state[key]) li.classList.add("done");
+    li.addEventListener("click", () => {
+      li.classList.toggle("done");
+      const s = loadProgress();
+      s[key] = li.classList.contains("done");
+      saveProgress(s);
+      updateBar();
+    });
+  });
+});
+updateBar();
+</script>
+</body>
+</html>
