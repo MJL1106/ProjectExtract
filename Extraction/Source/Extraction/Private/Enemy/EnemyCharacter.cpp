@@ -10,6 +10,11 @@
 #include "WeaponBase.h"
 #include "ExtractionDamageType.h"
 #include "ExtractionTypes.h"
+#include "EnemyArmourComponent.h"
+#include "EnemyShieldComponent.h"
+#include "EnemyGrenadierComponent.h"
+#include "SquadAuraComponent.h"
+#include "EnemySniperTelegraphComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/DamageEvents.h"
@@ -98,6 +103,8 @@ void AEnemyCharacter::BeginPlay()
 	}
 
 	Weapon->InitializeAmmo();
+	// Enemies have no BT reload task — auto-reload regardless of the weapon asset config.
+	Weapon->SetAutoReloadOnEmpty(true);
 }
 
 void AEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -137,7 +144,19 @@ FGenericTeamId AEnemyCharacter::GetGenericTeamId() const
 
 AActor* AEnemyCharacter::GetAIAimTarget() const
 {
-	return CurrentAimTarget.Get();
+	AActor* Target = CurrentAimTarget.Get();
+	if (!IsValid(Target)) return nullptr;
+
+	// MaxAimYawDeg: when > 0, suppress aim until the body has rotated within the arc.
+	// This prevents a heavy from shooting sideways while its slow turn catches up.
+	if (IsValid(ArchetypeData) && ArchetypeData->MaxAimYawDeg > 0.f)
+	{
+		const FVector ToTarget = (Target->GetActorLocation() - GetActorLocation()).GetSafeNormal2D();
+		const float YawDelta = FMath::RadiansToDegrees(FMath::Acos(FVector::DotProduct(GetActorForwardVector().GetSafeNormal2D(), ToTarget)));
+		if (YawDelta > ArchetypeData->MaxAimYawDeg) return nullptr;
+	}
+
+	return Target;
 }
 
 float AEnemyCharacter::GetAIAimSpreadDegrees() const
@@ -164,7 +183,27 @@ float AEnemyCharacter::GetAIAimSpreadDegrees() const
 		}
 	}
 
-	return Spread;
+	// Phase 3: squad aura narrows spread; extra spread from BT tasks (e.g. shield sidearm) widens it.
+	Spread *= CommandSpreadMultiplier;
+	Spread += ExtraSpreadDegrees;
+
+	return FMath::Max(Spread, 0.f);
+}
+
+bool AEnemyCharacter::GetAIAimLocation(FVector& OutLocation) const
+{
+	if (!bHasAimLocationOverride) return false;
+
+	// MaxAimYawDeg: suppress the override aim too until the body has turned far enough.
+	if (IsValid(ArchetypeData) && ArchetypeData->MaxAimYawDeg > 0.f)
+	{
+		const FVector ToOverride = (AimLocationOverride - GetActorLocation()).GetSafeNormal2D();
+		const float YawDelta = FMath::RadiansToDegrees(FMath::Acos(FVector::DotProduct(GetActorForwardVector().GetSafeNormal2D(), ToOverride)));
+		if (YawDelta > ArchetypeData->MaxAimYawDeg) return false;
+	}
+
+	OutLocation = AimLocationOverride;
+	return true;
 }
 
 // --- Aim API ---
@@ -176,6 +215,52 @@ void AEnemyCharacter::SetAimTarget(AActor* NewTarget)
 
 	CurrentAimTarget = NewTarget;
 	AimStartWorldTime = (IsValid(NewTarget) && GetWorld()) ? GetWorld()->GetTimeSeconds() : -1e9f;
+}
+
+void AEnemyCharacter::SetAimLocationOverride(FVector Location)
+{
+	bHasAimLocationOverride = true;
+	AimLocationOverride = Location;
+}
+
+void AEnemyCharacter::ClearAimLocationOverride()
+{
+	bHasAimLocationOverride = false;
+}
+
+void AEnemyCharacter::SetCommandSpreadMultiplier(float Multiplier)
+{
+	CommandSpreadMultiplier = FMath::Max(Multiplier, 0.f);
+}
+
+void AEnemyCharacter::SetExtraSpreadDegrees(float Degrees)
+{
+	ExtraSpreadDegrees = FMath::Max(Degrees, 0.f);
+}
+
+// --- Melee ---
+
+bool AEnemyCharacter::PerformMelee(AActor* Target)
+{
+	if (!IsValid(Target) || !IsValid(ArchetypeData)) return false;
+	if (!ArchetypeData->bCanMelee) return false;
+
+	// Range check
+	const float DistSq = FVector::DistSquared(GetActorLocation(), Target->GetActorLocation());
+	if (DistSq > FMath::Square(ArchetypeData->MeleeRange)) return false;
+
+	// Cooldown check
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	if (Now - LastMeleeWorldTime < ArchetypeData->MeleeCooldown) return false;
+
+	LastMeleeWorldTime = Now;
+
+	// Apply generic damage (no hit region — melee bypasses hitbox multiplier)
+	FDamageEvent MeleeDmgEvent;
+	Target->TakeDamage(ArchetypeData->MeleeDamage, MeleeDmgEvent, GetController(), this);
+
+	OnMeleePerformed.Broadcast();
+	return true;
 }
 
 // --- Move Speed ---
@@ -204,36 +289,126 @@ void AEnemyCharacter::ApplyArchetypeData()
 
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
+	{
 		MoveComp->MaxWalkSpeed = ArchetypeData->PatrolSpeed;
+
+		// Phase 3: heavy turn-rate clamp. Controller yaw must be disabled so the movement component's
+		// bUseControllerDesiredRotation path (which honours RotationRate) drives the body turn instead
+		// of the controller snapping rotation directly each frame.
+		if (ArchetypeData->TurnRateDegPerSec > 0.f)
+		{
+			bUseControllerRotationYaw = false;
+			MoveComp->bOrientRotationToMovement = false;
+			MoveComp->bUseControllerDesiredRotation = true;
+			MoveComp->RotationRate = FRotator(0.f, ArchetypeData->TurnRateDegPerSec, 0.f);
+		}
+	}
 
 	if (IsValid(HealthComponent))
 		HealthComponent->InitializeHealth(ArchetypeData->MaxHealth, ArchetypeData->MaxShield);
+
+	// Phase 3: conditionally add bolt-on components. Guards prevent duplication on re-possess.
+
+	if (ArchetypeData->bHasArmour && !ArmourComponent)
+	{
+		ArmourComponent = NewObject<UEnemyArmourComponent>(this, UEnemyArmourComponent::StaticClass());
+		ArmourComponent->RegisterComponent();
+		ArmourComponent->InitFromArchetype(ArchetypeData);
+	}
+
+	if (ArchetypeData->bHasShield && !ShieldComponent)
+	{
+		ShieldComponent = NewObject<UEnemyShieldComponent>(this, UEnemyShieldComponent::StaticClass());
+		ShieldComponent->RegisterComponent();
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+			ShieldComponent->AttachToComponent(MeshComp, FAttachmentTransformRules::KeepRelativeTransform);
+		ShieldComponent->InitFromArchetype(ArchetypeData);
+	}
+
+	if (ArchetypeData->bIsGrenadier && !GrenadierComponent)
+	{
+		GrenadierComponent = NewObject<UEnemyGrenadierComponent>(this, UEnemyGrenadierComponent::StaticClass());
+		GrenadierComponent->RegisterComponent();
+		GrenadierComponent->InitFromArchetype(ArchetypeData);
+	}
+
+	if (ArchetypeData->bHasCommandAura && !SquadAuraComp)
+	{
+		SquadAuraComp = NewObject<USquadAuraComponent>(this, USquadAuraComponent::StaticClass());
+		SquadAuraComp->RegisterComponent();
+		SquadAuraComp->InitFromArchetype(ArchetypeData);
+	}
+
+	if (ArchetypeData->bIsSniper && !SniperTelegraphComp)
+	{
+		SniperTelegraphComp = NewObject<UEnemySniperTelegraphComponent>(this, UEnemySniperTelegraphComponent::StaticClass());
+		SniperTelegraphComp->RegisterComponent();
+		SniperTelegraphComp->InitFromArchetype(ArchetypeData);
+	}
+
+	OnBoltOnComponentsReady();
 }
 
 // --- TakeDamage ---
+
+EHitRegion AEnemyCharacter::ResolveHitRegion(const FDamageEvent& DamageEvent) const
+{
+	if (!DamageEvent.IsOfType(FPointDamageEvent::ClassID)) return EHitRegion::Torso;
+
+	const FPointDamageEvent& PointDamage = static_cast<const FPointDamageEvent&>(DamageEvent);
+	const EHitRegion* Region = BoneToHitRegionMap.Find(PointDamage.HitInfo.BoneName);
+	return Region ? *Region : EHitRegion::Torso;
+}
 
 float AEnemyCharacter::GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const
 {
 	if (!DamageEvent.IsOfType(FPointDamageEvent::ClassID)) return 1.f;
 
 	const FPointDamageEvent& PointDamage = static_cast<const FPointDamageEvent&>(DamageEvent);
-	const EHitRegion* Region = BoneToHitRegionMap.Find(PointDamage.HitInfo.BoneName);
-	if (!Region) return 1.f;
 	if (!PointDamage.DamageTypeClass) return 1.f;
 
 	const UExtractionDamageType* DmgType = Cast<UExtractionDamageType>(
 		PointDamage.DamageTypeClass->GetDefaultObject());
 	if (!IsValid(DmgType)) return 1.f;
 
-	return DmgType->GetMultiplierForRegion(*Region);
+	return DmgType->GetMultiplierForRegion(ResolveHitRegion(DamageEvent));
 }
 
 float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
 	if (IsValid(HealthComponent) && HealthComponent->IsDead()) return 0.f;
 
-	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
-	const float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent);
+	float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
+
+	// Phase 3: route through shield first — shield may absorb the hit entirely.
+	UEnemyShieldComponent* Shield = ShieldComponent.Get();
+	if (IsValid(Shield) && !Shield->IsShieldBroken())
+	{
+		ActualDamage = Shield->ProcessIncomingDamage(ActualDamage, DamageEvent, DamageCauser);
+		// If the shield absorbed everything, still notify awareness but deal no health damage.
+		if (ActualDamage <= 0.f)
+		{
+			if (IsValid(EventInstigator))
+			{
+				LastDamageInstigator = EventInstigator;
+				LastDamageWorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+
+				if (AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController()))
+				{
+					if (UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent())
+						Awareness->NotifyDamaged(EventInstigator);
+				}
+			}
+			return 0.f;
+		}
+	}
+
+	// Apply hitbox multiplier, then armour directional reduction.
+	float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent);
+
+	UEnemyArmourComponent* Armour = ArmourComponent.Get();
+	if (IsValid(Armour))
+		FinalDamage = Armour->ModifyIncomingDamage(FinalDamage, DamageEvent, DamageCauser);
 
 	if (IsValid(HealthComponent))
 		HealthComponent->TakeDamage(FinalDamage);
@@ -263,6 +438,19 @@ void AEnemyCharacter::HandleDeath()
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+
+	// Shut down bolt-on components before registering as a corpse.
+	if (UEnemyGrenadierComponent* Grenadier = GrenadierComponent.Get())
+		Grenadier->CancelThrow();
+
+	if (USquadAuraComponent* Aura = SquadAuraComp.Get())
+		Aura->DeactivateAura();
+
+	if (UEnemySniperTelegraphComponent* Telegraph = SniperTelegraphComp.Get())
+		Telegraph->CancelTelegraph();
+
+	if (UEnemyShieldComponent* Shield = ShieldComponent.Get())
+		Shield->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
@@ -336,4 +524,13 @@ bool AEnemyCharacter::TryMarkBodyReported()
 	if (bBodyReported) return false;
 	bBodyReported = true;
 	return true;
+}
+
+// --- Damage query ---
+
+bool AEnemyCharacter::WasDamagedRecently(float Window) const
+{
+	const UWorld* World = GetWorld();
+	if (!World) return false;
+	return (World->GetTimeSeconds() - LastDamageWorldTime) <= Window;
 }

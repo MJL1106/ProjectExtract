@@ -22,4 +22,8 @@ public:
 
 	/** Returns the current aim spread in degrees (accounts for settle, movement widen, etc.). */
 	virtual float GetAIAimSpreadDegrees() const = 0;
+
+	/** Optionally returns a world-space position to aim at instead of the target actor's origin.
+	 *  Returns false (default) if no override is active; WeaponBase falls back to actor location. */
+	virtual bool GetAIAimLocation(FVector& OutLocation) const { return false; }
 };

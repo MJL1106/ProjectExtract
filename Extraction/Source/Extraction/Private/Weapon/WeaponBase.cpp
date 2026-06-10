@@ -141,6 +141,12 @@ void AWeaponBase::StartFiring()
 	// Cancel recoil recovery when firing resumes
 	bIsRecoveringRecoil = false;
 
+	// AI path: rebuild the friendly-fire ignore list once per burst so PerformHitscan doesn't
+	// iterate all pawns every shot. Player-owned weapons skip this (PC check in PerformHitscan).
+	const ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
+	if (IsValid(OwnerChar) && !IsValid(Cast<APlayerController>(OwnerChar->GetController())))
+		RebuildFFIgnoreList();
+
 	if (!CanFire()) return;
 
 	if (HasAuthority())
@@ -224,6 +230,43 @@ void AWeaponBase::OnAutoFireTimer()
 	FireShot();
 }
 
+void AWeaponBase::RebuildFFIgnoreList()
+{
+	CachedFFIgnoreList.Reset();
+
+	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
+	if (!IsValid(OwnerChar)) return;
+
+	const IGenericTeamAgentInterface* TeamAgent = Cast<IGenericTeamAgentInterface>(OwnerChar);
+	if (!TeamAgent) return;
+
+	const FGenericTeamId OwnerTeam = TeamAgent->GetGenericTeamId();
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// Count first so we can Reserve before filling.
+	int32 TeamCount = 0;
+	for (TActorIterator<APawn> It(World); It; ++It)
+	{
+		const IGenericTeamAgentInterface* OtherTeam = Cast<IGenericTeamAgentInterface>(*It);
+		if (OtherTeam && IsValid(*It) && *It != OwnerChar && OtherTeam->GetGenericTeamId() == OwnerTeam)
+			++TeamCount;
+	}
+
+	CachedFFIgnoreList.Reserve(TeamCount + 2); // +2 for self + weapon
+	for (TActorIterator<APawn> It(World); It; ++It)
+	{
+		APawn* OtherPawn = *It;
+		if (!IsValid(OtherPawn) || OtherPawn == OwnerChar) continue;
+		const IGenericTeamAgentInterface* OtherTeam = Cast<IGenericTeamAgentInterface>(OtherPawn);
+		if (OtherTeam && OtherTeam->GetGenericTeamId() == OwnerTeam)
+			CachedFFIgnoreList.Add(OtherPawn);
+	}
+
+	FFIgnoreListBuiltTime = World->GetTimeSeconds();
+}
+
 void AWeaponBase::FireShot()
 {
 	if (!IsValid(WeaponData)) return;
@@ -285,7 +328,8 @@ void AWeaponBase::PerformHitscan()
 		float InaccuracyDeg = 0.0f;
 		AActor* AimTarget = nullptr;
 
-		if (const IAIShooterInterface* Shooter = Cast<IAIShooterInterface>(OwnerChar))
+		const IAIShooterInterface* Shooter = Cast<IAIShooterInterface>(OwnerChar);
+		if (Shooter)
 		{
 			AimTarget = Shooter->GetAIAimTarget();
 			InaccuracyDeg = Shooter->GetAIAimSpreadDegrees();
@@ -296,6 +340,17 @@ void AWeaponBase::PerformHitscan()
 			const FVector ToTarget = AimTarget->GetActorLocation() - TraceStart;
 			if (!ToTarget.IsNearlyZero())
 				AimDirection = ToTarget.GetSafeNormal();
+		}
+		else if (Shooter)
+		{
+			// Target is gone but an aim-location override may exist (e.g. heavy suppressing last-known).
+			FVector AimOverride;
+			if (Shooter->GetAIAimLocation(AimOverride))
+			{
+				const FVector ToOverride = AimOverride - TraceStart;
+				if (!ToOverride.IsNearlyZero())
+					AimDirection = ToOverride.GetSafeNormal();
+			}
 		}
 
 		// Apply spread to the fire direction (not the actor rotation — body stays upright).
@@ -317,27 +372,18 @@ void AWeaponBase::PerformHitscan()
 	QueryParams.bReturnPhysicalMaterial = false;
 
 	// Friendly-fire prevention: AI-owned weapons ignore pawns on the same team (via IGenericTeamAgentInterface).
-	// Team is resolved from the owner pawn; if the owner has no team interface, no extra ignores are added.
 	// Player-fired shots (bAIOwned false) remain untouched.
+	// The ignore list is built once in StartFiring and refreshed every ~1s during sustained fire so we
+	// don't iterate all pawns per shot (~20 pawns * fire rate = significant per-frame cost).
 	const bool bAIOwned = !IsValid(PC);
 	if (bAIOwned)
 	{
-		if (UWorld* QueryWorld = GetWorld())
-		{
-			const IGenericTeamAgentInterface* TeamAgent = Cast<IGenericTeamAgentInterface>(OwnerChar);
-			if (TeamAgent)
-			{
-				const FGenericTeamId OwnerTeam = TeamAgent->GetGenericTeamId();
-				for (TActorIterator<APawn> It(QueryWorld); It; ++It)
-				{
-					APawn* OtherPawn = *It;
-					if (!IsValid(OtherPawn) || OtherPawn == OwnerChar) continue;
-					const IGenericTeamAgentInterface* OtherTeam = Cast<IGenericTeamAgentInterface>(OtherPawn);
-					if (OtherTeam && OtherTeam->GetGenericTeamId() == OwnerTeam)
-						QueryParams.AddIgnoredActor(OtherPawn);
-				}
-			}
-		}
+		// Refresh if stale (sustained auto fire running longer than 1s since last build).
+		const UWorld* QueryWorld = GetWorld();
+		if (QueryWorld && (QueryWorld->GetTimeSeconds() - FFIgnoreListBuiltTime) > 1.f)
+			RebuildFFIgnoreList();
+
+		QueryParams.AddIgnoredActors(CachedFFIgnoreList);
 	}
 
 	if (UWorld* World = GetWorld())

@@ -80,6 +80,10 @@ public:
 	/** Initialize ammo from data asset (called after spawn/equip) */
 	void InitializeAmmo();
 
+	/** Override the auto-reload flag set in the data asset. Enemies force this true so they never
+	 *  go permanently silent — no BT reload task exists for enemies. */
+	void SetAutoReloadOnEmpty(bool bEnable) { bAutoReloadOnEmpty = bEnable; }
+
 	// ---- Delegates ----
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
@@ -150,6 +154,9 @@ private:
 	void FireShot();
 	void PerformHitscan();
 	void OnAutoFireTimer();
+
+	/** Rebuilds CachedFFIgnoreList from current world pawns sharing the owner's team. AI path only. */
+	void RebuildFFIgnoreList();
 
 	// ---- Reload ----
 
@@ -223,4 +230,9 @@ private:
 
 	/** Resolved on BeginPlay: WeaponMesh if valid, else first USkeletalMeshComponent found. Avoids per-shot FindComponentByClass. */
 	TWeakObjectPtr<UMeshComponent> CachedEffectiveMesh;
+
+	/** Friendly-fire ignore list rebuilt once per StartFiring call. Per-shot TActorIterator is too expensive. */
+	TArray<AActor*> CachedFFIgnoreList;
+	/** World time when CachedFFIgnoreList was last built. Used for the 1s refresh during sustained fire. */
+	float FFIgnoreListBuiltTime = -1e9f;
 };

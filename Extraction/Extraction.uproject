@@ -23,7 +23,7 @@
 			]
 		},
 		{
-			"Name": "AgentIntegrationKit",
+			"Name": "NeoStackAI",
 			"Enabled": true,
 			"SupportedTargetPlatforms": [
 				"Win64",
