@@ -66,10 +66,18 @@ void UBTTask_OfficerCommand::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* 
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	AAIController* Controller = OwnerComp.GetAIOwner();
 	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
-	if (!BB || !Pawn) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	if (!BB || !Pawn)
+	{
+		CleanUp(OwnerComp, Mem);
+		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	}
 
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
-	if (!IsValid(Enemy)) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	if (!IsValid(Enemy))
+	{
+		CleanUp(OwnerComp, Mem);
+		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	}
 
 	AActor* Target = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
 	if (!IsValid(Target))
@@ -159,6 +167,23 @@ void UBTTask_OfficerCommand::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* 
 					Mem->RallyCooldownTimer = DA->RallyCooldown;
 				}
 			}
+
+			// Bounding overwatch trigger (Phase 7) — cooldown is squad-persisted (survives task restarts)
+			if (!Squad->IsBoundingActive())
+			{
+				const float WorldTime = Pawn->GetWorld()->GetTimeSeconds();
+				const float TimeSinceLast = WorldTime - Squad->GetLastBoundingAttemptTime();
+				if (TimeSinceLast >= DA->BoundingCooldown)
+				{
+					Squad->RecordBoundingAttempt();
+					if (Squad->StartBounding(Enemy))
+					{
+						UBarkSubsystem* BoundingBarks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
+						if (BoundingBarks && Squad->TryClaimSquadBark(EBarkType::CoveringGo))
+							BoundingBarks->RequestBark(Enemy, DA->BarkSet, EBarkType::CoveringGo, DA->DisplayName);
+					}
+				}
+			}
 		}
 	}
 }
@@ -214,7 +239,8 @@ bool UBTTask_OfficerCommand::ComputeHoldPosition(APawn* Pawn, AActor* Target, UE
 	}
 	else
 	{
-		// Squadless officer fallback: world scan
+		// Squadless officer fallback: world scan (expensive — should be rare)
+		UE_LOG(LogEnemyAI, Verbose, TEXT("%s: squadless officer fallback — using TActorIterator world scan"), *GetNameSafe(Pawn));
 		for (TActorIterator<AEnemyCharacter> It(Pawn->GetWorld()); It; ++It)
 		{
 			AEnemyCharacter* Ally = *It;

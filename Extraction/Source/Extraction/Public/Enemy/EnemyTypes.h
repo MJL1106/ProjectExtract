@@ -42,6 +42,15 @@ enum class EMoraleState : uint8
 	Broken		UMETA(DisplayName = "Broken"),
 };
 
+/** Bounding overwatch maneuver role assigned by the squad coordinator (Phase 7). */
+UENUM(BlueprintType)
+enum class EEnemyManeuverRole : uint8
+{
+	None		UMETA(DisplayName = "None"),
+	Suppressor	UMETA(DisplayName = "Suppressor"),
+	Flanker		UMETA(DisplayName = "Flanker"),
+};
+
 /** Mission phase — set by level scripting, consumed by the director for pacing and composition. */
 UENUM(BlueprintType)
 enum class EMissionPhase : uint8
@@ -76,4 +85,5 @@ enum class EBarkType : uint8
 	Flanking		UMETA(DisplayName = "Flanking"),
 	Suppressing		UMETA(DisplayName = "Suppressing"),
 	FocusTarget		UMETA(DisplayName = "Focus Target"),
+	CoveringGo		UMETA(DisplayName = "Covering Go"),
 };

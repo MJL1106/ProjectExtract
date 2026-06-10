@@ -472,4 +472,14 @@ public:
 	/** Minimum seconds between officer focus-fire calls. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer", meta = (ClampMin = "0.0"))
 	float FocusCallCooldown = 10.f;
+
+	// --- Bounding Overwatch (Phase 7 — officer-only) ---
+
+	/** Minimum seconds between bounding overwatch attempts (officer-side cooldown). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer|Bounding", meta = (ClampMin = "0.0"))
+	float BoundingCooldown = 20.f;
+
+	/** Minimum number of living squad members (including officer) required to start a bounding maneuver. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer|Bounding", meta = (ClampMin = "3"))
+	int32 BoundingMinSquadSize = 3;
 };

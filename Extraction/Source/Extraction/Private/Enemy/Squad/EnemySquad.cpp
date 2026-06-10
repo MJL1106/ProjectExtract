@@ -6,6 +6,9 @@
 #include "EnemyMoraleComponent.h"
 #include "EnemySquadSubsystem.h"
 #include "HealthComponent.h"
+#include "BarkSubsystem.h"
+#include "WeaponBase.h"
+#include "BehaviorTree/BlackboardComponent.h"
 
 // ---------------------------------------------------------------------------
 // Membership
@@ -104,6 +107,7 @@ bool UEnemySquad::TryClaimRole(EEnemySquadRole Role, AEnemyCharacter* Claimant)
 	TWeakObjectPtr<AEnemyCharacter>* Holder = RoleHolders.Find(Role);
 	if (Holder)
 	{
+		if (Holder->Get() == Claimant) return true;
 		if (IsMemberAlive(*Holder)) return false;
 		RoleHolders.Remove(Role);
 	}
@@ -191,6 +195,14 @@ void UEnemySquad::ClearFocusTarget()
 void UEnemySquad::NotifyMemberDied(AEnemyCharacter* Dead, bool bWasOfficer)
 {
 	if (bWasOfficer) ClearFocusTarget();
+
+	if (bBoundingActive)
+	{
+		if (bWasOfficer || Dead == BoundingSuppressor.Get() || Dead == BoundingFlanker.Get())
+		{
+			StopBounding(bWasOfficer ? TEXT("OfficerDied") : TEXT("ManeuverMemberDied"));
+		}
+	}
 
 	if (!AnyMemberAwareAtOrAbove(EEnemyAwarenessState::Searching, Dead)) return;
 
@@ -299,6 +311,287 @@ bool UEnemySquad::TryClaimSquadBark(EBarkType Type, float Window)
 	if (LastTime && (Now - *LastTime) < Window) return false;
 
 	LastSquadBarkTime.FindOrAdd(Type) = Now;
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// Bounding overwatch (Phase 7)
+// ---------------------------------------------------------------------------
+
+bool UEnemySquad::StartBounding(AEnemyCharacter* Officer)
+{
+	if (!IsValid(Officer)) return false;
+	if (bBoundingActive) return false;
+
+	const UEnemyArchetypeData* DA = Officer->GetArchetypeData();
+	if (!IsValid(DA) || !DA->bHasCommandAura) return false;
+
+	if (!SquadTarget.IsValid()) return false;
+
+	const int32 MinOtherMembers = FMath::Max(2, DA->BoundingMinSquadSize - 1);
+	int32 EligibleCount = 0;
+	for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
+	{
+		if (M.Get() == Officer) continue;
+		if (IsEligibleForManeuver(M)) ++EligibleCount;
+	}
+	if (EligibleCount < MinOtherMembers) return false;
+
+	AEnemyCharacter* Suppressor = PickBoundingCandidate(true, nullptr);
+	if (!IsValid(Suppressor)) return false;
+
+	AEnemyCharacter* Flanker = PickBoundingCandidate(false, Suppressor);
+	if (!IsValid(Flanker)) return false;
+
+	if (!TryClaimRole(EEnemySquadRole::Suppressor, Suppressor)) return false;
+	if (!TryClaimRole(EEnemySquadRole::Flanker, Flanker))
+	{
+		ReleaseRole(EEnemySquadRole::Suppressor, Suppressor);
+		return false;
+	}
+
+	bBoundingActive = true;
+	BoundingOfficer = Officer;
+	BoundingSuppressor = Suppressor;
+	BoundingFlanker = Flanker;
+
+	PushManeuverRoleToBB(Suppressor, EEnemyManeuverRole::Suppressor);
+	PushManeuverRoleToBB(Flanker, EEnemyManeuverRole::Flanker);
+
+	UE_LOG(LogEnemySquad, Log, TEXT("[%s] Bounding started — Suppressor=%s, Flanker=%s"),
+		*SquadId.ToString(), *Suppressor->GetName(), *Flanker->GetName());
+
+	return true;
+}
+
+void UEnemySquad::StopBounding(const TCHAR* Reason)
+{
+	if (!bBoundingActive) return;
+
+	AEnemyCharacter* Supp = BoundingSuppressor.Get();
+	AEnemyCharacter* Flank = BoundingFlanker.Get();
+
+	if (IsValid(Supp))
+	{
+		ReleaseRole(EEnemySquadRole::Suppressor, Supp);
+		PushManeuverRoleToBB(Supp, EEnemyManeuverRole::None);
+	}
+	if (IsValid(Flank))
+	{
+		ReleaseRole(EEnemySquadRole::Flanker, Flank);
+		PushManeuverRoleToBB(Flank, EEnemyManeuverRole::None);
+	}
+
+	bBoundingActive = false;
+	bSuppressorEngaged = false;
+	BoundingOfficer.Reset();
+	BoundingSuppressor.Reset();
+	BoundingFlanker.Reset();
+
+	UE_LOG(LogEnemySquad, Log, TEXT("[%s] Bounding stopped — Reason=%s"), *SquadId.ToString(), Reason);
+}
+
+bool UEnemySquad::IsBoundingActive()
+{
+	if (!bBoundingActive) return false;
+
+	if (!SquadTarget.IsValid() || !BoundingSuppressor.IsValid() || !BoundingFlanker.IsValid())
+	{
+		StopBounding(TEXT("StaleState"));
+		return false;
+	}
+
+	return true;
+}
+
+bool UEnemySquad::IsSuppressionLive() const
+{
+	if (!bBoundingActive) return false;
+	if (!bSuppressorEngaged) return false;
+	if (!BoundingSuppressor.IsValid()) return false;
+
+	AEnemyCharacter* Supp = BoundingSuppressor.Get();
+	if (!IsValid(Supp)) return false;
+
+	UHealthComponent* Health = Supp->GetHealthComponent();
+	if (!IsValid(Health) || Health->IsDead()) return false;
+
+	AWeaponBase* Weapon = Supp->GetCurrentWeapon();
+	if (!IsValid(Weapon)) return false;
+	if (Weapon->IsReloading()) return false;
+
+	return true;
+}
+
+bool UEnemySquad::IsSuppressionHolding() const
+{
+	if (!bBoundingActive) return false;
+	if (!bSuppressorEngaged) return false;
+	if (!BoundingSuppressor.IsValid()) return false;
+
+	AEnemyCharacter* Supp = BoundingSuppressor.Get();
+	if (!IsValid(Supp)) return false;
+
+	UHealthComponent* Health = Supp->GetHealthComponent();
+	if (!IsValid(Health) || Health->IsDead()) return false;
+
+	AWeaponBase* Weapon = Supp->GetCurrentWeapon();
+	return IsValid(Weapon) && Weapon->IsReloading();
+}
+
+void UEnemySquad::SetSuppressorEngaged(AEnemyCharacter* Who, bool bEngaged)
+{
+	if (Who != BoundingSuppressor.Get()) return;
+	bSuppressorEngaged = bEngaged;
+}
+
+void UEnemySquad::NotifyFlankerArrived(AEnemyCharacter* Flanker)
+{
+	if (!bBoundingActive) return;
+	if (bSwapInProgress) return;
+	if (Flanker != BoundingFlanker.Get()) return;
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	const float Now = World->GetTimeSeconds();
+	if (Now - LastSwapTime < MinSwapInterval) return;
+
+	bSwapInProgress = true;
+
+	AEnemyCharacter* OldSupp = BoundingSuppressor.Get();
+	AEnemyCharacter* OldFlank = BoundingFlanker.Get();
+
+	if (!IsValid(OldSupp) || !IsValid(OldFlank))
+	{
+		bSwapInProgress = false;
+		StopBounding(TEXT("SwapFailed_InvalidMember"));
+		return;
+	}
+
+	ReleaseRole(EEnemySquadRole::Suppressor, OldSupp);
+	ReleaseRole(EEnemySquadRole::Flanker, OldFlank);
+
+	if (!TryClaimRole(EEnemySquadRole::Suppressor, OldFlank) ||
+		!TryClaimRole(EEnemySquadRole::Flanker, OldSupp))
+	{
+		bSwapInProgress = false;
+		StopBounding(TEXT("SwapFailed_TokenConflict"));
+		return;
+	}
+
+	BoundingSuppressor = OldFlank;
+	BoundingFlanker = OldSupp;
+	bSuppressorEngaged = false;
+	LastSwapTime = Now;
+
+	PushManeuverRoleToBB(OldFlank, EEnemyManeuverRole::Suppressor);
+	PushManeuverRoleToBB(OldSupp, EEnemyManeuverRole::Flanker);
+
+	UBarkSubsystem* BarkSub = World->GetSubsystem<UBarkSubsystem>();
+	if (IsValid(BarkSub))
+	{
+		const UEnemyArchetypeData* SuppDA = OldFlank->GetArchetypeData();
+		if (IsValid(SuppDA) && SuppDA->BarkSet != nullptr && TryClaimSquadBark(EBarkType::CoveringGo))
+		{
+			BarkSub->RequestBark(OldFlank, SuppDA->BarkSet, EBarkType::CoveringGo, SuppDA->DisplayName);
+		}
+	}
+
+	UE_LOG(LogEnemySquad, Log, TEXT("[%s] Bounding swapped — Suppressor=%s, Flanker=%s"),
+		*SquadId.ToString(), *OldFlank->GetName(), *OldSupp->GetName());
+
+	bSwapInProgress = false;
+}
+
+void UEnemySquad::RecordBoundingAttempt()
+{
+	UWorld* World = GetWorld();
+	if (World) LastBoundingAttemptTime = World->GetTimeSeconds();
+}
+
+void UEnemySquad::NotifyManeuverMemberBlocked(AEnemyCharacter* Member)
+{
+	if (!bBoundingActive) return;
+	if (Member != BoundingFlanker.Get() && Member != BoundingSuppressor.Get()) return;
+
+	StopBounding(TEXT("MemberBlocked"));
+}
+
+void UEnemySquad::PushManeuverRoleToBB(AEnemyCharacter* Member, EEnemyManeuverRole Role)
+{
+	if (!IsValid(Member)) return;
+
+	AEnemyAIController* AIC = Cast<AEnemyAIController>(Member->GetController());
+	if (!IsValid(AIC)) return;
+
+	AIC->SetManeuverRole(Role);
+}
+
+AEnemyCharacter* UEnemySquad::PickBoundingCandidate(bool bPreferLOS, AEnemyCharacter* Exclude) const
+{
+	AEnemyCharacter* Best = nullptr;
+	float BestScore = -1.f;
+	const FVector TargetLoc = SquadLastKnown;
+	AEnemyCharacter* Officer = GetOfficer();
+
+	for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
+	{
+		if (!IsEligibleForManeuver(M)) continue;
+
+		AEnemyCharacter* Candidate = M.Get();
+		if (Candidate == Exclude) continue;
+		if (Candidate == Officer) continue;
+
+		float Score = 0.f;
+
+		if (bPreferLOS)
+		{
+			AEnemyAIController* AIC = Cast<AEnemyAIController>(Candidate->GetController());
+			if (IsValid(AIC))
+			{
+				UBlackboardComponent* BB = AIC->GetBlackboardComponent();
+				if (IsValid(BB) && BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight))
+				{
+					Score += 100.f;
+				}
+			}
+			float Dist = FVector::Dist(Candidate->GetActorLocation(), TargetLoc);
+			Score += FMath::Max(0.f, 5000.f - Dist);
+		}
+		else
+		{
+			UHealthComponent* Health = Candidate->GetHealthComponent();
+			if (IsValid(Health)) Score += Health->GetHealthPercent() * 100.f;
+		}
+
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			Best = Candidate;
+		}
+	}
+
+	return Best;
+}
+
+bool UEnemySquad::IsEligibleForManeuver(const TWeakObjectPtr<AEnemyCharacter>& Member) const
+{
+	if (!IsMemberAlive(Member)) return false;
+
+	const UEnemyArchetypeData* DA = Member->GetArchetypeData();
+	if (!IsValid(DA)) return false;
+	if (DA->Archetype != EEnemyArchetype::Grunt) return false;
+
+	AEnemyAIController* AIC = Cast<AEnemyAIController>(Member->GetController());
+	if (!IsValid(AIC)) return false;
+
+	UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness) || Awareness->GetAwarenessState() != EEnemyAwarenessState::Combat) return false;
+
+	UBlackboardComponent* BB = AIC->GetBlackboardComponent();
+	if (!IsValid(BB) || !BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget)) return false;
+
 	return true;
 }
 
