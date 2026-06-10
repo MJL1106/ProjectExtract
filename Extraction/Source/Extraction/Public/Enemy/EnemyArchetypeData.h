@@ -10,6 +10,8 @@
 class AWeaponBase;
 class UBehaviorTree;
 class UBarkSetData;
+class AEnemyGrenadeProjectile;
+class UStaticMesh;
 
 UCLASS(BlueprintType)
 class EXTRACTION_API UEnemyArchetypeData : public UDataAsset
@@ -115,6 +117,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
 	float LostContactGrace = 4.f;
 
+	/** Maximum yaw offset (degrees) between actor forward and the aim target before GetAIAimTarget/GetAIAimLocation
+	 *  returns null/false — forces the weapon to fall back to forward-fire while the body rotates.
+	 *  0 = unlimited (default for all non-heavy archetypes). Heavy DA sets ~60. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0", ClampMax = "180.0"))
+	float MaxAimYawDeg = 0.f;
+
 	// --- Suspicion (awareness ladder fill/decay; suspicion runs 0-100, Combat at 100) ---
 
 	/** Suspicion gained per second from a sighted target with all modifiers at 1 (close, centred, walking, standing). */
@@ -197,4 +205,157 @@ public:
 	/** Seconds after death before the actor is destroyed. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Lifecycle", meta = (ClampMin = "0.0"))
 	float DestroyDelay = 3.f;
+
+	// --- Armour (Phase 3 — Heavy) ---
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Armour")
+	bool bHasArmour = false;
+
+	/** Arc (degrees, centred on forward) inside which armour reduces damage. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Armour", meta = (ClampMin = "0.0", ClampMax = "360.0"))
+	float ArmourFrontalArcDeg = 140.f;
+
+	/** Damage multiplier for hits inside the frontal arc. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Armour", meta = (ClampMin = "0.0"))
+	float ArmourFrontalMultiplier = 0.3f;
+
+	/** Damage multiplier for hits outside the frontal arc (rear). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Armour", meta = (ClampMin = "0.1"))
+	float ArmourRearMultiplier = 1.5f;
+
+	/** Number of frontal armour plates before the arc protection degrades to 1.0. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Armour", meta = (ClampMin = "1"))
+	int32 ArmourPlateCount = 3;
+
+	// --- Shield (Phase 3 — Shield archetype) ---
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield")
+	bool bHasShield = false;
+
+	/** Hit points of the shield before it breaks. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield", meta = (ClampMin = "1.0"))
+	float ShieldHealth = 400.f;
+
+	/** Arc (degrees, centred on forward) inside which the shield blocks hits. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield", meta = (ClampMin = "0.0", ClampMax = "360.0"))
+	float ShieldBlockArcDeg = 150.f;
+
+	/** Extra aim spread (degrees) applied to the sidearm peeked around the shield. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield", meta = (ClampMin = "0.0"))
+	float ShieldSidearmSpreadDeg = 6.f;
+
+	/** Walk speed (cm/s) while advancing behind the shield. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield", meta = (ClampMin = "1.0"))
+	float ShieldAdvanceSpeed = 220.f;
+
+	/** Static mesh for the shield (soft ref — BP assigns; loaded on demand by the shield component). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield")
+	TSoftObjectPtr<UStaticMesh> ShieldMesh;
+
+	// --- Grenadier (Phase 3) ---
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier")
+	bool bIsGrenadier = false;
+
+	/** Max number of grenades the enemy carries. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1"))
+	int32 GrenadeSupply = 3;
+
+	/** Minimum seconds between grenade throws. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.5"))
+	float GrenadeCooldown = 12.f;
+
+	/** Seconds until the grenade detonates after spawning. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.5"))
+	float GrenadeFuseTime = 2.5f;
+
+	/** Seconds of aim telegraph before spawning the grenade. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.1"))
+	float GrenadeTelegraphTime = 1.0f;
+
+	/** Minimum throw distance (cm). Targets closer than this won't be lobbed at. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.0"))
+	float GrenadeMinRange = 500.f;
+
+	/** Maximum throw distance (cm). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1.0"))
+	float GrenadeMaxRange = 2000.f;
+
+	/** Damage dealt at the blast centre. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1.0"))
+	float GrenadeDamage = 80.f;
+
+	/** Radius (cm) of the radial damage sphere. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1.0"))
+	float GrenadeDamageRadius = 350.f;
+
+	/** Seconds the target must be LOS-blocked before the grenadier lobs. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.5"))
+	float GrenadeLobTriggerLOSBlockedTime = 4.f;
+
+	/** Projectile class spawned on throw. Blueprint-assigned. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier")
+	TSubclassOf<AEnemyGrenadeProjectile> GrenadeProjectileClass;
+
+	// --- Officer aura (Phase 3) ---
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer")
+	bool bHasCommandAura = false;
+
+	/** Radius (cm) within which nearby allies receive the spread multiplier buff. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer", meta = (ClampMin = "100.0"))
+	float AuraRadius = 1500.f;
+
+	/** Aim spread multiplier applied to buffed allies (< 1 = tighter spread). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer", meta = (ClampMin = "0.1"))
+	float AuraSpreadMultiplier = 0.75f;
+
+	// --- Melee (Phase 3 — Rusher, any archetype that can melee) ---
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Melee")
+	bool bCanMelee = false;
+
+	/** Distance (cm) within which PerformMelee can connect. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Melee", meta = (ClampMin = "1.0"))
+	float MeleeRange = 180.f;
+
+	/** Damage dealt per melee strike. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Melee", meta = (ClampMin = "1.0"))
+	float MeleeDamage = 35.f;
+
+	/** Minimum seconds between melee strikes. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Melee", meta = (ClampMin = "0.1"))
+	float MeleeCooldown = 1.5f;
+
+	// --- Sniper (Phase 3) ---
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Sniper")
+	bool bIsSniper = false;
+
+	/** Seconds the aim laser shows before the shot fires. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Sniper", meta = (ClampMin = "0.1"))
+	float SniperAimTelegraphTime = 2.0f;
+
+	/** Minimum seconds between sniper shots. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Sniper", meta = (ClampMin = "0.5"))
+	float SniperShotCooldown = 4.f;
+
+	/** Number of shots before the sniper relocates to a new perch. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Sniper", meta = (ClampMin = "1"))
+	int32 SniperRelocateAfterShots = 2;
+
+	/** If true the sniper immediately relocates when damaged. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Sniper")
+	bool bSniperRelocateWhenDamaged = true;
+
+	/** Radius (cm) for EQS perch search. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Sniper", meta = (ClampMin = "100.0"))
+	float SniperPerchSearchRadius = 3000.f;
+
+	// --- Heavy (Phase 3) ---
+
+	/** Maximum degrees per second the character can rotate toward its desired facing.
+	 *  0 = no clamp (default for all non-heavy archetypes). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Heavy", meta = (ClampMin = "0.0"))
+	float TurnRateDegPerSec = 0.f;
 };

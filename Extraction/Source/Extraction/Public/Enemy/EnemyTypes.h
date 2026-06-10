@@ -51,4 +51,5 @@ enum class EBarkType : uint8
 	Contact			UMETA(DisplayName = "Contact"),
 	LostTarget		UMETA(DisplayName = "Lost Target"),
 	BodyFound		UMETA(DisplayName = "Body Found"),
+	GrenadeOut		UMETA(DisplayName = "Grenade Out"),
 };

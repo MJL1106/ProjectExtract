@@ -18,7 +18,15 @@ class AWeaponBase;
 class APatrolRoute;
 class AEnemyAIController;
 
+// Phase 3 bolt-on components — forward-declared; headers live in Enemy/Components/ (authored by slices B/C).
+class UEnemyArmourComponent;
+class UEnemyShieldComponent;
+class UEnemyGrenadierComponent;
+class USquadAuraComponent;
+class UEnemySniperTelegraphComponent;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTakedownExecuted, AActor*, Instigator);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleePerformed);
 
 UCLASS(Blueprintable)
 class EXTRACTION_API AEnemyCharacter : public ACharacter,
@@ -41,6 +49,7 @@ public:
 	// --- IAIShooterInterface ---
 	virtual AActor* GetAIAimTarget() const override;
 	virtual float GetAIAimSpreadDegrees() const override;
+	virtual bool GetAIAimLocation(FVector& OutLocation) const override;
 
 	// --- IGenericTeamAgentInterface ---
 	virtual FGenericTeamId GetGenericTeamId() const override;
@@ -50,6 +59,58 @@ public:
 	/** Sets the actor to aim at. Resets the settle timer on a new target; clears on nullptr. */
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Combat")
 	void SetAimTarget(AActor* NewTarget);
+
+	/** Overrides the world-space aim point used by the weapon when no aim target actor is set.
+	 *  Used by BTTask_HeavySuppress to fire at LastKnownLocation. */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Combat")
+	void SetAimLocationOverride(FVector Location);
+
+	/** Clears a previously set aim location override. */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Combat")
+	void ClearAimLocationOverride();
+
+	/** Multiplier applied to the final spread value. Set/cleared by USquadAuraComponent. */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Combat")
+	void SetCommandSpreadMultiplier(float Multiplier);
+
+	/** Additive spread (degrees) stacked on top of the natural spread.
+	 *  BT tasks set this while in a special state and clear it on exit/abort. */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Combat")
+	void SetExtraSpreadDegrees(float Degrees);
+
+	/** Attempts a melee attack on Target. Enforces range from DA and internal cooldown.
+	 *  Returns true if the attack connected (damage was applied). */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Melee")
+	bool PerformMelee(AActor* Target);
+
+	/** Fired whenever a melee strike connects — animation/FX hook for BP. */
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Melee")
+	FOnMeleePerformed OnMeleePerformed;
+
+	/** Resolves which hit region a damage event maps to (used by armour component and internal hitbox path). */
+	EHitRegion ResolveHitRegion(const FDamageEvent& DamageEvent) const;
+
+	// --- Bolt-on component accessors (nullptr if archetype doesn't use them) ---
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	UEnemyArmourComponent* GetArmourComponent() const { return ArmourComponent.Get(); }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	UEnemyShieldComponent* GetShieldComponent() const { return ShieldComponent.Get(); }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	UEnemyGrenadierComponent* GetGrenadierComponent() const { return GrenadierComponent.Get(); }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	USquadAuraComponent* GetSquadAuraComponent() const { return SquadAuraComp.Get(); }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	UEnemySniperTelegraphComponent* GetSniperTelegraphComponent() const { return SniperTelegraphComp.Get(); }
+
+	/** Fired after ApplyArchetypeData finishes registering all bolt-on components.
+	 *  Called at possess time, before BP BeginPlay fires on placed pawns. BP can bind here for init FX. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Components")
+	void OnBoltOnComponentsReady();
 
 	// --- Move speed ---
 
@@ -74,6 +135,10 @@ public:
 
 	/** First caller gets true and owns reporting this body to the director. */
 	bool TryMarkBodyReported();
+
+	/** True if TakeDamage was called within the last Window seconds. Used by sniper relocate-on-damaged. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Combat")
+	bool WasDamagedRecently(float Window) const;
 
 	// --- Archetype ---
 
@@ -120,6 +185,33 @@ private:
 	/** World time at which the current aim target was set. Used to compute settle alpha without Tick. */
 	float AimStartWorldTime = -1e9f;
 	float LastDamageWorldTime = -1e9f;
+
+	// Phase 3 — spread modifiers
+	float CommandSpreadMultiplier = 1.f;
+	float ExtraSpreadDegrees = 0.f;
+
+	// Phase 3 — aim location override (used when no aim target actor is set)
+	bool bHasAimLocationOverride = false;
+	FVector AimLocationOverride = FVector::ZeroVector;
+
+	// Phase 3 — melee cooldown
+	float LastMeleeWorldTime = -1e9f;
+
+	// Phase 3 — bolt-on components (conditionally created in ApplyArchetypeData)
+	UPROPERTY()
+	TObjectPtr<UEnemyArmourComponent> ArmourComponent;
+
+	UPROPERTY()
+	TObjectPtr<UEnemyShieldComponent> ShieldComponent;
+
+	UPROPERTY()
+	TObjectPtr<UEnemyGrenadierComponent> GrenadierComponent;
+
+	UPROPERTY()
+	TObjectPtr<USquadAuraComponent> SquadAuraComp;
+
+	UPROPERTY()
+	TObjectPtr<UEnemySniperTelegraphComponent> SniperTelegraphComp;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Enemy|Tags")
 	FGameplayTagContainer OwnedTags;
