@@ -3,6 +3,7 @@
 #include "EnemyAIController.h"
 #include "EnemyCharacter.h"
 #include "EnemyAwarenessComponent.h"
+#include "EnemyMoraleComponent.h"
 #include "EnemyArchetypeData.h"
 #include "PatrolRoute.h"
 #include "HealthComponent.h"
@@ -29,6 +30,7 @@ const FName AEnemyAIController::BB_TargetInRange(TEXT("TargetInRange"));
 const FName AEnemyAIController::BB_CoverSlot(TEXT("CoverSlot"));
 const FName AEnemyAIController::BB_HasCover(TEXT("HasCover"));
 const FName AEnemyAIController::BB_PatrolRoute(TEXT("PatrolRoute"));
+const FName AEnemyAIController::BB_MoraleState(TEXT("MoraleState"));
 
 AEnemyAIController::AEnemyAIController()
 {
@@ -122,6 +124,15 @@ void AEnemyAIController::OnPossess(APawn* InPawn)
 			this, &AEnemyAIController::HandleAwarenessStateChanged);
 	}
 
+	// Phase 4: subscribe to morale state changes → write BB key
+	if (UEnemyMoraleComponent* Morale = Enemy->GetMoraleComponent())
+	{
+		Morale->OnMoraleStateChanged.AddUniqueDynamic(this, &AEnemyAIController::HandleMoraleStateChanged);
+
+		if (IsValid(BBComp))
+			BBComp->SetValueAsEnum(BB_MoraleState, static_cast<uint8>(EMoraleState::Confident));
+	}
+
 	// Bind pawn death for controller teardown
 	if (IsValid(Enemy->GetHealthComponent()))
 		Enemy->GetHealthComponent()->OnDeath.AddUniqueDynamic(this, &AEnemyAIController::HandlePawnDeath);
@@ -130,6 +141,16 @@ void AEnemyAIController::OnPossess(APawn* InPawn)
 void AEnemyAIController::OnUnPossess()
 {
 	ReleaseCoverSlotIfClaimed();
+
+	// Phase 4: unbind morale delegate before releasing the pawn
+	if (APawn* PreviousPawn = GetPawn())
+	{
+		if (AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(PreviousPawn))
+		{
+			if (UEnemyMoraleComponent* Morale = Enemy->GetMoraleComponent())
+				Morale->OnMoraleStateChanged.RemoveDynamic(this, &AEnemyAIController::HandleMoraleStateChanged);
+		}
+	}
 
 	if (BrainComponent)
 		BrainComponent->StopLogic(TEXT("Unpossessed"));
@@ -182,6 +203,15 @@ void AEnemyAIController::HandleAwarenessStateChanged(EEnemyAwarenessState OldSta
 	// Un-crouch the pawn if it was crouching in cover
 	if (APawn* ControlledPawn = GetPawn())
 		if (ACharacter* Char = Cast<ACharacter>(ControlledPawn)) Char->UnCrouch();
+}
+
+void AEnemyAIController::HandleMoraleStateChanged(EMoraleState OldState, EMoraleState NewState)
+{
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	BB->SetValueAsEnum(BB_MoraleState, static_cast<uint8>(NewState));
+	UE_LOG(LogEnemyAI, Log, TEXT("%s: morale %d -> %d"), *GetName(), static_cast<int32>(OldState), static_cast<int32>(NewState));
 }
 
 void AEnemyAIController::ReleaseCoverSlotIfClaimed()

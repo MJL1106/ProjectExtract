@@ -11,6 +11,7 @@
 class USkeletalMeshComponent;
 class UMeshComponent;
 class UWeaponDataAsset;
+class USuppressionComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponFired);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnReloadComplete);
@@ -158,6 +159,12 @@ private:
 	/** Rebuilds CachedFFIgnoreList from current world pawns sharing the owner's team. AI path only. */
 	void RebuildFFIgnoreList();
 
+	/** Rebuilds CachedSuppressionTargets: hostile pawns with USuppressionComponent. All shooters. */
+	void RebuildSuppressionTargets();
+
+	/** After hitscan trace, report near-misses to suppression-eligible pawns near the bullet segment. */
+	void ReportNearMisses(const FVector& TraceStart, const FVector& TraceEnd, AActor* HitActor);
+
 	// ---- Reload ----
 
 	void OnReloadFinished();
@@ -235,4 +242,19 @@ private:
 	TArray<AActor*> CachedFFIgnoreList;
 	/** World time when CachedFFIgnoreList was last built. Used for the 1s refresh during sustained fire. */
 	float FFIgnoreListBuiltTime = -1e9f;
+
+	/** Near-miss radius for suppression reporting (cm). Pawn within this distance of the bullet segment gets suppressed. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Suppression", meta = (ClampMin = "0.0"))
+	float NearMissRadius = 150.f;
+
+	struct FSuppressionTarget
+	{
+		TWeakObjectPtr<APawn> Pawn;
+		TWeakObjectPtr<USuppressionComponent> Component;
+	};
+
+	/** Hostile pawns with USuppressionComponent, rebuilt per burst (mirrors CachedFFIgnoreList pattern). */
+	TArray<FSuppressionTarget> CachedSuppressionTargets;
+	/** World time when CachedSuppressionTargets was last built. */
+	float SuppressionTargetsBuiltTime = -1e9f;
 };

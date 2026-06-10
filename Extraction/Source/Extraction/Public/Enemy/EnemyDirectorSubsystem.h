@@ -10,6 +10,7 @@
 class AEnemyCharacter;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnGlobalAlertChanged, EGlobalAlertLevel, OldLevel, EGlobalAlertLevel, NewLevel);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnEnemyDied, AEnemyCharacter*, DeadEnemy, FVector, Location, bool, bWasOfficer);
 
 UCLASS()
 class EXTRACTION_API UEnemyDirectorSubsystem : public UWorldSubsystem
@@ -38,6 +39,10 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Director")
 	FOnGlobalAlertChanged OnGlobalAlertChanged;
+
+	/** Broadcast when an enemy dies and is registered as a corpse. Morale component subscribes for ally-died / officer-died events. */
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Director")
+	FOnEnemyDied OnEnemyDied;
 
 private:
 	/** Raises the alert level (never lowers it). Broadcasts on change. */

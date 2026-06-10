@@ -3,6 +3,7 @@
 #include "EnemyDirectorSubsystem.h"
 #include "EnemyAIController.h"
 #include "EnemyCharacter.h"
+#include "EnemyArchetypeData.h"
 
 void UEnemyDirectorSubsystem::ReportEnemySearching()
 {
@@ -30,6 +31,9 @@ void UEnemyDirectorSubsystem::TripAlarm()
 void UEnemyDirectorSubsystem::RegisterCorpse(AEnemyCharacter* Corpse)
 {
 	if (!IsValid(Corpse)) return;
+
+	const bool bOfficer = IsValid(Corpse->GetArchetypeData()) && Corpse->GetArchetypeData()->bHasCommandAura;
+	OnEnemyDied.Broadcast(Corpse, Corpse->GetActorLocation(), bOfficer);
 
 	Corpses.RemoveAll([](const TWeakObjectPtr<AEnemyCharacter>& Entry) { return !Entry.IsValid(); });
 	Corpses.Add(Corpse);

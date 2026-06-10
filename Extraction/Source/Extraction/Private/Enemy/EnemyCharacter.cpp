@@ -15,6 +15,8 @@
 #include "EnemyGrenadierComponent.h"
 #include "SquadAuraComponent.h"
 #include "EnemySniperTelegraphComponent.h"
+#include "SuppressionComponent.h"
+#include "EnemyMoraleComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/DamageEvents.h"
@@ -28,6 +30,8 @@ AEnemyCharacter::AEnemyCharacter()
 	SetMinNetUpdateFrequency(5.f);
 
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
+	MoraleComponent = CreateDefaultSubobject<UEnemyMoraleComponent>(TEXT("MoraleComponent"));
 
 	AIControllerClass = AEnemyAIController::StaticClass();
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
@@ -183,6 +187,10 @@ float AEnemyCharacter::GetAIAimSpreadDegrees() const
 		}
 	}
 
+	// Phase 4: suppression widens spread before the command multiplier
+	if (IsValid(SuppressionComponent))
+		Spread += ArchetypeData->SuppressionSpreadPenaltyDeg * SuppressionComponent->GetSuppression01();
+
 	// Phase 3: squad aura narrows spread; extra spread from BT tasks (e.g. shield sidearm) widens it.
 	Spread *= CommandSpreadMultiplier;
 	Spread += ExtraSpreadDegrees;
@@ -307,6 +315,12 @@ void AEnemyCharacter::ApplyArchetypeData()
 	if (IsValid(HealthComponent))
 		HealthComponent->InitializeHealth(ArchetypeData->MaxHealth, ArchetypeData->MaxShield);
 
+	if (IsValid(SuppressionComponent))
+		SuppressionComponent->ConfigureSuppression(ArchetypeData->SuppressionResistance);
+
+	if (IsValid(MoraleComponent))
+		MoraleComponent->InitFromArchetype(ArchetypeData);
+
 	// Phase 3: conditionally add bolt-on components. Guards prevent duplication on re-possess.
 
 	if (ArchetypeData->bHasArmour && !ArmourComponent)
@@ -426,6 +440,10 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 		}
 	}
 
+	// Phase 4: broadcast hit-react for flinch montages (only while alive)
+	if (FinalDamage > 0.f && IsValid(HealthComponent) && !HealthComponent->IsDead())
+		OnHitReact.Broadcast(ResolveHitRegion(DamageEvent));
+
 	return FinalDamage;
 }
 
@@ -452,11 +470,32 @@ void AEnemyCharacter::HandleDeath()
 	if (UEnemyShieldComponent* Shield = ShieldComponent.Get())
 		Shield->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
+	if (IsValid(SuppressionComponent))
+		SuppressionComponent->DeactivateForDeath();
+
+	if (IsValid(MoraleComponent))
+		MoraleComponent->DeactivateForDeath();
+
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
 	{
 		MoveComp->StopMovementImmediately();
 		MoveComp->DisableMovement();
+	}
+
+	if (bPendingTakedownDeath)
+	{
+		if (UWorld* W = GetWorld())
+		{
+			W->GetTimerManager().SetTimer(
+				TakedownRagdollTimerHandle, this,
+				&AEnemyCharacter::ApplyRagdoll,
+				TakedownRagdollDelay, false);
+		}
+	}
+	else
+	{
+		ApplyRagdoll();
 	}
 
 	UWorld* World = GetWorld();
@@ -477,6 +516,18 @@ void AEnemyCharacter::HandleDeath()
 		&AEnemyCharacter::DestroyAfterDeath,
 		ArchetypeData->DestroyDelay,
 		false);
+}
+
+void AEnemyCharacter::ApplyRagdoll()
+{
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!IsValid(MeshComp)) return;
+
+	if (UAnimInstance* AnimInst = MeshComp->GetAnimInstance())
+		AnimInst->Montage_StopGroupByName(0.f, NAME_None);
+
+	MeshComp->SetCollisionProfileName(TEXT("Ragdoll"));
+	MeshComp->SetSimulatePhysics(true);
 }
 
 void AEnemyCharacter::DestroyAfterDeath()
@@ -508,6 +559,7 @@ bool AEnemyCharacter::ExecuteTakedown(AActor* TakedownInstigator)
 {
 	if (!CanBeTakenDown(TakedownInstigator)) return false;
 
+	bPendingTakedownDeath = true;
 	OnTakedownExecuted.Broadcast(TakedownInstigator);
 
 	// Silent kill: generic damage event (no hit-region path), no noise emission anywhere on this path.

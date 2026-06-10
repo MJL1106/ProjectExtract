@@ -8,6 +8,7 @@
 #include "WeaponDataAsset.h"
 #include "TraversalComponent.h"
 #include "CompanionAnimInstance.h"
+#include "SuppressionComponent.h"
 #include "ExtractionTypes.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/WidgetComponent.h"
@@ -26,6 +27,7 @@ ACompanionCharacter::ACompanionCharacter()
 	GetCapsuleComponent()->SetCapsuleSize(34.0f, 88.0f);
 
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
 
 	HealthWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("HealthWidget"));
@@ -175,6 +177,7 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 
 bool ACompanionCharacter::IsSuppressed(float Window) const
 {
+	if (IsValid(SuppressionComponent) && SuppressionComponent->IsSuppressed()) return true;
 	if (Window <= 0.f || !GetWorld()) return false;
 	return (GetWorld()->GetTimeSeconds() - LastDamageWorldTime) < Window;
 }
