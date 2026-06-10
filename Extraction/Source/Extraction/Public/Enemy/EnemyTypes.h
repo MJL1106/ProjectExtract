@@ -64,4 +64,7 @@ enum class EBarkType : uint8
 	ManDown			UMETA(DisplayName = "Man Down"),
 	Pinned			UMETA(DisplayName = "Pinned"),
 	FallingBack		UMETA(DisplayName = "Falling Back"),
+	Flanking		UMETA(DisplayName = "Flanking"),
+	Suppressing		UMETA(DisplayName = "Suppressing"),
+	FocusTarget		UMETA(DisplayName = "Focus Target"),
 };

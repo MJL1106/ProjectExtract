@@ -11,6 +11,8 @@
 class UBlackboardComponent;
 class UEnemyArchetypeData;
 class UEnemyDirectorSubsystem;
+class UEnemySquadSubsystem;
+class UEnemySquad;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAwarenessStateChanged, EEnemyAwarenessState, OldState, EEnemyAwarenessState, NewState);
 
@@ -36,6 +38,12 @@ public:
 
 	/** Called when the controlled pawn dies; stops the update timer and suppresses callbacks. */
 	void HandlePawnDeath();
+
+	/** Squad sighting ingress — called by UEnemySquad::ReportSighting on every other living member.
+	 *  If below Searching, transitions to Searching at the reported location (reuses hearing/investigate path).
+	 *  Never forces Combat — members confirm Combat through their own perception.
+	 *  If already in Combat with the same target, refreshes LastKnownLocation. */
+	void ReportSquadSighting(AActor* Target, const FVector& LastKnown);
 
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Awareness")
 	FOnAwarenessStateChanged OnAwarenessStateChanged;
@@ -75,6 +83,13 @@ private:
 	void HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus);
 	void HandleBodySighted(class AEnemyCharacter* Body);
 	void Bark(EBarkType Type) const;
+
+	/** Threat-scored target selection (design §10). Runs on the existing timer cadence during Combat.
+	 *  Returns the highest-scoring perceived hostile, or nullptr if none qualify. */
+	AActor* ScoreAndSelectTarget() const;
+
+	/** Egress: report our current combat target + last-known to the squad (rate-limited by the squad). */
+	void BroadcastSightingToSquad();
 
 	UFUNCTION()
 	void HandleGlobalAlertChanged(EGlobalAlertLevel OldLevel, EGlobalAlertLevel NewLevel);
@@ -116,6 +131,19 @@ private:
 
 	// Searching timeout
 	float TimeSpentSearching = 0.f;
+
+	// Threat-scored targeting: track the actor that last damaged us and when
+	TWeakObjectPtr<AActor> RecentDamageInstigatorPawn;
+	float RecentDamageWorldTime = -1e9f;
+
+	// Guard against squad sighting relay feedback loops: ReportSquadSighting must NOT re-broadcast
+	bool bInSquadSightingRelay = false;
+
+	// Cached squad subsystem reference (set in Initialize)
+	TWeakObjectPtr<UEnemySquadSubsystem> SquadSubsystem;
+
+	/** Seconds within which damage from a target counts for the RecentDamage threat weight. */
+	static constexpr float RecentDamageWindow = 4.f;
 
 	FTimerHandle UpdateTimerHandle;
 };

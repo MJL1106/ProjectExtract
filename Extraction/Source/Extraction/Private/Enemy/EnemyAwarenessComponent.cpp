@@ -5,6 +5,8 @@
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
 #include "EnemyDirectorSubsystem.h"
+#include "Squad/EnemySquadSubsystem.h"
+#include "Squad/EnemySquad.h"
 #include "BarkSubsystem.h"
 #include "BarkSetData.h"
 #include "HealthComponent.h"
@@ -46,6 +48,8 @@ void UEnemyAwarenessComponent::Initialize(UBlackboardComponent* InBB, const UEne
 	Director = World->GetSubsystem<UEnemyDirectorSubsystem>();
 	if (UEnemyDirectorSubsystem* Dir = Director.Get())
 		Dir->OnGlobalAlertChanged.AddUniqueDynamic(this, &UEnemyAwarenessComponent::HandleGlobalAlertChanged);
+
+	SquadSubsystem = World->GetSubsystem<UEnemySquadSubsystem>();
 
 	// Stagger the repeating update timer with a random initial delay to avoid all enemies ticking together
 	const float InitialDelay = FMath::RandRange(0.f, UpdateInterval);
@@ -135,13 +139,16 @@ void UEnemyAwarenessComponent::HandleSightStimulus(AActor* Actor, const FAIStimu
 void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus)
 {
 	if (!Stimulus.WasSuccessfullySensed()) return;
-	if (CurrentState == EEnemyAwarenessState::Combat) return;
 	if (!IsValid(ArchetypeData)) return;
 
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Actor);
+	Track.LastStimulusLocation = Stimulus.StimulusLocation;
+
+	// During Combat, only update track bookkeeping (location) — suspicion gain is irrelevant
+	if (CurrentState == EEnemyAwarenessState::Combat) return;
+
 	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain;
 	Track.Suspicion = FMath::Min(Track.Suspicion + Gain, NoiseSuspicionCap);
-	Track.LastStimulusLocation = Stimulus.StimulusLocation;
 }
 
 // --- Damage Notification ---
@@ -155,7 +162,28 @@ void UEnemyAwarenessComponent::NotifyDamaged(AController* Instigator)
 	if (!IsValid(InstigatorPawn)) return;
 	if (!IsHostile(InstigatorPawn)) return;
 
+	RecentDamageInstigatorPawn = InstigatorPawn;
+	RecentDamageWorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : -1e9f;
+
+	// Ensure the instigator has a suspicion track so threat scoring can find it even when
+	// perception never delivered a stimulus (suppressed weapon, out of hearing range — QA #6).
+	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(InstigatorPawn);
+	Track.LastStimulusLocation = InstigatorPawn->GetActorLocation();
+
 	EnterCombat(InstigatorPawn, false);
+
+	// Fix #4: leaderless focus-fire — if squad has no focus target, claim it on damage
+	if (UEnemySquadSubsystem* SquadSS = SquadSubsystem.Get())
+	{
+		const AAIController* MyController = Cast<AAIController>(GetOwner());
+		AEnemyCharacter* MyChar = MyController ? Cast<AEnemyCharacter>(MyController->GetPawn()) : nullptr;
+		if (IsValid(MyChar))
+		{
+			UEnemySquad* Squad = SquadSS->GetSquadFor(MyChar);
+			if (IsValid(Squad))
+				Squad->SetFocusTarget(InstigatorPawn, MyChar);
+		}
+	}
 }
 
 // --- Pawn Death ---
@@ -202,13 +230,33 @@ void UEnemyAwarenessComponent::UpdateCombat()
 
 	if (bTargetGone)
 	{
-		// Target died or vanished — no "lost him" bark for a kill.
-		TransitionToSearching(false);
+		// Target died — try to immediately acquire a sighted candidate before dropping to Searching
+		AActor* NextTarget = ScoreAndSelectTarget();
+		if (IsValid(NextTarget))
+		{
+			const FSuspicionTrack* Track = SuspicionTracks.Find(NextTarget);
+			EnterCombat(NextTarget, Track && Track->bSighted);
+		}
+		else
+		{
+			TransitionToSearching(false);
+		}
+		return;
 	}
-	else if (bHadLOS)
+
+	// Threat-scored target re-evaluation each tick
+	AActor* BestTarget = ScoreAndSelectTarget();
+	if (IsValid(BestTarget) && BestTarget != CombatTarget.Get())
+	{
+		const FSuspicionTrack* Track = SuspicionTracks.Find(BestTarget);
+		EnterCombat(BestTarget, Track && Track->bSighted);
+	}
+
+	if (bHadLOS)
 	{
 		LastKnownLocation = CombatTarget->GetActorLocation();
 		WriteBBVectors();
+		BroadcastSightingToSquad();
 	}
 	else
 	{
@@ -332,8 +380,6 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 	bHadLOS = bConfirmedVisual;
 	TimeSinceLOSLost = 0.f;
 
-	// Zero the meters but keep the tracks — bSighted bookkeeping must survive Combat so a
-	// continuously-visible second hostile is still known when Combat ends (no fresh gain event fires).
 	for (auto& Pair : SuspicionTracks)
 		Pair.Value.Suspicion = 0.f;
 
@@ -341,6 +387,9 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 	if (CurrentState != EEnemyAwarenessState::Combat)
 		Bark(EBarkType::Contact);
 	SetState(EEnemyAwarenessState::Combat);
+
+	if (bConfirmedVisual)
+		BroadcastSightingToSquad();
 }
 
 void UEnemyAwarenessComponent::TransitionToSearching(bool bContactLost)
@@ -453,6 +502,142 @@ bool UEnemyAwarenessComponent::IsHostile(AActor* Actor) const
 
 bool UEnemyAwarenessComponent::IsActorAlive(const AActor* Actor)
 {
-	const UHealthComponent* HC = Actor ? Actor->FindComponentByClass<UHealthComponent>() : nullptr;
+	if (!Actor) return false;
+
+	// Fast path for enemy characters (avoids FindComponentByClass at ~133 calls/s with 20 AI)
+	if (const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Actor))
+	{
+		const UHealthComponent* HC = Enemy->GetHealthComponent();
+		return !HC || !HC->IsDead();
+	}
+
+	const UHealthComponent* HC = Actor->FindComponentByClass<UHealthComponent>();
 	return !HC || !HC->IsDead();
+}
+
+// --- Threat-Scored Target Selection (design §10) ---
+
+AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
+{
+	if (!IsValid(ArchetypeData)) return nullptr;
+
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	if (!IsValid(MyPawn)) return nullptr;
+
+	// Officer focus-fire override: if squad has a focus target we can perceive, it wins outright
+	if (UEnemySquadSubsystem* SquadSS = SquadSubsystem.Get())
+	{
+		const AEnemyCharacter* MyChar = Cast<AEnemyCharacter>(MyPawn);
+		if (IsValid(MyChar))
+		{
+			UEnemySquad* Squad = SquadSS->GetSquadFor(MyChar);
+			if (IsValid(Squad))
+			{
+				AActor* FocusTarget = Squad->GetFocusTarget();
+				if (IsValid(FocusTarget) && IsActorAlive(FocusTarget))
+				{
+					const FSuspicionTrack* FocusTrack = SuspicionTracks.Find(FocusTarget);
+					if (FocusTrack && FocusTrack->bSighted) return FocusTarget;
+				}
+			}
+		}
+	}
+
+	const float SightRadiusInv = 1.f / FMath::Max(ArchetypeData->SightRadius, 1.f);
+	const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+
+	AActor* BestTarget = nullptr;
+	float BestScore = -1.f;
+	float IncumbentScore = -1.f;
+
+	for (const auto& Pair : SuspicionTracks)
+	{
+		AActor* Candidate = Pair.Key.Get();
+		if (!IsValid(Candidate)) continue;
+		if (!IsActorAlive(Candidate)) continue;
+		if (!IsHostile(Candidate)) continue;
+
+		const FSuspicionTrack& Track = Pair.Value;
+
+		const float Dist = FVector::Dist(MyPawn->GetActorLocation(), Candidate->GetActorLocation());
+		const float ProximityTerm = ArchetypeData->ThreatWeightProximity * (1.f - FMath::Clamp(Dist * SightRadiusInv, 0.f, 1.f));
+		const float LOSTerm = ArchetypeData->ThreatWeightLOS * (Track.bSighted ? 1.f : 0.f);
+
+		float DamageTerm = 0.f;
+		if (RecentDamageInstigatorPawn.Get() == Candidate && (WorldTime - RecentDamageWorldTime) < RecentDamageWindow)
+			DamageTerm = ArchetypeData->ThreatWeightRecentDamage;
+
+		const float Score = ProximityTerm + LOSTerm + DamageTerm;
+
+		if (Candidate == CombatTarget.Get())
+			IncumbentScore = Score;
+
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			BestTarget = Candidate;
+		}
+	}
+
+	if (!IsValid(BestTarget)) return nullptr;
+
+	// Hysteresis: challenger must beat the incumbent by the hysteresis factor to switch
+	if (BestTarget != CombatTarget.Get() && CombatTarget.IsValid() && IncumbentScore >= 0.f)
+	{
+		if (BestScore < IncumbentScore * ArchetypeData->TargetSwitchHysteresis)
+			return CombatTarget.Get();
+	}
+
+	return BestTarget;
+}
+
+// --- Squad Sighting Egress ---
+
+void UEnemyAwarenessComponent::BroadcastSightingToSquad()
+{
+	if (bInSquadSightingRelay) return;
+
+	UEnemySquadSubsystem* SquadSS = SquadSubsystem.Get();
+	if (!IsValid(SquadSS)) return;
+
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const AEnemyCharacter* MyChar = MyController ? Cast<AEnemyCharacter>(MyController->GetPawn()) : nullptr;
+	if (!IsValid(MyChar)) return;
+
+	UEnemySquad* Squad = SquadSS->GetSquadFor(MyChar);
+	if (!IsValid(Squad)) return;
+
+	AActor* Target = CombatTarget.Get();
+	if (!IsValid(Target)) return;
+
+	Squad->ReportSighting(Target, LastKnownLocation);
+}
+
+// --- Squad Sighting Ingress ---
+
+void UEnemyAwarenessComponent::ReportSquadSighting(AActor* Target, const FVector& LastKnown)
+{
+	if (bStopped) return;
+	if (!IsValid(Target)) return;
+
+	// Guard: set flag to prevent re-broadcast from any combat-entry path this call triggers
+	TGuardValue<bool> RelayGuard(bInSquadSightingRelay, true);
+
+	if (CurrentState == EEnemyAwarenessState::Combat)
+	{
+		if (CombatTarget.Get() == Target)
+		{
+			LastKnownLocation = LastKnown;
+			WriteBBVectors();
+		}
+		return;
+	}
+
+	// Below Combat: transition to Searching at the reported location (never force Combat)
+	SetInvestigateLocation(LastKnown);
+	TimeSpentSearching = 0.f;
+	if (CurrentState < EEnemyAwarenessState::Searching)
+		Bark(EBarkType::SearchArea);
+	SetState(EEnemyAwarenessState::Searching);
 }

@@ -417,4 +417,59 @@ public:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale|Events", meta = (ClampMin = "0.0"))
 	float MoraleGainTargetDowned = 15.f;
+
+	// --- Squad Coordination (Phase 5) ---
+
+	/** Minimum spacing (cm) between squad members when scoring cover slots. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Squad", meta = (ClampMin = "0.0"))
+	float MinAllySpacing = 300.f;
+
+	// --- Threat-Scored Targeting (Phase 5) ---
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0"))
+	float ThreatWeightProximity = 1.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0"))
+	float ThreatWeightLOS = 0.75f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0"))
+	float ThreatWeightRecentDamage = 1.5f;
+
+	/** Incumbent target must be beaten by this factor before switching. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "1.0"))
+	float TargetSwitchHysteresis = 1.25f;
+
+	// --- Flanking (Phase 5) ---
+
+	/** Minimum seconds between flank attempts (cooldown tracked in BT NodeMemory). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Squad", meta = (ClampMin = "0.0"))
+	float FlankAttemptCooldown = 8.f;
+
+	/** Health fraction below which a flanker aborts the move. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Squad", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FlankAbortHealthFraction = 0.35f;
+
+	// --- Officer Rally (Phase 5) ---
+
+	/** Morale points added to each living squad member on rally. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer|Rally", meta = (ClampMin = "0.0"))
+	float RallyMoraleBoost = 30.f;
+
+	/** Temporary morale floor raise applied on rally. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer|Rally", meta = (ClampMin = "0.0"))
+	float RallyFloorRaise = 20.f;
+
+	/** Seconds the rally floor raise lasts before expiring. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer|Rally", meta = (ClampMin = "1.0"))
+	float RallyFloorDuration = 20.f;
+
+	/** Minimum seconds between officer rally calls. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer|Rally", meta = (ClampMin = "0.0"))
+	float RallyCooldown = 25.f;
+
+	// --- Focus Fire (Phase 5) ---
+
+	/** Minimum seconds between officer focus-fire calls. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer", meta = (ClampMin = "0.0"))
+	float FocusCallCooldown = 10.f;
 };

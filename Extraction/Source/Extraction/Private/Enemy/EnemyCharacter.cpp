@@ -17,6 +17,7 @@
 #include "EnemySniperTelegraphComponent.h"
 #include "SuppressionComponent.h"
 #include "EnemyMoraleComponent.h"
+#include "EnemySquadSubsystem.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/DamageEvents.h"
@@ -80,6 +81,13 @@ void AEnemyCharacter::BeginPlay()
 		return;
 	}
 
+	// Phase 5: register with the squad subsystem (tolerates non-game worlds where subsystem is null).
+	if (UWorld* W = GetWorld())
+	{
+		if (UEnemySquadSubsystem* SquadSys = W->GetSubsystem<UEnemySquadSubsystem>())
+			SquadSys->RegisterMember(this, SquadId);
+	}
+
 	// Spawn weapon on authority only
 	if (!HasAuthority()) return;
 	if (!ArchetypeData->WeaponClass) return;
@@ -113,10 +121,26 @@ void AEnemyCharacter::BeginPlay()
 
 void AEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (const UWorld* World = GetWorld())
+	if (UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearAllTimersForObject(this);
 
+		if (UEnemySquadSubsystem* SquadSys = World->GetSubsystem<UEnemySquadSubsystem>())
+			SquadSys->UnregisterMember(this);
+	}
+
 	Super::EndPlay(EndPlayReason);
+}
+
+UEnemySquad* AEnemyCharacter::GetSquad() const
+{
+	const UWorld* World = GetWorld();
+	if (!World) return nullptr;
+
+	UEnemySquadSubsystem* SquadSys = World->GetSubsystem<UEnemySquadSubsystem>();
+	if (!IsValid(SquadSys)) return nullptr;
+
+	return SquadSys->GetSquadFor(this);
 }
 
 // --- IGameplayTagAssetInterface ---

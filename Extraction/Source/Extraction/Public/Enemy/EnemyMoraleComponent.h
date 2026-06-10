@@ -52,6 +52,14 @@ public:
 	/** This enemy dropped below low-HP threshold (one-shot, called once). */
 	void NotifyLowHealth();
 
+	// --- Phase 5: squad-routed ingress (called by UEnemySquad, bypasses radius check) ---
+
+	/** A squad member died. Applies ally/officer death morale loss without radius check. */
+	void NotifySquadAllyDied(bool bWasOfficer);
+
+	/** Officer rally: boosts morale, temporarily raises morale floor, un-pins Broken/Shaken. */
+	void NotifyRally(float MoraleBoost, float FloorRaise);
+
 	/** Delegate broadcast on state transitions. Slice C's controller subscribes to write BB. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Morale")
 	FOnMoraleStateChanged OnMoraleStateChanged;
@@ -90,6 +98,16 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UBarkSetData> CachedBarkSet;
+
+	// --- Phase 5: rally floor ---
+	float RallyFloorRaise = 0.f;
+	float RallyFloorDuration = 20.f;
+	FTimerHandle RallyFloorTimerHandle;
+
+	void ClearRallyFloor();
+
+	/** Returns the effective morale floor (base + any active rally raise). */
+	float GetEffectiveMoraleFloor() const;
 
 	// --- Timers ---
 	FTimerHandle MoraleTickHandle;

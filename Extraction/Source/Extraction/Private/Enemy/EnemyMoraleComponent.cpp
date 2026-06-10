@@ -54,6 +54,7 @@ void UEnemyMoraleComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(MoraleTickHandle);
+		World->GetTimerManager().ClearTimer(RallyFloorTimerHandle);
 
 		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
 			Director->OnEnemyDied.RemoveDynamic(this, &UEnemyMoraleComponent::HandleEnemyDied);
@@ -70,10 +71,13 @@ void UEnemyMoraleComponent::DeactivateForDeath()
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(MoraleTickHandle);
+		World->GetTimerManager().ClearTimer(RallyFloorTimerHandle);
 
 		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
 			Director->OnEnemyDied.RemoveDynamic(this, &UEnemyMoraleComponent::HandleEnemyDied);
 	}
+
+	RallyFloorRaise = 0.f;
 
 	if (CachedSuppressionComp.IsValid())
 		CachedSuppressionComp->OnSuppressedStateChanged.RemoveDynamic(this, &UEnemyMoraleComponent::HandleSuppressedStateChanged);
@@ -96,6 +100,7 @@ void UEnemyMoraleComponent::InitFromArchetype(const UEnemyArchetypeData* Data)
 	LossFlanked = Data->MoraleLossFlanked;
 	GainDamagedTarget = Data->MoraleGainDamagedTarget;
 	GainTargetDowned = Data->MoraleGainTargetDowned;
+	RallyFloorDuration = Data->RallyFloorDuration;
 	CachedBarkSet = Data->BarkSet;
 
 	CurrentMorale = 100.f;
@@ -125,6 +130,60 @@ void UEnemyMoraleComponent::NotifyLowHealth()
 	ApplyMoraleDelta(-LossLowHealth);
 }
 
+// --- Phase 5: squad-routed ingress ---
+
+void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer)
+{
+	if (bFearless) return;
+	if (!OwnerEnemy.IsValid()) return;
+	if (CachedHealthComp.IsValid() && CachedHealthComp->IsDead()) return;
+
+	const float Loss = bWasOfficer ? LossOfficerDied : LossAllyDied;
+	ApplyMoraleDelta(-Loss);
+	RequestBark(EBarkType::ManDown);
+}
+
+void UEnemyMoraleComponent::NotifyRally(float MoraleBoost, float FloorRaise)
+{
+	if (bFearless) return;
+	if (!OwnerEnemy.IsValid()) return;
+	if (CachedHealthComp.IsValid() && CachedHealthComp->IsDead()) return;
+
+	// Apply floor raise BEFORE boost so the clamp in ApplyMoraleDelta uses the new floor.
+	RallyFloorRaise = FMath::Max(RallyFloorRaise, FloorRaise);
+
+	// Clamp morale up to the new effective floor (rally can't leave you below it).
+	CurrentMorale = FMath::Max(CurrentMorale, GetEffectiveMoraleFloor());
+
+	ApplyMoraleDelta(MoraleBoost);
+
+	// Guarantee post-rally morale clears BrokenThreshold so the enemy actually un-pins.
+	const float MinRallyMorale = BrokenThreshold + 1.f;
+	if (CurrentMorale < MinRallyMorale)
+		CurrentMorale = FMath::Min(MinRallyMorale, 100.f);
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	World->GetTimerManager().ClearTimer(RallyFloorTimerHandle);
+	World->GetTimerManager().SetTimer(
+		RallyFloorTimerHandle, this, &UEnemyMoraleComponent::ClearRallyFloor,
+		RallyFloorDuration, false);
+
+	EvaluateState();
+}
+
+void UEnemyMoraleComponent::ClearRallyFloor()
+{
+	RallyFloorRaise = 0.f;
+	EvaluateState();
+}
+
+float UEnemyMoraleComponent::GetEffectiveMoraleFloor() const
+{
+	return FMath::Max(MoraleFloor + RallyFloorRaise, 0.f);
+}
+
 // --- Director death handler ---
 
 void UEnemyMoraleComponent::HandleEnemyDied(AEnemyCharacter* DeadEnemy, FVector Location, bool bWasOfficer)
@@ -133,6 +192,12 @@ void UEnemyMoraleComponent::HandleEnemyDied(AEnemyCharacter* DeadEnemy, FVector 
 	if (!OwnerEnemy.IsValid()) return;
 	if (CachedHealthComp.IsValid() && CachedHealthComp->IsDead()) return;
 	if (DeadEnemy == OwnerEnemy.Get()) return;
+
+	// Phase 5: skip radius path when the dead enemy shares the owner's squad. Same-squad deaths
+	// arrive via NotifySquadAllyDied (exactly-once). FName comparison is used because the subsystem
+	// ejects the dead member before this broadcast fires, making pointer lookups unreliable.
+	if (OwnerEnemy->SquadId != NAME_None && IsValid(DeadEnemy) && DeadEnemy->SquadId == OwnerEnemy->SquadId)
+		return;
 
 	const float DistSq = FVector::DistSquared(OwnerEnemy->GetActorLocation(), Location);
 
@@ -198,7 +263,7 @@ void UEnemyMoraleComponent::ApplyMoraleDelta(float Delta)
 {
 	const float ScaledDelta = (Delta < 0.f) ? (Delta / MoraleEventResistance) : Delta;
 	const float OldMorale = CurrentMorale;
-	CurrentMorale = FMath::Clamp(CurrentMorale + ScaledDelta, FMath::Max(MoraleFloor, 0.f), 100.f);
+	CurrentMorale = FMath::Clamp(CurrentMorale + ScaledDelta, GetEffectiveMoraleFloor(), 100.f);
 
 	if (ScaledDelta < 0.f && GetWorld())
 		LastLossWorldTime = GetWorld()->GetTimeSeconds();

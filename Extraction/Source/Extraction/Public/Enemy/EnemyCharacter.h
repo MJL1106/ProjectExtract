@@ -29,6 +29,10 @@ class UEnemySniperTelegraphComponent;
 class USuppressionComponent;
 class UEnemyMoraleComponent;
 
+// Phase 5 — squad coordination
+class UEnemySquadSubsystem;
+class UEnemySquad;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTakedownExecuted, AActor*, Instigator);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleePerformed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyHitReact, EHitRegion, Region);
@@ -175,6 +179,15 @@ public:
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Data")
 	TObjectPtr<UEnemyArchetypeData> ArchetypeData;
+
+	/** Designer-assigned squad identifier. Enemies with the same SquadId share sightings and coordinate.
+	 *  NAME_None = squadless (radius-based morale fallback, no coordination). */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Enemy|Squad")
+	FName SquadId;
+
+	/** Returns this enemy's squad (nullptr if squadless or subsystem unavailable). */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Squad")
+	UEnemySquad* GetSquad() const;
 
 	/** Patrol route assigned in the level for this character. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Enemy|Patrol")
