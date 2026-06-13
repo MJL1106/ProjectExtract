@@ -18,7 +18,10 @@ public class Extraction : ModuleRules
 			"UMG",
 			"Slate",
 			"SlateCore",
-			"GameplayTags"
+			"GameplayTags",
+			"AIModule",
+			"GameplayTasks",
+			"NavigationSystem"
 		});
 
 		PrivateDependencyModuleNames.AddRange(new string[] { });
@@ -30,10 +33,22 @@ public class Extraction : ModuleRules
 			"Extraction/Public/Animation",
 			"Extraction/Public/Game",
 			"Extraction/Public/Components",
+			"Extraction/Public/Movement",
 			"Extraction/Public/UI",
 			"Extraction/Public/Data",
 			"Extraction/Public/Weapon",
-			"Extraction/Public/Enemy"
+			"Extraction/Public/Enemy",
+			"Extraction/Public/Enemy/Components",
+			"Extraction/Public/Enemy/Squad",
+			"Extraction/Public/Enemy/Director",
+			"Extraction/Public/Companion",
+			"Extraction/Public/AI",
+			"Extraction/Public/AI/BTS",
+			"Extraction/Public/AI/Tasks",
+			"Extraction/Public/AI/EQS",
+			"Extraction/Public/AI/Navigation",
+			"Extraction/Public/AI/Cover",
+			"Extraction/Public/World"
 		});
 
 		// Private subfolder include paths
@@ -43,10 +58,22 @@ public class Extraction : ModuleRules
 			"Extraction/Private/Animation",
 			"Extraction/Private/Game",
 			"Extraction/Private/Components",
+			"Extraction/Private/Movement",
 			"Extraction/Private/UI",
 			"Extraction/Private/Data",
 			"Extraction/Private/Weapon",
-			"Extraction/Private/Enemy"
+			"Extraction/Private/Enemy",
+			"Extraction/Private/Enemy/Components",
+			"Extraction/Private/Enemy/Squad",
+			"Extraction/Private/Enemy/Director",
+			"Extraction/Private/Companion",
+			"Extraction/Private/AI",
+			"Extraction/Private/AI/BTS",
+			"Extraction/Private/AI/Tasks",
+			"Extraction/Private/AI/EQS",
+			"Extraction/Private/AI/Navigation",
+			"Extraction/Private/AI/Cover",
+			"Extraction/Private/World"
 		});
 	}
 }

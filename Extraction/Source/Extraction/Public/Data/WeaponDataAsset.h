@@ -49,6 +49,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "1"))
 	int32 MagazineSize = 30;
 
+	/** Minimum ammo needed for a useful peek/burst. Companion reloads instead of peeking when current mag < this value. */
+	UPROPERTY(EditDefaultsOnly, Category = "Combat", meta = (ClampMin = 1, UIMin = 1))
+	int32 BurstCount = 3;
+
 	/** Starting reserve ammo (total extra rounds carried) */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "0"))
 	int32 DefaultReserveAmmo = 120;
@@ -76,4 +80,37 @@ public:
 	/** Recoil pattern data for this weapon */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Recoil")
 	FRecoilPattern RecoilPattern;
+
+	// ---- AI Noise ----
+
+	/** Loudness of each shot for AI hearing (1 = unsuppressed rifle reference). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise", meta = (ClampMin = "0.0"))
+	float NoiseLoudness = 1.0f;
+
+	/** Max range (cm) at which AI hearing can register a shot. Suppressed weapon assets set this low. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise", meta = (ClampMin = "0.0"))
+	float NoiseRange = 3000.f;
+
+	/** Loudness of a reload for AI hearing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise", meta = (ClampMin = "0.0"))
+	float ReloadNoiseLoudness = 0.3f;
+
+	/** Max range (cm) at which AI hearing can register a reload. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise", meta = (ClampMin = "0.0"))
+	float ReloadNoiseRange = 600.f;
+
+	/** Marks this weapon as suppressed (stealth-kill semantics; pair with low NoiseLoudness/NoiseRange). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise")
+	bool bSuppressed = false;
+
+	// ---- Kit Weapon Bridge ----
+
+	/** Kit-side procedural animation values asset (BP-derived DataAsset, e.g. DT_ProceduralAnimValues / DA_Anim_Rifle). Read at runtime via IKitWeaponInterface::GetKitProceduralValues. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kit Weapon Bridge")
+	TObjectPtr<UDataAsset> KitWeaponPoseAsset;
+
+	/** The kit BP_Item_Base weapon spawned for the first-person visual + arm posing (the kit's procedural animation drives the arms for this weapon). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kit Weapon Bridge")
+	TSubclassOf<AActor> KitVisualWeaponClass;
+
 };

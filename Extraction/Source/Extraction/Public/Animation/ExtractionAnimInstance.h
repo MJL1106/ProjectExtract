@@ -5,10 +5,13 @@
 #include "CoreMinimal.h"
 #include "Animation/AnimInstance.h"
 #include "ExtractionTypes.h"
+#include "Movement/TraversalTypes.h"
 #include "ExtractionAnimInstance.generated.h"
 
-class AExtractionCharacter;
+class APawn;
+class IExtractionPlayerInterface;
 class UExtractionAnimDataAsset;
+class UTraversalComponent;
 class UCharacterMovementComponent;
 class UBlendSpace;
 class UAnimMontage;
@@ -30,6 +33,7 @@ public:
 	UExtractionAnimInstance();
 
 	virtual void NativeInitializeAnimation() override;
+	virtual void NativeUninitializeAnimation() override;
 	virtual void NativeUpdateAnimation(float DeltaSeconds) override;
 
 	// ---- Data Asset Configuration ----
@@ -195,6 +199,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Animation|Actions")
 	float PlayMantleMontage(float PlayRate = 1.0f);
 
+	/** Returns true if a montage asset is configured for the given traversal type. Cheap — pointer check only. */
+	UFUNCTION(BlueprintPure, Category = "Animation|Actions")
+	bool HasMontageForType(ETraversalType Type) const;
+
 	/** Returns true if the mantle montage is currently playing. */
 	UFUNCTION(BlueprintPure, Category = "Animation|State")
 	bool IsPlayingMantleMontage() const;
@@ -221,13 +229,19 @@ public:
 
 private:
 
-	/** Cached owning character */
+	/** Cached owning pawn (GC-safe UPROPERTY anchor) */
 	UPROPERTY()
-	TObjectPtr<AExtractionCharacter> OwningCharacter;
+	TObjectPtr<APawn> OwningPawn;
+
+	/** Interface into OwningPawn — valid as long as OwningPawn is alive */
+	IExtractionPlayerInterface* OwningPlayerIface = nullptr;
 
 	/** Cached movement component */
 	UPROPERTY()
-	TObjectPtr<UCharacterMovementComponent> MovementComponent;
+	TObjectPtr<UCharacterMovementComponent> CachedMovementComp;
+
+	/** Rebind all owner pointers from TryGetPawnOwner(). Called on init and whenever owner changes. */
+	void RebindOwner();
 
 	/** Play a single montage. Returns duration / PlayRate, or 0 on failure. */
 	float PlayMontageInternal(UAnimMontage* Montage, float PlayRate);

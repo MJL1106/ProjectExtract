@@ -7,7 +7,7 @@
 #include "WeaponComponent.generated.h"
 
 class AWeaponBase;
-class AExtractionCharacter;
+class IExtractionPlayerInterface;
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class EXTRACTION_API UWeaponComponent : public UActorComponent
@@ -54,6 +54,10 @@ private:
 	UPROPERTY(ReplicatedUsing = OnRep_CurrentWeapon)
 	TObjectPtr<AWeaponBase> CurrentWeapon;
 
+	/** Previous weapon — cached in OnRep so we can detach it if a swap occurs without destroy */
+	UPROPERTY()
+	TObjectPtr<AWeaponBase> PreviousWeapon;
+
 	UPROPERTY(ReplicatedUsing = OnRep_IsAiming)
 	bool bIsAiming;
 
@@ -88,7 +92,13 @@ private:
 	UFUNCTION()
 	void OnWeaponFiredCallback();
 
-	/** Cached owner character */
+	/** Re-seats the weapon after SnapToTarget so GripSocket coincides with ik_hand_gun. */
+	void SeatWeaponGripSocket();
+
+	/** Cached owner actor (GC-safe UPROPERTY anchor) */
 	UPROPERTY()
-	TObjectPtr<AExtractionCharacter> OwnerCharacter;
+	TObjectPtr<AActor> OwnerActor;
+
+	/** Interface pointer into the same UObject — valid as long as OwnerActor is alive */
+	IExtractionPlayerInterface* OwnerIface = nullptr;
 };

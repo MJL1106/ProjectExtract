@@ -10,6 +10,7 @@
 #include "PlayerHealthWidget.h"
 #include "CrosshairWidget.h"
 #include "AmmoWidget.h"
+#include "BarkFeedWidget.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
@@ -35,6 +36,12 @@ AExtractionPlayerController::AExtractionPlayerController()
 		TEXT("/Game/Core/UI/WBP_Ammo"));
 	if (AmmoBP.Succeeded())
 		AmmoWidgetClass = AmmoBP.Class;
+
+	// Default bark subtitle feed widget class
+	static ConstructorHelpers::FClassFinder<UBarkFeedWidget> BarkFeedBP(
+		TEXT("/Game/Core/UI/WBP_BarkFeed"));
+	if (BarkFeedBP.Succeeded())
+		BarkFeedWidgetClass = BarkFeedBP.Class;
 }
 
 void AExtractionPlayerController::BeginPlay()
@@ -83,6 +90,14 @@ void AExtractionPlayerController::BeginPlay()
 		AmmoWidget = CreateWidget<UAmmoWidget>(this, AmmoWidgetClass);
 		if (IsValid(AmmoWidget))
 			AmmoWidget->AddToPlayerScreen();
+	}
+
+	// Spawn enemy bark subtitle feed for local player
+	if (IsLocalPlayerController() && BarkFeedWidgetClass)
+	{
+		BarkFeedWidget = CreateWidget<UBarkFeedWidget>(this, BarkFeedWidgetClass);
+		if (IsValid(BarkFeedWidget))
+			BarkFeedWidget->AddToPlayerScreen();
 	}
 }
 

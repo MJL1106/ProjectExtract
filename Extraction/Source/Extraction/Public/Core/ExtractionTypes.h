@@ -4,10 +4,14 @@
 
 #include "CoreMinimal.h"
 #include "NativeGameplayTags.h"
+#include "Movement/TraversalTypes.h"
 #include "ExtractionTypes.generated.h"
 
 // --- Gameplay Tags ---
 UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Character_Enemy);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Character_Companion);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_Character_Player);
+UE_DECLARE_GAMEPLAY_TAG_EXTERN(TAG_BT_EnemyCombat);
 
 /**
  * Weapon type categories.
@@ -33,19 +37,6 @@ enum class EProneTransitionType : uint8
 	FromWalk	UMETA(DisplayName = "From Walk"),
 	FromSprint	UMETA(DisplayName = "From Sprint"),
 	FromCrouch	UMETA(DisplayName = "From Crouch"),
-};
-
-/**
- * Active traversal action type.
- * Determines which montage plays and what clearance logic applies.
- */
-UENUM(BlueprintType)
-enum class ETraversalType : uint8
-{
-	None	UMETA(DisplayName = "None"),
-	Vault	UMETA(DisplayName = "Vault"),
-	Climb	UMETA(DisplayName = "Climb"),
-	Mantle	UMETA(DisplayName = "Mantle"),
 };
 
 /**

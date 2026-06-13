@@ -41,6 +41,19 @@ void UHealthComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	DOREPLIFETIME(UHealthComponent, bIsDead);
 }
 
+void UHealthComponent::InitializeHealth(float NewMaxHealth, float NewMaxShield)
+{
+	if (!GetOwner() || !GetOwner()->HasAuthority()) return;
+
+	MaxHealth = FMath::Max(NewMaxHealth, 0.f);
+	MaxShield = FMath::Max(NewMaxShield, 0.f);
+	CurrentHealth = MaxHealth;
+	CurrentShield = MaxShield;
+
+	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+	OnShieldChanged.Broadcast(CurrentShield, MaxShield);
+}
+
 void UHealthComponent::TakeDamage(float Damage)
 {
 	if (bIsDead || Damage <= 0.f) return;
@@ -121,6 +134,20 @@ void UHealthComponent::Revive(float HealthPercent)
 	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
 	OnShieldChanged.Broadcast(CurrentShield, MaxShield);
 	OnRevive.Broadcast();
+
+	// Kick off shield regen after the usual delay, same as the post-damage path.
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(ShieldRegenDelayHandle);
+		World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+		World->GetTimerManager().SetTimer(
+			ShieldRegenDelayHandle,
+			this,
+			&UHealthComponent::StartShieldRegen,
+			ShieldRegenDelay,
+			false
+		);
+	}
 }
 
 void UHealthComponent::StartShieldRegen()

@@ -7,6 +7,8 @@
 #include "GameFramework/Character.h"
 #include "GameplayTagAssetInterface.h"
 #include "GameplayTagContainer.h"
+#include "AIShooterInterface.h"
+#include "GenericTeamAgentInterface.h"
 #include "EnemyBase.generated.h"
 
 class UHealthComponent;
@@ -15,7 +17,7 @@ class AWeaponBase;
 DECLARE_LOG_CATEGORY_EXTERN(LogEnemy, Log, All);
 
 UCLASS(Blueprintable)
-class EXTRACTION_API AEnemyBase : public ACharacter, public IGameplayTagAssetInterface
+class EXTRACTION_API AEnemyBase : public ACharacter, public IGameplayTagAssetInterface, public IAIShooterInterface, public IGenericTeamAgentInterface
 {
 	GENERATED_BODY()
 
@@ -26,6 +28,21 @@ public:
 
 	// --- IGameplayTagAssetInterface ---
 	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
+
+	/** Target the enemy is currently aiming at. Used by WeaponBase to aim along muzzle->target. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Combat")
+	AActor* GetCurrentTarget() const { return CurrentTarget.Get(); }
+
+	/** Degrees of random aim spread applied by the weapon when this enemy fires. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Combat")
+	float GetAimInaccuracyDegrees() const { return AimInaccuracyDegrees; }
+
+	// --- IAIShooterInterface ---
+	virtual AActor* GetAIAimTarget() const override { return CurrentTarget.Get(); }
+	virtual float GetAIAimSpreadDegrees() const override { return AimInaccuracyDegrees; }
+
+	// --- IGenericTeamAgentInterface ---
+	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(1); }
 
 protected:
 	virtual void BeginPlay() override;
@@ -91,6 +108,8 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<AWeaponBase> CurrentWeapon;
+
+	TWeakObjectPtr<AActor> CurrentTarget;
 
 	FVector SpawnLocation;
 

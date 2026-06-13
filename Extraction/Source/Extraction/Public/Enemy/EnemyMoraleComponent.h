@@ -1,0 +1,143 @@
+// UEnemyMoraleComponent — per-enemy morale (0-100): Confident → Shaken → Broken. Floor = fall-back, never rout (design §7).
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Components/ActorComponent.h"
+#include "EnemyTypes.h"
+#include "EnemyMoraleComponent.generated.h"
+
+class UEnemyArchetypeData;
+class AEnemyCharacter;
+class UHealthComponent;
+class USuppressionComponent;
+class UBarkSubsystem;
+class UBarkSetData;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMoraleStateChanged, EMoraleState, OldState, EMoraleState, NewState);
+
+UCLASS(ClassGroup = (Custom), meta = (BlueprintSpawnableComponent))
+class EXTRACTION_API UEnemyMoraleComponent : public UActorComponent
+{
+	GENERATED_BODY()
+
+public:
+	UEnemyMoraleComponent();
+
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/** Called by slice C after DA is available. Caches archetype profile values. */
+	void InitFromArchetype(const UEnemyArchetypeData* Data);
+
+	/** Called by slice C from HandleDeath. Clears timer and unbinds all delegates so corpses are inert. */
+	void DeactivateForDeath();
+
+	// --- Queries ---
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Morale")
+	EMoraleState GetMoraleState() const { return CurrentState; }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Morale")
+	float GetMorale01() const { return CurrentMorale / 100.f; }
+
+	// --- Event ingress (called by slice C wiring or internally) ---
+
+	/** This enemy hit a hostile target. */
+	void NotifyDamagedTarget();
+
+	/** This enemy killed a hostile target. */
+	void NotifyTargetDowned();
+
+	/** This enemy dropped below low-HP threshold (one-shot, called once). */
+	void NotifyLowHealth();
+
+	// --- Phase 5: squad-routed ingress (called by UEnemySquad, bypasses radius check) ---
+
+	/** A squad member died. Applies ally/officer death morale loss without radius check. */
+	void NotifySquadAllyDied(bool bWasOfficer);
+
+	/** Officer rally: boosts morale, temporarily raises morale floor, un-pins Broken/Shaken. */
+	void NotifyRally(float MoraleBoost, float FloorRaise);
+
+	/** Delegate broadcast on state transitions. Slice C's controller subscribes to write BB. */
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Morale")
+	FOnMoraleStateChanged OnMoraleStateChanged;
+
+private:
+	// --- Cached archetype profile ---
+	bool bFearless = false;
+	float MoraleFloor = 0.f;
+	float MoraleEventResistance = 1.f;
+	float ShakenThreshold = 60.f;
+	float BrokenThreshold = 30.f;
+	float RecoveryPerSecond = 2.f;
+	float LossAllyDied = 15.f;
+	float LossOfficerDied = 30.f;
+	float LossSustainedSuppression = 10.f;
+	float LossLowHealth = 20.f;
+	float LossFlanked = 10.f;
+	float GainDamagedTarget = 5.f;
+	float GainTargetDowned = 15.f;
+
+	// --- Runtime state ---
+	float CurrentMorale = 100.f;
+	EMoraleState CurrentState = EMoraleState::Confident;
+	float LastLossWorldTime = -1e9f;
+	bool bLowHealthFired = false;
+
+	// --- Cached references ---
+	UPROPERTY()
+	TWeakObjectPtr<AEnemyCharacter> OwnerEnemy;
+
+	UPROPERTY()
+	TWeakObjectPtr<UHealthComponent> CachedHealthComp;
+
+	UPROPERTY()
+	TWeakObjectPtr<USuppressionComponent> CachedSuppressionComp;
+
+	UPROPERTY()
+	TObjectPtr<UBarkSetData> CachedBarkSet;
+
+	// --- Phase 5: rally floor ---
+	float RallyFloorRaise = 0.f;
+	float RallyFloorDuration = 20.f;
+	FTimerHandle RallyFloorTimerHandle;
+
+	void ClearRallyFloor();
+
+	/** Returns the effective morale floor (base + any active rally raise). */
+	float GetEffectiveMoraleFloor() const;
+
+	// --- Timers ---
+	FTimerHandle MoraleTickHandle;
+
+	static constexpr float MoraleTickInterval = 1.f;
+	static constexpr float RecoveryGraceSeconds = 5.f;
+	static constexpr float AllyDeathRadius = 2500.f;
+	static constexpr float LowHealthThreshold = 0.3f;
+	static constexpr float FlankedDotThreshold = -0.2f;
+
+	/** Staggered 1s timer: recovery, sustained-suppression drain, low-HP check, flanked check. */
+	void MoraleTick();
+
+	/** Applies a morale delta (negative = loss, positive = gain). Scaled by 1/resistance. Clamps to floor. */
+	void ApplyMoraleDelta(float Delta);
+
+	/** Re-evaluates state from current value and broadcasts on change. */
+	void EvaluateState();
+
+	/** Checks if the combat target is behind this enemy's facing (cheap dot test). */
+	void CheckFlanked();
+
+	/** Requests a bark through the subsystem if available. */
+	void RequestBark(EBarkType Type) const;
+
+	// --- Director death subscription ---
+	UFUNCTION()
+	void HandleEnemyDied(AEnemyCharacter* DeadEnemy, FVector Location, bool bWasOfficer);
+
+	// --- Suppression subscription ---
+	UFUNCTION()
+	void HandleSuppressedStateChanged(bool bNowSuppressed);
+};
