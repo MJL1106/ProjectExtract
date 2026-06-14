@@ -55,6 +55,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	float GetHighestSuspicion() const;
 
+	/** True if any hostile actor currently has a sighted suspicion track (state-independent perception check). */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	bool IsAnyHostileSighted() const;
+
 private:
 
 	/** Per-stimulus-source suspicion bookkeeping. */
@@ -138,6 +142,9 @@ private:
 
 	// Guard against squad sighting relay feedback loops: ReportSquadSighting must NOT re-broadcast
 	bool bInSquadSightingRelay = false;
+
+	// Bark hysteresis: suppress re-acquire Contact bark shortly after leaving Combat
+	float LastCombatExitWorldTime = -1e9f;
 
 	// Cached squad subsystem reference (set in Initialize)
 	TWeakObjectPtr<UEnemySquadSubsystem> SquadSubsystem;

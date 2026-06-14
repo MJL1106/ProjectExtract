@@ -1,0 +1,12 @@
+[mcp_servers.VibeUE]
+url = "http://127.0.0.1:8089/mcp"
+
+[mcp_servers.unreal-editor]
+url = "http://127.0.0.1:9315/mcp"
+
+[mcp_servers.unrealclaude]
+command = "node"
+args = ["Extraction/Plugins/UnrealClaude/UnrealClaude/Resources/mcp-bridge/index.js"]
+
+[mcp_servers.unrealclaude.env]
+UNREAL_MCP_URL = "http://localhost:3000"

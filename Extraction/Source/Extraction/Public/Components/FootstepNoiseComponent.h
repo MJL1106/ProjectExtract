@@ -24,13 +24,13 @@ protected:
 
 	/** Owner speed (cm/s) at or above which steps use the sprint loudness/range. */
 	UPROPERTY(EditDefaultsOnly, Category = "Noise", meta = (ClampMin = "50.0"))
-	float SprintSpeedThreshold = 500.f;
+	float SprintSpeedThreshold = 750.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Noise", meta = (ClampMin = "0.0"))
 	float SprintLoudness = 1.0f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Noise", meta = (ClampMin = "0.0"))
-	float SprintRange = 1200.f;
+	float SprintRange = 1800.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Noise", meta = (ClampMin = "0.0"))
 	float WalkLoudness = 0.3f;

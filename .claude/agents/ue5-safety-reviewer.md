@@ -1,7 +1,7 @@
 ---
 name: ue5-safety-reviewer
 description: UE5 crash and correctness reviewer. Focuses on dangling pointers, GC issues, delegate leaks, timer leaks, and UE5-specific crash patterns. Read-only -- flags issues but does not edit code.
-model: claude-fable-5
+model: claude-opus-4-8
 tools:
   - Glob
   - Grep

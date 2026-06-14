@@ -24,7 +24,7 @@ public class Extraction : ModuleRules
 			"NavigationSystem"
 		});
 
-		PrivateDependencyModuleNames.AddRange(new string[] { });
+		SetupGameplayDebuggerSupport(Target);
 
 		// Public subfolder include paths
 		PublicIncludePaths.AddRange(new string[] {
@@ -39,6 +39,7 @@ public class Extraction : ModuleRules
 			"Extraction/Public/Weapon",
 			"Extraction/Public/Enemy",
 			"Extraction/Public/Enemy/Components",
+			"Extraction/Public/Enemy/Debug",
 			"Extraction/Public/Enemy/Squad",
 			"Extraction/Public/Enemy/Director",
 			"Extraction/Public/Companion",
@@ -64,6 +65,7 @@ public class Extraction : ModuleRules
 			"Extraction/Private/Weapon",
 			"Extraction/Private/Enemy",
 			"Extraction/Private/Enemy/Components",
+			"Extraction/Private/Enemy/Debug",
 			"Extraction/Private/Enemy/Squad",
 			"Extraction/Private/Enemy/Director",
 			"Extraction/Private/Companion",

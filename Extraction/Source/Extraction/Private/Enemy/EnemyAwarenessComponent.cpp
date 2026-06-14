@@ -10,6 +10,7 @@
 #include "BarkSubsystem.h"
 #include "BarkSetData.h"
 #include "HealthComponent.h"
+#include "SuppressionComponent.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Perception/AIPerceptionComponent.h"
@@ -18,8 +19,14 @@
 #include "GenericTeamAgentInterface.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Controller.h"
+#include "Components/CapsuleComponent.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "EnemyDebug.h"
+
+#if ENABLE_DRAW_DEBUG
+#include "DrawDebugHelpers.h"
+#endif
 
 UEnemyAwarenessComponent::UEnemyAwarenessComponent()
 {
@@ -129,6 +136,13 @@ void UEnemyAwarenessComponent::HandleSightStimulus(AActor* Actor, const FAIStimu
 	if (Track.bSighted)
 		Track.LastStimulusLocation = Actor->GetActorLocation();
 
+	// Searching fast-track: re-acquire combat on clean sight (own perception only, not squad relay)
+	if (CurrentState == EEnemyAwarenessState::Searching && Stimulus.WasSuccessfullySensed() && IsActorAlive(Actor))
+	{
+		EnterCombat(Actor, true);
+		return;
+	}
+
 	if (CurrentState != EEnemyAwarenessState::Combat) return;
 
 	if (Stimulus.WasSuccessfullySensed())
@@ -220,20 +234,41 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 	if (CurrentState == EEnemyAwarenessState::Combat)
 	{
 		UpdateCombat();
-		return;
 	}
-
-	UpdateSuspicion();
-
-	if (CurrentState == EEnemyAwarenessState::Searching)
+	else
 	{
-		TimeSpentSearching += UpdateInterval;
-		if (TimeSpentSearching >= ArchetypeData->SearchDuration)
+		UpdateSuspicion();
+
+		if (CurrentState == EEnemyAwarenessState::Searching)
 		{
-			SetCombatTarget(nullptr);
-			SetState(EEnemyAwarenessState::Unaware);
+			TimeSpentSearching += UpdateInterval;
+			if (TimeSpentSearching >= ArchetypeData->SearchDuration)
+			{
+				SetCombatTarget(nullptr);
+				SetState(EEnemyAwarenessState::Unaware);
+			}
 		}
 	}
+
+#if ENABLE_DRAW_DEBUG
+	if (IsEnemyDrawDebugEnabled())
+	{
+		const AAIController* MyController = Cast<AAIController>(GetOwner());
+		const ACharacter* MyChar = MyController ? Cast<ACharacter>(MyController->GetPawn()) : nullptr;
+		if (IsValid(MyChar))
+		{
+			const FString ArchetypeShort = UEnum::GetDisplayValueAsText(ArchetypeData->Archetype).ToString().ToUpper();
+			const FString StateShort = UEnum::GetDisplayValueAsText(CurrentState).ToString().ToUpper();
+			const FString Tag = FString::Printf(TEXT("%s | %s | %.0f"), *ArchetypeShort, *StateShort, GetHighestSuspicion());
+
+			constexpr float HeadOffset = 30.f;
+			const float HalfHeight = MyChar->GetCapsuleComponent() ? MyChar->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 90.f;
+			const FVector DrawLocation = MyChar->GetActorLocation() + FVector(0.f, 0.f, HalfHeight + HeadOffset);
+
+			DrawDebugString(GetWorld(), DrawLocation, Tag, nullptr, FColor::Cyan, UpdateInterval, true);
+		}
+	}
+#endif
 }
 
 void UEnemyAwarenessComponent::UpdateCombat()
@@ -266,7 +301,7 @@ void UEnemyAwarenessComponent::UpdateCombat()
 		EnterCombat(BestTarget, Track && Track->bSighted);
 	}
 
-	if (bHadLOS)
+	if (bHadLOS && CombatTarget.IsValid())
 	{
 		LastKnownLocation = CombatTarget->GetActorLocation();
 		WriteBBVectors();
@@ -274,9 +309,74 @@ void UEnemyAwarenessComponent::UpdateCombat()
 	}
 	else
 	{
-		TimeSinceLOSLost += UpdateInterval;
-		if (TimeSinceLOSLost >= ArchetypeData->LostContactGrace)
-			TransitionToSearching(true);
+		// Contact-hold evaluation: multiple signals can keep Combat alive when perception drops LOS.
+		bool bHoldContact = false;
+		bool bHoldViaFOVLOS = false;
+
+		const AAIController* MyController = Cast<AAIController>(GetOwner());
+		const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+
+		if (IsValid(MyPawn) && CombatTarget.IsValid())
+		{
+			// 1) FOV-gated geometric LOS: trace clear AND target inside view cone
+			const FVector EyeLocation = MyPawn->GetPawnViewLocation();
+			const FVector TargetLoc = CombatTarget->GetActorLocation();
+
+			FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyContactLoS), false);
+			QueryParams.AddIgnoredActor(MyPawn);
+			QueryParams.AddIgnoredActor(CombatTarget.Get());
+
+			const bool bTraceClear = !GetWorld()->LineTraceTestByChannel(EyeLocation, TargetLoc, ECC_Visibility, QueryParams);
+			if (bTraceClear)
+			{
+				const FVector ToTarget = (TargetLoc - MyPawn->GetActorLocation()).GetSafeNormal();
+				const float Dot = FVector::DotProduct(MyPawn->GetActorForwardVector(), ToTarget);
+				const float CosHalfFOV = FMath::Cos(FMath::DegreesToRadians(ArchetypeData->PeripheralVisionDeg * 0.5f));
+				if (Dot >= CosHalfFOV)
+				{
+					bHoldViaFOVLOS = true;
+					bHoldContact = true;
+				}
+			}
+
+			// 2) Recently damaged by any hostile
+			if (!bHoldContact)
+			{
+				const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+				if ((WorldTime - RecentDamageWorldTime) < RecentDamageWindow)
+					bHoldContact = true;
+			}
+
+			// 3) Currently suppressed
+			if (!bHoldContact)
+			{
+				const AEnemyCharacter* MyEnemy = Cast<AEnemyCharacter>(MyPawn);
+				if (IsValid(MyEnemy))
+				{
+					USuppressionComponent* SupprComp = MyEnemy->GetSuppressionComponent();
+					if (IsValid(SupprComp) && SupprComp->IsSuppressed())
+						bHoldContact = true;
+				}
+			}
+		}
+
+		if (bHoldContact)
+		{
+			TimeSinceLOSLost = 0.f;
+			// Only refresh last-known when we actually see the target (FOV LOS)
+			if (bHoldViaFOVLOS)
+			{
+				LastKnownLocation = CombatTarget->GetActorLocation();
+				WriteBBVectors();
+				BroadcastSightingToSquad();
+			}
+		}
+		else
+		{
+			TimeSinceLOSLost += UpdateInterval;
+			if (TimeSinceLOSLost >= ArchetypeData->LostContactGrace)
+				TransitionToSearching(true);
+		}
 	}
 }
 
@@ -399,7 +499,13 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 
 	SetCombatTarget(Target);
 	if (CurrentState != EEnemyAwarenessState::Combat)
-		Bark(EBarkType::Contact);
+	{
+		const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+		const bool bSuppressBark = IsValid(ArchetypeData)
+			&& (WorldTime - LastCombatExitWorldTime) < ArchetypeData->RecontactBarkCooldown;
+		if (!bSuppressBark)
+			Bark(EBarkType::Contact);
+	}
 	SetState(EEnemyAwarenessState::Combat);
 
 	if (bConfirmedVisual)
@@ -410,6 +516,10 @@ void UEnemyAwarenessComponent::TransitionToSearching(bool bContactLost)
 {
 	if (bContactLost)
 		Bark(EBarkType::LostTarget);
+
+	if (const UWorld* World = GetWorld())
+		LastCombatExitWorldTime = World->GetTimeSeconds();
+
 	SetInvestigateLocation(LastKnownLocation);
 	SetCombatTarget(nullptr);
 	TimeSpentSearching = 0.f;
@@ -445,7 +555,7 @@ void UEnemyAwarenessComponent::SetState(EEnemyAwarenessState NewState)
 	CurrentState = NewState;
 
 	if (const AAIController* C = Cast<AAIController>(GetOwner()))
-		UE_LOG(LogEnemyAI, Warning, TEXT("[AWARE] %s: %s -> %s"),
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[AWARE] %s: %s -> %s"),
 			C->GetPawn() ? *C->GetPawn()->GetName() : TEXT("<no pawn>"),
 			*UEnum::GetValueAsString(OldState), *UEnum::GetValueAsString(NewState));
 
@@ -496,6 +606,17 @@ float UEnemyAwarenessComponent::GetHighestSuspicion() const
 	for (const auto& Pair : SuspicionTracks)
 		Max = FMath::Max(Max, Pair.Value.Suspicion);
 	return Max;
+}
+
+bool UEnemyAwarenessComponent::IsAnyHostileSighted() const
+{
+	for (const auto& Pair : SuspicionTracks)
+	{
+		if (!Pair.Value.bSighted) continue;
+		AActor* Actor = Pair.Key.Get();
+		if (IsValid(Actor) && IsActorAlive(Actor)) return true;
+	}
+	return false;
 }
 
 void UEnemyAwarenessComponent::Bark(EBarkType Type) const

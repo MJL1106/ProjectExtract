@@ -1,7 +1,7 @@
 ---
 name: ue5-build-specialist
 description: UE5 Build.cs, module configuration, plugin setup, and linker error specialist. Diagnoses unresolved externals, missing includes, IWYU violations, and dependency issues.
-model: claude-fable-5
+model: claude-opus-4-8
 tools:
   - Glob
   - Grep

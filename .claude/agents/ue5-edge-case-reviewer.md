@@ -1,7 +1,7 @@
 ---
 name: ue5-edge-case-reviewer
 description: UE5 edge-case and unhappy-path detector. Reviews code against the task's stated goal and hunts for scenarios the implementer didn't think about — state transitions, race conditions, init-order timing, abort flows, partial failures, boundary values. Complements safety (crash patterns) and performance (hot path). Read-only -- flags issues but does not edit code.
-model: claude-fable-5
+model: claude-opus-4-8
 tools:
   - Glob
   - Grep

@@ -42,7 +42,7 @@ EBTNodeResult::Type UBTTask_EnemySearchLastKnown::ExecuteTask(UBehaviorTreeCompo
 	}
 
 	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(InvestigateLoc, 80.f, false, true, false, true);
-	UE_LOG(LogEnemyAI, Warning, TEXT("[SEARCH] %s MoveTo (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[SEARCH] %s MoveTo (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
 		*Pawn->GetName(), InvestigateLoc.X, InvestigateLoc.Y, InvestigateLoc.Z,
 		FVector::Dist(Pawn->GetActorLocation(), InvestigateLoc), (int32)MoveResult);
 	Mem->Phase = ESearchPhase::MoveTo;
@@ -64,7 +64,7 @@ void UBTTask_EnemySearchLastKnown::TickTask(UBehaviorTreeComponent& OwnerComp, u
 
 		if (PF->GetStatus() == EPathFollowingStatus::Idle)
 		{
-			UE_LOG(LogEnemyAI, Warning, TEXT("[SEARCH] %s moveto idle -> sweep (vel=%.0f)"), *Pawn->GetName(), Pawn->GetVelocity().Size());
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[SEARCH] %s moveto idle -> sweep (vel=%.0f)"), *Pawn->GetName(), Pawn->GetVelocity().Size());
 			// Arrived (or path failed) — start sweep
 			Mem->Phase = ESearchPhase::Sweep;
 			Mem->BaseYaw = Pawn->GetActorRotation().Yaw;

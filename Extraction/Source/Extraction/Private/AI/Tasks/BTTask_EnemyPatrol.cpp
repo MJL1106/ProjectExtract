@@ -36,7 +36,7 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::ExecuteTask(UBehaviorTreeComponent& Own
 
 	APatrolRoute* Route = Cast<APatrolRoute>(BB->GetValueAsObject(AEnemyAIController::BB_PatrolRoute));
 
-	UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s ExecuteTask: route=%s points=%d"),
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s ExecuteTask: route=%s points=%d"),
 		*Pawn->GetName(), Route ? *Route->GetName() : TEXT("NULL"),
 		IsValid(Route) ? Route->NumPoints() : -1);
 
@@ -47,22 +47,25 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::ExecuteTask(UBehaviorTreeComponent& Own
 		const ANavigationData* NavData = NavSys->GetNavDataForProps(Agent, Pawn->GetActorLocation());
 		FNavLocation Projected;
 		const bool bOnNav = NavSys->ProjectPointToNavigation(Pawn->GetActorLocation(), Projected, FVector(200.f, 200.f, 500.f));
-		UE_LOG(LogEnemyAI, Warning, TEXT("[NAV] %s agentR=%.1f agentH=%.1f NavDataForProps=%s onRuntimeNav=%d"),
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[NAV] %s agentR=%.1f agentH=%.1f NavDataForProps=%s onRuntimeNav=%d"),
 			*Pawn->GetName(), Agent.AgentRadius, Agent.AgentHeight, *GetNameSafe(NavData), bOnNav ? 1 : 0);
 	}
 	else
 	{
-		UE_LOG(LogEnemyAI, Warning, TEXT("[NAV] %s NavigationSystem is NULL at runtime"), *Pawn->GetName());
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[NAV] %s NavigationSystem is NULL at runtime"), *Pawn->GetName());
 	}
 
 	// Set patrol speed
 	if (AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn))
 		Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Patrol);
 
-	// No route: guard post — stay InProgress (idle); BT aborts when combat triggers
+	// No route: guard post — stay InProgress with periodic yaw sweep; BT aborts when combat triggers
 	if (!IsValid(Route) || Route->NumPoints() == 0)
 	{
-		UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s no route/points -> guard post (idle)"), *Pawn->GetName());
+		Mem->GuardBaseYaw = Pawn->GetActorRotation().Yaw;
+		Mem->bGuardScanActive = true;
+		Controller->ClearFocus(EAIFocusPriority::Gameplay);
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s no route/points -> guard post (scan baseYaw=%.0f)"), *Pawn->GetName(), Mem->GuardBaseYaw);
 		return EBTNodeResult::InProgress;
 	}
 
@@ -71,14 +74,14 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::ExecuteTask(UBehaviorTreeComponent& Own
 	if (StartDist <= 50.f)
 	{
 		// Already at the first point — start waiting
-		UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s already at P%d (dist %.0f) -> wait"),
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s already at P%d (dist %.0f) -> wait"),
 			*Pawn->GetName(), Mem->CurrentIndex, StartDist);
 		Mem->bWaiting = true;
 		return EBTNodeResult::InProgress;
 	}
 
 	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(Goal, 50.f, false, true, false, true);
-	UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s MoveTo P%d (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s MoveTo P%d (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
 		*Pawn->GetName(), Mem->CurrentIndex, Goal.X, Goal.Y, Goal.Z, StartDist, (int32)MoveResult);
 	Mem->bMoveIssued = true;
 	return EBTNodeResult::InProgress;
@@ -95,7 +98,34 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 
 	APatrolRoute* Route = Cast<APatrolRoute>(BB->GetValueAsObject(AEnemyAIController::BB_PatrolRoute));
 	if (!IsValid(Route) || Route->NumPoints() == 0)
-		return; // guard post — idle until BT aborts
+	{
+		// Guard-post yaw sweep (mirrors BTTask_EnemySearchLastKnown sweep style)
+		if (!Mem->bGuardScanActive) return;
+
+		const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
+		const UEnemyArchetypeData* DA = Enemy ? Enemy->GetArchetypeData() : nullptr;
+		if (!IsValid(DA) || DA->GuardScanYawRange <= 0.f) return;
+
+		constexpr int32 GuardSweepSegmentCount = 3;
+
+		// Advance to next sweep segment on the interval timer
+		Mem->GuardSweepTimer += DeltaSeconds;
+		if (Mem->GuardSweepTimer >= DA->GuardScanInterval)
+		{
+			Mem->GuardSweepTimer -= DA->GuardScanInterval;
+			Mem->GuardSweepSegment = (Mem->GuardSweepSegment + 1) % GuardSweepSegmentCount;
+		}
+
+		// Smooth interpolation toward current segment's target yaw (mirrors SearchLastKnown RInterpTo)
+		const float YawOffsets[] = { -DA->GuardScanYawRange * 0.5f, DA->GuardScanYawRange * 0.5f, 0.f };
+		const float TargetYaw = Mem->GuardBaseYaw + YawOffsets[FMath::Min(Mem->GuardSweepSegment, GuardSweepSegmentCount - 1)];
+
+		const FRotator CurrentRot = Pawn->GetActorRotation();
+		const FRotator TargetRot(CurrentRot.Pitch, TargetYaw, CurrentRot.Roll);
+		const FRotator NewRot = FMath::RInterpTo(CurrentRot, TargetRot, DeltaSeconds, DA->GuardScanTurnSpeed);
+		Controller->SetControlRotation(NewRot);
+		return;
+	}
 
 	// Wait phase
 	if (Mem->bWaiting)
@@ -109,7 +139,7 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 
 			const FVector NextGoal = Route->GetWorldPoint(Mem->CurrentIndex);
 			const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(NextGoal, 50.f, false, true, false, true);
-			UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s advance -> P%d (%.0f,%.0f,%.0f) result=%d"),
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s advance -> P%d (%.0f,%.0f,%.0f) result=%d"),
 				*Pawn->GetName(), Mem->CurrentIndex, NextGoal.X, NextGoal.Y, NextGoal.Z, (int32)MoveResult);
 			Mem->bMoveIssued = true;
 		}
@@ -129,12 +159,12 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 
 	// Heartbeat (~2x/sec) so we can see whether the pawn is actually translating while a move is active.
 	if ((GFrameCounter % 30) == 0)
-		UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s moving -> P%d status=%d (0=Idle 3=Moving) dist=%.0f vel=%.0f"),
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s moving -> P%d status=%d (0=Idle 3=Moving) dist=%.0f vel=%.0f"),
 			*Pawn->GetName(), Mem->CurrentIndex, (int32)Status, DistToGoal, Pawn->GetVelocity().Size());
 
 	if (Status == EPathFollowingStatus::Idle || DistToGoal <= 50.f)
 	{
-		UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s reached/idle P%d status=%d dist=%.0f vel=%.0f -> wait"),
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s reached/idle P%d status=%d dist=%.0f vel=%.0f -> wait"),
 			*Pawn->GetName(), Mem->CurrentIndex, (int32)Status, DistToGoal, Pawn->GetVelocity().Size());
 		Mem->bMoveIssued = false;
 		Mem->bWaiting = true;
@@ -147,7 +177,7 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::AbortTask(UBehaviorTreeComponent& Owner
 	if (AAIController* Controller = OwnerComp.GetAIOwner())
 	{
 		if (const APawn* P = Controller->GetPawn())
-			UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s AbortTask -> StopMovement (branch interrupted)"), *P->GetName());
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s AbortTask -> StopMovement (branch interrupted)"), *P->GetName());
 		Controller->StopMovement();
 	}
 	return EBTNodeResult::Aborted;

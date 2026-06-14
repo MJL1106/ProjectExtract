@@ -304,9 +304,12 @@ void AEnemyCharacter::SetMoveSpeedMode(EEnemyMoveSpeedMode Mode)
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (!IsValid(MoveComp)) return;
 
-	MoveComp->MaxWalkSpeed = (Mode == EEnemyMoveSpeedMode::Combat)
-		? ArchetypeData->CombatSpeed
-		: ArchetypeData->PatrolSpeed;
+	switch (Mode)
+	{
+	case EEnemyMoveSpeedMode::Combat: MoveComp->MaxWalkSpeed = ArchetypeData->CombatSpeed; break;
+	case EEnemyMoveSpeedMode::Strafe: MoveComp->MaxWalkSpeed = ArchetypeData->StrafeWalkSpeed; break;
+	case EEnemyMoveSpeedMode::Patrol: MoveComp->MaxWalkSpeed = ArchetypeData->PatrolSpeed; break;
+	}
 }
 
 // --- Archetype ---

@@ -31,6 +31,7 @@ enum class EEnemyMoveSpeedMode : uint8
 {
 	Patrol	UMETA(DisplayName = "Patrol"),
 	Combat	UMETA(DisplayName = "Combat"),
+	Strafe	UMETA(DisplayName = "Strafe"),
 };
 
 /** Per-enemy morale state (Phase 4). Floor = Broken — enemies never rout (design §7). */

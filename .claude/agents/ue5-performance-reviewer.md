@@ -1,7 +1,7 @@
 ---
 name: ue5-performance-reviewer
 description: UE5 performance auditor. Reviews code for hot-path allocations, Tick abuse, missing pooling, expensive iteration, and UE5-specific performance pitfalls. Read-only -- flags issues but does not edit code.
-model: claude-fable-5
+model: claude-opus-4-8
 tools:
   - Glob
   - Grep

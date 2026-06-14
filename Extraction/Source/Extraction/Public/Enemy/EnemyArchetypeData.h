@@ -109,6 +109,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "100.0"))
 	float CoverSearchRadius = 1200.f;
 
+	/** Within this range the enemy skips cover-seeking and fires in place (selector falls through to the open-ground fire branch). 0 = always seek cover. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
+	float PointBlankFireRange = 0.f;
+
 	/** How long the enemy will search before returning to Unaware. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "1.0"))
 	float SearchDuration = 8.f;
@@ -189,6 +193,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Barks")
 	TObjectPtr<UBarkSetData> BarkSet;
 
+	/** After leaving Combat, suppress the re-acquire Contact bark for this long to avoid bark spam when peek-fighting. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Barks", meta = (ClampMin = "0.0"))
+	float RecontactBarkCooldown = 8.f;
+
 	// --- Weapon ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Weapon")
@@ -205,6 +213,20 @@ public:
 	/** Seconds after death before the actor is destroyed. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Lifecycle", meta = (ClampMin = "0.0"))
 	float DestroyDelay = 3.f;
+
+	// --- Patrol (guard-post scanning for route-less enemies) ---
+
+	/** Total yaw sweep (degrees) for a route-less guard; 0 = no scanning. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Patrol", meta = (ClampMin = "0.0", ClampMax = "360.0"))
+	float GuardScanYawRange = 90.f;
+
+	/** Seconds between yaw-sweep steps for a route-less guard. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Patrol", meta = (ClampMin = "0.5"))
+	float GuardScanInterval = 2.5f;
+
+	/** Interpolation speed (deg/s scale for RInterpTo) for the guard-post yaw sweep. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Patrol", meta = (ClampMin = "1.0"))
+	float GuardScanTurnSpeed = 90.f;
 
 	// --- Armour (Phase 3 — Heavy) ---
 
@@ -482,4 +504,50 @@ public:
 	/** Minimum number of living squad members (including officer) required to start a bounding maneuver. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer|Bounding", meta = (ClampMin = "3"))
 	int32 BoundingMinSquadSize = 3;
+
+	// --- Move And Shoot (Phase 2 — tight cover-anchored strafe-while-firing) ---
+
+	/** Enables the tight cover-anchored strafe-while-firing combat behaviour. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot")
+	bool bUsesMoveAndShoot = false;
+
+	/** Below this range the point-blank fire-in-place branch handles combat. Must be < MoveAndShootMaxRange (and >= PointBlankFireRange). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "0.0"))
+	float MoveAndShootMinRange = 700.f;
+
+	/** Above this range seek cover or advance. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "100.0"))
+	float MoveAndShootMaxRange = 1600.f;
+
+	/** Range band hysteresis (cm) — TickTask exit gate widens by this amount on each side to prevent boundary churn. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "0.0"))
+	float MoveAndShootRangeHysteresis = 150.f;
+
+	/** Seconds without LOS before the task gives up and lets the selector re-seek cover/advance. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "0.1"))
+	float MoveAndShootNoLosGiveUpTime = 2.f;
+
+	/** Tight circle radius (cm) around the anchor for strafe picks. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "50.0"))
+	float StrafeRadius = 300.f;
+
+	/** Minimum seconds between strafe repicks. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "0.1"))
+	float StrafeIntervalMin = 1.0f;
+
+	/** Maximum seconds between strafe repicks. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "0.1"))
+	float StrafeIntervalMax = 2.2f;
+
+	/** Movement speed (cm/s) while strafe-firing (slower than CombatSpeed for a deliberate look). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "1.0"))
+	float StrafeWalkSpeed = 250.f;
+
+	/** Nav projection extent (cm) for strafe point validation. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "1.0"))
+	float StrafeNavProjectExtent = 200.f;
+
+	/** Attempts to find an LOS-valid strafe point per repick. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "1"))
+	int32 StrafeLosRetryCount = 4;
 };

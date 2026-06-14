@@ -32,6 +32,12 @@ private:
 		bool bWaiting = false;
 		float WaitElapsed = 0.f;
 		bool bMoveIssued = false;
+
+		// Guard-post yaw sweep (route-less enemies)
+		float GuardBaseYaw = 0.f;
+		float GuardSweepTimer = 0.f;
+		int32 GuardSweepSegment = 0;
+		bool bGuardScanActive = false;
 	};
 
 	void AdvanceIndex(FPatrolMemory& Mem, const APatrolRoute& Route) const;

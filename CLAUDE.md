@@ -68,7 +68,7 @@ The user is the director, not the engineer. Cut everything that isn't load-beari
 Continue the implement/review loop until no `CRITICAL` or `WARNING` findings remain.
 
 ### Role of the main chat
-The main Claude chat = **senior-dev watchdog (Fable 5)**.
+The main Claude chat = **senior-dev watchdog (Opus 4.8, 1M context)**.
 
 - Plans the work
 - Breaks tasks into file-ownership slices
@@ -80,12 +80,12 @@ The main Claude chat = **senior-dev watchdog (Fable 5)**.
 
 | Role | Model | Notes |
 |---|---|---|
-| Plan | **Fable** | Always |
-| Review | **Fable** | Always |
+| Plan | **Opus 4.8 (1M context)** | Always |
+| Review | **Opus 4.8 (1M context)** | Always |
 | Coding | **Sonnet** | Default for implementer agents |
-| Bug-fixer | **Fable** | Debugging is reasoning-heavy |
-| Architecture-planner | **Fable** | Cross-system design |
-| Research / docs | Sonnet | Fable only if reasoning is the bottleneck |
+| Bug-fixer | **Opus 4.8 (1M context)** | Debugging is reasoning-heavy |
+| Architecture-planner | **Opus 4.8 (1M context)** | Cross-system design |
+| Research / docs | Sonnet | Opus 4.8 (1M context) only if reasoning is the bottleneck |
 
 Current agent model assignments live in `.claude/agents/*.md` frontmatter.
 
@@ -170,7 +170,7 @@ If unsure whether to invoke, **bias toward invoking the skill** (cheap — just 
 
 ## Model rule — no Haiku for substantive work
 
-The custom subagents in `.claude/agents/` (Fable 5 / Sonnet 4.6) are the right tool for any UE5 work. The default `Explore` and `general-purpose` agents fall back to Haiku, which is too weak for this codebase.
+The custom subagents in `.claude/agents/` (Opus 4.8 (1M context) / Sonnet 4.6) are the right tool for any UE5 work. The default `Explore` and `general-purpose` agents fall back to Haiku, which is too weak for this codebase.
 
 - **For UE5 codebase exploration / research / implementation / review** → use the custom agents above. Never use the generic `Explore` agent for substantive work.
 - **For trivial file-path lookups** ("what file lives at X", "find all callers of Y") → `Glob` / `Grep` directly in the main session, no agent needed.

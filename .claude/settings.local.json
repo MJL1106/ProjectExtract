@@ -59,6 +59,8 @@
     "sequential-thinking",
     "code-review-graph",
     "unrealclaude",
-    "VibeUE"
-  ]
+    "VibeUE",
+    "unreal-editor"
+  ],
+  "enableAllProjectMcpServers": true
 }

@@ -48,6 +48,17 @@ EBTNodeResult::Type UBTTask_EnemyMoveToCover::ExecuteTask(UBehaviorTreeComponent
 	const UEnemyArchetypeData* DA = Enemy ? Enemy->GetArchetypeData() : nullptr;
 	if (!IsValid(DA)) return EBTNodeResult::Failed;
 
+	// Point-blank override: skip cover entirely so the selector falls through to open-ground fire
+	if (DA->PointBlankFireRange > 0.f)
+	{
+		const float DistSq = FVector::DistSquared(Pawn->GetActorLocation(), Target->GetActorLocation());
+		if (DistSq <= FMath::Square(DA->PointBlankFireRange))
+		{
+			ReleaseClaim(BB, Pawn);
+			return EBTNodeResult::Failed;
+		}
+	}
+
 	// Set combat speed for the move
 	if (AEnemyCharacter* EnemyMutable = Cast<AEnemyCharacter>(Pawn))
 		EnemyMutable->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
@@ -94,7 +105,7 @@ EBTNodeResult::Type UBTTask_EnemyMoveToCover::ExecuteTask(UBehaviorTreeComponent
 	}
 
 	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(ArrivalPos, 60.f, false, true, false, true);
-	UE_LOG(LogEnemyAI, Warning, TEXT("[COVER] %s MoveTo (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[COVER] %s MoveTo (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
 		*Pawn->GetName(), ArrivalPos.X, ArrivalPos.Y, ArrivalPos.Z, FVector::Dist(PawnLoc, ArrivalPos), (int32)MoveResult);
 	Mem->bMoveIssued = true;
 	return EBTNodeResult::InProgress;
