@@ -137,6 +137,10 @@ void AEnemyAIController::OnPossess(APawn* InPawn)
 	// Bind pawn death for controller teardown
 	if (IsValid(Enemy->GetHealthComponent()))
 		Enemy->GetHealthComponent()->OnDeath.AddUniqueDynamic(this, &AEnemyAIController::HandlePawnDeath);
+
+	UE_LOG(LogEnemyAI, Warning, TEXT("[POSSESS] %s -> %s | BT=%s | DA=%s | HasRoute=%d | BBValid=%d"),
+		*GetName(), *Enemy->GetName(), *GetNameSafe(EnemyBehaviorTree), *GetNameSafe(DA),
+		Enemy->PatrolRoute != nullptr ? 1 : 0, IsValid(BBComp) ? 1 : 0);
 }
 
 void AEnemyAIController::OnUnPossess()

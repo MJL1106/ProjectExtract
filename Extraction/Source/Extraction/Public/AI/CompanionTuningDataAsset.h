@@ -54,7 +54,8 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation")
 	float FormationOffsetRight = 200.f;
 
-	UPROPERTY(EditAnywhere, Category = "Companion|Formation")
+	// Floored at 50 so the derived follow min-separation can't collapse and silently disable the back-out.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "50"))
 	float AcceptableRadius = 250.f;
 
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation")
@@ -148,4 +149,35 @@ public:
 	// outside the forward 180° perception angle. Set to 0 to disable.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
 	float ProximityAwarenessRadius = 700.f;
+
+	// Companion avoids standing in the player's ADS firing line during combat.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat")
+	bool bAvoidPlayerADSCone = true;
+
+	// Half-angle (degrees) of the ADS firing cone the companion must stay out of. Minimum 1° — use bAvoidPlayerADSCone to fully disable.
+	// Capped at 80° so the push target (clamped to 85°) always exceeds the entry angle; above that the keep-out would invert.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "1", ClampMax = "80", EditCondition = "bAvoidPlayerADSCone"))
+	float ADSConeHalfAngleDegrees = 20.f;
+
+	// Extra clearance (degrees) past the cone edge added on top of the half-angle.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0", ClampMax = "45", EditCondition = "bAvoidPlayerADSCone"))
+	float ADSConeClearanceMarginDegrees = 5.f;
+
+	// Cone depth (cm); positions beyond this distance from the player are unconstrained.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0", EditCondition = "bAvoidPlayerADSCone"))
+	float ADSConeRange = 1500.f;
+
+	// --- Follow / formation min-separation ---
+
+	// Hard floor (cm) — companion never rests closer; inside this distance it backs out.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0"))
+	float FollowMinSeparation = 200.f;
+
+	// Distance (cm) to back out to when inside FollowMinSeparation.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0"))
+	float FollowIdleStandoff = 300.f;
+
+	// Acceptance radius for the back-out move (cm). Kept small so the companion actually reaches the standoff.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "10"))
+	float FollowBackoutAcceptRadius = 50.f;
 };

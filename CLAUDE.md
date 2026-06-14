@@ -6,7 +6,7 @@ Multiplayer first-person shooter on Unreal Engine 5.7 with an AI companion syste
 - **Engine:** Unreal Engine 5.7
 - **Language:** UE5 C++
 - **Module:** `Extraction` (`Extraction/Source/Extraction/`)
-- **Plugin:** `AgentIntegrationKit` (in-engine MCP integration — used for editor/asset/Blueprint work)
+- **In-engine tooling:** **VibeUE** (MCP HTTP :8088, primary — Blueprints/materials/UMG/assets via `execute_python_code` + `manage_skills`) + **UnrealClaude** (MCP HTTP :3000 — inline viewport screenshots, gimbal-free actor move/rotate). Full tooling map + gotchas: `agent_docs/UnrealWorkflow.md`. (NeoStackAI :9315 still connected for A/B comparison — prefer VibeUE/UnrealClaude.)
 - **API macro:** `EXTRACTION_API`
 - **Solution:** `Extraction/Extraction.sln`
 
@@ -160,7 +160,7 @@ Local skills under `.claude/skills/` are loaded on demand and cheap. **Invoke a 
 | New UE5 class from scratch | `ue5-class-scaffold` |
 | Any UE5 C++ review request | `ue5-code-review` |
 | Crash, freeze, compile error | `ue5-crash-debug` |
-| Drive the editor from the CLI — in-engine asset/BP/widget wiring via NeoStack `execute_script`, the code→build→boot→wire→close loop, surviving editor reboots | `neostack-loop` |
+| Drive the editor from the CLI — in-engine asset/BP/widget/material/UMG wiring, screenshots, the code→build→boot→wire→close loop | **read `agent_docs/UnrealWorkflow.md`** (VibeUE :8088 + UnrealClaude :3000) |
 | End of session — summarising for handoff | `session-handoff` |
 | **Start of any non-trivial task — decide solo vs team** | **`ue5-team` (mandatory Step 0)** |
 
@@ -180,7 +180,7 @@ The custom subagents in `.claude/agents/` (Fable 5 / Sonnet 4.6) are the right t
 
 ## Project-Specific Notes
 
-- **In-engine asset/BP/montage/Blueprint work** can be done two ways: (a) hand off to the in-engine MCP agent / `inengine-checklist` in plain English, or (b) drive the editor **directly from the CLI** via the `neostack-loop` skill (curl → NeoStack `execute_script`) — use this when you want the wiring done autonomously as part of a code→build→boot→wire→close loop rather than waiting on a human/editor-agent. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP.
+- **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, MCP :8088 — `execute_python_code`, `manage_skills`, `manage_asset`) + **UnrealClaude** (MCP :3000 — inline viewport screenshots, gimbal-free actor move/rotate). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). Alternatively hand off to a human via `inengine-checklist` in plain English. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. NeoStackAI (:9315) is still connected for A/B comparison but is being phased out — prefer VibeUE/UnrealClaude.
 - **Companion manual QA scenarios** live in `agent_docs/companion_testing.md` — refer there before claiming an AI feature works. When automation tests land, mirror the scenarios.
 - **Branching:** feature-by-feature on user-managed branches. User handles PRs to `main`. No CI/CD assumptions. Don't auto-merge or push without explicit instruction.
 - **Commits:** never add `Co-Authored-By: Claude` trailer. Never `git push` without explicit instruction.
@@ -194,7 +194,7 @@ The custom subagents in `.claude/agents/` (Fable 5 / Sonnet 4.6) are the right t
 ## Session Start
 
 At session start, on a fresh task, do this in order before responding:
-1. Check `agent_docs/` for any topic-relevant docs (currently: `companion_testing.md`)
+1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + UnrealClaude tooling map + gotchas); `companion_testing.md` for companion QA
 2. Confirm the active branch matches the feature being worked on (`git status`)
 3. If the task touches AI / movement / animation / replication / UI, **invoke the matching skill from the table above before any tool calls**
 4. **Invoke `ue5-team`** to decide solo vs team for the task — this is Step 0 of the workflow

@@ -3,6 +3,8 @@
 #include "BTTask_CompanionCombat.h"
 #include "AI/CompanionDiag.h"
 #include "WeaponDataAsset.h"
+#include "Character/ExtractionPlayerInterface.h"
+#include "WeaponComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "CompanionAIController.h"
@@ -165,6 +167,50 @@ namespace
 		const FVector Dir = (Dist > KINDA_SMALL_NUMBER) ? (ToPoint / Dist) : FVector(1.f, 0.f, 0.f);
 		const FVector Out = PlayerLoc + Dir * MinDist;
 		return FVector(Out.X, Out.Y, Point.Z);
+	}
+
+	// Returns true when the player is ADS, sets OutAimDir2D to the horizontal aim direction.
+	// Accepts an already-resolved player pawn to avoid redundant controller→player walks on hot paths.
+	// Returns false if the player is absent, doesn't implement the interface, has no weapon component,
+	// is not aiming, or the aim direction is degenerate.
+	static bool ResolvePlayerADSAim(APawn* Player, FVector& OutAimDir2D)
+	{
+		if (!IsValid(Player)) return false;
+
+		IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(Player);
+		if (!PlayerIface) return false;
+
+		UWeaponComponent* WeaponComp = PlayerIface->GetWeaponComponent();
+		if (!WeaponComp || !WeaponComp->IsAiming()) return false;
+
+		OutAimDir2D = Player->GetBaseAimRotation().Vector().GetSafeNormal2D();
+		return !OutAimDir2D.IsNearlyZero();
+	}
+
+	// Pushes Point horizontally out of the player's ADS cone (preserves Z, preserves distance from PlayerLoc).
+	// Returns Point unchanged if: the point is outside Range, the horizontal distance is degenerate, or
+	// the point is already outside the cone (angle >= HalfAngleRad).
+	static FVector ClampOutsidePlayerADSCone(const FVector& Point, const FVector& PlayerLoc,
+		const FVector& AimDir2D, float HalfAngleRad, float MarginRad, float Range)
+	{
+		FVector ToPoint = Point - PlayerLoc;
+		ToPoint.Z = 0.f;
+		const float Dist = ToPoint.Size();
+		if (Dist < KINDA_SMALL_NUMBER || Dist > Range) return Point;
+
+		const FVector Dir = ToPoint / Dist;
+		const float AngleRad = FMath::Acos(FMath::Clamp(FVector::DotProduct(Dir, AimDir2D), -1.f, 1.f));
+		if (AngleRad >= HalfAngleRad) return Point;
+
+		// Determine which side of the aim direction the point is on, default to left (+1) if on-axis.
+		const float SideSign = FMath::Sign(FVector::DotProduct(FVector::CrossProduct(AimDir2D, Dir), FVector::UpVector));
+		const float ChosenSign = (SideSign != 0.f) ? SideSign : 1.f;
+
+		constexpr float MaxConeTargetAngleRad = 85.f * PI / 180.f;
+		const float TargetAngle = FMath::Min(HalfAngleRad + MarginRad, MaxConeTargetAngleRad);
+		const FVector Rotated = AimDir2D.RotateAngleAxis(FMath::RadiansToDegrees(TargetAngle) * ChosenSign, FVector::UpVector);
+		const FVector NewPos = PlayerLoc + Rotated * Dist;
+		return FVector(NewPos.X, NewPos.Y, Point.Z);
 	}
 }
 
@@ -866,6 +912,22 @@ void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AA
 			if (!ProjectToNav(Companion->GetWorld(), ClampedHome, MoveShootNavProjectExtent, Reproj)) return;
 			Projected = Reproj;
 		}
+
+		ACompanionAIController* DriftCompAIC = Cast<ACompanionAIController>(Companion->GetController());
+		const UCompanionTuningDataAsset* DriftTuning = DriftCompAIC ? DriftCompAIC->GetTuning() : nullptr;
+		FVector AimDir2D;
+		if (DriftTuning && DriftTuning->bAvoidPlayerADSCone && ResolvePlayerADSAim(KOPlayer, AimDir2D))
+		{
+			const float HalfRad = FMath::DegreesToRadians(DriftTuning->ADSConeHalfAngleDegrees);
+			const float MarginRad = FMath::DegreesToRadians(DriftTuning->ADSConeClearanceMarginDegrees);
+			const FVector Clamped = ClampOutsidePlayerADSCone(Projected, KOPlayer->GetActorLocation(), AimDir2D, HalfRad, MarginRad, DriftTuning->ADSConeRange);
+			if (!Clamped.Equals(Projected))
+			{
+				FVector Reproj;
+				if (ProjectToNav(Companion->GetWorld(), Clamped, MoveShootNavProjectExtent, Reproj))
+					Projected = Reproj;
+			}
+		}
 	}
 
 	JiggleHome = Projected;
@@ -891,6 +953,13 @@ void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, A
 	EnterMoveShootIfNeeded(Companion, AIC, Target, CMC, TEXT("(jiggle)"));
 	CMC->MaxAcceleration = CombatMoveAcceleration;
 
+	// Hoist controller + tuning + player pawn once so the anchor block and the per-tick steering block
+	// both reuse them — avoids the duplicate controller→tuning→player walk on the hot per-frame path.
+	ACompanionAIController* CompAIC = Cast<ACompanionAIController>(AIC);
+	const UCompanionTuningDataAsset* Tuning = CompAIC ? CompAIC->GetTuning() : nullptr;
+	float KeepOut = 0.f;
+	APawn* KOPlayer = ResolvePlayerKeepOut(Companion, KeepOut);
+
 	// (Re)anchor on activation — also fires when resuming after a LoS-blocked stretch (bJiggleActive cleared there),
 	// so it jiggles around wherever it ended up. StopMovement() once cancels the regain fan's MoveToLocation path
 	// so it doesn't fight AddMovementInput.
@@ -898,10 +967,28 @@ void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, A
 	{
 		AIC->StopMovement();
 		JiggleHome = Companion->GetActorLocation();
-		float KeepOut = 0.f;
-		if (APawn* KOPlayer = ResolvePlayerKeepOut(Companion, KeepOut))
+		if (IsValid(KOPlayer))
+		{
 			JiggleHome = ClampOutsidePlayerCircle(JiggleHome, KOPlayer->GetActorLocation(), KeepOut);
+
+			FVector AimDir2D;
+			if (Tuning && Tuning->bAvoidPlayerADSCone && ResolvePlayerADSAim(KOPlayer, AimDir2D))
+			{
+				const float HalfRad = FMath::DegreesToRadians(Tuning->ADSConeHalfAngleDegrees);
+				const float MarginRad = FMath::DegreesToRadians(Tuning->ADSConeClearanceMarginDegrees);
+				const FVector Clamped = ClampOutsidePlayerADSCone(JiggleHome, KOPlayer->GetActorLocation(), AimDir2D, HalfRad, MarginRad, Tuning->ADSConeRange);
+				if (!Clamped.Equals(JiggleHome))
+				{
+					FVector Reproj;
+					if (ProjectToNav(Companion->GetWorld(), Clamped, MoveShootNavProjectExtent, Reproj))
+						JiggleHome = Reproj;
+					else
+						JiggleHome = Clamped;
+				}
+			}
+		}
 		JiggleDriftTimer = JiggleDriftInterval;
+		InConeContinuousTime = 0.f;
 		RerollJiggleOffset(Companion, Target, IgnoredAttached);
 		SmoothedMoveDir = SeedMoveDir(JiggleHome + JiggleOffset, JiggleHome, Companion->GetActorForwardVector());
 		bJiggleActive = true;
@@ -926,8 +1013,7 @@ void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, A
 	SmoothedMoveDir = FMath::VInterpNormalRotationTo(SmoothedMoveDir, TargetDir, DeltaSeconds, CombatMoveTurnRate);
 
 	// Player keep-out: never drive within the circle — push straight out if inside, slide tangentially if approaching.
-	float KeepOut = 0.f;
-	if (APawn* KOPlayer = ResolvePlayerKeepOut(Companion, KeepOut))
+	if (IsValid(KOPlayer))
 	{
 		FVector ToPlayer = KOPlayer->GetActorLocation() - CompanionLoc;
 		ToPlayer.Z = 0.f;
@@ -951,6 +1037,54 @@ void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, A
 				}
 			}
 		}
+
+		// ADS cone steering bias: if companion's current position is inside the player's firing cone,
+		// blend a tangential push out of the cone into SmoothedMoveDir.
+		// bAvoidPlayerADSCone is checked first so the feature-off path does zero casts.
+		FVector AimDir2D;
+		if (Tuning && Tuning->bAvoidPlayerADSCone && ResolvePlayerADSAim(KOPlayer, AimDir2D))
+		{
+			const float HalfRad = FMath::DegreesToRadians(Tuning->ADSConeHalfAngleDegrees);
+			FVector ToCompanion = CompanionLoc - KOPlayer->GetActorLocation();
+			ToCompanion.Z = 0.f;
+			const float DistFromPlayer = ToCompanion.Size();
+			if (DistFromPlayer > KINDA_SMALL_NUMBER && DistFromPlayer <= Tuning->ADSConeRange)
+			{
+				const FVector CompDir = ToCompanion / DistFromPlayer;
+				const float AngleRad = FMath::Acos(FMath::Clamp(FVector::DotProduct(CompDir, AimDir2D), -1.f, 1.f));
+				if (AngleRad < HalfRad)
+				{
+					// Tangent perpendicular to AimDir2D, toward companion's side.
+					const float SideSign = FMath::Sign(FVector::DotProduct(FVector::CrossProduct(AimDir2D, CompDir), FVector::UpVector));
+					const float ChosenSign = (SideSign != 0.f) ? SideSign : 1.f;
+					FVector Tangent = FVector::CrossProduct(FVector::UpVector, AimDir2D) * ChosenSign;
+					SmoothedMoveDir = (SmoothedMoveDir + Tangent).GetSafeNormal();
+					InConeContinuousTime += DeltaSeconds;
+				}
+				else
+				{
+					InConeContinuousTime = 0.f;
+				}
+			}
+			else
+			{
+				InConeContinuousTime = 0.f;
+			}
+		}
+		else
+		{
+			InConeContinuousTime = 0.f;
+		}
+	}
+
+	// Wall-grind escape: if steering bias hasn't cleared the cone after a bounded interval
+	// (companion pinned against a wall on the exit side), force a fresh re-anchor so it picks
+	// a new JiggleHome outside the cone rather than grinding forever.
+	constexpr float ConePinEscapeSeconds = 1.5f;
+	if (InConeContinuousTime >= ConePinEscapeSeconds)
+	{
+		bJiggleActive = false;
+		InConeContinuousTime = 0.f;
 	}
 
 	Companion->AddMovementInput(SmoothedMoveDir, 1.0f);
@@ -1034,6 +1168,22 @@ bool UBTTask_CompanionCombat::TryLateralLosDestination(ACompanionCharacter* Comp
 		FVector ToPlayer = KOPlayer->GetActorLocation() - OutDest;
 		ToPlayer.Z = 0.f;
 		if (ToPlayer.SizeSquared() < FMath::Square(KeepOut)) return false;
+
+		ACompanionAIController* FanCompAIC = Cast<ACompanionAIController>(Companion->GetController());
+		const UCompanionTuningDataAsset* FanTuning = FanCompAIC ? FanCompAIC->GetTuning() : nullptr;
+		FVector AimDir2D;
+		if (FanTuning && FanTuning->bAvoidPlayerADSCone && ResolvePlayerADSAim(KOPlayer, AimDir2D))
+		{
+			const float HalfRad = FMath::DegreesToRadians(FanTuning->ADSConeHalfAngleDegrees);
+			FVector ToCandidate = OutDest - KOPlayer->GetActorLocation();
+			ToCandidate.Z = 0.f;
+			const float DistToCandidate = ToCandidate.Size();
+			if (DistToCandidate > KINDA_SMALL_NUMBER && DistToCandidate <= FanTuning->ADSConeRange)
+			{
+				const float AngleRad = FMath::Acos(FMath::Clamp(FVector::DotProduct(ToCandidate / DistToCandidate, AimDir2D), -1.f, 1.f));
+				if (AngleRad < HalfRad) return false;
+			}
+		}
 	}
 	return PointHasLosToTarget(Companion, OutDest, Target, IgnoredAttached);
 }
@@ -1075,6 +1225,7 @@ void UBTTask_CompanionCombat::EndOpenAreaMoveShoot(ACompanionCharacter* Companio
 	JiggleRetargetTimer = 0.f;
 	JiggleDriftTimer = 0.f;
 	SmoothedMoveDir = FVector::ZeroVector;
+	InConeContinuousTime = 0.f;
 
 	// Player-pull hysteresis + entry-detection — both start unlatched so a fresh engagement is clean.
 	bPlayerPullLatched = false;

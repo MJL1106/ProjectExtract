@@ -107,6 +107,35 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	// --- Formation (non-sprint) mode: stay near the player indefinitely ---
 
+	// Clamp the three follow distances to a sensible ordering at read time so mistuning can't
+	// produce unreachable states: EffMinSep < AcceptableRadius, EffStandoff > EffMinSep.
+	constexpr float FollowDistMargin = 30.f;
+	constexpr float BackoutDeadband  = 20.f;
+	const float EffMinSep   = FMath::Min(T->FollowMinSeparation,  T->AcceptableRadius - FollowDistMargin);
+	const float EffStandoff = FMath::Max(T->FollowIdleStandoff,   EffMinSep + FollowDistMargin);
+
+	// Min-separation back-out: inside the hard floor → walk back to standoff rather than freezing in place.
+	// Deadband on entry prevents the branch from thrashing when the player loiters right at the floor boundary.
+	if (DistToPlayer < EffMinSep - BackoutDeadband)
+	{
+		FVector AwayDir = (CompanionLocation - PlayerLocation).GetSafeNormal2D();
+		if (AwayDir.IsNearlyZero())
+			AwayDir = (-Player->GetActorForwardVector()).GetSafeNormal2D();
+		if (AwayDir.IsNearlyZero())
+			AwayDir = FVector(1.f, 0.f, 0.f);
+
+		bIsIdling = false;
+		Companion->SetSprinting(false);
+
+		const FVector BackoutTarget = PlayerLocation + AwayDir * EffStandoff;
+		if (FVector::Dist(BackoutTarget, LastMoveTarget) > 50.f)
+		{
+			LastMoveTarget = BackoutTarget;
+			Controller->MoveToLocation(BackoutTarget, T->FollowBackoutAcceptRadius, false, true, false, true);
+		}
+		return;
+	}
+
 	// Close enough to player — stop and idle
 	if (DistToPlayer <= T->AcceptableRadius)
 	{

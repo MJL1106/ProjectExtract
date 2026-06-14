@@ -57,6 +57,8 @@
   },
   "enabledMcpjsonServers": [
     "sequential-thinking",
-    "code-review-graph"
+    "code-review-graph",
+    "unrealclaude",
+    "VibeUE"
   ]
 }

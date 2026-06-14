@@ -60,9 +60,14 @@ Extraction/Config/DefaultEditorPerProjectUserSettings.ini
 Extraction/Config/DefaultAgentIntegrationKit.ini
 
 # ----------------------------------------------------------------------------
-# Third-party plugins (installed locally, not tracked)
+# Third-party plugins
+# NeoStackAI / AgentIntegrationKit_backup stay local (untracked).
+# VibeUE + UnrealClaude are vendored — their own nested .gitignore files
+# exclude Binaries/Intermediate; UnrealClaude keeps its mcp-bridge node_modules.
 # ----------------------------------------------------------------------------
-Extraction/Plugins/
+Extraction/Plugins/*
+!Extraction/Plugins/VibeUE
+!Extraction/Plugins/UnrealClaude
 # Added by code-review-graph
 .code-review-graph/
 

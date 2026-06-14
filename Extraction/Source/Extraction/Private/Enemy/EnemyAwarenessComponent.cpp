@@ -444,6 +444,11 @@ void UEnemyAwarenessComponent::SetState(EEnemyAwarenessState NewState)
 	const EEnemyAwarenessState OldState = CurrentState;
 	CurrentState = NewState;
 
+	if (const AAIController* C = Cast<AAIController>(GetOwner()))
+		UE_LOG(LogEnemyAI, Warning, TEXT("[AWARE] %s: %s -> %s"),
+			C->GetPawn() ? *C->GetPawn()->GetName() : TEXT("<no pawn>"),
+			*UEnum::GetValueAsString(OldState), *UEnum::GetValueAsString(NewState));
+
 	UBlackboardComponent* BB = BlackboardComp.Get();
 	if (IsValid(BB))
 		BB->SetValueAsEnum(AEnemyAIController::BB_AwarenessState, static_cast<uint8>(CurrentState));

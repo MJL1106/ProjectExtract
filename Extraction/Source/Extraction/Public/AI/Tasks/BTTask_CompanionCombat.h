@@ -453,6 +453,10 @@ private:
 	/** CMC->MaxAcceleration captured on move-shoot entry so it can be restored on exit. 0 = not captured. */
 	float CachedDefaultAcceleration = 0.f;
 
+	/** Seconds the companion has continuously been inside the player's ADS cone during jiggle steering.
+	 *  When this exceeds the escape threshold, jiggle re-anchors to break the wall-grind stall. */
+	float InConeContinuousTime = 0.f;
+
 	// Peek action state
 	EPeekAction CurrentBurstAction = EPeekAction::Stand;
 	uint8 ConsecutiveHolds = 0;

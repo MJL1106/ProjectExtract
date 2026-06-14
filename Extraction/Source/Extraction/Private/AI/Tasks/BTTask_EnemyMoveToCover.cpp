@@ -93,7 +93,9 @@ EBTNodeResult::Type UBTTask_EnemyMoveToCover::ExecuteTask(UBehaviorTreeComponent
 		return EBTNodeResult::Succeeded;
 	}
 
-	Controller->MoveToLocation(ArrivalPos, 60.f, false, true, false, true);
+	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(ArrivalPos, 60.f, false, true, false, true);
+	UE_LOG(LogEnemyAI, Warning, TEXT("[COVER] %s MoveTo (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
+		*Pawn->GetName(), ArrivalPos.X, ArrivalPos.Y, ArrivalPos.Z, FVector::Dist(PawnLoc, ArrivalPos), (int32)MoveResult);
 	Mem->bMoveIssued = true;
 	return EBTNodeResult::InProgress;
 }
