@@ -380,13 +380,9 @@ void AWeaponBase::PerformHitscan()
 	}
 	else
 	{
-		// AI path: trace from muzzle socket. Aim directly at the AI's current target location
-		// (not ActorForward) so vertical offsets and yaw interp lag don't cause misses.
-		// CachedEffectiveMesh resolved in BeginPlay: WeaponMesh if valid, else FindComponentByClass result (avoids per-shot scan).
-		UMeshComponent* EffectiveMesh = CachedEffectiveMesh.Get();
-		TraceStart = IsValid(EffectiveMesh)
-			? EffectiveMesh->GetSocketLocation(WeaponConstants::MuzzleSocketName)
-			: OwnerChar->GetActorLocation();
+		// AI path: trace from eye height (GetPawnViewLocation) so damage agrees with LOS checks
+		// in BTService_EnemyCombat and EnemyAwarenessComponent. Muzzle socket is kept for FX/noise only.
+		TraceStart = OwnerChar->GetPawnViewLocation();
 
 		FVector AimDirection = OwnerChar->GetActorForwardVector(); // fallback
 		float InaccuracyDeg = 0.0f;
@@ -459,7 +455,7 @@ void AWeaponBase::PerformHitscan()
 			const IAIShooterInterface* DebugShooter = Cast<IAIShooterInterface>(OwnerChar);
 			const AActor* AILogAimTarget = DebugShooter ? DebugShooter->GetAIAimTarget() : nullptr;
 			UE_LOG(LogExtraction, Verbose,
-				TEXT("AI-FIRE owner=%s muzzle=%s end=%s aimTarget=%s bHit=%d hitActor=%s hitDist=%.0f"),
+				TEXT("AI-FIRE owner=%s eye=%s end=%s aimTarget=%s bHit=%d hitActor=%s hitDist=%.0f"),
 				*GetNameSafe(OwnerChar), *TraceStart.ToCompactString(), *TraceEnd.ToCompactString(),
 				*GetNameSafe(AILogAimTarget), (int32)bHit,
 				*GetNameSafe(bHit ? HitResult.GetActor() : nullptr),

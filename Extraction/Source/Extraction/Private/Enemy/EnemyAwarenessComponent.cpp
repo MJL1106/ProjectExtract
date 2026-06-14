@@ -26,6 +26,7 @@
 
 #if ENABLE_DRAW_DEBUG
 #include "DrawDebugHelpers.h"
+#include "BehaviorTree/BehaviorTreeComponent.h"
 #endif
 
 UEnemyAwarenessComponent::UEnemyAwarenessComponent()
@@ -251,21 +252,107 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 	}
 
 #if ENABLE_DRAW_DEBUG
-	if (IsEnemyDrawDebugEnabled())
 	{
-		const AAIController* MyController = Cast<AAIController>(GetOwner());
-		const ACharacter* MyChar = MyController ? Cast<ACharacter>(MyController->GetPawn()) : nullptr;
-		if (IsValid(MyChar))
+		const int32 DebugLevel = GetEnemyDrawDebugLevel();
+		if (DebugLevel > 0)
 		{
-			const FString ArchetypeShort = UEnum::GetDisplayValueAsText(ArchetypeData->Archetype).ToString().ToUpper();
-			const FString StateShort = UEnum::GetDisplayValueAsText(CurrentState).ToString().ToUpper();
-			const FString Tag = FString::Printf(TEXT("%s | %s | %.0f"), *ArchetypeShort, *StateShort, GetHighestSuspicion());
+			const AAIController* MyController = Cast<AAIController>(GetOwner());
+			const AEnemyCharacter* MyChar = MyController ? Cast<AEnemyCharacter>(MyController->GetPawn()) : nullptr;
+			UWorld* World = GetWorld();
+			if (IsValid(MyChar) && IsValid(World))
+			{
+				const float HalfHeight = MyChar->GetCapsuleComponent()
+					? MyChar->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 90.f;
+				constexpr float HeadOffset = 30.f;
+				const FVector HeadLocation = MyChar->GetActorLocation() + FVector(0.f, 0.f, HalfHeight + HeadOffset);
 
-			constexpr float HeadOffset = 30.f;
-			const float HalfHeight = MyChar->GetCapsuleComponent() ? MyChar->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 90.f;
-			const FVector DrawLocation = MyChar->GetActorLocation() + FVector(0.f, 0.f, HalfHeight + HeadOffset);
+				// --- Level 1+: head tag ---
+				const FString ArchetypeShort = UEnum::GetDisplayValueAsText(ArchetypeData->Archetype).ToString().ToUpper();
+				const FString StateShort = UEnum::GetDisplayValueAsText(CurrentState).ToString().ToUpper();
+				FString Tag = FString::Printf(TEXT("%s | %s | %.0f"), *ArchetypeShort, *StateShort, GetHighestSuspicion());
 
-			DrawDebugString(GetWorld(), DrawLocation, Tag, nullptr, FColor::Cyan, UpdateInterval, true);
+				if (DebugLevel >= 2)
+				{
+					// Append active BT task name
+					const UBehaviorTreeComponent* BTComp = Cast<UBehaviorTreeComponent>(MyController->GetBrainComponent());
+					const FString TaskName = IsValid(BTComp) ? BTComp->DescribeActiveTasks() : TEXT("No BT");
+					Tag += FString::Printf(TEXT("\n%s"), *TaskName);
+
+					// Append combat target name
+					AActor* Target = CombatTarget.Get();
+					if (IsValid(Target))
+						Tag += FString::Printf(TEXT("\nTgt: %s"), *Target->GetName());
+				}
+
+				DrawDebugString(World, HeadLocation, Tag, nullptr, FColor::Cyan, UpdateInterval, true);
+
+				if (DebugLevel >= 2)
+				{
+					const FVector PawnLoc = MyChar->GetActorLocation();
+					// Eye location at capsule half-height (horizontal cone origin)
+					const FVector EyeLoc = PawnLoc + FVector(0.f, 0.f, HalfHeight);
+					const FVector ForwardDir = MyChar->GetActorForwardVector();
+
+					// --- Vision cone (horizontal wedge) ---
+					if (IsValid(ArchetypeData))
+					{
+						const float HalfFOVRad = FMath::DegreesToRadians(ArchetypeData->PeripheralVisionDeg * 0.5f);
+						// DrawDebugCone expects half-angle; draw 16 segments, flat (no vertical spread)
+						DrawDebugCone(World, EyeLoc, ForwardDir, ArchetypeData->SightRadius,
+							HalfFOVRad, 0.f, 16, FColor::Yellow, false, UpdateInterval, 0);
+
+						// Lose-sight ring (faint circle)
+						DrawDebugCone(World, EyeLoc, ForwardDir, ArchetypeData->LoseSightRadius,
+							HalfFOVRad, 0.f, 16, FColor(128, 128, 0), false, UpdateInterval, 0);
+					}
+
+					// --- Combat target line ---
+					AActor* Target = CombatTarget.Get();
+					if (IsValid(Target))
+					{
+						FColor LineColor;
+						if (CurrentState == EEnemyAwarenessState::Combat)
+						{
+							// Green = confirmed LOS, yellow = contact-hold signal active, red = grace counting down
+							if (bHadLOS)
+								LineColor = FColor::Green;
+							else if (TimeSinceLOSLost < (IsValid(ArchetypeData) ? ArchetypeData->LostContactGrace * 0.5f : 2.f))
+								LineColor = FColor::Yellow;
+							else
+								LineColor = FColor::Red;
+						}
+						else
+						{
+							// Stale reference outside Combat — neutral grey
+							LineColor = FColor(160, 160, 160);
+						}
+
+						DrawDebugLine(World, EyeLoc, Target->GetActorLocation(), LineColor, false, UpdateInterval, 0, 2.f);
+					}
+
+					// --- Markers ---
+					// LastKnownLocation (show in Searching or Combat)
+					if (CurrentState == EEnemyAwarenessState::Searching || CurrentState == EEnemyAwarenessState::Combat)
+					{
+						if (!LastKnownLocation.IsZero())
+							DrawDebugSphere(World, LastKnownLocation, 20.f, 8, FColor::Orange, false, UpdateInterval, 0);
+					}
+
+					// InvestigateLocation — read from BB
+					const UBlackboardComponent* BB = BlackboardComp.Get();
+					if (IsValid(BB))
+					{
+						const FVector InvLoc = BB->GetValueAsVector(AEnemyAIController::BB_InvestigateLocation);
+						if (!InvLoc.IsZero())
+							DrawDebugSphere(World, InvLoc, 20.f, 8, FColor::Purple, false, UpdateInterval, 0);
+
+						// Guard post marker
+						const FVector PostLoc = BB->GetValueAsVector(AEnemyAIController::BB_PostLocation);
+						if (!PostLoc.IsZero())
+							DrawDebugSphere(World, PostLoc + FVector(0.f, 0.f, 5.f), 15.f, 8, FColor::Cyan, false, UpdateInterval, 0);
+					}
+				}
+			}
 		}
 	}
 #endif
@@ -374,6 +461,20 @@ void UEnemyAwarenessComponent::UpdateCombat()
 		else
 		{
 			TimeSinceLOSLost += UpdateInterval;
+			// Log contact-hold evaluation while grace is counting (not while at 0 — avoids per-tick spam)
+			if (TimeSinceLOSLost > 0.f)
+			{
+				const float CosHalfFOV = IsValid(ArchetypeData) ? FMath::Cos(FMath::DegreesToRadians(ArchetypeData->PeripheralVisionDeg * 0.5f)) : 0.f;
+				const FVector ToTarget = IsValid(MyPawn) && CombatTarget.IsValid()
+					? (CombatTarget->GetActorLocation() - MyPawn->GetActorLocation()).GetSafeNormal()
+					: FVector::ZeroVector;
+				const float Dot = IsValid(MyPawn) ? FVector::DotProduct(MyPawn->GetActorForwardVector(), ToTarget) : 0.f;
+				// bTraceClear already consumed above; use bHoldViaFOVLOS as proxy for whether trace cleared + FOV passed
+				UE_LOG(LogEnemyAI, Verbose, TEXT("[AWARENESS] %s contact-hold fail: bFOVLOS=%d Dot=%.2f CosHalf=%.2f grace=%.1f/%.1f"),
+					IsValid(MyPawn) ? *MyPawn->GetName() : TEXT("?"),
+					(int32)bHoldViaFOVLOS, Dot, CosHalfFOV,
+					TimeSinceLOSLost, IsValid(ArchetypeData) ? ArchetypeData->LostContactGrace : 0.f);
+			}
 			if (TimeSinceLOSLost >= ArchetypeData->LostContactGrace)
 				TransitionToSearching(true);
 		}
@@ -514,6 +615,13 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 
 void UEnemyAwarenessComponent::TransitionToSearching(bool bContactLost)
 {
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	UE_LOG(LogEnemyAI, Log, TEXT("[AWARENESS] %s TransitionToSearching bContactLost=%d InvestigateLocation=(%.0f,%.0f,%.0f)"),
+		IsValid(MyPawn) ? *MyPawn->GetName() : TEXT("?"),
+		(int32)bContactLost,
+		LastKnownLocation.X, LastKnownLocation.Y, LastKnownLocation.Z);
+
 	if (bContactLost)
 		Bark(EBarkType::LostTarget);
 

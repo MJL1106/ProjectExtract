@@ -63,6 +63,22 @@ public:
 
 	bool IsTargetInFireArc(const FVector& TargetLoc) const;
 
+	/**
+	 * World-space position behind the wall at the given Alpha.
+	 * Result = GetLocationAtAlpha(Alpha) - GetForwardDirection() * Standoff.
+	 * Standoff should be capsule radius + DA->CoverStandoffPadding.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Cover|Geometry")
+	FVector GetBehindCoverPosition(float Alpha, float Standoff) const;
+
+	/**
+	 * Returns true when at least one probe from the slot can see ThreatLoc.
+	 * Checks eye-height centre and peekable-corner apexes for Stand-height slots.
+	 * IgnoreActor is excluded from the trace (pass the threat actor so self-hits are ignored).
+	 */
+	static bool HasLOSToThreat(UWorld* World, const AAICoverSlot* Slot,
+		const FVector& ThreatLoc, const AActor* IgnoreActor);
+
 	// Crouch cover = chest-high wall, can fire over the top.
 	bool CanStandFireOver() const;
 

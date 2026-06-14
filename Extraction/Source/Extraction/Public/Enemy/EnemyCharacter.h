@@ -48,6 +48,7 @@ class EXTRACTION_API AEnemyCharacter : public ACharacter,
 public:
 	AEnemyCharacter();
 
+	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
@@ -132,6 +133,27 @@ public:
 	 *  Called at possess time, before BP BeginPlay fires on placed pawns. BP can bind here for init FX. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Components")
 	void OnBoltOnComponentsReady();
+
+	// --- Guard post ---
+
+	/** World-space location of this enemy's guard post.
+	 *  Returns GuardPostOverride when bOverrideGuardPost is true, otherwise the location captured at BeginPlay. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Patrol")
+	FVector GetGuardPostLocation() const;
+
+	/** Yaw (degrees) captured at BeginPlay — used as the base sweep direction for guard-scan. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Patrol")
+	float GetInitialPostYaw() const { return InitialPostYaw; }
+
+	/** When enabled, the guard returns to GuardPostOverride instead of the spawn location. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Enemy|Patrol")
+	bool bOverrideGuardPost = false;
+
+	/** World-space override for the guard post (only used when bOverrideGuardPost is true).
+	 *  MakeEditWidget lets designers drag it in the viewport. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Enemy|Patrol",
+		meta = (MakeEditWidget, EditCondition = "bOverrideGuardPost"))
+	FVector GuardPostOverride = FVector::ZeroVector;
 
 	// --- Move speed ---
 
@@ -252,6 +274,12 @@ private:
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Enemy|Tags")
 	FGameplayTagContainer OwnedTags;
+
+	/** World-space location captured at BeginPlay (authority only). Fallback guard post when no override is set. */
+	FVector InitialPostLocation = FVector::ZeroVector;
+
+	/** Yaw captured at BeginPlay (degrees). Base direction for guard-scan sweep. */
+	float InitialPostYaw = 0.f;
 
 	/** Set once when an enemy first reports this corpse to the director. */
 	bool bBodyReported = false;

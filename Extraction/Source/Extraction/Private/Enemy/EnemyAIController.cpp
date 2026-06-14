@@ -32,6 +32,7 @@ const FName AEnemyAIController::BB_HasCover(TEXT("HasCover"));
 const FName AEnemyAIController::BB_PatrolRoute(TEXT("PatrolRoute"));
 const FName AEnemyAIController::BB_MoraleState(TEXT("MoraleState"));
 const FName AEnemyAIController::BB_ManeuverRole(TEXT("ManeuverRole"));
+const FName AEnemyAIController::BB_PostLocation(TEXT("PostLocation"));
 
 AEnemyAIController::AEnemyAIController()
 {
@@ -114,6 +115,10 @@ void AEnemyAIController::OnPossess(APawn* InPawn)
 	// Write patrol route to BB
 	if (IsValid(BBComp) && IsValid(Enemy->PatrolRoute))
 		BBComp->SetValueAsObject(BB_PatrolRoute, Enemy->PatrolRoute);
+
+	// Write guard post location to BB (always set — used by patrol task when route is absent)
+	if (IsValid(BBComp))
+		BBComp->SetValueAsVector(BB_PostLocation, Enemy->GetGuardPostLocation());
 
 	// Wire awareness component
 	if (IsValid(AwarenessComponent) && IsValid(BBComp))

@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "BehaviorTree/BTTaskNode.h"
+#include "BTTask_EnemyMoveAndShoot.h"
 #include "BTTask_EnemyFallback.generated.h"
 
 class AAICoverSlot;
@@ -41,7 +42,14 @@ private:
 		float PeekCooldown = 0.f;
 		float CoverRetryTimer = 0.f;
 		bool bSlotClaimed = false;
+		FVector ArrivalPos = FVector::ZeroVector;
 		TWeakObjectPtr<AAICoverSlot> LastFailedSlot;
+
+		// Advance-fire sub-loop (mirrors FMoveToCoverMemory)
+		EMoveShootFirePhase FirePhase = EMoveShootFirePhase::Acquire;
+		float FireTimer = 0.f;
+		float FireTickAccum = 0.f;
+		bool bFiring = false;
 	};
 
 	/** Search radius multiplier applied to the DA CoverSearchRadius. */
@@ -72,6 +80,7 @@ private:
 	float CoverRetryInterval = 5.f;
 
 	bool FindDeepCover(UBehaviorTreeComponent& OwnerComp, FFallbackMemory* Mem);
+	void StopFallbackFire(UBehaviorTreeComponent& OwnerComp, FFallbackMemory* Mem, bool bKeepFocus) const;
 	void StopFireAndCleanUp(UBehaviorTreeComponent& OwnerComp) const;
 	void ReleaseClaim(UBlackboardComponent* BB, APawn* Pawn) const;
 };

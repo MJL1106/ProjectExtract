@@ -6,7 +6,7 @@ Multiplayer first-person shooter on Unreal Engine 5.7 with an AI companion syste
 - **Engine:** Unreal Engine 5.7
 - **Language:** UE5 C++
 - **Module:** `Extraction` (`Extraction/Source/Extraction/`)
-- **In-engine tooling:** **VibeUE** (MCP HTTP :8088, primary — Blueprints/materials/UMG/assets via `execute_python_code` + `manage_skills`) + **UnrealClaude** (MCP HTTP :3000 — inline viewport screenshots, gimbal-free actor move/rotate). Full tooling map + gotchas: `agent_docs/UnrealWorkflow.md`. (NeoStackAI :9315 still connected for A/B comparison — prefer VibeUE/UnrealClaude.)
+- **In-engine tooling:** **VibeUE** (MCP HTTP :8088, primary — Blueprints/materials/UMG/assets via `execute_python_code` + `manage_skills`) + **UnrealClaude** (MCP HTTP :3000 — inline viewport screenshots, gimbal-free actor move/rotate) + **NeoStack** (MCP HTTP :9315 — fallback when VibeUE/UnrealClaude lack the capability, **especially in-engine AI systems: Behavior Trees, Blackboards, EQS, AI Blueprint wiring** — VibeUE has no BT/Blackboard skill). Full tooling map + gotchas: `agent_docs/UnrealWorkflow.md`.
 - **API macro:** `EXTRACTION_API`
 - **Solution:** `Extraction/Extraction.sln`
 
@@ -121,6 +121,7 @@ Prefer custom subagents wherever the task matches an agent description. Main cha
 
 | Task | Agent |
 |---|---|
+| In-engine asset/BP/material/UMG/Niagara/DataAsset/level wiring, asset import, **Behavior Trees/Blackboards/EQS** — via MCP, no C++ | `ue5-inengine-agent` (or invoke the `inengine-agent` skill) |
 | Unresolved externals, IWYU warnings, missing API macros, Build.cs edits, linker errors | `ue5-build-specialist` |
 | Writing automation tests, scaffolding a test module | `ue5-qa-tester` |
 | UE5 API behaviour unclear / new engine feature / want to confirm best practice | `ue5-doc-researcher` |
@@ -160,7 +161,8 @@ Local skills under `.claude/skills/` are loaded on demand and cheap. **Invoke a 
 | New UE5 class from scratch | `ue5-class-scaffold` |
 | Any UE5 C++ review request | `ue5-code-review` |
 | Crash, freeze, compile error | `ue5-crash-debug` |
-| Drive the editor from the CLI — in-engine asset/BP/widget/material/UMG wiring, screenshots, the code→build→boot→wire→close loop | **read `agent_docs/UnrealWorkflow.md`** (VibeUE :8088 + UnrealClaude :3000) |
+| In-engine editor work via MCP (BP/material/UMG/Niagara/DataAsset/level/asset import) **and in-engine AI systems** (Behavior Trees / Blackboards / EQS → NeoStack) — done autonomously | **`inengine-agent`** (dispatches the `ue5-inengine-agent` subagent) |
+| Drive the editor from the CLI yourself — tooling map, screenshots, the code→build→boot→wire→close loop, gotchas | **read `agent_docs/UnrealWorkflow.md`** (VibeUE :8088 + UnrealClaude :3000 + NeoStack :9315) |
 | End of session — summarising for handoff | `session-handoff` |
 | **Start of any non-trivial task — decide solo vs team** | **`ue5-team` (mandatory Step 0)** |
 
@@ -180,7 +182,7 @@ The custom subagents in `.claude/agents/` (Opus 4.8 (1M context) / Sonnet 4.6) a
 
 ## Project-Specific Notes
 
-- **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, MCP :8088 — `execute_python_code`, `manage_skills`, `manage_asset`) + **UnrealClaude** (MCP :3000 — inline viewport screenshots, gimbal-free actor move/rotate). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). Alternatively hand off to a human via `inengine-checklist` in plain English. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. NeoStackAI (:9315) is still connected for A/B comparison but is being phased out — prefer VibeUE/UnrealClaude.
+- **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, MCP :8088 — `execute_python_code`, `manage_skills`, `manage_asset`) + **UnrealClaude** (MCP :3000 — inline viewport screenshots, gimbal-free actor move/rotate). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). To get it done autonomously, **dispatch `ue5-inengine-agent`** (via the `inengine-agent` skill) — it drives the editor MCP itself with all the tooling/skill/doc pointers pre-loaded. Alternatively hand off to a human via `inengine-checklist` (small) / `inengine-prompt` (large) in plain English. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. **NeoStack (:9315) is the fallback when VibeUE/UnrealClaude lack the capability — especially in-engine AI systems: Behavior Trees, Blackboards, EQS, and AI Blueprint wiring (VibeUE has no BT/Blackboard skill).** Drive it via the `neostack-loop` / `neostack-blueprint` skills.
 - **Companion manual QA scenarios** live in `agent_docs/companion_testing.md` — refer there before claiming an AI feature works. When automation tests land, mirror the scenarios.
 - **Branching:** feature-by-feature on user-managed branches. User handles PRs to `main`. No CI/CD assumptions. Don't auto-merge or push without explicit instruction.
 - **Commits:** never add `Co-Authored-By: Claude` trailer. Never `git push` without explicit instruction.

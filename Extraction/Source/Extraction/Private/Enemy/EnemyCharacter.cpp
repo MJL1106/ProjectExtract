@@ -23,6 +23,11 @@
 #include "Engine/DamageEvents.h"
 #include "TimerManager.h"
 
+static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
+	TEXT("enemy.PersistCorpses"), 0,
+	TEXT("If non-zero, dead enemies persist as discoverable corpses (director-managed). If 0 (default), they disappear after a short delay."),
+	ECVF_Cheat);
+
 AEnemyCharacter::AEnemyCharacter()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -66,6 +71,19 @@ AEnemyCharacter::AEnemyCharacter()
 	BoneToHitRegionMap.Add(FName("foot_r"),     EHitRegion::Legs);
 	BoneToHitRegionMap.Add(FName("ball_l"),     EHitRegion::Legs);
 	BoneToHitRegionMap.Add(FName("ball_r"),     EHitRegion::Legs);
+}
+
+void AEnemyCharacter::PostInitializeComponents()
+{
+	Super::PostInitializeComponents();
+
+	// Capture guard-post here — runs before BeginPlay and before OnPossess, so BB_PostLocation
+	// written in OnPossess will always see the correct values. Valid for placed actors.
+	if (HasAuthority())
+	{
+		InitialPostLocation = GetActorLocation();
+		InitialPostYaw = GetActorRotation().Yaw;
+	}
 }
 
 void AEnemyCharacter::BeginPlay()
@@ -293,6 +311,16 @@ bool AEnemyCharacter::PerformMelee(AActor* Target)
 
 	OnMeleePerformed.Broadcast();
 	return true;
+}
+
+// --- Guard Post ---
+
+FVector AEnemyCharacter::GetGuardPostLocation() const
+{
+	// GuardPostOverride is stored in actor-local space (MakeEditWidget convention, mirrors APatrolRoute::Points).
+	// TransformPosition converts to world space the same way APatrolRoute::GetWorldPoint does.
+	if (bOverrideGuardPost) return GetActorTransform().TransformPosition(GuardPostOverride);
+	return InitialPostLocation;
 }
 
 // --- Move Speed ---
@@ -528,20 +556,21 @@ void AEnemyCharacter::HandleDeath()
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 
-	// Persist as a discoverable body — the director's corpse registry owns cleanup (capped recycle).
-	if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+	if (CVarEnemyPersistCorpses.GetValueOnGameThread() != 0)
 	{
-		Director->RegisterCorpse(this);
-		return;
+		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+		{
+			Director->RegisterCorpse(this);
+			return;
+		}
 	}
 
-	// No director (non-game world) — fall back to the old destroy-after-delay.
-	if (!IsValid(ArchetypeData)) return;
+	static constexpr float DisappearDelaySeconds = 2.f;
 	World->GetTimerManager().SetTimer(
 		DestroyTimerHandle,
 		this,
 		&AEnemyCharacter::DestroyAfterDeath,
-		ArchetypeData->DestroyDelay,
+		DisappearDelaySeconds,
 		false);
 }
 

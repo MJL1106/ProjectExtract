@@ -119,7 +119,7 @@ public:
 
 	/** Seconds of no LOS before transitioning from Combat to Searching. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
-	float LostContactGrace = 4.f;
+	float LostContactGrace = 8.f;
 
 	/** Maximum yaw offset (degrees) between actor forward and the aim target before GetAIAimTarget/GetAIAimLocation
 	 *  returns null/false — forces the weapon to fall back to forward-fire while the body rotates.
@@ -550,4 +550,32 @@ public:
 	/** Attempts to find an LOS-valid strafe point per repick. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "1"))
 	int32 StrafeLosRetryCount = 4;
+
+	// --- Cover Positioning & Advance Fire ---
+
+	/** Extra depth (cm) behind the cover line the enemy targets, beyond capsule radius.
+	 *  Arrival = cover-line point - ForwardDirection * (CapsuleRadius + CoverStandoffPadding). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
+		ToolTip = "Extra standoff padding behind the cover wall surface, in cm, added on top of capsule radius."))
+	float CoverStandoffPadding = 25.f;
+
+	/** When true the enemy fires at the combat target while advancing to cover (BTTask_EnemyMoveToCover only). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ToolTip = "Allow the enemy to fire while running to a cover slot. Uses separate burst timing (AdvanceFireBurstPause*)."))
+	bool bFireWhileAdvancing = true;
+
+	/** Additional aim spread (degrees) applied while advancing to cover and firing on the move. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
+		ToolTip = "Additive spread on top of normal combat spread while the enemy is running to cover."))
+	float AdvanceFireExtraSpreadDeg = 5.f;
+
+	/** Minimum inter-burst pause (seconds) for the advance-fire sub-loop. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.05",
+		ToolTip = "Shortest inter-burst pause while advancing to cover. Independent of BurstPauseMin."))
+	float AdvanceFireBurstPauseMin = 1.2f;
+
+	/** Maximum inter-burst pause (seconds) for the advance-fire sub-loop. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.05",
+		ToolTip = "Longest inter-burst pause while advancing to cover. Independent of BurstPauseMax."))
+	float AdvanceFireBurstPauseMax = 3.0f;
 };

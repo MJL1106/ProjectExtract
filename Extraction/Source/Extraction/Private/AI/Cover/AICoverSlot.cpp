@@ -2,6 +2,7 @@
 #include "CoverRegistrySubsystem.h"
 #include "Components/ArrowComponent.h"
 #include "Components/BoxComponent.h"
+#include "Engine/World.h"
 
 DEFINE_LOG_CATEGORY(LogCoverSlot);
 
@@ -245,4 +246,49 @@ bool AAICoverSlot::IsLocationOverlappingCoverLine(const FVector& WorldLoc) const
 bool AAICoverSlot::IsAlphaAtPeekableCorner(float Alpha, float Epsilon) const
 {
 	return (Alpha <= Epsilon && bIsPeekableCornerStart) || (Alpha >= 1.f - Epsilon && bIsPeekableCornerEnd);
+}
+
+// --- Behind-cover geometry ---
+
+FVector AAICoverSlot::GetBehindCoverPosition(float Alpha, float Standoff) const
+{
+	return GetLocationAtAlpha(Alpha) - GetForwardDirection() * Standoff;
+}
+
+// --- Shared LOS helper ---
+
+bool AAICoverSlot::HasLOSToThreat(UWorld* World, const AAICoverSlot* Slot,
+	const FVector& ThreatLoc, const AActor* IgnoreActor)
+{
+	if (!World || !Slot) return false;
+
+	constexpr float EyeHeight = 150.f;
+	constexpr float ApexProbeDist = 100.f;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(EnemyCoverLoS), false);
+	if (IgnoreActor) Params.AddIgnoredActor(IgnoreActor);
+
+	const FVector SlotEye = Slot->GetActorLocation() + FVector(0.f, 0.f, EyeHeight);
+	FHitResult Hit;
+	bool bHasLOS = !World->LineTraceSingleByChannel(Hit, SlotEye, ThreatLoc, ECC_Visibility, Params)
+		|| Hit.GetActor() == IgnoreActor;
+
+	if (!bHasLOS && Slot->Height == ECoverHeight::Stand)
+	{
+		const FVector LineDir = Slot->GetLineDirection();
+		if (Slot->bIsPeekableCornerStart)
+		{
+			const FVector Apex = Slot->GetLeftEdge() + (-LineDir) * ApexProbeDist + FVector(0.f, 0.f, EyeHeight);
+			bHasLOS = !World->LineTraceSingleByChannel(Hit, Apex, ThreatLoc, ECC_Visibility, Params)
+				|| Hit.GetActor() == IgnoreActor;
+		}
+		if (!bHasLOS && Slot->bIsPeekableCornerEnd)
+		{
+			const FVector Apex = Slot->GetRightEdge() + LineDir * ApexProbeDist + FVector(0.f, 0.f, EyeHeight);
+			bHasLOS = !World->LineTraceSingleByChannel(Hit, Apex, ThreatLoc, ECC_Visibility, Params)
+				|| Hit.GetActor() == IgnoreActor;
+		}
+	}
+
+	return bHasLOS;
 }

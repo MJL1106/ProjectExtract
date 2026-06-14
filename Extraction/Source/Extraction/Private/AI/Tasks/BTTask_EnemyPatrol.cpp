@@ -1,4 +1,5 @@
 // BTTask_EnemyPatrol — walks the APatrolRoute assigned in BB, loops or ping-pongs.
+// Route-less enemies return to their guard post then perform a yaw sweep.
 
 #include "BTTask_EnemyPatrol.h"
 #include "CoreGlobals.h"
@@ -22,6 +23,15 @@ UBTTask_EnemyPatrol::UBTTask_EnemyPatrol()
 uint16 UBTTask_EnemyPatrol::GetInstanceMemorySize() const
 {
 	return sizeof(FPatrolMemory);
+}
+
+void UBTTask_EnemyPatrol::BeginGuardScan(FPatrolMemory& Mem, float BaseYaw) const
+{
+	Mem.GuardPhase = EGuardPhase::Scan;
+	Mem.bGuardScanActive = true;
+	Mem.GuardBaseYaw = BaseYaw;
+	Mem.GuardSweepTimer = 0.f;
+	Mem.GuardSweepSegment = 0;
 }
 
 EBTNodeResult::Type UBTTask_EnemyPatrol::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
@@ -56,16 +66,49 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::ExecuteTask(UBehaviorTreeComponent& Own
 	}
 
 	// Set patrol speed
-	if (AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn))
+	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
+	if (IsValid(Enemy))
 		Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Patrol);
 
-	// No route: guard post — stay InProgress with periodic yaw sweep; BT aborts when combat triggers
+	// No route: guard post — return to post, then sweep
 	if (!IsValid(Route) || Route->NumPoints() == 0)
 	{
-		Mem->GuardBaseYaw = Pawn->GetActorRotation().Yaw;
-		Mem->bGuardScanActive = true;
 		Controller->ClearFocus(EAIFocusPriority::Gameplay);
-		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s no route/points -> guard post (scan baseYaw=%.0f)"), *Pawn->GetName(), Mem->GuardBaseYaw);
+
+		// Read post location from BB; fallback to pawn API if the key is unset (zero vector)
+		FVector PostLocation = BB->GetValueAsVector(AEnemyAIController::BB_PostLocation);
+		if (PostLocation.IsZero() && IsValid(Enemy))
+			PostLocation = Enemy->GetGuardPostLocation();
+
+		const float DistToPost = FVector::Dist(Pawn->GetActorLocation(), PostLocation);
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s no route -> guard post at (%.0f,%.0f,%.0f) dist=%.0f"),
+			*Pawn->GetName(), PostLocation.X, PostLocation.Y, PostLocation.Z, DistToPost);
+
+		if (DistToPost <= GuardPostAcceptanceRadius)
+		{
+			// Already at post — go straight to scan
+			const float BaseYaw = IsValid(Enemy) ? Enemy->GetInitialPostYaw() : Pawn->GetActorRotation().Yaw;
+			BeginGuardScan(*Mem, BaseYaw);
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s already at post -> scan baseYaw=%.0f"), *Pawn->GetName(), Mem->GuardBaseYaw);
+		}
+		else
+		{
+			// Issue move to post — project to nav so an off-mesh override snaps to the nearest point
+			Mem->GuardPhase = EGuardPhase::Return;
+			const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(
+				PostLocation, GuardPostAcceptanceRadius, false, true, true, true);
+			Mem->bMoveIssued = true;
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s returning to post result=%d"), *Pawn->GetName(), (int32)MoveResult);
+
+			if (MoveResult == EPathFollowingRequestResult::Failed)
+			{
+				// Path unavailable — degrade to in-place scan rather than looping failure
+				const float BaseYaw = IsValid(Enemy) ? Enemy->GetInitialPostYaw() : Pawn->GetActorRotation().Yaw;
+				BeginGuardScan(*Mem, BaseYaw);
+				UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s MoveToPost failed -> scan in place"), *Pawn->GetName());
+			}
+		}
+
 		return EBTNodeResult::InProgress;
 	}
 
@@ -99,7 +142,47 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	APatrolRoute* Route = Cast<APatrolRoute>(BB->GetValueAsObject(AEnemyAIController::BB_PatrolRoute));
 	if (!IsValid(Route) || Route->NumPoints() == 0)
 	{
-		// Guard-post yaw sweep (mirrors BTTask_EnemySearchLastKnown sweep style)
+		// ---- Guard post tick ----
+
+		if (Mem->GuardPhase == EGuardPhase::Return)
+		{
+			// Waiting for the move-to-post to complete
+			UPathFollowingComponent* PF = Controller->GetPathFollowingComponent();
+			if (!PF) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+
+			Mem->ReturnElapsed += DeltaSeconds;
+
+			const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
+			FVector PostLocation = BB->GetValueAsVector(AEnemyAIController::BB_PostLocation);
+			if (PostLocation.IsZero() && IsValid(Enemy))
+				PostLocation = Enemy->GetGuardPostLocation();
+
+			const float DistToPost = FVector::Dist(Pawn->GetActorLocation(), PostLocation);
+			const EPathFollowingStatus::Type Status = PF->GetStatus();
+
+			const bool bArrived = Status == EPathFollowingStatus::Idle || DistToPost <= GuardPostAcceptanceRadius;
+			const bool bTimedOut = Mem->ReturnElapsed >= GuardReturnTimeout;
+
+			if (bArrived || bTimedOut)
+			{
+				if (bTimedOut && !bArrived)
+				{
+					UE_LOG(LogEnemyAI, Warning, TEXT("[PATROL] %s return-to-post timed out (%.1fs) -> scan in place"), *Pawn->GetName(), Mem->ReturnElapsed);
+				}
+				else
+				{
+					UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s reached post (dist=%.0f status=%d) -> scan baseYaw=%.0f"),
+						*Pawn->GetName(), DistToPost, (int32)Status, Mem->GuardBaseYaw);
+				}
+
+				const float BaseYaw = IsValid(Enemy) ? Enemy->GetInitialPostYaw() : Pawn->GetActorRotation().Yaw;
+				BeginGuardScan(*Mem, BaseYaw);
+				Controller->ClearFocus(EAIFocusPriority::Gameplay);
+			}
+			return;
+		}
+
+		// ---- Scan phase ----
 		if (!Mem->bGuardScanActive) return;
 
 		const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
@@ -108,7 +191,6 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 
 		constexpr int32 GuardSweepSegmentCount = 3;
 
-		// Advance to next sweep segment on the interval timer
 		Mem->GuardSweepTimer += DeltaSeconds;
 		if (Mem->GuardSweepTimer >= DA->GuardScanInterval)
 		{
@@ -116,7 +198,6 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 			Mem->GuardSweepSegment = (Mem->GuardSweepSegment + 1) % GuardSweepSegmentCount;
 		}
 
-		// Smooth interpolation toward current segment's target yaw (mirrors SearchLastKnown RInterpTo)
 		const float YawOffsets[] = { -DA->GuardScanYawRange * 0.5f, DA->GuardScanYawRange * 0.5f, 0.f };
 		const float TargetYaw = Mem->GuardBaseYaw + YawOffsets[FMath::Min(Mem->GuardSweepSegment, GuardSweepSegmentCount - 1)];
 
@@ -126,6 +207,8 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 		Controller->SetControlRotation(NewRot);
 		return;
 	}
+
+	// ---- Routed patrol tick ----
 
 	// Wait phase
 	if (Mem->bWaiting)
@@ -157,7 +240,6 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 
 	const EPathFollowingStatus::Type Status = PF->GetStatus();
 
-	// Heartbeat (~2x/sec) so we can see whether the pawn is actually translating while a move is active.
 	if ((GFrameCounter % 30) == 0)
 		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s moving -> P%d status=%d (0=Idle 3=Moving) dist=%.0f vel=%.0f"),
 			*Pawn->GetName(), Mem->CurrentIndex, (int32)Status, DistToGoal, Pawn->GetVelocity().Size());
@@ -203,5 +285,5 @@ void UBTTask_EnemyPatrol::AdvanceIndex(FPatrolMemory& Mem, const APatrolRoute& R
 
 FString UBTTask_EnemyPatrol::GetStaticDescription() const
 {
-	return TEXT("Walk patrol route from BB_PatrolRoute (loop/ping-pong)");
+	return TEXT("Walk patrol route from BB_PatrolRoute (loop/ping-pong). Route-less: return to guard post then sweep.");
 }
