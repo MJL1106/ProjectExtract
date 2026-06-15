@@ -6,6 +6,7 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
 #include "EnemyAIController.h"
+#include "BrainComponent.h"
 #include "EnemyAwarenessComponent.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyDirectorSubsystem.h"
@@ -713,34 +714,199 @@ void AEnemyCharacter::DestroyAfterDeath()
 
 bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator) const
 {
-	if (!IsValid(TakedownInstigator) || !IsValid(ArchetypeData)) return false;
-	if (IsValid(HealthComponent) && HealthComponent->IsDead()) return false;
+#if !UE_BUILD_SHIPPING
+	const bool bLogTakedown = IsValid(TakedownInstigator) &&
+		(TakedownInstigator->GetActorLocation() - GetActorLocation()).SizeSquared() < FMath::Square(600.f);
+#endif
+
+	if (!IsValid(TakedownInstigator) || !IsValid(ArchetypeData))
+	{
+#if !UE_BUILD_SHIPPING
+		// Can't gate on bLogTakedown here — instigator may be invalid.
+		UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s reject: invalid instigator/ArchetypeData"), *GetNameSafe(this));
+#endif
+		return false;
+	}
+
+	if (IsValid(HealthComponent) && HealthComponent->IsDead())
+	{
+#if !UE_BUILD_SHIPPING
+		if (bLogTakedown) UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s reject: already dead"), *GetNameSafe(this));
+#endif
+		return false;
+	}
 
 	// Only an Unaware enemy can be taken down (design §4: Unaware/Dormant).
 	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
 	const UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
-	if (!Awareness || Awareness->GetAwarenessState() != EEnemyAwarenessState::Unaware) return false;
+	if (!Awareness)
+	{
+#if !UE_BUILD_SHIPPING
+		if (bLogTakedown) UE_LOG(LogEnemyAI, Warning,
+			TEXT("[Takedown] %s reject: no EnemyAIController/awareness comp (controller=%s)"),
+			*GetNameSafe(this), *GetNameSafe(GetController()));
+#endif
+		return false;
+	}
+
+	if (Awareness->GetAwarenessState() != EEnemyAwarenessState::Unaware)
+	{
+#if !UE_BUILD_SHIPPING
+		if (bLogTakedown)
+		{
+			const FString AwarenessStr = StaticEnum<EEnemyAwarenessState>()
+				? StaticEnum<EEnemyAwarenessState>()->GetNameStringByValue((int64)Awareness->GetAwarenessState())
+				: TEXT("Unknown");
+			UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s reject: awareness=%s (need Unaware)"),
+				*GetNameSafe(this), *AwarenessStr);
+		}
+#endif
+		return false;
+	}
 
 	const FVector ToInstigator = TakedownInstigator->GetActorLocation() - GetActorLocation();
-	if (ToInstigator.SizeSquared() > FMath::Square(ArchetypeData->TakedownRange)) return false;
+	const float DistSq = ToInstigator.SizeSquared();
+	if (DistSq > FMath::Square(ArchetypeData->TakedownRange))
+	{
+#if !UE_BUILD_SHIPPING
+		if (bLogTakedown) UE_LOG(LogEnemyAI, Warning,
+			TEXT("[Takedown] %s reject: out of range (dist=%.0f > TakedownRange=%.0f)"),
+			*GetNameSafe(this), FMath::Sqrt(DistSq), ArchetypeData->TakedownRange);
+#endif
+		return false;
+	}
 
 	// Instigator must sit inside the rear arc (centred on backward).
 	const float Dot = FVector::DotProduct(GetActorForwardVector(), ToInstigator.GetSafeNormal2D());
-	return Dot <= -FMath::Cos(FMath::DegreesToRadians(ArchetypeData->TakedownRearArcDeg * 0.5f));
+	const float ArcThreshold = -FMath::Cos(FMath::DegreesToRadians(ArchetypeData->TakedownRearArcDeg * 0.5f));
+
+#if !UE_BUILD_SHIPPING
+	if (bLogTakedown)
+	{
+		if (Dot <= ArcThreshold)
+		{
+			UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s TAKEABLE (dist ok, dot=%.2f)"), *GetNameSafe(this), Dot);
+		}
+		else
+		{
+			UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s reject: outside rear arc (dot=%.2f, need <= %.2f)"),
+				*GetNameSafe(this), Dot, ArcThreshold);
+		}
+	}
+#endif
+
+	return Dot <= ArcThreshold;
+}
+
+bool AEnemyCharacter::BeginTakedownHold(AActor* TakedownInstigator, FVector SnapLocation, float SnapYaw, float WatchdogTimeout)
+{
+	if (!CanBeTakenDown(TakedownInstigator)) return false;
+
+	UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s BeginTakedownHold OK (watchdog=%.1f)"), *GetNameSafe(this), WatchdogTimeout);
+
+	bPendingTakedownDeath = true;
+	bTakedownFrozen = true;
+
+	// Stop any active body anim (walk/idle/fidget) so it doesn't play through the finisher.
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+		if (UAnimInstance* AnimInst = MeshComp->GetAnimInstance())
+			AnimInst->Montage_Stop(0.f);
+
+	OnTakedownExecuted.Broadcast(TakedownInstigator);
+
+	// Snap position and facing so any finisher montage lines up consistently.
+	SetActorLocation(SnapLocation, false, nullptr, ETeleportType::TeleportPhysics);
+	SetActorRotation(FRotator(0.f, SnapYaw, 0.f), ETeleportType::TeleportPhysics);
+
+	// Freeze AI brain and movement so the enemy can't walk away during the montage.
+	if (AAIController* AIC = Cast<AAIController>(GetController()))
+		if (AIC->BrainComponent) AIC->BrainComponent->StopLogic(TEXT("Takedown"));
+
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+	{
+		MoveComp->StopMovementImmediately();
+		MoveComp->DisableMovement();
+	}
+
+	// Watchdog: if the player montage never fires the kill notify, kill the enemy after timeout
+	// so it can never be left frozen-alive. Skipped on the instant path (WatchdogTimeout == 0).
+	// EndPlay clears via ClearAllTimersForObject.
+	if (WatchdogTimeout > 0.f)
+	{
+		if (UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().SetTimer(
+				TakedownWatchdogTimerHandle,
+				[this]() { FinishTakedownKill(nullptr); },
+				WatchdogTimeout, false);
+		}
+	}
+
+	return true;
+}
+
+void AEnemyCharacter::FinishTakedownKill(AActor* TakedownInstigator)
+{
+	if (!bTakedownFrozen)
+	{
+		UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s FinishTakedownKill early-out: not frozen"), *GetNameSafe(this));
+		return;
+	}
+	if (IsValid(HealthComponent) && HealthComponent->IsDead())
+	{
+		UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s FinishTakedownKill early-out: already dead"), *GetNameSafe(this));
+		return;
+	}
+
+	bTakedownFrozen = false;
+
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(TakedownWatchdogTimerHandle);
+
+	const APawn* InstigatorPawn = Cast<APawn>(TakedownInstigator);
+	AController* InstigatorController = InstigatorPawn ? InstigatorPawn->GetController() : nullptr;
+
+	UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s FinishTakedownKill applying %.0f damage"), *GetNameSafe(this), TakedownDamage);
+	TakeDamage(TakedownDamage, FDamageEvent(), InstigatorController, TakedownInstigator);
 }
 
 bool AEnemyCharacter::ExecuteTakedown(AActor* TakedownInstigator)
 {
-	if (!CanBeTakenDown(TakedownInstigator)) return false;
+	UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s ExecuteTakedown (instant path)"), *GetNameSafe(this));
 
-	bPendingTakedownDeath = true;
-	OnTakedownExecuted.Broadcast(TakedownInstigator);
+	// Instant path: no snap (enemy stays in place), no watchdog (kill follows immediately).
+	const FVector SnapLoc = GetActorLocation();
+	const FVector ToInstigator = IsValid(TakedownInstigator)
+		? (TakedownInstigator->GetActorLocation() - SnapLoc).GetSafeNormal2D()
+		: -GetActorForwardVector();
+	const float SnapYaw = FRotationMatrix::MakeFromX(-ToInstigator).Rotator().Yaw;
 
-	// Silent kill: generic damage event (no hit-region path), no noise emission anywhere on this path.
-	const APawn* InstigatorPawn = Cast<APawn>(TakedownInstigator);
-	AController* InstigatorController = InstigatorPawn ? InstigatorPawn->GetController() : nullptr;
-	TakeDamage(TakedownDamage, FDamageEvent(), InstigatorController, TakedownInstigator);
+	if (!BeginTakedownHold(TakedownInstigator, SnapLoc, SnapYaw, 0.f))
+	{
+		UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s ExecuteTakedown aborted (BeginTakedownHold failed)"), *GetNameSafe(this));
+		return false;
+	}
+	FinishTakedownKill(TakedownInstigator);
 	return true;
+}
+
+void AEnemyCharacter::AbortTakedownHold()
+{
+	if (!bTakedownFrozen) return;
+
+	bTakedownFrozen = false;
+	bPendingTakedownDeath = false;
+
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(TakedownWatchdogTimerHandle);
+
+	// Re-enable movement so the enemy can react normally.
+	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
+		MoveComp->SetMovementMode(MOVE_Walking);
+
+	// Restart the AI brain so the enemy can resume its behaviour tree.
+	if (AAIController* AIC = Cast<AAIController>(GetController()))
+		if (AIC->BrainComponent) AIC->BrainComponent->RestartLogic();
 }
 
 // --- Body discovery ---

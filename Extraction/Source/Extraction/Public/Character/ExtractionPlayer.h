@@ -13,8 +13,10 @@
 #include "ExtractionPlayer.generated.h"
 
 class AWeaponBase;
+class AEnemyCharacter;
 class UInputComponent;
 class UInputAction;
+class UInputMappingContext;
 class UExtractionAnimInstance;
 class UHealthComponent;
 class UFootstepNoiseComponent;
@@ -57,6 +59,7 @@ public:
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 	virtual void NotifyControllerChanged() override;
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
+	virtual void PawnClientRestart() override;
 
 	// ---- Delegates ----
 
@@ -143,6 +146,10 @@ public:
 	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
 	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }
 
+	/** Called by UAnimNotify_TakedownKill at the death frame of the finisher montage.
+	 *  Also serves as the fallback when the montage ends/interrupts before the notify fires. */
+	void FinishPendingTakedown();
+
 protected:
 
 	// ---- Gameplay Components ----
@@ -158,6 +165,11 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UTraversalComponent> TraversalComponent;
+
+	// ---- Input Mapping Context (assigned in BP child class) ----
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
+	TObjectPtr<UInputMappingContext> DefaultMappingContext;
 
 	// ---- Input Actions (assigned in BP child class) ----
 
@@ -187,6 +199,23 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> TakedownAction;
+
+	// ---- Takedown Config ----
+
+	/** Player-side finisher montage. Assign in the BP child class.
+	 *  When null, the takedown kills instantly (current behavior).
+	 *  When set, death fires from UAnimNotify_TakedownKill placed at the correct frame. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Takedown")
+	TObjectPtr<UAnimMontage> TakedownMontage;
+
+	/** When true, the victim is snapped to PlayerLocation + PlayerForward * TakedownVictimForwardOffset
+	 *  so the finisher montage lines up. Disable if your montage uses root motion instead. */
+	UPROPERTY(EditAnywhere, Category = "Takedown")
+	bool bAlignTakedownVictim = true;
+
+	/** Distance (cm) in front of the player to place the victim when bAlignTakedownVictim is true. */
+	UPROPERTY(EditAnywhere, Category = "Takedown", meta = (ClampMin = "0.0", EditCondition = "bAlignTakedownVictim"))
+	float TakedownVictimForwardOffset = 90.f;
 
 	// ---- DBNO / Revive Config ----
 
@@ -292,6 +321,10 @@ private:
 	void InteractStop(const FInputActionValue& Value);
 
 	void TakedownInput(const FInputActionValue& Value);
+	void StartMontageDeferred(AEnemyCharacter* Victim);
+
+	UFUNCTION()
+	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	// ---- Traversal ----
 
@@ -319,6 +352,14 @@ private:
 	void DebugApplyDamage();
 
 	FTimerHandle BleedoutTimerHandle;
+
+	// ---- Takedown state ----
+
+	/** Victim held during a montage-deferred takedown. Cleared after kill or montage abort. */
+	TWeakObjectPtr<AEnemyCharacter> PendingTakedownVictim;
+
+	/** Whether a takedown montage is currently playing (guards against double-finish). */
+	bool bTakedownMontageActive = false;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Tags")
 	FGameplayTagContainer OwnedTags;

@@ -10,7 +10,7 @@
 
 | Phase | Scope | C++ | Editor wiring | Playtest |
 |---|---|---|---|---|
-| 1 | Skeleton — Grunt (character, controller, archetype DA, perception, base BT, teams, weapon decouple) | ✅ 2026-06-09 | ⏳ handed off | ❌ |
+| 1 | Skeleton — Grunt (character, controller, archetype DA, perception, base BT, teams, weapon decouple) | ✅ 2026-06-09 | ✅ 2026-06-15 | ✅ 2026-06-15 |
 | 2 | Awareness ladder (suspicion, noise, global alert, bodies, takedown, barks v1) | ✅ 2026-06-09 | ⏳ handed off | ❌ |
 | 3 | Roster (7 archetypes, bolt-on components, grenade, subtrees) | ✅ 2026-06-10 | ✅ 2026-06-10 (meshes manual) | ❌ |
 | 4 | Morale & suppression (+ hit reacts, ragdoll) | ✅ 2026-06-10 | ✅ 2026-06-10 (montages manual) | ❌ |
@@ -224,6 +224,8 @@ C++ complete, reviewed (2 fix rounds), `Result: Succeeded`. Deviations from cont
 9. Two grunts: never share one cover slot; never damage each other (team FF).
 10. Death: firing stops, BT stops, body despawns after DestroyDelay; companion drops it as a target.
 11. Old `AEnemyBase` dummy still functions (no weapon-path regression) if still placed.
+
+**Playtest ✅ (2026-06-15) — user-confirmed in PIE.** Editor wiring complete; Phase 1 grunt loop verified after the enemy bug-fix rounds + companion combat/cover fixes.
 
 ---
 

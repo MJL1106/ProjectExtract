@@ -9,7 +9,9 @@
 #include "Camera/CameraComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "EnhancedInputComponent.h"
+#include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
+#include "InputMappingContext.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "HealthComponent.h"
@@ -26,6 +28,7 @@
 #include "DrawDebugHelpers.h"
 #include "ExtractionTypes.h"
 #include "Extraction.h"
+#include "AnimNotify_TakedownKill.h"
 
 AExtractionPlayer::AExtractionPlayer()
 	: bIsDBNO(false)
@@ -128,6 +131,12 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+
+	// Takedown was committed — kill the frozen victim so player despawn can't leave them stuck alive.
+	if (AEnemyCharacter* Victim = PendingTakedownVictim.Get())
+		Victim->FinishTakedownKill(this);
+	PendingTakedownVictim.Reset();
+	bTakedownMontageActive = false;
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -243,6 +252,24 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 	// Temp debug: H key applies 25 damage
 	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionPlayer::DebugApplyDamage);
+}
+
+void AExtractionPlayer::PawnClientRestart()
+{
+	Super::PawnClientRestart();
+
+	if (!IsValid(DefaultMappingContext)) return;
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!IsValid(PC)) return;
+
+	ULocalPlayer* LP = PC->GetLocalPlayer();
+	if (!IsValid(LP)) return;
+
+	UEnhancedInputLocalPlayerSubsystem* Subsystem = LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>();
+	if (!IsValid(Subsystem)) return;
+
+	Subsystem->AddMappingContext(DefaultMappingContext, 0);
 }
 
 // ---- Core Input Handlers ----
@@ -516,25 +543,145 @@ void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 
 void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
 {
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown] AExtractionPlayer::TakedownInput fired — HasAuthority=%d MontageActive=%d TakedownMontage=%s"),
+		HasAuthority(), bTakedownMontageActive, *GetNameSafe(TakedownMontage));
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Cyan, TEXT("[Takedown] Player::TakedownInput fired"));
+
 	if (!HasAuthority()) return;
+	// Re-entrancy guard: a second press during an active montage takedown would orphan the frozen victim.
+	if (bTakedownMontageActive) return;
 
 	static constexpr float FacingDotMin = 0.3f;
 	AEnemyCharacter* Best = nullptr;
 	float BestDistSq = MAX_FLT;
 
+	int32 DbgTotal = 0;
+	int32 DbgTakeable = 0;
+	int32 DbgFacingRejected = 0;
+
 	for (TActorIterator<AEnemyCharacter> It(GetWorld()); It; ++It)
 	{
 		AEnemyCharacter* Enemy = *It;
-		if (!IsValid(Enemy) || !Enemy->CanBeTakenDown(this)) continue;
+		if (!IsValid(Enemy)) continue;
+		++DbgTotal;
+		if (!Enemy->CanBeTakenDown(this)) continue;
+		++DbgTakeable;
 
 		const FVector ToEnemy = Enemy->GetActorLocation() - GetActorLocation();
-		if (FVector::DotProduct(GetActorForwardVector(), ToEnemy.GetSafeNormal2D()) < FacingDotMin) continue;
+		if (FVector::DotProduct(GetActorForwardVector(), ToEnemy.GetSafeNormal2D()) < FacingDotMin)
+		{
+			++DbgFacingRejected;
+			continue;
+		}
 
 		const float DistSq = ToEnemy.SizeSquared();
 		if (DistSq < BestDistSq) { BestDistSq = DistSq; Best = Enemy; }
 	}
 
-	if (Best) Best->ExecuteTakedown(this);
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown] scan complete: %d enemies, %d takeable, %d facing-rejected, Best=%s"),
+		DbgTotal, DbgTakeable, DbgFacingRejected, *GetNameSafe(Best));
+
+	if (!IsValid(Best))
+	{
+		const FString Msg = TEXT("Takedown: no target (need Unaware enemy within range, behind it)");
+		UE_LOG(LogExtraction, Warning, TEXT("%s"), *Msg);
+		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Yellow, Msg);
+		return;
+	}
+
+	UE_LOG(LogExtraction, Warning, TEXT("Takedown: %s"), *GetNameSafe(Best));
+	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Green,
+		FString::Printf(TEXT("Takedown: %s"), *GetNameSafe(Best)));
+
+	if (!IsValid(TakedownMontage))
+	{
+		// Instant path: enemy stays in place, snap/align is skipped entirely.
+		Best->ExecuteTakedown(this);
+		return;
+	}
+
+	StartMontageDeferred(Best);
+}
+
+void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
+{
+	// Compute a collision-safe snap location for the victim.
+	const FVector PlayerLoc = GetActorLocation();
+	const FVector PlayerFwd = GetActorForwardVector();
+	const float SnapYaw = GetActorRotation().Yaw;
+
+	FVector VictimLoc = Victim->GetActorLocation();
+	if (bAlignTakedownVictim)
+	{
+		const FVector IdealXY = PlayerLoc + PlayerFwd * TakedownVictimForwardOffset;
+
+		// Sweep from player to the ideal snap point and clamp on first blocking hit.
+		static constexpr float SweepRadius = 20.f;
+		FHitResult Hit;
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(TakedownSnap), false, this);
+		Params.AddIgnoredActor(Victim);
+		const bool bBlocked = GetWorld()->SweepSingleByChannel(
+			Hit, PlayerLoc, FVector(IdealXY.X, IdealXY.Y, PlayerLoc.Z),
+			FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(SweepRadius), Params);
+
+		const FVector SafeXY = bBlocked ? Hit.Location : IdealXY;
+		VictimLoc = FVector(SafeXY.X, SafeXY.Y, Victim->GetActorLocation().Z);
+	}
+
+	// Montage length drives the watchdog timeout; add a small buffer for blend-out.
+	const float MontageDuration = TakedownMontage->GetPlayLength() + 1.f;
+
+#if !UE_BUILD_SHIPPING
+	{
+		const TArray<FAnimNotifyEvent>& Notifies = TakedownMontage->Notifies;
+		const bool bHasKillNotify = Notifies.ContainsByPredicate([](const FAnimNotifyEvent& N)
+			{ return N.Notify && N.Notify->IsA<UAnimNotify_TakedownKill>(); });
+		if (!bHasKillNotify)
+			UE_LOG(LogExtraction, Warning, TEXT("TakedownMontage '%s' has no UAnimNotify_TakedownKill — death will fire from the montage-end fallback, not at the intended frame."),
+				*GetNameSafe(TakedownMontage));
+	}
+#endif
+
+	if (!Victim->BeginTakedownHold(this, VictimLoc, SnapYaw, MontageDuration)) return;
+
+	PendingTakedownVictim = Victim;
+	bTakedownMontageActive = true;
+
+	UAnimInstance* AnimInst = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst))
+	{
+		FinishPendingTakedown();
+		return;
+	}
+
+	const float PlayedLength = AnimInst->Montage_Play(TakedownMontage);
+	if (PlayedLength <= 0.f)
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("TakedownInput: Montage_Play failed for '%s', killing immediately."),
+			*GetNameSafe(TakedownMontage));
+		FinishPendingTakedown();
+		return;
+	}
+
+	// End delegate fires on natural end AND interruption — fallback kill so no frozen enemy survives.
+	FOnMontageEnded EndDelegate;
+	EndDelegate.BindUObject(this, &AExtractionPlayer::OnTakedownMontageEnded);
+	AnimInst->Montage_SetEndDelegate(EndDelegate, TakedownMontage);
+}
+
+void AExtractionPlayer::FinishPendingTakedown()
+{
+	AEnemyCharacter* Victim = PendingTakedownVictim.Get();
+	PendingTakedownVictim.Reset();
+	bTakedownMontageActive = false;
+
+	if (IsValid(Victim)) Victim->FinishTakedownKill(this);
+}
+
+void AExtractionPlayer::OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	// Fallback: if the notify didn't fire before the montage ended/was interrupted, apply the kill now.
+	if (bTakedownMontageActive) FinishPendingTakedown();
 }
 
 // ---- Controller Changed ----

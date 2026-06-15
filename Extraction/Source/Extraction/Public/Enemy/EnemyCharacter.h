@@ -171,11 +171,35 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Takedown")
 	bool CanBeTakenDown(const AActor* TakedownInstigator) const;
 
-	/** Performs a silent instant kill if CanBeTakenDown passes. Returns whether it executed. */
+	/**
+	 * Phase 1 of a montage-deferred takedown: validates CanBeTakenDown, sets pending-death flag,
+	 * broadcasts OnTakedownExecuted, snaps victim position/facing, and freezes the enemy
+	 * (AI brain + movement disabled). Does NOT apply damage. Returns false if cannot start.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Takedown")
+	bool BeginTakedownHold(AActor* TakedownInstigator, FVector SnapLocation, float SnapYaw, float WatchdogTimeout = 5.f);
+
+	/**
+	 * Phase 2: applies lethal damage to the frozen enemy.
+	 * Safe to call once; no-ops if already dead or not in a pending takedown hold.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Takedown")
+	void FinishTakedownKill(AActor* TakedownInstigator);
+
+	/** Instant path (no montage): BeginTakedownHold + FinishTakedownKill in one call. */
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Takedown")
 	bool ExecuteTakedown(AActor* TakedownInstigator);
 
-	/** Fired on a successful takedown — animation/FX hook for BP. */
+	/**
+	 * Cancels an in-progress montage-deferred hold: re-enables movement, restarts the AI brain,
+	 * and clears bTakedownFrozen / bPendingTakedownDeath. Call this if the player montage is
+	 * cancelled before the kill notify and the takedown should be abandoned rather than committed.
+	 * No-ops if not currently held.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Takedown")
+	void AbortTakedownHold();
+
+	/** Fired when a takedown begins (BeginTakedownHold succeeds) — animation/FX hook for BP. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Takedown")
 	FOnTakedownExecuted OnTakedownExecuted;
 
@@ -301,6 +325,7 @@ private:
 	bool bBodyReported = false;
 
 	bool bPendingTakedownDeath = false;
+	bool bTakedownFrozen = false;
 
 	/** Generic damage amount guaranteed to kill through any shield (takedown path). */
 	static constexpr float TakedownDamage = 1.e6f;
@@ -311,6 +336,7 @@ private:
 
 	FTimerHandle DestroyTimerHandle;
 	FTimerHandle TakedownRagdollTimerHandle;
+	FTimerHandle TakedownWatchdogTimerHandle;
 
 	/** Resolves hitbox multiplier from the damage event's bone + damage type. */
 	float GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const;
