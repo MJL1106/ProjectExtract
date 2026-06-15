@@ -20,9 +20,9 @@ Launch the editor + the VibeUE proxy yourself, wait for boot, confirm the MCP se
 
 ## Procedure
 
-1. **Check it isn't already up.** If `UnrealEditor` is running and `vibeue_status` already responds, skip to step 5.
+1. **Check it isn't already up.** If this project's `UnrealEditor` is running and `vibeue_status` already responds, skip to step 5. Filter by the project's `.uproject` so another project's editor isn't mistaken for this one:
    ```powershell
-   Get-Process UnrealEditor -ErrorAction SilentlyContinue
+   Get-CimInstance Win32_Process -Filter "Name='UnrealEditor.exe'" | Where-Object { $_.CommandLine -like '*Extraction.uproject*' } | Select-Object ProcessId, CommandLine
    ```
 
 2. **Pre-flight: no pending full C++ build.** A from-scratch / new-module build needs the editor CLOSED (Live Coding can't add modules; `Build.bat` fails fast, exit 6). If C++ changed and hasn't been built, run the build (editor closed) BEFORE booting. Don't boot on top of unbuilt module changes.
@@ -31,7 +31,7 @@ Launch the editor + the VibeUE proxy yourself, wait for boot, confirm the MCP se
    ```powershell
    Start-Process "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" -ArgumentList '"C:\Users\matth\Documents\Github\ProjectExtract\Extraction\Extraction.uproject"'
    ```
-   On a prior crash, add `-ddc=InstalledNoZenLocalFallback` and first kill any frozen `UnrealEditor` / `CrashReportClientEditor` processes (§1.7).
+   On a prior crash, add `-ddc=InstalledNoZenLocalFallback` and first kill **only this project's** frozen `UnrealEditor` / `CrashReportClientEditor` (match the `.uproject` in the command line — see the project-scoped kill in Gotchas; never blanket-kill all editors) (§1.7).
 
 4. **Start the VibeUE proxy** (idempotent):
    ```powershell
@@ -49,4 +49,10 @@ Launch the editor + the VibeUE proxy yourself, wait for boot, confirm the MCP se
 - **Don't `Start-Sleep` in the foreground** waiting for boot — use a background wait / Monitor loop or just schedule a re-check, so you don't block the session for two minutes.
 - **VibeUE silent if the proxy is down:** if `unreal_status` works but `vibeue_status` doesn't, the editor is up but the `:8089` proxy isn't — re-run the proxy bat (step 4).
 - **First in-engine call may lag** a few seconds after the editor reports ready while the MCP server finishes binding — one retry, not a failure.
-- **Closing for a build:** the inverse — when a full C++ rebuild is needed, quit the editor first (`unreal.SystemLibrary.quit_editor()` via VibeUE, or close the window), build, then re-boot with this skill.
+- **Closing for a build — PROJECT-SCOPED, never blanket-kill:** when a full C++ rebuild is needed, close **only this project's** editor. ⚠️ **NEVER `Stop-Process -Name UnrealEditor`** — the user routinely has more than one project's editor open at once, and killing by name terminates *all* of them (losing unsaved work in unrelated projects). Identify this project's instance by its command line (the `.uproject` path) and kill only that PID:
+  ```powershell
+  Get-CimInstance Win32_Process -Filter "Name='UnrealEditor.exe'" |
+    Where-Object { $_.CommandLine -like '*Extraction.uproject*' } |
+    ForEach-Object { Write-Output "Killing PID $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
+  ```
+  Same rule for `CrashReportClientEditor` — only kill one tied to this project; don't blanket-kill. (Graceful alternative when PIE is stopped: `unreal.SystemLibrary.quit_editor()` via VibeUE, or close the window.) Then build, then re-boot with this skill.

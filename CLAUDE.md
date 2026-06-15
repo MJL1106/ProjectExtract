@@ -110,12 +110,18 @@ Prefer custom subagents wherever the task matches an agent description. Main cha
    - `ue5-ui-specialist` — if UMG / Slate / widget code touched
    - `ue5-build-specialist` — if `Build.cs` / `Target.cs` / `.uproject` / plugin config / include paths touched
 3. **Fix review findings:** any `CRITICAL` or `WARNING` → re-dispatch `ue5-cpp-implementer` with the consolidated findings. **Do NOT fix in main chat.** Loop back to step 2 if the fix is non-trivial.
-4. **Verify the build before reporting back.** Run a UE5 build and confirm exit 0 before telling the user anything is "done", "ready to test", or compiled. Reviewers read; they don't compile. If the build fails, dispatch `ue5-build-specialist` (linker/IWYU/Build.cs) or `ue5-cpp-implementer` (semantic/template/API errors) with the error log, then re-build. Standard command:
-   ```
-   "/c/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat" ExtractionEditor Win64 Development -Project="C:/Users/matth/Documents/Github/ProjectExtract/Extraction/Extraction.uproject" -WaitMutex
-   ```
-   Run with `run_in_background: true` (UE builds take 30-300s), redirect output to a temp file, grep for `error` after completion.
-5. **Only then surface result + reviewer summaries to the user.** Never declare a task complete while there are outstanding `CRITICAL` or `WARNING` findings, or while the build is failing.
+4. **Own the close→build→reboot loop yourself — never make the user the build/editor operator.** For any C++ change that needs testing:
+   - **(a) Close ONLY this project's editor.** Scope by the `.uproject` in the process command line. ⚠️ **NEVER `Stop-Process -Name UnrealEditor`** — the user keeps other projects' editors open at the same time, and blanket-kill terminates all of them (lost unsaved work). Use:
+     ```
+     Get-CimInstance Win32_Process -Filter "Name='UnrealEditor.exe'" | Where-Object { $_.CommandLine -like '*Extraction.uproject*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+     ```
+   - **(b) Build with the editor closed and confirm `Result: Succeeded` in the log** — exit 0 from the `Build.bat` wrapper is NOT proof (a Live Coding lock exits fast without compiling). If it fails, dispatch `ue5-build-specialist` (linker/IWYU/Build.cs) or `ue5-cpp-implementer` (semantic/template/API), then re-build. Standard command:
+     ```
+     "/c/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat" ExtractionEditor Win64 Development -Project="C:/Users/matth/Documents/Github/ProjectExtract/Extraction/Extraction.uproject" -WaitMutex
+     ```
+     Run with `run_in_background: true` (UE builds take 30-300s), redirect to a temp file, grep for `Result:` / `error`.
+   - **(c) On green, re-boot this project's editor** via the `boot-engine` skill (+ VibeUE proxy); wait for `vibeue_status` / `unreal_status`. Reviewers read; they don't compile.
+5. **"Ready" / "done" = the user can literally press Play.** Build-green is a mid-step, not a stopping point — never report ready while the editor is closed. Only surface the result + reviewer summaries once ALL hold: no outstanding `CRITICAL`/`WARNING` findings, the build hit `Result: Succeeded`, AND this project's editor is re-booted and sitting where pressing Play works.
 
 ### Other agents (dispatch on match)
 

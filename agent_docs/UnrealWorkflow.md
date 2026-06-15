@@ -135,7 +135,8 @@ then compile + `save_asset`.
 For plugin/C++ changes: save → `unreal.SystemLibrary.quit_editor()`, relaunch
 `UnrealEditor.exe "<...>.uproject"`, wait 60–120 s, confirm with `ue-python.exe exec "print('ready')"`.
 On a crash relaunch with `-ddc=InstalledNoZenLocalFallback` (use the project's safe-DDC `.bat`). After a
-crash, first **kill the frozen `UnrealEditor` + `CrashReportClientEditor` processes**, then relaunch; it's
+crash, first **kill ONLY this project's frozen `UnrealEditor` + `CrashReportClientEditor` processes** —
+scope by the `.uproject` in the command line (`Get-CimInstance Win32_Process -Filter "Name='UnrealEditor.exe'" | Where-Object { $_.CommandLine -like '*Extraction.uproject*' }`); ⚠️ **never `Stop-Process -Name UnrealEditor`** (the user keeps other projects' editors open — blanket-kill loses their unsaved work). Then relaunch; it's
 booted once the process memory climbs past ~1.8 GB, and the VibeUE MCP **auto-reconnects** (no manual step).
 **Never delete `Binaries/`/`Intermediate/`** — triggers a long missing-modules rebuild.
 
