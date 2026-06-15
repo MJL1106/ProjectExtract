@@ -50,6 +50,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception", meta = (ClampMin = "100.0"))
 	float LoseSightRadius = 3000.f;
 
+	/** Distance (cm) within which the sight fill rate stays at full (1.0) before ramping down. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception", meta = (ClampMin = "0.0"))
+	float FullFillRange = 1500.f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception", meta = (ClampMin = "10.0", ClampMax = "180.0"))
 	float PeripheralVisionDeg = 110.f;
 
@@ -159,7 +163,7 @@ public:
 
 	/** Fill multiplier for a near-stationary target. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.05"))
-	float StillFillFactor = 0.5f;
+	float StillFillFactor = 0.85f;
 
 	/** Fill multiplier for a sprinting target. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.1"))

@@ -7,8 +7,10 @@
 #include "EnemySquadSubsystem.h"
 #include "HealthComponent.h"
 #include "BarkSubsystem.h"
+#include "EnemyDebug.h"
 #include "WeaponBase.h"
 #include "BehaviorTree/BlackboardComponent.h"
+#include "Engine/Engine.h"
 
 // ---------------------------------------------------------------------------
 // Membership
@@ -308,7 +310,21 @@ bool UEnemySquad::TryClaimSquadBark(EBarkType Type, float Window)
 
 	const float Now = World->GetTimeSeconds();
 	float* LastTime = LastSquadBarkTime.Find(Type);
-	if (LastTime && (Now - *LastTime) < Window) return false;
+	if (LastTime && (Now - *LastTime) < Window)
+	{
+		if (IsEnemyBarkDebugEnabled())
+		{
+			const float Since = Now - *LastTime;
+			const FString TypeStr = UEnum::GetValueAsString(Type);
+			UE_LOG(LogEnemyBark, Log, TEXT("DROP SquadClaim type=%s (since=%.2fs < window=%.2fs)"), *TypeStr, Since, Window);
+			if (GEngine)
+			{
+				const FString Msg = FString::Printf(TEXT("DROP SquadClaim %s (%.1fs<%.1fs)"), *TypeStr, Since, Window);
+				GEngine->AddOnScreenDebugMessage(-1, 4.f, FColor::Silver, Msg);
+			}
+		}
+		return false;
+	}
 
 	LastSquadBarkTime.FindOrAdd(Type) = Now;
 	return true;

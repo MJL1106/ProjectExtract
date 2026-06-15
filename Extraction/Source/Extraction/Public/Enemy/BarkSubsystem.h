@@ -10,6 +10,8 @@
 
 class UBarkSetData;
 
+DECLARE_LOG_CATEGORY_EXTERN(LogEnemyBark, Log, All);
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnBarkRequested, FText, SpeakerName, FText, Line);
 
 UCLASS()
@@ -27,6 +29,9 @@ public:
 private:
 	/** Same bark type from any speaker within this window is dropped (no five-voice "Contact!" stacks). */
 	static constexpr float GlobalTypeDedupWindow = 1.5f;
+
+	/** Shows a coalescing on-screen debug message for a bark event (gated by caller). */
+	void ShowBarkScreenMessage(const AActor* Speaker, EBarkType Type, const FString& Message, const FColor& Color);
 
 	TMap<TPair<FObjectKey, uint8>, float> LastBarkTimePerSpeaker;
 	TMap<EBarkType, float> LastBarkTimePerType;

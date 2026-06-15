@@ -44,6 +44,10 @@ ACompanionCharacter::ACompanionCharacter()
 	GetMesh()->SetRelativeLocation(FVector(0.f, 0.f, -88.f));
 	GetMesh()->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
 
+	// Bug 6: weapon hitscan traces ECC_Visibility, which the inherited CharacterMesh profile ignores —
+	// block it on the mesh so enemy fire actually registers on the companion.
+	GetMesh()->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+
 	OwnedTags.AddTag(TAG_Character_Companion);
 
 	// Movement defaults

@@ -45,6 +45,7 @@ AEnemyAIController::AEnemyAIController()
 	SightConfig->SightRadius = 2500.f;
 	SightConfig->LoseSightRadius = 3000.f;
 	SightConfig->PeripheralVisionAngleDegrees = 110.f;
+	SightConfig->AutoSuccessRangeFromLastSeenLocation = 500.f;
 	SightConfig->SetMaxAge(5.f);
 	SightConfig->DetectionByAffiliation.bDetectEnemies = true;
 	// Neutrals are perceivable: corpses drop to NoTeam on death so allies can discover bodies.
@@ -84,6 +85,7 @@ void AEnemyAIController::OnPossess(APawn* InPawn)
 		SightConfig->SightRadius                  = DA->SightRadius;
 		SightConfig->LoseSightRadius              = DA->LoseSightRadius;
 		SightConfig->PeripheralVisionAngleDegrees = DA->PeripheralVisionDeg;
+		SightConfig->AutoSuccessRangeFromLastSeenLocation = 500.f;
 		SightConfig->SetMaxAge(DA->SightMaxAge);
 		HearingConfig->HearingRange               = DA->HearingRange;
 		HearingConfig->SetMaxAge(DA->HearingMaxAge);

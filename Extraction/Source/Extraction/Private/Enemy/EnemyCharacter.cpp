@@ -28,6 +28,8 @@ static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
 	TEXT("If non-zero, dead enemies persist as discoverable corpses (director-managed). If 0 (default), they disappear after a short delay."),
 	ECVF_Cheat);
 
+static constexpr float CrouchSpeedFraction = 0.5f; // MaxWalkSpeedCrouched = mode speed * this
+
 AEnemyCharacter::AEnemyCharacter()
 {
 	PrimaryActorTick.bCanEverTick = false;
@@ -41,6 +43,14 @@ AEnemyCharacter::AEnemyCharacter()
 
 	AIControllerClass = AEnemyAIController::StaticClass();
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
+
+	// Bug 8: enable crouching for NavAgent so Crouch()/UnCrouch() works.
+	GetCharacterMovement()->GetNavAgentPropertiesRef().bCanCrouch = true;
+
+	// Bug 6: weapon hitscan traces ECC_Visibility, but the inherited CharacterMesh profile ignores it,
+	// so player/companion shots passed straight through. Block Visibility on the mesh so hits register
+	// (the trace returns the struck bone, so hit-region multipliers resolve correctly).
+	if (USkeletalMeshComponent* MeshComp = GetMesh()) MeshComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 
 	OwnedTags.AddTag(TAG_Character_Enemy);
 
@@ -139,6 +149,14 @@ void AEnemyCharacter::BeginPlay()
 
 void AEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// CurrentWeapon is a separate owned/attached actor — UE does not auto-destroy it
+	// when this character is destroyed. Destroy server-side so removal replicates.
+	if (HasAuthority())
+	{
+		if (AWeaponBase* Weapon = CurrentWeapon.Get()) Weapon->Destroy();
+		CurrentWeapon = nullptr;
+	}
+
 	if (UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearAllTimersForObject(this);
@@ -263,8 +281,35 @@ void AEnemyCharacter::SetAimTarget(AActor* NewTarget)
 	const AActor* OldTarget = CurrentAimTarget.Get();
 	if (OldTarget == NewTarget) return;
 
-	CurrentAimTarget = NewTarget;
-	AimStartWorldTime = (IsValid(NewTarget) && GetWorld()) ? GetWorld()->GetTimeSeconds() : -1e9f;
+	const UWorld* World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.f;
+
+	if (!IsValid(NewTarget))
+	{
+		// Clearing aim — record the old target and the current settle time for grace restore.
+		LastSettleTarget = const_cast<AActor*>(OldTarget);
+		LastAimClearWorldTime = Now;
+		SavedAimStartWorldTime = AimStartWorldTime;
+		CurrentAimTarget = nullptr;
+		AimStartWorldTime = -1e9f;
+		return;
+	}
+
+	// Acquiring a new target. Check if it matches the grace window.
+	if (NewTarget == LastSettleTarget.Get() && (Now - LastAimClearWorldTime) < ReAimSettleGrace)
+	{
+		// Same target re-acquired within grace — restore prior settle progress.
+		CurrentAimTarget = NewTarget;
+		AimStartWorldTime = SavedAimStartWorldTime;
+	}
+	else
+	{
+		// Genuine new target — reset settle.
+		CurrentAimTarget = NewTarget;
+		AimStartWorldTime = Now;
+	}
+
+	LastSettleTarget = nullptr;
 }
 
 void AEnemyCharacter::SetAimLocationOverride(FVector Location)
@@ -334,9 +379,18 @@ void AEnemyCharacter::SetMoveSpeedMode(EEnemyMoveSpeedMode Mode)
 
 	switch (Mode)
 	{
-	case EEnemyMoveSpeedMode::Combat: MoveComp->MaxWalkSpeed = ArchetypeData->CombatSpeed; break;
-	case EEnemyMoveSpeedMode::Strafe: MoveComp->MaxWalkSpeed = ArchetypeData->StrafeWalkSpeed; break;
-	case EEnemyMoveSpeedMode::Patrol: MoveComp->MaxWalkSpeed = ArchetypeData->PatrolSpeed; break;
+	case EEnemyMoveSpeedMode::Combat:
+		MoveComp->MaxWalkSpeed = ArchetypeData->CombatSpeed;
+		MoveComp->MaxWalkSpeedCrouched = ArchetypeData->CombatSpeed * CrouchSpeedFraction;
+		break;
+	case EEnemyMoveSpeedMode::Strafe:
+		MoveComp->MaxWalkSpeed = ArchetypeData->StrafeWalkSpeed;
+		MoveComp->MaxWalkSpeedCrouched = ArchetypeData->StrafeWalkSpeed * CrouchSpeedFraction;
+		break;
+	case EEnemyMoveSpeedMode::Patrol:
+		MoveComp->MaxWalkSpeed = ArchetypeData->PatrolSpeed;
+		MoveComp->MaxWalkSpeedCrouched = ArchetypeData->PatrolSpeed * CrouchSpeedFraction;
+		break;
 	}
 }
 

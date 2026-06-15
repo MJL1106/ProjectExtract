@@ -17,6 +17,11 @@
 #include "Engine/World.h"
 
 
+// Arrival distance thresholds (cm)
+static constexpr float FallbackArrivalAcceptRadius = 40.f;
+static constexpr float FallbackArrivalTickRadius = 50.f;
+static constexpr float FallbackArrivalIdleRadius = 200.f;
+
 UBTTask_EnemyFallback::UBTTask_EnemyFallback()
 {
 	NodeName = TEXT("Enemy Fallback (Broken)");
@@ -137,7 +142,7 @@ bool UBTTask_EnemyFallback::FindDeepCover(UBehaviorTreeComponent& OwnerComp, FFa
 	ArrivalPos.Z = PawnLoc.Z;
 	Mem->ArrivalPos = ArrivalPos;
 
-	if (FVector::Dist(PawnLoc, ArrivalPos) <= 60.f)
+	if (FVector::Dist(PawnLoc, ArrivalPos) <= FallbackArrivalAcceptRadius)
 	{
 		BB->SetValueAsBool(AEnemyAIController::BB_HasCover, true);
 		if (BestSlot->Height == ECoverHeight::Crouch)
@@ -156,7 +161,7 @@ bool UBTTask_EnemyFallback::FindDeepCover(UBehaviorTreeComponent& OwnerComp, FFa
 		return true;
 	}
 
-	Controller->MoveToLocation(ArrivalPos, 60.f, false, true, true, true);
+	Controller->MoveToLocation(ArrivalPos, FallbackArrivalAcceptRadius, false, true, true, true);
 	Mem->Phase = EFallbackPhase::Moving;
 	UE_LOG(LogEnemyAI, Log, TEXT("[FALLBACK] %s -> Moving to slot '%s'"),
 		*Pawn->GetName(), *BestSlot->GetName());
@@ -226,7 +231,7 @@ void UBTTask_EnemyFallback::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		const FVector PawnLoc = Pawn->GetActorLocation();
 		const float Dist = FVector::Dist(PawnLoc, Mem->ArrivalPos);
 		const EPathFollowingStatus::Type Status = PF->GetStatus();
-		const bool bArrived = (Dist <= 80.f) || (Status == EPathFollowingStatus::Idle && Dist <= 200.f);
+		const bool bArrived = (Dist <= FallbackArrivalTickRadius) || (Status == EPathFollowingStatus::Idle && Dist <= FallbackArrivalIdleRadius);
 
 		// --- Advance-fire tick (throttled to ~10 Hz via accumulator) ---
 		const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();

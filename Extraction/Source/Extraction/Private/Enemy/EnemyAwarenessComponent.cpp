@@ -11,6 +11,7 @@
 #include "BarkSetData.h"
 #include "HealthComponent.h"
 #include "SuppressionComponent.h"
+#include "EnemyMoraleComponent.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Perception/AIPerceptionComponent.h"
@@ -282,6 +283,27 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 					AActor* Target = CombatTarget.Get();
 					if (IsValid(Target))
 						Tag += FString::Printf(TEXT("\nTgt: %s"), *Target->GetName());
+
+					// Morale state + value
+					if (const UEnemyMoraleComponent* Morale = MyChar->GetMoraleComponent())
+					{
+						const FString MoraleStateStr = UEnum::GetDisplayValueAsText(Morale->GetMoraleState()).ToString();
+						Tag += FString::Printf(TEXT("\nMorale: %s %.0f%%"), *MoraleStateStr, Morale->GetMorale01() * 100.f);
+					}
+
+					// Suppression value
+					if (const USuppressionComponent* Supp = MyChar->GetSuppressionComponent())
+					{
+						Tag += FString::Printf(TEXT("\nSupp: %.0f%%%s"), Supp->GetSuppression01() * 100.f,
+							Supp->IsSuppressed() ? TEXT(" [SUPPRESSED]") : TEXT(""));
+					}
+
+					// Threshold context line
+					if (IsValid(ArchetypeData))
+					{
+						Tag += FString::Printf(TEXT("\nSusp %.0f (susp>=%.0f search>=%.0f)"),
+							GetHighestSuspicion(), ArchetypeData->SuspiciousThreshold, ArchetypeData->SearchingThreshold);
+					}
 				}
 
 				DrawDebugString(World, HeadLocation, Tag, nullptr, FColor::Cyan, UpdateInterval, true);
@@ -561,8 +583,19 @@ void UEnemyAwarenessComponent::ApplySuspicionState(float MaxSuspicion, const FVe
 
 float UEnemyAwarenessComponent::ComputeSightFillRate(const APawn* MyPawn, const AActor* Target) const
 {
+	if (!IsValid(ArchetypeData)) return 0.f;
+
 	const float Dist = FVector::Dist(MyPawn->GetActorLocation(), Target->GetActorLocation());
-	const float DistFactor = FMath::Clamp(1.f - Dist / FMath::Max(ArchetypeData->SightRadius, 1.f), 0.15f, 1.f);
+
+	// Near-full band: 1.0 within FullFillRange, linear ramp to DistFloor between FullFillRange and LoseSightRadius
+	const float MaxRange = ArchetypeData->LoseSightRadius;
+	const float FullRange = FMath::Min(ArchetypeData->FullFillRange, MaxRange);
+	constexpr float DistFloor = 0.15f;
+	float DistFactor;
+	if (Dist <= FullRange)
+		DistFactor = 1.f;
+	else
+		DistFactor = FMath::Clamp(FMath::Lerp(1.f, DistFloor, (Dist - FullRange) / FMath::Max(MaxRange - FullRange, 1.f)), DistFloor, 1.f);
 
 	// View-angle factor: 1 at centre, AngleEdgeFillFactor at the cone edge
 	const FVector ToTarget = (Target->GetActorLocation() - MyPawn->GetActorLocation()).GetSafeNormal();

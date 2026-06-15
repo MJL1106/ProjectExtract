@@ -43,6 +43,12 @@ static TAutoConsoleVariable<int32> CVarAIWeaponTraceDebug(
 	TEXT("If non-zero, log AI weapon hitscan trace details (start, end, hit actor, distance)."),
 	ECVF_Cheat);
 
+static TAutoConsoleVariable<int32> CVarPlayerTraceDebug(
+	TEXT("weapon.PlayerTraceDebug"),
+	0,
+	TEXT("If non-zero, log player weapon hitscan trace details (start, end, hit actor, component, distance, health check)."),
+	ECVF_Cheat);
+
 AWeaponBase::AWeaponBase()
 	: CurrentState(EWeaponState::Idle)
 	, CurrentAmmo(0)
@@ -94,6 +100,11 @@ void AWeaponBase::BeginPlay()
 
 	if (IsValid(WeaponData) && !WeaponData->KitWeaponPoseAsset)
 		UE_LOG(LogExtraction, Warning, TEXT("[KitWeapon] %s shipping without KitWeaponPoseAsset — kit procedural arms will receive nullptr"), *GetNameSafe(this));
+
+	// Bug 6a: safe ammo seed — if the weapon spawned server-side with a valid DA but no ammo
+	// (kit path not yet called KitSetAmmo), seed the magazine so CanFire() succeeds.
+	if (HasAuthority() && IsValid(WeaponData) && CurrentAmmo == 0)
+		InitializeAmmo();
 }
 
 void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -413,12 +424,15 @@ void AWeaponBase::PerformHitscan()
 			}
 		}
 
-		// Apply spread to the fire direction (not the actor rotation — body stays upright).
+		// Bug 5b: uniform cone spread — single random angle + magnitude within InaccuracyDeg.
+		// The old per-axis approach doubled the effective cone (independent Yaw+Pitch).
 		if (InaccuracyDeg > 0.0f)
 		{
+			const float RandAngle = FMath::RandRange(0.f, 360.f);
+			const float RandMagnitude = FMath::RandRange(0.f, InaccuracyDeg);
 			FRotator SpreadRot = AimDirection.Rotation();
-			SpreadRot.Yaw += FMath::RandRange(-InaccuracyDeg, InaccuracyDeg);
-			SpreadRot.Pitch += FMath::RandRange(-InaccuracyDeg, InaccuracyDeg);
+			SpreadRot.Yaw += FMath::Cos(FMath::DegreesToRadians(RandAngle)) * RandMagnitude;
+			SpreadRot.Pitch += FMath::Sin(FMath::DegreesToRadians(RandAngle)) * RandMagnitude;
 			AimDirection = SpreadRot.Vector();
 		}
 
@@ -431,14 +445,13 @@ void AWeaponBase::PerformHitscan()
 	QueryParams.AddIgnoredActor(OwnerChar);
 	QueryParams.bReturnPhysicalMaterial = false;
 
-	// Friendly-fire prevention: AI-owned weapons ignore pawns on the same team (via IGenericTeamAgentInterface).
-	// Player-fired shots (bAIOwned false) remain untouched.
-	// The ignore list is built once in StartFiring and refreshed every ~1s during sustained fire so we
-	// don't iterate all pawns per shot (~20 pawns * fire rate = significant per-frame cost).
+	// Friendly-fire prevention for ALL shooters (player + AI): ignore pawns on the SAME team as the
+	// shooter (via IGenericTeamAgentInterface), so the bullet passes through allies to whatever is
+	// behind. Player (team 0) won't hit the companion; an enemy (team 1) won't hit other enemies.
+	// The ignore list is team-based and rebuilt at most once per ~1s (iterating all pawns per shot is costly).
+	// NOTE: this is intentionally weapon-trace-only — grenades stay team-blind by design.
 	const bool bAIOwned = !IsValid(PC);
-	if (bAIOwned)
 	{
-		// Refresh if stale (sustained auto fire running longer than 1s since last build).
 		const UWorld* QueryWorld = GetWorld();
 		if (QueryWorld && (QueryWorld->GetTimeSeconds() - FFIgnoreListBuiltTime) > 1.f)
 			RebuildFFIgnoreList();
@@ -460,6 +473,20 @@ void AWeaponBase::PerformHitscan()
 				*GetNameSafe(AILogAimTarget), (int32)bHit,
 				*GetNameSafe(bHit ? HitResult.GetActor() : nullptr),
 				bHit ? HitResult.Distance : 0.f);
+		}
+
+		// Bug 6b: player trace diagnostics
+		if (!bAIOwned && CVarPlayerTraceDebug.GetValueOnGameThread() != 0)
+		{
+			AActor* DbgHitActor = bHit ? HitResult.GetActor() : nullptr;
+			UE_LOG(LogExtraction, Log,
+				TEXT("PLAYER-FIRE start=%s end=%s bHit=%d hitActor=%s hitComp=%s dist=%.0f"),
+				*TraceStart.ToCompactString(), *TraceEnd.ToCompactString(),
+				(int32)bHit, *GetNameSafe(DbgHitActor),
+				bHit ? *GetNameSafe(HitResult.GetComponent()) : TEXT("none"),
+				bHit ? HitResult.Distance : 0.f);
+			if (bHit && IsValid(DbgHitActor) && !DbgHitActor->FindComponentByClass<UHealthComponent>())
+				UE_LOG(LogExtraction, Warning, TEXT("PLAYER-FIRE hit %s but it has NO UHealthComponent — damage will be ignored"), *GetNameSafe(DbgHitActor));
 		}
 
 		if (bHit)
@@ -761,8 +788,13 @@ void AWeaponBase::KitBeginFire_Implementation()
 	bDryFireLogged = false;
 	bIsRecoveringRecoil = false;
 
+	// Build the team friendly-ignore list at burst start (mirrors StartFiring for AI) so the player's
+	// shots pass through allies — PerformHitscan applies it for the player branch too.
 	if (IsValid(Cast<ACharacter>(GetOwner())))
+	{
+		RebuildFFIgnoreList();
 		RebuildSuppressionTargets();
+	}
 }
 
 void AWeaponBase::KitStopFire_Implementation()
@@ -778,7 +810,23 @@ void AWeaponBase::KitStopFire_Implementation()
 void AWeaponBase::KitFire_HitScan_Implementation()
 {
 	// One shot per kit dispatch — kit calls this on its own fire-rate cadence.
-	if (!CanFire()) return;
+	if (!CanFire())
+	{
+		// Bug 6b: throttled diagnostic — log once per second why CanFire failed.
+		if (CVarPlayerTraceDebug.GetValueOnGameThread() != 0)
+		{
+			static float LastKitFireFailLogTime = -1e9f;
+			const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+			if ((Now - LastKitFireFailLogTime) >= 1.f)
+			{
+				LastKitFireFailLogTime = Now;
+				UE_LOG(LogExtraction, Warning,
+					TEXT("KitFire_HitScan BLOCKED: owner=%s state=%d ammo=%d WeaponData=%s"),
+					*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, *GetNameSafe(WeaponData));
+			}
+		}
+		return;
+	}
 
 	if (HasAuthority())
 		CurrentState = EWeaponState::Firing;

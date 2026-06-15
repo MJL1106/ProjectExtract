@@ -54,11 +54,11 @@ private:
 
 	/** Search radius multiplier applied to the DA CoverSearchRadius. */
 	UPROPERTY(EditAnywhere, Category = "Fallback", meta = (ClampMin = "1.0"))
-	float CoverSearchRadiusMultiplier = 2.f;
+	float CoverSearchRadiusMultiplier = 1.3f;
 
 	/** Bonus score per cm of distance from threat (favours deeper cover). */
 	UPROPERTY(EditAnywhere, Category = "Fallback", meta = (ClampMin = "0.0"))
-	float DistanceFromThreatWeight = 2.f;
+	float DistanceFromThreatWeight = 1.2f;
 
 	/** Seconds between peek-fire bursts while holding. */
 	UPROPERTY(EditAnywhere, Category = "Fallback", meta = (ClampMin = "1.0"))

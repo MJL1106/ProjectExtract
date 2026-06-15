@@ -19,6 +19,11 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "CoverSlotTypes.h"
 
+// Arrival distance thresholds (cm)
+static constexpr float CoverArrivalAcceptRadius = 40.f;
+static constexpr float CoverArrivalTickRadius = 50.f;
+static constexpr float CoverArrivalIdleRadius = 200.f;
+
 UBTTask_EnemyMoveToCover::UBTTask_EnemyMoveToCover()
 {
 	NodeName = TEXT("Enemy Move To Cover");
@@ -103,7 +108,7 @@ EBTNodeResult::Type UBTTask_EnemyMoveToCover::ExecuteTask(UBehaviorTreeComponent
 	ArrivalPos.Z = PawnLoc.Z;
 	Mem->ArrivalPos = ArrivalPos;
 
-	if (FVector::Dist(PawnLoc, ArrivalPos) <= 60.f)
+	if (FVector::Dist(PawnLoc, ArrivalPos) <= CoverArrivalAcceptRadius)
 	{
 		BB->SetValueAsBool(AEnemyAIController::BB_HasCover, true);
 		if (Slot->Height == ECoverHeight::Crouch)
@@ -112,7 +117,7 @@ EBTNodeResult::Type UBTTask_EnemyMoveToCover::ExecuteTask(UBehaviorTreeComponent
 		return EBTNodeResult::Succeeded;
 	}
 
-	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(ArrivalPos, 60.f, false, true, true, true);
+	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(ArrivalPos, CoverArrivalAcceptRadius, false, true, true, true);
 	UE_LOG(LogEnemyAI, Verbose, TEXT("[COVER] %s MoveTo (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
 		*Pawn->GetName(), ArrivalPos.X, ArrivalPos.Y, ArrivalPos.Z, FVector::Dist(PawnLoc, ArrivalPos), (int32)MoveResult);
 	Mem->bMoveIssued = true;
@@ -165,7 +170,7 @@ void UBTTask_EnemyMoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 	const float Dist = FVector::Dist(PawnLoc, Mem->ArrivalPos);
 	const EPathFollowingStatus::Type Status = PF->GetStatus();
 
-	const bool bArrived = (Dist <= 80.f) || (Status == EPathFollowingStatus::Idle && Dist <= 200.f);
+	const bool bArrived = (Dist <= CoverArrivalTickRadius) || (Status == EPathFollowingStatus::Idle && Dist <= CoverArrivalIdleRadius);
 
 	// --- Advance-fire tick (throttled to ~10 Hz via accumulator) ---
 	Mem->FireTickAccum += DeltaSeconds;

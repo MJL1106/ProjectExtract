@@ -252,7 +252,11 @@ bool AAICoverSlot::IsAlphaAtPeekableCorner(float Alpha, float Epsilon) const
 
 FVector AAICoverSlot::GetBehindCoverPosition(float Alpha, float Standoff) const
 {
-	return GetLocationAtAlpha(Alpha) - GetForwardDirection() * Standoff;
+	// Clamp standoff to the box's X half-extent so the capsule never lands outside
+	// the authored cover volume. Callers pass CapsuleRadius + Padding; geometry wins.
+	const float MaxDepth = IsValid(CoverBoundsBox) ? CoverBoundsBox->GetScaledBoxExtent().X : Standoff;
+	const float ClampedStandoff = FMath::Min(Standoff, MaxDepth);
+	return GetLocationAtAlpha(Alpha) - GetForwardDirection() * ClampedStandoff;
 }
 
 // --- Shared LOS helper ---

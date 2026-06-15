@@ -65,8 +65,9 @@ public:
 
 	/**
 	 * World-space position behind the wall at the given Alpha.
-	 * Result = GetLocationAtAlpha(Alpha) - GetForwardDirection() * Standoff.
-	 * Standoff should be capsule radius + DA->CoverStandoffPadding.
+	 * Standoff is clamped to CoverBoundsBox X half-extent so the result never
+	 * exceeds the authored cover volume depth.
+	 * Callers pass CapsuleRadius + DA->CoverStandoffPadding as Standoff.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Cover|Geometry")
 	FVector GetBehindCoverPosition(float Alpha, float Standoff) const;

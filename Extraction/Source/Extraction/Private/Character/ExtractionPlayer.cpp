@@ -41,6 +41,10 @@ AExtractionPlayer::AExtractionPlayer()
 	WeaponComponent   = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
 
+	// Bug 6: weapon hitscan traces ECC_Visibility, which the inherited CharacterMesh profile ignores —
+	// block it on the mesh so enemy fire registers on the player.
+	if (USkeletalMeshComponent* MeshComp = GetMesh()) MeshComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+
 	// Default bone-to-region map (UE5 mannequin skeleton)
 	BoneToHitRegionMap.Reserve(25);
 	BoneToHitRegionMap.Add(FName("head"),        EHitRegion::Head);

@@ -238,6 +238,17 @@ private:
 	float AimStartWorldTime = -1e9f;
 	float LastDamageWorldTime = -1e9f;
 
+	// Bug 5a: re-aim settle grace — prevents settle timer reset on same-target re-acquire within a window.
+	TWeakObjectPtr<AActor> LastSettleTarget;
+	float LastAimClearWorldTime = -1e9f;
+	/** Saved AimStartWorldTime to restore if the same target is re-acquired within grace. */
+	float SavedAimStartWorldTime = -1e9f;
+
+	/** Grace period (seconds) after clearing aim within which re-acquiring the same target
+	 *  restores the prior settle progress instead of resetting it. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Combat")
+	float ReAimSettleGrace = 1.5f;
+
 	// Phase 3 — spread modifiers
 	float CommandSpreadMultiplier = 1.f;
 	float ExtraSpreadDegrees = 0.f;

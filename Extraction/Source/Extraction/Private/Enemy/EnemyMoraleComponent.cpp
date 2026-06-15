@@ -236,9 +236,16 @@ void UEnemyMoraleComponent::MoraleTick()
 
 	if (CachedHealthComp.IsValid() && CachedHealthComp->IsDead()) return;
 
-	// Sustained suppression drain
+	const bool bInCover = IsOwnerInCover();
+
+	// Sustained suppression drain — scaled by suppression intensity and cover protection.
 	if (CachedSuppressionComp.IsValid() && CachedSuppressionComp->IsSuppressed())
-		ApplyMoraleDelta(-LossSustainedSuppression);
+	{
+		const float Suppression01 = CachedSuppressionComp->GetSuppression01();
+		float SuppressionLoss = LossSustainedSuppression * Suppression01;
+		if (bInCover) SuppressionLoss *= InCoverMoraleProtection;
+		ApplyMoraleDelta(-SuppressionLoss, /*bIsContinuousDrain=*/true);
+	}
 
 	// Low-HP one-shot check
 	if (!bLowHealthFired && CachedHealthComp.IsValid())
@@ -248,24 +255,31 @@ void UEnemyMoraleComponent::MoraleTick()
 	}
 
 	// Flanked check: combat target behind owner's facing
-	CheckFlanked();
+	CheckFlanked(bInCover);
 
-	// Recovery drift
+	// Recovery drift — in-cover bonus when not heavily suppressed.
 	const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 	const float TimeSinceLoss = WorldTime - LastLossWorldTime;
 	if (TimeSinceLoss >= RecoveryGraceSeconds && CurrentMorale < 100.f)
-		ApplyMoraleDelta(RecoveryPerSecond * MoraleTickInterval);
+	{
+		float Recovery = RecoveryPerSecond * MoraleTickInterval;
+		const bool bHeavilySuppressed = CachedSuppressionComp.IsValid() && CachedSuppressionComp->GetSuppression01() > 0.5f;
+		if (bInCover && !bHeavilySuppressed) Recovery *= InCoverRecoveryMultiplier;
+		ApplyMoraleDelta(Recovery);
+	}
 }
 
 // --- Internals ---
 
-void UEnemyMoraleComponent::ApplyMoraleDelta(float Delta)
+void UEnemyMoraleComponent::ApplyMoraleDelta(float Delta, bool bIsContinuousDrain)
 {
 	const float ScaledDelta = (Delta < 0.f) ? (Delta / MoraleEventResistance) : Delta;
 	const float OldMorale = CurrentMorale;
 	CurrentMorale = FMath::Clamp(CurrentMorale + ScaledDelta, GetEffectiveMoraleFloor(), 100.f);
 
-	if (ScaledDelta < 0.f && GetWorld())
+	// Only discrete events reset the recovery grace clock. Continuous per-tick drains
+	// (suppression, flank) do NOT, allowing recovery to kick in even under sustained fire.
+	if (ScaledDelta < 0.f && !bIsContinuousDrain && GetWorld())
 		LastLossWorldTime = GetWorld()->GetTimeSeconds();
 
 	if (CurrentMorale != OldMorale)
@@ -276,11 +290,22 @@ void UEnemyMoraleComponent::EvaluateState()
 {
 	EMoraleState NewState;
 	if (CurrentMorale <= BrokenThreshold)
+	{
 		NewState = EMoraleState::Broken;
+	}
+	else if (CurrentState == EMoraleState::Broken && CurrentMorale < BrokenThreshold + BrokenExitMargin)
+	{
+		// Hysteresis: remain Broken until morale exceeds threshold + margin.
+		NewState = EMoraleState::Broken;
+	}
 	else if (CurrentMorale <= ShakenThreshold)
+	{
 		NewState = EMoraleState::Shaken;
+	}
 	else
+	{
 		NewState = EMoraleState::Confident;
+	}
 
 	if (NewState == CurrentState) return;
 
@@ -299,7 +324,7 @@ void UEnemyMoraleComponent::EvaluateState()
 		RequestBark(EBarkType::FallingBack);
 }
 
-void UEnemyMoraleComponent::CheckFlanked()
+void UEnemyMoraleComponent::CheckFlanked(bool bInCover)
 {
 	if (!OwnerEnemy.IsValid()) return;
 
@@ -317,7 +342,29 @@ void UEnemyMoraleComponent::CheckFlanked()
 	const float Dot = FVector::DotProduct(Forward, ToTarget);
 
 	if (Dot < FlankedDotThreshold)
-		ApplyMoraleDelta(-LossFlanked);
+	{
+		// Throttle: apply flank loss at most once per FlankLossInterval.
+		const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+		if (WorldTime - LastFlankLossWorldTime < FlankLossInterval) return;
+		LastFlankLossWorldTime = WorldTime;
+
+		float FlankLoss = LossFlanked;
+		if (bInCover) FlankLoss *= InCoverMoraleProtection;
+		ApplyMoraleDelta(-FlankLoss, /*bIsContinuousDrain=*/true);
+	}
+}
+
+bool UEnemyMoraleComponent::IsOwnerInCover() const
+{
+	if (!OwnerEnemy.IsValid()) return false;
+
+	AAIController* AIC = Cast<AAIController>(OwnerEnemy->GetController());
+	if (!IsValid(AIC)) return false;
+
+	UBlackboardComponent* BB = AIC->GetBlackboardComponent();
+	if (!BB) return false;
+
+	return BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
 }
 
 void UEnemyMoraleComponent::RequestBark(EBarkType Type) const

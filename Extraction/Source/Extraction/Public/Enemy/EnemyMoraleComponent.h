@@ -80,10 +80,29 @@ private:
 	float GainDamagedTarget = 5.f;
 	float GainTargetDowned = 15.f;
 
+	// --- Cover protection & recovery tunables ---
+
+	/** Multiplier applied to sustained-suppression and flank losses when owner has cover. Lower = more protection. */
+	UPROPERTY(EditDefaultsOnly, Category = "Morale|Cover")
+	float InCoverMoraleProtection = 0.25f;
+
+	/** Multiplier applied to RecoveryPerSecond when owner is in cover and not heavily suppressed. */
+	UPROPERTY(EditDefaultsOnly, Category = "Morale|Cover")
+	float InCoverRecoveryMultiplier = 2.0f;
+
+	/** Once Broken, morale must reach BrokenThreshold + this margin before returning to Shaken. Prevents flicker. */
+	UPROPERTY(EditDefaultsOnly, Category = "Morale|Thresholds")
+	float BrokenExitMargin = 15.f;
+
+	/** Minimum interval (seconds) between flank-loss applications. Throttles per-tick flank drain. */
+	UPROPERTY(EditDefaultsOnly, Category = "Morale|Flanking")
+	float FlankLossInterval = 2.0f;
+
 	// --- Runtime state ---
 	float CurrentMorale = 100.f;
 	EMoraleState CurrentState = EMoraleState::Confident;
 	float LastLossWorldTime = -1e9f;
+	float LastFlankLossWorldTime = -1e9f;
 	bool bLowHealthFired = false;
 
 	// --- Cached references ---
@@ -121,14 +140,20 @@ private:
 	/** Staggered 1s timer: recovery, sustained-suppression drain, low-HP check, flanked check. */
 	void MoraleTick();
 
-	/** Applies a morale delta (negative = loss, positive = gain). Scaled by 1/resistance. Clamps to floor. */
-	void ApplyMoraleDelta(float Delta);
+	/**
+	 * Applies a morale delta (negative = loss, positive = gain). Scaled by 1/resistance. Clamps to floor.
+	 * @param bIsContinuousDrain If true, does NOT reset the recovery grace clock (allows recovery under sustained fire).
+	 */
+	void ApplyMoraleDelta(float Delta, bool bIsContinuousDrain = false);
 
 	/** Re-evaluates state from current value and broadcasts on change. */
 	void EvaluateState();
 
 	/** Checks if the combat target is behind this enemy's facing (cheap dot test). */
-	void CheckFlanked();
+	void CheckFlanked(bool bInCover);
+
+	/** Returns true if the owning controller's blackboard has BB_HasCover set. */
+	bool IsOwnerInCover() const;
 
 	/** Requests a bark through the subsystem if available. */
 	void RequestBark(EBarkType Type) const;

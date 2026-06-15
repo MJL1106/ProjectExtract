@@ -9,3 +9,9 @@ int32 GetEnemyDrawDebugLevel();
 
 /** Returns true when the enemy.DrawDebug cvar is non-zero (backwards-compat for existing callers). */
 bool IsEnemyDrawDebugEnabled();
+
+/** Returns the current enemy.DrawBarkDebug cvar value (0=off, 1=on). Separate from DrawDebug due to high frequency. */
+int32 GetEnemyBarkDebugLevel();
+
+/** Returns true when the enemy.DrawBarkDebug cvar is non-zero. */
+bool IsEnemyBarkDebugEnabled();
