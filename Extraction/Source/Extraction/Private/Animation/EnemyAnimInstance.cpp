@@ -2,6 +2,9 @@
 
 #include "EnemyAnimInstance.h"
 #include "EnemyCharacter.h"
+#include "EnemyAIController.h"
+#include "EnemyAwarenessComponent.h"
+#include "EnemyTypes.h"
 #include "WeaponBase.h"
 #include "HealthComponent.h"
 #include "Animation/AnimMontage.h"
@@ -104,6 +107,14 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsReloading = false;
 	}
 
+	bInCombat = false;
+	if (IsValid(OwningEnemy))
+	{
+		if (AEnemyAIController* AIC = Cast<AEnemyAIController>(OwningEnemy->GetController()))
+			if (const UEnemyAwarenessComponent* Aw = AIC->GetAwarenessComponent())
+				bInCombat = (Aw->GetAwarenessState() == EEnemyAwarenessState::Combat);
+	}
+
 	// --- Auto-trigger: fire montage on weapon state transitions ---
 
 	if (bIsAlive)
@@ -172,6 +183,9 @@ void UEnemyAnimInstance::PlayReloadMontage(float PlayRate)
 
 void UEnemyAnimInstance::PlayHitReactMontage(float PlayRate)
 {
+	// Suppress hit react during active combat so repeated hits don't stomp firing/aiming —
+	// mirrors UCompanionAnimInstance. Fire/reload montages already replace the slot.
+	if (bIsFiring || bIsAiming || bInCombat) return;
 	if (!IsValid(HitReactMontage)) return;
 	Montage_Play(HitReactMontage, PlayRate);
 }

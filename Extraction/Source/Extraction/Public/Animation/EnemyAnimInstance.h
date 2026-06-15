@@ -102,6 +102,9 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Combat")
 	bool bIsReloading = false;
 
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Combat")
+	bool bInCombat = false;
+
 	// --- Montage Assets (designer-assigned on the ABP) ---
 
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Montages")
