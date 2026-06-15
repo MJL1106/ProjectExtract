@@ -24,9 +24,11 @@
 #include "EnemyMoraleComponent.h"
 #include "EnemySquadSubsystem.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/WidgetComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/DamageEvents.h"
 #include "TimerManager.h"
+#include "EnemyAwarenessWidget.h"
 
 static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
 	TEXT("enemy.PersistCorpses"), 0,
@@ -58,6 +60,19 @@ AEnemyCharacter::AEnemyCharacter()
 	if (USkeletalMeshComponent* MeshComp = GetMesh()) MeshComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 
 	OwnedTags.AddTag(TAG_Character_Enemy);
+
+	static constexpr float AwarenessWidgetOffsetZ = 30.f;
+	static constexpr float AwarenessWidgetSize     = 64.f;
+
+	AwarenessWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("AwarenessWidget"));
+	AwarenessWidgetComponent->SetupAttachment(GetMesh(), TEXT("head"));
+	AwarenessWidgetComponent->SetRelativeLocation(FVector(0.f, 0.f, AwarenessWidgetOffsetZ));
+	AwarenessWidgetComponent->SetWidgetSpace(EWidgetSpace::Screen);
+	AwarenessWidgetComponent->SetDrawSize(FVector2D(AwarenessWidgetSize, AwarenessWidgetSize));
+	AwarenessWidgetComponent->SetPivot(FVector2D(0.5f, 0.5f));
+	AwarenessWidgetComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	AwarenessWidgetComponent->SetTwoSided(false);
+	AwarenessWidgetComponent->SetVisibility(false);
 
 	// Default mannequin bone-to-region map
 	BoneToHitRegionMap.Reserve(25);
@@ -107,6 +122,13 @@ void AEnemyCharacter::BeginPlay()
 
 	if (IsValid(HealthComponent))
 		HealthComponent->OnDeath.AddUniqueDynamic(this, &AEnemyCharacter::HandleDeath);
+
+	if (AwarenessWidgetClass && IsValid(AwarenessWidgetComponent))
+	{
+		AwarenessWidgetComponent->SetWidgetClass(AwarenessWidgetClass);
+		AwarenessWidgetComponent->SetVisibility(true);
+		TryLinkAwarenessWidget();
+	}
 
 	if (!IsValid(ArchetypeData))
 	{
@@ -164,6 +186,7 @@ void AEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	if (UWorld* World = GetWorld())
 	{
+		World->GetTimerManager().ClearTimer(AwarenessWidgetLinkTimerHandle);
 		World->GetTimerManager().ClearAllTimersForObject(this);
 
 		if (UEnemySquadSubsystem* SquadSys = World->GetSubsystem<UEnemySquadSubsystem>())
@@ -171,6 +194,35 @@ void AEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 
 	Super::EndPlay(EndPlayReason);
+}
+
+void AEnemyCharacter::TryLinkAwarenessWidget()
+{
+	if (!IsValid(AwarenessWidgetComponent)) return;
+
+	UEnemyAwarenessWidget* W = Cast<UEnemyAwarenessWidget>(AwarenessWidgetComponent->GetUserWidgetObject());
+	if (IsValid(W))
+	{
+		W->SetEnemy(this);
+		GetWorldTimerManager().ClearTimer(AwarenessWidgetLinkTimerHandle);
+		UE_LOG(LogTemp, Log, TEXT("[AwarenessMeter] linked widget on %s"), *GetName());
+		return;
+	}
+
+	++AwarenessWidgetLinkAttempts;
+	if (AwarenessWidgetLinkAttempts > MaxAwarenessLinkAttempts)
+	{
+		GetWorldTimerManager().ClearTimer(AwarenessWidgetLinkTimerHandle);
+		UE_LOG(LogTemp, Warning, TEXT("[AwarenessMeter] gave up linking widget on %s (GetUserWidgetObject null)"), *GetName());
+		return;
+	}
+
+	if (!AwarenessWidgetLinkTimerHandle.IsValid())
+	{
+		static constexpr float LinkRetryInterval = 0.1f;
+		GetWorldTimerManager().SetTimer(AwarenessWidgetLinkTimerHandle, this,
+			&AEnemyCharacter::TryLinkAwarenessWidget, LinkRetryInterval, true);
+	}
 }
 
 UEnemySquad* AEnemyCharacter::GetSquad() const
@@ -625,6 +677,9 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 
 void AEnemyCharacter::HandleDeath()
 {
+	if (IsValid(AwarenessWidgetComponent))
+		AwarenessWidgetComponent->SetVisibility(false);
+
 	if (AWeaponBase* Weapon = CurrentWeapon.Get())
 		Weapon->StopFiring();
 

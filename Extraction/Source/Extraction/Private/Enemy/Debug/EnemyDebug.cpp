@@ -34,3 +34,14 @@ bool IsEnemyBarkDebugEnabled()
 {
 	return CVarEnemyDrawBarkDebug.GetValueOnGameThread() != 0;
 }
+
+static TAutoConsoleVariable<int32> CVarAwarenessMeterLog(
+	TEXT("enemy.AwarenessMeterLog"),
+	0,
+	TEXT("Awareness meter diagnostic log: 0=off, 1=log state/fill/visibility once per second per enemy."),
+	ECVF_Cheat);
+
+int32 GetAwarenessMeterLogLevel()
+{
+	return CVarAwarenessMeterLog.GetValueOnGameThread();
+}

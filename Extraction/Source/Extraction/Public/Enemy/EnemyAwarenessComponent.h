@@ -62,6 +62,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	float GetHighestSuspicion() const;
 
+	/** Normalised 0-1 fill value for the awareness meter widget.
+	 *  Returns 1 in Combat (suspicion resets to 0 on combat entry, so raw suspicion is useless there).
+	 *  Otherwise clamps GetHighestSuspicion() / SuspicionMax. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	float GetAwarenessMeter01() const;
+
 	/** True if any hostile actor currently has a sighted suspicion track (state-independent perception check). */
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	bool IsAnyHostileSighted() const;

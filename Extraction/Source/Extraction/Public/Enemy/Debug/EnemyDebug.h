@@ -15,3 +15,6 @@ int32 GetEnemyBarkDebugLevel();
 
 /** Returns true when the enemy.DrawBarkDebug cvar is non-zero. */
 bool IsEnemyBarkDebugEnabled();
+
+/** Returns the current enemy.AwarenessMeterLog cvar value (0=off, 1=on). */
+int32 GetAwarenessMeterLogLevel();

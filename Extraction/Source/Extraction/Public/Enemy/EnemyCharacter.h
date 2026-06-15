@@ -18,6 +18,7 @@ class UEnemyArchetypeData;
 class AWeaponBase;
 class APatrolRoute;
 class AEnemyAIController;
+class UWidgetComponent;
 
 // Phase 3 bolt-on components — forward-declared; headers live in Enemy/Components/ (authored by slices B/C).
 class UEnemyArmourComponent;
@@ -248,6 +249,14 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Weapon")
 	FName WeaponSocket = TEXT("WeaponSocket");
 
+	/** Floating awareness meter above the enemy's head. Widget self-collapses while Unaware. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|UI")
+	TObjectPtr<UWidgetComponent> AwarenessWidgetComponent;
+
+	/** Assign the WBP_EnemyAwarenessMeter Blueprint in the enemy BP defaults. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|UI")
+	TSubclassOf<UUserWidget> AwarenessWidgetClass;
+
 	/** Maps skeleton bone names to hit regions for damage multiplier lookup. Mannequin defaults. */
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Hitbox")
 	TMap<FName, EHitRegion> BoneToHitRegionMap;
@@ -337,6 +346,16 @@ private:
 	FTimerHandle DestroyTimerHandle;
 	FTimerHandle TakedownRagdollTimerHandle;
 	FTimerHandle TakedownWatchdogTimerHandle;
+	FTimerHandle AwarenessWidgetLinkTimerHandle;
+
+	/** Deferred retry count for linking the awareness widget after the component creates it. */
+	int32 AwarenessWidgetLinkAttempts = 0;
+
+	/** Maximum retries for awareness widget link (0.1s interval → ~5s total). */
+	static constexpr int32 MaxAwarenessLinkAttempts = 50;
+
+	/** Deferred retry: links the awareness widget once GetUserWidgetObject() returns non-null. */
+	void TryLinkAwarenessWidget();
 
 	/** Resolves hitbox multiplier from the damage event's bone + damage type. */
 	float GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const;

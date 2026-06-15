@@ -802,6 +802,12 @@ float UEnemyAwarenessComponent::GetHighestSuspicion() const
 	return Max;
 }
 
+float UEnemyAwarenessComponent::GetAwarenessMeter01() const
+{
+	if (CurrentState == EEnemyAwarenessState::Combat) return 1.f;
+	return FMath::Clamp(GetHighestSuspicion() / SuspicionMax, 0.f, 1.f);
+}
+
 bool UEnemyAwarenessComponent::IsAnyHostileSighted() const
 {
 	for (const auto& Pair : SuspicionTracks)
