@@ -216,6 +216,59 @@ void UEnemyAwarenessComponent::NotifyDamaged(AController* Instigator)
 	}
 }
 
+// --- Shot-At Notification ---
+
+void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVector& ShotOrigin)
+{
+	if (bStopped) return;
+	if (!IsValid(InstigatorPawn)) return;
+	if (!IsHostile(InstigatorPawn)) return;
+	if (!IsValid(ArchetypeData) || !ArchetypeData->bReactsToBeingShotAt) return;
+
+	// Already in Combat — only refresh the track location; let the existing loop run.
+	if (CurrentState == EEnemyAwarenessState::Combat)
+	{
+		FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(InstigatorPawn);
+		Track.LastStimulusLocation = ShotOrigin;
+		return;
+	}
+
+	// Per-instigator rate-limit folded into FSuspicionTrack (fix #4 — no separate map).
+	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(InstigatorPawn);
+	if ((Now - Track.LastShotAtTime) < ShotAtRateLimit) return;
+	Track.LastShotAtTime = Now;
+
+	// Clamp to at least SearchingThreshold so a mistuned DA can't decay out on the next tick (fix #7).
+	Track.LastStimulusLocation = ShotOrigin;
+	const float Floor = FMath::Max(ArchetypeData->ShotAtSuspicionFloor, ArchetypeData->SearchingThreshold);
+	Track.Suspicion = FMath::Max(Track.Suspicion, Floor);
+
+	// LOS trace: eye → instigator. If clear, snap to Combat (they can see their attacker).
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	if (!IsValid(MyPawn)) return;
+
+	const FVector EyeLocation = MyPawn->GetPawnViewLocation();
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyShotAtLoS), false);
+	QueryParams.AddIgnoredActor(MyPawn);
+	QueryParams.AddIgnoredActor(InstigatorPawn);
+
+	const bool bLOSClear = !GetWorld()->LineTraceTestByChannel(EyeLocation, InstigatorPawn->GetActorLocation(), ECC_Visibility, QueryParams);
+	if (bLOSClear)
+	{
+		EnterCombat(InstigatorPawn, /*bConfirmedVisual=*/true);
+		return;
+	}
+
+	// LOS blocked — transition to Searching toward the shot origin.
+	SetInvestigateLocation(ShotOrigin);
+	TimeSpentSearching = 0.f;
+	if (CurrentState < EEnemyAwarenessState::Searching)
+		Bark(EBarkType::SearchArea);
+	SetState(EEnemyAwarenessState::Searching);
+}
+
 // --- Pawn Death ---
 
 void UEnemyAwarenessComponent::HandlePawnDeath()

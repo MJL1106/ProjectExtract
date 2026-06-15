@@ -73,6 +73,15 @@ public:
 	FVector GetBehindCoverPosition(float Alpha, float Standoff) const;
 
 	/**
+	 * Stand-height slot only: behind-cover position AT the peekable corner nearest the threat,
+	 * so a flush enemy lands at the corner (registry-proven LOS) instead of mid-wall.
+	 * OutAlpha receives the chosen endpoint alpha (0=LeftEdge, 1=RightEdge). Falls back to the
+	 * projected-alpha behind-cover position for non-Stand slots or slots with no peekable corner.
+	 * Standoff is the same capsule+padding value passed to GetBehindCoverPosition.
+	 */
+	FVector GetStandPeekPosition(const FVector& ThreatLoc, float Standoff, float& OutAlpha) const;
+
+	/**
 	 * Returns true when at least one probe from the slot can see ThreatLoc.
 	 * Checks eye-height centre and peekable-corner apexes for Stand-height slots.
 	 * IgnoreActor is excluded from the trace (pass the threat actor so self-hits are ignored).

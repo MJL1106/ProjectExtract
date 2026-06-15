@@ -36,6 +36,13 @@ public:
 	/** Called by AEnemyCharacter::TakeDamage to force Combat state toward the instigator's pawn. */
 	void NotifyDamaged(AController* Instigator);
 
+	/** Called by AWeaponBase::ReportNearMisses when a near-miss bullet passes close to this enemy.
+	 *  ShotOrigin is the bullet trace start (eye/muzzle of the shooter) — sent as the investigate
+	 *  point when LOS is blocked so the enemy advances toward the shot corner, not through walls.
+	 *  LOS-gated: if eye→ShotOrigin is clear, enters Combat immediately; else transitions to Searching.
+	 *  Rate-limited per instigator (~0.4s via FSuspicionTrack::LastShotAtTime). */
+	void NotifyShotAt(AActor* InstigatorPawn, const FVector& ShotOrigin);
+
 	/** Called when the controlled pawn dies; stops the update timer and suppresses callbacks. */
 	void HandlePawnDeath();
 
@@ -67,6 +74,8 @@ private:
 		float Suspicion = 0.f;
 		bool bSighted = false;
 		FVector LastStimulusLocation = FVector::ZeroVector;
+		/** World time of last NotifyShotAt processing for this instigator (rate-limit). */
+		float LastShotAtTime = -1e9f;
 	};
 
 	void SetState(EEnemyAwarenessState NewState);
@@ -120,6 +129,8 @@ private:
 	TSet<TWeakObjectPtr<const AActor>> DiscoveredBodies;
 
 	static constexpr float UpdateInterval = 0.15f;
+	/** Minimum seconds between NotifyShotAt processing for the same instigator (below Combat). */
+	static constexpr float ShotAtRateLimit = 0.4f;
 	static constexpr float SuspicionMax = 100.f;
 	/** Noise alone caps just below confirmation — hearing never instantly reveals (design §4). */
 	static constexpr float NoiseSuspicionCap = 99.f;

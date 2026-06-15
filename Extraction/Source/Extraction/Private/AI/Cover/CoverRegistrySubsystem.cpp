@@ -7,7 +7,10 @@ DEFINE_LOG_CATEGORY(LogCoverRegistry);
 // Scoring weights — tune here, not in scoring logic
 static constexpr float Weight_Proximity   = 1.0f;
 static constexpr float Weight_Distance    = 0.7f;
-static constexpr float Weight_StandFire   = 0.3f;
+// Part C de-bias: was Weight_StandFire = 0.3 with StandScore (crouch=1.0, stand=0.5),
+// giving crouch +0.30 and stand +0.15 — a 0.15 differential disfavouring stand slots.
+// Split into two independent weights so the terms are fully neutral between the two heights.
+static constexpr float Weight_CoverBonus  = 0.15f;
 
 // Target distance scoring: sweet spot between MinIdealDist and MaxIdealDist (cm)
 static constexpr float IdealDistMin       = 500.f;
@@ -106,28 +109,32 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 		// Stand cover with no peekable corners = hide-only; useless for combat.
 		if (Slot->Height == ECoverHeight::Stand && !Slot->bIsPeekableCornerStart && !Slot->bIsPeekableCornerEnd)
 		{
-			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s -> REJECT-hide-only"), *Slot->GetName());
+			if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
+				UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s -> REJECT-hide-only"), *Slot->GetName());
 			continue;
 		}
 
 		// Must be unclaimed (or claimed by the querier's actor — handled via TryClaim being idempotent)
 		if (bClaimed)
 		{
-			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=1 inArc=0 -> REJECT-claimed"), *Slot->GetName(), DistToQuerier);
+			if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
+				UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=1 -> REJECT-claimed"), *Slot->GetName(), DistToQuerier);
 			continue;
 		}
 
 		// P4 — exclude a slot the querier just deliberately vacated, until the cooldown elapses (anti snap-back).
 		if (Slot->IsOnPostVacateCooldownFor(QuerierPawn, PostVacateCooldown))
 		{
-			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-post-vacate-cooldown"), *Slot->GetName(), DistToQuerier);
+			if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
+				UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-post-vacate-cooldown"), *Slot->GetName(), DistToQuerier);
 			continue;
 		}
 
 		// Must be within search radius
 		if (DistToQuerierSq > MaxRadiusSq)
 		{
-			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=0 inArc=0 -> REJECT-radius"), *Slot->GetName(), DistToQuerier);
+			if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
+				UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-radius"), *Slot->GetName(), DistToQuerier);
 			continue;
 		}
 
@@ -135,7 +142,8 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 		const bool bInArc = Slot->IsTargetInFireArc(TargetLoc);
 		if (!bInArc)
 		{
-			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=0 inArc=0 -> REJECT-arc"), *Slot->GetName(), DistToQuerier);
+			if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
+				UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-arc"), *Slot->GetName(), DistToQuerier);
 			continue;
 		}
 
@@ -162,7 +170,8 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 
 			if (!bHasAnyLos)
 			{
-				UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-no-los"), *Slot->GetName(), DistToQuerier);
+				if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
+					UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-no-los"), *Slot->GetName(), DistToQuerier);
 				continue;
 			}
 		}
@@ -170,7 +179,8 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 		// Score the slot — pass DistToQuerier so ScoreSlotFor skips the recompute.
 		const float TotalScore = UCoverRegistrySubsystem::ScoreSlotFor(Slot, QuerierLoc, Target, MaxRadius, DistToQuerier);
 
-		UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f claimed=0 inArc=1 -> SCORE=%.2f"), *Slot->GetName(), DistToQuerier, TotalScore);
+		if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
+			UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f inArc=1 -> SCORE=%.2f"), *Slot->GetName(), DistToQuerier, TotalScore);
 
 		const bool bBetter = TotalScore > BestScore;
 		const bool bTie = FMath::IsNearlyEqual(TotalScore, BestScore) && DistToQuerierSq < BestDistSq;
@@ -200,11 +210,11 @@ float UCoverRegistrySubsystem::ScoreSlotFor(const AAICoverSlot* Slot, const FVec
 	const float DistToTarget = FVector::Dist(StandPos, Target->GetActorLocation());
 	const float DistanceScore = FMath::Clamp((DistToTarget - IdealDistMin) / IdealDistRange, 0.f, 1.f);
 
-	const float StandScore = Slot->CanStandFireOver() ? 1.f : 0.5f;
-
+	// Part C: flat cover bonus — applied equally to crouch and flagged-stand slots.
+	// Hide-only stand slots are already rejected before scoring reaches here.
 	return Weight_Proximity * ProximityScore
 		+ Weight_Distance * DistanceScore
-		+ Weight_StandFire * StandScore;
+		+ Weight_CoverBonus;
 }
 
 void UCoverRegistrySubsystem::PruneStaleSlots()

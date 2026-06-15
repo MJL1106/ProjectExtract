@@ -555,6 +555,95 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "1"))
 	int32 StrafeLosRetryCount = 4;
 
+	// --- Perception: Shot-At Reaction (Part A) ---
+
+	/** When true, near-miss rounds escalate this enemy's awareness toward the shooter. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception",
+		meta = (ToolTip = "If true, near-miss gunfire can escalate awareness to Searching (LOS-gated to Combat). Disable for deaf/heavy variants."))
+	bool bReactsToBeingShotAt = true;
+
+	/** Minimum suspicion value set on the shooter's track when a near-miss is received below Combat.
+	 *  Must be >= SearchingThreshold so the enemy reliably transitions to Searching. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception",
+		meta = (ClampMin = "65.0", ClampMax = "99.0",
+		ToolTip = "Suspicion floor applied to the shooter when a near-miss is received. Set >= SearchingThreshold."))
+	float ShotAtSuspicionFloor = 80.f;
+
+	// --- Cover Flank Break (Part B) ---
+
+	/** When true, the enemy will leave a compromised cover slot and seek a new one when flanked. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ToolTip = "Enable cover-flank detection: enemy relocates when the current slot no longer protects against the combat target."))
+	bool bCoverFlankBreakEnabled = true;
+
+	/** Seconds between flank-compromise evaluations while in the peek-fire loop. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ClampMin = "0.1", ToolTip = "How often (seconds) the flank-compromise check runs inside CombatFire."))
+	float CoverCompromiseEvalInterval = 0.4f;
+
+	/** Minimum seconds after physically arriving at a cover slot before a flank-break relocate is allowed. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ClampMin = "0.0", ToolTip = "Dwell time at a slot (seconds) before flank-break can trigger."))
+	float CoverCompromiseMinDwell = 1.0f;
+
+	/** Minimum seconds between successive cover relocations (prevents A→B→A ping-pong). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ClampMin = "0.5", ToolTip = "Per-enemy cooldown (seconds) between flank-triggered cover relocations."))
+	float CoverRelocateCooldown = 3.5f;
+
+	/** Minimum seconds between open-ground lateral repositions when fighting with no cover.
+	 *  Applies in the no-cover CombatFire path and as fallback when flank-break finds no new slot. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ClampMin = "0.5", ToolTip = "Rate-limit (seconds) for open-ground lateral strafes between bursts."))
+	float OpenGroundStrafeInterval = 2.5f;
+
+	/** Radius (cm) of the random lateral reposition pick when fighting in the open. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ClampMin = "50.0", ToolTip = "Max lateral distance (cm) for an open-ground strafe reposition."))
+	float OpenGroundStrafeRadius = 350.f;
+
+	/** Extra degrees added to the slot's fire arc when testing whether the target is outside it.
+	 *  A positive value makes the compromise test more lenient (arc effectively wider). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ClampMin = "0.0", ClampMax = "45.0",
+		ToolTip = "Slack added to the slot fire arc before declaring the target outside it."))
+	float CoverFlankArcSlackDeg = 15.f;
+
+	/** Continuous seconds without eye->target LOS before an active burst is cut. Sized above the
+	 *  perception service interval (0.25s) so a single stale trace does not chop the burst. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
+		ToolTip = "Grace period (s) LOS may be absent mid-burst before firing stops. Keep > perception interval (0.25)."))
+	float FireLosLostGrace = 0.35f;
+
+	/** Max seconds Expose waits for LOS before giving up to Recover (anti-stuck). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.1",
+		ToolTip = "Cap (s) on how long Expose waits for LOS before recovering. Stops a permanently-blocked enemy hanging in Expose."))
+	float ExposeLosWaitMax = 1.5f;
+
+	/** Consecutive Expose-phase LOS timeouts before the enemy treats the slot as unworkable and
+	 *  forces a flank-break relocate (same path as a compromise). Resets to 0 when fire is opened. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "1",
+		ToolTip = "How many consecutive Expose LOS-timeouts (no shot fired) before the enemy relocates off this slot."))
+	int32 MaxExposeLosTimeouts = 2;
+
+	/** Flank-break relocate only accepts a slot whose hunkered body is geometry-shielded from the
+	 *  threat. Disable to fall back to can-shoot-only selection. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ToolTip = "Require the relocate target slot to actually protect the body, not just shoot the threat."))
+	bool bRelocateRequiresBodyProtection = true;
+
+	/** Score bonus for a relocate candidate whose body is geometry-protected. Large vs proximity/
+	 *  distance terms so protection dominates the pick. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
+		ToolTip = "Score weight for body-protected relocate candidates. Should exceed combined proximity+distance weights."))
+	float ProtectiveCoverScoreBonus = 2.f;
+
+	/** Retreat-strafe fallback (no protective cover) prefers points this far (cm) further from the
+	 *  threat and off its current bearing, so the enemy breaks contact rather than strafing in place. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
+		ToolTip = "Min extra distance (cm) away from the threat a fallback strafe should add when no protective cover exists."))
+	float FlankBreakRetreatBias = 250.f;
+
 	// --- Cover Positioning & Advance Fire ---
 
 	/** Extra depth (cm) behind the cover line the enemy targets, beyond capsule radius.

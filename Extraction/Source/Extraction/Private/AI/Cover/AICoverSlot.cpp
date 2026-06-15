@@ -259,6 +259,28 @@ FVector AAICoverSlot::GetBehindCoverPosition(float Alpha, float Standoff) const
 	return GetLocationAtAlpha(Alpha) - GetForwardDirection() * ClampedStandoff;
 }
 
+FVector AAICoverSlot::GetStandPeekPosition(const FVector& ThreatLoc, float Standoff, float& OutAlpha) const
+{
+	if (Height != ECoverHeight::Stand || (!bIsPeekableCornerStart && !bIsPeekableCornerEnd))
+	{
+		OutAlpha = 0.5f;
+		return GetBehindCoverPosition(OutAlpha, Standoff);
+	}
+
+	if (bIsPeekableCornerStart && bIsPeekableCornerEnd)
+	{
+		const float DistStart = FVector::DistSquared2D(GetLeftEdge(), ThreatLoc);
+		const float DistEnd   = FVector::DistSquared2D(GetRightEdge(), ThreatLoc);
+		OutAlpha = (DistStart <= DistEnd) ? 0.f : 1.f;
+	}
+	else
+	{
+		OutAlpha = bIsPeekableCornerStart ? 0.f : 1.f;
+	}
+
+	return GetBehindCoverPosition(OutAlpha, Standoff);
+}
+
 // --- Shared LOS helper ---
 
 bool AAICoverSlot::HasLOSToThreat(UWorld* World, const AAICoverSlot* Slot,

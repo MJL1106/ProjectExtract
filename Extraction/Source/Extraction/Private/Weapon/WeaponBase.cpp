@@ -9,6 +9,8 @@
 #include "HealthComponent.h"
 #include "SuppressionComponent.h"
 #include "EnemyCharacter.h"
+#include "EnemyAIController.h"
+#include "EnemyAwarenessComponent.h"
 #include "EnemyMoraleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/MeshComponent.h"
@@ -338,7 +340,23 @@ void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& Tra
 		const float DistSq = FVector::DistSquared(ClosestPoint, Pawn->GetActorLocation());
 
 		if (DistSq <= NearMissRadiusSq)
+		{
 			Comp->RegisterNearMiss();
+
+			// Part A: notify enemy awareness so near-misses escalate alertness.
+			if (const AEnemyCharacter* EnemyChar = Cast<AEnemyCharacter>(Pawn))
+			{
+				if (const AEnemyAIController* AIC = Cast<AEnemyAIController>(EnemyChar->GetController()))
+				{
+					if (UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent())
+					{
+						APawn* ShooterPawn = Cast<APawn>(GetOwner());
+						if (IsValid(ShooterPawn))
+							Awareness->NotifyShotAt(ShooterPawn, TraceStart);
+					}
+				}
+			}
+		}
 	}
 }
 

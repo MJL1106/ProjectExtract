@@ -10,6 +10,8 @@
 #include "BTTask_EnemyCombatFire.generated.h"
 
 class AAICoverSlot;
+class AEnemyCharacter;
+class UEnemyArchetypeData;
 
 UENUM()
 enum class EFireTaskPhase : uint8
@@ -54,6 +56,27 @@ private:
 		TWeakObjectPtr<AAICoverSlot> ReseekSlot;
 		/** Destination stored when issuing the seek-cover MoveToLocation (arrival validation). */
 		FVector ReseekArrivalPos = FVector::ZeroVector;
+
+		// --- Part B: flank-break state ---
+
+		/** Accumulated dwell time at the current slot (seconds since physical arrival). */
+		float SlotDwellTime = 0.f;
+		/** Whether the pawn has physically arrived at the current slot this task execution. */
+		bool bArrivedAtSlot = false;
+		/** Seconds since last compromise evaluation. */
+		float CompromiseEvalTimer = 0.f;
+		/** Consecutive evaluations that agreed the slot is compromised (debounce counter). */
+		int32 CompromiseConsecutiveCount = 0;
+		/** World time when the last flank-triggered relocate completed (per-enemy cooldown). */
+		float LastRelocateCompletedTime = -1e9f;
+		/** Seconds LOS has been continuously absent during an active burst (Fire phase). */
+		float NoLosGraceTimer = 0.f;
+		/** Seconds Expose has waited for LOS before opening fire (anti-stuck cap). */
+		float ExposeLosWaitTimer = 0.f;
+		/** Consecutive Expose-phase timeouts with no LOS (never fired). Reset when fire opens. */
+		int32 ExposeLosTimeoutCount = 0;
+		/** True when a compromise was detected during Fire; deferred commit to next safe phase. */
+		bool bRelocatePending = false;
 	};
 
 	/** How far (cm) to step sideways when exposing from a stand-height cover slot. */
@@ -65,4 +88,11 @@ private:
 	float SuppressedReseekCooldown = 2.5f;
 
 	void StopFireAndCleanUp(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem = nullptr) const;
+
+	/** Shared relocate path: release current slot, find protective cover or fall back to strafe.
+	 *  Used by both the compromise debounce and the Expose-LOS-timeout path. */
+	void ExecuteRelocate(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
+		AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
+		AActor* Target, AAICoverSlot* CurSlot, const UEnemyArchetypeData* DA,
+		bool bHasLOS) const;
 };

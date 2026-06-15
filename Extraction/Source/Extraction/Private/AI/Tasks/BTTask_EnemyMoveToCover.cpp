@@ -104,7 +104,16 @@ EBTNodeResult::Type UBTTask_EnemyMoveToCover::ExecuteTask(UBehaviorTreeComponent
 	constexpr float DefaultCapsuleRadius = 34.f;
 	const UCapsuleComponent* Capsule = Enemy->GetCapsuleComponent();
 	const float Standoff = (Capsule ? Capsule->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
-	FVector ArrivalPos = Slot->GetBehindCoverPosition(Slot->GetAlphaFromLocation(PawnLoc), Standoff);
+	FVector ArrivalPos;
+	if (Slot->Height == ECoverHeight::Stand)
+	{
+		float PeekAlpha;
+		ArrivalPos = Slot->GetStandPeekPosition(Target->GetActorLocation(), Standoff, PeekAlpha);
+	}
+	else
+	{
+		ArrivalPos = Slot->GetBehindCoverPosition(Slot->GetAlphaFromLocation(PawnLoc), Standoff);
+	}
 	ArrivalPos.Z = PawnLoc.Z;
 	Mem->ArrivalPos = ArrivalPos;
 
