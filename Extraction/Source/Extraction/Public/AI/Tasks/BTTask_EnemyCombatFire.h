@@ -57,6 +57,10 @@ private:
 		/** Destination stored when issuing the seek-cover MoveToLocation (arrival validation). */
 		FVector ReseekArrivalPos = FVector::ZeroVector;
 
+		// Stall detection for the SeekingCover transit — recover if the relocate move stops progressing.
+		float SeekStallBestDist = TNumericLimits<float>::Max();
+		float SeekStallAccum = 0.f;
+
 		// --- Part B: flank-break state ---
 
 		/** Accumulated dwell time at the current slot (seconds since physical arrival). */
@@ -95,4 +99,10 @@ private:
 		AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
 		AActor* Target, AAICoverSlot* CurSlot, const UEnemyArchetypeData* DA,
 		bool bHasLOS) const;
+
+	/** Attempt to find and claim the best cover slot, issue MoveToLocation, and enter SeekingCover.
+	 *  Returns true on success (phase set to SeekingCover). Does NOT stamp LastReseekCoverTime. */
+	bool TryReseekCover(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
+		AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy, AActor* Target,
+		const UEnemyArchetypeData* DA, bool bHasLOS) const;
 };

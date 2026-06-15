@@ -22,7 +22,7 @@
 // Arrival distance thresholds (cm)
 static constexpr float CoverArrivalAcceptRadius = 40.f;
 static constexpr float CoverArrivalTickRadius = 50.f;
-static constexpr float CoverArrivalIdleRadius = 200.f;
+static constexpr float CoverArrivalIdleRadius = 75.f;   // small margin over accept radius — a stop further out is treated as a failed move
 
 UBTTask_EnemyMoveToCover::UBTTask_EnemyMoveToCover()
 {
@@ -188,6 +188,22 @@ void UBTTask_EnemyMoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 	AEnemyCharacter* Enemy = Mem->CachedEnemy.Get();
 	const UEnemyArchetypeData* DA = Mem->CachedDA.Get();
 
+	// Stall detection: abandon a cover move that stops closing on its anchor (pinned in the open).
+	bool bStalled = false;
+	if (!bArrived && IsValid(DA))
+	{
+		if (Dist + DA->CoverMoveStallProgressEpsilon < Mem->StallBestDist)
+		{
+			Mem->StallBestDist = Dist;
+			Mem->StallAccum = 0.f;
+		}
+		else
+		{
+			Mem->StallAccum += DeltaSeconds;
+			bStalled = (Mem->StallAccum >= DA->CoverMoveStallTimeout);
+		}
+	}
+
 	if (IsValid(Enemy) && IsValid(DA) && DA->bFireWhileAdvancing && !bArrived && Mem->FireTickAccum >= FireTickInterval)
 	{
 		const float FireDelta = Mem->FireTickAccum;
@@ -287,7 +303,7 @@ void UBTTask_EnemyMoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 		}
 	}
 
-	if (!bArrived && Status == EPathFollowingStatus::Moving) return;
+	if (!bArrived && Status != EPathFollowingStatus::Idle && !bStalled) return;
 
 	if (bArrived)
 	{
@@ -298,7 +314,10 @@ void UBTTask_EnemyMoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
 
-	// Path failed
+	// Path failed (or stalled with no progress)
+	if (bStalled) UE_LOG(LogEnemyAI, Log, TEXT("[COVER] %s stalled advancing to cover (dist=%.0f) — abandoning slot"), *Pawn->GetName(), Dist);
+	if (Controller) Controller->StopMovement();
+	if (IsValid(Slot)) Slot->MarkVacatedForSwitch(Pawn);
 	ReleaseClaim(BB, Pawn);
 	StopAdvanceFire(OwnerComp, Mem, false);
 	return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
@@ -398,7 +417,7 @@ AAICoverSlot* UBTTask_EnemyMoveToCover::ScoreSlotsWithSpacing(APawn* Pawn, const
 	for (AAICoverSlot* Slot : Candidates)
 	{
 		if (!IsValid(Slot) || Slot->IsClaimed()) continue;
-		if (Slot->IsOnPostVacateCooldownFor(Pawn, 0.f)) continue;
+		if (Slot->IsOnPostVacateCooldownFor(Pawn, DA->CoverRelocateCooldown)) continue;
 
 		// Hide-only stand cover reject
 		if (Slot->Height == ECoverHeight::Stand && !Slot->bIsPeekableCornerStart && !Slot->bIsPeekableCornerEnd)

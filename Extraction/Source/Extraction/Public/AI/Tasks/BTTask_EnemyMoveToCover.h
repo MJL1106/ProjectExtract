@@ -41,6 +41,10 @@ private:
 		float FireTimer = 0.f;
 		float FireTickAccum = 0.f;
 		bool bFiring = false;
+
+		// Stall detection — abandon a cover move that stops making progress (pinned).
+		float StallBestDist = TNumericLimits<float>::Max();
+		float StallAccum = 0.f;
 	};
 
 	void ReleaseClaim(UBlackboardComponent* BB, APawn* Pawn) const;

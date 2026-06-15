@@ -657,6 +657,18 @@ public:
 		meta = (ToolTip = "Allow the enemy to fire while running to a cover slot. Uses separate burst timing (AdvanceFireBurstPause*)."))
 	bool bFireWhileAdvancing = true;
 
+	/** Seconds a cover move may make no meaningful progress toward its arrival anchor before the
+	 *  enemy abandons it (releases the slot and recovers) instead of stalling stuck in the open. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.25",
+		ToolTip = "Seconds a cover move may make no meaningful progress toward its arrival anchor before the enemy abandons it (releases the slot and recovers) instead of stalling stuck in the open."))
+	float CoverMoveStallTimeout = 1.25f;
+
+	/** Minimum distance (cm) a cover move must close toward its anchor to count as progress and
+	 *  reset the stall timer; below this the move is considered stalled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "1.0",
+		ToolTip = "Minimum distance (cm) a cover move must close toward its anchor to count as progress and reset the stall timer; below this the move is considered stalled."))
+	float CoverMoveStallProgressEpsilon = 12.f;
+
 	/** Additional aim spread (degrees) applied while advancing to cover and firing on the move. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
 		ToolTip = "Additive spread on top of normal combat spread while the enemy is running to cover."))

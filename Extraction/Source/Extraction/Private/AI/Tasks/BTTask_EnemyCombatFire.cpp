@@ -24,7 +24,7 @@ static constexpr float ExposePhaseDuration  = 0.2f;  // settle before first shot
 static constexpr float RecoverPhaseDuration = 0.15f; // re-crouch settle after burst
 static constexpr float DefaultCapsuleRadius = 34.f;
 static constexpr float SeekCoverArrivalTickRadius = 50.f;   // mirrors BTTask_EnemyMoveToCover
-static constexpr float SeekCoverArrivalIdleRadius = 200.f;  // path-failed tolerance
+static constexpr float SeekCoverArrivalIdleRadius = 75.f;   // small margin over accept radius — a stop further out is treated as a failed move
 /** Arrival radius used when checking whether the enemy has reached their slot (Part B dwell). */
 static constexpr float FlankSlotArrivalRadius = 120.f;
 /** Consecutive compromise-positive evaluations required before triggering a relocate (debounce). */
@@ -384,6 +384,22 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		const bool bArrived = (DistToSlot <= SeekCoverArrivalTickRadius)
 			|| (SeekStatus == EPathFollowingStatus::Idle && DistToSlot <= SeekCoverArrivalIdleRadius);
 
+		// Stall detection: recover if the relocate/reseek move stops closing on the slot (pinned in the open).
+		bool bSeekStalled = false;
+		if (!bArrived && IsValid(DA))
+		{
+			if (DistToSlot + DA->CoverMoveStallProgressEpsilon < Mem->SeekStallBestDist)
+			{
+				Mem->SeekStallBestDist = DistToSlot;
+				Mem->SeekStallAccum = 0.f;
+			}
+			else
+			{
+				Mem->SeekStallAccum += DeltaSeconds;
+				bSeekStalled = (Mem->SeekStallAccum >= DA->CoverMoveStallTimeout);
+			}
+		}
+
 		if (bArrived)
 		{
 			BB->SetValueAsBool(AEnemyAIController::BB_HasCover, true);
@@ -408,6 +424,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			Mem->CompromiseEvalTimer = 0.f;
 			Mem->bRelocatePending = false;
 			Mem->ExposeLosTimeoutCount = 0;
+			Mem->SeekStallBestDist = TNumericLimits<float>::Max(); Mem->SeekStallAccum = 0.f;
 
 			Enemy->SetAimTarget(Target);
 			Controller->SetFocus(Target);
@@ -416,13 +433,20 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
-		// Path failed (idle but still far from slot) — slot unreachable.
-		if (SeekStatus == EPathFollowingStatus::Idle)
+		// Path failed (idle but still far from slot) — slot unreachable. Also fires on stall.
+		if (SeekStatus == EPathFollowingStatus::Idle || bSeekStalled)
 		{
+			if (bSeekStalled)
+			{
+				if (Controller) Controller->StopMovement();
+				UE_LOG(LogEnemyAI, Log, TEXT("[COVER] %s stalled relocating to cover (dist=%.0f) — crouch-in-place, re-seeking"), *Pawn->GetName(), DistToSlot);
+			}
+
 			// Release the unreachable slot and fall back to crouch-in-place.
 			AAICoverSlot* BadSlot = Mem->ReseekSlot.Get();
 			if (IsValid(BadSlot) && IsValid(Pawn))
 			{
+				BadSlot->MarkVacatedForSwitch(Pawn);
 				BadSlot->Release(Pawn);
 				Mem->ReseekSlot = nullptr;
 			}
@@ -536,19 +560,27 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		else
 		{
-			// No cover slot: open-ground reposition between bursts (fix #1 — headline freeze scenario).
+			// No cover slot.
 			Mem->bArrivedAtSlot = false;
 			Mem->SlotDwellTime = 0.f;
 			Mem->CompromiseConsecutiveCount = 0;
 
-			if (bSafePhase && bNotFiring && bHasLOS
-				&& (Now - Mem->LastRelocateCompletedTime) >= DA->OpenGroundStrafeInterval)
+			if (bSafePhase && bNotFiring && bHasLOS)
 			{
-				FVector StrafePoint;
-				if (TryOpenGroundStrafe(Pawn, Target, DA->OpenGroundStrafeRadius, StrafePoint))
+				// Prefer getting back into cover (NOT gated on suppression). Fall back to open-ground strafe.
+				if ((Now - Mem->LastReseekCoverTime) >= SuppressedReseekCooldown)
 				{
-					Controller->MoveToLocation(StrafePoint, 80.f, false, true, false, true);
-					Mem->LastRelocateCompletedTime = Now;
+					Mem->LastReseekCoverTime = Now;
+					if (TryReseekCover(OwnerComp, Mem, Controller, Pawn, Enemy, Target, DA, bHasLOS)) return;
+				}
+				if ((Now - Mem->LastRelocateCompletedTime) >= DA->OpenGroundStrafeInterval)
+				{
+					FVector StrafePoint;
+					if (TryOpenGroundStrafe(Pawn, Target, DA->OpenGroundStrafeRadius, StrafePoint))
+					{
+						Controller->MoveToLocation(StrafePoint, 80.f, false, true, false, true);
+						Mem->LastRelocateCompletedTime = Now;
+					}
 				}
 			}
 		}
@@ -571,53 +603,8 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if ((Now - Mem->LastReseekCoverTime) >= SuppressedReseekCooldown)
 					{
 						Mem->LastReseekCoverTime = Now;
-						UCoverRegistrySubsystem* Registry = World ? World->GetSubsystem<UCoverRegistrySubsystem>() : nullptr;
-						if (Registry)
-						{
-							// Release any slot we still hold before reclaiming — otherwise the old
-							// slot is stranded (claims are server-only and never auto-cleared).
-							if (AAICoverSlot* Prev = Mem->ReseekSlot.Get())
-							{
-								if (IsValid(Prev))
-								{
-									Prev->MarkVacatedForSwitch(Pawn);
-									Prev->Release(Pawn);
-								}
-								Mem->ReseekSlot = nullptr;
-							}
-
-							// Part B correctness fix: pass real cooldown so the just-vacated slot
-							// cannot be immediately re-selected (was 0, enabling snap-back).
-							AAICoverSlot* FoundSlot = Registry->FindBestCoverFor(
-								Pawn->GetActorLocation(), Target, DA->CoverSearchRadius, nullptr, Pawn, DA->CoverRelocateCooldown);
-							if (IsValid(FoundSlot) && FoundSlot->TryClaim(Pawn))
-							{
-								// Claim succeeded — write BB and move toward it.
-								BB->SetValueAsObject(AEnemyAIController::BB_CoverSlot, FoundSlot);
-								Mem->ReseekSlot = FoundSlot;
-
-								const UCapsuleComponent* Capsule = Enemy->GetCapsuleComponent();
-								const float Standoff = (Capsule ? Capsule->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
-
-								// Stand-corner arrival: land AT the peekable corner so the eye clears the wall.
-								float ReseekAlpha;
-								const FVector ArrivalPos = (FoundSlot->Height == ECoverHeight::Stand)
-									? FoundSlot->GetStandPeekPosition(Target->GetActorLocation(), Standoff, ReseekAlpha)
-									: FoundSlot->GetBehindCoverPosition(FoundSlot->GetAlphaFromLocation(Pawn->GetActorLocation()), Standoff);
-
-								Mem->ReseekArrivalPos = ArrivalPos;
-								Controller->MoveToLocation(ArrivalPos, 50.f, false, true, false, true);
-
-								// Move-and-shoot only when LOS is confirmed — never fire through own cover.
-								AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
-								if (IsValid(Weapon) && bHasLOS) Weapon->StartFiring();
-
-								Mem->Phase = EFireTaskPhase::SeekingCover;
-								break;
-							}
-						}
+						if (TryReseekCover(OwnerComp, Mem, Controller, Pawn, Enemy, Target, DA, bHasLOS)) break;
 					}
-
 					// No cover found or cooldown active — fall back to crouch-in-place (safe).
 					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
 					Mem->bSuppressCrouchedNoCover = true;
@@ -850,6 +837,69 @@ void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerCo
 		Controller->ClearFocus(EAIFocusPriority::Gameplay);
 }
 
+bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
+	AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy, AActor* Target,
+	const UEnemyArchetypeData* DA, bool bHasLOS) const
+{
+	if (!Controller || !Pawn || !Enemy || !Target || !DA) return false;
+
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	const UWorld* World = Pawn->GetWorld();
+	UCoverRegistrySubsystem* Registry = World ? World->GetSubsystem<UCoverRegistrySubsystem>() : nullptr;
+	if (!Registry || !BB) return false;
+
+	// Release any slot we still hold before reclaiming.
+	AAICoverSlot* JustReleased = nullptr;
+	if (AAICoverSlot* Prev = Mem->ReseekSlot.Get())
+	{
+		if (IsValid(Prev))
+		{
+			Prev->MarkVacatedForSwitch(Pawn);
+			Prev->Release(Pawn);
+			JustReleased = Prev;
+		}
+		Mem->ReseekSlot = nullptr;
+	}
+
+	AAICoverSlot* FoundSlot = Registry->FindBestCoverFor(
+		Pawn->GetActorLocation(), Target, DA->CoverSearchRadius, nullptr, Pawn, DA->CoverRelocateCooldown);
+	if (!IsValid(FoundSlot) || FoundSlot == JustReleased || !FoundSlot->TryClaim(Pawn)) return false;
+
+	BB->SetValueAsObject(AEnemyAIController::BB_CoverSlot, FoundSlot);
+	Mem->ReseekSlot = FoundSlot;
+
+	const UCapsuleComponent* Capsule = Enemy->GetCapsuleComponent();
+	const float Standoff = (Capsule ? Capsule->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
+
+	float ReseekAlpha;
+	const FVector ArrivalPos = (FoundSlot->Height == ECoverHeight::Stand)
+		? FoundSlot->GetStandPeekPosition(Target->GetActorLocation(), Standoff, ReseekAlpha)
+		: FoundSlot->GetBehindCoverPosition(FoundSlot->GetAlphaFromLocation(Pawn->GetActorLocation()), Standoff);
+
+	Mem->ReseekArrivalPos = ArrivalPos;
+
+	if (Mem->bSuppressCrouchedNoCover)
+	{
+		if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+		Mem->bSuppressCrouchedNoCover = false;
+	}
+
+	Controller->MoveToLocation(ArrivalPos, 50.f, false, true, true, true);
+
+	if (bHasLOS)
+	{
+		AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
+		if (IsValid(Weapon)) Weapon->StartFiring();
+	}
+
+	Mem->SeekStallBestDist = TNumericLimits<float>::Max();
+	Mem->SeekStallAccum = 0.f;
+	Mem->Phase = EFireTaskPhase::SeekingCover;
+
+	UE_LOG(LogEnemyAI, Log, TEXT("[COVER] %s re-seeking cover from open -> %s"), *Pawn->GetName(), *FoundSlot->GetName());
+	return true;
+}
+
 void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
 	AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
 	AActor* Target, AAICoverSlot* CurSlot, const UEnemyArchetypeData* DA,
@@ -879,7 +929,6 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 	if (IsValid(NewSlot) && NewSlot->TryClaim(Pawn))
 	{
 		BB->SetValueAsObject(AEnemyAIController::BB_CoverSlot, NewSlot);
-		BB->SetValueAsBool(AEnemyAIController::BB_HasCover, true);
 		Mem->ReseekSlot = NewSlot;
 
 		float PeekAlpha;
@@ -890,11 +939,12 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 		Mem->bArrivedAtSlot = false;
 		Mem->SlotDwellTime = 0.f;
 		Mem->LastRelocateCompletedTime = Now;
-		Controller->MoveToLocation(Mem->ReseekArrivalPos, 50.f, false, true, false, true);
+		Controller->MoveToLocation(Mem->ReseekArrivalPos, 50.f, false, true, true, true);
 
 		AWeaponBase* MoveW = Enemy->GetCurrentWeapon();
 		if (IsValid(MoveW) && bHasLOS) MoveW->StartFiring();
 		Enemy->SetAimTarget(Target);
+		Mem->SeekStallBestDist = TNumericLimits<float>::Max(); Mem->SeekStallAccum = 0.f;
 		Mem->Phase = EFireTaskPhase::SeekingCover;
 	}
 	else
