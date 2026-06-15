@@ -217,12 +217,14 @@ void UCompanionAnimInstance::PlayReloadMontage(float PlayRate)
 
 void UCompanionAnimInstance::PlayHitReactMontage(float PlayRate)
 {
-	// Pick aim variant when in combat, fall back to default if aim variant not assigned.
-	UAnimMontage* MontageToPlay = ((bIsFiring || bIsAiming) && IsValid(HitReactMontage_Aim))
-		? HitReactMontage_Aim.Get()
-		: HitReactMontage.Get();
-	if (IsValid(MontageToPlay))
-		Montage_Play(MontageToPlay, PlayRate);
+	// Suppress hit react for the entire engagement — cover-idle gaps between bursts clear
+	// bIsFiring/bIsAiming, but posture stays Combat while a BB target is held.
+	// Proper upper-body additive blend is future work.
+	if (bIsFiring || bIsAiming || CurrentPosture == ECompanionPosture::Combat) return;
+
+	// Out-of-combat path — HitReactMontage_Aim reserved for the future blend step.
+	if (IsValid(HitReactMontage))
+		Montage_Play(HitReactMontage, PlayRate);
 }
 
 void UCompanionAnimInstance::PlayDeathMontage(float PlayRate)

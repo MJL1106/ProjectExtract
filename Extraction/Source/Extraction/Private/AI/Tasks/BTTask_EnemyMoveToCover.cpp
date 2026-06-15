@@ -101,9 +101,9 @@ EBTNodeResult::Type UBTTask_EnemyMoveToCover::ExecuteTask(UBehaviorTreeComponent
 	BB->SetValueAsObject(AEnemyAIController::BB_CoverSlot, Slot);
 
 	const FVector PawnLoc = Pawn->GetActorLocation();
-	constexpr float DefaultCapsuleRadius = 34.f;
+	constexpr float MoveToCoverCapsuleRadius = 34.f;
 	const UCapsuleComponent* Capsule = Enemy->GetCapsuleComponent();
-	const float Standoff = (Capsule ? Capsule->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
+	const float Standoff = (Capsule ? Capsule->GetScaledCapsuleRadius() : MoveToCoverCapsuleRadius) + DA->CoverStandoffPadding;
 	FVector ArrivalPos;
 	if (Slot->Height == ECoverHeight::Stand)
 	{

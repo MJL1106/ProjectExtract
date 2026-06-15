@@ -144,6 +144,26 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
 	float CoverSearchRadius = 1200.f;
 
+	// When true, FindBestCoverFor rejects any slot whose hunkered body position is NOT shielded from
+	// the target by world geometry. Slots that are off to the side or behind the companion relative
+	// to the threat are discarded. Disable to revert to the old unfiltered pick.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
+	bool bCoverRequiresBodyProtection = true;
+
+	// Chest height (cm) used for the body-shield trace from the behind-cover position.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0"))
+	float CoverProtectionChestHeight = 60.f;
+
+	// Arc slack (degrees) added to a slot's FireArcDegrees when testing whether the current slot has
+	// been flanked. Prevents freshly-entered slots from immediately re-triggering.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0"))
+	float CoverCompromiseArcSlackDeg = 15.f;
+
+	// Consecutive evaluations where the slot is detected compromised before the companion breaks cover.
+	// Higher = less reactive to transient flanks; 1 = immediate.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1"))
+	int32 CoverCompromiseDebounce = 2;
+
 	// Detection radius (cm) for 360° close-range threat awareness, independent of the sight cone.
 	// Any enemy within this sphere with clear LoS is treated as a valid combat target even if
 	// outside the forward 180° perception angle. Set to 0 to disable.

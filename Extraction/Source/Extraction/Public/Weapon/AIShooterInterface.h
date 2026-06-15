@@ -26,4 +26,12 @@ public:
 	/** Optionally returns a world-space position to aim at instead of the target actor's origin.
 	 *  Returns false (default) if no override is active; WeaponBase falls back to actor location. */
 	virtual bool GetAIAimLocation(FVector& OutLocation) const { return false; }
+
+	/** Returns the world-space point on Target that this shooter aims at (for hitscan direction).
+	 *  Default returns target actor centre so enemy behaviour is unchanged.
+	 *  Companion overrides to return the head/eye point so rounds actually strike partially-exposed enemies. */
+	virtual FVector GetAimPointForTarget(const AActor* Target) const
+	{
+		return IsValid(Target) ? Target->GetActorLocation() : FVector::ZeroVector;
+	}
 };

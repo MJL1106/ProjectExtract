@@ -426,7 +426,9 @@ void AWeaponBase::PerformHitscan()
 
 		if (IsValid(AimTarget))
 		{
-			const FVector ToTarget = AimTarget->GetActorLocation() - TraceStart;
+			// GetAimPointForTarget: companion returns head/eye; enemy default returns actor centre.
+			const FVector AimPoint = Shooter->GetAimPointForTarget(AimTarget);
+			const FVector ToTarget = AimPoint - TraceStart;
 			if (!ToTarget.IsNearlyZero())
 				AimDirection = ToTarget.GetSafeNormal();
 		}

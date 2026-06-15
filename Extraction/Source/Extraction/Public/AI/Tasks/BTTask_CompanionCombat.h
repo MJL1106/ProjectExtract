@@ -493,6 +493,11 @@ private:
 	float CurrentAlpha = 0.5f;
 	/** Cached yaw of Slot->GetForwardDirection() at reposition commit; avoids per-tick cross+dot+atan2 in Phase B. */
 	float CachedSlotForwardYaw = 0.f;
+
+	/** Consecutive cover-validity ticks where the slot has been detected compromised (flanked / body-exposed).
+	 *  Trips the break-cover path once it reaches the tuning CoverCompromiseDebounce threshold.
+	 *  Reset to 0 on fresh slot arrival or when the compromise condition is NOT met. */
+	int32 CoverCompromiseConsecutiveCount = 0;
 	float SubSlotLosRecheckTimer = 0.f;
 	TWeakObjectPtr<AAICoverSlot> LastTickSlot;
 	uint8 BlockedRecheckHits = 0;

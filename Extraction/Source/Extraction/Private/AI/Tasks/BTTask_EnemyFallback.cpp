@@ -135,9 +135,9 @@ bool UBTTask_EnemyFallback::FindDeepCover(UBehaviorTreeComponent& OwnerComp, FFa
 	Mem->bSlotClaimed = true;
 	BB->SetValueAsObject(AEnemyAIController::BB_CoverSlot, BestSlot);
 
-	constexpr float DefaultCapsuleRadius = 34.f;
+	constexpr float FallbackCapsuleRadius = 34.f;
 	const UCapsuleComponent* Capsule = Enemy->GetCapsuleComponent();
-	const float Standoff = (Capsule ? Capsule->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
+	const float Standoff = (Capsule ? Capsule->GetScaledCapsuleRadius() : FallbackCapsuleRadius) + DA->CoverStandoffPadding;
 	FVector ArrivalPos = BestSlot->GetBehindCoverPosition(BestSlot->GetAlphaFromLocation(PawnLoc), Standoff);
 	ArrivalPos.Z = PawnLoc.Z;
 	Mem->ArrivalPos = ArrivalPos;

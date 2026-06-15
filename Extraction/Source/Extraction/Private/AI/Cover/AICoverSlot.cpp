@@ -281,6 +281,28 @@ FVector AAICoverSlot::GetStandPeekPosition(const FVector& ThreatLoc, float Stand
 	return GetBehindCoverPosition(OutAlpha, Standoff);
 }
 
+// --- Body-shield geometry helper ---
+
+bool AAICoverSlot::IsBodyShieldedFrom(const FVector& ThreatLoc, float Alpha, float Standoff, float ChestHeight,
+	const AActor* IgnoreThreat, const AActor* IgnorePawn) const
+{
+	UWorld* World = GetWorld();
+	if (!World) return false;
+
+	const FVector BodyPos = GetBehindCoverPosition(Alpha, Standoff) + FVector(0.f, 0.f, ChestHeight);
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionCoverBodyShield), false);
+	if (IgnoreThreat) Params.AddIgnoredActor(IgnoreThreat);
+	if (IgnorePawn)   Params.AddIgnoredActor(IgnorePawn);
+
+	// ECC_Visibility — the channel cover walls provably block (consistent with weapon/LoS traces
+	// and the enemy's IsSlotBodyProtected). A blocked hit whose actor != IgnoreThreat means a
+	// wall is interposed = the companion's body is shielded.
+	FHitResult Hit;
+	const bool bBlocked = World->LineTraceSingleByChannel(Hit, BodyPos, ThreatLoc, ECC_Visibility, Params);
+	return bBlocked && Hit.GetActor() != IgnoreThreat;
+}
+
 // --- Shared LOS helper ---
 
 bool AAICoverSlot::HasLOSToThreat(UWorld* World, const AAICoverSlot* Slot,

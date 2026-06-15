@@ -82,6 +82,17 @@ public:
 	FVector GetStandPeekPosition(const FVector& ThreatLoc, float Standoff, float& OutAlpha) const;
 
 	/**
+	 * Returns true when the companion's hunker-position at (Alpha, Standoff) is geometry-shielded
+	 * from ThreatLoc: a chest-height ECC_Visibility trace from GetBehindCoverPosition(...)+ChestHeight
+	 * must be BLOCKED by something other than IgnoreThreat (i.e. a wall is interposed).
+	 * IgnoreThreat + IgnorePawn are both excluded from the trace so neither self-hits nor the threat
+	 * actor counts as the blocking object.
+	 * Mirror of the enemy's file-static IsSlotBodyProtected in BTTask_EnemyCombatFire.cpp.
+	 */
+	bool IsBodyShieldedFrom(const FVector& ThreatLoc, float Alpha, float Standoff, float ChestHeight,
+		const AActor* IgnoreThreat, const AActor* IgnorePawn) const;
+
+	/**
 	 * Returns true when at least one probe from the slot can see ThreatLoc.
 	 * Checks eye-height centre and peekable-corner apexes for Stand-height slots.
 	 * IgnoreActor is excluded from the trace (pass the threat actor so self-hits are ignored).

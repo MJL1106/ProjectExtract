@@ -23,9 +23,14 @@ public:
 	 * OutScore receives the best slot's score; pass nullptr to ignore.
 	 * QuerierPawn + PostVacateCooldown (P4): if both are set, any slot that QuerierPawn just
 	 * vacated via MarkVacatedForSwitch is excluded until the cooldown elapses (prevents snap-back).
+	 * bRequireBodyProtection: when true, any slot whose hunkered body position is not shielded from
+	 * TargetLoc by world geometry is hard-rejected before scoring. Defaults to false so existing
+	 * callers that pass no value preserve the previous (unfiltered) behaviour.
+	 * ChestHeight: Z offset from the behind-cover position for the body-shield trace (cm).
 	 */
 	AAICoverSlot* FindBestCoverFor(const FVector& QuerierLoc, AActor* Target, float MaxRadius, float* OutScore = nullptr,
-		const AActor* QuerierPawn = nullptr, float PostVacateCooldown = 0.f) const;
+		const AActor* QuerierPawn = nullptr, float PostVacateCooldown = 0.f,
+		bool bRequireBodyProtection = false, float ChestHeight = 60.f) const;
 
 	/**
 	 * Scores a single slot using the same formula as FindBestCoverFor.

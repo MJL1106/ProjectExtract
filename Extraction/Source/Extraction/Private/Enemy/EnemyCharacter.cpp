@@ -1,6 +1,10 @@
 // AEnemyCharacter — single character class for all enemy archetypes.
 
 #include "EnemyCharacter.h"
+#include "AI/AITargetingStatics.h"
+#include "Perception/AISense_Sight.h"
+#include "Components/SkeletalMeshComponent.h"
+#include "Engine/World.h"
 #include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
 #include "EnemyArchetypeData.h"
@@ -184,6 +188,66 @@ UEnemySquad* AEnemyCharacter::GetSquad() const
 void AEnemyCharacter::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
 {
 	TagContainer.AppendTags(OwnedTags);
+}
+
+// --- IAISightTargetInterface ---
+
+UAISense_Sight::EVisibilityResult AEnemyCharacter::CanBeSeenFrom(
+	const FCanBeSeenFromContext& Context,
+	FVector& OutSeenLocation,
+	int32& OutNumberOfLoSChecksPerformed,
+	int32& OutNumberOfAsyncLosCheckRequested,
+	float& OutSightStrength,
+	int32* UserData,
+	const FOnPendingVisibilityQueryProcessedDelegate* Delegate)
+{
+	OutNumberOfAsyncLosCheckRequested = 0;
+	OutNumberOfLoSChecksPerformed = 0;
+	OutSightStrength = 0.f;
+
+	UWorld* World = GetWorld();
+	if (!World) return UAISense_Sight::EVisibilityResult::NotVisible;
+
+	// Dead enemies use team-neutral so allied perception can find corpses — but they shouldn't
+	// feed hostile sight. Skip sight target processing when dead.
+	if (IsValid(HealthComponent) && HealthComponent->IsDead())
+		return UAISense_Sight::EVisibilityResult::NotVisible;
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemySightTarget), true);
+	QueryParams.AddIgnoredActor(this);
+	if (IsValid(Context.IgnoreActor)) QueryParams.AddIgnoredActor(Context.IgnoreActor);
+
+	// Test candidate points — head clears cover first when enemy stands up from crouch.
+	// Chest provides a backup visible point when the head is still occluded.
+	static const FName ChestBoneName(TEXT("spine_03"));
+	static constexpr float ChestFallbackOffsetZ = 40.f;
+
+	const USkeletalMeshComponent* EnemyMesh = GetMesh();
+	const bool bHasChestBone = IsValid(EnemyMesh) && EnemyMesh->DoesSocketExist(ChestBoneName);
+
+	const FVector HeadLoc  = AITargeting::GetSightLocation(this); // head bone → eye → centre
+	const FVector ChestLoc = (IsValid(EnemyMesh) && bHasChestBone)
+		? EnemyMesh->GetSocketLocation(ChestBoneName)
+		: GetActorLocation() + FVector(0.f, 0.f, ChestFallbackOffsetZ);
+	const FVector CentreLoc = GetActorLocation();
+
+	const FVector CandidatePoints[] = { HeadLoc, ChestLoc, CentreLoc };
+
+	for (const FVector& Candidate : CandidatePoints)
+	{
+		FHitResult Hit;
+		++OutNumberOfLoSChecksPerformed;
+		const bool bBlocked = World->LineTraceSingleByChannel(
+			Hit, Context.ObserverLocation, Candidate, ECC_Visibility, QueryParams);
+		if (!bBlocked || Hit.GetActor() == this)
+		{
+			OutSeenLocation = Candidate;
+			OutSightStrength = 1.f;
+			return UAISense_Sight::EVisibilityResult::Visible;
+		}
+	}
+
+	return UAISense_Sight::EVisibilityResult::NotVisible;
 }
 
 // --- IGenericTeamAgentInterface ---

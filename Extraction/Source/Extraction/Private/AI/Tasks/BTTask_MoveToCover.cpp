@@ -126,8 +126,11 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 	const UCompanionTuningDataAsset* Tuning = CompanionController ? CompanionController->GetTuning() : nullptr;
 	const float PostVacateCooldown = Tuning ? Tuning->CoverSwitchPostVacateCooldown : 0.f;
 
-	const float EffectiveRadius = Tuning ? Tuning->CoverSearchRadius : SearchRadius;
-	AAICoverSlot* Slot = Registry->FindBestCoverFor(Pawn->GetActorLocation(), Target, EffectiveRadius, nullptr, Pawn, PostVacateCooldown);
+	const float EffectiveRadius  = Tuning ? Tuning->CoverSearchRadius : SearchRadius;
+	const bool  bBodyProtect     = Tuning ? Tuning->bCoverRequiresBodyProtection : false;
+	const float ProtectChestH    = Tuning ? Tuning->CoverProtectionChestHeight   : 60.f;
+	AAICoverSlot* Slot = Registry->FindBestCoverFor(Pawn->GetActorLocation(), Target, EffectiveRadius, nullptr, Pawn, PostVacateCooldown,
+		bBodyProtect, ProtectChestH);
 	if (!Slot)
 	{
 		UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover no slot found within radius=%.0f"), *Pawn->GetName(), EffectiveRadius);

@@ -1,6 +1,7 @@
 // AI companion character — follows player, engages enemies, revives downed teammates.
 
 #include "CompanionCharacter.h"
+#include "AI/AITargetingStatics.h"
 #include "AI/CompanionDiag.h"
 #include "CompanionAIController.h"
 #include "HealthComponent.h"
@@ -382,6 +383,11 @@ float ACompanionCharacter::GetCurrentInaccuracy() const
 {
 	const float Alpha = FMath::Clamp(TimeAimingAtCurrentTarget / InaccuracySettleTime, 0.0f, 1.0f);
 	return FMath::Lerp(MaxInaccuracyDegrees, MinInaccuracyDegrees, Alpha);
+}
+
+FVector ACompanionCharacter::GetAimPointForTarget(const AActor* Target) const
+{
+	return AITargeting::GetSightLocation(Target);
 }
 
 // --- Death ---

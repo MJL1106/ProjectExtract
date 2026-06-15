@@ -111,7 +111,8 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	// OutScore avoids a duplicate ScoreSlotFor call for BestSlot below.
 	float BestScore = -1.f;
 	AAICoverSlot* BestSlot = Registry->FindBestCoverFor(
-		FormationPoint, CombatTarget, SearchRadius, &BestScore, Pawn, Tuning->CoverSwitchPostVacateCooldown);
+		FormationPoint, CombatTarget, SearchRadius, &BestScore, Pawn, Tuning->CoverSwitchPostVacateCooldown,
+		Tuning->bCoverRequiresBodyProtection, Tuning->CoverProtectionChestHeight);
 	if (!IsValid(BestSlot) || BestSlot == CurrentSlot)
 	{
 		// No better candidate this re-eval — reset the debounce so a future winner must agree fresh. (G2)

@@ -1,6 +1,8 @@
 #include "CoverRegistrySubsystem.h"
 #include "AICoverSlot.h"
 #include "CompanionAIController.h" // for LogCompanionAI
+#include "GameFramework/Character.h"
+#include "Components/CapsuleComponent.h"
 
 DEFINE_LOG_CATEGORY(LogCoverRegistry);
 
@@ -18,6 +20,14 @@ static constexpr float IdealDistRange     = 700.f;
 
 // Initial reservation size for the slot registry
 static constexpr int32 InitialReserveSize = 32;
+
+// Fallback capsule radius (cm) when the querier is not an ACharacter or has no capsule.
+// Matches the enemy's DefaultCapsuleRadius in BTTask_EnemyCombatFire.cpp.
+static constexpr float DefaultCoverStandoffCapsule = 34.f;
+
+// Small clearance padding (cm) added on top of capsule radius for the body-shield standoff.
+// Keeps the trace origin visually inside the wall's protective volume.
+static constexpr float CoverStandoffPadding = 10.f;
 
 void UCoverRegistrySubsystem::RegisterSlot(AAICoverSlot* Slot)
 {
@@ -65,7 +75,8 @@ void UCoverRegistrySubsystem::GetSlotsInRadius(const FVector& Origin, float Radi
 }
 
 AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLoc, AActor* Target, float MaxRadius, float* OutScore,
-	const AActor* QuerierPawn, float PostVacateCooldown) const
+	const AActor* QuerierPawn, float PostVacateCooldown,
+	bool bRequireBodyProtection, float ChestHeight) const
 {
 	if (!IsValid(Target))
 		return nullptr;
@@ -91,6 +102,12 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 		const bool bBlocked = World->LineTraceSingleByChannel(Hit, EyePos, TargetLoc, ECC_Visibility, LoSParams);
 		return !bBlocked || Hit.GetActor() == Target;
 	};
+
+	// Hoist loop-invariant standoff: depends only on QuerierPawn, not on individual slots.
+	const ACharacter* QuerierChar = Cast<ACharacter>(QuerierPawn);
+	const UCapsuleComponent* QuerierCap = QuerierChar ? QuerierChar->GetCapsuleComponent() : nullptr;
+	const float QuerierCapsuleR = QuerierCap ? QuerierCap->GetScaledCapsuleRadius() : DefaultCoverStandoffCapsule;
+	const float ProtectionStandoff = QuerierCapsuleR + CoverStandoffPadding;
 
 	for (const TWeakObjectPtr<AAICoverSlot>& WeakSlot : RegisteredSlots)
 	{
@@ -172,6 +189,29 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 			{
 				if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
 					UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-no-los"), *Slot->GetName(), DistToQuerier);
+				continue;
+			}
+		}
+
+		// Body-protection hard reject: the companion's hunkered body must be shielded from the target
+		// by world geometry. Slots whose wall is off to the side or behind the companion relative to
+		// the target are discarded. Standoff is loop-invariant and hoisted above the loop.
+		if (bRequireBodyProtection)
+		{
+			// Use the pawn's actual location for the alpha projection when available: the
+			// CoverSwitchMonitor passes a player-relative FormationPoint as QuerierLoc, not the
+			// pawn's real position, so projecting QuerierLoc would test an alpha the companion
+			// won't actually stand at. MoveToCover passes QuerierLoc == PawnLoc, so this is a
+			// no-op there. QuerierLoc is preserved for proximity scoring.
+			const AActor* PawnActor = QuerierPawn;
+			const FVector AlphaOrigin = IsValid(PawnActor) ? PawnActor->GetActorLocation() : QuerierLoc;
+			const float Alpha = Slot->GetAlphaFromLocation(AlphaOrigin);
+
+			if (!Slot->IsBodyShieldedFrom(TargetLoc, Alpha, ProtectionStandoff, ChestHeight, Target, QuerierPawn))
+			{
+				if (UE_LOG_ACTIVE(LogCompanionAI, Verbose))
+					UE_LOG(LogCompanionAI, Verbose, TEXT("CoverRegistry: slot=%s dist=%.0f -> REJECT-not-protective"),
+						*Slot->GetName(), DistToQuerier);
 				continue;
 			}
 		}

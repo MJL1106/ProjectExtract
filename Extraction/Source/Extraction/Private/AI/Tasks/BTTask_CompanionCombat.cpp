@@ -1,6 +1,7 @@
 // BT task — cover-aware companion combat. State machine drives EngageFromOpen, EngageFromCover, StandUpFire.
 
 #include "BTTask_CompanionCombat.h"
+#include "AI/AITargetingStatics.h"
 #include "AI/CompanionDiag.h"
 #include "WeaponDataAsset.h"
 #include "Character/ExtractionPlayerInterface.h"
@@ -32,7 +33,8 @@ namespace
 		UBlackboardComponent* Blackboard = nullptr;
 	};
 
-	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredAttached)
+	// Point overload — caller pre-resolves the destination (avoids recomputing GetSightLocation in tight loops).
+	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, const FVector& ToLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredAttached)
 	{
 		OutBlockedBy = nullptr;
 		if (!World || !IsValid(ToTarget) || !IsValid(Companion)) return false;
@@ -43,13 +45,20 @@ namespace
 		QueryParams.AddIgnoredActor(Companion->GetCurrentWeapon());
 		for (AActor* const A : IgnoredAttached) QueryParams.AddIgnoredActor(A);
 
-		const bool bHit = World->LineTraceSingleByChannel(Hit, FromLoc, ToTarget->GetActorLocation(), ECC_Visibility, QueryParams);
+		const bool bHit = World->LineTraceSingleByChannel(Hit, FromLoc, ToLoc, ECC_Visibility, QueryParams);
 		if (bHit && Hit.GetActor() != ToTarget)
 		{
 			OutBlockedBy = Hit.GetActor();
 			return false;
 		}
 		return true;
+	}
+
+	// Actor overload — resolves the sight point once and forwards to the point overload.
+	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredAttached)
+	{
+		if (!IsValid(ToTarget)) { OutBlockedBy = nullptr; return false; }
+		return HasLineOfSight(World, FromLoc, AITargeting::GetSightLocation(ToTarget), ToTarget, Companion, OutBlockedBy, IgnoredAttached);
 	}
 
 	static const TCHAR* BranchName(int8 Index)
@@ -658,6 +667,9 @@ TOptional<float> UBTTask_CompanionCombat::PickBestAlphaByLos(AAICoverSlot* Slot,
 	if (!IsValid(Slot) || !IsValid(Target) || !IsValid(Companion)) return {};
 	UWorld* World = Companion->GetWorld();
 
+	// Hoist — target sight point is invariant across all sweep iterations.
+	const FVector TargetSightLoc = AITargeting::GetSightLocation(Target);
+
 	if (Slot->Height == ECoverHeight::Stand)
 	{
 		// Stand cover only fires from peekable corner apexes — test those, not arbitrary eye positions.
@@ -675,7 +687,7 @@ TOptional<float> UBTTask_CompanionCombat::PickBestAlphaByLos(AAICoverSlot* Slot,
 			const FVector ApexLoc = CornerLoc + P.Dir * CornerPeekStepDistance;
 			const FVector ApexEye = ApexLoc + FVector(0.f, 0.f, StandFireEyeHeight);
 			AActor* Blocker = nullptr;
-			if (HasLineOfSight(World, ApexEye, Target, Companion, Blocker, IgnoredAttached))
+			if (HasLineOfSight(World, ApexEye, TargetSightLoc, Target, Companion, Blocker, IgnoredAttached))
 				return P.Alpha;
 		}
 		return {};
@@ -690,7 +702,7 @@ TOptional<float> UBTTask_CompanionCombat::PickBestAlphaByLos(AAICoverSlot* Slot,
 		if (FMath::Abs(Alpha - ExcludeAlpha) < ExcludeEpsilon) continue;
 		const FVector Eye = Slot->GetLocationAtAlpha(Alpha) + FVector(0.f, 0.f, StandFireEyeHeight);
 		AActor* Blocker = nullptr;
-		if (HasLineOfSight(World, Eye, Target, Companion, Blocker, IgnoredAttached))
+		if (HasLineOfSight(World, Eye, TargetSightLoc, Target, Companion, Blocker, IgnoredAttached))
 			return Alpha;
 	}
 	return {};
@@ -1368,6 +1380,7 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	PeekCooldown = 0.f;
 	CoverValidityCheckTimer = 0.f;
 	TimeAtCurrentCover = 0.f;
+	CoverCompromiseConsecutiveCount = 0;
 	LosBlockedAccum = 0.f;
 	TimeInOpenEngageNoCover = 0.f;
 	LastTickBranch = -1;
@@ -1880,6 +1893,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		bStandUpRepositionWalking = false;
 		bRepositionStartLogged = false;
 		CurrentBurstAction = EPeekAction::Hold;
+		CoverCompromiseConsecutiveCount = 0;
 	}
 	LastTickSlot = Slot;
 
@@ -2058,6 +2072,66 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				{
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: Cover INVALIDATE reason=no-corner-apex-los slot=%s"), *Ctx.Companion->GetName(), *Slot->GetName());
 					if (Slot->IsClaimedBy(Ctx.Companion)) Slot->Release(Ctx.Companion);
+					Ctx.Blackboard->SetValueAsObject(CoverSlotKey.SelectedKeyName, nullptr);
+					Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+					return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+				}
+			}
+
+			// Flank-compromise check: is the enemy getting an angle on the companion in cover?
+			// Mirrors the enemy's IsCurrentCoverCompromised + CompromiseDebounceRequired pattern.
+			// Compromised = target outside the slot's fire arc widened by ArcSlackDeg, OR
+			//               the companion's hunkered body has clear LoS to the target (flanked/exposed).
+			{
+				const ACompanionAIController* CompCtrl = Cast<ACompanionAIController>(Ctx.Companion->GetController());
+				const UCompanionTuningDataAsset* CompTuning = CompCtrl ? CompCtrl->GetTuning() : nullptr;
+
+				// Resolve tuning values — fall back to safe no-op defaults so this check never
+				// trips if no tuning asset is assigned (preserves existing behaviour).
+				const float ArcSlackDeg       = CompTuning ? CompTuning->CoverCompromiseArcSlackDeg   : 0.f;
+				const int32 DebounceRequired  = CompTuning ? CompTuning->CoverCompromiseDebounce        : 2;
+				const float ChestH            = CompTuning ? CompTuning->CoverProtectionChestHeight     : 60.f;
+				const bool  bProtectRequired  = CompTuning ? CompTuning->bCoverRequiresBodyProtection   : false;
+
+				// Arc test: widen the slot's fire arc by ArcSlackDeg so a slot that just passed
+				// the selection filter doesn't immediately re-trigger (mirrors enemy implementation).
+				const FVector ToTarget2D = (TargetLocation - Slot->GetActorLocation()).GetSafeNormal2D();
+				const FVector SlotFwd2D  = Slot->GetActorForwardVector().GetSafeNormal2D();
+				const float   Dot        = FVector::DotProduct(SlotFwd2D, ToTarget2D);
+				const float   WidenedHalfArcDeg = Slot->FireArcDegrees * 0.5f + ArcSlackDeg;
+				const bool    bOutsideArc = Dot < FMath::Cos(FMath::DegreesToRadians(WidenedHalfArcDeg));
+
+				// Body-LoS test: if the companion's hunker position can be seen by the enemy, the
+				// wall is no longer interposing — flanked / body exposed. Only run if protection was
+				// requested (it always is by default, but bProtectRequired=false turns it off).
+				bool bBodyExposed = false;
+				if (bProtectRequired)
+				{
+					const UCapsuleComponent* CompCap = Ctx.Companion->GetCapsuleComponent();
+					const float CapsuleR = CompCap ? CompCap->GetScaledCapsuleRadius() : 34.f;
+					const float Standoff = CapsuleR + 10.f;
+					// IsBodyShieldedFrom returns true when BLOCKED (protected). Exposed = NOT shielded.
+					bBodyExposed = !Slot->IsBodyShieldedFrom(TargetLocation, CurrentAlpha, Standoff, ChestH,
+						Ctx.Target, Ctx.Companion);
+				}
+
+				const bool bCompromisedNow = bOutsideArc || bBodyExposed;
+				if (bCompromisedNow)
+					++CoverCompromiseConsecutiveCount;
+				else
+					CoverCompromiseConsecutiveCount = 0;
+
+				if (CoverCompromiseConsecutiveCount >= DebounceRequired)
+				{
+					CoverCompromiseConsecutiveCount = 0;
+					UE_LOG(LogCompanionAI, Log,
+						TEXT("%s: Cover INVALIDATE reason=flanked-compromised slot=%s outsideArc=%d bodyExposed=%d"),
+						*Ctx.Companion->GetName(), *Slot->GetName(), (int32)bOutsideArc, (int32)bBodyExposed);
+					if (Slot->IsClaimedBy(Ctx.Companion))
+					{
+						Slot->MarkVacatedForSwitch(Ctx.Companion);
+						Slot->Release(Ctx.Companion);
+					}
 					Ctx.Blackboard->SetValueAsObject(CoverSlotKey.SelectedKeyName, nullptr);
 					Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 					return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
@@ -2740,7 +2814,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// Trace from the eyeline (GetPawnViewLocation ~= head height), not the actor centre — the lowered-barrel
 		// height falsely reports blocked LoS against elevated enemies / low geometry.
 		const FVector AimOrigin = Ctx.Companion->GetPawnViewLocation();
-		Ctx.Companion->GetWorld()->LineTraceSingleByChannel(LosHit, AimOrigin, TargetLocation, ECC_Visibility, QueryParams);
+		Ctx.Companion->GetWorld()->LineTraceSingleByChannel(LosHit, AimOrigin, AITargeting::GetSightLocation(Ctx.Target), ECC_Visibility, QueryParams);
 	}
 	const bool bLineOfSight = (!LosHit.bBlockingHit) || (LosHit.GetActor() == Ctx.Target);
 
@@ -2812,7 +2886,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			if (UCoverRegistrySubsystem* Reg = CoverWorld->GetSubsystem<UCoverRegistrySubsystem>())
 			{
 				AAICoverSlot* Avail = Reg->FindBestCoverFor(MyLocation, Ctx.Target,
-					CoverTuning->CoverSearchRadius, nullptr, Ctx.Companion, CoverTuning->CoverSwitchPostVacateCooldown);
+					CoverTuning->CoverSearchRadius, nullptr, Ctx.Companion, CoverTuning->CoverSwitchPostVacateCooldown,
+					CoverTuning->bCoverRequiresBodyProtection, CoverTuning->CoverProtectionChestHeight);
 				if (IsValid(Avail))
 				{
 					if (bDebugLogging)

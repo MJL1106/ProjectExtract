@@ -1,6 +1,7 @@
 // BT service — ticks to update all companion blackboard keys (DBNO, combat target, etc).
 
 #include "BTService_UpdateCompanionState.h"
+#include "AI/AITargetingStatics.h"
 #include "AI/CompanionDiag.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Perception/AIPerceptionComponent.h"
@@ -167,7 +168,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				for (AActor* Attached : ProxIgnoredAttached)
 					ProxLosParams.AddIgnoredActor(Attached);
 				const bool bProxBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
-					ProxLosHit, ProxAimOrigin, ProxActor->GetActorLocation(), ECC_Visibility, ProxLosParams);
+					ProxLosHit, ProxAimOrigin, AITargeting::GetSightLocation(ProxActor), ECC_Visibility, ProxLosParams);
 				if (bProxBlocked && ProxLosHit.GetActor() != ProxActor) continue;
 
 				const float ProxDistSq = FVector::DistSquared(MyLocation, ProxActor->GetActorLocation());
@@ -191,7 +192,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		// consistent with the move-shoot fire gate so the companion doesn't acquire low but fail to fire.
 		const FVector AimOrigin = Companion->GetPawnViewLocation();
 		const bool bBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
-			LosHit, AimOrigin, BestTarget->GetActorLocation(), ECC_Visibility, LosParams);
+			LosHit, AimOrigin, AITargeting::GetSightLocation(BestTarget), ECC_Visibility, LosParams);
 
 		if (bBlocked && LosHit.GetActor() != BestTarget)
 		{
@@ -262,7 +263,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			AcqLosParams.AddIgnoredActor(Companion);
 			FHitResult AcqLosHit;
 			const bool bAcqBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
-				AcqLosHit, Companion->GetPawnViewLocation(), BestTarget->GetActorLocation(), ECC_Visibility, AcqLosParams);
+				AcqLosHit, Companion->GetPawnViewLocation(), AITargeting::GetSightLocation(BestTarget), ECC_Visibility, AcqLosParams);
 			const bool bAcqLos = !bAcqBlocked || (AcqLosHit.GetActor() == BestTarget);
 			UE_LOG(LogCompanionDiag, Log, TEXT("%s: COMBAT-TARGET-ACQUIRED from=null to=%s dist=%.0f los=%d"),
 				*Companion->GetName(), *BestTarget->GetName(), FMath::Sqrt(BestDistSq), (int32)bAcqLos);

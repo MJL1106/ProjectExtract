@@ -7,6 +7,7 @@
 #include "GameplayTagAssetInterface.h"
 #include "GameplayTagContainer.h"
 #include "GenericTeamAgentInterface.h"
+#include "Perception/AISightTargetInterface.h"
 #include "AIShooterInterface.h"
 #include "ExtractionTypes.h"
 #include "EnemyTypes.h"
@@ -40,6 +41,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyHitReact, EHitRegion, Region
 UCLASS(Blueprintable)
 class EXTRACTION_API AEnemyCharacter : public ACharacter,
 	public IGameplayTagAssetInterface,
+	public IAISightTargetInterface,
 	public IAIShooterInterface,
 	public IGenericTeamAgentInterface
 {
@@ -55,6 +57,9 @@ public:
 
 	// --- IGameplayTagAssetInterface ---
 	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
+
+	// --- IAISightTargetInterface ---
+	virtual UAISense_Sight::EVisibilityResult CanBeSeenFrom(const FCanBeSeenFromContext& Context, FVector& OutSeenLocation, int32& OutNumberOfLoSChecksPerformed, int32& OutNumberOfAsyncLosCheckRequested, float& OutSightStrength, int32* UserData = nullptr, const FOnPendingVisibilityQueryProcessedDelegate* Delegate = nullptr) override;
 
 	// --- IAIShooterInterface ---
 	virtual AActor* GetAIAimTarget() const override;

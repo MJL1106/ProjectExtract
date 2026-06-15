@@ -45,6 +45,7 @@ public:
 	// --- IAIShooterInterface ---
 	virtual AActor* GetAIAimTarget() const override { return CurrentAimTarget.Get(); }
 	virtual float GetAIAimSpreadDegrees() const override { return GetCurrentInaccuracy(); }
+	virtual FVector GetAimPointForTarget(const AActor* Target) const override;
 
 	// --- IGenericTeamAgentInterface ---
 	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(0); }
