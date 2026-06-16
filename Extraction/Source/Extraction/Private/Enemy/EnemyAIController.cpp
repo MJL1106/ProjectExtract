@@ -84,7 +84,9 @@ void AEnemyAIController::OnPossess(APawn* InPawn)
 	{
 		SightConfig->SightRadius                  = DA->SightRadius;
 		SightConfig->LoseSightRadius              = DA->LoseSightRadius;
-		SightConfig->PeripheralVisionAngleDegrees = DA->PeripheralVisionDeg;
+		// PeripheralVisionDeg is authored as a full FOV (the suspicion math halves it); the engine
+		// sight config expects a half-angle from forward, so halve it here to match.
+		SightConfig->PeripheralVisionAngleDegrees = DA->PeripheralVisionDeg * 0.5f;
 		SightConfig->AutoSuccessRangeFromLastSeenLocation = 500.f;
 		SightConfig->SetMaxAge(DA->SightMaxAge);
 		HearingConfig->HearingRange               = DA->HearingRange;
