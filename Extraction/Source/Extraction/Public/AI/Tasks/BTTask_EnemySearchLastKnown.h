@@ -35,7 +35,13 @@ private:
 		float SweepElapsed = 0.f;
 		int32 SweepSegment = 0;
 		float BaseYaw = 0.f;
+		/** The goal last issued to MoveToLocation — used to detect BB drift. */
+		FVector IssuedGoal = FVector::ZeroVector;
 	};
+
+	/** If BB_InvestigateLocation drifts more than this from the issued move goal, re-issue the move. */
+	UPROPERTY(EditAnywhere, Category = "Search")
+	float GoalDriftThreshold = 60.f;
 
 	/** Total sweep duration (seconds) split across SweepSegmentCount segments. */
 	static constexpr float SweepDuration = 3.f;

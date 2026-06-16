@@ -3,6 +3,7 @@
 #include "EnemyCharacter.h"
 #include "AI/AITargetingStatics.h"
 #include "Perception/AISense_Sight.h"
+#include "Perception/AIPerceptionSystem.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
 #include "EnemyAIController.h"
@@ -31,9 +32,9 @@
 #include "EnemyAwarenessWidget.h"
 
 static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
-	TEXT("enemy.PersistCorpses"), 0,
-	TEXT("If non-zero, dead enemies persist as discoverable corpses (director-managed). If 0 (default), they disappear after a short delay."),
-	ECVF_Cheat);
+	TEXT("enemy.PersistCorpses"), 1,
+	TEXT("If non-zero (default), dead enemies persist as discoverable corpses (director-managed). If 0, they disappear after a short delay."),
+	ECVF_Default);
 
 static constexpr float CrouchSpeedFraction = 0.5f; // MaxWalkSpeedCrouched = mode speed * this
 
@@ -129,6 +130,11 @@ void AEnemyCharacter::BeginPlay()
 		AwarenessWidgetComponent->SetVisibility(true);
 		TryLinkAwarenessWidget();
 	}
+
+	// Cache chest bone availability once — used per CanBeSeenFrom call.
+	static const FName ChestBoneName(TEXT("spine_03"));
+	if (const USkeletalMeshComponent* MeshComp = GetMesh())
+		bCachedHasChestBone = MeshComp->DoesSocketExist(ChestBoneName);
 
 	if (!IsValid(ArchetypeData))
 	{
@@ -261,10 +267,11 @@ UAISense_Sight::EVisibilityResult AEnemyCharacter::CanBeSeenFrom(
 	UWorld* World = GetWorld();
 	if (!World) return UAISense_Sight::EVisibilityResult::NotVisible;
 
-	// Dead enemies use team-neutral so allied perception can find corpses — but they shouldn't
-	// feed hostile sight. Skip sight target processing when dead.
-	if (IsValid(HealthComponent) && HealthComponent->IsDead())
-		return UAISense_Sight::EVisibilityResult::NotVisible;
+	// Dead enemies flip to NoTeam (neutral) so allied enemy perception can discover corpses
+	// for the body-sighting path (HandleBodySighted). Combat targeting is gated separately:
+	// HandleSightStimulus bails on dead actors, and the companion's BTService_UpdateCompanionState
+	// explicitly filters IsDead() out of target selection. Allow the LOS traces to run for
+	// corpses so body discovery actually fires.
 
 	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemySightTarget), true);
 	QueryParams.AddIgnoredActor(this);
@@ -276,10 +283,9 @@ UAISense_Sight::EVisibilityResult AEnemyCharacter::CanBeSeenFrom(
 	static constexpr float ChestFallbackOffsetZ = 40.f;
 
 	const USkeletalMeshComponent* EnemyMesh = GetMesh();
-	const bool bHasChestBone = IsValid(EnemyMesh) && EnemyMesh->DoesSocketExist(ChestBoneName);
 
 	const FVector HeadLoc  = AITargeting::GetSightLocation(this); // head bone → eye → centre
-	const FVector ChestLoc = (IsValid(EnemyMesh) && bHasChestBone)
+	const FVector ChestLoc = (IsValid(EnemyMesh) && bCachedHasChestBone)
 		? EnemyMesh->GetSocketLocation(ChestBoneName)
 		: GetActorLocation() + FVector(0.f, 0.f, ChestFallbackOffsetZ);
 	const FVector CentreLoc = GetActorLocation();
@@ -742,21 +748,37 @@ void AEnemyCharacter::HandleDeath()
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 
+	// Sight perception bakes the listener-target affiliation into its query at registration and never
+	// re-evaluates a runtime team change. This pawn just flipped to NoTeam (dead) — living enemies
+	// ignored it as a friendly while alive, so no sight query pair exists. Evict + re-register it as a
+	// sight source so perceivers re-pair with it as a neutral and can discover the body.
+	if (UAIPerceptionSystem* PerceptionSys = UAIPerceptionSystem::GetCurrent(World))
+	{
+		PerceptionSys->UnregisterSource(*this, UAISense_Sight::StaticClass());
+		PerceptionSys->RegisterSourceForSenseClass(UAISense_Sight::StaticClass(), *this);
+	}
+
 	if (CVarEnemyPersistCorpses.GetValueOnGameThread() != 0)
 	{
 		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
 		{
 			Director->RegisterCorpse(this);
+
+			World->GetTimerManager().SetTimer(
+				DestroyTimerHandle,
+				this,
+				&AEnemyCharacter::DestroyAfterDeath,
+				CorpseMaxLifespanSeconds,
+				false);
 			return;
 		}
 	}
 
-	static constexpr float DisappearDelaySeconds = 2.f;
 	World->GetTimerManager().SetTimer(
 		DestroyTimerHandle,
 		this,
 		&AEnemyCharacter::DestroyAfterDeath,
-		DisappearDelaySeconds,
+		CorpseDisappearSeconds,
 		false);
 }
 
@@ -770,6 +792,16 @@ void AEnemyCharacter::ApplyRagdoll()
 
 	MeshComp->SetCollisionProfileName(TEXT("Ragdoll"));
 	MeshComp->SetSimulatePhysics(true);
+
+	// Snapshot the corpse location after the ragdoll settles to avoid per-tick bone lookups.
+	if (UWorld* World = GetWorld())
+	{
+		RagdollStartTime = World->GetTimeSeconds();
+		World->GetTimerManager().SetTimer(
+			CorpseSettleTimerHandle, this,
+			&AEnemyCharacter::CacheCorpseLocation,
+			CorpseSettleTime, false);
+	}
 }
 
 void AEnemyCharacter::DestroyAfterDeath()
@@ -983,6 +1015,77 @@ bool AEnemyCharacter::TryMarkBodyReported()
 	if (bBodyReported) return false;
 	bBodyReported = true;
 	return true;
+}
+
+// --- Corpse Location ---
+
+FVector AEnemyCharacter::GetCorpseLocation() const
+{
+	if (bCorpseLocationCached) return CachedCorpseLocation;
+
+	static const FName PelvisBone(TEXT("pelvis"));
+	static const FName SpineBone(TEXT("spine_03"));
+
+	const USkeletalMeshComponent* MeshComp = GetMesh();
+	if (IsValid(MeshComp) && MeshComp->IsSimulatingPhysics())
+	{
+		if (MeshComp->DoesSocketExist(PelvisBone))
+			return MeshComp->GetSocketLocation(PelvisBone);
+		if (bCachedHasChestBone)
+			return MeshComp->GetSocketLocation(SpineBone);
+		return MeshComp->Bounds.Origin;
+	}
+
+	return GetActorLocation();
+}
+
+void AEnemyCharacter::CacheCorpseLocation()
+{
+	static const FName PelvisBone(TEXT("pelvis"));
+	static const FName SpineBone(TEXT("spine_03"));
+
+	UWorld* World = GetWorld();
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	const bool bHardCeiling = !IsValid(World) || (World->GetTimeSeconds() - RagdollStartTime) >= CorpseSettleMaxWait;
+
+	if (!bHardCeiling && IsValid(MeshComp) && MeshComp->IsSimulatingPhysics())
+	{
+		const FName CheckBone = MeshComp->DoesSocketExist(PelvisBone) ? PelvisBone : (bCachedHasChestBone ? SpineBone : NAME_None);
+		const float SpeedSq = (CheckBone != NAME_None)
+			? MeshComp->GetPhysicsLinearVelocity(CheckBone).SizeSquared()
+			: MeshComp->GetPhysicsLinearVelocity().SizeSquared();
+
+		if (SpeedSq > FMath::Square(CorpseSettleSpeedThreshold))
+		{
+			World->GetTimerManager().SetTimer(
+				CorpseSettleTimerHandle, this,
+				&AEnemyCharacter::CacheCorpseLocation,
+				CorpseSettleRetryInterval, false);
+			return;
+		}
+	}
+
+	CachedCorpseLocation = GetCorpseLocation();
+	bCorpseLocationCached = true;
+}
+
+// --- Corpse Removal ---
+
+void AEnemyCharacter::BeginCorpseRemoval()
+{
+	if (bCorpseRemovalStarted) return;
+	bCorpseRemovalStarted = true;
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	World->GetTimerManager().ClearTimer(DestroyTimerHandle);
+	World->GetTimerManager().SetTimer(
+		DestroyTimerHandle,
+		this,
+		&AEnemyCharacter::DestroyAfterDeath,
+		CorpseRemovalAfterReachSeconds,
+		false);
 }
 
 // --- Damage query ---

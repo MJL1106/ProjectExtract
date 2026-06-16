@@ -38,6 +38,8 @@ UEnemyAwarenessComponent::UEnemyAwarenessComponent()
 
 void UEnemyAwarenessComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	ClearInvestigateBody();
+
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearAllTimersForObject(this);
 
@@ -93,6 +95,12 @@ void UEnemyAwarenessComponent::OnTargetPerceptionUpdated(AActor* Actor, FAIStimu
 	if (bStopped) return;
 	if (!IsValid(Actor)) return;
 
+	if (GetDetectionLogLevel() > 0 && Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>())
+		if (const AEnemyCharacter* EC = Cast<AEnemyCharacter>(Actor))
+			UE_LOG(LogTemp, Warning, TEXT("[BODYDBG] %s sight-stim from enemy %s sensed=%d alive=%d state=%s"),
+				*GetNameSafe(GetOwner()), *GetNameSafe(Actor), Stimulus.WasSuccessfullySensed() ? 1 : 0,
+				IsActorAlive(EC) ? 1 : 0, *UEnum::GetValueAsString(CurrentState));
+
 	// Dead allies arrive as neutral stimuli — body discovery runs before the hostility filter.
 	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>() && Stimulus.WasSuccessfullySensed())
 	{
@@ -113,18 +121,32 @@ void UEnemyAwarenessComponent::OnTargetPerceptionUpdated(AActor* Actor, FAIStimu
 
 void UEnemyAwarenessComponent::HandleBodySighted(AEnemyCharacter* Body)
 {
-	if (CurrentState == EEnemyAwarenessState::Combat) return;
-	if (DiscoveredBodies.Contains(Body)) return;
-	DiscoveredBodies.Add(Body);
+	if (GetDetectionLogLevel() > 0)
+		UE_LOG(LogTemp, Warning, TEXT("[BODYDBG] %s HandleBodySighted body=%s state=%s alreadyDiscovered=%d"),
+			*GetNameSafe(GetOwner()), *GetNameSafe(Body), *UEnum::GetValueAsString(CurrentState),
+			DiscoveredBodies.Contains(Body) ? 1 : 0);
 
-	if (Body->TryMarkBodyReported())
+	if (CurrentState == EEnemyAwarenessState::Combat) return;
+
+	const bool bAlreadyDiscovered = DiscoveredBodies.Contains(Body);
+
+	// One-shot report and bark on first discovery only.
+	if (!bAlreadyDiscovered)
 	{
-		if (UEnemyDirectorSubsystem* Dir = Director.Get())
-			Dir->ReportBodyDiscovered();
+		DiscoveredBodies.Add(Body);
+		if (Body->TryMarkBodyReported())
+			if (UEnemyDirectorSubsystem* Dir = Director.Get())
+				Dir->ReportBodyDiscovered();
+		Bark(EBarkType::BodyFound);
 	}
 
-	Bark(EBarkType::BodyFound);
-	SetInvestigateLocation(Body->GetActorLocation());
+	// Route to this body only when free — never abandon a body already being investigated.
+	if (CurrentInvestigateBody.IsValid()) return;
+
+	ClearInvestigateBody();
+	Body->IncrementInvestigators();
+	CurrentInvestigateBody = Body;
+	SetInvestigateLocation(Body->GetCorpseLocation());
 	TimeSpentSearching = 0.f;
 	SetState(EEnemyAwarenessState::Searching);
 }
@@ -291,6 +313,7 @@ void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVecto
 void UEnemyAwarenessComponent::HandlePawnDeath()
 {
 	bStopped = true;
+	ClearInvestigateBody();
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(UpdateTimerHandle);
@@ -313,11 +336,35 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 
 		if (CurrentState == EEnemyAwarenessState::Searching)
 		{
-			TimeSpentSearching += UpdateInterval;
-			if (TimeSpentSearching >= ArchetypeData->SearchDuration)
+			if (CurrentInvestigateBody.IsValid())
 			{
-				SetCombatTarget(nullptr);
-				SetState(EEnemyAwarenessState::Unaware);
+				// Track the ragdoll — update the BT move goal so it follows a settling/sliding body.
+				SetInvestigateLocation(CurrentInvestigateBody->GetCorpseLocation());
+
+				const AAIController* MyController = Cast<AAIController>(GetOwner());
+				const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+				if (IsValid(MyPawn))
+				{
+					const float DistToBody = FVector::Dist(MyPawn->GetActorLocation(), CurrentInvestigateBody->GetCorpseLocation());
+					if (DistToBody <= CorpseReachRadius)
+					{
+						CurrentInvestigateBody->BeginCorpseRemoval();
+						ClearInvestigateBody();
+					}
+				}
+			}
+
+			// Hold the search timeout while actively investigating a body — the enemy must reach it
+			// or lose it (hard-cap destroy nulls the weak ref) before reverting to Unaware.
+			if (!CurrentInvestigateBody.IsValid())
+			{
+				TimeSpentSearching += UpdateInterval;
+				if (TimeSpentSearching >= ArchetypeData->SearchDuration)
+				{
+					ClearInvestigateBody();
+					SetCombatTarget(nullptr);
+					SetState(EEnemyAwarenessState::Unaware);
+				}
 			}
 		}
 	}
@@ -700,6 +747,8 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 			IsValid(Target) ? *Target->GetName() : TEXT("null"), bConfirmedVisual ? 1 : 0, DbgDist, *UEnum::GetValueAsString(CurrentState));
 	}
 
+	ClearInvestigateBody();
+
 	LastKnownLocation = IsValid(Target) ? Target->GetActorLocation() : LastKnownLocation;
 	bHadLOS = bConfirmedVisual;
 	TimeSinceLOSLost = 0.f;
@@ -852,6 +901,13 @@ void UEnemyAwarenessComponent::Bark(EBarkType Type) const
 	UBarkSubsystem* Barks = IsValid(World) ? World->GetSubsystem<UBarkSubsystem>() : nullptr;
 	if (Barks)
 		Barks->RequestBark(MyPawn, ArchetypeData->BarkSet, Type, ArchetypeData->DisplayName);
+}
+
+void UEnemyAwarenessComponent::ClearInvestigateBody()
+{
+	if (AEnemyCharacter* Body = CurrentInvestigateBody.Get())
+		Body->DecrementInvestigators();
+	CurrentInvestigateBody.Reset();
 }
 
 bool UEnemyAwarenessComponent::IsHostile(AActor* Actor) const

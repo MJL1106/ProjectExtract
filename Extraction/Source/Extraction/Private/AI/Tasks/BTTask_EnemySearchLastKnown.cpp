@@ -41,6 +41,7 @@ EBTNodeResult::Type UBTTask_EnemySearchLastKnown::ExecuteTask(UBehaviorTreeCompo
 		return EBTNodeResult::InProgress;
 	}
 
+	Mem->IssuedGoal = InvestigateLoc;
 	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(InvestigateLoc, 80.f, false, true, false, true);
 	UE_LOG(LogEnemyAI, Verbose, TEXT("[SEARCH] %s MoveTo (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
 		*Pawn->GetName(), InvestigateLoc.X, InvestigateLoc.Y, InvestigateLoc.Z,
@@ -61,6 +62,18 @@ void UBTTask_EnemySearchLastKnown::TickTask(UBehaviorTreeComponent& OwnerComp, u
 	{
 		UPathFollowingComponent* PF = Controller->GetPathFollowingComponent();
 		if (!PF) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+
+		// Re-poll BB_InvestigateLocation — the awareness component tracks ragdoll drift.
+		UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+		if (IsValid(BB) && PF->GetStatus() != EPathFollowingStatus::Idle)
+		{
+			const FVector CurrentGoal = BB->GetValueAsVector(AEnemyAIController::BB_InvestigateLocation);
+			if (FVector::Dist(CurrentGoal, Mem->IssuedGoal) > GoalDriftThreshold)
+			{
+				Mem->IssuedGoal = CurrentGoal;
+				Controller->MoveToLocation(CurrentGoal, 80.f, false, true, false, true);
+			}
+		}
 
 		if (PF->GetStatus() == EPathFollowingStatus::Idle)
 		{

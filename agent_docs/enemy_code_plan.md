@@ -11,7 +11,7 @@
 | Phase | Scope | C++ | Editor wiring | Playtest |
 |---|---|---|---|---|
 | 1 | Skeleton — Grunt (character, controller, archetype DA, perception, base BT, teams, weapon decouple) | ✅ 2026-06-09 | ✅ 2026-06-15 | ✅ 2026-06-15 |
-| 2 | Awareness ladder (suspicion, noise, global alert, bodies, takedown, barks v1) | ✅ 2026-06-09 | ⏳ handed off | ❌ |
+| 2 | Awareness ladder (suspicion, noise, global alert, bodies, takedown, barks v1) | ✅ 2026-06-09 | ⏳ handed off | 🟡 body discovery ✅ 2026-06-16 (rest ❌) |
 | 3 | Roster (7 archetypes, bolt-on components, grenade, subtrees) | ✅ 2026-06-10 | ✅ 2026-06-10 (meshes manual) | ❌ |
 | 4 | Morale & suppression (+ hit reacts, ragdoll) | ✅ 2026-06-10 | ✅ 2026-06-10 (montages manual) | ❌ |
 | 5 | Squad baseline (coordinator, shared sightings, flanker, focus-fire, threat targeting) | ✅ 2026-06-10 | ✅ 2026-06-10 (SquadId placement = user) | ❌ |
@@ -468,3 +468,42 @@ C++ via 2-slice team, 3 reviewers + 2 verification rounds, `Result: Succeeded`. 
 ## Out of scope (per design §13)
 
 Surrender/rout, player-side suppression, co-op, smoke/flash, throwback, full VO, body-dragging, exact tuning values (live in DA instances, set during balance).
+
+---
+
+## Design backlog (emerged in dev — design before code)
+
+### Body-discovery convergence (deferred — needs design first)
+
+**Raised 2026-06-16.** Player asked for enemies to *respond* to a discovered body, not just the finder investigating it — but flagged the obvious failure: enemies from unrelated rooms abandoning their posts to walk to a corpse. Decision: document, don't code yet.
+
+**As-built today (so the backlog has a baseline):** body detection itself works (this session fixed two CRITICALs — `CanBeSeenFrom` short-circuited on dead enemies, and `enemy.PersistCorpses` defaulted off/cheat — plus a corpse lifecycle and a perception re-register on death; see memory `project-enemy-body-detection`). On discovering a corpse, an enemy: barks `BodyFound`, raises the global alert (1 body → Searching, 2nd distinct body → Loud), walks to the body and look-around-sweeps, then the corpse despawns ~2s after it's reached (or a 120s cap). Multi-body is sequential (investigate one, then the next; re-routes on patrol-back). **What does NOT happen:** other enemies converging on the body. The squad sighting relay (`UEnemyAwarenessComponent::BroadcastSightingToSquad` → `UEnemySquad::ReportSighting` → squadmates `ReportSquadSighting` → Searching at the relayed location) EXISTS but fires only on a live player `CombatTarget` — body discovery never feeds it. On the Loud edge, dormant enemies wake but `HandleGlobalAlertChanged` sets each one's investigate point to its **own** location (sweep own post), not the body.
+
+**The core question: WHO converges and HOW FAR** (the "different rooms" problem).
+
+| Scoping option | Behaviour | Trade-off |
+|---|---|---|
+| **Squad-only** *(recommended base)* | Only the discoverer's squad responds — reuse `Squad->ReportSighting` carrying the body location. | Squads are already the per-area/room grouping → naturally avoids cross-room pull. Requires `SquadId` actually authored per room (manual placement, often skipped). Lone/un-squaded guards only self-investigate. |
+| Radius (nav-distance) | Any enemy within N **path**-metres converges. | Simple but room-blind; a body by a wall pulls the guard on the other side. MUST be nav-distance, never straight-line (else walk-through-wall illogic). |
+| **Squad + nav cap** *(recommended full)* | Squadmates within a path-distance cap converge; farther squadmates hold post / only elevate. | Room-scoped AND stops a squadmate across the level trekking over. Slightly more logic. |
+| Nearest-N | Closest 1–2 enemies converge regardless of squad. | Bounds numbers but ignores rooms; can pull across them. |
+
+**Recommendation:** squad-scoped + nav-distance cap, **scaled by alert level** — 1 body = finder + at most 1–2 nearest squadmates investigate; 2+ bodies (Loud) = whole squad converges; out-of-squad enemies never leave post for a body (the global Loud floor still applies, keeping the "sweep own post" behaviour). Officer-gating optional (mirror the existing maneuver gate).
+
+**Tunables (DA — `UEnemyArchetypeData` or `UDirectorConfigData`):** `BodyConvergeScope` (Squad / Radius / SquadAndCap), `BodyConvergeNavRadius` (path cap, ~1500–2500), `BodyConvergeMaxResponders` (e.g. 2 at Searching, all at Loud), `bBodyConvergeOfficerGated`.
+
+**Open questions (resolve before code):**
+1. Squad scope needs `SquadId` authored per room in the test levels first — confirm levels have squads, else squad-scope silently no-ops to "finder only".
+2. Converge on the exact body, or a search anchor near it (avoid clustering on the corpse)?
+3. Finder finishes its own investigation first, or calls squadmates immediately?
+4. Interaction with the still-monotonic global alert (no de-escalation yet) — tie to the deferred lose-the-trail recovery so "converge + alert-forever" doesn't compound.
+5. Staggered arrival vs all-at-once.
+
+**Implementation hook (when greenlit):** in `HandleBodySighted` (after report/bark), if scope permits, relay the body location through a squad-sighting variant that carries no live target → squadmates Search at the body anchor, gated by nav-distance + responder cap. Reuse the `BroadcastSightingToSquad` / `ReportSquadSighting` plumbing.
+
+**QA scenarios (add when built):**
+1. Two rooms, two squads: kill a guard in room A → only room-A squad investigates; room-B keeps patrolling.
+2. Lone guard (no squad) finds a body → self-investigates only; no one else moves.
+3. Body beyond the nav cap from a squadmate → that squadmate holds post (or only elevates), doesn't cross the map.
+4. Two bodies → Loud → squad converges; responder cap honoured.
+5. Body in an unreachable spot → no enemy gets stuck pathing to it (cap/timeout catches it).

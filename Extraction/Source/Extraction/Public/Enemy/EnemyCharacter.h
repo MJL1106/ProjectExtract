@@ -210,6 +210,21 @@ public:
 	/** First caller gets true and owns reporting this body to the director. */
 	bool TryMarkBodyReported();
 
+	// --- Corpse lifecycle ---
+
+	/** Returns the world-space location of the ragdolled corpse (pelvis bone if simulating, else actor loc). */
+	FVector GetCorpseLocation() const;
+
+	/** Initiates the short removal countdown after a living enemy reaches the body. Safe to call multiple times. */
+	void BeginCorpseRemoval();
+
+	/** Number of living enemies currently investigating this corpse. Managed by UEnemyAwarenessComponent. */
+	int32 InvestigateRefCount = 0;
+
+	void IncrementInvestigators() { ++InvestigateRefCount; }
+	void DecrementInvestigators() { InvestigateRefCount = FMath::Max(InvestigateRefCount - 1, 0); }
+	bool IsBeingInvestigated() const { return InvestigateRefCount > 0; }
+
 	/** True if TakeDamage was called within the last Window seconds. Used by sniper relocate-on-damaged. */
 	UFUNCTION(BlueprintPure, Category = "Enemy|Combat")
 	bool WasDamagedRecently(float Window) const;
@@ -344,7 +359,54 @@ private:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Takedown")
 	float TakedownRagdollDelay = 0.8f;
 
+	// --- Corpse lifecycle tuning ---
+
+	/** Hard-cap lifespan (seconds) for a persisted corpse before it self-destructs if nobody investigates. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Corpse")
+	float CorpseMaxLifespanSeconds = 120.f;
+
+	/** Seconds after a living enemy reaches the corpse before it is destroyed (brief beat so it doesn't pop). */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Corpse")
+	float CorpseRemovalAfterReachSeconds = 2.f;
+
+	/** Destroy delay when corpse persistence is disabled (legacy mode). */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Corpse")
+	float CorpseDisappearSeconds = 2.f;
+
+	/** Guard against multiple BeginCorpseRemoval calls. */
+	bool bCorpseRemovalStarted = false;
+
+	/** Cached corpse location after ragdoll settles, to avoid per-tick bone lookups. */
+	FVector CachedCorpseLocation = FVector::ZeroVector;
+	bool bCorpseLocationCached = false;
+
+	/** Initial delay (seconds) after ragdoll before the first settle check. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Corpse")
+	float CorpseSettleTime = 2.f;
+
+	/** Speed threshold (cm/s) below which the ragdoll is considered settled. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Corpse")
+	float CorpseSettleSpeedThreshold = 10.f;
+
+	/** Retry interval (seconds) when the ragdoll hasn't settled yet. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Corpse")
+	float CorpseSettleRetryInterval = 0.5f;
+
+	/** Hard ceiling (seconds from ragdoll start) after which we cache regardless of velocity. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Corpse")
+	float CorpseSettleMaxWait = 5.f;
+
+	/** World time when ApplyRagdoll was called — used for the hard ceiling. */
+	float RagdollStartTime = 0.f;
+
+	/** Attempts to snapshot the corpse location; retries if the ragdoll is still moving. */
+	void CacheCorpseLocation();
+
+	/** Cached result of DoesSocketExist("spine_03") — set once in BeginPlay, used per CanBeSeenFrom call. */
+	bool bCachedHasChestBone = false;
+
 	FTimerHandle DestroyTimerHandle;
+	FTimerHandle CorpseSettleTimerHandle;
 	FTimerHandle TakedownRagdollTimerHandle;
 	FTimerHandle TakedownWatchdogTimerHandle;
 	FTimerHandle AwarenessWidgetLinkTimerHandle;

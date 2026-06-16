@@ -8,6 +8,7 @@
 #include "EnemyTypes.h"
 #include "EnemyAwarenessComponent.generated.h"
 
+class AEnemyCharacter;
 class UBlackboardComponent;
 class UEnemyArchetypeData;
 class UEnemyDirectorSubsystem;
@@ -133,6 +134,16 @@ private:
 
 	/** Bodies this enemy has already reacted to (one search trigger per body per enemy). */
 	TSet<TWeakObjectPtr<const AActor>> DiscoveredBodies;
+
+	/** The corpse this enemy is currently investigating (set in HandleBodySighted, cleared on timeout/combat/removal). */
+	TWeakObjectPtr<AEnemyCharacter> CurrentInvestigateBody;
+
+	/** Distance (cm) within which the investigating enemy triggers corpse removal. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Awareness")
+	float CorpseReachRadius = 150.f;
+
+	/** Clears the investigate-body reference and the target flag on the corpse. */
+	void ClearInvestigateBody();
 
 	static constexpr float UpdateInterval = 0.15f;
 	/** Minimum seconds between NotifyShotAt processing for the same instigator (below Combat). */

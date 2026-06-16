@@ -78,16 +78,27 @@ void UEnemyDirectorSubsystem::RegisterCorpse(AEnemyCharacter* Corpse)
 	if (!IsValid(Corpse)) return;
 
 	const bool bOfficer = IsValid(Corpse->GetArchetypeData()) && Corpse->GetArchetypeData()->bHasCommandAura;
-	OnEnemyDied.Broadcast(Corpse, Corpse->GetActorLocation(), bOfficer);
+	OnEnemyDied.Broadcast(Corpse, Corpse->GetCorpseLocation(), bOfficer);
 
 	Corpses.RemoveAll([](const TWeakObjectPtr<AEnemyCharacter>& Entry) { return !Entry.IsValid(); });
 	Corpses.Add(Corpse);
 
 	while (Corpses.Num() > MaxCorpses)
 	{
-		if (AEnemyCharacter* Oldest = Corpses[0].Get())
-			Oldest->Destroy();
-		Corpses.RemoveAt(0);
+		// Prefer evicting the oldest corpse that is NOT currently an investigate target.
+		int32 EvictIndex = INDEX_NONE;
+		for (int32 i = 0; i < Corpses.Num(); ++i)
+		{
+			AEnemyCharacter* Candidate = Corpses[i].Get();
+			if (!IsValid(Candidate)) { EvictIndex = i; break; }
+			if (!Candidate->IsBeingInvestigated()) { EvictIndex = i; break; }
+		}
+		// All corpses targeted — evict the oldest anyway to stay bounded.
+		if (EvictIndex == INDEX_NONE) EvictIndex = 0;
+
+		if (AEnemyCharacter* Evicted = Corpses[EvictIndex].Get())
+			Evicted->Destroy();
+		Corpses.RemoveAt(EvictIndex);
 	}
 }
 
