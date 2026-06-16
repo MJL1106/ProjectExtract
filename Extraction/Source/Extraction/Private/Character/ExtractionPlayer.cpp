@@ -32,6 +32,7 @@
 #include "ExtractionTypes.h"
 #include "Extraction.h"
 #include "AnimNotify_TakedownKill.h"
+#include "EnemyDebug.h"
 
 AExtractionPlayer::AExtractionPlayer()
 	: bIsDBNO(false)
@@ -99,17 +100,33 @@ UAISense_Sight::EVisibilityResult AExtractionPlayer::CanBeSeenFrom(
 	const FOnPendingVisibilityQueryProcessedDelegate* Delegate)
 {
 	OutNumberOfAsyncLosCheckRequested = 0;
-	OutNumberOfLoSChecksPerformed = 0;
+	OutNumberOfLoSChecksPerformed = 1;
 	OutSightStrength = 0.f;
 
-	if (AITargeting::GetVisibleBodyPoint(this, Context.ObserverLocation, Context.IgnoreActor, OutSeenLocation))
-	{
-		OutSightStrength = 1.f;
-		OutNumberOfLoSChecksPerformed = 1;
-		return UAISense_Sight::EVisibilityResult::Visible;
-	}
+	const bool bVisible = AITargeting::GetVisibleBodyPoint(this, Context.ObserverLocation, Context.IgnoreActor, OutSeenLocation);
 
-	return UAISense_Sight::EVisibilityResult::NotVisible;
+	if (bVisible)
+		OutSightStrength = 1.f;
+
+#if !UE_BUILD_SHIPPING
+	if (GetDetectionLogLevel() > 0)
+	{
+		TWeakObjectPtr<const AActor> ObsKey(Context.IgnoreActor);
+		const bool* LastResult = DebugLastCanBeSeenResult.Find(ObsKey);
+		if (!LastResult || *LastResult != bVisible)
+		{
+			DebugLastCanBeSeenResult.Add(ObsKey, bVisible);
+			UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] CanBeSeenFrom obs=%s result=%s seenZ=%.0f playerZ=%.0f crouched=%d"),
+				*GetNameSafe(Context.IgnoreActor),
+				bVisible ? TEXT("VISIBLE") : TEXT("NOT-VISIBLE"),
+				bVisible ? OutSeenLocation.Z : -1.f,
+				GetActorLocation().Z,
+				bIsCrouched ? 1 : 0);
+		}
+	}
+#endif
+
+	return bVisible ? UAISense_Sight::EVisibilityResult::Visible : UAISense_Sight::EVisibilityResult::NotVisible;
 }
 
 void AExtractionPlayer::PostInitializeComponents()
@@ -148,6 +165,10 @@ void AExtractionPlayer::BeginPlay()
 
 void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+#if !UE_BUILD_SHIPPING
+	DebugLastCanBeSeenResult.Empty();
+#endif
+
 	if (IsValid(TraversalComponent))
 	{
 		TraversalComponent->OnTraversalStarted.RemoveAll(this);

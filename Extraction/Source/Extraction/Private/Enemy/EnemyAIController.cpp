@@ -15,6 +15,7 @@
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISenseConfig_Sight.h"
 #include "Perception/AISenseConfig_Hearing.h"
+#include "AITypes.h"
 #include "ExtractionTypes.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
@@ -45,7 +46,8 @@ AEnemyAIController::AEnemyAIController()
 	SightConfig->SightRadius = 2500.f;
 	SightConfig->LoseSightRadius = 3000.f;
 	SightConfig->PeripheralVisionAngleDegrees = 110.f;
-	SightConfig->AutoSuccessRangeFromLastSeenLocation = 500.f;
+	// Disabled: engine auto-success returns Visible without calling CanBeSeenFrom, bypassing the head-safe body-point gate (head-only peeks would leak). Stickiness is owned by UEnemyAwarenessComponent's contact-hold grace, not engine auto-success.
+	SightConfig->AutoSuccessRangeFromLastSeenLocation = FAISystem::InvalidRange;
 	SightConfig->SetMaxAge(5.f);
 	SightConfig->DetectionByAffiliation.bDetectEnemies = true;
 	// Neutrals are perceivable: corpses drop to NoTeam on death so allies can discover bodies.
@@ -79,6 +81,9 @@ void AEnemyAIController::OnPossess(APawn* InPawn)
 
 	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
 
+	// Disabled: engine auto-success returns Visible without calling CanBeSeenFrom, bypassing the head-safe body-point gate (head-only peeks would leak). Stickiness is owned by UEnemyAwarenessComponent's contact-hold grace, not engine auto-success.
+	SightConfig->AutoSuccessRangeFromLastSeenLocation = FAISystem::InvalidRange;
+
 	// Override perception configs from DA if set
 	if (IsValid(DA))
 	{
@@ -87,7 +92,6 @@ void AEnemyAIController::OnPossess(APawn* InPawn)
 		// PeripheralVisionDeg is authored as a full FOV (the suspicion math halves it); the engine
 		// sight config expects a half-angle from forward, so halve it here to match.
 		SightConfig->PeripheralVisionAngleDegrees = DA->PeripheralVisionDeg * 0.5f;
-		SightConfig->AutoSuccessRangeFromLastSeenLocation = 500.f;
 		SightConfig->SetMaxAge(DA->SightMaxAge);
 		HearingConfig->HearingRange               = DA->HearingRange;
 		HearingConfig->SetMaxAge(DA->HearingMaxAge);

@@ -139,6 +139,11 @@ void UEnemyAwarenessComponent::HandleSightStimulus(AActor* Actor, const FAIStimu
 	if (Track.bSighted)
 		Track.LastStimulusLocation = Actor->GetActorLocation();
 
+	if (GetDetectionLogLevel() > 0)
+		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] SightStim tgt=%s success=%d state=%s stimLoc=(%.0f,%.0f,%.0f)"),
+			*GetNameSafe(Actor), Stimulus.WasSuccessfullySensed() ? 1 : 0, *UEnum::GetValueAsString(CurrentState),
+			Stimulus.StimulusLocation.X, Stimulus.StimulusLocation.Y, Stimulus.StimulusLocation.Z);
+
 	// Searching fast-track: re-acquire combat on clean sight (own perception only, not squad relay)
 	if (CurrentState == EEnemyAwarenessState::Searching && Stimulus.WasSuccessfullySensed() && IsActorAlive(Actor))
 	{
@@ -171,6 +176,10 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 {
 	if (!Stimulus.WasSuccessfullySensed()) return;
 	if (!IsValid(ArchetypeData)) return;
+
+	if (GetDetectionLogLevel() > 0)
+		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] HearStim actor=%s strength=%.2f state=%s"),
+			*Actor->GetName(), Stimulus.Strength, *UEnum::GetValueAsString(CurrentState));
 
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Actor);
 	Track.LastStimulusLocation = Stimulus.StimulusLocation;
@@ -226,6 +235,10 @@ void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVecto
 	if (!IsHostile(InstigatorPawn)) return;
 	if (!IsValid(ArchetypeData) || !ArchetypeData->bReactsToBeingShotAt) return;
 
+	if (GetDetectionLogLevel() > 0)
+		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] ShotAt instigator=%s state=%s"),
+			*InstigatorPawn->GetName(), *UEnum::GetValueAsString(CurrentState));
+
 	// Already in Combat — only refresh the track location; let the existing loop run.
 	if (CurrentState == EEnemyAwarenessState::Combat)
 	{
@@ -256,6 +269,9 @@ void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVecto
 	QueryParams.AddIgnoredActor(InstigatorPawn);
 
 	const bool bLOSClear = !GetWorld()->LineTraceTestByChannel(EyeLocation, InstigatorPawn->GetActorLocation(), ECC_Visibility, QueryParams);
+	if (GetDetectionLogLevel() > 0)
+		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] ShotAt %s LOS-to-center=%s"),
+			*InstigatorPawn->GetName(), bLOSClear ? TEXT("CLEAR->COMBAT") : TEXT("BLOCKED->SEARCHING"));
 	if (bLOSClear)
 	{
 		EnterCombat(InstigatorPawn, /*bConfirmedVisual=*/true);
@@ -675,6 +691,15 @@ float UEnemyAwarenessComponent::ComputeSightFillRate(const APawn* MyPawn, const 
 
 void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual)
 {
+	if (CurrentState != EEnemyAwarenessState::Combat && GetDetectionLogLevel() > 0)
+	{
+		const AAIController* DbgC = Cast<AAIController>(GetOwner());
+		const APawn* DbgP = DbgC ? DbgC->GetPawn() : nullptr;
+		const float DbgDist = (IsValid(DbgP) && IsValid(Target)) ? FVector::Dist(DbgP->GetActorLocation(), Target->GetActorLocation()) : -1.f;
+		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] DETECTED tgt=%s confirmedVisual=%d dist=%.0f fromState=%s"),
+			IsValid(Target) ? *Target->GetName() : TEXT("null"), bConfirmedVisual ? 1 : 0, DbgDist, *UEnum::GetValueAsString(CurrentState));
+	}
+
 	LastKnownLocation = IsValid(Target) ? Target->GetActorLocation() : LastKnownLocation;
 	bHadLOS = bConfirmedVisual;
 	TimeSinceLOSLost = 0.f;

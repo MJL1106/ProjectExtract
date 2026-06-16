@@ -18,3 +18,6 @@ bool IsEnemyBarkDebugEnabled();
 
 /** Returns the current enemy.AwarenessMeterLog cvar value (0=off, 1=on). */
 int32 GetAwarenessMeterLogLevel();
+
+/** Returns the current enemy.DetectionLog cvar value (0=off, 1=on). */
+int32 GetDetectionLogLevel();

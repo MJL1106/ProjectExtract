@@ -358,6 +358,11 @@ private:
 
 	FTimerHandle BleedoutTimerHandle;
 
+#if !UE_BUILD_SHIPPING
+	// Edge-triggered map: tracks the last logged CanBeSeenFrom result per observer to avoid log spam.
+	TMap<TWeakObjectPtr<const AActor>, bool> DebugLastCanBeSeenResult;
+#endif
+
 	// ---- Takedown state ----
 
 	/** Victim held during a montage-deferred takedown. Cleared after kill or montage abort. */

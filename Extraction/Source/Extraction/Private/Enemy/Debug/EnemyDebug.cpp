@@ -45,3 +45,14 @@ int32 GetAwarenessMeterLogLevel()
 {
 	return CVarAwarenessMeterLog.GetValueOnGameThread();
 }
+
+static TAutoConsoleVariable<int32> CVarDetectionLog(
+	TEXT("enemy.DetectionLog"),
+	1,
+	TEXT("Detection diagnostic log: 0=off, 1=log [DETECTDBG] sight verdict (CanBeSeenFrom), sight/hearing/shot-at stimuli, and combat entry. Default 1 (temporary diagnostic)."),
+	ECVF_Cheat);
+
+int32 GetDetectionLogLevel()
+{
+	return CVarDetectionLog.GetValueOnGameThread();
+}
