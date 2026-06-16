@@ -10,6 +10,7 @@
 #include "GameplayTagAssetInterface.h"
 #include "GameplayTagContainer.h"
 #include "GenericTeamAgentInterface.h"
+#include "Perception/AISightTargetInterface.h"
 #include "ExtractionPlayer.generated.h"
 
 class AWeaponBase;
@@ -37,7 +38,7 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPlayerDBNOStateChanged, bool, bN
  * damage routing, and the input handlers the kit doesn't provide.
  */
 UCLASS()
-class EXTRACTION_API AExtractionPlayer : public ACharacter, public IExtractionPlayerInterface, public IGameplayTagAssetInterface, public IGenericTeamAgentInterface
+class EXTRACTION_API AExtractionPlayer : public ACharacter, public IExtractionPlayerInterface, public IGameplayTagAssetInterface, public IGenericTeamAgentInterface, public IAISightTargetInterface
 {
 	GENERATED_BODY()
 
@@ -52,6 +53,10 @@ public:
 
 	// --- IGenericTeamAgentInterface ---
 	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(0); }
+
+	// --- IAISightTargetInterface ---
+	// Head bone excluded: only pelvis/chest/neck clear LOS for detection, matching the aim and fire-gate resolvers.
+	virtual UAISense_Sight::EVisibilityResult CanBeSeenFrom(const FCanBeSeenFromContext& Context, FVector& OutSeenLocation, int32& OutNumberOfLoSChecksPerformed, int32& OutNumberOfAsyncLosCheckRequested, float& OutSightStrength, int32* UserData = nullptr, const FOnPendingVisibilityQueryProcessedDelegate* Delegate = nullptr) override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;

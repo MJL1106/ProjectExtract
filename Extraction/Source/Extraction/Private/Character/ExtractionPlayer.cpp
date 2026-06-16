@@ -1,6 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionPlayer.h"
+#include "AI/AITargetingStatics.h"
+#include "Perception/AISightTargetInterface.h"
+#include "Perception/AISense_Sight.h"
 #include "ExtractionAnimInstance.h"
 #include "TraversalComponent.h"
 #include "Animation/AnimInstance.h"
@@ -82,6 +85,31 @@ AExtractionPlayer::AExtractionPlayer()
 void AExtractionPlayer::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
 {
 	TagContainer.AppendTags(OwnedTags);
+}
+
+// --- IAISightTargetInterface ---
+
+UAISense_Sight::EVisibilityResult AExtractionPlayer::CanBeSeenFrom(
+	const FCanBeSeenFromContext& Context,
+	FVector& OutSeenLocation,
+	int32& OutNumberOfLoSChecksPerformed,
+	int32& OutNumberOfAsyncLosCheckRequested,
+	float& OutSightStrength,
+	int32* UserData,
+	const FOnPendingVisibilityQueryProcessedDelegate* Delegate)
+{
+	OutNumberOfAsyncLosCheckRequested = 0;
+	OutNumberOfLoSChecksPerformed = 0;
+	OutSightStrength = 0.f;
+
+	if (AITargeting::GetVisibleBodyPoint(this, Context.ObserverLocation, Context.IgnoreActor, OutSeenLocation))
+	{
+		OutSightStrength = 1.f;
+		OutNumberOfLoSChecksPerformed = 1;
+		return UAISense_Sight::EVisibilityResult::Visible;
+	}
+
+	return UAISense_Sight::EVisibilityResult::NotVisible;
 }
 
 void AExtractionPlayer::PostInitializeComponents()

@@ -66,6 +66,7 @@ public:
 	virtual AActor* GetAIAimTarget() const override;
 	virtual float GetAIAimSpreadDegrees() const override;
 	virtual bool GetAIAimLocation(FVector& OutLocation) const override;
+	virtual FVector GetAimPointForTarget(const AActor* Target) const override;
 
 	// --- IGenericTeamAgentInterface ---
 	virtual FGenericTeamId GetGenericTeamId() const override;

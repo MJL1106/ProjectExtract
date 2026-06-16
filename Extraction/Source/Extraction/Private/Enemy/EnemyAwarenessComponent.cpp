@@ -1,6 +1,7 @@
 // UEnemyAwarenessComponent — awareness state ladder driven by perception stimuli and damage events.
 
 #include "EnemyAwarenessComponent.h"
+#include "AI/AITargetingStatics.h"
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
@@ -480,15 +481,12 @@ void UEnemyAwarenessComponent::UpdateCombat()
 
 		if (IsValid(MyPawn) && CombatTarget.IsValid())
 		{
-			// 1) FOV-gated geometric LOS: trace clear AND target inside view cone
+			// 1) FOV-gated geometric LOS: body-point clear (head excluded) AND target inside view cone
 			const FVector EyeLocation = MyPawn->GetPawnViewLocation();
 			const FVector TargetLoc = CombatTarget->GetActorLocation();
 
-			FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyContactLoS), false);
-			QueryParams.AddIgnoredActor(MyPawn);
-			QueryParams.AddIgnoredActor(CombatTarget.Get());
-
-			const bool bTraceClear = !GetWorld()->LineTraceTestByChannel(EyeLocation, TargetLoc, ECC_Visibility, QueryParams);
+			FVector VisiblePoint;
+			const bool bTraceClear = AITargeting::GetVisibleBodyPoint(CombatTarget.Get(), EyeLocation, MyPawn, VisiblePoint);
 			if (bTraceClear)
 			{
 				const FVector ToTarget = (TargetLoc - MyPawn->GetActorLocation()).GetSafeNormal();

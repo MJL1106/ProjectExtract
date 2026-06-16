@@ -391,6 +391,18 @@ bool AEnemyCharacter::GetAIAimLocation(FVector& OutLocation) const
 	return true;
 }
 
+FVector AEnemyCharacter::GetAimPointForTarget(const AActor* Target) const
+{
+	if (!IsValid(Target)) return FVector::ZeroVector;
+
+	FVector BodyPoint;
+	if (AITargeting::GetVisibleBodyPoint(Target, GetPawnViewLocation(), this, BodyPoint))
+		return BodyPoint;
+
+	// Nothing visible (fire-gate won't be open anyway) — aim toward centre mass, never the head.
+	return Target->GetActorLocation();
+}
+
 // --- Aim API ---
 
 void AEnemyCharacter::SetAimTarget(AActor* NewTarget)

@@ -1,6 +1,7 @@
 // BTService_EnemyCombat — validates target liveness; writes HasLineOfSight, TargetInRange.
 
 #include "BTService_EnemyCombat.h"
+#include "AI/AITargetingStatics.h"
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
@@ -34,18 +35,14 @@ void UBTService_EnemyCombat::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* 
 		return;
 	}
 
-	// LOS trace — eye height to target
+	// LOS check — body-point resolver excludes head so head-only peek never opens fire.
 	const FVector EyeLocation = Pawn->GetPawnViewLocation();
-	const FVector TargetLoc = Target->GetActorLocation();
-
-	FCollisionQueryParams QueryParams;
-	QueryParams.AddIgnoredActor(Pawn);
-	QueryParams.AddIgnoredActor(Target);
-
-	const bool bHasLOS = !OwnerComp.GetWorld()->LineTraceTestByChannel(EyeLocation, TargetLoc, ECC_Visibility, QueryParams);
+	FVector VisiblePoint;
+	const bool bHasLOS = AITargeting::GetVisibleBodyPoint(Target, EyeLocation, Pawn, VisiblePoint);
 	BB->SetValueAsBool(AEnemyAIController::BB_HasLineOfSight, bHasLOS);
 
 	// Range check against archetype EngageRangeMax
+	const FVector TargetLoc = Target->GetActorLocation();
 	bool bInRange = false;
 	if (const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn))
 	{
