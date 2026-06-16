@@ -45,6 +45,7 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::ExecuteTask(UBehaviorTreeComponent& Own
 	if (!BB || !Controller || !Pawn) return EBTNodeResult::Failed;
 
 	APatrolRoute* Route = Cast<APatrolRoute>(BB->GetValueAsObject(AEnemyAIController::BB_PatrolRoute));
+	Mem->CachedRoute = Route;
 
 	UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s ExecuteTask: route=%s points=%d"),
 		*Pawn->GetName(), Route ? *Route->GetName() : TEXT("NULL"),
@@ -67,6 +68,8 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::ExecuteTask(UBehaviorTreeComponent& Own
 
 	// Set patrol speed
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
+	Mem->CachedEnemy = Enemy;
+	Mem->CachedDA = IsValid(Enemy) ? Enemy->GetArchetypeData() : nullptr;
 	if (IsValid(Enemy))
 		Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Patrol);
 
@@ -112,21 +115,29 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::ExecuteTask(UBehaviorTreeComponent& Own
 		return EBTNodeResult::InProgress;
 	}
 
-	const FVector Goal = Route->GetWorldPoint(Mem->CurrentIndex);
-	const float StartDist = FVector::Dist(Pawn->GetActorLocation(), Goal);
+	// For Shuffle, pick a random starting point; Loop/PingPong always start at index 0.
+	// CurrentIndex was zeroed by placement-new above, so Loop/PingPong need no change here.
+	if (Route->PatrolOrder == EPatrolOrder::Shuffle && Route->NumPoints() > 1)
+		Mem->CurrentIndex = FMath::RandRange(0, Route->NumPoints() - 1);
+
+	// Resolve and check the starting goal (may be jittered for wander)
+	Mem->CurrentGoal = ResolveGoal(*Pawn, *Route, Mem->CurrentIndex);
+	const float StartDist = FVector::Dist(Pawn->GetActorLocation(), Mem->CurrentGoal);
+
 	if (StartDist <= 50.f)
 	{
-		// Already at the first point — start waiting
+		// Already at the starting point — enter wait immediately
 		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s already at P%d (dist %.0f) -> wait"),
 			*Pawn->GetName(), Mem->CurrentIndex, StartDist);
 		Mem->bWaiting = true;
+		RollWaitTarget(*Mem, *Route);
+		Mem->GuardBaseYaw = Pawn->GetActorRotation().Yaw;
+		Mem->GuardSweepTimer = 0.f;
+		Mem->GuardSweepSegment = 0;
 		return EBTNodeResult::InProgress;
 	}
 
-	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(Goal, 50.f, false, true, false, true);
-	UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s MoveTo P%d (%.0f,%.0f,%.0f) dist=%.0f result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
-		*Pawn->GetName(), Mem->CurrentIndex, Goal.X, Goal.Y, Goal.Z, StartDist, (int32)MoveResult);
-	Mem->bMoveIssued = true;
+	IssueMoveToCurrentGoal(*Controller, *Pawn, *Mem, *Route);
 	return EBTNodeResult::InProgress;
 }
 
@@ -139,7 +150,7 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
 	if (!BB || !Controller || !Pawn) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
-	APatrolRoute* Route = Cast<APatrolRoute>(BB->GetValueAsObject(AEnemyAIController::BB_PatrolRoute));
+	APatrolRoute* Route = Mem->CachedRoute.Get();
 	if (!IsValid(Route) || Route->NumPoints() == 0)
 	{
 		// ---- Guard post tick ----
@@ -152,15 +163,15 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 
 			Mem->ReturnElapsed += DeltaSeconds;
 
-			const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
+			const AEnemyCharacter* Enemy = Mem->CachedEnemy.Get();
 			FVector PostLocation = BB->GetValueAsVector(AEnemyAIController::BB_PostLocation);
 			if (PostLocation.IsZero() && IsValid(Enemy))
 				PostLocation = Enemy->GetGuardPostLocation();
 
-			const float DistToPost = FVector::Dist(Pawn->GetActorLocation(), PostLocation);
+			const float DistToPostSq = FVector::DistSquared(Pawn->GetActorLocation(), PostLocation);
 			const EPathFollowingStatus::Type Status = PF->GetStatus();
 
-			const bool bArrived = Status == EPathFollowingStatus::Idle || DistToPost <= GuardPostAcceptanceRadius;
+			const bool bArrived = Status == EPathFollowingStatus::Idle || DistToPostSq <= FMath::Square(GuardPostAcceptanceRadius);
 			const bool bTimedOut = Mem->ReturnElapsed >= GuardReturnTimeout;
 
 			if (bArrived || bTimedOut)
@@ -171,8 +182,8 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 				}
 				else
 				{
-					UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s reached post (dist=%.0f status=%d) -> scan baseYaw=%.0f"),
-						*Pawn->GetName(), DistToPost, (int32)Status, Mem->GuardBaseYaw);
+					UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s reached post (distSq=%.0f status=%d) -> scan baseYaw=%.0f"),
+						*Pawn->GetName(), DistToPostSq, (int32)Status, Mem->GuardBaseYaw);
 				}
 
 				const float BaseYaw = IsValid(Enemy) ? Enemy->GetInitialPostYaw() : Pawn->GetActorRotation().Yaw;
@@ -185,26 +196,12 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 		// ---- Scan phase ----
 		if (!Mem->bGuardScanActive) return;
 
-		const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
-		const UEnemyArchetypeData* DA = Enemy ? Enemy->GetArchetypeData() : nullptr;
+		const AEnemyCharacter* Enemy = Mem->CachedEnemy.Get();
+		const UEnemyArchetypeData* DA = Mem->CachedDA.Get();
 		if (!IsValid(DA) || DA->GuardScanYawRange <= 0.f) return;
 
-		constexpr int32 GuardSweepSegmentCount = 3;
-
-		Mem->GuardSweepTimer += DeltaSeconds;
-		if (Mem->GuardSweepTimer >= DA->GuardScanInterval)
-		{
-			Mem->GuardSweepTimer -= DA->GuardScanInterval;
-			Mem->GuardSweepSegment = (Mem->GuardSweepSegment + 1) % GuardSweepSegmentCount;
-		}
-
-		const float YawOffsets[] = { -DA->GuardScanYawRange * 0.5f, DA->GuardScanYawRange * 0.5f, 0.f };
-		const float TargetYaw = Mem->GuardBaseYaw + YawOffsets[FMath::Min(Mem->GuardSweepSegment, GuardSweepSegmentCount - 1)];
-
-		const FRotator CurrentRot = Pawn->GetActorRotation();
-		const FRotator TargetRot(CurrentRot.Pitch, TargetYaw, CurrentRot.Roll);
-		const FRotator NewRot = FMath::RInterpTo(CurrentRot, TargetRot, DeltaSeconds, DA->GuardScanTurnSpeed);
-		Controller->SetControlRotation(NewRot);
+		TickYawSweep(*Controller, *Pawn, *DA, Mem->GuardBaseYaw,
+			Mem->GuardSweepTimer, Mem->GuardSweepSegment, DeltaSeconds);
 		return;
 	}
 
@@ -213,18 +210,22 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	// Wait phase
 	if (Mem->bWaiting)
 	{
+		// Loiter glance: use guard sweep fields reused for routed loiter
+		const AEnemyCharacter* LoiterEnemy = Mem->CachedEnemy.Get();
+		const UEnemyArchetypeData* LoiterDA = Mem->CachedDA.Get();
+		if (IsValid(LoiterDA) && LoiterDA->GuardScanYawRange > 0.f)
+		{
+			TickYawSweep(*Controller, *Pawn, *LoiterDA, Mem->GuardBaseYaw,
+				Mem->GuardSweepTimer, Mem->GuardSweepSegment, DeltaSeconds);
+		}
+
 		Mem->WaitElapsed += DeltaSeconds;
-		if (Mem->WaitElapsed >= Route->WaitAtPointSeconds)
+		if (Mem->WaitElapsed >= Mem->WaitTarget)
 		{
 			Mem->bWaiting = false;
 			Mem->WaitElapsed = 0.f;
-			AdvanceIndex(*Mem, *Route);
-
-			const FVector NextGoal = Route->GetWorldPoint(Mem->CurrentIndex);
-			const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(NextGoal, 50.f, false, true, false, true);
-			UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s advance -> P%d (%.0f,%.0f,%.0f) result=%d"),
-				*Pawn->GetName(), Mem->CurrentIndex, NextGoal.X, NextGoal.Y, NextGoal.Z, (int32)MoveResult);
-			Mem->bMoveIssued = true;
+			PickNextIndex(*Mem, *Route);
+			IssueMoveToCurrentGoal(*Controller, *Pawn, *Mem, *Route);
 		}
 		return;
 	}
@@ -235,22 +236,30 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	UPathFollowingComponent* PF = Controller->GetPathFollowingComponent();
 	if (!PF) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
-	const FVector Goal = Route->GetWorldPoint(Mem->CurrentIndex);
-	const float DistToGoal = FVector::Dist(Pawn->GetActorLocation(), Goal);
+	// Use the stored goal — not GetWorldPoint — so wander doesn't re-roll each tick
+	const float DistToGoalSq = FVector::DistSquared(Pawn->GetActorLocation(), Mem->CurrentGoal);
 
 	const EPathFollowingStatus::Type Status = PF->GetStatus();
 
 	if ((GFrameCounter % 30) == 0)
-		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s moving -> P%d status=%d (0=Idle 3=Moving) dist=%.0f vel=%.0f"),
-			*Pawn->GetName(), Mem->CurrentIndex, (int32)Status, DistToGoal, Pawn->GetVelocity().Size());
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s moving -> P%d status=%d (0=Idle 3=Moving) distSq=%.0f vel=%.0f"),
+			*Pawn->GetName(), Mem->CurrentIndex, (int32)Status, DistToGoalSq, Pawn->GetVelocity().Size());
 
-	if (Status == EPathFollowingStatus::Idle || DistToGoal <= 50.f)
+	if (Status == EPathFollowingStatus::Idle || DistToGoalSq <= FMath::Square(50.f))
 	{
-		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s reached/idle P%d status=%d dist=%.0f vel=%.0f -> wait"),
-			*Pawn->GetName(), Mem->CurrentIndex, (int32)Status, DistToGoal, Pawn->GetVelocity().Size());
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s reached/idle P%d status=%d distSq=%.0f vel=%.0f -> wait"),
+			*Pawn->GetName(), Mem->CurrentIndex, (int32)Status, DistToGoalSq, Pawn->GetVelocity().Size());
 		Mem->bMoveIssued = false;
 		Mem->bWaiting = true;
 		Mem->WaitElapsed = 0.f;
+
+		// Roll randomised wait duration
+		RollWaitTarget(*Mem, *Route);
+
+		// Capture current yaw as base for loiter glance; reset sweep state
+		Mem->GuardBaseYaw = Pawn->GetActorRotation().Yaw;
+		Mem->GuardSweepTimer = 0.f;
+		Mem->GuardSweepSegment = 0;
 	}
 }
 
@@ -265,25 +274,117 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::AbortTask(UBehaviorTreeComponent& Owner
 	return EBTNodeResult::Aborted;
 }
 
-void UBTTask_EnemyPatrol::AdvanceIndex(FPatrolMemory& Mem, const APatrolRoute& Route) const
+void UBTTask_EnemyPatrol::PickNextIndex(FPatrolMemory& Mem, const APatrolRoute& Route) const
 {
 	const int32 Num = Route.NumPoints();
 	if (Num <= 1) return;
 
-	if (Route.bLoop)
+	switch (Route.PatrolOrder)
 	{
+	case EPatrolOrder::Loop:
 		Mem.CurrentIndex = (Mem.CurrentIndex + 1) % Num;
-	}
-	else
-	{
-		// Ping-pong
+		break;
+
+	case EPatrolOrder::PingPong:
 		Mem.CurrentIndex += Mem.Direction;
 		if (Mem.CurrentIndex >= Num - 1) { Mem.CurrentIndex = Num - 1; Mem.Direction = -1; }
 		else if (Mem.CurrentIndex <= 0)  { Mem.CurrentIndex = 0;       Mem.Direction =  1; }
+		break;
+
+	case EPatrolOrder::Shuffle:
+	{
+		if (Num > 32)
+		{
+			// Above 32 points: pure-random excluding current (no mask — would overflow uint32)
+			int32 Next = FMath::RandRange(0, Num - 2);
+			if (Next >= Mem.CurrentIndex) ++Next;
+			Mem.CurrentIndex = Next;
+			break;
+		}
+
+		// Mark current as visited
+		Mem.VisitedMask |= (1u << Mem.CurrentIndex);
+
+		// Build the set of not-yet-visited indices (current already excluded via mask)
+		// If the mask covers everything, reset it — but keep current excluded for this draw
+		const uint32 FullMask = (Num < 32) ? ((1u << Num) - 1u) : 0xFFFFFFFFu;
+		if ((Mem.VisitedMask & FullMask) == FullMask)
+			Mem.VisitedMask = (1u << Mem.CurrentIndex);  // reset, keep current excluded
+
+		// Collect candidate indices into a fixed-size stack buffer
+		int32 Candidates[32];
+		int32 CandidateCount = 0;
+		for (int32 i = 0; i < Num; ++i)
+		{
+			if (!(Mem.VisitedMask & (1u << i)))
+				Candidates[CandidateCount++] = i;
+		}
+
+		if (CandidateCount > 0)
+			Mem.CurrentIndex = Candidates[FMath::RandRange(0, CandidateCount - 1)];
+		break;
 	}
+	}
+}
+
+FVector UBTTask_EnemyPatrol::ResolveGoal(const APawn& Pawn, const APatrolRoute& Route, int32 Index) const
+{
+	const FVector Centre = Route.GetWorldPoint(Index);
+	if (Route.WanderRadius <= 0.f) return Centre;
+
+	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(Pawn.GetWorld());
+	if (!NavSys) return Centre;
+
+	FNavLocation NavLoc;
+	if (NavSys->GetRandomReachablePointInRadius(Centre, Route.WanderRadius, NavLoc))
+		return NavLoc.Location;
+
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s WanderRadius %.0f: no reachable point near P%d -> using exact point"),
+		*Pawn.GetName(), Route.WanderRadius, Index);
+	return Centre;
+}
+
+void UBTTask_EnemyPatrol::IssueMoveToCurrentGoal(
+	AAIController& Controller, const APawn& Pawn, FPatrolMemory& Mem, const APatrolRoute& Route) const
+{
+	Mem.CurrentGoal = ResolveGoal(Pawn, Route, Mem.CurrentIndex);
+	const EPathFollowingRequestResult::Type Result =
+		Controller.MoveToLocation(Mem.CurrentGoal, 50.f, false, true, false, true);
+	Mem.bMoveIssued = true;
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[PATROL] %s MoveTo P%d (%.0f,%.0f,%.0f) result=%d (0=Failed 1=AlreadyAtGoal 2=RequestSuccessful)"),
+		*Pawn.GetName(), Mem.CurrentIndex, Mem.CurrentGoal.X, Mem.CurrentGoal.Y, Mem.CurrentGoal.Z, (int32)Result);
+}
+
+void UBTTask_EnemyPatrol::RollWaitTarget(FPatrolMemory& Mem, const APatrolRoute& Route) const
+{
+	if (Route.WaitAtPointMaxSeconds > Route.WaitAtPointSeconds)
+		Mem.WaitTarget = FMath::RandRange(Route.WaitAtPointSeconds, Route.WaitAtPointMaxSeconds);
+	else
+		Mem.WaitTarget = Route.WaitAtPointSeconds;
+}
+
+void UBTTask_EnemyPatrol::TickYawSweep(AAIController& Controller, const APawn& Pawn,
+	const UEnemyArchetypeData& DA, float BaseYaw, float& Timer, int32& Segment, float DeltaSeconds) const
+{
+	constexpr int32 GuardSweepSegmentCount = 3;
+
+	Timer += DeltaSeconds;
+	if (Timer >= DA.GuardScanInterval)
+	{
+		Timer -= DA.GuardScanInterval;
+		Segment = (Segment + 1) % GuardSweepSegmentCount;
+	}
+
+	const float YawOffsets[] = { -DA.GuardScanYawRange * 0.5f, DA.GuardScanYawRange * 0.5f, 0.f };
+	const float TargetYaw = BaseYaw + YawOffsets[FMath::Min(Segment, GuardSweepSegmentCount - 1)];
+
+	const FRotator CurrentRot = Pawn.GetActorRotation();
+	const FRotator TargetRot(CurrentRot.Pitch, TargetYaw, CurrentRot.Roll);
+	const FRotator NewRot = FMath::RInterpTo(CurrentRot, TargetRot, DeltaSeconds, DA.GuardScanTurnSpeed);
+	Controller.SetControlRotation(NewRot);
 }
 
 FString UBTTask_EnemyPatrol::GetStaticDescription() const
 {
-	return TEXT("Walk patrol route from BB_PatrolRoute (loop/ping-pong). Route-less: return to guard post then sweep.");
+	return TEXT("Walk patrol route from BB_PatrolRoute (loop/ping-pong/shuffle, wander radius, randomised wait, loiter glance). Route-less: return to guard post then sweep.");
 }
