@@ -581,7 +581,13 @@ void AEnemyCharacter::ApplyArchetypeData()
 		ShieldComponent = NewObject<UEnemyShieldComponent>(this, UEnemyShieldComponent::StaticClass());
 		ShieldComponent->RegisterComponent();
 		if (USkeletalMeshComponent* MeshComp = GetMesh())
-			ShieldComponent->AttachToComponent(MeshComp, FAttachmentTransformRules::KeepRelativeTransform);
+		{
+			if (ArchetypeData->ShieldAttachSocket != NAME_None && MeshComp->DoesSocketExist(ArchetypeData->ShieldAttachSocket))
+				ShieldComponent->AttachToComponent(MeshComp, FAttachmentTransformRules::SnapToTargetIncludingScale, ArchetypeData->ShieldAttachSocket);
+			else
+				ShieldComponent->AttachToComponent(MeshComp, FAttachmentTransformRules::KeepRelativeTransform);
+			ShieldComponent->SetRelativeTransform(ArchetypeData->ShieldRelativeTransform);
+		}
 		ShieldComponent->InitFromArchetype(ArchetypeData);
 	}
 

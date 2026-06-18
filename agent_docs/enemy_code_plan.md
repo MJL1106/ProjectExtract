@@ -11,7 +11,7 @@
 | Phase | Scope | C++ | Editor wiring | Playtest |
 |---|---|---|---|---|
 | 1 | Skeleton — Grunt (character, controller, archetype DA, perception, base BT, teams, weapon decouple) | ✅ 2026-06-09 | ✅ 2026-06-15 | ✅ 2026-06-15 |
-| 2 | Awareness ladder (suspicion, noise, global alert, bodies, takedown, barks v1) | ✅ 2026-06-09 | ⏳ handed off | 🟡 body discovery ✅ 2026-06-16 (rest ❌) |
+| 2 | Awareness ladder (suspicion, noise, global alert, bodies, takedown, barks v1) | ✅ 2026-06-09 | ✅ 2026-06-16 | ✅ 2026-06-16 |
 | 3 | Roster (7 archetypes, bolt-on components, grenade, subtrees) | ✅ 2026-06-10 | ✅ 2026-06-10 (meshes manual) | ❌ |
 | 4 | Morale & suppression (+ hit reacts, ragdoll) | ✅ 2026-06-10 | ✅ 2026-06-10 (montages manual) | ❌ |
 | 5 | Squad baseline (coordinator, shared sightings, flanker, focus-fire, threat targeting) | ✅ 2026-06-10 | ✅ 2026-06-10 (SquadId placement = user) | ❌ |

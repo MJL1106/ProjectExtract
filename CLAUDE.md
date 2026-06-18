@@ -186,6 +186,18 @@ The custom subagents in `.claude/agents/` (Opus 4.8 (1M context) / Sonnet 4.6) a
 
 ---
 
+## Code orientation — query the graph before exploring
+
+A persistent `code-review-graph` knowledge graph of the repo is built and kept current by the SessionStart/PostToolUse hooks. To find where code lives or how systems connect, query it FIRST — don't fan out exploration:
+- `mcp__code-review-graph__semantic_search_nodes_tool` — natural-language "where is the code that does X"
+- `mcp__code-review-graph__get_architecture_overview_tool` — high-level map
+- `mcp__code-review-graph__get_minimal_context_tool` — minimum files for a task
+- `mcp__code-review-graph__query_graph_tool` / `traverse_graph_tool` — callers/callees, impact
+
+Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a custom agent only when the graph can't answer.
+
+---
+
 ## Project-Specific Notes
 
 - **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, MCP :8088 — `execute_python_code`, `manage_skills`, `manage_asset`) + **UnrealClaude** (MCP :3000 — inline viewport screenshots, gimbal-free actor move/rotate). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). To get it done autonomously, **dispatch `ue5-inengine-agent`** (via the `inengine-agent` skill) — it drives the editor MCP itself with all the tooling/skill/doc pointers pre-loaded. Alternatively hand off to a human via `inengine-checklist` (small) / `inengine-prompt` (large) in plain English. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. **NeoStack (:9315) is the fallback when VibeUE/UnrealClaude lack the capability — especially in-engine AI systems: Behavior Trees, Blackboards, EQS, and AI Blueprint wiring (VibeUE has no BT/Blackboard skill).** Drive it via the `neostack-loop` / `neostack-blueprint` skills.

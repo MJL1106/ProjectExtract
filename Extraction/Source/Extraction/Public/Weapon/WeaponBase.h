@@ -130,6 +130,17 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Config")
 	TObjectPtr<UWeaponDataAsset> WeaponData;
 
+	/** Optional pre-assembled visual weapon actor (e.g. an Infima ..._Default_Example weapon BP).
+	 *  When set, this actor class is spawned and attached at the weapon root as the held visual,
+	 *  and the skeletal WeaponMesh is hidden. Leave null for weapons that use WeaponMesh directly
+	 *  (e.g. the player's kit weapons). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Visual")
+	TSubclassOf<AActor> ThirdPersonVisualActorClass;
+
+	/** Runtime instance of ThirdPersonVisualActorClass, spawned in BeginPlay. */
+	UPROPERTY(Transient)
+	TObjectPtr<AActor> SpawnedVisualActor;
+
 	/** When true, the weapon auto-reloads on empty (suitable for player UX).
 	 *  AI-controlled weapons should set this false so the BT task drives reload timing —
 	 *  the companion's reload-while-cover-returning flow needs BT control to avoid

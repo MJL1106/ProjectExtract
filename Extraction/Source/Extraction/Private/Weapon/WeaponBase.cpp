@@ -14,6 +14,7 @@
 #include "EnemyMoraleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/MeshComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/PlayerController.h"
@@ -107,6 +108,52 @@ void AWeaponBase::BeginPlay()
 	// (kit path not yet called KitSetAmmo), seed the magazine so CanFire() succeeds.
 	if (HasAuthority() && IsValid(WeaponData) && CurrentAmmo == 0)
 		InitializeAmmo();
+
+	// Spawn the pre-assembled visual weapon actor (e.g. Infima _Default_Example BP) if configured.
+	// The visual actor replaces the bare skeletal WeaponMesh for third-person display while
+	// WeaponMesh stays active as root + muzzle-socket source.
+	// Guards: need a valid class, a valid WeaponMesh to attach to, no existing visual (re-entrancy),
+	// and a valid world to spawn into.
+	if (ThirdPersonVisualActorClass && IsValid(WeaponMesh) && !IsValid(SpawnedVisualActor) && IsValid(GetWorld()))
+	{
+		FActorSpawnParameters SpawnParams;
+		SpawnParams.Owner = this;
+		SpawnParams.Instigator = GetInstigator();
+		SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+		SpawnedVisualActor = GetWorld()->SpawnActor<AActor>(ThirdPersonVisualActorClass, GetActorTransform(), SpawnParams);
+		if (IsValid(SpawnedVisualActor))
+		{
+			SpawnedVisualActor->AttachToComponent(WeaponMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			SpawnedVisualActor->SetActorTickEnabled(false);
+
+			// Disable collision on every primitive in the visual actor so it can't shove/block its owner.
+			TInlineComponentArray<UPrimitiveComponent*> Primitives;
+			SpawnedVisualActor->GetComponents(Primitives);
+			for (UPrimitiveComponent* Prim : Primitives)
+			{
+				if (IsValid(Prim))
+					Prim->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+			}
+
+			// Only hide the bare frame once the visual is confirmed attached.
+			// On attach failure the enemy keeps the skeletal mesh as a visible fallback.
+			if (SpawnedVisualActor->GetAttachParentActor() == this)
+			{
+				WeaponMesh->SetVisibility(false, false);
+			}
+			else
+			{
+				UE_LOG(LogExtraction, Warning, TEXT("%s: ThirdPersonVisualActor spawned but attach failed — keeping WeaponMesh visible"),
+					*GetName());
+			}
+		}
+		else
+		{
+			UE_LOG(LogExtraction, Warning, TEXT("%s: failed to spawn ThirdPersonVisualActor of class %s"),
+				*GetName(), *GetNameSafe(ThirdPersonVisualActorClass));
+		}
+	}
 }
 
 void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -120,6 +167,12 @@ void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 
 void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (IsValid(SpawnedVisualActor))
+	{
+		SpawnedVisualActor->Destroy();
+		SpawnedVisualActor = nullptr;
+	}
+
 	if (const UWorld* World = GetWorld())
 	{
 		FTimerManager& TM = World->GetTimerManager();

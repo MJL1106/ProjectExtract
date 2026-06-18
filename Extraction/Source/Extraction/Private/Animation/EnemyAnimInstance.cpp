@@ -38,6 +38,12 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 
 void UEnemyAnimInstance::NativeUninitializeAnimation()
 {
+	if (BoundFireWeapon.IsValid())
+	{
+		BoundFireWeapon->OnWeaponFired.RemoveDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
+		BoundFireWeapon.Reset();
+	}
+
 	if (IsValid(OwningEnemy))
 	{
 		OwningEnemy->OnHitReact.RemoveDynamic(this, &UEnemyAnimInstance::HandleHitReact);
@@ -105,6 +111,16 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	{
 		bIsFiring = false;
 		bIsReloading = false;
+	}
+
+	// Lazy bind/rebind per-shot delegate — weapon spawns after anim init, and may swap.
+	if (Weapon != BoundFireWeapon.Get())
+	{
+		if (BoundFireWeapon.IsValid())
+			BoundFireWeapon->OnWeaponFired.RemoveDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
+		if (IsValid(Weapon))
+			Weapon->OnWeaponFired.AddDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
+		BoundFireWeapon = Weapon;
 	}
 
 	bInCombat = false;
@@ -203,6 +219,17 @@ void UEnemyAnimInstance::PlayMeleeMontage(float PlayRate)
 }
 
 // --- Delegate Handlers ---
+
+void UEnemyAnimInstance::HandleWeaponFired()
+{
+	if (!bIsAlive) return;
+
+	// Sustained/auto fire already shows the loop montage — don't double up.
+	if (IsValid(FireMontage) && Montage_IsPlaying(FireMontage)) return;
+
+	if (IsValid(SingleFireMontage) && !Montage_IsPlaying(SingleFireMontage))
+		Montage_Play(SingleFireMontage);
+}
 
 void UEnemyAnimInstance::HandleHitReact(EHitRegion Region)
 {

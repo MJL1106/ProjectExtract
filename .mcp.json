@@ -1,5 +1,15 @@
 {
   "mcpServers": {
+    "code-review-graph": {
+      "command": "uvx",
+      "args": [
+        "--with",
+        "sentence-transformers",
+        "code-review-graph",
+        "serve"
+      ],
+      "type": "stdio"
+    },
     "unreal-editor": {
       "type": "http",
       "url": "http://127.0.0.1:9315/mcp"
@@ -15,7 +25,7 @@
     },
     "VibeUE": {
       "type": "http",
-      "url": "http://127.0.0.1:8089/mcp"
+      "url": "http://127.0.0.1:8088/mcp"
     }
   }
 }

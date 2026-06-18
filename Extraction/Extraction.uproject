@@ -29,7 +29,8 @@
 				"Win64",
 				"Mac",
 				"Linux"
-			]
+			],
+			"MarketplaceURL": "com.epicgames.launcher://ue/Fab/product/b4f03b65-7d8b-47f3-aeab-a23284295242"
 		},
 		{
 			"Name": "AnimationWarping",
@@ -41,20 +42,15 @@
 		},
 		{
 			"Name": "VibeUE",
-			"Enabled": true,
-			"SupportedTargetPlatforms": [
-				"Win64",
-				"Mac",
-				"Linux"
-			]
+			"Enabled": true
 		},
 		{
 			"Name": "UnrealClaude",
 			"Enabled": true,
 			"SupportedTargetPlatforms": [
 				"Win64",
-				"Mac",
-				"Linux"
+				"Linux",
+				"Mac"
 			]
 		}
 	]

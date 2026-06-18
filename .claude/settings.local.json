@@ -26,15 +26,11 @@
       "Read(//c/Users/matth/Downloads/**)",
       "Bash(python -c \"import reportlab; print\\(f'reportlab {reportlab.Version}'\\)\")",
       "Bash(python \"C:/Users/matth/Documents/Github/ProjectExtract/agent_docs/_md_to_pdf.py\")",
-      "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
       "Bash(python -c \"import reportlab; print\\('reportlab', reportlab.__version__\\)\")",
       "Bash(python \"C:/Users/matth/Documents/Github/ProjectExtract/generate_briefing_pdf.py\")",
       "Bash(mkdir -p /c/Users/matth/Documents/Github/ProjectExtract/.claude/agents)",
       "Bash(cp /c/Users/matth/Documents/Github/pebble/.claude/agents/ue5-*.md /c/Users/matth/Documents/Github/ProjectExtract/.claude/agents/)",
-      "mcp__plugin_context-mode_context-mode__ctx_search",
-      "mcp__plugin_context-mode_context-mode__ctx_execute_file",
       "WebSearch",
-      "mcp__plugin_context-mode_context-mode__ctx_execute",
       "Read(//c/Program Files/Epic Games/UE_5.7/Engine/Source/Runtime/AIModule/Private/BehaviorTree/**)",
       "Read(//c/Program Files/Epic Games/UE_5.7/Engine/Source/Runtime/AIModule/**)",
       "Bash(grep -rn \"DrawDebugHelpers\" Extraction/Source/Extraction/Public/Extraction.h Extraction/Source/Extraction/Public/Character/ExtractionPlayer.h Extraction/Source/Extraction/Public/Character/ExtractionCharacter.h)",
@@ -52,15 +48,17 @@
       "Read(//c/Users/matth/.claude/plans/**)",
       "Bash(tee /tmp/ue5_build.log)",
       "Bash(echo \"EXIT:$?\")",
-      "Bash(tee /tmp/ue5_build2.log)"
+      "Bash(tee /tmp/ue5_build2.log)",
+      "mcp__unreal-editor__execute_script",
+      "mcp__unrealclaude__unreal_blueprint_query"
     ]
   },
+  "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "sequential-thinking",
     "code-review-graph",
     "unrealclaude",
     "VibeUE",
     "unreal-editor"
-  ],
-  "enableAllProjectMcpServers": true
+  ]
 }

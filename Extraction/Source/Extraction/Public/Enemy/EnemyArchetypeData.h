@@ -278,6 +278,14 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield")
 	TSoftObjectPtr<UStaticMesh> ShieldMesh;
 
+	/** Bone/socket on the character mesh to attach the shield to (e.g. left-forearm bone). NAME_None = attach at mesh root (legacy). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield")
+	FName ShieldAttachSocket = NAME_None;
+
+	/** Relative offset, rotation, and scale of the shield from the attach socket. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield")
+	FTransform ShieldRelativeTransform = FTransform::Identity;
+
 	// --- Grenadier (Phase 3) ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier")

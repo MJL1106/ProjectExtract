@@ -8,6 +8,7 @@
 #include "EnemyAnimInstance.generated.h"
 
 class AEnemyCharacter;
+class AWeaponBase;
 class UCharacterMovementComponent;
 class UHealthComponent;
 class UAnimMontage;
@@ -125,6 +126,11 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Montages")
 	TObjectPtr<UAnimMontage> TakedownReactionMontage;
 
+	// Single-shot fire montage — plays via OnWeaponFired delegate for weapons whose fire
+	// duration is too short for the loop-montage rising-edge to catch (snipers, shotguns).
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation|Montages")
+	TObjectPtr<UAnimMontage> SingleFireMontage;
+
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Montages")
 	FName FireMontageLoopSection = TEXT("Default");
 
@@ -143,6 +149,14 @@ private:
 
 	UFUNCTION()
 	void HandleTakedown(AActor* Instigator);
+
+	// --- Per-shot delegate for single-fire weapons (sniper, shotgun) ---
+
+	UFUNCTION()
+	void HandleWeaponFired();
+
+	UPROPERTY(Transient)
+	TWeakObjectPtr<AWeaponBase> BoundFireWeapon;
 
 	// --- Auto-trigger tracking ---
 
