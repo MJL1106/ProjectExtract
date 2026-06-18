@@ -248,6 +248,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Data")
 	TObjectPtr<UEnemyArchetypeData> ArchetypeData;
 
+	// When true, this enemy detects by sight only (ignores hearing) and neither raises nor reacts to
+	// the global alert. For isolating test-gym encounters; leave false in real gameplay.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Testing")
+	bool bIsolatedEncounter = false;
+
+	bool IsIsolatedEncounter() const { return bIsolatedEncounter; }
+
 	/** Designer-assigned squad identifier. Enemies with the same SquadId share sightings and coordinate.
 	 *  NAME_None = squadless (radius-based morale fallback, no coordination). */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Enemy|Squad")

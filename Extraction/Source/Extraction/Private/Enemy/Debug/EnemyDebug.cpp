@@ -56,3 +56,25 @@ int32 GetDetectionLogLevel()
 {
 	return CVarDetectionLog.GetValueOnGameThread();
 }
+
+static TAutoConsoleVariable<int32> CVarSightDiag(
+	TEXT("enemy.SightDiag"),
+	0,
+	TEXT("If >0, logs a per-enemy sight-gate diagnostic for the local player (dist/cone/LOS/sighted) while not in Combat."),
+	ECVF_Cheat);
+
+int32 GetSightDiagLevel()
+{
+	return CVarSightDiag.GetValueOnGameThread();
+}
+
+static TAutoConsoleVariable<FString> CVarSightDiagFilter(
+	TEXT("enemy.SightDiagFilter"),
+	TEXT(""),
+	TEXT("Substring filter for [SIGHTDIAG] output. Only enemies whose pawn label contains this string (case-insensitive) are logged. Empty = log all."),
+	ECVF_Cheat);
+
+FString GetSightDiagFilter()
+{
+	return CVarSightDiagFilter.GetValueOnGameThread();
+}

@@ -21,6 +21,7 @@
 #include "GenericTeamAgentInterface.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Controller.h"
+#include "GameFramework/PlayerController.h"
 #include "Components/CapsuleComponent.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
@@ -62,7 +63,7 @@ void UEnemyAwarenessComponent::Initialize(UBlackboardComponent* InBB, const UEne
 	{
 		Dir->OnGlobalAlertChanged.AddUniqueDynamic(this, &UEnemyAwarenessComponent::HandleGlobalAlertChanged);
 
-		if (Dir->GetAlertLevel() == EGlobalAlertLevel::Loud && CurrentState == EEnemyAwarenessState::Unaware)
+		if (!IsOwnerIsolatedEncounter() && Dir->GetAlertLevel() == EGlobalAlertLevel::Loud && CurrentState == EEnemyAwarenessState::Unaware)
 		{
 			const AAIController* MyController = Cast<AAIController>(GetOwner());
 			const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
@@ -196,6 +197,7 @@ void UEnemyAwarenessComponent::HandleSightStimulus(AActor* Actor, const FAIStimu
 
 void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus)
 {
+	if (IsOwnerIsolatedEncounter()) return;
 	if (!Stimulus.WasSuccessfullySensed()) return;
 	if (!IsValid(ArchetypeData)) return;
 
@@ -424,77 +426,87 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 				}
 
 				DrawDebugString(World, HeadLocation, Tag, nullptr, FColor::Cyan, UpdateInterval, true);
+			}
+		}
+	}
+#endif
 
-				if (DebugLevel >= 2)
+	// --- Sight-gate diagnostic (enemy.SightDiag) ---
+	if (GetSightDiagLevel() > 0)
+	{
+		SightDiagAccum += UpdateInterval;
+		if (SightDiagAccum >= 0.5f)
+		{
+			SightDiagAccum = 0.f;
+
+			if (CurrentState != EEnemyAwarenessState::Combat)
+			{
+				const AAIController* DiagController = Cast<AAIController>(GetOwner());
+				const APawn* DiagPawn = DiagController ? DiagController->GetPawn() : nullptr;
+				if (IsValid(DiagPawn) && IsValid(ArchetypeData))
 				{
-					const FVector PawnLoc = MyChar->GetActorLocation();
-					// Eye location at capsule half-height (horizontal cone origin)
-					const FVector EyeLoc = PawnLoc + FVector(0.f, 0.f, HalfHeight);
-					const FVector ForwardDir = MyChar->GetActorForwardVector();
-
-					// --- Vision cone (horizontal wedge) ---
-					if (IsValid(ArchetypeData))
+					FString DiagName;
+#if WITH_EDITOR
+					DiagName = DiagPawn->GetActorLabel();
+#else
+					DiagName = GetNameSafe(DiagPawn);
+#endif
+					const FString DiagFilter = GetSightDiagFilter();
+					if (DiagFilter.IsEmpty() || DiagName.Contains(DiagFilter, ESearchCase::IgnoreCase))
 					{
-						const float HalfFOVRad = FMath::DegreesToRadians(ArchetypeData->PeripheralVisionDeg * 0.5f);
-						// DrawDebugCone expects half-angle; draw 16 segments, flat (no vertical spread)
-						DrawDebugCone(World, EyeLoc, ForwardDir, ArchetypeData->SightRadius,
-							HalfFOVRad, 0.f, 16, FColor::Yellow, false, UpdateInterval, 0);
-
-						// Lose-sight ring (faint circle)
-						DrawDebugCone(World, EyeLoc, ForwardDir, ArchetypeData->LoseSightRadius,
-							HalfFOVRad, 0.f, 16, FColor(128, 128, 0), false, UpdateInterval, 0);
-					}
-
-					// --- Combat target line ---
-					AActor* Target = CombatTarget.Get();
-					if (IsValid(Target))
-					{
-						FColor LineColor;
-						if (CurrentState == EEnemyAwarenessState::Combat)
+						APawn* PlayerPawn = nullptr;
+						if (UWorld* W = GetWorld())
 						{
-							// Green = confirmed LOS, yellow = contact-hold signal active, red = grace counting down
-							if (bHadLOS)
-								LineColor = FColor::Green;
-							else if (TimeSinceLOSLost < (IsValid(ArchetypeData) ? ArchetypeData->LostContactGrace * 0.5f : 2.f))
-								LineColor = FColor::Yellow;
-							else
-								LineColor = FColor::Red;
-						}
-						else
-						{
-							// Stale reference outside Combat — neutral grey
-							LineColor = FColor(160, 160, 160);
+							if (APlayerController* PC = W->GetFirstPlayerController())
+								PlayerPawn = PC->GetPawn();
 						}
 
-						DrawDebugLine(World, EyeLoc, Target->GetActorLocation(), LineColor, false, UpdateInterval, 0, 2.f);
-					}
+						if (IsValid(PlayerPawn))
+						{
+							const FVector MyLoc = DiagPawn->GetActorLocation();
+							const FVector PlayerLoc = PlayerPawn->GetActorLocation();
+							const float Dist = FVector::Dist(MyLoc, PlayerLoc);
 
-					// --- Markers ---
-					// LastKnownLocation (show in Searching or Combat)
-					if (CurrentState == EEnemyAwarenessState::Searching || CurrentState == EEnemyAwarenessState::Combat)
-					{
-						if (!LastKnownLocation.IsZero())
-							DrawDebugSphere(World, LastKnownLocation, 20.f, 8, FColor::Orange, false, UpdateInterval, 0);
-					}
+							if (Dist <= ArchetypeData->LoseSightRadius)
+							{
+								const FVector Eye = DiagPawn->GetPawnViewLocation();
 
-					// InvestigateLocation — read from BB
-					const UBlackboardComponent* BB = BlackboardComp.Get();
-					if (IsValid(BB))
-					{
-						const FVector InvLoc = BB->GetValueAsVector(AEnemyAIController::BB_InvestigateLocation);
-						if (!InvLoc.IsZero())
-							DrawDebugSphere(World, InvLoc, 20.f, 8, FColor::Purple, false, UpdateInterval, 0);
+								// Cone check
+								const FVector ToTarget = (PlayerLoc - MyLoc).GetSafeNormal();
+								const float Dot = FVector::DotProduct(DiagPawn->GetActorForwardVector(), ToTarget);
+								const float CosHalfFOV = FMath::Cos(FMath::DegreesToRadians(ArchetypeData->PeripheralVisionDeg * 0.5f));
+								const bool bInCone = Dot >= CosHalfFOV;
 
-						// Guard post marker
-						const FVector PostLoc = BB->GetValueAsVector(AEnemyAIController::BB_PostLocation);
-						if (!PostLoc.IsZero())
-							DrawDebugSphere(World, PostLoc + FVector(0.f, 0.f, 5.f), 15.f, 8, FColor::Cyan, false, UpdateInterval, 0);
+								// Body LOS (head-excluded — the detection gate)
+								FVector BodyPt;
+								const bool bBodyVisible = AITargeting::GetVisibleBodyPoint(PlayerPawn, Eye, DiagPawn, BodyPt);
+
+								// Head clear (contrast — proves head-exclusion is the cause when body blocked)
+								const FVector HeadLoc = AITargeting::GetSightLocation(PlayerPawn);
+								FCollisionQueryParams HeadTraceParams(SCENE_QUERY_STAT(SightDiagHead), false);
+								HeadTraceParams.AddIgnoredActor(DiagPawn);
+								HeadTraceParams.AddIgnoredActor(PlayerPawn);
+								const bool bHeadClear = !GetWorld()->LineTraceTestByChannel(Eye, HeadLoc, ECC_Visibility, HeadTraceParams);
+
+								// Engine sighted state from suspicion tracks
+								const FSuspicionTrack* Tr = SuspicionTracks.Find(PlayerPawn);
+								const bool bEngineSighted = Tr && Tr->bSighted;
+								const float Susp = Tr ? Tr->Suspicion : 0.f;
+
+								UE_LOG(LogTemp, Warning,
+									TEXT("[SIGHTDIAG] %s dist=%.0f inRange=%d inCone=%d(dot=%.2f cos=%.2f) bodyLOS=%d headClear=%d engineSighted=%d susp=%.0f state=%s"),
+									*DiagName, Dist,
+									(int32)(Dist <= ArchetypeData->SightRadius),
+									(int32)bInCone, Dot, CosHalfFOV,
+									(int32)bBodyVisible, (int32)bHeadClear, (int32)bEngineSighted,
+									Susp, *UEnum::GetValueAsString(CurrentState));
+							}
+						}
 					}
 				}
 			}
 		}
 	}
-#endif
 }
 
 void UEnemyAwarenessComponent::UpdateCombat()
@@ -544,12 +556,14 @@ void UEnemyAwarenessComponent::UpdateCombat()
 
 		if (IsValid(MyPawn) && CombatTarget.IsValid())
 		{
-			// 1) FOV-gated geometric LOS: body-point clear (head excluded) AND target inside view cone
+			// 1) FOV-gated geometric LOS: body-point clear AND target inside view cone
+			// Snipers include the head for a standing target (sniper+standing exception).
 			const FVector EyeLocation = MyPawn->GetPawnViewLocation();
 			const FVector TargetLoc = CombatTarget->GetActorLocation();
 
 			FVector VisiblePoint;
-			const bool bTraceClear = AITargeting::GetVisibleBodyPoint(CombatTarget.Get(), EyeLocation, MyPawn, VisiblePoint);
+			const bool bAllowHead = AITargeting::ShouldIncludeHeadForObserver(MyPawn, CombatTarget.Get());
+			const bool bTraceClear = AITargeting::GetVisibleBodyPoint(CombatTarget.Get(), EyeLocation, MyPawn, VisiblePoint, bAllowHead);
 			if (bTraceClear)
 			{
 				const FVector ToTarget = (TargetLoc - MyPawn->GetActorLocation()).GetSafeNormal();
@@ -797,6 +811,7 @@ void UEnemyAwarenessComponent::TransitionToSearching(bool bContactLost)
 void UEnemyAwarenessComponent::HandleGlobalAlertChanged(EGlobalAlertLevel OldLevel, EGlobalAlertLevel NewLevel)
 {
 	if (bStopped) return;
+	if (IsOwnerIsolatedEncounter()) return;
 	if (NewLevel != EGlobalAlertLevel::Loud) return;
 	if (CurrentState != EEnemyAwarenessState::Unaware) return;
 
@@ -829,10 +844,13 @@ void UEnemyAwarenessComponent::SetState(EEnemyAwarenessState NewState)
 	if (IsValid(BB))
 		BB->SetValueAsEnum(AEnemyAIController::BB_AwarenessState, static_cast<uint8>(CurrentState));
 
-	if (UEnemyDirectorSubsystem* Dir = Director.Get())
+	if (!IsOwnerIsolatedEncounter())
 	{
-		if (NewState == EEnemyAwarenessState::Combat) Dir->ReportEnemyCombat();
-		else if (NewState == EEnemyAwarenessState::Searching) Dir->ReportEnemySearching();
+		if (UEnemyDirectorSubsystem* Dir = Director.Get())
+		{
+			if (NewState == EEnemyAwarenessState::Combat) Dir->ReportEnemyCombat();
+			else if (NewState == EEnemyAwarenessState::Searching) Dir->ReportEnemySearching();
+		}
 	}
 
 	OnAwarenessStateChanged.Broadcast(OldState, NewState);
@@ -908,6 +926,13 @@ void UEnemyAwarenessComponent::ClearInvestigateBody()
 	if (AEnemyCharacter* Body = CurrentInvestigateBody.Get())
 		Body->DecrementInvestigators();
 	CurrentInvestigateBody.Reset();
+}
+
+bool UEnemyAwarenessComponent::IsOwnerIsolatedEncounter() const
+{
+	const AAIController* C = Cast<AAIController>(GetOwner());
+	const AEnemyCharacter* E = C ? Cast<AEnemyCharacter>(C->GetPawn()) : nullptr;
+	return E && E->IsIsolatedEncounter();
 }
 
 bool UEnemyAwarenessComponent::IsHostile(AActor* Actor) const

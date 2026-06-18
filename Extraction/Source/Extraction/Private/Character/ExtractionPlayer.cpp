@@ -103,7 +103,8 @@ UAISense_Sight::EVisibilityResult AExtractionPlayer::CanBeSeenFrom(
 	OutNumberOfLoSChecksPerformed = 1;
 	OutSightStrength = 0.f;
 
-	const bool bVisible = AITargeting::GetVisibleBodyPoint(this, Context.ObserverLocation, Context.IgnoreActor, OutSeenLocation);
+	const bool bAllowHead = AITargeting::ShouldIncludeHeadForObserver(Context.IgnoreActor, this);
+	const bool bVisible = AITargeting::GetVisibleBodyPoint(this, Context.ObserverLocation, Context.IgnoreActor, OutSeenLocation, bAllowHead);
 
 	if (bVisible)
 		OutSightStrength = 1.f;

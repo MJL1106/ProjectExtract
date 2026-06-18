@@ -35,10 +35,12 @@ void UBTService_EnemyCombat::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* 
 		return;
 	}
 
-	// LOS check — body-point resolver excludes head so head-only peek never opens fire.
+	// LOS check — body-point resolver excludes head so head-only peek never opens fire,
+	// except snipers vs a standing target (sniper+standing exception).
 	const FVector EyeLocation = Pawn->GetPawnViewLocation();
 	FVector VisiblePoint;
-	const bool bHasLOS = AITargeting::GetVisibleBodyPoint(Target, EyeLocation, Pawn, VisiblePoint);
+	const bool bAllowHead = AITargeting::ShouldIncludeHeadForObserver(Pawn, Target);
+	const bool bHasLOS = AITargeting::GetVisibleBodyPoint(Target, EyeLocation, Pawn, VisiblePoint, bAllowHead);
 	BB->SetValueAsBool(AEnemyAIController::BB_HasLineOfSight, bHasLOS);
 
 	// Range check against archetype EngageRangeMax

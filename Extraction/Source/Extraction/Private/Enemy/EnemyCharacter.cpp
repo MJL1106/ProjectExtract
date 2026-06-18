@@ -402,10 +402,12 @@ FVector AEnemyCharacter::GetAimPointForTarget(const AActor* Target) const
 	if (!IsValid(Target)) return FVector::ZeroVector;
 
 	FVector BodyPoint;
-	if (AITargeting::GetVisibleBodyPoint(Target, GetPawnViewLocation(), this, BodyPoint))
+	const bool bAllowHead = AITargeting::ShouldIncludeHeadForObserver(this, Target);
+	if (AITargeting::GetVisibleBodyPoint(Target, GetPawnViewLocation(), this, BodyPoint, bAllowHead))
 		return BodyPoint;
 
-	// Nothing visible (fire-gate won't be open anyway) — aim toward centre mass, never the head.
+	// Nothing visible (fire-gate won't be open anyway) — aim toward centre mass.
+	// Snipers may aim at a standing target's head when body is fully occluded (sniper+standing exception).
 	return Target->GetActorLocation();
 }
 

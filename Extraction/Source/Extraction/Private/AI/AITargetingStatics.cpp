@@ -1,6 +1,9 @@
 // AITargetingStatics — shared sight-location helper for companion and enemy AI.
 
 #include "AI/AITargetingStatics.h"
+#include "Enemy/EnemyCharacter.h"
+#include "Enemy/EnemyArchetypeData.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "GameFramework/Character.h"
 #include "GameFramework/Pawn.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -35,7 +38,7 @@ namespace AITargeting
 		return Target->GetActorLocation();
 	}
 
-	bool GetVisibleBodyPoint(const AActor* Target, const FVector& ObserverEye, const AActor* IgnoreActor, FVector& OutPoint)
+	bool GetVisibleBodyPoint(const AActor* Target, const FVector& ObserverEye, const AActor* IgnoreActor, FVector& OutPoint, bool bIncludeHead)
 	{
 		if (!IsValid(Target)) return false;
 
@@ -46,7 +49,7 @@ namespace AITargeting
 		QueryParams.AddIgnoredActor(Target);
 		if (IsValid(IgnoreActor)) QueryParams.AddIgnoredActor(IgnoreActor);
 
-		// Build the low→high candidate ladder (head and neck intentionally excluded —
+		// Build the low→high candidate ladder (head excluded by default —
 		// a head+neck peek stays undetected; only chest and below register).
 		// Actor centre is the guaranteed fallback when pelvis socket is missing.
 		TArray<FVector, TInlineAllocator<4>> Candidates;
@@ -68,6 +71,12 @@ namespace AITargeting
 
 			if (Mesh->DoesSocketExist(ChestBoneName))
 				Candidates.Add(Mesh->GetSocketLocation(ChestBoneName));
+
+			// Head as last-resort candidate — only when the caller explicitly opts in.
+			// Appended LAST so the existing low→high "return lowest visible" order is unchanged;
+			// the head only fires when pelvis and chest are both blocked.
+			if (bIncludeHead && Mesh->DoesSocketExist(HeadBoneName))
+				Candidates.Add(Mesh->GetSocketLocation(HeadBoneName));
 		}
 
 		for (const FVector& Candidate : Candidates)
@@ -84,5 +93,24 @@ namespace AITargeting
 		// Nothing visible — write a defined fallback so callers never read an uninitialised out-param.
 		OutPoint = Target->GetActorLocation();
 		return false;
+	}
+
+	bool ShouldIncludeHeadForObserver(const AActor* Observer, const AActor* Target)
+	{
+		if (!IsValid(Observer) || !IsValid(Target)) return false;
+
+		const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Observer);
+		if (!Enemy) return false;
+
+		const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+		if (!IsValid(DA) || !DA->bIsSniper) return false;
+
+		const ACharacter* TargetChar = Cast<ACharacter>(Target);
+		if (!TargetChar || TargetChar->bIsCrouched) return false;
+
+		const IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(Target);
+		if (PlayerIface && PlayerIface->GetIsProne()) return false;
+
+		return true;
 	}
 }

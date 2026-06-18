@@ -114,6 +114,9 @@ private:
 	UFUNCTION()
 	void HandleGlobalAlertChanged(EGlobalAlertLevel OldLevel, EGlobalAlertLevel NewLevel);
 
+	/** True when the controlled pawn has bIsolatedEncounter set (sight-only, no global alert). */
+	bool IsOwnerIsolatedEncounter() const;
+
 	bool IsHostile(AActor* Actor) const;
 	static bool IsActorAlive(const AActor* Actor);
 
@@ -181,4 +184,7 @@ private:
 	static constexpr float RecentDamageWindow = 4.f;
 
 	FTimerHandle UpdateTimerHandle;
+
+	// Throttle accumulator for the [SIGHTDIAG] log (enemy.SightDiag cvar)
+	float SightDiagAccum = 0.f;
 };

@@ -21,3 +21,12 @@ int32 GetAwarenessMeterLogLevel();
 
 /** Returns the current enemy.DetectionLog cvar value (0=off, 1=on). */
 int32 GetDetectionLogLevel();
+
+/** Returns the current enemy.SightDiag cvar value (0=off, 1=on).
+ *  When on, each enemy logs a per-tick sight-gate diagnostic against the local player pawn:
+ *  distance, in-range, in-cone, body-LOS, head-clear, engine-sighted, suspicion, and state. */
+int32 GetSightDiagLevel();
+
+/** Returns the current enemy.SightDiagFilter string (case-insensitive substring match on pawn label).
+ *  Empty = no filter (all enemies logged). */
+FString GetSightDiagFilter();
