@@ -597,7 +597,7 @@ bool UEnemySquad::IsEligibleForManeuver(const TWeakObjectPtr<AEnemyCharacter>& M
 
 	const UEnemyArchetypeData* DA = Member->GetArchetypeData();
 	if (!IsValid(DA)) return false;
-	if (DA->Archetype != EEnemyArchetype::Grunt) return false;
+	if (DA->Archetype != EEnemyArchetype::Grunt && DA->Archetype != EEnemyArchetype::Pistol) return false;
 
 	AEnemyAIController* AIC = Cast<AEnemyAIController>(Member->GetController());
 	if (!IsValid(AIC)) return false;

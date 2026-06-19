@@ -9,7 +9,6 @@
 #include "EnemyArchetypeData.h"
 #include "EnemyMoraleComponent.h"
 #include "SuppressionComponent.h"
-#include "EnemyShieldComponent.h"
 #include "EnemyGrenadierComponent.h"
 #include "EnemySniperTelegraphComponent.h"
 #include "SquadAuraComponent.h"
@@ -176,18 +175,6 @@ void FGameplayDebuggerCategory_Enemy::CollectData(APlayerController* OwnerPC, AA
 	{
 		switch (DA->Archetype)
 		{
-		case EEnemyArchetype::Shield:
-		{
-			UEnemyShieldComponent* Shield = Enemy->GetShieldComponent();
-			if (IsValid(Shield))
-			{
-				DataPack.ArchetypeExtra = FString::Printf(
-					TEXT("Shield: %s | HP: %.0f%%"),
-					Shield->IsShieldBroken() ? TEXT("BROKEN") : TEXT("UP"),
-					Shield->GetShieldHealthPercent() * 100.f);
-			}
-			break;
-		}
 		case EEnemyArchetype::Grenadier:
 		{
 			UEnemyGrenadierComponent* Gren = Enemy->GetGrenadierComponent();
@@ -222,6 +209,19 @@ void FGameplayDebuggerCategory_Enemy::CollectData(APlayerController* OwnerPC, AA
 				TEXT("Officer: Aura=%s | SquadAlive=%d"),
 				bAuraPresent ? TEXT("Active") : TEXT("None"),
 				SquadSize);
+			break;
+		}
+		case EEnemyArchetype::Pistol:
+			DataPack.ArchetypeExtra = TEXT("Pistol (grunt behaviour)");
+			break;
+		case EEnemyArchetype::Shotgun:
+		{
+			const UEnemyArchetypeData* ShotgunDA = Enemy->GetArchetypeData();
+			DataPack.ArchetypeExtra = FString::Printf(
+				TEXT("Shotgun: CommitRange=%.0f | HysteresisRange=%.0f | AbortHP=%.0f%%"),
+				ShotgunDA ? ShotgunDA->ShotgunCommitRange : 0.f,
+				ShotgunDA ? (ShotgunDA->ShotgunCommitRange + ShotgunDA->ShotgunCommitHysteresis) : 0.f,
+				ShotgunDA ? ShotgunDA->ShotgunRushAbortHealthFraction * 100.f : 0.f);
 			break;
 		}
 		default:

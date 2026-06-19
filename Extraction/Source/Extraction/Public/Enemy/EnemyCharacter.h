@@ -22,7 +22,6 @@ class UWidgetComponent;
 
 // Phase 3 bolt-on components — forward-declared; headers live in Enemy/Components/ (authored by slices B/C).
 class UEnemyArmourComponent;
-class UEnemyShieldComponent;
 class UEnemyGrenadierComponent;
 class USquadAuraComponent;
 class UEnemySniperTelegraphComponent;
@@ -128,9 +127,6 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
 	UEnemyArmourComponent* GetArmourComponent() const { return ArmourComponent.Get(); }
-
-	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
-	UEnemyShieldComponent* GetShieldComponent() const { return ShieldComponent.Get(); }
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
 	UEnemyGrenadierComponent* GetGrenadierComponent() const { return GrenadierComponent.Get(); }
@@ -347,9 +343,6 @@ private:
 	// Phase 3 — bolt-on components (conditionally created in ApplyArchetypeData)
 	UPROPERTY()
 	TObjectPtr<UEnemyArmourComponent> ArmourComponent;
-
-	UPROPERTY()
-	TObjectPtr<UEnemyShieldComponent> ShieldComponent;
 
 	UPROPERTY()
 	TObjectPtr<UEnemyGrenadierComponent> GrenadierComponent;

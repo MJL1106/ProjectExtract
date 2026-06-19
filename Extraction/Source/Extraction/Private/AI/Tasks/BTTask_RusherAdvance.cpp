@@ -72,7 +72,7 @@ void UBTTask_RusherAdvance::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 	const float DistSq = FVector::DistSquared(Pawn->GetActorLocation(), Target->GetActorLocation());
 	const float MeleeRangeSq = DA->MeleeRange * DA->MeleeRange;
 
-	if (DistSq <= MeleeRangeSq)
+	if (DistSq <= MeleeRangeSq && DA->bCanMelee)
 	{
 		// Stop firing while in melee range; attempt strike each tick (PerformMelee enforces cooldown)
 		AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
@@ -88,7 +88,7 @@ void UBTTask_RusherAdvance::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		return;
 	}
 
-	// Outside melee range — ensure firing is active while closing
+	// Outside melee range (or melee disabled) — ensure firing is active while closing
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
 	if (IsValid(Weapon))
 		Weapon->StartFiring();

@@ -18,7 +18,6 @@
 #include "ExtractionDamageType.h"
 #include "ExtractionTypes.h"
 #include "EnemyArmourComponent.h"
-#include "EnemyShieldComponent.h"
 #include "EnemyGrenadierComponent.h"
 #include "SquadAuraComponent.h"
 #include "EnemySniperTelegraphComponent.h"
@@ -385,7 +384,7 @@ float AEnemyCharacter::GetAIAimSpreadDegrees() const
 	if (IsValid(SuppressionComponent))
 		Spread += ArchetypeData->SuppressionSpreadPenaltyDeg * SuppressionComponent->GetSuppression01();
 
-	// Phase 3: squad aura narrows spread; extra spread from BT tasks (e.g. shield sidearm) widens it.
+	// Phase 3: squad aura narrows spread; extra spread from BT tasks widens it.
 	Spread *= CommandSpreadMultiplier;
 	Spread += ExtraSpreadDegrees;
 
@@ -587,21 +586,6 @@ void AEnemyCharacter::ApplyArchetypeData()
 		ArmourComponent->InitFromArchetype(ArchetypeData);
 	}
 
-	if (ArchetypeData->bHasShield && !ShieldComponent)
-	{
-		ShieldComponent = NewObject<UEnemyShieldComponent>(this, UEnemyShieldComponent::StaticClass());
-		ShieldComponent->RegisterComponent();
-		if (USkeletalMeshComponent* MeshComp = GetMesh())
-		{
-			if (ArchetypeData->ShieldAttachSocket != NAME_None && MeshComp->DoesSocketExist(ArchetypeData->ShieldAttachSocket))
-				ShieldComponent->AttachToComponent(MeshComp, FAttachmentTransformRules::SnapToTargetIncludingScale, ArchetypeData->ShieldAttachSocket);
-			else
-				ShieldComponent->AttachToComponent(MeshComp, FAttachmentTransformRules::KeepRelativeTransform);
-			ShieldComponent->SetRelativeTransform(ArchetypeData->ShieldRelativeTransform);
-		}
-		ShieldComponent->InitFromArchetype(ArchetypeData);
-	}
-
 	if (ArchetypeData->bIsGrenadier && !GrenadierComponent)
 	{
 		GrenadierComponent = NewObject<UEnemyGrenadierComponent>(this, UEnemyGrenadierComponent::StaticClass());
@@ -662,29 +646,6 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 
 	float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 
-	// Phase 3: route through shield first — shield may absorb the hit entirely.
-	UEnemyShieldComponent* Shield = ShieldComponent.Get();
-	if (IsValid(Shield) && !Shield->IsShieldBroken())
-	{
-		ActualDamage = Shield->ProcessIncomingDamage(ActualDamage, DamageEvent, DamageCauser);
-		// If the shield absorbed everything, still notify awareness but deal no health damage.
-		if (ActualDamage <= 0.f)
-		{
-			if (IsValid(EventInstigator))
-			{
-				LastDamageInstigator = EventInstigator;
-				LastDamageWorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
-
-				if (AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController()))
-				{
-					if (UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent())
-						Awareness->NotifyDamaged(EventInstigator);
-				}
-			}
-			return 0.f;
-		}
-	}
-
 	// Apply hitbox multiplier, then armour directional reduction.
 	float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent);
 
@@ -742,9 +703,6 @@ void AEnemyCharacter::HandleDeath()
 
 	if (UEnemySniperTelegraphComponent* Telegraph = SniperTelegraphComp.Get())
 		Telegraph->CancelTelegraph();
-
-	if (UEnemyShieldComponent* Shield = ShieldComponent.Get())
-		Shield->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 
 	if (IsValid(SuppressionComponent))
 		SuppressionComponent->DeactivateForDeath();

@@ -11,8 +11,6 @@ class AWeaponBase;
 class UBehaviorTree;
 class UBarkSetData;
 class AEnemyGrenadeProjectile;
-class UStaticMesh;
-
 UCLASS(BlueprintType)
 class EXTRACTION_API UEnemyArchetypeData : public UDataAsset
 {
@@ -253,38 +251,22 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Armour", meta = (ClampMin = "1"))
 	int32 ArmourPlateCount = 3;
 
-	// --- Shield (Phase 3 — Shield archetype) ---
+	// --- Shotgun (commit-to-rush gate) ---
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield")
-	bool bHasShield = false;
+	/** Distance (cm) within which the shotgunner commits to a rush at the target. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shotgun",
+		meta = (ClampMin = "0.0", ToolTip = "Distance (cm) at which the shotgunner commits to rushing the target."))
+	float ShotgunCommitRange = 800.f;
 
-	/** Hit points of the shield before it breaks. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield", meta = (ClampMin = "1.0"))
-	float ShieldHealth = 400.f;
+	/** Hysteresis band (cm) — the target must open distance past CommitRange + this before the rush drops back to hold. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shotgun",
+		meta = (ClampMin = "0.0", ToolTip = "Extra distance (cm) beyond CommitRange before the rush is cancelled (prevents flip-flopping at the boundary)."))
+	float ShotgunCommitHysteresis = 200.f;
 
-	/** Arc (degrees, centred on forward) inside which the shield blocks hits. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield", meta = (ClampMin = "0.0", ClampMax = "360.0"))
-	float ShieldBlockArcDeg = 150.f;
-
-	/** Extra aim spread (degrees) applied to the sidearm peeked around the shield. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield", meta = (ClampMin = "0.0"))
-	float ShieldSidearmSpreadDeg = 6.f;
-
-	/** Walk speed (cm/s) while advancing behind the shield. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield", meta = (ClampMin = "1.0"))
-	float ShieldAdvanceSpeed = 220.f;
-
-	/** Static mesh for the shield (soft ref — BP assigns; loaded on demand by the shield component). */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield")
-	TSoftObjectPtr<UStaticMesh> ShieldMesh;
-
-	/** Bone/socket on the character mesh to attach the shield to (e.g. left-forearm bone). NAME_None = attach at mesh root (legacy). */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield")
-	FName ShieldAttachSocket = NAME_None;
-
-	/** Relative offset, rotation, and scale of the shield from the attach socket. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shield")
-	FTransform ShieldRelativeTransform = FTransform::Identity;
+	/** Health fraction below which the shotgunner breaks off a rush mid-charge and retreats to cover. 0 = never abort. Must be < 1.0 or the health gate is always tripped and the enemy can never rush. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Shotgun",
+		meta = (ClampMin = "0.0", ClampMax = "0.95", ToolTip = "Health fraction (0-0.95) below which the shotgunner aborts a rush and returns to cover. 0 disables the health abort."))
+	float ShotgunRushAbortHealthFraction = 0.35f;
 
 	// --- Grenadier (Phase 3) ---
 
@@ -405,7 +387,7 @@ public:
 
 	// --- Morale (Phase 4) ---
 
-	/** If true, morale events are ignored and the enemy stays Confident permanently (rusher, shield-up). */
+	/** If true, morale events are ignored and the enemy stays Confident permanently (e.g. rusher archetype). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Morale")
 	bool bFearless = false;
 

@@ -14,7 +14,8 @@ enum class EEnemyArchetype : uint8
 	Sniper		UMETA(DisplayName = "Sniper"),
 	Officer		UMETA(DisplayName = "Officer"),
 	Grenadier	UMETA(DisplayName = "Grenadier"),
-	Shield		UMETA(DisplayName = "Shield"),
+	Pistol		UMETA(DisplayName = "Pistol"),
+	Shotgun		UMETA(DisplayName = "Shotgun"),
 };
 
 UENUM(BlueprintType)
