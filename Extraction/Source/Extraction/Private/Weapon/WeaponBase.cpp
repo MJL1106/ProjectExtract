@@ -12,6 +12,7 @@
 #include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
 #include "EnemyMoraleComponent.h"
+#include "Animation/AnimInstance.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/MeshComponent.h"
 #include "Components/PrimitiveComponent.h"
@@ -178,6 +179,30 @@ void AWeaponBase::BeginPlay()
 						TEXT("%s: MagazineComponentName '%s' not found in visual actor '%s' — magazine swap disabled"),
 						*GetName(), *MagazineComponentName.ToString(), *GetNameSafe(SpawnedVisualActor));
 				}
+			}
+
+			// Resolve the gun body's skeletal mesh component for weapon reload montage playback.
+			if (WeaponVisualMeshName != NAME_None)
+			{
+				TInlineComponentArray<USkeletalMeshComponent*> SkelComps;
+				SpawnedVisualActor->GetComponents(SkelComps);
+				USkeletalMeshComponent* FoundVisualMesh = nullptr;
+				for (USkeletalMeshComponent* Comp : SkelComps)
+				{
+					if (!IsValid(Comp)) continue;
+					if (Comp->GetFName() == WeaponVisualMeshName || Comp->ComponentHasTag(WeaponVisualMeshName))
+					{
+						FoundVisualMesh = Comp;
+						break;
+					}
+				}
+
+				if (IsValid(FoundVisualMesh))
+					CachedWeaponVisualMesh = FoundVisualMesh;
+				else
+					UE_LOG(LogExtraction, Warning,
+						TEXT("%s: WeaponVisualMeshName '%s' not found in visual actor '%s' — weapon reload montage disabled"),
+						*GetName(), *WeaponVisualMeshName.ToString(), *GetNameSafe(SpawnedVisualActor));
 			}
 		}
 		else
@@ -717,6 +742,29 @@ void AWeaponBase::ReattachMagazine()
 	bMagazineDetached = false;
 }
 
+void AWeaponBase::PlayVisualWeaponReload(float PlayRate)
+{
+	if (!CachedWeaponVisualMesh.IsValid()) return;
+	if (!IsValid(WeaponData) || !IsValid(WeaponData->EnemyAnimSet.WeaponReload)) return;
+
+	UAnimInstance* AnimInst = CachedWeaponVisualMesh->GetAnimInstance();
+	if (!IsValid(AnimInst)) return;
+	if (AnimInst->Montage_IsPlaying(WeaponData->EnemyAnimSet.WeaponReload)) return;
+
+	AnimInst->Montage_Play(WeaponData->EnemyAnimSet.WeaponReload, PlayRate);
+}
+
+void AWeaponBase::StopVisualWeaponReload(float BlendOutTime)
+{
+	if (!CachedWeaponVisualMesh.IsValid()) return;
+	if (!IsValid(WeaponData) || !IsValid(WeaponData->EnemyAnimSet.WeaponReload)) return;
+
+	UAnimInstance* AnimInst = CachedWeaponVisualMesh->GetAnimInstance();
+	if (!IsValid(AnimInst)) return;
+
+	AnimInst->Montage_Stop(BlendOutTime, WeaponData->EnemyAnimSet.WeaponReload);
+}
+
 // ---- Reload ----
 
 bool AWeaponBase::CanReload() const
@@ -789,6 +837,7 @@ void AWeaponBase::OnReloadFinished()
 
 		// Safety net: snap the magazine home if the notify-end was missed (montage interrupted, etc.).
 		ReattachMagazine();
+		StopVisualWeaponReload();
 	}
 
 	if (HasAuthority() && UE_LOG_ACTIVE(LogCompanionDiag, Log))
@@ -925,7 +974,10 @@ void AWeaponBase::OnRep_CurrentState()
 	// notify-end was missed (e.g. the montage was interrupted on the server before it reached
 	// NotifyEnd), snap the magazine home so it doesn't stay floating on clients.
 	if (CurrentState != EWeaponState::Reloading)
+	{
 		ReattachMagazine();
+		StopVisualWeaponReload();
+	}
 }
 
 void AWeaponBase::OnRep_CurrentAmmo()
@@ -1041,6 +1093,7 @@ void AWeaponBase::KitUnequip_Implementation()
 {
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+	StopVisualWeaponReload();
 	CancelRecoilRecovery();
 	if (HasAuthority())
 		CurrentState = EWeaponState::Idle;
@@ -1121,6 +1174,7 @@ void AWeaponBase::KitSetAmmo_Implementation(int32 AmmoCount, int32 MaxAmmo)
 			World->GetTimerManager().ClearTimer(ReloadTimerHandle);
 		CurrentState = EWeaponState::Idle;
 		ReattachMagazine();
+		StopVisualWeaponReload();
 	}
 
 	// ST_Item carries no reserve figure, so seed reserve from our data — otherwise the

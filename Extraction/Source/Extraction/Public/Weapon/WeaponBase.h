@@ -112,6 +112,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void ReattachMagazine();
 
+	/** Plays the per-weapon WeaponReload montage on the gun visual's WeaponMesh anim instance.
+	 *  No-ops when no WeaponReload montage is set or the mesh/anim instance is unavailable.
+	 *  PlayRate should match the character reload montage's effective rate to keep the mag pull synced. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void PlayVisualWeaponReload(float PlayRate = 1.f);
+
+	/** Stops the per-weapon WeaponReload montage on the gun visual's WeaponMesh, blending it back
+	 *  to idle so the magazine returns home when a reload is cancelled or interrupted. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void StopVisualWeaponReload(float BlendOutTime = 0.1f);
+
 	// ---- Delegates ----
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
@@ -183,6 +194,11 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Reload")
 	FName MagazineComponentName = NAME_None;
 
+	/** Name of the skeletal mesh component inside the visual actor that carries the magazine bone
+	 *  (KINEMATION gun body — typically "WeaponMesh"). Used to play the weapon reload montage. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Reload")
+	FName WeaponVisualMeshName = TEXT("WeaponMesh");
+
 	// ---- Replicated State ----
 
 	UPROPERTY(ReplicatedUsing = OnRep_CurrentState, BlueprintReadOnly, Category = "Weapon|State")
@@ -200,6 +216,9 @@ private:
 
 	/** Weak ref to the magazine component found inside SpawnedVisualActor (null when MagazineComponentName is NAME_None). */
 	TWeakObjectPtr<USceneComponent> CachedMagazineComp;
+
+	/** Weak ref to the gun's WeaponMesh skeletal component inside SpawnedVisualActor (null until resolved). */
+	TWeakObjectPtr<USkeletalMeshComponent> CachedWeaponVisualMesh;
 
 	/** Original parent component of the magazine — used to reattach to the exact well. */
 	TWeakObjectPtr<USceneComponent> MagazineHomeParent;

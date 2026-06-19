@@ -365,6 +365,9 @@ void UEnemyAnimInstance::PlayReloadMontage(float PlayRate)
 	}
 
 	Montage_Play(Montage, EffectiveRate);
+
+	if (BoundFireWeapon.IsValid())
+		BoundFireWeapon->PlayVisualWeaponReload(EffectiveRate);
 }
 
 void UEnemyAnimInstance::PlayHitReactMontage(float PlayRate)

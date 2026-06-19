@@ -33,6 +33,11 @@ struct EXTRACTION_API FEnemyWeaponAnimSet
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	TObjectPtr<UAnimMontage> Reload;
 
+	/** Weapon-mesh reload montage played on the gun visual's WeaponMesh (KINEMATION e.g. AM_W_AK105_Reload_Tac).
+	 *  Animates the gun's Magazine_Parent bone so the attached magazine drops out and reseats. Optional. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UAnimMontage> WeaponReload = nullptr;
+
 	/** Melee strike. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	TObjectPtr<UAnimMontage> Melee;
