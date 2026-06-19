@@ -71,6 +71,15 @@ public:
 
 	USkeletalMeshComponent* GetWeaponMesh() const { return WeaponMesh; }
 
+	/**
+	 * Returns the skeletal mesh component that the enemy's left-hand IK should target.
+	 * When a ThirdPersonVisualActor is spawned (all Infima enemies), that actor's first
+	 * USkeletalMeshComponent is the visible gun — WeaponMesh is hidden and has no authored
+	 * sockets. Falls back to WeaponMesh when no visual actor exists (weapons that use the frame
+	 * mesh directly). Returns nullptr if neither source is valid.
+	 */
+	USkeletalMeshComponent* GetThirdPersonGripMesh() const;
+
 	/** World-space location of the muzzle. Returns the MuzzleSocket if the weapon mesh has one, else the actor location. */
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	FVector GetMuzzleLocation() const;

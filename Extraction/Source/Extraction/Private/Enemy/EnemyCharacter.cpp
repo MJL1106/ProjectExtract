@@ -1,6 +1,7 @@
 // AEnemyCharacter — single character class for all enemy archetypes.
 
 #include "EnemyCharacter.h"
+#include "EnemyAnimInstance.h"
 #include "AI/AITargetingStatics.h"
 #include "Perception/AISense_Sight.h"
 #include "Perception/AIPerceptionSystem.h"
@@ -596,6 +597,11 @@ void AEnemyCharacter::ApplyArchetypeData()
 		GrenadierComponent = NewObject<UEnemyGrenadierComponent>(this, UEnemyGrenadierComponent::StaticClass());
 		GrenadierComponent->RegisterComponent();
 		GrenadierComponent->InitFromArchetype(ArchetypeData);
+
+		// Forward the grenadier's telegraph/cancel events through this actor so the
+		// anim instance has a single binding source (mirrors OnMeleePerformed pattern).
+		GrenadierComponent->OnGrenadeTelegraph.AddDynamic(this, &AEnemyCharacter::HandleGrenadeTelegraph);
+		GrenadierComponent->OnGrenadeCancelled.AddDynamic(this, &AEnemyCharacter::HandleGrenadeCancelled);
 	}
 
 	if (ArchetypeData->bHasCommandAura && !SquadAuraComp)
@@ -738,6 +744,20 @@ void AEnemyCharacter::HandleDeath()
 		MoveComp->DisableMovement();
 	}
 
+	// Play the death montage before ragdoll so there is a pose transition on death.
+	// Only on the non-takedown path — takedowns use TakedownReactionMontage / DeathMontage via
+	// the OnTakedownExecuted delegate path in UEnemyAnimInstance::HandleTakedown.
+	// ApplyRagdoll calls Montage_StopGroupByName(0, None) which terminates the montage cleanly
+	// when ragdoll physics takes over — no risk of the montage fighting the ragdoll.
+	if (!bPendingTakedownDeath)
+	{
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			if (UEnemyAnimInstance* AnimInst = Cast<UEnemyAnimInstance>(MeshComp->GetAnimInstance()))
+				AnimInst->PlayDeathMontage();
+		}
+	}
+
 	if (bPendingTakedownDeath)
 	{
 		if (UWorld* W = GetWorld())
@@ -788,6 +808,18 @@ void AEnemyCharacter::HandleDeath()
 		&AEnemyCharacter::DestroyAfterDeath,
 		CorpseDisappearSeconds,
 		false);
+}
+
+void AEnemyCharacter::HandleGrenadeTelegraph(FVector PredictedLanding, float TimeToImpact)
+{
+	OnGrenadeThrow.Broadcast(PredictedLanding, TimeToImpact);
+}
+
+void AEnemyCharacter::HandleGrenadeCancelled()
+{
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+		if (UEnemyAnimInstance* AnimInst = Cast<UEnemyAnimInstance>(MeshComp->GetAnimInstance()))
+			AnimInst->StopGrenadeMontage();
 }
 
 void AEnemyCharacter::ApplyRagdoll()

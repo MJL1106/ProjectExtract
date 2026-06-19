@@ -191,6 +191,18 @@ FVector AWeaponBase::GetMuzzleLocation() const
 	return GetActorLocation();
 }
 
+USkeletalMeshComponent* AWeaponBase::GetThirdPersonGripMesh() const
+{
+	// Prefer the visual actor's skeletal mesh — it is the visible geometry with authored sockets.
+	// WeaponMesh is hidden whenever a visual actor is present (see BeginPlay).
+	if (IsValid(SpawnedVisualActor))
+	{
+		if (USkeletalMeshComponent* VisualMesh = SpawnedVisualActor->FindComponentByClass<USkeletalMeshComponent>())
+			return VisualMesh;
+	}
+	return IsValid(WeaponMesh) ? WeaponMesh.Get() : nullptr;
+}
+
 // ---- Fire Control ----
 
 bool AWeaponBase::CanFire() const

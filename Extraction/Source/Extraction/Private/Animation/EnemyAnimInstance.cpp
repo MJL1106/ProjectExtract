@@ -6,10 +6,26 @@
 #include "EnemyAwarenessComponent.h"
 #include "EnemyTypes.h"
 #include "WeaponBase.h"
+#include "WeaponDataAsset.h"
+#include "SuppressionComponent.h"
 #include "HealthComponent.h"
 #include "Animation/AnimMontage.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "KismetAnimationLibrary.h"
+#include "Components/SkeletalMeshComponent.h"
+
+// ---------------------------------------------------------------------------
+// Helpers — cached awareness resolve
+
+static UEnemyAwarenessComponent* ResolveAwarenessComponent(const AEnemyCharacter* Enemy)
+{
+	if (!IsValid(Enemy)) return nullptr;
+	AEnemyAIController* AIC = Cast<AEnemyAIController>(Enemy->GetController());
+	if (!IsValid(AIC)) return nullptr;
+	return AIC->GetAwarenessComponent();
+}
+
+// ---------------------------------------------------------------------------
 
 void UEnemyAnimInstance::NativeInitializeAnimation()
 {
@@ -17,6 +33,9 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 
 	bPrevIsFiring = false;
 	bPrevIsReloading = false;
+	bGripSocketValid = false;
+	CachedGripMesh.Reset();
+	CachedGripSocketName = NAME_None;
 
 	APawn* PawnOwner = TryGetPawnOwner();
 	if (!IsValid(PawnOwner)) return;
@@ -27,13 +46,18 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	MovementComponent = OwningEnemy->GetCharacterMovement();
 	HealthComponent = OwningEnemy->GetHealthComponent();
 
+	// Cache the awareness component once — the controller is set by now at init.
+	CachedAwarenessComponent = ResolveAwarenessComponent(OwningEnemy.Get());
+
 	OwningEnemy->OnHitReact.RemoveDynamic(this, &UEnemyAnimInstance::HandleHitReact);
 	OwningEnemy->OnMeleePerformed.RemoveDynamic(this, &UEnemyAnimInstance::HandleMeleePerformed);
 	OwningEnemy->OnTakedownExecuted.RemoveDynamic(this, &UEnemyAnimInstance::HandleTakedown);
+	OwningEnemy->OnGrenadeThrow.RemoveDynamic(this, &UEnemyAnimInstance::HandleGrenadeThrow);
 
 	OwningEnemy->OnHitReact.AddDynamic(this, &UEnemyAnimInstance::HandleHitReact);
 	OwningEnemy->OnMeleePerformed.AddDynamic(this, &UEnemyAnimInstance::HandleMeleePerformed);
 	OwningEnemy->OnTakedownExecuted.AddDynamic(this, &UEnemyAnimInstance::HandleTakedown);
+	OwningEnemy->OnGrenadeThrow.AddDynamic(this, &UEnemyAnimInstance::HandleGrenadeThrow);
 }
 
 void UEnemyAnimInstance::NativeUninitializeAnimation()
@@ -49,7 +73,11 @@ void UEnemyAnimInstance::NativeUninitializeAnimation()
 		OwningEnemy->OnHitReact.RemoveDynamic(this, &UEnemyAnimInstance::HandleHitReact);
 		OwningEnemy->OnMeleePerformed.RemoveDynamic(this, &UEnemyAnimInstance::HandleMeleePerformed);
 		OwningEnemy->OnTakedownExecuted.RemoveDynamic(this, &UEnemyAnimInstance::HandleTakedown);
+		OwningEnemy->OnGrenadeThrow.RemoveDynamic(this, &UEnemyAnimInstance::HandleGrenadeThrow);
 	}
+
+	CachedAwarenessComponent.Reset();
+	CachedGripMesh.Reset();
 
 	Super::NativeUninitializeAnimation();
 }
@@ -62,7 +90,7 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	const FRotator ActorRot = OwningEnemy->GetActorRotation();
 
-	// --- Locomotion ---
+	// --- Locomotion (always updated — drives the ragdoll blend too) ---
 
 	const FVector Velocity = MovementComponent->Velocity;
 	Speed = Velocity.Size2D();
@@ -80,6 +108,23 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	// --- Health ---
 
 	bIsAlive = IsValid(HealthComponent) ? HealthComponent->IsAlive() : true;
+
+	// Dead: zero combat/IK signals and skip the rest. Locomotion is left running so the
+	// death-montage→ragdoll blend in the ABP has correct speed/direction inputs.
+	if (!bIsAlive)
+	{
+		bIsFiring = false;
+		bIsReloading = false;
+		bInCombat = false;
+		bIsPatrolling = false;
+		bIsAiming = false;
+		bIsSuppressed = false;
+		bHasLeftHandIK = false;
+		LeftHandIKTarget = FTransform::Identity;
+		bPrevIsFiring = false;
+		bPrevIsReloading = false;
+		return;
+	}
 
 	// --- Aim Offset ---
 
@@ -99,7 +144,7 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsAiming = false;
 	}
 
-	// --- Combat ---
+	// --- Weapon state ---
 
 	AWeaponBase* Weapon = OwningEnemy->GetCurrentWeapon();
 	if (IsValid(Weapon))
@@ -113,43 +158,89 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsReloading = false;
 	}
 
-	// Lazy bind/rebind per-shot delegate — weapon spawns after anim init, and may swap.
+	// Lazy bind/rebind per-shot delegate and IK socket cache — fires only when the weapon changes.
 	if (Weapon != BoundFireWeapon.Get())
 	{
 		if (BoundFireWeapon.IsValid())
 			BoundFireWeapon->OnWeaponFired.RemoveDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
+
 		if (IsValid(Weapon))
 			Weapon->OnWeaponFired.AddDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
+
 		BoundFireWeapon = Weapon;
+
+		// Resolve weapon animation type once on equip.
+		WeaponAnimType = EEnemyWeaponAnimType::Rifle;
+
+		// Resolve IK socket validity once on equip — avoids per-frame DoesSocketExist.
+		bGripSocketValid = false;
+		CachedGripMesh.Reset();
+		CachedGripSocketName = NAME_None;
+
+		if (IsValid(Weapon))
+		{
+			if (const UWeaponDataAsset* DA = Weapon->GetWeaponData())
+			{
+				WeaponAnimType = DA->EnemyWeaponAnimType;
+				const FName SocketName = DA->LeftHandGripSocket;
+				if (!SocketName.IsNone())
+				{
+					// Query the VISIBLE mesh (ThirdPersonGripMesh), not the hidden frame mesh.
+					if (USkeletalMeshComponent* GripMesh = Weapon->GetThirdPersonGripMesh())
+					{
+						if (GripMesh->DoesSocketExist(SocketName))
+						{
+							bGripSocketValid = true;
+							CachedGripMesh = GripMesh;
+							CachedGripSocketName = SocketName;
+						}
+					}
+				}
+			}
+		}
 	}
 
-	bInCombat = false;
-	if (IsValid(OwningEnemy))
+	// --- Awareness (cached — no per-frame controller cast) ---
+
+	if (!CachedAwarenessComponent.IsValid())
+		CachedAwarenessComponent = ResolveAwarenessComponent(OwningEnemy.Get());
+
+	bInCombat = CachedAwarenessComponent.IsValid()
+		&& (CachedAwarenessComponent->GetAwarenessState() == EEnemyAwarenessState::Combat);
+
+	bIsPatrolling = !bInCombat && !bIsAiming;
+
+	// --- Suppression ---
+
+	if (USuppressionComponent* Suppression = OwningEnemy->GetSuppressionComponent())
+		bIsSuppressed = Suppression->IsSuppressed();
+	else
+		bIsSuppressed = false;
+
+	// --- Left-Hand IK (socket transform — cheap once validity is cached) ---
+
+	if (bGripSocketValid && CachedGripMesh.IsValid())
 	{
-		if (AEnemyAIController* AIC = Cast<AEnemyAIController>(OwningEnemy->GetController()))
-			if (const UEnemyAwarenessComponent* Aw = AIC->GetAwarenessComponent())
-				bInCombat = (Aw->GetAwarenessState() == EEnemyAwarenessState::Combat);
-	}
-
-	// --- Auto-trigger: fire montage on weapon state transitions ---
-
-	if (bIsAlive)
-	{
-		if (bIsFiring && !bPrevIsFiring)
-			PlayFireMontage();
-		else if (!bIsFiring && bPrevIsFiring)
-			StopFireMontage();
-		bPrevIsFiring = bIsFiring;
-
-		if (bIsReloading && !bPrevIsReloading)
-			PlayReloadMontage();
-		bPrevIsReloading = bIsReloading;
+		LeftHandIKTarget = CachedGripMesh->GetSocketTransform(CachedGripSocketName, RTS_World);
+		bHasLeftHandIK = true;
 	}
 	else
 	{
-		bPrevIsFiring = false;
-		bPrevIsReloading = false;
+		LeftHandIKTarget = FTransform::Identity;
+		bHasLeftHandIK = false;
 	}
+
+	// --- Auto-trigger: fire / reload montages on state transitions ---
+
+	if (bIsFiring && !bPrevIsFiring)
+		PlayFireMontage();
+	else if (!bIsFiring && bPrevIsFiring)
+		StopFireMontage();
+	bPrevIsFiring = bIsFiring;
+
+	if (bIsReloading && !bPrevIsReloading)
+		PlayReloadMontage();
+	bPrevIsReloading = bIsReloading;
 }
 
 // --- Aim Offset Helper ---
@@ -170,52 +261,156 @@ void UEnemyAnimInstance::UpdateAimOffset(const FVector& ToTarget, const FRotator
 	bIsAiming = true;
 }
 
+// --- Resolved-set helpers ---
+// Per-weapon DA anim set takes priority; ABP-level single field is the fallback.
+
+UAnimMontage* UEnemyAnimInstance::GetEffectiveFireLoopMontage() const
+{
+	if (BoundFireWeapon.IsValid())
+		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
+			if (IsValid(DA->EnemyAnimSet.FireLoop)) return DA->EnemyAnimSet.FireLoop.Get();
+	return FireMontage.Get();
+}
+
+UAnimMontage* UEnemyAnimInstance::GetEffectiveFireSingleMontage() const
+{
+	if (BoundFireWeapon.IsValid())
+		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
+			if (IsValid(DA->EnemyAnimSet.FireSingle)) return DA->EnemyAnimSet.FireSingle.Get();
+	return SingleFireMontage.Get();
+}
+
+UAnimMontage* UEnemyAnimInstance::GetEffectiveReloadMontage() const
+{
+	if (BoundFireWeapon.IsValid())
+		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
+			if (IsValid(DA->EnemyAnimSet.Reload)) return DA->EnemyAnimSet.Reload.Get();
+	return ReloadMontage.Get();
+}
+
+UAnimMontage* UEnemyAnimInstance::GetEffectiveMeleeMontage() const
+{
+	if (BoundFireWeapon.IsValid())
+		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
+			if (IsValid(DA->EnemyAnimSet.Melee)) return DA->EnemyAnimSet.Melee.Get();
+	return MeleeMontage.Get();
+}
+
+UAnimMontage* UEnemyAnimInstance::GetEffectiveGrenadeMontage() const
+{
+	if (BoundFireWeapon.IsValid())
+		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
+			if (IsValid(DA->EnemyAnimSet.Grenade)) return DA->EnemyAnimSet.Grenade.Get();
+	return GrenadeMontage.Get();
+}
+
+UAnimMontage* UEnemyAnimInstance::GetEffectiveDeathMontage() const
+{
+	if (BoundFireWeapon.IsValid())
+		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
+			if (IsValid(DA->EnemyAnimSet.Death)) return DA->EnemyAnimSet.Death.Get();
+	return DeathMontage.Get();
+}
+
+UAnimMontage* UEnemyAnimInstance::GetEffectiveHitReactFlinchMontage() const
+{
+	if (BoundFireWeapon.IsValid())
+		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
+			if (IsValid(DA->EnemyAnimSet.HitReactFlinch)) return DA->EnemyAnimSet.HitReactFlinch.Get();
+	return nullptr; // no ABP-level fallback for the flinch slot — it is intentionally new
+}
+
 // --- Montage Helpers ---
 
 void UEnemyAnimInstance::PlayFireMontage(float PlayRate)
 {
-	if (!IsValid(FireMontage)) return;
-	if (Montage_IsPlaying(FireMontage)) return;
-	Montage_Play(FireMontage, PlayRate);
+	UAnimMontage* Montage = GetEffectiveFireLoopMontage();
+	if (!IsValid(Montage)) return;
+	if (Montage_IsPlaying(Montage)) return;
+	Montage_Play(Montage, PlayRate);
 
-	if (FireMontage->GetSectionIndex(FireMontageLoopSection) != INDEX_NONE)
-		Montage_SetNextSection(FireMontageLoopSection, FireMontageLoopSection, FireMontage);
+	if (Montage->GetSectionIndex(FireMontageLoopSection) != INDEX_NONE)
+		Montage_SetNextSection(FireMontageLoopSection, FireMontageLoopSection, Montage);
 	else
 		UE_LOG(LogTemp, Warning, TEXT("EnemyAnimInstance: FireMontage loop section '%s' not found — montage won't loop"), *FireMontageLoopSection.ToString());
 }
 
 void UEnemyAnimInstance::StopFireMontage(float BlendOutTime)
 {
-	if (IsValid(FireMontage))
-		Montage_Stop(BlendOutTime, FireMontage);
+	UAnimMontage* Montage = GetEffectiveFireLoopMontage();
+	if (IsValid(Montage))
+		Montage_Stop(BlendOutTime, Montage);
 }
 
 void UEnemyAnimInstance::PlayReloadMontage(float PlayRate)
 {
-	if (!IsValid(ReloadMontage)) return;
-	if (Montage_IsPlaying(ReloadMontage)) return;
-	Montage_Play(ReloadMontage, PlayRate);
+	UAnimMontage* Montage = GetEffectiveReloadMontage();
+	if (!IsValid(Montage)) return;
+	if (Montage_IsPlaying(Montage)) return;
+
+	// Scale playback rate so the montage covers the weapon's reload window.
+	// When the DA has a per-weapon set with an authored-duration montage, PlayRate stays near 1.
+	// When the fallback AR montage is used on a slow-reload weapon (LMG/Sniper), this stretches
+	// it to fill the gap rather than leaving dead time after the montage ends.
+	float EffectiveRate = PlayRate;
+	if (BoundFireWeapon.IsValid())
+	{
+		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
+		{
+			const float ReloadTime = DA->ReloadTime;
+			const float MontageLength = Montage->GetPlayLength();
+			if (ReloadTime > 0.f && MontageLength > 0.f)
+				EffectiveRate = FMath::Clamp(MontageLength / ReloadTime, 0.5f, 2.0f);
+		}
+	}
+
+	Montage_Play(Montage, EffectiveRate);
 }
 
 void UEnemyAnimInstance::PlayHitReactMontage(float PlayRate)
 {
-	// Suppress hit react during active combat so repeated hits don't stomp firing/aiming —
-	// mirrors UCompanionAnimInstance. Fire/reload montages already replace the slot.
+	// Suppress full-body hit react during active combat so repeated hits don't stomp firing/aiming.
+	// The additive flinch path (PlayHitReactFlinch) remains ungated.
 	if (bIsFiring || bIsAiming || bInCombat) return;
 	if (!IsValid(HitReactMontage)) return;
 	Montage_Play(HitReactMontage, PlayRate);
 }
 
+void UEnemyAnimInstance::PlayHitReactFlinch(float PlayRate)
+{
+	UAnimMontage* Montage = GetEffectiveHitReactFlinchMontage();
+	if (!IsValid(Montage)) return;
+	if (Montage_IsPlaying(Montage)) return;
+	Montage_Play(Montage, PlayRate);
+}
+
 void UEnemyAnimInstance::PlayDeathMontage(float PlayRate)
 {
-	if (!IsValid(DeathMontage)) return;
-	Montage_Play(DeathMontage, PlayRate);
+	UAnimMontage* Montage = GetEffectiveDeathMontage();
+	if (!IsValid(Montage)) return;
+	Montage_Play(Montage, PlayRate);
 }
 
 void UEnemyAnimInstance::PlayMeleeMontage(float PlayRate)
 {
-	if (!IsValid(MeleeMontage)) return;
-	Montage_Play(MeleeMontage, PlayRate);
+	UAnimMontage* Montage = GetEffectiveMeleeMontage();
+	if (!IsValid(Montage)) return;
+	Montage_Play(Montage, PlayRate);
+}
+
+void UEnemyAnimInstance::PlayGrenadeMontage(float PlayRate)
+{
+	UAnimMontage* Montage = GetEffectiveGrenadeMontage();
+	if (!IsValid(Montage)) return;
+	if (Montage_IsPlaying(Montage)) return;
+	Montage_Play(Montage, PlayRate);
+}
+
+void UEnemyAnimInstance::StopGrenadeMontage(float BlendOutTime)
+{
+	UAnimMontage* Montage = GetEffectiveGrenadeMontage();
+	if (IsValid(Montage))
+		Montage_Stop(BlendOutTime, Montage);
 }
 
 // --- Delegate Handlers ---
@@ -224,15 +419,22 @@ void UEnemyAnimInstance::HandleWeaponFired()
 {
 	if (!bIsAlive) return;
 
-	// Sustained/auto fire already shows the loop montage — don't double up.
-	if (IsValid(FireMontage) && Montage_IsPlaying(FireMontage)) return;
+	UAnimMontage* LoopMontage = GetEffectiveFireLoopMontage();
 
-	if (IsValid(SingleFireMontage) && !Montage_IsPlaying(SingleFireMontage))
-		Montage_Play(SingleFireMontage);
+	// Sustained/auto fire already shows the loop montage — don't double up.
+	if (IsValid(LoopMontage) && Montage_IsPlaying(LoopMontage)) return;
+
+	UAnimMontage* SingleMontage = GetEffectiveFireSingleMontage();
+	if (IsValid(SingleMontage) && !Montage_IsPlaying(SingleMontage))
+		Montage_Play(SingleMontage);
 }
 
 void UEnemyAnimInstance::HandleHitReact(EHitRegion Region)
 {
+	// Always attempt the additive flinch — not gated by combat state.
+	PlayHitReactFlinch();
+
+	// Full-body react still available for non-combat hits (gate unchanged).
 	PlayHitReactMontage();
 }
 
@@ -247,4 +449,9 @@ void UEnemyAnimInstance::HandleTakedown(AActor* Instigator)
 		Montage_Play(TakedownReactionMontage);
 	else
 		PlayDeathMontage();
+}
+
+void UEnemyAnimInstance::HandleGrenadeThrow(FVector PredictedLanding, float TimeToImpact)
+{
+	PlayGrenadeMontage();
 }

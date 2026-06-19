@@ -39,6 +39,14 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTakedownExecuted, AActor*, Instig
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleePerformed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyHitReact, EHitRegion, Region);
 
+/**
+ * Fired when the grenadier component commits to a throw (at the start of the telegraph window).
+ * Parallel to OnMeleePerformed — the anim instance binds this to play the grenade throw montage.
+ * PredictedLanding and TimeToImpact mirror the UEnemyGrenadierComponent::OnGrenadeTelegraph params
+ * so Blueprint listeners can drive the landing indicator without a second binding.
+ */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnGrenadeThrow, FVector, PredictedLanding, float, TimeToImpact);
+
 UCLASS(Blueprintable)
 class EXTRACTION_API AEnemyCharacter : public ACharacter,
 	public IGameplayTagAssetInterface,
@@ -103,6 +111,14 @@ public:
 	/** Fired whenever a melee strike connects — animation/FX hook for BP. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Melee")
 	FOnMeleePerformed OnMeleePerformed;
+
+	/**
+	 * Fired when the grenadier component commits to a throw (mirrors OnMeleePerformed pattern).
+	 * UEnemyAnimInstance binds this in NativeInitializeAnimation to play the grenade throw montage.
+	 * Only fires when bIsGrenadier is true and TryThrowAt succeeds.
+	 */
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Grenadier")
+	FOnGrenadeThrow OnGrenadeThrow;
 
 	/** Resolves which hit region a damage event maps to (used by armour component and internal hitbox path). */
 	EHitRegion ResolveHitRegion(const FDamageEvent& DamageEvent) const;
@@ -432,6 +448,18 @@ private:
 
 	UFUNCTION()
 	void HandleDeath();
+
+	/**
+	 * Re-broadcasts the grenadier component's OnGrenadeTelegraph as OnGrenadeThrow on this actor.
+	 * Bound in ApplyArchetypeData when bIsGrenadier is true. Keeps UEnemyGrenadierComponent
+	 * decoupled from UEnemyAnimInstance (same pattern as OnMeleePerformed forwarding).
+	 */
+	UFUNCTION()
+	void HandleGrenadeTelegraph(FVector PredictedLanding, float TimeToImpact);
+
+	/** Stops the grenade throw montage when a throw is cancelled mid-telegraph. */
+	UFUNCTION()
+	void HandleGrenadeCancelled();
 
 	void ApplyRagdoll();
 	void DestroyAfterDeath();

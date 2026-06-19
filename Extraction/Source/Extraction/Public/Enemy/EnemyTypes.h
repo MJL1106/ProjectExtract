@@ -70,6 +70,21 @@ enum class EGlobalAlertLevel : uint8
 	Loud		UMETA(DisplayName = "Loud"),
 };
 
+/**
+ * Weapon animation family — controls which grip pose, locomotion blendspace variant, and montage
+ * set the ABP selects. Set per-weapon on UWeaponDataAsset; read each frame by UEnemyAnimInstance.
+ * Default Rifle keeps existing enemies unchanged until their DA is explicitly configured.
+ */
+UENUM(BlueprintType)
+enum class EEnemyWeaponAnimType : uint8
+{
+	Rifle	UMETA(DisplayName = "Rifle"),
+	SMG		UMETA(DisplayName = "SMG"),
+	LMG		UMETA(DisplayName = "LMG"),
+	Sniper	UMETA(DisplayName = "Sniper"),
+	Pistol	UMETA(DisplayName = "Pistol"),
+};
+
 /** Bark categories — the legibility layer (design §8). Subtitle text first, VO later. */
 UENUM(BlueprintType)
 enum class EBarkType : uint8

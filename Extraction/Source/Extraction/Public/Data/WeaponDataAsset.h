@@ -5,9 +5,53 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "ExtractionTypes.h"
+#include "EnemyTypes.h"
+#include "Animation/AnimMontage.h"
 #include "WeaponDataAsset.generated.h"
 
 class UExtractionDamageType;
+
+/**
+ * Per-weapon animation slot set — every montage the enemy anim instance can play for this weapon.
+ * All fields are EditDefaultsOnly; designers assign montages in the weapon's DataAsset.
+ * Null entries fall through gracefully (the play function early-returns when the montage is null).
+ */
+USTRUCT(BlueprintType)
+struct EXTRACTION_API FEnemyWeaponAnimSet
+{
+	GENERATED_BODY()
+
+	/** Full-auto fire loop — plays while bIsFiring. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UAnimMontage> FireLoop;
+
+	/** Single-shot fire kick — plays via OnWeaponFired delegate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UAnimMontage> FireSingle;
+
+	/** Tactical reload. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UAnimMontage> Reload;
+
+	/** Melee strike. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UAnimMontage> Melee;
+
+	/** Grenade throw (upper-body slot). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UAnimMontage> Grenade;
+
+	/** Death — plays before ragdoll. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UAnimMontage> Death;
+
+	/**
+	 * Additive hit flinch — plays on an additive upper-body slot regardless of combat state.
+	 * Separate from the full-body HitReact which remains gated on !bInCombat.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UAnimMontage> HitReactFlinch;
+};
 
 /**
  * Holds all tuning values for a single weapon type.
@@ -112,5 +156,33 @@ public:
 	/** The kit BP_Item_Base weapon spawned for the first-person visual + arm posing (the kit's procedural animation drives the arms for this weapon). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kit Weapon Bridge")
 	TSubclassOf<AActor> KitVisualWeaponClass;
+
+	// ---- Enemy Animation ----
+
+	/**
+	 * Weapon animation family. Controls the ABP grip pose, locomotion blend, and aim-offset
+	 * variant selected by the enemy's AnimGraph. Default = Rifle so existing enemies are unchanged
+	 * until the DA is explicitly configured.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	EEnemyWeaponAnimType EnemyWeaponAnimType = EEnemyWeaponAnimType::Rifle;
+
+	/**
+	 * Full animation set for this weapon when carried by an enemy.
+	 * All montage fields are null by default — the anim instance falls back to its own legacy
+	 * single-field UPROPERTYs when a set slot is null (backward-compatible).
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	FEnemyWeaponAnimSet EnemyAnimSet;
+
+	/**
+	 * Socket name on the VISIBLE weapon mesh (ThirdPersonVisualActor's skeletal mesh) used as
+	 * the left-hand IK target. NAME_None (default) disables IK — correct for one-handed weapons
+	 * (Pistol/Revolver/Shield) and any weapon without an authored socket yet. Set per-weapon
+	 * in-engine once the socket exists on the visual actor's skeleton.
+	 * UEnemyAnimInstance caches validity on weapon equip, not per-frame.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	FName LeftHandGripSocket = NAME_None;
 
 };
