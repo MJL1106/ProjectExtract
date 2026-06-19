@@ -713,7 +713,10 @@ void AEnemyCharacter::HandleDeath()
 		AwarenessWidgetComponent->SetVisibility(false);
 
 	if (AWeaponBase* Weapon = CurrentWeapon.Get())
+	{
 		Weapon->StopFiring();
+		Weapon->ReattachMagazine();
+	}
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);

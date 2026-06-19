@@ -147,6 +147,38 @@ void AWeaponBase::BeginPlay()
 				UE_LOG(LogExtraction, Warning, TEXT("%s: ThirdPersonVisualActor spawned but attach failed — keeping WeaponMesh visible"),
 					*GetName());
 			}
+
+			// Resolve magazine component for reload swap (enemy weapons only).
+			// When MagazineComponentName is NAME_None (player kit weapons) skip entirely.
+			if (MagazineComponentName != NAME_None)
+			{
+				USceneComponent* FoundMag = nullptr;
+				TInlineComponentArray<USceneComponent*> SceneComps;
+				SpawnedVisualActor->GetComponents(SceneComps);
+				for (USceneComponent* Comp : SceneComps)
+				{
+					if (!IsValid(Comp)) continue;
+					if (Comp->GetFName() == MagazineComponentName || Comp->ComponentHasTag(MagazineComponentName))
+					{
+						FoundMag = Comp;
+						break;
+					}
+				}
+
+				if (IsValid(FoundMag))
+				{
+					CachedMagazineComp = FoundMag;
+					MagazineHomeParent = FoundMag->GetAttachParent();
+					MagazineHomeSocket = FoundMag->GetAttachSocketName();
+					MagazineHomeRelativeTransform = FoundMag->GetRelativeTransform();
+				}
+				else
+				{
+					UE_LOG(LogExtraction, Warning,
+						TEXT("%s: MagazineComponentName '%s' not found in visual actor '%s' — magazine swap disabled"),
+						*GetName(), *MagazineComponentName.ToString(), *GetNameSafe(SpawnedVisualActor));
+				}
+			}
 		}
 		else
 		{
@@ -646,6 +678,45 @@ void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocat
 #endif
 }
 
+// ---- Magazine swap ----
+
+void AWeaponBase::DetachMagazineToHand(USkeletalMeshComponent* HandMesh, FName HandSocket)
+{
+	if (!CachedMagazineComp.IsValid()) return;
+	if (!IsValid(HandMesh)) return;
+	if (HandSocket.IsNone())
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("DetachMagazineToHand: %s — HandSocket is None, notify is misconfigured (mag not detached)"), *GetNameSafe(this));
+		return;
+	}
+
+	CachedMagazineComp->AttachToComponent(HandMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale, HandSocket);
+	bMagazineDetached = true;
+}
+
+void AWeaponBase::ReattachMagazine()
+{
+	if (!bMagazineDetached) return;
+
+	if (CachedMagazineComp.IsValid())
+	{
+		if (MagazineHomeParent.IsValid())
+		{
+			CachedMagazineComp->AttachToComponent(MagazineHomeParent.Get(),
+				FAttachmentTransformRules::KeepRelativeTransform, MagazineHomeSocket);
+			CachedMagazineComp->SetRelativeTransform(MagazineHomeRelativeTransform);
+		}
+		else
+		{
+			// Home parent went stale — detach from the hand so the mag doesn't stay welded to it.
+			UE_LOG(LogExtraction, Warning, TEXT("ReattachMagazine: %s — home parent invalid, detaching mag in world space"), *GetNameSafe(this));
+			CachedMagazineComp->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
+		}
+	}
+
+	bMagazineDetached = false;
+}
+
 // ---- Reload ----
 
 bool AWeaponBase::CanReload() const
@@ -715,6 +786,9 @@ void AWeaponBase::OnReloadFinished()
 		CurrentState = EWeaponState::Idle;
 
 		OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+
+		// Safety net: snap the magazine home if the notify-end was missed (montage interrupted, etc.).
+		ReattachMagazine();
 	}
 
 	if (HasAuthority() && UE_LOG_ACTIVE(LogCompanionDiag, Log))
@@ -847,7 +921,11 @@ void AWeaponBase::InitializeAmmo()
 
 void AWeaponBase::OnRep_CurrentState()
 {
-	// Proxies can trigger animations based on state change here
+	// Safety net for simulated proxies: if the state transitioned away from Reloading and the
+	// notify-end was missed (e.g. the montage was interrupted on the server before it reached
+	// NotifyEnd), snap the magazine home so it doesn't stay floating on clients.
+	if (CurrentState != EWeaponState::Reloading)
+		ReattachMagazine();
 }
 
 void AWeaponBase::OnRep_CurrentAmmo()
@@ -1042,6 +1120,7 @@ void AWeaponBase::KitSetAmmo_Implementation(int32 AmmoCount, int32 MaxAmmo)
 		if (const UWorld* World = GetWorld())
 			World->GetTimerManager().ClearTimer(ReloadTimerHandle);
 		CurrentState = EWeaponState::Idle;
+		ReattachMagazine();
 	}
 
 	// ST_Item carries no reserve figure, so seed reserve from our data — otherwise the

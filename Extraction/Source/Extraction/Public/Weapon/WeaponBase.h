@@ -94,6 +94,24 @@ public:
 	 *  go permanently silent — no BT reload task exists for enemies. */
 	void SetAutoReloadOnEmpty(bool bEnable) { bAutoReloadOnEmpty = bEnable; }
 
+	// ---- Magazine swap (enemy reload visual) ----
+
+	/**
+	 * Detaches the cached magazine component from the visual rifle actor and reparents it to
+	 * HandSocket on HandMesh. Called by UAnimNotifyState_MagazineSwap::NotifyBegin.
+	 * No-ops when MagazineComponentName is NAME_None (player kit weapons).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void DetachMagazineToHand(USkeletalMeshComponent* HandMesh, FName HandSocket);
+
+	/**
+	 * Reparents the magazine back to its original well location inside the visual rifle actor.
+	 * Called by UAnimNotifyState_MagazineSwap::NotifyEnd (fires on blend-out/interruption too).
+	 * Idempotent — safe to call even when the mag was never detached.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void ReattachMagazine();
+
 	// ---- Delegates ----
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
@@ -157,6 +175,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Weapon|Reload")
 	bool bAutoReloadOnEmpty = true;
 
+	/**
+	 * Name of the magazine StaticMeshComponent inside the spawned visual rifle actor
+	 * (e.g. the Infima _Default_Example BP). Set this per enemy weapon BP; leave NAME_None
+	 * for player kit weapons so the magazine swap code is completely bypassed.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Reload")
+	FName MagazineComponentName = NAME_None;
+
 	// ---- Replicated State ----
 
 	UPROPERTY(ReplicatedUsing = OnRep_CurrentState, BlueprintReadOnly, Category = "Weapon|State")
@@ -169,6 +195,23 @@ protected:
 	int32 ReserveAmmo;
 
 private:
+
+	// ---- Magazine swap runtime state ----
+
+	/** Weak ref to the magazine component found inside SpawnedVisualActor (null when MagazineComponentName is NAME_None). */
+	TWeakObjectPtr<USceneComponent> CachedMagazineComp;
+
+	/** Original parent component of the magazine — used to reattach to the exact well. */
+	TWeakObjectPtr<USceneComponent> MagazineHomeParent;
+
+	/** Socket name on MagazineHomeParent the mag was originally attached to (often NAME_None for root). */
+	FName MagazineHomeSocket = NAME_None;
+
+	/** Relative transform of the mag inside the rifle actor — restored verbatim on ReattachMagazine. */
+	FTransform MagazineHomeRelativeTransform = FTransform::Identity;
+
+	/** True while the magazine is detached and riding the hand. */
+	bool bMagazineDetached = false;
 
 	// ---- Fire ----
 

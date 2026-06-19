@@ -50,7 +50,8 @@
       "Bash(echo \"EXIT:$?\")",
       "Bash(tee /tmp/ue5_build2.log)",
       "mcp__unreal-editor__execute_script",
-      "mcp__unrealclaude__unreal_blueprint_query"
+      "mcp__unrealclaude__unreal_blueprint_query",
+      "mcp__VibeUE__execute_python_code"
     ]
   },
   "enableAllProjectMcpServers": true,
