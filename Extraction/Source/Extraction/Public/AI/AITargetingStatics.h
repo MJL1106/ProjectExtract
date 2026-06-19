@@ -20,7 +20,7 @@ namespace AITargeting
 
 	/**
 	 * Returns the lowest body point on Target with clear LOS from ObserverEye, head EXCLUDED by default.
-	 * Ladder (low→high): pelvis → spine_03 (chest). When bIncludeHead is true, the head socket is
+	 * Ladder (low→high): pelvis → spine_03 (chest) → neck_01. When bIncludeHead is true, the head socket is
 	 * appended as the HIGHEST (last-resort) candidate so it only fires when all body points are blocked.
 	 * Traces ECC_Visibility ignoring Target and IgnoreActor so only world cover blocks (not the body).
 	 * Out: OutPoint = first (lowest) visible point. Returns false when no point is visible.

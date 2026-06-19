@@ -14,6 +14,7 @@ namespace AITargeting
 	static const FName HeadBoneName(TEXT("head"));
 	static const FName PelvisBoneName(TEXT("pelvis"));
 	static const FName ChestBoneName(TEXT("spine_03"));
+	static const FName NeckBoneName(TEXT("neck_01"));
 
 	FVector GetSightLocation(const AActor* Target)
 	{
@@ -50,7 +51,7 @@ namespace AITargeting
 		if (IsValid(IgnoreActor)) QueryParams.AddIgnoredActor(IgnoreActor);
 
 		// Build the low→high candidate ladder (head excluded by default —
-		// a head+neck peek stays undetected; only chest and below register).
+		// only a head-only peek with neck still occluded stays undetected; neck and below register).
 		// Actor centre is the guaranteed fallback when pelvis socket is missing.
 		TArray<FVector, TInlineAllocator<4>> Candidates;
 		Candidates.Reserve(4);
@@ -72,9 +73,12 @@ namespace AITargeting
 			if (Mesh->DoesSocketExist(ChestBoneName))
 				Candidates.Add(Mesh->GetSocketLocation(ChestBoneName));
 
+			if (Mesh->DoesSocketExist(NeckBoneName))
+				Candidates.Add(Mesh->GetSocketLocation(NeckBoneName));
+
 			// Head as last-resort candidate — only when the caller explicitly opts in.
 			// Appended LAST so the existing low→high "return lowest visible" order is unchanged;
-			// the head only fires when pelvis and chest are both blocked.
+			// the head only fires when pelvis, chest, and neck are all blocked.
 			if (bIncludeHead && Mesh->DoesSocketExist(HeadBoneName))
 				Candidates.Add(Mesh->GetSocketLocation(HeadBoneName));
 		}
