@@ -118,9 +118,19 @@ void AEnemyCharacter::PostInitializeComponents()
 	}
 }
 
+bool AEnemyCharacter::CanCrouch() const
+{
+	// Debug stand-and-shoot: never crouch — the enemy holds its standing spot and fires from there.
+	if (bDebugStandAndShoot) return false;
+	return Super::CanCrouch();
+}
+
 void AEnemyCharacter::BeginPlay()
 {
 	Super::BeginPlay();
+
+	// Belt-and-suspenders: clear any starting crouch when the debug flag is set pre-play.
+	if (bDebugStandAndShoot) UnCrouch();
 
 	if (IsValid(HealthComponent))
 		HealthComponent->OnDeath.AddUniqueDynamic(this, &AEnemyCharacter::HandleDeath);
@@ -717,6 +727,7 @@ void AEnemyCharacter::HandleDeath()
 		Weapon->StopFiring();
 		Weapon->ReattachMagazine();
 		Weapon->SetFireAlignAlpha(0.f);
+		Weapon->StopVisualWeaponFire();
 	}
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())

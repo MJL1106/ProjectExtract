@@ -123,6 +123,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void StopVisualWeaponReload(float BlendOutTime = 0.1f);
 
+	/** Plays the per-weapon WeaponFire montage on the gun visual's WeaponMesh anim instance, restarting
+	 *  it from the top each call so the bolt re-cocks every shot. No-ops when no WeaponFire montage is set
+	 *  or the visual mesh/anim instance is unavailable. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Fire")
+	void PlayVisualWeaponFire(float PlayRate = 1.f);
+
+	/** Stops the per-weapon WeaponFire montage on the gun visual's WeaponMesh, blending the bolt back
+	 *  home so it doesn't freeze mid-cycle when firing stops or the enemy dies. Idempotent. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Fire")
+	void StopVisualWeaponFire(float BlendOutTime = 0.1f);
+
 	// ---- Weapon fire alignment (enemy fire visual) ----
 
 	/**

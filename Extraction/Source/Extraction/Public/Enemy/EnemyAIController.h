@@ -47,6 +47,7 @@ protected:
 	virtual void OnPossess(APawn* InPawn) override;
 	virtual void OnUnPossess() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+	virtual FPathFollowingRequestResult MoveTo(const FAIMoveRequest& MoveRequest, FNavPathSharedPtr* OutPath = nullptr) override;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|AI")
 	TObjectPtr<UBehaviorTree> EnemyBehaviorTree;

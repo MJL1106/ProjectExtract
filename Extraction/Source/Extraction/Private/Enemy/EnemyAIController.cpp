@@ -16,6 +16,7 @@
 #include "Perception/AISenseConfig_Sight.h"
 #include "Perception/AISenseConfig_Hearing.h"
 #include "AITypes.h"
+#include "Navigation/PathFollowingComponent.h"
 #include "ExtractionTypes.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
@@ -239,6 +240,24 @@ void AEnemyAIController::SetManeuverRole(EEnemyManeuverRole NewRole)
 	if (!BB) return;
 
 	BB->SetValueAsEnum(BB_ManeuverRole, static_cast<uint8>(NewRole));
+}
+
+FPathFollowingRequestResult AEnemyAIController::MoveTo(const FAIMoveRequest& MoveRequest, FNavPathSharedPtr* OutPath)
+{
+	if (const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(GetPawn()))
+	{
+		if (Enemy->bDebugStandAndShoot)
+		{
+			// Debug stand-and-shoot: refuse all locomotion. Report AlreadyAtGoal (NOT Failed) so any
+			// BT move task that finishes on the result treats the move as satisfied and falls through
+			// to its fire logic instead of aborting the combat branch. Tasks that ignore the result
+			// (EnemyMoveToCover / EnemyCombatFire) see PathFollowing stay Idle and handle it as normal.
+			FPathFollowingRequestResult Result;
+			Result.Code = EPathFollowingRequestResult::AlreadyAtGoal;
+			return Result;
+		}
+	}
+	return Super::MoveTo(MoveRequest, OutPath);
 }
 
 void AEnemyAIController::ReleaseCoverSlotIfClaimed()

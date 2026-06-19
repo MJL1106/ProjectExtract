@@ -63,6 +63,7 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
+	virtual bool CanCrouch() const override;
 
 	// --- IGameplayTagAssetInterface ---
 	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
@@ -268,6 +269,12 @@ public:
 	// the global alert. For isolating test-gym encounters; leave false in real gameplay.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Testing")
 	bool bIsolatedEncounter = false;
+
+	/** Debug: when true, this enemy never relocates — every AI MoveTo request is refused — but it
+	 *  still rotates to aim and fires from its placed spot. For inspecting hold/fire poses in-editor.
+	 *  Leave false in real gameplay. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Testing")
+	bool bDebugStandAndShoot = false;
 
 	bool IsIsolatedEncounter() const { return bIsolatedEncounter; }
 

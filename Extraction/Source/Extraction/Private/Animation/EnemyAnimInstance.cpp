@@ -33,6 +33,8 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 
 	bPrevIsFiring = false;
 	bPrevIsReloading = false;
+	bHoldFireHeld = false;
+	bHoldFireAdvancing = false;
 	FireAlignAlpha = 0.f;
 	bFireAlignSetup = false;
 	bGripSocketValid = false;
@@ -125,6 +127,8 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		LeftHandIKTarget = FTransform::Identity;
 		bPrevIsFiring = false;
 		bPrevIsReloading = false;
+		bHoldFireHeld = false;
+		bHoldFireAdvancing = false;
 		return;
 	}
 
@@ -201,6 +205,10 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			}
 		}
 
+		// Hold-fire state resets on weapon swap — the new weapon may not have bHoldFireUntilShot.
+		bHoldFireHeld = false;
+		bHoldFireAdvancing = false;
+
 		// Fire-align setup: compute rest→fire offset once on equip so per-frame cost is just a lerp.
 		bFireAlignSetup = false;
 		FireAlignAlpha = 0.f;
@@ -243,15 +251,43 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	// --- Auto-trigger: fire / reload montages on state transitions ---
 
-	if (bIsFiring && !bPrevIsFiring)
-		PlayFireMontage();
-	else if (!bIsFiring && bPrevIsFiring)
-		StopFireMontage();
+	// Hold-fire weapons own their single-fire montage — skip the loop-montage auto-trigger for them.
+	if (!IsHoldFireActive())
+	{
+		if (bIsFiring && !bPrevIsFiring)
+			PlayFireMontage();
+		else if (!bIsFiring && bPrevIsFiring)
+			StopFireMontage();
+	}
 	bPrevIsFiring = bIsFiring;
 
 	if (bIsReloading && !bPrevIsReloading)
 		PlayReloadMontage();
 	bPrevIsReloading = bIsReloading;
+
+	// --- Hold-fire state machine (deliberate weapons — sniper/bolt-action) ---
+
+	if (IsHoldFireActive())
+	{
+		UAnimMontage* Single = GetEffectiveFireSingleMontage();
+		const bool bWantHold = bInCombat && bIsAiming;   // shouldered & engaging
+
+		if (bWantHold)
+		{
+			// (re)arm: play from start; the FireHold notify pauses it at the aimed pose.
+			if (!bHoldFireHeld && !Montage_IsPlaying(Single))
+			{
+				bHoldFireAdvancing = false;
+				Montage_Play(Single);
+			}
+		}
+		else if (bHoldFireHeld || Montage_IsPlaying(Single))
+		{
+			Montage_Stop(0.15f, Single);
+			bHoldFireHeld = false;
+			bHoldFireAdvancing = false;
+		}
+	}
 
 	// --- Fire-align: smoothly blend weapon offset while the fire-loop montage plays ---
 	// Alpha drives SetFireAlignAlpha per-frame via FInterpTo so it eases in/out with the montage
@@ -309,7 +345,10 @@ UAnimMontage* UEnemyAnimInstance::GetEffectiveFireSingleMontage() const
 	if (BoundFireWeapon.IsValid())
 		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
 			if (IsValid(DA->EnemyAnimSet.FireSingle)) return DA->EnemyAnimSet.FireSingle.Get();
-	return SingleFireMontage.Get();
+	// The ABP-level SingleFireMontage is the AK/Companion-tuned fallback — only pose-correct for Rifle
+	// weapons. Non-rifle weapons (e.g. the Mk14 sniper) must supply their own via the DA; otherwise the
+	// AK montage swings the arms off the weapon-specific grip pose, jolting per shot. Return null instead.
+	return (WeaponAnimType == EEnemyWeaponAnimType::Rifle) ? SingleFireMontage.Get() : nullptr;
 }
 
 UAnimMontage* UEnemyAnimInstance::GetEffectiveReloadMontage() const
@@ -350,6 +389,28 @@ UAnimMontage* UEnemyAnimInstance::GetEffectiveHitReactFlinchMontage() const
 		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
 			if (IsValid(DA->EnemyAnimSet.HitReactFlinch)) return DA->EnemyAnimSet.HitReactFlinch.Get();
 	return nullptr; // no ABP-level fallback for the flinch slot — it is intentionally new
+}
+
+// --- Hold-fire helpers ---
+
+bool UEnemyAnimInstance::IsHoldFireActive() const
+{
+	if (!BoundFireWeapon.IsValid()) return false;
+	const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData();
+	if (!DA || !DA->EnemyAnimSet.bHoldFireUntilShot) return false;
+	return IsValid(GetEffectiveFireSingleMontage());
+}
+
+void UEnemyAnimInstance::AnimNotify_FireHold()
+{
+	if (!IsHoldFireActive()) return;
+	if (bHoldFireAdvancing) return;   // mid-fire pass-through; don't re-pause
+	UAnimMontage* Single = GetEffectiveFireSingleMontage();
+	if (IsValid(Single) && Montage_IsPlaying(Single))
+	{
+		Montage_Pause(Single);
+		bHoldFireHeld = true;
+	}
 }
 
 // --- Montage Helpers ---
@@ -453,6 +514,20 @@ void UEnemyAnimInstance::StopGrenadeMontage(float BlendOutTime)
 void UEnemyAnimInstance::HandleWeaponFired()
 {
 	if (!bIsAlive) return;
+
+	// Hold-fire weapons: resume the paused single-fire montage past the FireHold notify so the
+	// recoil/cycle plays, then NativeUpdateAnimation re-arms it back to the aimed pose.
+	if (IsHoldFireActive())
+	{
+		UAnimMontage* Single = GetEffectiveFireSingleMontage();
+		if (bHoldFireHeld && IsValid(Single))
+		{
+			bHoldFireHeld = false;
+			bHoldFireAdvancing = true;
+			Montage_Resume(Single);   // hold -> recoil/cycle -> end; NativeUpdate re-arms after
+		}
+		return;   // hold path owns the single montage
+	}
 
 	UAnimMontage* LoopMontage = GetEffectiveFireLoopMontage();
 

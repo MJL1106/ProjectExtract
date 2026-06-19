@@ -53,6 +53,12 @@ static TAutoConsoleVariable<int32> CVarPlayerTraceDebug(
 	TEXT("If non-zero, log player weapon hitscan trace details (start, end, hit actor, component, distance, health check)."),
 	ECVF_Cheat);
 
+static TAutoConsoleVariable<int32> CVarFireAlignDebug(
+	TEXT("weapon.FireAlignDebug"),
+	0,
+	TEXT("If non-zero, log enemy weapon fire-align: SetupFireAlign captures (rest/fire relative, sockets, fire offset) and SetFireAlignAlpha (alpha + resulting WeaponMesh relative/world transform). Diagnoses misalignment from the WeaponSocket_Fire blend. Default 0 = no logging, no behavior change."),
+	ECVF_Cheat);
+
 AWeaponBase::AWeaponBase()
 	: CurrentState(EWeaponState::Idle)
 	, CurrentAmmo(0)
@@ -347,6 +353,7 @@ void AWeaponBase::StopFiring()
 	// Auto-reload if magazine empty and we have reserve (player UX — AI weapons set bAutoReloadOnEmpty=false to defer to BT).
 	if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
 		Reload();
+
 }
 
 void AWeaponBase::OnAutoFireTimer()
@@ -509,6 +516,7 @@ void AWeaponBase::FireShot()
 	}
 
 	OnWeaponFired.Broadcast();
+	PlayVisualWeaponFire();
 }
 
 void AWeaponBase::PerformHitscan()
@@ -788,6 +796,19 @@ void AWeaponBase::SetupFireAlign(USkeletalMeshComponent* EnemyMesh, FName FireSo
 	FireAlignFireRelative = FireAlignRestRelative * (TFire * TRest.Inverse());
 
 	bFireAlignReady = true;
+
+	if (CVarFireAlignDebug.GetValueOnGameThread() != 0)
+	{
+		const FTransform FireOffset = FireAlignFireRelative.GetRelativeTransform(FireAlignRestRelative);
+		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f;
+		UE_LOG(LogExtraction, Warning,
+			TEXT("[FIREALIGN] %s SetupFireAlign t=%.2f restSock='%s' fireSock='%s' | restLoc=%s restRot=%s | fireLoc=%s fireRot=%s | fireOffsetLoc=%s fireOffsetRotDeg=%s"),
+			*GetNameSafe(this), Now,
+			*RestSocket.ToString(), *FireSocket.ToString(),
+			*FireAlignRestRelative.GetLocation().ToString(), *FireAlignRestRelative.Rotator().ToString(),
+			*FireAlignFireRelative.GetLocation().ToString(), *FireAlignFireRelative.Rotator().ToString(),
+			*FireOffset.GetLocation().ToString(), *FireOffset.Rotator().ToString());
+	}
 }
 
 void AWeaponBase::SetFireAlignAlpha(float Alpha)
@@ -804,6 +825,16 @@ void AWeaponBase::SetFireAlignAlpha(float Alpha)
 	Blended.SetScale3D(FMath::Lerp(FireAlignRestRelative.GetScale3D(), FireAlignFireRelative.GetScale3D(), Alpha));
 
 	WeaponMesh->SetRelativeTransform(Blended);
+
+	if (CVarFireAlignDebug.GetValueOnGameThread() != 0 &&
+		(GFrameCounter % 10 == 0 || Alpha <= KINDA_SMALL_NUMBER || Alpha >= 1.f - KINDA_SMALL_NUMBER))
+	{
+		UE_LOG(LogExtraction, Warning,
+			TEXT("[FIREALIGN] %s Alpha=%.3f relLoc=%s relRotDeg=%s worldLoc=%s"),
+			*GetNameSafe(this), Alpha,
+			*Blended.GetLocation().ToString(), *Blended.Rotator().ToString(),
+			*WeaponMesh->GetComponentLocation().ToString());
+	}
 }
 
 void AWeaponBase::PlayVisualWeaponReload(float PlayRate)
@@ -827,6 +858,39 @@ void AWeaponBase::StopVisualWeaponReload(float BlendOutTime)
 	if (!IsValid(AnimInst)) return;
 
 	AnimInst->Montage_Stop(BlendOutTime, WeaponData->EnemyAnimSet.WeaponReload);
+}
+
+void AWeaponBase::PlayVisualWeaponFire(float PlayRate)
+{
+	if (!CachedWeaponVisualMesh.IsValid()) return;
+	if (!IsValid(WeaponData) || !IsValid(WeaponData->EnemyAnimSet.WeaponFire)) return;
+
+	UAnimInstance* AnimInst = CachedWeaponVisualMesh->GetAnimInstance();
+	if (!IsValid(AnimInst)) return;
+
+	// Intentionally NO Montage_IsPlaying guard — each shot must restart the bolt cycle from the top.
+	// Fit the bolt cycle to the fire cadence: cycle-time x rounds/sec. This makes each per-shot
+	// restart land on the clip's end pose (which equals idle == frame 0), eliminating the mid-travel
+	// snap from restarting a 0.333s clip every ~0.1s. Clamp [1,6]: floor keeps natural speed for
+	// slow/semi fire, ceiling guards extreme fire rates. (PlayLen x FireRate is also the physically
+	// correct cyclic rate for full-auto.)
+	float Rate = PlayRate;
+	const float PlayLen = WeaponData->EnemyAnimSet.WeaponFire->GetPlayLength();
+	if (PlayLen > 0.f && WeaponData->FireRate > 0.f)
+		Rate = FMath::Clamp(PlayLen * WeaponData->FireRate, 1.f, 6.f);
+
+	AnimInst->Montage_Play(WeaponData->EnemyAnimSet.WeaponFire, Rate);
+}
+
+void AWeaponBase::StopVisualWeaponFire(float BlendOutTime)
+{
+	if (!CachedWeaponVisualMesh.IsValid()) return;
+	if (!IsValid(WeaponData) || !IsValid(WeaponData->EnemyAnimSet.WeaponFire)) return;
+
+	UAnimInstance* AnimInst = CachedWeaponVisualMesh->GetAnimInstance();
+	if (!IsValid(AnimInst)) return;
+
+	AnimInst->Montage_Stop(BlendOutTime, WeaponData->EnemyAnimSet.WeaponFire);
 }
 
 // ---- Reload ----

@@ -219,6 +219,7 @@ protected:
 	// --- Resolved-set helpers ---
 	// Return the effective montage for each slot: per-weapon DA set first, ABP fallback second.
 
+	bool IsHoldFireActive() const;
 	UAnimMontage* GetEffectiveFireLoopMontage() const;
 	UAnimMontage* GetEffectiveFireSingleMontage() const;
 	UAnimMontage* GetEffectiveReloadMontage() const;
@@ -247,6 +248,11 @@ private:
 	UFUNCTION()
 	void HandleWeaponFired();
 
+	// --- Hold-fire notify — auto-routed from the "FireHold" skeleton notify in the single-fire montage ---
+
+	UFUNCTION()
+	void AnimNotify_FireHold();
+
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AWeaponBase> BoundFireWeapon;
 
@@ -265,6 +271,13 @@ private:
 
 	bool bPrevIsFiring = false;
 	bool bPrevIsReloading = false;
+
+	// --- Hold-fire state ---
+
+	/** True when the single-fire montage is paused at the FireHold notify (aimed, waiting to shoot). */
+	bool bHoldFireHeld = false;
+	/** True while the montage is resuming past the FireHold notify to play the recoil/cycle. */
+	bool bHoldFireAdvancing = false;
 
 	// --- Fire-align tracking ---
 

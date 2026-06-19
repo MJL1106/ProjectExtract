@@ -38,6 +38,18 @@ struct EXTRACTION_API FEnemyWeaponAnimSet
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	TObjectPtr<UAnimMontage> WeaponReload = nullptr;
 
+	/** Weapon-mesh fire montage played on the gun visual's WeaponMesh (KINEMATION e.g. AM_W_AK105_Fire).
+	 *  Cycles the bolt/charging handle once per shot — re-triggered every round. Optional. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UAnimMontage> WeaponFire = nullptr;
+
+	/** When true, the single-fire montage is driven as hold-then-fire: it plays to a notify named
+	 *  "FireHold" and PAUSES on the aimed pose; each shot resumes it past the notify to play the
+	 *  recoil/cycle, then it re-arms back to the held pose. For deliberate weapons (sniper/bolt-action).
+	 *  Requires FireSingle to contain a notify named "FireHold". Default false = play-per-shot as before. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	bool bHoldFireUntilShot = false;
+
 	/** Melee strike. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	TObjectPtr<UAnimMontage> Melee;
