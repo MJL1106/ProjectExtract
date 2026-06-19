@@ -153,6 +153,9 @@ Local skills under `.claude/skills/` are loaded on demand and cheap. **Invoke a 
 | CharacterMovementComponent / custom movement / vault / climb | `ue-character-movement` |
 | DataAsset / DataTable / async loading / soft refs | `ue-data-assets-tables` |
 | AnimInstance / montage / state machine / IK / blendspace | `ue-animation-system` |
+| Enemy held weapon looks wrong AT REST (hands off grip, gun floats/clips, robot wrist) | `enemy-weapon-grip-blend` |
+| Enemy gun cants/pops WHILE FIRING (fire montage from a different pack than the grip) | `enemy-weapon-fire-align` |
+| Enemy weapon magazine should drop out + reseat on reload | `enemy-weapon-reload` |
 | AI / Behavior Tree / EQS / Blackboard / perception | `ue-ai-navigation`, `ue5-ai-systems` |
 | State Tree | `ue-state-trees` |
 | Enhanced Input / InputAction / IMC | `ue-input-system` |

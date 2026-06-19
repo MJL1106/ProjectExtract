@@ -200,6 +200,18 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Montages")
 	FName FireMontageLoopSection = TEXT("Default");
 
+	/**
+	 * Socket on the enemy skeleton to blend the weapon toward while the fire-loop montage plays.
+	 * Leave NAME_None to disable fire-alignment for this ABP.
+	 * Set to "WeaponSocket_Fire" (or equivalent) on the ABP defaults.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FireAlign")
+	FName FireAlignSocketName = NAME_None;
+
+	/** Interpolation speed (1/s) for the fire-align offset blend. Higher = snappier. Tunable per ABP. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|FireAlign")
+	float FireAlignBlendSpeed = 12.f;
+
 	// --- Aim Offset Helper ---
 
 	void UpdateAimOffset(const FVector& ToTarget, const FRotator& ActorRot);
@@ -253,4 +265,12 @@ private:
 
 	bool bPrevIsFiring = false;
 	bool bPrevIsReloading = false;
+
+	// --- Fire-align tracking ---
+
+	/** Current interpolated alpha (0=rest, 1=fire pose). Driven per-frame toward the target. */
+	float FireAlignAlpha = 0.f;
+
+	/** True once SetupFireAlign has been called successfully for the current weapon. Reset on weapon rebind. */
+	bool bFireAlignSetup = false;
 };

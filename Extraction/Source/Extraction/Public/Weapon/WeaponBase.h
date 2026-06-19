@@ -123,6 +123,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
 	void StopVisualWeaponReload(float BlendOutTime = 0.1f);
 
+	// ---- Weapon fire alignment (enemy fire visual) ----
+
+	/**
+	 * One-time setup: captures the rest relative transform and computes the fire-align offset
+	 * from the rest socket to FireSocket, both expressed in EnemyMesh component space.
+	 * Call once per weapon equip when FireAlignSocketName is set on the ABP.
+	 * No-ops if either socket is absent or WeaponMesh is invalid.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|FireAlign")
+	void SetupFireAlign(USkeletalMeshComponent* EnemyMesh, FName FireSocket);
+
+	/**
+	 * Blends WeaponMesh's relative transform between rest (Alpha=0) and fire-aligned (Alpha=1).
+	 * No-op when SetupFireAlign hasn't succeeded (bFireAlignReady=false).
+	 * Call per-frame from the anim instance with an interpolated alpha.
+	 * Safety reset: call with Alpha=0 on death or EndPlay.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|FireAlign")
+	void SetFireAlignAlpha(float Alpha);
+
 	// ---- Delegates ----
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
@@ -231,6 +251,18 @@ private:
 
 	/** True while the magazine is detached and riding the hand. */
 	bool bMagazineDetached = false;
+
+	// ---- Fire alignment runtime state ----
+
+	/** Relative transform of WeaponMesh at rest (captured by SetupFireAlign). Alpha=0 target. */
+	FTransform FireAlignRestRelative = FTransform::Identity;
+
+	/** Pre-composed relative transform that lands the weapon at WeaponSocket_Fire. Alpha=1 target.
+	 *  = FireAlignRestRelative * (T_fire * T_rest.Inverse()). Cached at setup; bone-pose-invariant. */
+	FTransform FireAlignFireRelative = FTransform::Identity;
+
+	/** True when SetupFireAlign succeeded — both sockets found and targets computed. */
+	bool bFireAlignReady = false;
 
 	// ---- Fire ----
 

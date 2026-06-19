@@ -33,6 +33,8 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 
 	bPrevIsFiring = false;
 	bPrevIsReloading = false;
+	FireAlignAlpha = 0.f;
+	bFireAlignSetup = false;
 	bGripSocketValid = false;
 	CachedGripMesh.Reset();
 	CachedGripSocketName = NAME_None;
@@ -198,6 +200,15 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				}
 			}
 		}
+
+		// Fire-align setup: compute rest→fire offset once on equip so per-frame cost is just a lerp.
+		bFireAlignSetup = false;
+		FireAlignAlpha = 0.f;
+		if (IsValid(Weapon) && !FireAlignSocketName.IsNone())
+		{
+			Weapon->SetupFireAlign(GetOwningComponent(), FireAlignSocketName);
+			bFireAlignSetup = true;
+		}
 	}
 
 	// --- Awareness (cached — no per-frame controller cast) ---
@@ -241,6 +252,27 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	if (bIsReloading && !bPrevIsReloading)
 		PlayReloadMontage();
 	bPrevIsReloading = bIsReloading;
+
+	// --- Fire-align: smoothly blend weapon offset while the fire-loop montage plays ---
+	// Alpha drives SetFireAlignAlpha per-frame via FInterpTo so it eases in/out with the montage
+	// blend rather than popping. Skipped entirely when not set up (FireAlignSocketName is None or
+	// weapon lacks the required sockets) and when alpha is already settled at 0 while not firing.
+
+	if (bFireAlignSetup && IsValid(Weapon))
+	{
+		UAnimMontage* FireLoopMontage = GetEffectiveFireLoopMontage();
+		const bool bIsFireMontagePlaying = IsValid(FireLoopMontage) && Montage_IsPlaying(FireLoopMontage);
+		const float AlphaTarget = bIsFireMontagePlaying ? 1.f : 0.f;
+
+		const float PrevAlpha = FireAlignAlpha;
+		FireAlignAlpha = FMath::FInterpTo(FireAlignAlpha, AlphaTarget, DeltaSeconds, FireAlignBlendSpeed);
+
+		// Only push a new transform when the alpha is moving or non-zero — avoids per-frame
+		// SetRelativeTransform calls while the weapon is fully at rest.
+		const bool bAlphaSettled = FMath::IsNearlyEqual(FireAlignAlpha, PrevAlpha, KINDA_SMALL_NUMBER);
+		if (!bAlphaSettled || FireAlignAlpha > KINDA_SMALL_NUMBER)
+			Weapon->SetFireAlignAlpha(FireAlignAlpha);
+	}
 }
 
 // --- Aim Offset Helper ---

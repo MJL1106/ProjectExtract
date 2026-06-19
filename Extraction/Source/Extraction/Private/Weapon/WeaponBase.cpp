@@ -224,6 +224,8 @@ void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 
 void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	SetFireAlignAlpha(0.f);
+
 	if (IsValid(SpawnedVisualActor))
 	{
 		SpawnedVisualActor->Destroy();
@@ -740,6 +742,68 @@ void AWeaponBase::ReattachMagazine()
 	}
 
 	bMagazineDetached = false;
+}
+
+// ---- Weapon fire alignment ----
+
+void AWeaponBase::SetupFireAlign(USkeletalMeshComponent* EnemyMesh, FName FireSocket)
+{
+	bFireAlignReady = false;
+
+	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+	if (FireSocket.IsNone())
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("SetupFireAlign: %s — FireSocket is None"), *GetNameSafe(this));
+		return;
+	}
+
+	const FName RestSocket = WeaponMesh->GetAttachSocketName();
+	if (!EnemyMesh->DoesSocketExist(RestSocket))
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("SetupFireAlign: %s — rest socket '%s' not found on enemy mesh (fire-align disabled)"),
+			*GetNameSafe(this), *RestSocket.ToString());
+		return;
+	}
+	if (!EnemyMesh->DoesSocketExist(FireSocket))
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("SetupFireAlign: %s — fire socket '%s' not found on enemy mesh (fire-align disabled)"),
+			*GetNameSafe(this), *FireSocket.ToString());
+		return;
+	}
+
+	// Capture the rest-pose relative transform as the Alpha=0 target.
+	FireAlignRestRelative = WeaponMesh->GetRelativeTransform();
+
+	// Compute the Alpha=1 target in one step — pre-compose so SetFireAlignAlpha is a pure blend.
+	//
+	// Derivation (UE: A*B means apply A then B):
+	//   We want: R1 * P_rest = R0 * P_fire  (weapon world transform is the same as sitting at WeaponSocket_Fire)
+	//   ⇒  R1 = R0 * P_fire * P_rest.Inverse() = FireAlignRestRelative * (T_fire * T_rest.Inverse())
+	//
+	// T_fire * T_rest.Inverse() is bone-pose-invariant: both sockets share the same bone B,
+	// so T_x = S_x * B and T_fire * T_rest.Inverse() = S_fire * S_rest.Inverse() (B cancels).
+	// Caching this at setup-time is therefore valid regardless of hand pose at runtime.
+	const FTransform TRest = EnemyMesh->GetSocketTransform(RestSocket, RTS_Component);
+	const FTransform TFire = EnemyMesh->GetSocketTransform(FireSocket, RTS_Component);
+	FireAlignFireRelative = FireAlignRestRelative * (TFire * TRest.Inverse());
+
+	bFireAlignReady = true;
+}
+
+void AWeaponBase::SetFireAlignAlpha(float Alpha)
+{
+	if (!bFireAlignReady) return;
+	if (!IsValid(WeaponMesh)) return;
+
+	Alpha = FMath::Clamp(Alpha, 0.f, 1.f);
+
+	// Blend directly between the two pre-computed targets — no per-frame recompose.
+	FTransform Blended;
+	Blended.SetLocation(FMath::Lerp(FireAlignRestRelative.GetLocation(), FireAlignFireRelative.GetLocation(), Alpha));
+	Blended.SetRotation(FQuat::Slerp(FireAlignRestRelative.GetRotation(), FireAlignFireRelative.GetRotation(), Alpha));
+	Blended.SetScale3D(FMath::Lerp(FireAlignRestRelative.GetScale3D(), FireAlignFireRelative.GetScale3D(), Alpha));
+
+	WeaponMesh->SetRelativeTransform(Blended);
 }
 
 void AWeaponBase::PlayVisualWeaponReload(float PlayRate)

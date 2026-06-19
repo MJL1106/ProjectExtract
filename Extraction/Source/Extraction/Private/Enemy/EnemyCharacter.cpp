@@ -716,6 +716,7 @@ void AEnemyCharacter::HandleDeath()
 	{
 		Weapon->StopFiring();
 		Weapon->ReattachMagazine();
+		Weapon->SetFireAlignAlpha(0.f);
 	}
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
