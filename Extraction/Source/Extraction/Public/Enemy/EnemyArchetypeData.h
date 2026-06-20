@@ -343,6 +343,13 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Melee", meta = (ClampMin = "0.1"))
 	float MeleeCooldown = 1.5f;
 
+	/** Distance (cm) the rusher stops short of the target when closing to melee. The engine adds the
+	 *  target's capsule radius (~34 cm) to this, so the effective stop is ~MeleeApproachDistance + 34.
+	 *  Keep it ~one capsule-radius below MeleeRange (e.g. <= 145 when MeleeRange = 180) so the strike
+	 *  still connects; the 70 floor keeps the capsules from overlapping (the burrow bug this fixes). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Melee", meta = (ClampMin = "70.0"))
+	float MeleeApproachDistance = 120.f;
+
 	// --- Sniper (Phase 3) ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Sniper")

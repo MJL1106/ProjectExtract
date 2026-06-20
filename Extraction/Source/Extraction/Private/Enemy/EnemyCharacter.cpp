@@ -497,12 +497,26 @@ bool AEnemyCharacter::PerformMelee(AActor* Target)
 
 	LastMeleeWorldTime = Now;
 
-	// Apply generic damage (no hit region — melee bypasses hitbox multiplier)
-	FDamageEvent MeleeDmgEvent;
-	Target->TakeDamage(ArchetypeData->MeleeDamage, MeleeDmgEvent, GetController(), this);
-
+	// Commit the swing: capture the target and play the montage. Damage is applied at the
+	// contact frame by UAnimNotify_EnemyMeleeHit → ApplyMeleeDamage(), not here.
+	PendingMeleeTarget = Target;
 	OnMeleePerformed.Broadcast();
 	return true;
+}
+
+void AEnemyCharacter::ApplyMeleeDamage()
+{
+	if (!IsValid(ArchetypeData)) return;
+
+	AActor* Target = PendingMeleeTarget.Get();
+	PendingMeleeTarget = nullptr;
+	if (!IsValid(Target)) return;
+
+	// A dead enemy lands no hit (the death montage can overlap the upper-body melee slot).
+	if (IsValid(HealthComponent) && !HealthComponent->IsAlive()) return;
+
+	FDamageEvent MeleeDmgEvent;
+	Target->TakeDamage(ArchetypeData->MeleeDamage, MeleeDmgEvent, GetController(), this);
 }
 
 // --- Guard Post ---
@@ -688,6 +702,7 @@ void AEnemyCharacter::HandleDeath()
 		Weapon->StopFiring();
 		Weapon->ReattachMagazine();
 		Weapon->SetFireAlignAlpha(0.f);
+		Weapon->SetMeleeAlignAlpha(0.f);
 		Weapon->StopVisualWeaponFire();
 	}
 

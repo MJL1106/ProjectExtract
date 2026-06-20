@@ -43,13 +43,6 @@ struct EXTRACTION_API FEnemyWeaponAnimSet
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	TObjectPtr<UAnimMontage> WeaponFire = nullptr;
 
-	/** When true, the single-fire montage is driven as hold-then-fire: it plays to a notify named
-	 *  "FireHold" and PAUSES on the aimed pose; each shot resumes it past the notify to play the
-	 *  recoil/cycle, then it re-arms back to the held pose. For deliberate weapons (sniper/bolt-action).
-	 *  Requires FireSingle to contain a notify named "FireHold". Default false = play-per-shot as before. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
-	bool bHoldFireUntilShot = false;
-
 	/** Melee strike. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	TObjectPtr<UAnimMontage> Melee;
@@ -201,5 +194,13 @@ public:
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	FName LeftHandGripSocket = NAME_None;
+
+	/**
+	 * Visual-only procedural recoil profile (a KINEMATION DA_RecoilData asset) passed to the enemy's
+	 * AC_RecoilAnimation::Init via the anim bridge. Typed as UDataAsset so C++ stays agnostic of the
+	 * Blueprint recoil-data class. Null = no procedural recoil for this weapon.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	TObjectPtr<UDataAsset> EnemyRecoilData = nullptr;
 
 };

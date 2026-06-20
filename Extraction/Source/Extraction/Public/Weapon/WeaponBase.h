@@ -154,6 +154,30 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|FireAlign")
 	void SetFireAlignAlpha(float Alpha);
 
+	// ---- Weapon melee alignment (enemy melee visual) ----
+
+	/**
+	 * One-time setup: captures the rest relative transform and computes the melee-align offset
+	 * from the rest socket to MeleeSocket, both expressed in EnemyMesh component space.
+	 * Call once per weapon equip when MeleeAlignSocketName is set on the ABP.
+	 * No-ops if either socket is absent or WeaponMesh is invalid.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|MeleeAlign")
+	void SetupMeleeAlign(USkeletalMeshComponent* EnemyMesh, FName MeleeSocket);
+
+	/**
+	 * Blends WeaponMesh's relative transform between rest (Alpha=0) and melee-aligned (Alpha=1).
+	 * No-op when SetupMeleeAlign hasn't succeeded (bMeleeAlignReady=false).
+	 * Call per-frame from the anim instance with an interpolated alpha.
+	 * Safety reset: call with Alpha=0 on death or EndPlay.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|MeleeAlign")
+	void SetMeleeAlignAlpha(float Alpha);
+
+	/** True once SetupMeleeAlign succeeded (both sockets found). Lets the anim instance skip the
+	 *  per-frame melee-align block entirely when the WeaponSocket_Melee socket isn't authored yet. */
+	bool IsMeleeAlignReady() const { return bMeleeAlignReady; }
+
 	// ---- Delegates ----
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
@@ -274,6 +298,18 @@ private:
 
 	/** True when SetupFireAlign succeeded — both sockets found and targets computed. */
 	bool bFireAlignReady = false;
+
+	// ---- Melee alignment runtime state ----
+
+	/** Relative transform of WeaponMesh at rest (captured by SetupMeleeAlign). Alpha=0 target. */
+	FTransform MeleeAlignRestRelative = FTransform::Identity;
+
+	/** Pre-composed relative transform that lands the weapon at WeaponSocket_Melee. Alpha=1 target.
+	 *  = MeleeAlignRestRelative * (T_melee * T_rest.Inverse()). Cached at setup; bone-pose-invariant. */
+	FTransform MeleeAlignMeleeRelative = FTransform::Identity;
+
+	/** True when SetupMeleeAlign succeeded — both sockets found and targets computed. */
+	bool bMeleeAlignReady = false;
 
 	// ---- Fire ----
 

@@ -104,9 +104,14 @@ public:
 	void SetExtraSpreadDegrees(float Degrees);
 
 	/** Attempts a melee attack on Target. Enforces range from DA and internal cooldown.
-	 *  Returns true if the attack connected (damage was applied). */
+	 *  Returns true if a strike was committed; the montage plays and damage is applied by the contact-frame AnimNotify. */
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Melee")
 	bool PerformMelee(AActor* Target);
+
+	/** Applies the committed melee strike's damage to the target the swing was launched against.
+	 *  Called by UAnimNotify_EnemyMeleeHit at the contact frame. No range re-check (pure timing). */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Melee")
+	void ApplyMeleeDamage();
 
 	/** Fired whenever a melee strike connects — animation/FX hook for BP. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Melee")
@@ -339,6 +344,9 @@ private:
 
 	// Phase 3 — melee cooldown
 	float LastMeleeWorldTime = -1e9f;
+
+	// Melee target captured at swing start; damage applied by the contact-frame notify.
+	TWeakObjectPtr<AActor> PendingMeleeTarget;
 
 	// Phase 3 — bolt-on components (conditionally created in ApplyArchetypeData)
 	UPROPERTY()

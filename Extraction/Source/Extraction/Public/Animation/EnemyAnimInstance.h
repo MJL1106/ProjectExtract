@@ -11,6 +11,7 @@
 class AEnemyCharacter;
 class AWeaponBase;
 class UCharacterMovementComponent;
+class UDataAsset;
 class UHealthComponent;
 class UAnimMontage;
 class UEnemyAwarenessComponent;
@@ -60,6 +61,24 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Animation")
 	void StopGrenadeMontage(float BlendOutTime = 0.2f);
+
+	// --- Recoil bridge (implemented in ABP to drive the AC_RecoilAnimation component) ---
+
+	/** Setup/re-init the recoil component for the equipped weapon. RecoilData null = disable recoil. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Animation|Recoil")
+	void BP_SetupRecoil(UDataAsset* RecoilData, float FireRate);
+
+	/** Trigger one recoil pulse — called once per shot. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Animation|Recoil")
+	void BP_PlayRecoil();
+
+	/** Settle recoil — called when firing stops and on death. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Animation|Recoil")
+	void BP_StopRecoil();
+
+	/** Forward the aim state to the recoil solver. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Animation|Recoil")
+	void BP_SetRecoilAiming(bool bAiming);
 
 protected:
 	// --- Cached Refs ---
@@ -137,6 +156,12 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Combat")
 	bool bIsSuppressed = false;
 
+	/** 0-1 weight tracking the melee montage play-state (eased via FInterpTo). Drives the weapon
+	 *  melee-align socket AND lets the ABP fade the aim-offset out during the swing
+	 *  (AimAlpha = 1 - MeleeMontageWeight) so the arms match the raw montage pose. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Combat")
+	float MeleeMontageWeight = 0.f;
+
 	// --- Weapon Animation Type ---
 
 	/**
@@ -212,6 +237,18 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|FireAlign")
 	float FireAlignBlendSpeed = 12.f;
 
+	/**
+	 * Socket on the enemy skeleton to blend the weapon toward while the melee montage plays.
+	 * Leave NAME_None to disable melee-alignment for this ABP.
+	 * Set to "WeaponSocket_Melee" (or equivalent) on the ABP defaults.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|MeleeAlign")
+	FName MeleeAlignSocketName = FName(TEXT("WeaponSocket_Melee"));
+
+	/** Interpolation speed (1/s) for the melee-align offset blend. Higher = snappier. Tunable per ABP. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|MeleeAlign")
+	float MeleeAlignBlendSpeed = 12.f;
+
 	// --- Aim Offset Helper ---
 
 	void UpdateAimOffset(const FVector& ToTarget, const FRotator& ActorRot);
@@ -219,7 +256,6 @@ protected:
 	// --- Resolved-set helpers ---
 	// Return the effective montage for each slot: per-weapon DA set first, ABP fallback second.
 
-	bool IsHoldFireActive() const;
 	UAnimMontage* GetEffectiveFireLoopMontage() const;
 	UAnimMontage* GetEffectiveFireSingleMontage() const;
 	UAnimMontage* GetEffectiveReloadMontage() const;
@@ -248,11 +284,6 @@ private:
 	UFUNCTION()
 	void HandleWeaponFired();
 
-	// --- Hold-fire notify — auto-routed from the "FireHold" skeleton notify in the single-fire montage ---
-
-	UFUNCTION()
-	void AnimNotify_FireHold();
-
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AWeaponBase> BoundFireWeapon;
 
@@ -271,13 +302,8 @@ private:
 
 	bool bPrevIsFiring = false;
 	bool bPrevIsReloading = false;
-
-	// --- Hold-fire state ---
-
-	/** True when the single-fire montage is paused at the FireHold notify (aimed, waiting to shoot). */
-	bool bHoldFireHeld = false;
-	/** True while the montage is resuming past the FireHold notify to play the recoil/cycle. */
-	bool bHoldFireAdvancing = false;
+	bool bPrevIsAiming = false;
+	bool bWasAlive = true;
 
 	// --- Fire-align tracking ---
 
@@ -286,4 +312,9 @@ private:
 
 	/** True once SetupFireAlign has been called successfully for the current weapon. Reset on weapon rebind. */
 	bool bFireAlignSetup = false;
+
+	// --- Melee-align tracking ---
+
+	/** True once SetupMeleeAlign has been called successfully for the current weapon. Reset on weapon rebind. */
+	bool bMeleeAlignSetup = false;
 };

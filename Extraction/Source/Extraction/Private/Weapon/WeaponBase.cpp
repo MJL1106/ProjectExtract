@@ -231,6 +231,7 @@ void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	SetFireAlignAlpha(0.f);
+	SetMeleeAlignAlpha(0.f);
 
 	if (IsValid(SpawnedVisualActor))
 	{
@@ -835,6 +836,59 @@ void AWeaponBase::SetFireAlignAlpha(float Alpha)
 			*Blended.GetLocation().ToString(), *Blended.Rotator().ToString(),
 			*WeaponMesh->GetComponentLocation().ToString());
 	}
+}
+
+// ---- Weapon melee alignment ----
+
+void AWeaponBase::SetupMeleeAlign(USkeletalMeshComponent* EnemyMesh, FName MeleeSocket)
+{
+	bMeleeAlignReady = false;
+
+	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+	if (MeleeSocket.IsNone())
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("SetupMeleeAlign: %s — MeleeSocket is None"), *GetNameSafe(this));
+		return;
+	}
+
+	const FName RestSocket = WeaponMesh->GetAttachSocketName();
+	if (!EnemyMesh->DoesSocketExist(RestSocket))
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("SetupMeleeAlign: %s — rest socket '%s' not found on enemy mesh (melee-align disabled)"),
+			*GetNameSafe(this), *RestSocket.ToString());
+		return;
+	}
+	if (!EnemyMesh->DoesSocketExist(MeleeSocket))
+	{
+		// Verbose, not Warning: the socket is authored manually per-weapon and is legitimately absent
+		// until then — melee-align stays disabled and writes nothing, so this must not spam every equip.
+		UE_LOG(LogExtraction, Verbose, TEXT("SetupMeleeAlign: %s — melee socket '%s' not found on enemy mesh (melee-align disabled)"),
+			*GetNameSafe(this), *MeleeSocket.ToString());
+		return;
+	}
+
+	MeleeAlignRestRelative = WeaponMesh->GetRelativeTransform();
+
+	const FTransform TRest = EnemyMesh->GetSocketTransform(RestSocket, RTS_Component);
+	const FTransform TMelee = EnemyMesh->GetSocketTransform(MeleeSocket, RTS_Component);
+	MeleeAlignMeleeRelative = MeleeAlignRestRelative * (TMelee * TRest.Inverse());
+
+	bMeleeAlignReady = true;
+}
+
+void AWeaponBase::SetMeleeAlignAlpha(float Alpha)
+{
+	if (!bMeleeAlignReady) return;
+	if (!IsValid(WeaponMesh)) return;
+
+	Alpha = FMath::Clamp(Alpha, 0.f, 1.f);
+
+	FTransform Blended;
+	Blended.SetLocation(FMath::Lerp(MeleeAlignRestRelative.GetLocation(), MeleeAlignMeleeRelative.GetLocation(), Alpha));
+	Blended.SetRotation(FQuat::Slerp(MeleeAlignRestRelative.GetRotation(), MeleeAlignMeleeRelative.GetRotation(), Alpha));
+	Blended.SetScale3D(FMath::Lerp(MeleeAlignRestRelative.GetScale3D(), MeleeAlignMeleeRelative.GetScale3D(), Alpha));
+
+	WeaponMesh->SetRelativeTransform(Blended);
 }
 
 void AWeaponBase::PlayVisualWeaponReload(float PlayRate)

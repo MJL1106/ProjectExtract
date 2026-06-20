@@ -41,7 +41,9 @@ EBTNodeResult::Type UBTTask_RusherAdvance::ExecuteTask(UBehaviorTreeComponent& O
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 	Enemy->SetAimTarget(Target);
 	Controller->SetFocus(Target);
-	Controller->MoveToActor(Target, 50.f, false, true, false, nullptr, true);
+	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+	const float AcceptRadius = IsValid(DA) ? DA->MeleeApproachDistance : 120.f;
+	Controller->MoveToActor(Target, AcceptRadius, false, true, false, nullptr, true);
 	Mem->RePathTimer = RusherRePathInterval;
 
 	return EBTNodeResult::InProgress;
@@ -96,7 +98,7 @@ void UBTTask_RusherAdvance::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 	Mem->RePathTimer -= DeltaSeconds;
 	if (Mem->RePathTimer <= 0.f)
 	{
-		Controller->MoveToActor(Target, 50.f, false, true, false, nullptr, true);
+		Controller->MoveToActor(Target, DA->MeleeApproachDistance, false, true, false, nullptr, true);
 		Mem->RePathTimer = RusherRePathInterval;
 	}
 }

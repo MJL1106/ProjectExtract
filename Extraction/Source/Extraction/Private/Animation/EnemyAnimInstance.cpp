@@ -33,10 +33,12 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 
 	bPrevIsFiring = false;
 	bPrevIsReloading = false;
-	bHoldFireHeld = false;
-	bHoldFireAdvancing = false;
+	bPrevIsAiming = false;
+	bWasAlive = true;
 	FireAlignAlpha = 0.f;
 	bFireAlignSetup = false;
+	MeleeMontageWeight = 0.f;
+	bMeleeAlignSetup = false;
 	bGripSocketValid = false;
 	CachedGripMesh.Reset();
 	CachedGripSocketName = NAME_None;
@@ -113,6 +115,20 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	bIsAlive = IsValid(HealthComponent) ? HealthComponent->IsAlive() : true;
 
+	// Settle recoil once on the alive→dead transition, before the early-return zeros everything.
+	// Also clear the recoil aiming flag here — the aim-edge block below is unreachable after the
+	// early-return, so a mid-ADS death would otherwise leave the recoil solver stuck in Aiming=true.
+	if (!bIsAlive && bWasAlive)
+	{
+		BP_StopRecoil();
+		if (bPrevIsAiming)
+		{
+			BP_SetRecoilAiming(false);
+			bPrevIsAiming = false;
+		}
+	}
+	bWasAlive = bIsAlive;
+
 	// Dead: zero combat/IK signals and skip the rest. Locomotion is left running so the
 	// death-montage→ragdoll blend in the ABP has correct speed/direction inputs.
 	if (!bIsAlive)
@@ -127,8 +143,6 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		LeftHandIKTarget = FTransform::Identity;
 		bPrevIsFiring = false;
 		bPrevIsReloading = false;
-		bHoldFireHeld = false;
-		bHoldFireAdvancing = false;
 		return;
 	}
 
@@ -164,6 +178,14 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsReloading = false;
 	}
 
+	// --- Recoil: forward aim-state changes to the ABP bridge ---
+
+	if (bIsAiming != bPrevIsAiming)
+	{
+		BP_SetRecoilAiming(bIsAiming);
+		bPrevIsAiming = bIsAiming;
+	}
+
 	// Lazy bind/rebind per-shot delegate and IK socket cache — fires only when the weapon changes.
 	if (Weapon != BoundFireWeapon.Get())
 	{
@@ -188,6 +210,8 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			if (const UWeaponDataAsset* DA = Weapon->GetWeaponData())
 			{
 				WeaponAnimType = DA->EnemyWeaponAnimType;
+				BP_SetupRecoil(DA->EnemyRecoilData.Get(), DA->FireRate);
+
 				const FName SocketName = DA->LeftHandGripSocket;
 				if (!SocketName.IsNone())
 				{
@@ -204,10 +228,10 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				}
 			}
 		}
-
-		// Hold-fire state resets on weapon swap — the new weapon may not have bHoldFireUntilShot.
-		bHoldFireHeld = false;
-		bHoldFireAdvancing = false;
+		else
+		{
+			BP_SetupRecoil(nullptr, 0.f);
+		}
 
 		// Fire-align setup: compute rest→fire offset once on equip so per-frame cost is just a lerp.
 		bFireAlignSetup = false;
@@ -216,6 +240,16 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		{
 			Weapon->SetupFireAlign(GetOwningComponent(), FireAlignSocketName);
 			bFireAlignSetup = true;
+		}
+
+		// Melee-align setup: compute rest→melee offset once on equip, mirroring fire-align.
+		bMeleeAlignSetup = false;
+		MeleeMontageWeight = 0.f;
+		if (IsValid(Weapon) && !MeleeAlignSocketName.IsNone())
+		{
+			Weapon->SetupMeleeAlign(GetOwningComponent(), MeleeAlignSocketName);
+			// Reflect actual readiness — when the socket isn't authored yet the per-frame block stays dormant.
+			bMeleeAlignSetup = Weapon->IsMeleeAlignReady();
 		}
 	}
 
@@ -251,43 +285,18 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	// --- Auto-trigger: fire / reload montages on state transitions ---
 
-	// Hold-fire weapons own their single-fire montage — skip the loop-montage auto-trigger for them.
-	if (!IsHoldFireActive())
+	if (bIsFiring && !bPrevIsFiring)
+		PlayFireMontage();
+	else if (!bIsFiring && bPrevIsFiring)
 	{
-		if (bIsFiring && !bPrevIsFiring)
-			PlayFireMontage();
-		else if (!bIsFiring && bPrevIsFiring)
-			StopFireMontage();
+		StopFireMontage();
+		BP_StopRecoil();
 	}
 	bPrevIsFiring = bIsFiring;
 
 	if (bIsReloading && !bPrevIsReloading)
 		PlayReloadMontage();
 	bPrevIsReloading = bIsReloading;
-
-	// --- Hold-fire state machine (deliberate weapons — sniper/bolt-action) ---
-
-	if (IsHoldFireActive())
-	{
-		UAnimMontage* Single = GetEffectiveFireSingleMontage();
-		const bool bWantHold = bInCombat && bIsAiming;   // shouldered & engaging
-
-		if (bWantHold)
-		{
-			// (re)arm: play from start; the FireHold notify pauses it at the aimed pose.
-			if (!bHoldFireHeld && !Montage_IsPlaying(Single))
-			{
-				bHoldFireAdvancing = false;
-				Montage_Play(Single);
-			}
-		}
-		else if (bHoldFireHeld || Montage_IsPlaying(Single))
-		{
-			Montage_Stop(0.15f, Single);
-			bHoldFireHeld = false;
-			bHoldFireAdvancing = false;
-		}
-	}
 
 	// --- Fire-align: smoothly blend weapon offset while the fire-loop montage plays ---
 	// Alpha drives SetFireAlignAlpha per-frame via FInterpTo so it eases in/out with the montage
@@ -308,6 +317,20 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		const bool bAlphaSettled = FMath::IsNearlyEqual(FireAlignAlpha, PrevAlpha, KINDA_SMALL_NUMBER);
 		if (!bAlphaSettled || FireAlignAlpha > KINDA_SMALL_NUMBER)
 			Weapon->SetFireAlignAlpha(FireAlignAlpha);
+	}
+
+	// --- Melee montage weight (unconditional) + melee-align (gated on socket setup) ---
+	// MeleeMontageWeight eases toward 1 while the melee montage plays and back to 0 when it ends.
+	// Exposed BlueprintReadOnly so the ABP can fade the aim-offset out during the swing
+	// (AimAlpha = 1 - MeleeMontageWeight). The weapon melee-align write stays gated on a valid
+	// align socket — archetypes without the socket still get the weight for the aim gate.
+	{
+		UAnimMontage* EffMeleeMontage = GetEffectiveMeleeMontage();
+		const bool bIsMeleePlaying = IsValid(EffMeleeMontage) && Montage_IsPlaying(EffMeleeMontage);
+		MeleeMontageWeight = FMath::FInterpTo(MeleeMontageWeight, bIsMeleePlaying ? 1.f : 0.f, DeltaSeconds, MeleeAlignBlendSpeed);
+
+		if (bMeleeAlignSetup && IsValid(Weapon) && (bIsMeleePlaying || MeleeMontageWeight > KINDA_SMALL_NUMBER))
+			Weapon->SetMeleeAlignAlpha(MeleeMontageWeight);
 	}
 }
 
@@ -391,28 +414,6 @@ UAnimMontage* UEnemyAnimInstance::GetEffectiveHitReactFlinchMontage() const
 	return nullptr; // no ABP-level fallback for the flinch slot — it is intentionally new
 }
 
-// --- Hold-fire helpers ---
-
-bool UEnemyAnimInstance::IsHoldFireActive() const
-{
-	if (!BoundFireWeapon.IsValid()) return false;
-	const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData();
-	if (!DA || !DA->EnemyAnimSet.bHoldFireUntilShot) return false;
-	return IsValid(GetEffectiveFireSingleMontage());
-}
-
-void UEnemyAnimInstance::AnimNotify_FireHold()
-{
-	if (!IsHoldFireActive()) return;
-	if (bHoldFireAdvancing) return;   // mid-fire pass-through; don't re-pause
-	UAnimMontage* Single = GetEffectiveFireSingleMontage();
-	if (IsValid(Single) && Montage_IsPlaying(Single))
-	{
-		Montage_Pause(Single);
-		bHoldFireHeld = true;
-	}
-}
-
 // --- Montage Helpers ---
 
 void UEnemyAnimInstance::PlayFireMontage(float PlayRate)
@@ -491,7 +492,18 @@ void UEnemyAnimInstance::PlayMeleeMontage(float PlayRate)
 {
 	UAnimMontage* Montage = GetEffectiveMeleeMontage();
 	if (!IsValid(Montage)) return;
+	// Don't restart a swing already in progress — a mid-swing replay would wipe the contact-frame
+	// damage notify before it fires. Pace swings via MeleeCooldown (>= montage length). Matches the
+	// IsPlaying guard on the fire/reload/grenade montage helpers.
+	if (Montage_IsPlaying(Montage)) return;
 	Montage_Play(Montage, PlayRate);
+
+	const int32 NumSections = Montage->CompositeSections.Num();
+	if (NumSections > 1)
+	{
+		const int32 Pick = FMath::RandRange(0, NumSections - 1);
+		Montage_JumpToSection(Montage->CompositeSections[Pick].SectionName, Montage);
+	}
 }
 
 void UEnemyAnimInstance::PlayGrenadeMontage(float PlayRate)
@@ -515,19 +527,7 @@ void UEnemyAnimInstance::HandleWeaponFired()
 {
 	if (!bIsAlive) return;
 
-	// Hold-fire weapons: resume the paused single-fire montage past the FireHold notify so the
-	// recoil/cycle plays, then NativeUpdateAnimation re-arms it back to the aimed pose.
-	if (IsHoldFireActive())
-	{
-		UAnimMontage* Single = GetEffectiveFireSingleMontage();
-		if (bHoldFireHeld && IsValid(Single))
-		{
-			bHoldFireHeld = false;
-			bHoldFireAdvancing = true;
-			Montage_Resume(Single);   // hold -> recoil/cycle -> end; NativeUpdate re-arms after
-		}
-		return;   // hold path owns the single montage
-	}
+	BP_PlayRecoil();
 
 	UAnimMontage* LoopMontage = GetEffectiveFireLoopMontage();
 
