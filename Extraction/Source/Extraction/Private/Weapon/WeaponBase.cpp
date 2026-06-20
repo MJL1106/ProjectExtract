@@ -29,6 +29,7 @@
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
 #include "Extraction.h"
+#include "EnemyDebug.h"
 
 namespace WeaponConstants
 {
@@ -217,6 +218,14 @@ void AWeaponBase::BeginPlay()
 				*GetName(), *GetNameSafe(ThirdPersonVisualActorClass));
 		}
 	}
+
+	// Capture the rest relative transform now that the visual actor is attached (or confirmed absent).
+	// Doing this here guarantees a true rest capture regardless of when SetRecoilOffset is first called.
+	if (IsValid(WeaponMesh))
+	{
+		RecoilRestRelative = WeaponMesh->GetRelativeTransform();
+		bRecoilRestCaptured = true;
+	}
 }
 
 void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -232,6 +241,13 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	SetFireAlignAlpha(0.f);
 	SetMeleeAlignAlpha(0.f);
+
+	// Restore the weapon mesh to its captured rest pose so no recoil offset freezes in place.
+	if (bRecoilRestCaptured && IsValid(WeaponMesh))
+	{
+		WeaponMesh->SetRelativeTransform(RecoilRestRelative);
+		bRecoilRestCaptured = false;
+	}
 
 	if (IsValid(SpawnedVisualActor))
 	{
@@ -891,6 +907,29 @@ void AWeaponBase::SetMeleeAlignAlpha(float Alpha)
 	WeaponMesh->SetRelativeTransform(Blended);
 }
 
+// ---- Weapon recoil offset ----
+
+void AWeaponBase::SetRecoilOffset(const FTransform& Offset)
+{
+	if (!IsValid(WeaponMesh)) return;
+
+	// Rest was captured deterministically in BeginPlay. This guard is a backstop only —
+	// should never trigger in practice, but prevents a write before the mesh is valid.
+	if (!bRecoilRestCaptured) return;
+
+	if (Offset.Equals(FTransform::Identity, KINDA_SMALL_NUMBER))
+	{
+		WeaponMesh->SetRelativeTransform(RecoilRestRelative);
+		return;
+	}
+
+	// Compose: apply the offset onto the rest pose.
+	// FTransform operator* = A * B (apply A first, then B in component space).
+	// A local rotation/translation offset composed through Rest lands in the correct attach space.
+	const FTransform Result = Offset * RecoilRestRelative;
+	WeaponMesh->SetRelativeTransform(Result);
+}
+
 void AWeaponBase::PlayVisualWeaponReload(float PlayRate)
 {
 	if (!CachedWeaponVisualMesh.IsValid()) return;
@@ -960,6 +999,19 @@ bool AWeaponBase::CanReload() const
 void AWeaponBase::Reload()
 {
 	if (!CanReload()) return;
+
+	if (IsReloadDebugEnabled())
+	{
+		const FString OwnerName = GetNameSafe(GetOwner());
+		const int32 MagSize = IsValid(WeaponData) ? WeaponData->MagazineSize : -1;
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RELOADDBG] %s Reload() entry: owner=%s ammo=%d/%d -> state=Reloading"),
+			*GetName(), *OwnerName, CurrentAmmo, MagSize);
+		if (GEngine)
+			GEngine->AddOnScreenDebugMessage(
+				static_cast<uint64>(GetTypeHash(FString::Printf(TEXT("WepReload_%s"), *GetName()))), 4.f, FColor::Orange,
+				FString::Printf(TEXT("[RELOADDBG] %s ammo=%d/%d -> Reloading"), *OwnerName, CurrentAmmo, MagSize));
+	}
 
 	if (const UWorld* World = GetWorld())
 	{

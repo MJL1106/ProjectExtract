@@ -196,11 +196,12 @@ public:
 	FName LeftHandGripSocket = NAME_None;
 
 	/**
-	 * Visual-only procedural recoil profile (a KINEMATION DA_RecoilData asset) passed to the enemy's
-	 * AC_RecoilAnimation::Init via the anim bridge. Typed as UDataAsset so C++ stays agnostic of the
-	 * Blueprint recoil-data class. Null = no procedural recoil for this weapon.
+	 * Inline visual-only recoil profile for this weapon's enemy body kick.
+	 * Drives the UEnemyAnimInstance C++ spring solver (spine rotation + weapon kickback).
+	 * Replaces the old KINEMATION DA_RecoilData reference — no external asset required.
+	 * Tune PitchKick/RecoverySpeed/Sharpness first; all values in degrees or cm.
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
-	TObjectPtr<UDataAsset> EnemyRecoilData = nullptr;
+	FEnemyRecoilProfile EnemyRecoilProfile;
 
 };

@@ -13,6 +13,8 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "KismetAnimationLibrary.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/Engine.h"
+#include "EnemyDebug.h"
 
 // ---------------------------------------------------------------------------
 // Helpers — cached awareness resolve
@@ -33,8 +35,14 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 
 	bPrevIsFiring = false;
 	bPrevIsReloading = false;
-	bPrevIsAiming = false;
 	bWasAlive = true;
+	bHasRecoilProfile = false;
+	RecoilTargetRot = FRotator::ZeroRotator;
+	RecoilCurrentRot = FRotator::ZeroRotator;
+	RecoilTargetKickback = 0.f;
+	RecoilCurrentKickback = 0.f;
+	RecoilSpineRotation = FRotator::ZeroRotator;
+	bRecoilWroteWeapon = false;
 	FireAlignAlpha = 0.f;
 	bFireAlignSetup = false;
 	MeleeMontageWeight = 0.f;
@@ -115,17 +123,20 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	bIsAlive = IsValid(HealthComponent) ? HealthComponent->IsAlive() : true;
 
-	// Settle recoil once on the alive→dead transition, before the early-return zeros everything.
-	// Also clear the recoil aiming flag here — the aim-edge block below is unreachable after the
-	// early-return, so a mid-ADS death would otherwise leave the recoil solver stuck in Aiming=true.
+	// On the alive→dead transition, zero the spring solver and reset the weapon offset
+	// so no frozen kick pose bleeds into the ragdoll. Must happen before the early-return below.
 	if (!bIsAlive && bWasAlive)
 	{
-		BP_StopRecoil();
-		if (bPrevIsAiming)
-		{
-			BP_SetRecoilAiming(false);
-			bPrevIsAiming = false;
-		}
+		RecoilTargetRot = FRotator::ZeroRotator;
+		RecoilCurrentRot = FRotator::ZeroRotator;
+		RecoilTargetKickback = 0.f;
+		RecoilCurrentKickback = 0.f;
+		RecoilSpineRotation = FRotator::ZeroRotator;
+
+		bRecoilWroteWeapon = false;
+		AWeaponBase* DeathWeapon = IsValid(OwningEnemy) ? OwningEnemy->GetCurrentWeapon() : nullptr;
+		if (IsValid(DeathWeapon))
+			DeathWeapon->SetRecoilOffset(FTransform::Identity);
 	}
 	bWasAlive = bIsAlive;
 
@@ -178,19 +189,15 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsReloading = false;
 	}
 
-	// --- Recoil: forward aim-state changes to the ABP bridge ---
-
-	if (bIsAiming != bPrevIsAiming)
-	{
-		BP_SetRecoilAiming(bIsAiming);
-		bPrevIsAiming = bIsAiming;
-	}
-
 	// Lazy bind/rebind per-shot delegate and IK socket cache — fires only when the weapon changes.
 	if (Weapon != BoundFireWeapon.Get())
 	{
 		if (BoundFireWeapon.IsValid())
+		{
 			BoundFireWeapon->OnWeaponFired.RemoveDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
+			// Reset the outgoing weapon's offset so swapped-out guns don't keep a frozen kick.
+			BoundFireWeapon->SetRecoilOffset(FTransform::Identity);
+		}
 
 		if (IsValid(Weapon))
 			Weapon->OnWeaponFired.AddDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
@@ -210,7 +217,16 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			if (const UWeaponDataAsset* DA = Weapon->GetWeaponData())
 			{
 				WeaponAnimType = DA->EnemyWeaponAnimType;
-				BP_SetupRecoil(DA->EnemyRecoilData.Get(), DA->FireRate);
+
+				// Copy the inline profile and zero the spring state for the new weapon.
+				RecoilProfile = DA->EnemyRecoilProfile;
+				bHasRecoilProfile = true;
+				RecoilTargetRot = FRotator::ZeroRotator;
+				RecoilCurrentRot = FRotator::ZeroRotator;
+				RecoilTargetKickback = 0.f;
+				RecoilCurrentKickback = 0.f;
+				RecoilSpineRotation = FRotator::ZeroRotator;
+				bRecoilWroteWeapon = false;
 
 				const FName SocketName = DA->LeftHandGripSocket;
 				if (!SocketName.IsNone())
@@ -230,7 +246,13 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		}
 		else
 		{
-			BP_SetupRecoil(nullptr, 0.f);
+			bHasRecoilProfile = false;
+			RecoilTargetRot = FRotator::ZeroRotator;
+			RecoilCurrentRot = FRotator::ZeroRotator;
+			RecoilTargetKickback = 0.f;
+			RecoilCurrentKickback = 0.f;
+			RecoilSpineRotation = FRotator::ZeroRotator;
+			bRecoilWroteWeapon = false;
 		}
 
 		// Fire-align setup: compute rest→fire offset once on equip so per-frame cost is just a lerp.
@@ -288,14 +310,23 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	if (bIsFiring && !bPrevIsFiring)
 		PlayFireMontage();
 	else if (!bIsFiring && bPrevIsFiring)
-	{
 		StopFireMontage();
-		BP_StopRecoil();
-	}
+	// Natural decay (RecoverySpeed) settles the recoil spring — no explicit stop needed.
 	bPrevIsFiring = bIsFiring;
 
 	if (bIsReloading && !bPrevIsReloading)
+	{
+		if (IsReloadDebugEnabled())
+		{
+			const FString EnemyName = IsValid(OwningEnemy) ? OwningEnemy->GetName() : TEXT("?");
+			UE_LOG(LogTemp, Warning, TEXT("[RELOADDBG] %s reload detected -> PlayReloadMontage"), *EnemyName);
+			if (GEngine)
+				GEngine->AddOnScreenDebugMessage(
+					static_cast<uint64>(GetTypeHash(FString::Printf(TEXT("ReloadTrig_%s"), *EnemyName))), 4.f, FColor::Cyan,
+					FString::Printf(TEXT("[RELOADDBG] %s reload detected"), *EnemyName));
+		}
 		PlayReloadMontage();
+	}
 	bPrevIsReloading = bIsReloading;
 
 	// --- Fire-align: smoothly blend weapon offset while the fire-loop montage plays ---
@@ -332,6 +363,9 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		if (bMeleeAlignSetup && IsValid(Weapon) && (bIsMeleePlaying || MeleeMontageWeight > KINDA_SMALL_NUMBER))
 			Weapon->SetMeleeAlignAlpha(MeleeMontageWeight);
 	}
+
+	// --- Recoil spring solver ---
+	UpdateRecoilSolver(DeltaSeconds, Weapon);
 }
 
 // --- Aim Offset Helper ---
@@ -439,6 +473,7 @@ void UEnemyAnimInstance::StopFireMontage(float BlendOutTime)
 void UEnemyAnimInstance::PlayReloadMontage(float PlayRate)
 {
 	UAnimMontage* Montage = GetEffectiveReloadMontage();
+
 	if (!IsValid(Montage)) return;
 	if (Montage_IsPlaying(Montage)) return;
 
@@ -458,7 +493,33 @@ void UEnemyAnimInstance::PlayReloadMontage(float PlayRate)
 		}
 	}
 
-	Montage_Play(Montage, EffectiveRate);
+	const float PlayResult = Montage_Play(Montage, EffectiveRate);
+
+	if (IsReloadDebugEnabled())
+	{
+		const FName SlotName = (Montage->SlotAnimTracks.Num() > 0)
+			? Montage->SlotAnimTracks[0].SlotName : NAME_None;
+		const UWeaponDataAsset* DA = BoundFireWeapon.IsValid() ? BoundFireWeapon->GetWeaponData() : nullptr;
+		const FString EnemyName = IsValid(OwningEnemy) ? OwningEnemy->GetName() : TEXT("?");
+		const FString MontageName = GetNameSafe(Montage);
+		const FString WeaponName = GetNameSafe(BoundFireWeapon.Get());
+		const FString DAName = GetNameSafe(DA);
+		const FString PerWeaponReload = DA ? GetNameSafe(DA->EnemyAnimSet.Reload) : TEXT("null");
+
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RELOADDBG] %s PlayReloadMontage: montage=%s slot=%s weapon=%s DA=%s DA.Reload=%s rate=%.2f playResult=%.2f"),
+			*EnemyName, *MontageName, *SlotName.ToString(), *WeaponName, *DAName, *PerWeaponReload,
+			EffectiveRate, PlayResult);
+
+		if (GEngine)
+		{
+			const FString Msg = FString::Printf(
+				TEXT("[RELOADDBG] %s montage=%s slot=%s DA.Reload=%s play=%.2f"),
+				*EnemyName, *MontageName, *SlotName.ToString(), *PerWeaponReload, PlayResult);
+			GEngine->AddOnScreenDebugMessage(
+				static_cast<uint64>(GetTypeHash(FString::Printf(TEXT("ReloadDbg_%s"), *EnemyName))), 4.f, FColor::Yellow, Msg);
+		}
+	}
 
 	if (BoundFireWeapon.IsValid())
 		BoundFireWeapon->PlayVisualWeaponReload(EffectiveRate);
@@ -527,7 +588,7 @@ void UEnemyAnimInstance::HandleWeaponFired()
 {
 	if (!bIsAlive) return;
 
-	BP_PlayRecoil();
+	AddRecoilImpulse();
 
 	UAnimMontage* LoopMontage = GetEffectiveFireLoopMontage();
 
@@ -564,4 +625,79 @@ void UEnemyAnimInstance::HandleTakedown(AActor* Instigator)
 void UEnemyAnimInstance::HandleGrenadeThrow(FVector PredictedLanding, float TimeToImpact)
 {
 	PlayGrenadeMontage();
+}
+
+// --- Recoil Solver ---
+
+void UEnemyAnimInstance::AddRecoilImpulse()
+{
+	if (!bHasRecoilProfile) return;
+
+	const float AimScale = bIsAiming ? RecoilProfile.AimRecoilScale : 1.f;
+
+	// Pitch: positive Pitch on FRotator = nose down in UE; we negate so PitchKick > 0 = upward kick.
+	// Designers set PitchKick as a positive "up" value; the sign is absorbed here.
+	RecoilTargetRot.Pitch -= RecoilProfile.PitchKick * AimScale;
+	RecoilTargetRot.Pitch = FMath::Clamp(RecoilTargetRot.Pitch, -RecoilProfile.MaxAccumulatedPitch, 0.f);
+
+	// Yaw and roll wander both directions — random sign per shot so bursts don't walk sideways.
+	// Guard min<=max so a fat-fingered DA value doesn't crash RandRange.
+	const float YawSign = FMath::RandBool() ? 1.f : -1.f;
+	const float RollSign = FMath::RandBool() ? 1.f : -1.f;
+	const float YawLo = FMath::Min(RecoilProfile.YawKickMin, RecoilProfile.YawKickMax);
+	const float YawHi = FMath::Max(RecoilProfile.YawKickMin, RecoilProfile.YawKickMax);
+	RecoilTargetRot.Yaw += FMath::RandRange(YawLo, YawHi) * YawSign * AimScale;
+	RecoilTargetRot.Roll += RecoilProfile.RollKick * RollSign * AimScale;
+
+	// Clamp yaw and roll so a long LMG belt can't drift the gun off-screen.
+	const float YawMax = 2.f * RecoilProfile.YawKickMax;
+	const float RollMax = 2.f * RecoilProfile.RollKick;
+	RecoilTargetRot.Yaw = FMath::Clamp(RecoilTargetRot.Yaw, -YawMax, YawMax);
+	RecoilTargetRot.Roll = FMath::Clamp(RecoilTargetRot.Roll, -RollMax, RollMax);
+
+	// Kickback: accumulate and clamp to 3x single-shot to prevent extreme offsets on LMG bursts.
+	RecoilTargetKickback += RecoilProfile.WeaponKickback * AimScale;
+	RecoilTargetKickback = FMath::Min(RecoilTargetKickback, RecoilProfile.WeaponKickback * 3.f);
+}
+
+// NOTE: this function (and the SetRelativeTransform it triggers) must run on the game thread.
+// It is unsafe if multithreaded anim update (bUseMultiThreadedAnimationUpdate) is ever enabled.
+void UEnemyAnimInstance::UpdateRecoilSolver(float DeltaSeconds, AWeaponBase* Weapon)
+{
+	if (!bHasRecoilProfile)
+	{
+		RecoilSpineRotation = FRotator::ZeroRotator;
+		return;
+	}
+
+	// Settle-guard: skip integration and weapon write when the spring is at rest.
+	// "Active" = any accumulator is meaningfully non-zero.
+	const bool bRecoilActive =
+		!RecoilCurrentRot.IsNearlyZero(KINDA_SMALL_NUMBER) ||
+		!RecoilTargetRot.IsNearlyZero(KINDA_SMALL_NUMBER) ||
+		!FMath::IsNearlyZero(RecoilCurrentKickback, KINDA_SMALL_NUMBER) ||
+		!FMath::IsNearlyZero(RecoilTargetKickback, KINDA_SMALL_NUMBER);
+
+	if (!bRecoilActive)
+	{
+		RecoilSpineRotation = FRotator::ZeroRotator;
+		// One-shot identity reset on the settle edge — then go quiet.
+		if (bRecoilWroteWeapon && IsValid(Weapon))
+		{
+			Weapon->SetRecoilOffset(FTransform::Identity);
+			bRecoilWroteWeapon = false;
+		}
+		return;
+	}
+
+	// Ease current → target (attack transient).
+	RecoilCurrentRot = FMath::RInterpTo(RecoilCurrentRot, RecoilTargetRot, DeltaSeconds, RecoilProfile.Sharpness);
+	RecoilCurrentKickback = FMath::FInterpTo(RecoilCurrentKickback, RecoilTargetKickback, DeltaSeconds, RecoilProfile.Sharpness);
+
+	// Decay target → zero (recovery between shots / on cease-fire).
+	RecoilTargetRot = FMath::RInterpTo(RecoilTargetRot, FRotator::ZeroRotator, DeltaSeconds, RecoilProfile.RecoverySpeed);
+	RecoilTargetKickback = FMath::FInterpTo(RecoilTargetKickback, 0.f, DeltaSeconds, RecoilProfile.RecoverySpeed);
+
+	// Spine output: fraction of the rotation routed to the body additive.
+	RecoilSpineRotation = RecoilCurrentRot * RecoilProfile.SpineKickScale;
 }

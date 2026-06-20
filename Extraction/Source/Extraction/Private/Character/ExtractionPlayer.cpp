@@ -595,7 +595,6 @@ void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
 {
 	UE_LOG(LogExtraction, Warning, TEXT("[Takedown] AExtractionPlayer::TakedownInput fired — HasAuthority=%d MontageActive=%d TakedownMontage=%s"),
 		HasAuthority(), bTakedownMontageActive, *GetNameSafe(TakedownMontage));
-	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Cyan, TEXT("[Takedown] Player::TakedownInput fired"));
 
 	if (!HasAuthority()) return;
 	// Re-entrancy guard: a second press during an active montage takedown would orphan the frozen victim.
@@ -633,15 +632,11 @@ void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
 
 	if (!IsValid(Best))
 	{
-		const FString Msg = TEXT("Takedown: no target (need Unaware enemy within range, behind it)");
-		UE_LOG(LogExtraction, Warning, TEXT("%s"), *Msg);
-		if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Yellow, Msg);
+		UE_LOG(LogExtraction, Warning, TEXT("Takedown: no target (need Unaware enemy within range, behind it)"));
 		return;
 	}
 
 	UE_LOG(LogExtraction, Warning, TEXT("Takedown: %s"), *GetNameSafe(Best));
-	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 2.f, FColor::Green,
-		FString::Printf(TEXT("Takedown: %s"), *GetNameSafe(Best)));
 
 	if (!IsValid(TakedownMontage))
 	{

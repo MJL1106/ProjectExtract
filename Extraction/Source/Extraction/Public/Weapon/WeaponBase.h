@@ -178,6 +178,19 @@ public:
 	 *  per-frame melee-align block entirely when the WeaponSocket_Melee socket isn't authored yet. */
 	bool IsMeleeAlignReady() const { return bMeleeAlignReady; }
 
+	// ---- Weapon recoil offset (enemy body-kick visual) ----
+
+	/**
+	 * Composes Offset onto WeaponMesh's rest relative transform and writes the result.
+	 * Called per-frame from UEnemyAnimInstance::UpdateRecoilSolver.
+	 * SetRecoilOffset(FTransform::Identity) restores the exact rest pose.
+	 * Rest is captured lazily on the first call (after BeginPlay, once the visual actor is attached).
+	 * Single writer: fire-align is inert during the fire loop (its montage is nulled),
+	 * and melee is temporally exclusive with firing — no conflict.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Recoil")
+	void SetRecoilOffset(const FTransform& Offset);
+
 	// ---- Delegates ----
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
@@ -298,6 +311,18 @@ private:
 
 	/** True when SetupFireAlign succeeded — both sockets found and targets computed. */
 	bool bFireAlignReady = false;
+
+	// ---- Recoil offset runtime state ----
+
+	/**
+	 * WeaponMesh rest relative transform captured on the first SetRecoilOffset call.
+	 * Lazy capture (not in BeginPlay) so the visual actor is guaranteed attached.
+	 * SetRecoilOffset(Identity) restores this exactly.
+	 */
+	FTransform RecoilRestRelative = FTransform::Identity;
+
+	/** True once RecoilRestRelative has been captured. */
+	bool bRecoilRestCaptured = false;
 
 	// ---- Melee alignment runtime state ----
 

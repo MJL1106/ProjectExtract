@@ -2557,10 +2557,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				CurrentAlpha, *CornerPeekHomeLocation.ToString(), *CornerPeekApexLocation.ToString(),
 				CornerPeekStepDistance, BurstTimer, Ctx.Companion->GetCurrentAmmo());
 #if ENABLE_DRAW_DEBUG
-			DrawDebugLine(Ctx.Companion->GetWorld(), CornerPeekHomeLocation + FVector(0, 0, 20.f),
-				CornerPeekApexLocation + FVector(0, 0, 20.f), FColor::Magenta, false, 3.f, 0, 4.f);
-			DrawDebugSphere(Ctx.Companion->GetWorld(), CornerPeekApexLocation + FVector(0, 0, 20.f),
-				18.f, 12, FColor::Magenta, false, 3.f, 0, 2.f);
+			if (bDebugLogging)
+			{
+				DrawDebugLine(Ctx.Companion->GetWorld(), CornerPeekHomeLocation + FVector(0, 0, 20.f),
+					CornerPeekApexLocation + FVector(0, 0, 20.f), FColor::Magenta, false, 3.f, 0, 4.f);
+				DrawDebugSphere(Ctx.Companion->GetWorld(), CornerPeekApexLocation + FVector(0, 0, 20.f),
+					18.f, 12, FColor::Magenta, false, 3.f, 0, 2.f);
+			}
 #endif
 			DebugBurstLosCheckTimer = 0.f;
 			CornerPeekLosCheckTimer = 0.f;

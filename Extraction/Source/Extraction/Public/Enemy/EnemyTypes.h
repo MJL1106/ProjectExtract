@@ -5,6 +5,58 @@
 #include "CoreMinimal.h"
 #include "EnemyTypes.generated.h"
 
+/**
+ * Visual-only enemy recoil profile driving the UEnemyAnimInstance spring solver.
+ * One instance lives inline on UWeaponDataAsset — no separate asset required.
+ * All values are in human units (degrees / cm) and tuned per-weapon archetype.
+ * Single-player only; this data is never replicated.
+ */
+USTRUCT(BlueprintType)
+struct EXTRACTION_API FEnemyRecoilProfile
+{
+	GENERATED_BODY()
+
+	/** Pitch kick per shot in degrees (upward). ClampMin=0. Rifle baseline = 4. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
+	float PitchKick = 4.0f;
+
+	/** Minimum random yaw kick magnitude per shot in degrees. ClampMin=0. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
+	float YawKickMin = 1.0f;
+
+	/** Maximum random yaw kick magnitude per shot in degrees. Sign randomised each shot. ClampMin=0. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
+	float YawKickMax = 2.5f;
+
+	/** Roll kick per shot in degrees. Sign randomised each shot. ClampMin=0. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
+	float RollKick = 1.5f;
+
+	/** How far the weapon mesh nudges backward per shot in cm. ClampMin=0. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
+	float WeaponKickback = 2.0f;
+
+	/** Fraction of the rotation routed to the spine additive (0=weapon only, 1=spine only). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SpineKickScale = 0.5f;
+
+	/** Ease-in interp speed (1/s) — how fast the current value chases the target. Higher = snappier attack. ClampMin=0.1. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.1"))
+	float Sharpness = 22.0f;
+
+	/** Decay speed (1/s) — how fast the target drains back to zero between shots. Higher = faster settle. ClampMin=0.1. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.1"))
+	float RecoverySpeed = 9.0f;
+
+	/** Scale applied to all kick values while the enemy is aiming down sights (0-1). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AimRecoilScale = 0.6f;
+
+	/** Maximum absolute accumulated pitch on the target (deg). Prevents sustained-fire endless drift. ClampMin=0. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
+	float MaxAccumulatedPitch = 12.0f;
+};
+
 UENUM(BlueprintType)
 enum class EEnemyArchetype : uint8
 {
@@ -84,6 +136,7 @@ enum class EEnemyWeaponAnimType : uint8
 	LMG		UMETA(DisplayName = "LMG"),
 	Sniper	UMETA(DisplayName = "Sniper"),
 	Pistol	UMETA(DisplayName = "Pistol"),
+	Shotgun	UMETA(DisplayName = "Shotgun"),
 };
 
 /** Bark categories — the legibility layer (design §8). Subtitle text first, VO later. */

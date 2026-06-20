@@ -11,7 +11,6 @@
 class AEnemyCharacter;
 class AWeaponBase;
 class UCharacterMovementComponent;
-class UDataAsset;
 class UHealthComponent;
 class UAnimMontage;
 class UEnemyAwarenessComponent;
@@ -62,23 +61,17 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Animation")
 	void StopGrenadeMontage(float BlendOutTime = 0.2f);
 
-	// --- Recoil bridge (implemented in ABP to drive the AC_RecoilAnimation component) ---
+	// --- Recoil (C++ spring solver) ---
 
-	/** Setup/re-init the recoil component for the equipped weapon. RecoilData null = disable recoil. */
-	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Animation|Recoil")
-	void BP_SetupRecoil(UDataAsset* RecoilData, float FireRate);
-
-	/** Trigger one recoil pulse — called once per shot. */
-	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Animation|Recoil")
-	void BP_PlayRecoil();
-
-	/** Settle recoil — called when firing stops and on death. */
-	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Animation|Recoil")
-	void BP_StopRecoil();
-
-	/** Forward the aim state to the recoil solver. */
-	UFUNCTION(BlueprintImplementableEvent, Category = "Enemy|Animation|Recoil")
-	void BP_SetRecoilAiming(bool bAiming);
+	/**
+	 * Additive spine rotation output — the ABP reads this with a component-space
+	 * Transform(Modify)Bone on spine_03 placed as the last node before Output Pose.
+	 * Positive Pitch = upward kick (UE FRotator sign: negative Pitch = up, but we
+	 * negate when writing so designers see positive values = upward kick in the DA).
+	 * Tuning note: if the torso kicks the wrong direction, flip the sign in UpdateRecoilSolver.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Recoil")
+	FRotator RecoilSpineRotation = FRotator::ZeroRotator;
 
 protected:
 	// --- Cached Refs ---
@@ -253,6 +246,14 @@ protected:
 
 	void UpdateAimOffset(const FVector& ToTarget, const FRotator& ActorRot);
 
+	// --- Recoil Solver ---
+
+	/** Add one shot's impulse to the recoil target accumulators. No-op when bHasRecoilProfile=false. */
+	void AddRecoilImpulse();
+
+	/** Integrate the spring solver and push outputs to RecoilSpineRotation + weapon offset. */
+	void UpdateRecoilSolver(float DeltaSeconds, AWeaponBase* Weapon);
+
 	// --- Resolved-set helpers ---
 	// Return the effective montage for each slot: per-weapon DA set first, ABP fallback second.
 
@@ -298,11 +299,34 @@ private:
 	// The socket name resolved at equip time (copied from DA to avoid per-frame DA access).
 	FName CachedGripSocketName = NAME_None;
 
+	// --- Recoil solver state ---
+
+	/** Profile copied from the weapon DA on equip. */
+	FEnemyRecoilProfile RecoilProfile;
+
+	/** True when a valid profile is loaded for the current weapon. */
+	bool bHasRecoilProfile = false;
+
+	/** Accumulated target rotation (before ease-in). Decays toward zero at RecoverySpeed. */
+	FRotator RecoilTargetRot = FRotator::ZeroRotator;
+
+	/** Smoothed current rotation (chases target at Sharpness). Written to RecoilSpineRotation * SpineKickScale. */
+	FRotator RecoilCurrentRot = FRotator::ZeroRotator;
+
+	/** Accumulated target kickback distance (cm). Decays toward zero at RecoverySpeed. */
+	float RecoilTargetKickback = 0.f;
+
+	/** Smoothed current kickback (chases target at Sharpness). Forwarded to Weapon->SetRecoilOffset. */
+	float RecoilCurrentKickback = 0.f;
+
+	/** True while the solver last wrote a non-identity offset to the weapon. Used to emit exactly
+	 *  one Identity reset on the settle edge instead of calling SetRecoilOffset every idle frame. */
+	bool bRecoilWroteWeapon = false;
+
 	// --- Auto-trigger tracking ---
 
 	bool bPrevIsFiring = false;
 	bool bPrevIsReloading = false;
-	bool bPrevIsAiming = false;
 	bool bWasAlive = true;
 
 	// --- Fire-align tracking ---

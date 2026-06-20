@@ -56,6 +56,7 @@ Extraction/Config/DefaultEditorPerProjectUserSettings.ini
 # only transient agent-team worktrees stay local
 # ----------------------------------------------------------------------------
 .claude/worktrees/
+.claude/engine-session.lock.json
 .omc/
 Extraction/Config/DefaultAgentIntegrationKit.ini
 

@@ -1306,7 +1306,6 @@ void AExtractionCharacter::InteractStop(const FInputActionValue& Value)
 void AExtractionCharacter::TakedownInput(const FInputActionValue& Value)
 {
 	UE_LOG(LogExtraction, Warning, TEXT("[Takedown] AExtractionCharacter::TakedownInput fired (LEGACY class) — HasAuthority=%d"), HasAuthority());
-	if (GEngine) GEngine->AddOnScreenDebugMessage(-1, 3.f, FColor::Orange, TEXT("[Takedown] LEGACY Character::TakedownInput fired"));
 
 	if (!HasAuthority()) return;
 

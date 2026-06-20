@@ -703,6 +703,7 @@ void AEnemyCharacter::HandleDeath()
 		Weapon->ReattachMagazine();
 		Weapon->SetFireAlignAlpha(0.f);
 		Weapon->SetMeleeAlignAlpha(0.f);
+		Weapon->SetRecoilOffset(FTransform::Identity);
 		Weapon->StopVisualWeaponFire();
 	}
 

@@ -30,3 +30,9 @@ int32 GetSightDiagLevel();
 /** Returns the current enemy.SightDiagFilter string (case-insensitive substring match on pawn label).
  *  Empty = no filter (all enemies logged). */
 FString GetSightDiagFilter();
+
+/** Returns the current enemy.ReloadDebug cvar value (0=off, 1=on). */
+int32 GetReloadDebugLevel();
+
+/** Returns true when the enemy.ReloadDebug cvar is non-zero. */
+bool IsReloadDebugEnabled();

@@ -48,8 +48,8 @@ int32 GetAwarenessMeterLogLevel()
 
 static TAutoConsoleVariable<int32> CVarDetectionLog(
 	TEXT("enemy.DetectionLog"),
-	1,
-	TEXT("Detection diagnostic log: 0=off, 1=log [DETECTDBG] sight verdict (CanBeSeenFrom), sight/hearing/shot-at stimuli, and combat entry. Default 1 (temporary diagnostic)."),
+	0,
+	TEXT("Detection diagnostic log: 0=off, 1=log [DETECTDBG] sight verdict (CanBeSeenFrom), sight/hearing/shot-at stimuli, and combat entry."),
 	ECVF_Cheat);
 
 int32 GetDetectionLogLevel()
@@ -77,4 +77,20 @@ static TAutoConsoleVariable<FString> CVarSightDiagFilter(
 FString GetSightDiagFilter()
 {
 	return CVarSightDiagFilter.GetValueOnGameThread();
+}
+
+static TAutoConsoleVariable<int32> CVarReloadDebug(
+	TEXT("enemy.ReloadDebug"),
+	0,
+	TEXT("Deep reload diagnostic: 0=off, 1=log + on-screen the full enemy reload path (weapon reload entry, montage resolution, slot, play result)."),
+	ECVF_Cheat);
+
+int32 GetReloadDebugLevel()
+{
+	return CVarReloadDebug.GetValueOnGameThread();
+}
+
+bool IsReloadDebugEnabled()
+{
+	return CVarReloadDebug.GetValueOnGameThread() != 0;
 }
