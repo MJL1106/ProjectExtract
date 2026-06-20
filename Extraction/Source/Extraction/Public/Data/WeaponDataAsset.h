@@ -115,6 +115,24 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "0.1"))
 	float ReloadTime = 2.2f;
 
+	/**
+	 * When true, the enemy reload plays the body + gun montages' Loop section once per shell,
+	 * ticking CurrentAmmo +1 per shell as each seats, and finishes montage-driven.
+	 * Default false keeps the existing single-play full-refill behaviour for every other weapon.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo")
+	bool bShellByShellReload = false;
+
+	/** Section name on the body/gun reload montages that represents one shell insert.
+	 *  Must match the authored section name exactly. Ignored when bShellByShellReload is false. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo")
+	FName ShellReloadLoopSection = TEXT("Loop");
+
+	/** Section name on the body/gun reload montages that plays after the last shell seats.
+	 *  Must match the authored section name exactly. Ignored when bShellByShellReload is false. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo")
+	FName ShellReloadEndSection = TEXT("End");
+
 	// ---- ADS ----
 
 	/** Target field of view while aiming down sights */
@@ -203,5 +221,13 @@ public:
 	 */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	FEnemyRecoilProfile EnemyRecoilProfile;
+
+	/**
+	 * Inline visual-only ADS arm-raise profile for this weapon's enemy clavicle lift while firing.
+	 * Drives UEnemyAnimInstance — arms ease up to a braced pose on fire start and ease back on stop.
+	 * Tune RaisePitch (degrees, positive = up) and BlendSpeed first; HoldTime smooths semi-auto.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
+	FEnemyAdsProfile EnemyAdsProfile;
 
 };

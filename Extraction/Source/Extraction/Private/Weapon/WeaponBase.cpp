@@ -34,6 +34,9 @@
 namespace WeaponConstants
 {
 	static const FName MuzzleSocketName(TEXT("Muzzle"));
+
+	/** Extra seconds added to the computed shell reload duration to cover montage blend-in/out. */
+	static constexpr float ShellReloadSafetyMargin = 1.5f;
 }
 
 static TAutoConsoleVariable<int32> CVarShowBulletTracers(
@@ -1043,11 +1046,15 @@ void AWeaponBase::Reload()
 	{
 		World->GetTimerManager().ClearTimer(AutoFireTimerHandle);
 
+		const float TimerDuration = (IsValid(WeaponData) && WeaponData->bShellByShellReload)
+			? GetShellReloadSafetyTimeout()
+			: WeaponData->ReloadTime;
+
 		World->GetTimerManager().SetTimer(
 			ReloadTimerHandle,
 			this,
 			&AWeaponBase::OnReloadFinished,
-			WeaponData->ReloadTime,
+			TimerDuration,
 			false
 		);
 	}
@@ -1056,6 +1063,7 @@ void AWeaponBase::Reload()
 void AWeaponBase::OnReloadFinished()
 {
 	if (!IsValid(WeaponData)) return;
+	if (CurrentState != EWeaponState::Reloading) return;
 	bDryFireLogged = false;
 
 	if (HasAuthority())
@@ -1072,6 +1080,11 @@ void AWeaponBase::OnReloadFinished()
 		// Safety net: snap the magazine home if the notify-end was missed (montage interrupted, etc.).
 		ReattachMagazine();
 		StopVisualWeaponReload();
+
+		// Shell-by-shell weapons prime their Loop to self-loop — force-stop the body montage
+		// so it doesn't keep looping after the safety timer filled the mag.
+		if (IsValid(WeaponData) && WeaponData->bShellByShellReload)
+			StopBodyReloadMontage();
 	}
 
 	if (HasAuthority() && UE_LOG_ACTIVE(LogCompanionDiag, Log))
@@ -1093,6 +1106,187 @@ void AWeaponBase::OnReloadFinished()
 	// Resume firing if input is still held
 	if (bWantsToFire)
 		StartFiring();
+}
+
+void AWeaponBase::HandleShellInserted()
+{
+	if (!HasAuthority()) return;
+	if (CurrentState != EWeaponState::Reloading) return;
+	if (!IsValid(WeaponData) || !WeaponData->bShellByShellReload) return;
+
+	// If the mag is already full or reserve is exhausted, end the reload now.
+	if (CurrentAmmo >= WeaponData->MagazineSize || ReserveAmmo <= 0)
+	{
+		AdvanceShellReloadSection(false);
+		FinishShellReload();
+		return;
+	}
+
+	// Seat one shell.
+	CurrentAmmo = FMath::Min(CurrentAmmo + 1, WeaponData->MagazineSize);
+	ReserveAmmo = FMath::Max(ReserveAmmo - 1, 0);
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+
+	const bool bMore = (CurrentAmmo < WeaponData->MagazineSize && ReserveAmmo > 0);
+
+	if (IsReloadDebugEnabled())
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[RELOADDBG] %s HandleShellInserted: owner=%s ammo=%d/%d reserve=%d more=%d"),
+			*GetName(), *GetNameSafe(GetOwner()),
+			CurrentAmmo, WeaponData->MagazineSize, ReserveAmmo, (int32)bMore);
+	}
+
+	AdvanceShellReloadSection(bMore);
+	if (!bMore) FinishShellReload();
+}
+
+void AWeaponBase::CancelReload()
+{
+	if (CurrentState != EWeaponState::Reloading) return;
+
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+
+	if (HasAuthority()) CurrentState = EWeaponState::Idle;
+
+	ReattachMagazine();
+	StopVisualWeaponReload();
+
+	// Shell-by-shell weapons prime their Loop to self-loop — force-stop the body montage
+	// so it doesn't keep looping after an interrupt.
+	if (IsValid(WeaponData) && WeaponData->bShellByShellReload)
+		StopBodyReloadMontage();
+}
+
+void AWeaponBase::AdvanceShellReloadSection(bool bContinue)
+{
+	if (!IsValid(WeaponData)) return;
+
+	const FName LoopName = WeaponData->ShellReloadLoopSection;
+	const FName NextSection = bContinue ? WeaponData->ShellReloadLoopSection : WeaponData->ShellReloadEndSection;
+
+	// Body montage — drive the character mesh anim instance.
+	{
+		UAnimMontage* BodyReload = WeaponData->EnemyAnimSet.Reload;
+		if (IsValid(BodyReload))
+		{
+			if (ACharacter* OwnerChar = Cast<ACharacter>(GetOwner()))
+			{
+				if (USkeletalMeshComponent* CharMesh = OwnerChar->GetMesh())
+				{
+					if (UAnimInstance* AnimInst = CharMesh->GetAnimInstance())
+					{
+						if (AnimInst->Montage_IsPlaying(BodyReload))
+						{
+							AnimInst->Montage_SetNextSection(LoopName, NextSection, BodyReload);
+							// Make End terminal so section flow is fully code-driven, not authoring-dependent.
+							if (!bContinue)
+								AnimInst->Montage_SetNextSection(WeaponData->ShellReloadEndSection, NAME_None, BodyReload);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Gun montage — drive the visual weapon mesh anim instance.
+	{
+		UAnimMontage* GunReload = WeaponData->EnemyAnimSet.WeaponReload;
+		if (IsValid(GunReload) && CachedWeaponVisualMesh.IsValid())
+		{
+			if (UAnimInstance* AnimInst = CachedWeaponVisualMesh->GetAnimInstance())
+			{
+				if (AnimInst->Montage_IsPlaying(GunReload))
+				{
+					AnimInst->Montage_SetNextSection(LoopName, NextSection, GunReload);
+					// Make End terminal so section flow is fully code-driven, not authoring-dependent.
+					if (!bContinue)
+						AnimInst->Montage_SetNextSection(WeaponData->ShellReloadEndSection, NAME_None, GunReload);
+				}
+			}
+		}
+	}
+}
+
+void AWeaponBase::FinishShellReload()
+{
+	if (CurrentState != EWeaponState::Reloading) return;
+
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
+
+	if (HasAuthority()) CurrentState = EWeaponState::Idle;
+
+	bDryFireLogged = false;
+	OnReloadComplete.Broadcast();
+
+	if (bWantsToFire) StartFiring();
+}
+
+void AWeaponBase::PrimeShellReloadLoop()
+{
+	if (!IsValid(WeaponData) || !WeaponData->bShellByShellReload) return;
+
+	// Loud-fail: warn if the body montage is missing the expected Loop section.
+	const UAnimMontage* BodyReload = WeaponData->EnemyAnimSet.Reload;
+	if (!IsValid(BodyReload) || BodyReload->GetSectionIndex(WeaponData->ShellReloadLoopSection) == INDEX_NONE)
+	{
+		UE_LOG(LogTemp, Warning,
+			TEXT("[ShellReload] %s: bShellByShellReload set but reload montage missing the '%s' loop section — reload will fall back to the safety timer"),
+			*GetNameSafe(this), *WeaponData->ShellReloadLoopSection.ToString());
+	}
+
+	// Set Loop → Loop on both body and gun montages so the first section boundary self-loops.
+	// HandleShellInserted's per-shell AdvanceShellReloadSection(bMore) re-asserts this on continue
+	// and sets Loop → End on break-out.
+	AdvanceShellReloadSection(true);
+}
+
+void AWeaponBase::StopBodyReloadMontage(float BlendOut)
+{
+	if (!IsValid(WeaponData) || !IsValid(WeaponData->EnemyAnimSet.Reload)) return;
+
+	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
+	if (!IsValid(OwnerChar)) return;
+
+	USkeletalMeshComponent* CharMesh = OwnerChar->GetMesh();
+	if (!IsValid(CharMesh)) return;
+
+	UAnimInstance* AnimInst = CharMesh->GetAnimInstance();
+	if (!IsValid(AnimInst)) return;
+
+	AnimInst->Montage_Stop(BlendOut, WeaponData->EnemyAnimSet.Reload);
+}
+
+float AWeaponBase::GetShellReloadSafetyTimeout() const
+{
+	if (!IsValid(WeaponData)) return WeaponConstants::ShellReloadSafetyMargin;
+
+	const UAnimMontage* Body = WeaponData->EnemyAnimSet.Reload;
+	if (!IsValid(Body))
+	{
+		// No montage — fall back to shell-count × ReloadTime.
+		return WeaponData->MagazineSize * WeaponData->ReloadTime + WeaponConstants::ShellReloadSafetyMargin;
+	}
+
+	const float Total = Body->GetPlayLength();
+	const int32 LoopIdx = Body->GetSectionIndex(WeaponData->ShellReloadLoopSection);
+	const float LoopLen = (LoopIdx != INDEX_NONE) ? Body->GetSectionLength(LoopIdx) : Total;
+
+	// Mirror the rate clamp used in EnemyAnimInstance::PlayReloadMontage.
+	const float Rate = (WeaponData->ReloadTime > 0.f)
+		? FMath::Clamp(Total / WeaponData->ReloadTime, 0.5f, 2.0f)
+		: 1.f;
+
+	// Total playback: one full montage pass + (MagazineSize-1) extra Loop sections.
+	// Assumes Loop is followed by End (Loop is not the terminal section).
+	const int32 ExtraLoops = FMath::Max(0, WeaponData->MagazineSize - 1);
+	const float Duration = (Total + ExtraLoops * LoopLen) / Rate;
+
+	// Scale slack with magazine size so larger mags keep proportional headroom.
+	static constexpr float PerShellSlack = 0.15f;
+	return Duration + WeaponConstants::ShellReloadSafetyMargin + PerShellSlack * WeaponData->MagazineSize;
 }
 
 // ---- Recoil ----

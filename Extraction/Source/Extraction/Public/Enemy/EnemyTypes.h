@@ -16,45 +16,73 @@ struct EXTRACTION_API FEnemyRecoilProfile
 {
 	GENERATED_BODY()
 
-	/** Pitch kick per shot in degrees (upward). ClampMin=0. Rifle baseline = 4. */
+	/** Pitch kick per shot in degrees (upward). ClampMin=0. Rifle baseline = 7. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
-	float PitchKick = 4.0f;
+	float PitchKick = 7.0f;
 
 	/** Minimum random yaw kick magnitude per shot in degrees. ClampMin=0. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
-	float YawKickMin = 1.0f;
+	float YawKickMin = 0.8f;
 
 	/** Maximum random yaw kick magnitude per shot in degrees. Sign randomised each shot. ClampMin=0. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
-	float YawKickMax = 2.5f;
+	float YawKickMax = 1.8f;
 
 	/** Roll kick per shot in degrees. Sign randomised each shot. ClampMin=0. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
-	float RollKick = 1.5f;
+	float RollKick = 1.0f;
 
-	/** How far the weapon mesh nudges backward per shot in cm. ClampMin=0. */
+	/** How far the spine (whole upper body + gripped gun) nudges backward per shot in cm. ClampMin=0. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
-	float WeaponKickback = 2.0f;
+	float WeaponKickback = 3.5f;
 
 	/** Fraction of the rotation routed to the spine additive (0=weapon only, 1=spine only). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float SpineKickScale = 0.5f;
+	float SpineKickScale = 0.6f;
 
 	/** Ease-in interp speed (1/s) — how fast the current value chases the target. Higher = snappier attack. ClampMin=0.1. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.1"))
-	float Sharpness = 22.0f;
+	float Sharpness = 24.0f;
 
 	/** Decay speed (1/s) — how fast the target drains back to zero between shots. Higher = faster settle. ClampMin=0.1. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.1"))
-	float RecoverySpeed = 9.0f;
+	float RecoverySpeed = 11.0f;
 
 	/** Scale applied to all kick values while the enemy is aiming down sights (0-1). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float AimRecoilScale = 0.6f;
+	float AimRecoilScale = 0.55f;
 
 	/** Maximum absolute accumulated pitch on the target (deg). Prevents sustained-fire endless drift. ClampMin=0. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Recoil", meta = (ClampMin = "0.0"))
-	float MaxAccumulatedPitch = 12.0f;
+	float MaxAccumulatedPitch = 14.0f;
+};
+
+/**
+ * Visual-only per-weapon ADS arm-raise profile driving UEnemyAnimInstance.
+ * While the enemy fires, both clavicles ease to a braced/raised pose and ease back on cease-fire.
+ * One instance lives inline on UWeaponDataAsset — no separate asset required.
+ * Single-player only; this data is never replicated.
+ */
+USTRUCT(BlueprintType)
+struct EXTRACTION_API FEnemyAdsProfile
+{
+	GENERATED_BODY()
+
+	/** How much up/down the arms raise while firing, in degrees (positive = up). No clamp — negative drops arms down. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
+	float RaisePitch = 8.f;
+
+	/** Optional inward tuck of the arms while firing, in degrees. Most weapons leave this at 0. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS")
+	float RaiseRoll = 0.f;
+
+	/** FInterpTo speed (1/s) for easing the raise in and out. Higher = snappier. ClampMin=0.1. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.1"))
+	float BlendSpeed = 10.f;
+
+	/** Seconds to hold the raised pose after the last firing frame. Prevents semi-auto bob between rounds. ClampMin=0.0. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ADS", meta = (ClampMin = "0.0"))
+	float HoldTime = 0.15f;
 };
 
 UENUM(BlueprintType)

@@ -42,11 +42,15 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	RecoilTargetKickback = 0.f;
 	RecoilCurrentKickback = 0.f;
 	RecoilSpineRotation = FRotator::ZeroRotator;
-	bRecoilWroteWeapon = false;
+	RecoilSpineOffset = FVector::ZeroVector;
 	FireAlignAlpha = 0.f;
 	bFireAlignSetup = false;
 	MeleeMontageWeight = 0.f;
 	bMeleeAlignSetup = false;
+	AdsAlpha = 0.f;
+	AdsFireHoldTimer = 0.f;
+	AdsClavicleRotation = FRotator::ZeroRotator;
+	bHasAdsProfile = false;
 	bGripSocketValid = false;
 	CachedGripMesh.Reset();
 	CachedGripSocketName = NAME_None;
@@ -132,11 +136,7 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		RecoilTargetKickback = 0.f;
 		RecoilCurrentKickback = 0.f;
 		RecoilSpineRotation = FRotator::ZeroRotator;
-
-		bRecoilWroteWeapon = false;
-		AWeaponBase* DeathWeapon = IsValid(OwningEnemy) ? OwningEnemy->GetCurrentWeapon() : nullptr;
-		if (IsValid(DeathWeapon))
-			DeathWeapon->SetRecoilOffset(FTransform::Identity);
+		RecoilSpineOffset = FVector::ZeroVector;
 	}
 	bWasAlive = bIsAlive;
 
@@ -154,6 +154,9 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		LeftHandIKTarget = FTransform::Identity;
 		bPrevIsFiring = false;
 		bPrevIsReloading = false;
+		AdsAlpha = 0.f;
+		AdsFireHoldTimer = 0.f;
+		AdsClavicleRotation = FRotator::ZeroRotator;
 		return;
 	}
 
@@ -193,11 +196,7 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	if (Weapon != BoundFireWeapon.Get())
 	{
 		if (BoundFireWeapon.IsValid())
-		{
 			BoundFireWeapon->OnWeaponFired.RemoveDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
-			// Reset the outgoing weapon's offset so swapped-out guns don't keep a frozen kick.
-			BoundFireWeapon->SetRecoilOffset(FTransform::Identity);
-		}
 
 		if (IsValid(Weapon))
 			Weapon->OnWeaponFired.AddDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
@@ -226,7 +225,14 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				RecoilTargetKickback = 0.f;
 				RecoilCurrentKickback = 0.f;
 				RecoilSpineRotation = FRotator::ZeroRotator;
-				bRecoilWroteWeapon = false;
+				RecoilSpineOffset = FVector::ZeroVector;
+
+				// Copy the ADS arm-raise profile and reset its solver state for the new weapon.
+				AdsProfile = DA->EnemyAdsProfile;
+				bHasAdsProfile = true;
+				AdsAlpha = 0.f;
+				AdsFireHoldTimer = 0.f;
+				AdsClavicleRotation = FRotator::ZeroRotator;
 
 				const FName SocketName = DA->LeftHandGripSocket;
 				if (!SocketName.IsNone())
@@ -252,7 +258,12 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			RecoilTargetKickback = 0.f;
 			RecoilCurrentKickback = 0.f;
 			RecoilSpineRotation = FRotator::ZeroRotator;
-			bRecoilWroteWeapon = false;
+			RecoilSpineOffset = FVector::ZeroVector;
+
+			bHasAdsProfile = false;
+			AdsAlpha = 0.f;
+			AdsFireHoldTimer = 0.f;
+			AdsClavicleRotation = FRotator::ZeroRotator;
 		}
 
 		// Fire-align setup: compute rest→fire offset once on equip so per-frame cost is just a lerp.
@@ -364,8 +375,30 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			Weapon->SetMeleeAlignAlpha(MeleeMontageWeight);
 	}
 
+	// --- ADS arm-raise solver ---
+	// Eases both clavicles into a braced firing pose while the enemy shoots and back on cease-fire.
+	// Output: AdsClavicleRotation (additive FRotator) + AdsAlpha (0-1 scalar) — both consumed by the ABP.
+
+	if (bHasAdsProfile)
+	{
+		const bool bWantRaise = bIsFiring && !bIsReloading;
+		if (bWantRaise)
+			AdsFireHoldTimer = AdsProfile.HoldTime;
+		else
+			AdsFireHoldTimer = FMath::Max(0.f, AdsFireHoldTimer - DeltaSeconds);
+
+		const float AlphaTarget = (bWantRaise || AdsFireHoldTimer > 0.f) ? 1.f : 0.f;
+		AdsAlpha = FMath::FInterpTo(AdsAlpha, AlphaTarget, DeltaSeconds, AdsProfile.BlendSpeed);
+		AdsClavicleRotation = FRotator(AdsProfile.RaisePitch * AdsAlpha, 0.f, AdsProfile.RaiseRoll * AdsAlpha);
+	}
+	else
+	{
+		AdsAlpha = 0.f;
+		AdsClavicleRotation = FRotator::ZeroRotator;
+	}
+
 	// --- Recoil spring solver ---
-	UpdateRecoilSolver(DeltaSeconds, Weapon);
+	UpdateRecoilSolver(DeltaSeconds);
 }
 
 // --- Aim Offset Helper ---
@@ -522,7 +555,17 @@ void UEnemyAnimInstance::PlayReloadMontage(float PlayRate)
 	}
 
 	if (BoundFireWeapon.IsValid())
+	{
 		BoundFireWeapon->PlayVisualWeaponReload(EffectiveRate);
+
+		// Shell-by-shell weapons: prime the Loop section to self-loop now that both body and gun
+		// montages are playing. The per-shell notify breaks out to End on the last shell.
+		if (const UWeaponDataAsset* DA = BoundFireWeapon->GetWeaponData())
+		{
+			if (DA->bShellByShellReload)
+				BoundFireWeapon->PrimeShellReloadLoop();
+		}
+	}
 }
 
 void UEnemyAnimInstance::PlayHitReactMontage(float PlayRate)
@@ -660,17 +703,19 @@ void UEnemyAnimInstance::AddRecoilImpulse()
 	RecoilTargetKickback = FMath::Min(RecoilTargetKickback, RecoilProfile.WeaponKickback * 3.f);
 }
 
-// NOTE: this function (and the SetRelativeTransform it triggers) must run on the game thread.
-// It is unsafe if multithreaded anim update (bUseMultiThreadedAnimationUpdate) is ever enabled.
-void UEnemyAnimInstance::UpdateRecoilSolver(float DeltaSeconds, AWeaponBase* Weapon)
+// NOTE: runs on the game thread (called from NativeUpdateAnimation).
+// The weapon SetRelativeTransform call has been removed — RecoilSpineOffset is a plain member write,
+// which is safe here and avoids the previous thread-safety concern.
+void UEnemyAnimInstance::UpdateRecoilSolver(float DeltaSeconds)
 {
 	if (!bHasRecoilProfile)
 	{
 		RecoilSpineRotation = FRotator::ZeroRotator;
+		RecoilSpineOffset = FVector::ZeroVector;
 		return;
 	}
 
-	// Settle-guard: skip integration and weapon write when the spring is at rest.
+	// Settle-guard: skip integration when the spring is at rest.
 	// "Active" = any accumulator is meaningfully non-zero.
 	const bool bRecoilActive =
 		!RecoilCurrentRot.IsNearlyZero(KINDA_SMALL_NUMBER) ||
@@ -681,12 +726,7 @@ void UEnemyAnimInstance::UpdateRecoilSolver(float DeltaSeconds, AWeaponBase* Wea
 	if (!bRecoilActive)
 	{
 		RecoilSpineRotation = FRotator::ZeroRotator;
-		// One-shot identity reset on the settle edge — then go quiet.
-		if (bRecoilWroteWeapon && IsValid(Weapon))
-		{
-			Weapon->SetRecoilOffset(FTransform::Identity);
-			bRecoilWroteWeapon = false;
-		}
+		RecoilSpineOffset = FVector::ZeroVector;
 		return;
 	}
 
@@ -698,6 +738,10 @@ void UEnemyAnimInstance::UpdateRecoilSolver(float DeltaSeconds, AWeaponBase* Wea
 	RecoilTargetRot = FMath::RInterpTo(RecoilTargetRot, FRotator::ZeroRotator, DeltaSeconds, RecoilProfile.RecoverySpeed);
 	RecoilTargetKickback = FMath::FInterpTo(RecoilTargetKickback, 0.f, DeltaSeconds, RecoilProfile.RecoverySpeed);
 
-	// Spine output: fraction of the rotation routed to the body additive.
+	// Spine rotation output: fraction of the rotation routed to the body additive.
 	RecoilSpineRotation = RecoilCurrentRot * RecoilProfile.SpineKickScale;
+
+	// Forward/back piston: route the eased kickback (cm) to a backward spine translation.
+	// -X = backward in spine_03 component space (best guess — verify in PIE; flip here if wrong).
+	RecoilSpineOffset = FVector(-RecoilCurrentKickback, 0.f, 0.f);
 }

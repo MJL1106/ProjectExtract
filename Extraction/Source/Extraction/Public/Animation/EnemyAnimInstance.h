@@ -73,6 +73,33 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Recoil")
 	FRotator RecoilSpineRotation = FRotator::ZeroRotator;
 
+	/**
+	 * Additive spine TRANSLATION output (cm, component space) — the ABP reads this with the
+	 * same component-space Transform(Modify)Bone on spine_03 that applies RecoilSpineRotation,
+	 * via its Translation channel (Add to Existing). Drives the forward/back recoil piston:
+	 * the whole upper body + gripped gun jolt backward along the aim axis and return.
+	 * Backward is -X in spine_03 component space as a best guess — verify the direction in PIE;
+	 * if it jolts sideways/up, flip the axis/sign in UpdateRecoilSolver (one line, Live-Coding patchable).
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Recoil")
+	FVector RecoilSpineOffset = FVector::ZeroVector;
+
+	/**
+	 * Additive clavicle rotation output — the ABP applies this on clavicle_l and clavicle_r via
+	 * Transform Modify Bone (Add to Existing) to lift the arms into a braced firing pose while
+	 * the enemy is shooting. Positive RaisePitch = arms up by convention; if PIE shows the arms
+	 * dropping, flip the sign in UpdateAdsSolver or on the ABP node axis (one-line fix).
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|ADS")
+	FRotator AdsClavicleRotation = FRotator::ZeroRotator;
+
+	/**
+	 * 0→1 raise weight. Exposed in case the ABP prefers to drive a node's Alpha directly
+	 * rather than consuming AdsClavicleRotation. Both outputs are always updated together.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|ADS")
+	float AdsAlpha = 0.f;
+
 protected:
 	// --- Cached Refs ---
 
@@ -251,8 +278,8 @@ protected:
 	/** Add one shot's impulse to the recoil target accumulators. No-op when bHasRecoilProfile=false. */
 	void AddRecoilImpulse();
 
-	/** Integrate the spring solver and push outputs to RecoilSpineRotation + weapon offset. */
-	void UpdateRecoilSolver(float DeltaSeconds, AWeaponBase* Weapon);
+	/** Integrate the spring solver and push outputs to RecoilSpineRotation + RecoilSpineOffset. */
+	void UpdateRecoilSolver(float DeltaSeconds);
 
 	// --- Resolved-set helpers ---
 	// Return the effective montage for each slot: per-weapon DA set first, ABP fallback second.
@@ -316,12 +343,21 @@ private:
 	/** Accumulated target kickback distance (cm). Decays toward zero at RecoverySpeed. */
 	float RecoilTargetKickback = 0.f;
 
-	/** Smoothed current kickback (chases target at Sharpness). Forwarded to Weapon->SetRecoilOffset. */
+	/** Smoothed current kickback (chases target at Sharpness). Written to RecoilSpineOffset.X (-X = backward). */
 	float RecoilCurrentKickback = 0.f;
 
-	/** True while the solver last wrote a non-identity offset to the weapon. Used to emit exactly
-	 *  one Identity reset on the settle edge instead of calling SetRecoilOffset every idle frame. */
-	bool bRecoilWroteWeapon = false;
+	// bRecoilWroteWeapon removed — weapon offset path retired; kickback now routes to RecoilSpineOffset.
+
+	// --- ADS arm-raise solver state ---
+
+	/** Profile copied from the weapon DA on equip. */
+	FEnemyAdsProfile AdsProfile;
+
+	/** True when a valid ADS profile is loaded for the current weapon. */
+	bool bHasAdsProfile = false;
+
+	/** Seconds remaining to hold the raised pose after the last firing frame. */
+	float AdsFireHoldTimer = 0.f;
 
 	// --- Auto-trigger tracking ---
 

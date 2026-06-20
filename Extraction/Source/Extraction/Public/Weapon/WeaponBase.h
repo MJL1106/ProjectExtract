@@ -41,6 +41,31 @@ public:
 	void Reload();
 	bool CanReload() const;
 
+	/**
+	 * Called by the AnimNotify_EnemyShellInserted notify once per shell seat.
+	 * Authority-only. Ticks CurrentAmmo +1, decides whether another loop follows,
+	 * advances both body and gun montages, and finalises the reload when the mag is full
+	 * or reserve is dry. No-ops when bShellByShellReload is false on this weapon.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void HandleShellInserted();
+
+	/**
+	 * Interrupt an in-progress reload, keeping all shells already seated.
+	 * Clears the safety timer, stops the gun-mesh loop montage, and returns state to Idle.
+	 * No-op when not currently reloading.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void CancelReload();
+
+	/**
+	 * Sets both body and gun reload montages to self-loop their Loop section immediately after
+	 * Montage_Play. Call once at montage start for shell-by-shell weapons so the first section
+	 * boundary loops correctly independent of notify timing. No-op when bShellByShellReload is false.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Reload")
+	void PrimeShellReloadLoop();
+
 	// ---- Recoil ----
 
 	/** Called from character Tick to interpolate camera back after firing stops */
@@ -182,11 +207,11 @@ public:
 
 	/**
 	 * Composes Offset onto WeaponMesh's rest relative transform and writes the result.
-	 * Called per-frame from UEnemyAnimInstance::UpdateRecoilSolver.
 	 * SetRecoilOffset(FTransform::Identity) restores the exact rest pose.
 	 * Rest is captured lazily on the first call (after BeginPlay, once the visual actor is attached).
-	 * Single writer: fire-align is inert during the fire loop (its montage is nulled),
-	 * and melee is temporally exclusive with firing — no conflict.
+	 * Currently unused: the enemy body-kick now translates the spine
+	 * (UEnemyAnimInstance::RecoilSpineOffset), not the weapon mesh. Retained as public API for a
+	 * future in-grip gun jolt (which would IK the right hand to the gun, not offset the mesh).
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Recoil")
 	void SetRecoilOffset(const FTransform& Offset);
@@ -354,6 +379,23 @@ private:
 	// ---- Reload ----
 
 	void OnReloadFinished();
+
+	/** Redirects the next section of both body and gun reload montages.
+	 *  bContinue=true → LoopSection→LoopSection; bContinue=false → LoopSection→EndSection. */
+	void AdvanceShellReloadSection(bool bContinue);
+
+	/** Finalises the shell-by-shell reload: clears the safety timer, sets state Idle,
+	 *  broadcasts OnReloadComplete, and resumes fire if bWantsToFire. No ammo refill —
+	 *  ammo was already counted incrementally by HandleShellInserted. */
+	void FinishShellReload();
+
+	/** Upper-bounds the total shell reload duration for the safety timer.
+	 *  Derived from the body montage's section lengths and the effective play rate. */
+	float GetShellReloadSafetyTimeout() const;
+
+	/** Stops the body reload montage on the owning character's mesh. Used by OnReloadFinished
+	 *  and CancelReload for shell-by-shell weapons whose Loop section is primed to self-loop. */
+	void StopBodyReloadMontage(float BlendOut = 0.1f);
 
 	// ---- Recoil ----
 

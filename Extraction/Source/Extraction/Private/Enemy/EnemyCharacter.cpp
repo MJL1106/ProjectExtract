@@ -700,10 +700,10 @@ void AEnemyCharacter::HandleDeath()
 	if (AWeaponBase* Weapon = CurrentWeapon.Get())
 	{
 		Weapon->StopFiring();
+		Weapon->CancelReload();
 		Weapon->ReattachMagazine();
 		Weapon->SetFireAlignAlpha(0.f);
 		Weapon->SetMeleeAlignAlpha(0.f);
-		Weapon->SetRecoilOffset(FTransform::Identity);
 		Weapon->StopVisualWeaponFire();
 	}
 
