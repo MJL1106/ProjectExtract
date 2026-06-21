@@ -296,6 +296,16 @@ private:
 	UFUNCTION()
 	void HandleWeaponFired();
 
+	/** Selects the appropriate grenade throw montage based on crouch state and archetype DA slots. */
+	UAnimMontage* SelectGrenadeMontage() const;
+
+	/** The montage actually started by HandleGrenadeThrow — used by StopGrenadeMontage to stop the right asset on cancel. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> ActiveGrenadeMontage = nullptr;
+
+	/** Suppresses repeated missing-montage warnings after the first per instance. */
+	bool bGrenadeMontageWarnedMissing = false;
+
 	UPROPERTY(Transient)
 	TWeakObjectPtr<AWeaponBase> BoundFireWeapon;
 

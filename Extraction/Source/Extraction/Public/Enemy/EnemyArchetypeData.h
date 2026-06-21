@@ -10,6 +10,7 @@
 class AWeaponBase;
 class UBehaviorTree;
 class UBarkSetData;
+class UAnimMontage;
 class AEnemyGrenadeProjectile;
 UCLASS(BlueprintType)
 class EXTRACTION_API UEnemyArchetypeData : public UDataAsset
@@ -312,6 +313,23 @@ public:
 	/** Projectile class spawned on throw. Blueprint-assigned. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier")
 	TSubclassOf<AEnemyGrenadeProjectile> GrenadeProjectileClass;
+
+	/** Montage played when the grenadier is crouched behind low cover. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier")
+	TObjectPtr<UAnimMontage> GrenadeThrowCrouchMontage;
+
+	/** Pool of throw montages when standing — one is chosen at random per throw. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier")
+	TArray<TObjectPtr<UAnimMontage>> GrenadeThrowStandMontages;
+
+	/** Mesh socket from which the grenade is launched at the release notify frame. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier")
+	FName GrenadeThrowSocket = TEXT("GrenadeSocket");
+
+	/** Scales the throw landing distance toward the thrower along the horizontal: 1.0 = land at the
+	 *  target's last-known spot; 0.8 = 20% shorter. Keeps the target's ground Z (pulls X/Y only). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float GrenadeLandingDistanceScale = 1.0f;
 
 	// --- Officer aura (Phase 3) ---
 

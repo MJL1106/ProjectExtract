@@ -519,6 +519,12 @@ void AEnemyCharacter::ApplyMeleeDamage()
 	Target->TakeDamage(ArchetypeData->MeleeDamage, MeleeDmgEvent, GetController(), this);
 }
 
+void AEnemyCharacter::ReleaseGrenade()
+{
+	if (!IsValid(GrenadierComponent)) return;
+	GrenadierComponent->ReleaseGrenade();
+}
+
 // --- Guard Post ---
 
 FVector AEnemyCharacter::GetGuardPostLocation() const

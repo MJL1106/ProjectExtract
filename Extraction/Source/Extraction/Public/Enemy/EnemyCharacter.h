@@ -113,6 +113,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Melee")
 	void ApplyMeleeDamage();
 
+	/** Forwards the grenade release to the grenadier component.
+	 *  Called by UAnimNotify_EnemyGrenadeRelease at the hand-open frame of the throw montage. */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Grenadier")
+	void ReleaseGrenade();
+
 	/** Fired whenever a melee strike connects — animation/FX hook for BP. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Melee")
 	FOnMeleePerformed OnMeleePerformed;

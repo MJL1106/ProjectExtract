@@ -44,6 +44,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Grenadier")
 	void CancelThrow();
 
+	/**
+	 * Primary, notify-driven grenade release. Called by UAnimNotify_EnemyGrenadeRelease at the
+	 * hand-open frame. Clears the fallback telegraph timer and spawns the grenade from the socket.
+	 * No-ops if bTelegraphing is false (guards against duplicate spawns).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Grenadier")
+	void ReleaseGrenade();
+
 	/** True while the telegraph timer is running (before the projectile spawns). */
 	UFUNCTION(BlueprintPure, Category = "Enemy|Grenadier")
 	bool IsTelegraphing() const { return bTelegraphing; }
@@ -73,13 +81,22 @@ private:
 	bool bTelegraphing = false;
 	bool bCooldownActive = false;
 
-	/** Location solved during telegraph; used when the actual spawn fires. */
+	/** Socket name read from the archetype DA; grenade launches from here at release. */
+	FName GrenadeThrowSocket = TEXT("GrenadeSocket");
+
+	/** Horizontal distance scale for the landing point (1.0 = exact target, <1 = shorter throw). */
+	float GrenadeLandingDistanceScale = 1.f;
+
+	/** Velocity solved at TryThrowAt commit time; used as fallback when the re-solve at release fails. */
 	FVector PendingLaunchVelocity = FVector::ZeroVector;
+
+	/** Target landing location stored at commit time; re-arced from the socket at release. */
 	FVector PendingLandingLocation = FVector::ZeroVector;
 
 	FTimerHandle TelegraphTimerHandle;
 	FTimerHandle CooldownTimerHandle;
 
-	void SpawnGrenade();
+	/** Shared spawn path — called by both ReleaseGrenade() and the fallback timer. */
+	void SpawnGrenadeFromSocket();
 	void OnCooldownElapsed();
 };

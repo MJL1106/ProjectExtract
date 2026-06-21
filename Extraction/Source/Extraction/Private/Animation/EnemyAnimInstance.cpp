@@ -2,6 +2,7 @@
 
 #include "EnemyAnimInstance.h"
 #include "EnemyCharacter.h"
+#include "EnemyArchetypeData.h"
 #include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
 #include "EnemyTypes.h"
@@ -579,9 +580,17 @@ void UEnemyAnimInstance::PlayGrenadeMontage(float PlayRate)
 
 void UEnemyAnimInstance::StopGrenadeMontage(float BlendOutTime)
 {
-	UAnimMontage* Montage = GetEffectiveGrenadeMontage();
-	if (IsValid(Montage))
-		Montage_Stop(BlendOutTime, Montage);
+	if (IsValid(ActiveGrenadeMontage))
+	{
+		Montage_Stop(BlendOutTime, ActiveGrenadeMontage.Get());
+		ActiveGrenadeMontage = nullptr;
+		return;
+	}
+
+	// Back-compat: legacy single-slot path (e.g. BP-assigned GrenadeMontage, no DA montages set).
+	UAnimMontage* Fallback = GetEffectiveGrenadeMontage();
+	if (IsValid(Fallback))
+		Montage_Stop(BlendOutTime, Fallback);
 }
 
 // --- Delegate Handlers ---
@@ -624,9 +633,52 @@ void UEnemyAnimInstance::HandleTakedown(AActor* Instigator)
 		PlayDeathMontage();
 }
 
+UAnimMontage* UEnemyAnimInstance::SelectGrenadeMontage() const
+{
+	if (!IsValid(OwningEnemy)) return GetEffectiveGrenadeMontage();
+
+	const UEnemyArchetypeData* DA = OwningEnemy->GetArchetypeData();
+	if (!IsValid(DA)) return GetEffectiveGrenadeMontage();
+
+	const bool bCrouched = OwningEnemy->bIsCrouched;
+
+	if (bCrouched && IsValid(DA->GrenadeThrowCrouchMontage))
+		return DA->GrenadeThrowCrouchMontage.Get();
+
+	// Pick a valid stand montage — start at a random index and walk forward (wrap) to skip null slots.
+	const int32 Num = DA->GrenadeThrowStandMontages.Num();
+	if (Num > 0)
+	{
+		const int32 Start = FMath::RandRange(0, Num - 1);
+		for (int32 i = 0; i < Num; ++i)
+		{
+			UAnimMontage* Candidate = DA->GrenadeThrowStandMontages[(Start + i) % Num].Get();
+			if (IsValid(Candidate)) return Candidate;
+		}
+	}
+
+	// Crouched with no crouch montage, or standing with no stand montages — legacy fallback.
+	return GetEffectiveGrenadeMontage();
+}
+
 void UEnemyAnimInstance::HandleGrenadeThrow(FVector PredictedLanding, float TimeToImpact)
 {
-	PlayGrenadeMontage();
+	UAnimMontage* Montage = SelectGrenadeMontage();
+
+	// FIX 2: warn once when a grenadier has no throw montage assigned so the gap fails loud.
+	if (!IsValid(Montage) && !bGrenadeMontageWarnedMissing)
+	{
+		bGrenadeMontageWarnedMissing = true;
+		UE_LOG(LogTemp, Warning,
+			TEXT("UEnemyAnimInstance [%s]: no grenade throw montage found — assign GrenadeThrowCrouchMontage / GrenadeThrowStandMontages on the DA or GrenadeMontage on the ABP."),
+			*GetNameSafe(OwningEnemy.Get()));
+	}
+
+	if (!IsValid(Montage)) return;
+	if (Montage_IsPlaying(Montage)) return;
+
+	Montage_Play(Montage);
+	ActiveGrenadeMontage = Montage;
 }
 
 // --- Recoil Solver ---
