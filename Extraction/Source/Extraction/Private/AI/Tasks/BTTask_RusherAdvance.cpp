@@ -90,9 +90,12 @@ void UBTTask_RusherAdvance::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		return;
 	}
 
-	// Outside melee range (or melee disabled) — ensure firing is active while closing
+	// Outside melee range (or melee disabled) — fire while closing.
+	// Gate on CanFire()+!IsFiring() (mirrors BTTask_EnemyCombatFire) so we never call StartFiring
+	// during a reload: doing so orphans bWantsToFire=true, and a no-melee rusher (shotgun) has no
+	// StopFiring path to clear it, leaving the weapon permanently silent after the first reload.
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
-	if (IsValid(Weapon))
+	if (IsValid(Weapon) && Weapon->CanFire() && !Weapon->IsFiring())
 		Weapon->StartFiring();
 
 	Mem->RePathTimer -= DeltaSeconds;
