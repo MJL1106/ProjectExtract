@@ -47,10 +47,6 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	bFireAlignSetup = false;
 	MeleeMontageWeight = 0.f;
 	bMeleeAlignSetup = false;
-	AdsAlpha = 0.f;
-	AdsFireHoldTimer = 0.f;
-	AdsClavicleRotation = FRotator::ZeroRotator;
-	bHasAdsProfile = false;
 	bGripSocketValid = false;
 	CachedGripMesh.Reset();
 	CachedGripSocketName = NAME_None;
@@ -154,9 +150,6 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		LeftHandIKTarget = FTransform::Identity;
 		bPrevIsFiring = false;
 		bPrevIsReloading = false;
-		AdsAlpha = 0.f;
-		AdsFireHoldTimer = 0.f;
-		AdsClavicleRotation = FRotator::ZeroRotator;
 		return;
 	}
 
@@ -227,13 +220,6 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				RecoilSpineRotation = FRotator::ZeroRotator;
 				RecoilSpineOffset = FVector::ZeroVector;
 
-				// Copy the ADS arm-raise profile and reset its solver state for the new weapon.
-				AdsProfile = DA->EnemyAdsProfile;
-				bHasAdsProfile = true;
-				AdsAlpha = 0.f;
-				AdsFireHoldTimer = 0.f;
-				AdsClavicleRotation = FRotator::ZeroRotator;
-
 				const FName SocketName = DA->LeftHandGripSocket;
 				if (!SocketName.IsNone())
 				{
@@ -259,11 +245,6 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			RecoilCurrentKickback = 0.f;
 			RecoilSpineRotation = FRotator::ZeroRotator;
 			RecoilSpineOffset = FVector::ZeroVector;
-
-			bHasAdsProfile = false;
-			AdsAlpha = 0.f;
-			AdsFireHoldTimer = 0.f;
-			AdsClavicleRotation = FRotator::ZeroRotator;
 		}
 
 		// Fire-align setup: compute rest→fire offset once on equip so per-frame cost is just a lerp.
@@ -373,28 +354,6 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 		if (bMeleeAlignSetup && IsValid(Weapon) && (bIsMeleePlaying || MeleeMontageWeight > KINDA_SMALL_NUMBER))
 			Weapon->SetMeleeAlignAlpha(MeleeMontageWeight);
-	}
-
-	// --- ADS arm-raise solver ---
-	// Eases both clavicles into a braced firing pose while the enemy shoots and back on cease-fire.
-	// Output: AdsClavicleRotation (additive FRotator) + AdsAlpha (0-1 scalar) — both consumed by the ABP.
-
-	if (bHasAdsProfile)
-	{
-		const bool bWantRaise = bIsFiring && !bIsReloading;
-		if (bWantRaise)
-			AdsFireHoldTimer = AdsProfile.HoldTime;
-		else
-			AdsFireHoldTimer = FMath::Max(0.f, AdsFireHoldTimer - DeltaSeconds);
-
-		const float AlphaTarget = (bWantRaise || AdsFireHoldTimer > 0.f) ? 1.f : 0.f;
-		AdsAlpha = FMath::FInterpTo(AdsAlpha, AlphaTarget, DeltaSeconds, AdsProfile.BlendSpeed);
-		AdsClavicleRotation = FRotator(AdsProfile.RaisePitch * AdsAlpha, 0.f, AdsProfile.RaiseRoll * AdsAlpha);
-	}
-	else
-	{
-		AdsAlpha = 0.f;
-		AdsClavicleRotation = FRotator::ZeroRotator;
 	}
 
 	// --- Recoil spring solver ---
@@ -742,6 +701,7 @@ void UEnemyAnimInstance::UpdateRecoilSolver(float DeltaSeconds)
 	RecoilSpineRotation = RecoilCurrentRot * RecoilProfile.SpineKickScale;
 
 	// Forward/back piston: route the eased kickback (cm) to a backward spine translation.
-	// -X = backward in spine_03 component space (best guess — verify in PIE; flip here if wrong).
-	RecoilSpineOffset = FVector(-RecoilCurrentKickback, 0.f, 0.f);
+	// Component-space -Y = backward along the aim axis. (Component -X reads as lateral/side-to-side
+	// because the enemy mesh component is yawed -90 deg; if this ever kicks forward, flip the sign.)
+	RecoilSpineOffset = FVector(0.f, -RecoilCurrentKickback, 0.f);
 }

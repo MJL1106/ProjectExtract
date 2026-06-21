@@ -84,22 +84,6 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Recoil")
 	FVector RecoilSpineOffset = FVector::ZeroVector;
 
-	/**
-	 * Additive clavicle rotation output — the ABP applies this on clavicle_l and clavicle_r via
-	 * Transform Modify Bone (Add to Existing) to lift the arms into a braced firing pose while
-	 * the enemy is shooting. Positive RaisePitch = arms up by convention; if PIE shows the arms
-	 * dropping, flip the sign in UpdateAdsSolver or on the ABP node axis (one-line fix).
-	 */
-	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|ADS")
-	FRotator AdsClavicleRotation = FRotator::ZeroRotator;
-
-	/**
-	 * 0→1 raise weight. Exposed in case the ABP prefers to drive a node's Alpha directly
-	 * rather than consuming AdsClavicleRotation. Both outputs are always updated together.
-	 */
-	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|ADS")
-	float AdsAlpha = 0.f;
-
 protected:
 	// --- Cached Refs ---
 
@@ -347,17 +331,6 @@ private:
 	float RecoilCurrentKickback = 0.f;
 
 	// bRecoilWroteWeapon removed — weapon offset path retired; kickback now routes to RecoilSpineOffset.
-
-	// --- ADS arm-raise solver state ---
-
-	/** Profile copied from the weapon DA on equip. */
-	FEnemyAdsProfile AdsProfile;
-
-	/** True when a valid ADS profile is loaded for the current weapon. */
-	bool bHasAdsProfile = false;
-
-	/** Seconds remaining to hold the raised pose after the last firing frame. */
-	float AdsFireHoldTimer = 0.f;
 
 	// --- Auto-trigger tracking ---
 

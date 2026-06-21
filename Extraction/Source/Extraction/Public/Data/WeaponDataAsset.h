@@ -228,12 +228,4 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	FEnemyRecoilProfile EnemyRecoilProfile;
 
-	/**
-	 * Inline visual-only ADS arm-raise profile for this weapon's enemy clavicle lift while firing.
-	 * Drives UEnemyAnimInstance — arms ease up to a braced pose on fire start and ease back on stop.
-	 * Tune RaisePitch (degrees, positive = up) and BlendSpeed first; HoldTime smooths semi-auto.
-	 */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
-	FEnemyAdsProfile EnemyAdsProfile;
-
 };
