@@ -292,9 +292,18 @@ USkeletalMeshComponent* AWeaponBase::GetThirdPersonGripMesh() const
 
 bool AWeaponBase::CanFire() const
 {
-	return (CurrentState == EWeaponState::Idle || CurrentState == EWeaponState::Firing)
-		&& CurrentAmmo > 0
-		&& IsValid(WeaponData);
+	if (CurrentState != EWeaponState::Idle && CurrentState != EWeaponState::Firing) return false;
+	if (CurrentAmmo <= 0 || !IsValid(WeaponData)) return false;
+
+	// Post-reload settle: block the first shot until the reload's end section has played out
+	// (gun back in hand). Only armed when WeaponData->PostReloadFireDelay > 0; player weapons leave it 0.
+	if (FireReadyTimeSeconds > 0.f)
+	{
+		const UWorld* World = GetWorld();
+		if (World && World->GetTimeSeconds() < FireReadyTimeSeconds) return false;
+	}
+
+	return true;
 }
 
 void AWeaponBase::StartFiring()
@@ -1075,6 +1084,10 @@ void AWeaponBase::OnReloadFinished()
 		ReserveAmmo -= AmmoToLoad;
 		CurrentState = EWeaponState::Idle;
 
+		// Post-reload settle: hold fire briefly so the reload anim finishes seating the gun.
+		if (WeaponData->PostReloadFireDelay > 0.f && GetWorld())
+			FireReadyTimeSeconds = GetWorld()->GetTimeSeconds() + WeaponData->PostReloadFireDelay;
+
 		OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
 
 		// Safety net: snap the magazine home if the notify-end was missed (montage interrupted, etc.).
@@ -1217,6 +1230,10 @@ void AWeaponBase::FinishShellReload()
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
 
 	if (HasAuthority()) CurrentState = EWeaponState::Idle;
+
+	// Post-reload settle: hold fire briefly so the shell-by-shell end section seats the gun.
+	if (HasAuthority() && IsValid(WeaponData) && WeaponData->PostReloadFireDelay > 0.f && GetWorld())
+		FireReadyTimeSeconds = GetWorld()->GetTimeSeconds() + WeaponData->PostReloadFireDelay;
 
 	bDryFireLogged = false;
 	OnReloadComplete.Broadcast();

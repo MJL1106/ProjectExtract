@@ -463,6 +463,11 @@ private:
 	UPROPERTY(Transient)
 	float ReloadStartTimeSeconds = 0.f;
 
+	/** World time before which CanFire() is blocked after a reload completes (settle delay).
+	 *  Set from WeaponData->PostReloadFireDelay on reload finish; 0 means no block. */
+	UPROPERTY(Transient)
+	float FireReadyTimeSeconds = 0.f;
+
 	/** Resolved on BeginPlay: WeaponMesh if valid, else first USkeletalMeshComponent found. Avoids per-shot FindComponentByClass. */
 	TWeakObjectPtr<UMeshComponent> CachedEffectiveMesh;
 

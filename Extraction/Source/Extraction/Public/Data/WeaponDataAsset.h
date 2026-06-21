@@ -133,6 +133,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo")
 	FName ShellReloadEndSection = TEXT("End");
 
+	/** Settle time (seconds) after a reload completes before the weapon may fire again. Lets the
+	 *  reload animation's end section play out so the gun is back in the hand before the next shot.
+	 *  CanFire() blocks until this elapses. 0 = fire immediately (player weapons leave it at 0). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "0.0"))
+	float PostReloadFireDelay = 0.f;
+
 	// ---- ADS ----
 
 	/** Target field of view while aiming down sights */
