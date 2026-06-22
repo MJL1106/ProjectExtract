@@ -11,6 +11,7 @@
 #include "SuppressionComponent.h"
 #include "HealthComponent.h"
 #include "Animation/AnimMontage.h"
+#include "Animation/AnimSequence.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "KismetAnimationLibrary.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -48,9 +49,14 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	bFireAlignSetup = false;
 	MeleeMontageWeight = 0.f;
 	bMeleeAlignSetup = false;
+	PatrolAlignAlpha = 0.f;
+	bPatrolAlignSetup = false;
 	bGripSocketValid = false;
 	CachedGripMesh.Reset();
 	CachedGripSocketName = NAME_None;
+	bRepertoireRolled = false;
+	RolledRepertoire.Empty();
+	ActivePatrolIdleMontage = nullptr;
 
 	APawn* PawnOwner = TryGetPawnOwner();
 	if (!IsValid(PawnOwner)) return;
@@ -151,6 +157,9 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		LeftHandIKTarget = FTransform::Identity;
 		bPrevIsFiring = false;
 		bPrevIsReloading = false;
+		FireAlignAlpha = 0.f;
+		PatrolAlignAlpha = 0.f;
+		StopPatrolIdle();
 		return;
 	}
 
@@ -200,6 +209,10 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		// Resolve weapon animation type once on equip.
 		WeaponAnimType = EEnemyWeaponAnimType::Rifle;
 
+		// Reset repertoire so the next patrol stop re-rolls from the correct pool for the new weapon.
+		bRepertoireRolled = false;
+		RolledRepertoire.Empty();
+
 		// Resolve IK socket validity once on equip — avoids per-frame DoesSocketExist.
 		bGripSocketValid = false;
 		CachedGripMesh.Reset();
@@ -210,6 +223,10 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			if (const UWeaponDataAsset* DA = Weapon->GetWeaponData())
 			{
 				WeaponAnimType = DA->EnemyWeaponAnimType;
+
+				// BoundFireWeapon is valid here — roll the repertoire immediately so
+				// the first patrol stop draws from the correct pool (pistol vs general).
+				RollRepertoireIfNeeded();
 
 				// Copy the inline profile and zero the spring state for the new weapon.
 				RecoilProfile = DA->EnemyRecoilProfile;
@@ -266,6 +283,15 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			// Reflect actual readiness — when the socket isn't authored yet the per-frame block stays dormant.
 			bMeleeAlignSetup = Weapon->IsMeleeAlignReady();
 		}
+
+		// Patrol-align setup: cache the DA-driven offset once on equip, mirroring fire/melee-align.
+		bPatrolAlignSetup = false;
+		PatrolAlignAlpha = 0.f;
+		if (IsValid(Weapon))
+		{
+			Weapon->SetupPatrolAlign();
+			bPatrolAlignSetup = Weapon->IsPatrolAlignReady();
+		}
 	}
 
 	// --- Awareness (cached — no per-frame controller cast) ---
@@ -277,6 +303,13 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		&& (CachedAwarenessComponent->GetAwarenessState() == EEnemyAwarenessState::Combat);
 
 	bIsPatrolling = !bInCombat && !bIsAiming;
+
+	// Stop any playing patrol-idle the moment combat starts or the enemy moves beyond jitter
+	// threshold, independent of the BT abort (covers the 1-frame perception/BT seam).
+	// PatrolIdleMotionAbortSpeed guards against stationary physics jitter cutting idles short.
+	static constexpr float PatrolIdleMotionAbortSpeed = 20.f;
+	if (ActivePatrolIdleMontage && IsPlayingPatrolIdle() && (!bIsPatrolling || Speed > PatrolIdleMotionAbortSpeed))
+		StopPatrolIdle();
 
 	// --- Suppression ---
 
@@ -321,6 +354,21 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		PlayReloadMontage();
 	}
 	bPrevIsReloading = bIsReloading;
+
+	// --- Patrol-align: smoothly blend weapon to relaxed carry while patrolling ---
+	// Runs BEFORE fire-align and melee-align so combat overrides take priority on transition frames
+	// (all three are last-writer-wins on WeaponMesh->SetRelativeTransform; patrol eases to 0 as
+	// fire/melee ease to 1, but on a single frame where both are non-zero the combat writer wins).
+	if (bPatrolAlignSetup && IsValid(Weapon))
+	{
+		const float AlphaTarget = bIsPatrolling ? 1.f : 0.f;
+		const float PrevAlpha = PatrolAlignAlpha;
+		PatrolAlignAlpha = FMath::FInterpTo(PatrolAlignAlpha, AlphaTarget, DeltaSeconds, PatrolAlignBlendSpeed);
+
+		const bool bAlphaSettled = FMath::IsNearlyEqual(PatrolAlignAlpha, PrevAlpha, KINDA_SMALL_NUMBER);
+		if (!bAlphaSettled || PatrolAlignAlpha > KINDA_SMALL_NUMBER)
+			Weapon->SetPatrolAlignAlpha(PatrolAlignAlpha);
+	}
 
 	// --- Fire-align: smoothly blend weapon offset while the fire-loop montage plays ---
 	// Alpha drives SetFireAlignAlpha per-frame via FInterpTo so it eases in/out with the montage
@@ -377,6 +425,80 @@ void UEnemyAnimInstance::UpdateAimOffset(const FVector& ToTarget, const FRotator
 	AimPitch = Delta.Pitch;
 	AimYaw = Delta.Yaw;
 	bIsAiming = true;
+}
+
+// --- Patrol Idle ---
+
+void UEnemyAnimInstance::RollRepertoireIfNeeded()
+{
+	if (bRepertoireRolled) return;
+	// Defer without committing bRepertoireRolled so the roll retries on the next stop once
+	// the weapon is bound and WeaponAnimType has resolved from the DA.
+	if (!BoundFireWeapon.IsValid()) return;
+
+	const TArray<TObjectPtr<UAnimSequence>>& SourcePool =
+		(WeaponAnimType == EEnemyWeaponAnimType::Pistol) ? PistolPatrolIdlePool : GeneralPatrolIdlePool;
+
+	// Compact nulls into a temp array.
+	TArray<TObjectPtr<UAnimSequence>> ValidClips;
+	ValidClips.Reserve(SourcePool.Num());
+	for (const TObjectPtr<UAnimSequence>& Clip : SourcePool)
+	{
+		if (IsValid(Clip)) ValidClips.Add(Clip);
+	}
+
+	if (ValidClips.Num() <= PatrolIdleRepertoireSize)
+	{
+		RolledRepertoire = MoveTemp(ValidClips);
+	}
+	else
+	{
+		// Fisher-Yates partial shuffle — pick PatrolIdleRepertoireSize entries.
+		for (int32 i = 0; i < PatrolIdleRepertoireSize; ++i)
+		{
+			const int32 j = FMath::RandRange(i, ValidClips.Num() - 1);
+			ValidClips.Swap(i, j);
+		}
+		RolledRepertoire.Reset(PatrolIdleRepertoireSize);
+		for (int32 i = 0; i < PatrolIdleRepertoireSize; ++i)
+			RolledRepertoire.Add(ValidClips[i]);
+	}
+
+	bRepertoireRolled = true;
+}
+
+float UEnemyAnimInstance::PlayRandomPatrolIdle()
+{
+	RollRepertoireIfNeeded();
+	if (RolledRepertoire.IsEmpty()) return 0.f;
+
+	const int32 Pick = FMath::RandRange(0, RolledRepertoire.Num() - 1);
+	UAnimSequence* Clip = RolledRepertoire[Pick].Get();
+	if (!IsValid(Clip)) return 0.f;
+
+	ActivePatrolIdleMontage = PlaySlotAnimationAsDynamicMontage(
+		Clip, PatrolIdleSlotName, PatrolIdleBlendIn, PatrolIdleBlendOut, 1.f, 1);
+
+	// Re-trigger the next idle as this clip begins blending out (length - blend-out) rather than at
+	// its full length. The next PlayRandomPatrolIdle then starts while this one is still on the slot,
+	// so the montage system crossfades pose A -> pose B directly instead of settling onto the base
+	// relaxed pose in between (which read as a dwell + snap). Clamped so a very short clip can't
+	// produce a zero/negative wait and machine-gun the re-trigger.
+	const float ReTriggerTime = FMath::Max(Clip->GetPlayLength() - PatrolIdleBlendOut, 0.15f);
+	return IsValid(ActivePatrolIdleMontage) ? ReTriggerTime : 0.f;
+}
+
+void UEnemyAnimInstance::StopPatrolIdle(float BlendOutTime)
+{
+	if (!IsValid(ActivePatrolIdleMontage)) return;
+	if (!Montage_IsPlaying(ActivePatrolIdleMontage)) return;
+	Montage_Stop(BlendOutTime, ActivePatrolIdleMontage);
+}
+
+bool UEnemyAnimInstance::IsPlayingPatrolIdle() const
+{
+	if (!IsValid(ActivePatrolIdleMontage)) return false;
+	return Montage_IsPlaying(ActivePatrolIdleMontage);
 }
 
 // --- Resolved-set helpers ---

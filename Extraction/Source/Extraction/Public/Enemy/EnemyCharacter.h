@@ -19,6 +19,7 @@ class AWeaponBase;
 class APatrolRoute;
 class AEnemyAIController;
 class UWidgetComponent;
+class UEnemyAnimInstance;
 
 // Phase 3 bolt-on components — forward-declared; headers live in Enemy/Components/ (authored by slices B/C).
 class UEnemyArmourComponent;
@@ -63,6 +64,7 @@ public:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 	virtual bool CanCrouch() const override;
+	virtual void GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const override;
 
 	// --- IGameplayTagAssetInterface ---
 	virtual void GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const override;
@@ -282,6 +284,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Testing")
 	bool bDebugStandAndShoot = false;
 
+	// --- Perception: head-driven sight cone ---
+
+	/** When true and patrolling, GetActorEyesViewPoint follows the animated head bone so the vision
+	 *  cone direction tracks the idle animation (an idle that glances left actually sees left).
+	 *  Disable to revert to the default capsule-centre forward vector. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception")
+	bool bUseHeadDrivenSightCone = true;
+
+	/** Bone name whose world transform drives the sight cone origin and direction while patrolling. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception")
+	FName SightHeadBoneName = TEXT("head");
+
+	/** Head bone's LOCAL axis that points out the face, in bone space. Rotated by the head bone's
+	 *  world orientation each perception update to drive the sight-cone direction, so the cone tracks
+	 *  the animated head. Default +Y matches the Quantum skeleton's head bone; tune if the face axis differs. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception")
+	FVector HeadSightForwardAxis = FVector(0.f, 1.f, 0.f);
+
 	bool IsIsolatedEncounter() const { return bIsolatedEncounter; }
 
 	/** Designer-assigned squad identifier. Enemies with the same SquadId share sightings and coordinate.
@@ -440,6 +460,12 @@ private:
 
 	/** Cached result of DoesSocketExist("spine_03") — set once in BeginPlay, used per CanBeSeenFrom call. */
 	bool bCachedHasChestBone = false;
+
+	/** Non-owning ref to the anim instance — set in BeginPlay, lazily re-resolved if null (deferred anim init). */
+	mutable TWeakObjectPtr<UEnemyAnimInstance> CachedAnimInstance;
+
+	/** Suppress repeated "missing anim instance for head-cone" warnings after the first. */
+	mutable bool bLoggedMissingSightAnimInstance = false;
 
 	FTimerHandle DestroyTimerHandle;
 	FTimerHandle CorpseSettleTimerHandle;

@@ -15,6 +15,7 @@ class UHealthComponent;
 class UAnimMontage;
 class UEnemyAwarenessComponent;
 class USkeletalMeshComponent;
+class UAnimSequence;
 
 UCLASS()
 class EXTRACTION_API UEnemyAnimInstance : public UAnimInstance
@@ -60,6 +61,29 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Animation")
 	void StopGrenadeMontage(float BlendOutTime = 0.2f);
+
+	// --- Patrol Idle ---
+
+	/**
+	 * Picks a random clip from the per-enemy repertoire and plays it once via a dynamic montage
+	 * on the PatrolIdle slot. Returns the clip's play length so the caller can set WaitTarget.
+	 * Returns 0.f when the pool is empty or the sequence is invalid.
+	 */
+	float PlayRandomPatrolIdle();
+
+	/** Stops the active patrol-idle montage with the given blend-out time. No-op when not playing. */
+	void StopPatrolIdle(float BlendOutTime = 0.2f);
+
+	/** True while the patrol-idle dynamic montage is playing. */
+	bool IsPlayingPatrolIdle() const;
+
+	/** Exposes the bIsPatrolling flag for ABP locomotion path selection. */
+	bool IsPatrolling() const { return bIsPatrolling; }
+
+	/** Stable non-combat signal for the head-driven sight cone gate.
+	 *  Unlike bIsPatrolling, this is NOT toggled by per-frame bIsAiming, preventing
+	 *  edge-of-FOV detection flicker during Searching while the enemy scans. */
+	bool IsInCombat() const { return bInCombat; }
 
 	// --- Recoil (C++ spring solver) ---
 
@@ -229,6 +253,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Montages")
 	FName FireMontageLoopSection = TEXT("Default");
 
+	// --- Patrol Weapon Alignment ---
+
+	/** Interpolation speed (1/s) for the patrol-align offset blend. Higher = snappier transition
+	 *  between ADS and relaxed carry. Tunable per ABP. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|PatrolAlign")
+	float PatrolAlignBlendSpeed = 8.f;
+
 	/**
 	 * Socket on the enemy skeleton to blend the weapon toward while the fire-loop montage plays.
 	 * Leave NAME_None to disable fire-alignment for this ABP.
@@ -252,6 +283,31 @@ protected:
 	/** Interpolation speed (1/s) for the melee-align offset blend. Higher = snappier. Tunable per ABP. */
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|MeleeAlign")
 	float MeleeAlignBlendSpeed = 12.f;
+
+	// --- Patrol Idle Designer Data ---
+
+	/** Full-body idle sequences used for routed patrols / guard post when the weapon is NOT a pistol.
+	 *  Designer fills this on the ABP defaults; no /Game/ paths in C++. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|PatrolIdle")
+	TArray<TObjectPtr<UAnimSequence>> GeneralPatrolIdlePool;
+
+	/** Full-body idle sequences used when WeaponAnimType == Pistol. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|PatrolIdle")
+	TArray<TObjectPtr<UAnimSequence>> PistolPatrolIdlePool;
+
+	/** How many distinct clips to draw from the pool per enemy instance (shuffled once, then repeated). */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|PatrolIdle", meta = (ClampMin = "1"))
+	int32 PatrolIdleRepertoireSize = 4;
+
+	/** Slot name in the ABP AnimGraph that the dynamic patrol-idle montage plays on. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|PatrolIdle")
+	FName PatrolIdleSlotName = TEXT("PatrolIdle");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|PatrolIdle")
+	float PatrolIdleBlendIn = 0.25f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|PatrolIdle")
+	float PatrolIdleBlendOut = 0.25f;
 
 	// --- Aim Offset Helper ---
 
@@ -277,6 +333,21 @@ protected:
 	UAnimMontage* GetEffectiveHitReactFlinchMontage() const;
 
 private:
+	// --- Patrol Idle private state ---
+
+	/** Subset of the active pool drawn once per weapon-equip (Fisher-Yates, size = PatrolIdleRepertoireSize). */
+	TArray<TObjectPtr<UAnimSequence>> RolledRepertoire;
+
+	/** The dynamic montage started by the most recent PlayRandomPatrolIdle call. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> ActivePatrolIdleMontage = nullptr;
+
+	/** Guards the lazy-roll so RollRepertoireIfNeeded is a no-op after the first call per weapon. */
+	bool bRepertoireRolled = false;
+
+	/** Builds RolledRepertoire from the weapon-appropriate pool. No-op after first call (bRepertoireRolled). */
+	void RollRepertoireIfNeeded();
+
 	// --- Delegate handlers ---
 
 	UFUNCTION()
@@ -360,4 +431,12 @@ private:
 
 	/** True once SetupMeleeAlign has been called successfully for the current weapon. Reset on weapon rebind. */
 	bool bMeleeAlignSetup = false;
+
+	// --- Patrol-align tracking ---
+
+	/** Current interpolated alpha (0=ADS/rest, 1=patrol carry). Driven per-frame toward bIsPatrolling. */
+	float PatrolAlignAlpha = 0.f;
+
+	/** True once SetupPatrolAlign has been called successfully for the current weapon. Reset on weapon rebind. */
+	bool bPatrolAlignSetup = false;
 };

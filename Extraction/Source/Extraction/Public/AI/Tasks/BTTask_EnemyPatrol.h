@@ -53,12 +53,9 @@ private:
 		// Wait duration rolled for the current stop
 		float WaitTarget = 0.f;
 
-		// Guard-post state (route-less enemies) — also reused for loiter glance on routed patrols
+		// Guard-post state (route-less enemies)
 		EGuardPhase GuardPhase = EGuardPhase::Return;
 		bool bGuardScanActive = false;
-		float GuardBaseYaw = 0.f;
-		float GuardSweepTimer = 0.f;
-		int32 GuardSweepSegment = 0;
 		float ReturnElapsed = 0.f;    // Watchdog accumulator for the Return phase
 
 		// Cached per-execute — avoids BB lookup + Cast every tick
@@ -73,6 +70,9 @@ private:
 	/** Max seconds allowed for the return-to-post move before degrading to in-place scan. */
 	static constexpr float GuardReturnTimeout = 10.f;
 
+	/** Fallback wait duration (seconds) when PlayRandomPatrolIdle returns 0 (empty pool). */
+	static constexpr float StationaryIdleFallbackWait = 3.f;
+
 	/** Pick the next waypoint index according to PatrolOrder and update Mem accordingly. */
 	void PickNextIndex(FPatrolMemory& Mem, const APatrolRoute& Route) const;
 
@@ -83,12 +83,13 @@ private:
 	void IssueMoveToCurrentGoal(
 		AAIController& Controller, const APawn& Pawn, FPatrolMemory& Mem, const APatrolRoute& Route) const;
 
-	/** Roll and store Mem.WaitTarget from the route's wait range. */
-	void RollWaitTarget(FPatrolMemory& Mem, const APatrolRoute& Route) const;
+	/**
+	 * Plays a random patrol-idle on the enemy's anim instance and sets WaitTarget to the clip's length.
+	 * Falls back to FallbackWait when the pool is empty or the anim instance is unavailable.
+	 * Resets WaitElapsed so the caller's wait loop measures from this moment.
+	 */
+	void StartStationaryIdle(FPatrolMemory& Mem, float FallbackWait) const;
 
-	/** Tick the guard/loiter yaw sweep — shared between guard-post scan and routed loiter glance. */
-	void TickYawSweep(AAIController& Controller, const APawn& Pawn, const UEnemyArchetypeData& DA,
-		float BaseYaw, float& Timer, int32& Segment, float DeltaSeconds) const;
-
-	void BeginGuardScan(FPatrolMemory& Mem, float BaseYaw) const;
+	/** Transitions to the guard-scan phase and kicks the first stationary idle. */
+	void BeginGuardScan(FPatrolMemory& Mem) const;
 };

@@ -244,6 +244,7 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	SetFireAlignAlpha(0.f);
 	SetMeleeAlignAlpha(0.f);
+	SetPatrolAlignAlpha(0.f);
 
 	// Restore the weapon mesh to its captured rest pose so no recoil offset freezes in place.
 	if (bRecoilRestCaptured && IsValid(WeaponMesh))
@@ -915,6 +916,47 @@ void AWeaponBase::SetMeleeAlignAlpha(float Alpha)
 	Blended.SetLocation(FMath::Lerp(MeleeAlignRestRelative.GetLocation(), MeleeAlignMeleeRelative.GetLocation(), Alpha));
 	Blended.SetRotation(FQuat::Slerp(MeleeAlignRestRelative.GetRotation(), MeleeAlignMeleeRelative.GetRotation(), Alpha));
 	Blended.SetScale3D(FMath::Lerp(MeleeAlignRestRelative.GetScale3D(), MeleeAlignMeleeRelative.GetScale3D(), Alpha));
+
+	WeaponMesh->SetRelativeTransform(Blended);
+}
+
+// ---- Weapon patrol alignment ----
+
+void AWeaponBase::SetupPatrolAlign()
+{
+	bPatrolAlignReady = false;
+
+	if (!IsValid(WeaponMesh)) return;
+	if (!IsValid(WeaponData)) return;
+
+	// Zero offsets = no patrol-carry pose. Weapon stays at ADS — skip entirely.
+	if (WeaponData->PatrolAlignLocationOffset.IsNearlyZero() &&
+		WeaponData->PatrolAlignRotationOffset.IsNearlyZero())
+		return;
+
+	// Capture the rest-pose relative transform as the Alpha=0 target.
+	PatrolAlignRestRelative = WeaponMesh->GetRelativeTransform();
+
+	// Pre-compose the Alpha=1 target: rest pose + the DA-driven offset.
+	const FTransform OffsetTransform(
+		FQuat(WeaponData->PatrolAlignRotationOffset),
+		WeaponData->PatrolAlignLocationOffset);
+	PatrolAlignPatrolRelative = OffsetTransform * PatrolAlignRestRelative;
+
+	bPatrolAlignReady = true;
+}
+
+void AWeaponBase::SetPatrolAlignAlpha(float Alpha)
+{
+	if (!bPatrolAlignReady) return;
+	if (!IsValid(WeaponMesh)) return;
+
+	Alpha = FMath::Clamp(Alpha, 0.f, 1.f);
+
+	FTransform Blended;
+	Blended.SetLocation(FMath::Lerp(PatrolAlignRestRelative.GetLocation(), PatrolAlignPatrolRelative.GetLocation(), Alpha));
+	Blended.SetRotation(FQuat::Slerp(PatrolAlignRestRelative.GetRotation(), PatrolAlignPatrolRelative.GetRotation(), Alpha));
+	Blended.SetScale3D(FMath::Lerp(PatrolAlignRestRelative.GetScale3D(), PatrolAlignPatrolRelative.GetScale3D(), Alpha));
 
 	WeaponMesh->SetRelativeTransform(Blended);
 }

@@ -203,6 +203,28 @@ public:
 	 *  per-frame melee-align block entirely when the WeaponSocket_Melee socket isn't authored yet. */
 	bool IsMeleeAlignReady() const { return bMeleeAlignReady; }
 
+	// ---- Weapon patrol alignment (enemy relaxed carry visual) ----
+
+	/**
+	 * Caches the patrol-carry offset from the weapon's UWeaponDataAsset and captures the
+	 * rest relative transform. Call once per weapon equip (mirrors SetupFireAlign).
+	 * No-ops when the DA has zero offsets (zero = no patrol carry, weapon stays at ADS).
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|PatrolAlign")
+	void SetupPatrolAlign();
+
+	/**
+	 * Blends WeaponMesh's relative transform between rest (Alpha=0) and the DA-driven
+	 * patrol-carry offset (Alpha=1). No-op when SetupPatrolAlign hasn't succeeded
+	 * (bPatrolAlignReady=false). Call per-frame from the anim instance with an interpolated alpha.
+	 * Safety reset: call with Alpha=0 on death or EndPlay.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|PatrolAlign")
+	void SetPatrolAlignAlpha(float Alpha);
+
+	/** True once SetupPatrolAlign succeeded (non-zero DA offsets present). */
+	bool IsPatrolAlignReady() const { return bPatrolAlignReady; }
+
 	// ---- Weapon recoil offset (enemy body-kick visual) ----
 
 	/**
@@ -324,6 +346,18 @@ private:
 
 	/** True while the magazine is detached and riding the hand. */
 	bool bMagazineDetached = false;
+
+	// ---- Patrol alignment runtime state ----
+
+	/** Relative transform of WeaponMesh at rest (captured by SetupPatrolAlign). Alpha=0 target. */
+	FTransform PatrolAlignRestRelative = FTransform::Identity;
+
+	/** Pre-composed relative transform for the patrol-carry pose. Alpha=1 target.
+	 *  = Rest * FTransform(DA.PatrolAlignRotationOffset, DA.PatrolAlignLocationOffset). */
+	FTransform PatrolAlignPatrolRelative = FTransform::Identity;
+
+	/** True when SetupPatrolAlign succeeded — non-zero DA offsets were found. */
+	bool bPatrolAlignReady = false;
 
 	// ---- Fire alignment runtime state ----
 

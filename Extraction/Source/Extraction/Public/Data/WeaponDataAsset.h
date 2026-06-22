@@ -228,4 +228,20 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation")
 	FEnemyRecoilProfile EnemyRecoilProfile;
 
+	// ---- Enemy Patrol Weapon Alignment ----
+
+	/** Location offset (cm) applied to the weapon's rest relative transform while patrolling.
+	 *  Defines the relaxed-carry position RELATIVE to the ADS/rest attach. Zero = weapon stays at ADS.
+	 *  Designers tune per weapon; no behavior change until non-zero values are entered. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation",
+		meta = (DisplayName = "Patrol Align Location Offset"))
+	FVector PatrolAlignLocationOffset = FVector::ZeroVector;
+
+	/** Rotation offset (degrees) applied to the weapon's rest relative transform while patrolling.
+	 *  Defines the relaxed-carry rotation RELATIVE to the ADS/rest attach. Zero = weapon stays at ADS.
+	 *  Designers tune per weapon; no behavior change until non-zero values are entered. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation",
+		meta = (DisplayName = "Patrol Align Rotation Offset"))
+	FRotator PatrolAlignRotationOffset = FRotator::ZeroRotator;
+
 };

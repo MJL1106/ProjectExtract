@@ -124,6 +124,45 @@ bool AEnemyCharacter::CanCrouch() const
 	return Super::CanCrouch();
 }
 
+void AEnemyCharacter::GetActorEyesViewPoint(FVector& OutLocation, FRotator& OutRotation) const
+{
+	// Lazy re-resolve: deferred anim init may have returned null at BeginPlay.
+	if (bUseHeadDrivenSightCone && !CachedAnimInstance.IsValid())
+	{
+		if (USkeletalMeshComponent* M = GetMesh())
+			CachedAnimInstance = Cast<UEnemyAnimInstance>(M->GetAnimInstance());
+
+		if (!CachedAnimInstance.IsValid() && !bLoggedMissingSightAnimInstance)
+		{
+			bLoggedMissingSightAnimInstance = true;
+			UE_LOG(LogTemp, Warning,
+				TEXT("AEnemyCharacter [%s]: bUseHeadDrivenSightCone=true but UEnemyAnimInstance is null — falling back to capsule origin."),
+				*GetName());
+		}
+	}
+
+	const bool bInCombat = CachedAnimInstance.IsValid() && CachedAnimInstance->IsInCombat();
+	const bool bAlive = IsValid(HealthComponent) && HealthComponent->IsAlive();
+
+	if (bUseHeadDrivenSightCone && bAlive && !bInCombat)
+	{
+		const USkeletalMeshComponent* MeshComp = GetMesh();
+		if (IsValid(MeshComp) && MeshComp->DoesSocketExist(SightHeadBoneName))
+		{
+			const FTransform T = MeshComp->GetSocketTransform(SightHeadBoneName, RTS_World);
+			OutLocation = T.GetLocation();
+			const FVector LocalAxis = HeadSightForwardAxis.GetSafeNormal();
+			if (!LocalAxis.IsNearlyZero())
+			{
+				OutRotation = T.GetRotation().RotateVector(LocalAxis).Rotation();
+				return;
+			}
+		}
+	}
+
+	Super::GetActorEyesViewPoint(OutLocation, OutRotation);
+}
+
 void AEnemyCharacter::BeginPlay()
 {
 	Super::BeginPlay();
@@ -143,8 +182,11 @@ void AEnemyCharacter::BeginPlay()
 
 	// Cache chest bone availability once — used per CanBeSeenFrom call.
 	static const FName ChestBoneName(TEXT("spine_03"));
-	if (const USkeletalMeshComponent* MeshComp = GetMesh())
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
 		bCachedHasChestBone = MeshComp->DoesSocketExist(ChestBoneName);
+		CachedAnimInstance = Cast<UEnemyAnimInstance>(MeshComp->GetAnimInstance());
+	}
 
 	if (!IsValid(ArchetypeData))
 	{
