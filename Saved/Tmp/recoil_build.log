@@ -1,0 +1,24 @@
+Using bundled DotNet SDK version: 8.0.412 win-x64
+Running UnrealBuildTool: dotnet "..\..\Engine\Binaries\DotNET\UnrealBuildTool\UnrealBuildTool.dll" ExtractionEditor Win64 Development -Project=C:/Users/matth/Documents/Github/ProjectExtract/Extraction/Extraction.uproject -WaitMutex
+Log file: C:\Users\matth\AppData\Local\UnrealBuildTool\Log.txt
+Using 'git status' to determine working set for adaptive non-unity build (C:\Users\matth\Documents\Github\ProjectExtract).
+Building ExtractionEditor...
+Using Visual Studio 2022 14.50.35724 toolchain (C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.50.35717) and Windows 10.0.22621.0 SDK (C:\Program Files (x86)\Windows Kits\10).
+Warning: Visual Studio 2022 compiler is not a preferred version
+[Adaptive Build] Excluded from Extraction unity file: EnemyAnimInstance.cpp, WeaponDataAsset.cpp, EnemyCharacter.cpp, WeaponBase.cpp
+Determining max actions to execute in parallel (8 physical cores, 16 logical cores)
+  Executing up to 8 processes, one per physical core
+Using Unreal Build Accelerator local executor to run 4 action(s)
+  Storage capacity 40Gb
+---- Starting trace: 260620_135026 ----
+UbaSessionServer - Disable remote execution (remote sessions will finish current processes)
+[1/4] Compile [x64] EnemyAnimInstance.cpp
+[2/4] Link [x64] UnrealEditor-Extraction.lib
+[3/4] Link [x64] UnrealEditor-Extraction.dll
+[4/4] WriteMetadata ExtractionEditor.target [NoUba]
+
+Trace written to file C:/Users/matth/AppData/Local/UnrealBuildTool/Log.uba with size 3.7kb
+Total time in Unreal Build Accelerator local executor: 6.46 seconds
+
+Result: Succeeded
+Total execution time: 8.29 seconds
