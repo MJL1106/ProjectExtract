@@ -14,6 +14,30 @@
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "Engine/HitResult.h"
+
+// Projects a world-space point down to the nearest WorldStatic surface below it.
+// Returns Point with its Z replaced by the hit Z. Falls back to subtracting a nominal capsule half-height on miss.
+static FVector ProjectGrenadeTargetToGround(UWorld* World, const FVector& Point, const AActor* IgnoreActor)
+{
+	if (!World) return Point;
+
+	constexpr float StartOffsetUp  = 100.f;   // lift above Point to avoid starting inside geometry
+	constexpr float TraceDepthDown = 400.f;   // covers steps/slopes; won't punch to a separate lower storey
+	constexpr float FallbackDrop   = 96.f;    // player standing capsule half-height (ExtractionCharacter)
+
+	const FVector Start = Point + FVector(0.f, 0.f, StartOffsetUp);
+	const FVector End   = Start  - FVector(0.f, 0.f, TraceDepthDown);
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(GrenadeGroundProject), false);
+	Params.AddIgnoredActor(IgnoreActor);
+
+	FHitResult Hit;
+	if (World->LineTraceSingleByChannel(Hit, Start, End, ECC_WorldStatic, Params))
+		return FVector(Point.X, Point.Y, Hit.Location.Z);
+
+	return FVector(Point.X, Point.Y, Point.Z - FallbackDrop);
+}
 
 UEnemyGrenadierComponent::UEnemyGrenadierComponent()
 {
@@ -83,6 +107,10 @@ bool UEnemyGrenadierComponent::TryThrowAt(const FVector& TargetLocation)
 		AdjustedTarget.X = LaunchOrigin.X + (TargetLocation.X - LaunchOrigin.X) * GrenadeLandingDistanceScale;
 		AdjustedTarget.Y = LaunchOrigin.Y + (TargetLocation.Y - LaunchOrigin.Y) * GrenadeLandingDistanceScale;
 	}
+
+	const float PreGroundZ = AdjustedTarget.Z;
+	AdjustedTarget = ProjectGrenadeTargetToGround(World, AdjustedTarget, Owner);
+	UE_LOG(LogTemp, Verbose, TEXT("%s: grenade aim Z %.0f -> grounded %.0f"), *GetNameSafe(Owner), PreGroundZ, AdjustedTarget.Z);
 
 	const float DistSq = FVector::DistSquared2D(LaunchOrigin, AdjustedTarget);
 	if (DistSq < FMath::Square(GrenadeMinRange) || DistSq > FMath::Square(GrenadeMaxRange))
