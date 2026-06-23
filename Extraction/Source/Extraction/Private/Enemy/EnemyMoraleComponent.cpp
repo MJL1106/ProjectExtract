@@ -91,7 +91,7 @@ void UEnemyMoraleComponent::InitFromArchetype(const UEnemyArchetypeData* Data)
 	MoraleFloor = Data->MoraleFloor;
 	MoraleEventResistance = FMath::Max(Data->MoraleEventResistance, 0.1f);
 	ShakenThreshold = Data->ShakenThreshold;
-	BrokenThreshold = Data->BrokenThreshold;
+	BrokenThreshold = FMath::Min(Data->BrokenThreshold, ShakenThreshold - 1.f);
 	RecoveryPerSecond = Data->MoraleRecoveryPerSecond;
 	LossAllyDied = Data->MoraleLossAllyDied;
 	LossOfficerDied = Data->MoraleLossOfficerDied;
@@ -319,6 +319,9 @@ void UEnemyMoraleComponent::EvaluateState()
 		CurrentMorale);
 
 	OnMoraleStateChanged.Broadcast(OldState, NewState);
+
+	if (NewState == EMoraleState::Shaken && OldState == EMoraleState::Confident)
+		RequestBark(EBarkType::Pinned);
 
 	if (NewState == EMoraleState::Broken)
 		RequestBark(EBarkType::FallingBack);

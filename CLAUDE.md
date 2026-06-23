@@ -6,7 +6,7 @@ Multiplayer first-person shooter on Unreal Engine 5.7 with an AI companion syste
 - **Engine:** Unreal Engine 5.7
 - **Language:** UE5 C++
 - **Module:** `Extraction` (`Extraction/Source/Extraction/`)
-- **In-engine tooling:** **VibeUE** (MCP HTTP :8088, primary — Blueprints/materials/UMG/assets via `execute_python_code` + `manage_skills`) + **UnrealClaude** (MCP HTTP :3000 — inline viewport screenshots, gimbal-free actor move/rotate) + **NeoStack** (MCP HTTP :9315 — fallback when VibeUE/UnrealClaude lack the capability, **especially in-engine AI systems: Behavior Trees, Blackboards, EQS, AI Blueprint wiring** — VibeUE has no BT/Blackboard skill). Full tooling map + gotchas: `agent_docs/UnrealWorkflow.md`.
+- **In-engine tooling:** **VibeUE** (MCP HTTP :8088, primary — Blueprints/materials/UMG/assets via `execute_python_code` + `manage_skills`) + **NeoStack** (MCP HTTP :9315 — fallback when VibeUE lacks the capability, **especially in-engine AI systems: Behavior Trees, Blackboards, EQS, AI Blueprint wiring** — VibeUE has no BT/Blackboard skill). Full tooling map + gotchas: `agent_docs/UnrealWorkflow.md`.
 - **API macro:** `EXTRACTION_API`
 - **Solution:** `Extraction/Extraction.sln`
 
@@ -171,7 +171,7 @@ Local skills under `.claude/skills/` are loaded on demand and cheap. **Invoke a 
 | Any UE5 C++ review request | `ue5-code-review` |
 | Crash, freeze, compile error | `ue5-crash-debug` |
 | In-engine editor work via MCP (BP/material/UMG/Niagara/DataAsset/level/asset import) **and in-engine AI systems** (Behavior Trees / Blackboards / EQS → NeoStack) — done autonomously | **`inengine-agent`** (dispatches the `ue5-inengine-agent` subagent) |
-| Drive the editor from the CLI yourself — tooling map, screenshots, the code→build→boot→wire→close loop, gotchas | **read `agent_docs/UnrealWorkflow.md`** (VibeUE :8088 + UnrealClaude :3000 + NeoStack :9315) |
+| Drive the editor from the CLI yourself — tooling map, screenshots, the code→build→boot→wire→close loop, gotchas | **read `agent_docs/UnrealWorkflow.md`** (VibeUE :8088 + NeoStack :9315) |
 | End of session — summarising for handoff | `session-handoff` |
 | **Start of any non-trivial task — decide solo vs team** | **`ue5-team` (mandatory Step 0)** |
 
@@ -203,7 +203,7 @@ Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a c
 
 ## Project-Specific Notes
 
-- **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, MCP :8088 — `execute_python_code`, `manage_skills`, `manage_asset`) + **UnrealClaude** (MCP :3000 — inline viewport screenshots, gimbal-free actor move/rotate). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). To get it done autonomously, **dispatch `ue5-inengine-agent`** (via the `inengine-agent` skill) — it drives the editor MCP itself with all the tooling/skill/doc pointers pre-loaded. Alternatively hand off to a human via `inengine-checklist` (small) / `inengine-prompt` (large) in plain English. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. **NeoStack (:9315) is the fallback when VibeUE/UnrealClaude lack the capability — especially in-engine AI systems: Behavior Trees, Blackboards, EQS, and AI Blueprint wiring (VibeUE has no BT/Blackboard skill).** Drive it via the `neostack-loop` / `neostack-blueprint` skills.
+- **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, MCP :8088 — `execute_python_code`, `manage_skills`, `manage_asset`). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). To get it done autonomously, **dispatch `ue5-inengine-agent`** (via the `inengine-agent` skill) — it drives the editor MCP itself with all the tooling/skill/doc pointers pre-loaded. Alternatively hand off to a human via `inengine-checklist` (small) / `inengine-prompt` (large) in plain English. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. **NeoStack (:9315) is the fallback when VibeUE lacks the capability — especially in-engine AI systems: Behavior Trees, Blackboards, EQS, and AI Blueprint wiring (VibeUE has no BT/Blackboard skill).** Drive it via the `neostack-loop` / `neostack-blueprint` skills.
 - **Companion manual QA scenarios** live in `agent_docs/companion_testing.md` — refer there before claiming an AI feature works. When automation tests land, mirror the scenarios.
 - **Branching:** feature-by-feature on user-managed branches. User handles PRs to `main`. No CI/CD assumptions. Don't auto-merge or push without explicit instruction.
 - **Commits:** never add `Co-Authored-By: Claude` trailer. Never `git push` without explicit instruction.
@@ -217,7 +217,7 @@ Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a c
 ## Session Start
 
 At session start, on a fresh task, do this in order before responding:
-1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + UnrealClaude tooling map + gotchas); `companion_testing.md` for companion QA
+1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + NeoStack tooling map + gotchas); `companion_testing.md` for companion QA
 2. Confirm the active branch matches the feature being worked on (`git status`)
 3. If the task touches AI / movement / animation / replication / UI, **invoke the matching skill from the table above before any tool calls**
 4. **Invoke `ue5-team`** to decide solo vs team for the task — this is Step 0 of the workflow

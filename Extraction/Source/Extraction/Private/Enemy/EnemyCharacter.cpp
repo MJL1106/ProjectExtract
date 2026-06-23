@@ -899,7 +899,7 @@ bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator) const
 	{
 #if !UE_BUILD_SHIPPING
 		// Can't gate on bLogTakedown here — instigator may be invalid.
-		UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s reject: invalid instigator/ArchetypeData"), *GetNameSafe(this));
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: invalid instigator/ArchetypeData"), *GetNameSafe(this));
 #endif
 		return false;
 	}
@@ -907,7 +907,7 @@ bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator) const
 	if (IsValid(HealthComponent) && HealthComponent->IsDead())
 	{
 #if !UE_BUILD_SHIPPING
-		if (bLogTakedown) UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s reject: already dead"), *GetNameSafe(this));
+		if (bLogTakedown) UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: already dead"), *GetNameSafe(this));
 #endif
 		return false;
 	}
@@ -933,7 +933,7 @@ bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator) const
 			const FString AwarenessStr = StaticEnum<EEnemyAwarenessState>()
 				? StaticEnum<EEnemyAwarenessState>()->GetNameStringByValue((int64)Awareness->GetAwarenessState())
 				: TEXT("Unknown");
-			UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s reject: awareness=%s (need Unaware)"),
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: awareness=%s (need Unaware)"),
 				*GetNameSafe(this), *AwarenessStr);
 		}
 #endif
@@ -961,11 +961,11 @@ bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator) const
 	{
 		if (Dot <= ArcThreshold)
 		{
-			UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s TAKEABLE (dist ok, dot=%.2f)"), *GetNameSafe(this), Dot);
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s TAKEABLE (dist ok, dot=%.2f)"), *GetNameSafe(this), Dot);
 		}
 		else
 		{
-			UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s reject: outside rear arc (dot=%.2f, need <= %.2f)"),
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: outside rear arc (dot=%.2f, need <= %.2f)"),
 				*GetNameSafe(this), Dot, ArcThreshold);
 		}
 	}
@@ -978,7 +978,7 @@ bool AEnemyCharacter::BeginTakedownHold(AActor* TakedownInstigator, FVector Snap
 {
 	if (!CanBeTakenDown(TakedownInstigator)) return false;
 
-	UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s BeginTakedownHold OK (watchdog=%.1f)"), *GetNameSafe(this), WatchdogTimeout);
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s BeginTakedownHold OK (watchdog=%.1f)"), *GetNameSafe(this), WatchdogTimeout);
 
 	bPendingTakedownDeath = true;
 	bTakedownFrozen = true;
@@ -1025,12 +1025,12 @@ void AEnemyCharacter::FinishTakedownKill(AActor* TakedownInstigator)
 {
 	if (!bTakedownFrozen)
 	{
-		UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s FinishTakedownKill early-out: not frozen"), *GetNameSafe(this));
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s FinishTakedownKill early-out: not frozen"), *GetNameSafe(this));
 		return;
 	}
 	if (IsValid(HealthComponent) && HealthComponent->IsDead())
 	{
-		UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s FinishTakedownKill early-out: already dead"), *GetNameSafe(this));
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s FinishTakedownKill early-out: already dead"), *GetNameSafe(this));
 		return;
 	}
 
@@ -1042,13 +1042,13 @@ void AEnemyCharacter::FinishTakedownKill(AActor* TakedownInstigator)
 	const APawn* InstigatorPawn = Cast<APawn>(TakedownInstigator);
 	AController* InstigatorController = InstigatorPawn ? InstigatorPawn->GetController() : nullptr;
 
-	UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s FinishTakedownKill applying %.0f damage"), *GetNameSafe(this), TakedownDamage);
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s FinishTakedownKill applying %.0f damage"), *GetNameSafe(this), TakedownDamage);
 	TakeDamage(TakedownDamage, FDamageEvent(), InstigatorController, TakedownInstigator);
 }
 
 bool AEnemyCharacter::ExecuteTakedown(AActor* TakedownInstigator)
 {
-	UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s ExecuteTakedown (instant path)"), *GetNameSafe(this));
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s ExecuteTakedown (instant path)"), *GetNameSafe(this));
 
 	// Instant path: no snap (enemy stays in place), no watchdog (kill follows immediately).
 	const FVector SnapLoc = GetActorLocation();
@@ -1059,7 +1059,7 @@ bool AEnemyCharacter::ExecuteTakedown(AActor* TakedownInstigator)
 
 	if (!BeginTakedownHold(TakedownInstigator, SnapLoc, SnapYaw, 0.f))
 	{
-		UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s ExecuteTakedown aborted (BeginTakedownHold failed)"), *GetNameSafe(this));
+		UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s ExecuteTakedown aborted (BeginTakedownHold failed)"), *GetNameSafe(this));
 		return false;
 	}
 	FinishTakedownKill(TakedownInstigator);

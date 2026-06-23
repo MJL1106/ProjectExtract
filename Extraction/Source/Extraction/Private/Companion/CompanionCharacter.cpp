@@ -161,7 +161,7 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 	if (IsValid(HealthComponent))
 	{
 		HealthComponent->TakeDamage(ActualDamage);
-		UE_LOG(LogCompanion, Log, TEXT("Companion took %.1f damage — HP: %.0f / Shield: %.0f"),
+		UE_LOG(LogCompanion, Verbose, TEXT("Companion took %.1f damage — HP: %.0f / Shield: %.0f"),
 			ActualDamage, HealthComponent->GetCurrentHealth(), HealthComponent->GetCurrentShield());
 	}
 	if (ActualDamage > 0.f && GetWorld())
@@ -208,7 +208,7 @@ void ACompanionCharacter::OnStartCrouch(float HalfHeightAdjust, float ScaledHalf
 {
 	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
 	if (HasAuthority())
-		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [OnStartCrouch] t=%.3f halfAdj=%.1f capsHalfH=%.1f meshRelZ=%.1f worldZ=%.1f"),
+		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [OnStartCrouch] t=%.3f halfAdj=%.1f capsHalfH=%.1f meshRelZ=%.1f worldZ=%.1f"),
 			*GetName(),
 			GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f,
 			HalfHeightAdjust,
@@ -221,7 +221,7 @@ void ACompanionCharacter::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHe
 {
 	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
 	if (HasAuthority())
-		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [OnEndCrouch] t=%.3f halfAdj=%.1f capsHalfH=%.1f meshRelZ=%.1f worldZ=%.1f"),
+		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [OnEndCrouch] t=%.3f halfAdj=%.1f capsHalfH=%.1f meshRelZ=%.1f worldZ=%.1f"),
 			*GetName(),
 			GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f,
 			HalfHeightAdjust,

@@ -40,8 +40,12 @@ private:
 		float FocusCooldownTimer = 0.f;
 		float RallyCooldownTimer = 0.f;
 		bool bFiring = false;
+		/** Tracks previous alone state to detect not-alone→alone and alone→not-alone edges. */
+		bool bWasAlone = false;
 	};
 
 	void CleanUp(UBehaviorTreeComponent& OwnerComp, FOfficerCommandMemory* Mem) const;
 	bool ComputeHoldPosition(APawn* Pawn, AActor* Target, class UEnemySquad* Squad, FVector& OutPos) const;
+	void EngageDirectly(UBehaviorTreeComponent& OwnerComp, FOfficerCommandMemory* Mem, AAIController* Controller,
+		class AEnemyCharacter* Enemy, AActor* Target, UBlackboardComponent* BB);
 };

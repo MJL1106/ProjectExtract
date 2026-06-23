@@ -10,7 +10,7 @@ metadata:
 # Spawn the In-Engine Agent (ProjectExtract)
 
 ## Purpose
-Dispatch the `ue5-inengine-agent` (Opus) to drive the running Unreal Editor via VibeUE / UnrealClaude / NeoStack MCP and do the in-editor work itself — instead of the main chat doing fiddly MCP edits inline, or handing the user a manual checklist.
+Dispatch the `ue5-inengine-agent` (Opus) to drive the running Unreal Editor via VibeUE / NeoStack MCP and do the in-editor work itself — instead of the main chat doing fiddly MCP edits inline, or handing the user a manual checklist.
 
 This packages all the in-engine pointers (tooling map, VibeUE + local skill libraries, the `agent_docs/UnrealWorkflow.md` gotchas) into one pre-briefed agent, so editor work is faster and the main chat stays free to plan/review.
 

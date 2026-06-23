@@ -59,6 +59,14 @@ private:
 		// Archetype-specific
 		FString ArchetypeExtra;
 
+		// Flank-break diagnostics (computed live from cover slot + target geometry)
+		bool bFlankEnabled = false;
+		bool bFlankSlotValid = false;
+		float FlankAngleDeg = 0.f;
+		bool bFlankOutsideArc = false;
+		bool bFlankBodyProtected = false;
+		bool bFlankCompromised = false;
+
 		// Validity
 		bool bHasValidEnemy = false;
 

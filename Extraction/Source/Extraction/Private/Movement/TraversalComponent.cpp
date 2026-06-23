@@ -133,13 +133,13 @@ bool UTraversalComponent::TryStartTraversal(bool bWasSprinting)
 
 bool UTraversalComponent::DetectTraversalAhead(FVector& OutSnapTarget, ETraversalType& OutType)
 {
-	UE_LOG(LogTraversal, Warning, TEXT("[VAULT_DEBUG] DetectTraversalAhead start on owner=%s"), *GetNameSafe(GetOwner()));
+	UE_LOG(LogTraversal, Verbose, TEXT("[VAULT_DEBUG] DetectTraversalAhead start on owner=%s"), *GetNameSafe(GetOwner()));
 
 	OutType = PerformTraversalDetection();
 	const bool bResult = (OutType != ETraversalType::None);
 	if (bResult) OutSnapTarget = VaultTargetLocation;
 
-	UE_LOG(LogTraversal, Warning, TEXT("[VAULT_DEBUG] DetectTraversalAhead result=%s detected_type=%d snap=%s"),
+	UE_LOG(LogTraversal, Verbose, TEXT("[VAULT_DEBUG] DetectTraversalAhead result=%s detected_type=%d snap=%s"),
 		bResult ? TEXT("true") : TEXT("false"), (int32)OutType, *OutSnapTarget.ToString());
 
 	return bResult;
@@ -353,7 +353,7 @@ void UTraversalComponent::EndNavLinkApproach(bool bTeleportToEnd)
 
 void UTraversalComponent::ExecuteByType(ETraversalType Type, bool bWasSprinting)
 {
-	UE_LOG(LogTraversal, Warning, TEXT("[VAULT_DEBUG] ExecuteByType type=%d bIsSprinting=%s on owner=%s"),
+	UE_LOG(LogTraversal, Verbose, TEXT("[VAULT_DEBUG] ExecuteByType type=%d bIsSprinting=%s on owner=%s"),
 		(int32)Type, bWasSprinting ? TEXT("true") : TEXT("false"), *GetNameSafe(GetOwner()));
 
 	if (Type == ETraversalType::None) return;
@@ -384,7 +384,7 @@ void UTraversalComponent::ExecuteByType(ETraversalType Type, bool bWasSprinting)
 		break;
 	}
 
-	UE_LOG(LogTraversal, Warning, TEXT("[VAULT_DEBUG] Broadcasting OnTraversalStarted type=%d"), (int32)Type);
+	UE_LOG(LogTraversal, Verbose, TEXT("[VAULT_DEBUG] Broadcasting OnTraversalStarted type=%d"), (int32)Type);
 	OnTraversalStarted.Broadcast(Type, PlayRate, VaultSurfaceLocation, VaultTargetLocation);
 }
 

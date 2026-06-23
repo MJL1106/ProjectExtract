@@ -94,3 +94,14 @@ bool IsReloadDebugEnabled()
 {
 	return CVarReloadDebug.GetValueOnGameThread() != 0;
 }
+
+static TAutoConsoleVariable<int32> CVarFlankBreakLog(
+	TEXT("enemy.FlankBreakLog"),
+	0,
+	TEXT("Cover flank-break diagnostic: 0=off, 1=log [FLANKDBG] per compromise eval (arc/body-shield verdict, debounce count, cooldown, phase) and on relocate (protective slot found vs strafe fallback)."),
+	ECVF_Cheat);
+
+int32 GetFlankBreakLogLevel()
+{
+	return CVarFlankBreakLog.GetValueOnGameThread();
+}

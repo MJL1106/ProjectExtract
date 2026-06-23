@@ -83,6 +83,16 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
 	void OnADSChanged(bool bIsADS);
 
+	/** Fired once after Montage_Play succeeds and the end delegate is bound.
+	 *  BP uses this to lock the camera, hide the gun, and show the knife. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Takedown|Events")
+	void OnTakedownStarted(AEnemyCharacter* Victim);
+
+	/** Fired once when the finisher montage ends (natural end or interrupt).
+	 *  BP uses this to restore the camera, show the gun, and hide the knife. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Takedown|Events")
+	void OnTakedownFinished();
+
 	// ---- Input handlers (BlueprintCallable so kit BP can delegate if needed) ----
 
 	UFUNCTION(BlueprintCallable, Category = "Input")
@@ -154,6 +164,11 @@ public:
 	/** Called by UAnimNotify_TakedownKill at the death frame of the finisher montage.
 	 *  Also serves as the fallback when the montage ends/interrupts before the notify fires. */
 	void FinishPendingTakedown();
+
+	/** True while the takedown finisher montage is playing.
+	 *  AnimBP reads this to gate the procedural FP-arm layer off during the finisher. */
+	UFUNCTION(BlueprintPure, Category = "Takedown")
+	bool IsInTakedown() const { return bTakedownMontageActive; }
 
 protected:
 

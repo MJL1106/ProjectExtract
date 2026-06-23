@@ -41,6 +41,16 @@ private:
 	UPROPERTY(EditDefaultsOnly, Category = "Combat|Flank", meta = (ClampMin = "10.0"))
 	float ArrivalAcceptance = 120.f;
 
+	/** Weight for the perpendicular/side displacement term in flank point scoring.
+	 *  Higher value = flanker arcs to player's side rather than crossing behind. */
+	UPROPERTY(EditDefaultsOnly, Category = "Combat|Flank", meta = (ClampMin = "0.0"))
+	float SideWeight = 2.0f;
+
+	/** Weight for the behind-target term in flank point scoring. Kept low so it only provides
+	 *  a mild directional bias without pulling the flanker through/past the player. */
+	UPROPERTY(EditDefaultsOnly, Category = "Combat|Flank", meta = (ClampMin = "0.0"))
+	float BehindWeight = 0.5f;
+
 	bool SolveFlankPoint(APawn* Pawn, AActor* Target, float RangeMin, FVector& OutPoint) const;
 	void ReleaseRoleAndStopFire(UBehaviorTreeComponent& OwnerComp, FFlankMemory* Mem) const;
 };

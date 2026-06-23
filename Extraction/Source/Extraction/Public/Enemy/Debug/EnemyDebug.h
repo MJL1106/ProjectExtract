@@ -36,3 +36,7 @@ int32 GetReloadDebugLevel();
 
 /** Returns true when the enemy.ReloadDebug cvar is non-zero. */
 bool IsReloadDebugEnabled();
+
+/** Returns the current enemy.FlankBreakLog cvar value (0=off, 1=on). When on, logs [FLANKDBG] per
+ *  cover-compromise eval: arc verdict, hunkered body-shield verdict, debounce count, cooldown, phase. */
+int32 GetFlankBreakLogLevel();

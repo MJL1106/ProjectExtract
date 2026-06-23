@@ -389,11 +389,13 @@ void UEnemySquad::StopBounding(const TCHAR* Reason)
 
 	if (IsValid(Supp))
 	{
+		StampManeuverHold(Supp);
 		ReleaseRole(EEnemySquadRole::Suppressor, Supp);
 		PushManeuverRoleToBB(Supp, EEnemyManeuverRole::None);
 	}
 	if (IsValid(Flank))
 	{
+		StampManeuverHold(Flank);
 		ReleaseRole(EEnemySquadRole::Flanker, Flank);
 		PushManeuverRoleToBB(Flank, EEnemyManeuverRole::None);
 	}
@@ -544,6 +546,26 @@ void UEnemySquad::PushManeuverRoleToBB(AEnemyCharacter* Member, EEnemyManeuverRo
 	AIC->SetManeuverRole(Role);
 }
 
+void UEnemySquad::StampManeuverHold(AEnemyCharacter* Member)
+{
+	if (!IsValid(Member)) return;
+
+	const UEnemyArchetypeData* DA = Member->GetArchetypeData();
+	if (!IsValid(DA) || DA->ManeuverDisengageHoldTime <= 0.f) return;
+
+	AEnemyAIController* AIC = Cast<AEnemyAIController>(Member->GetController());
+	if (!IsValid(AIC)) return;
+
+	UBlackboardComponent* BB = AIC->GetBlackboardComponent();
+	if (!IsValid(BB)) return;
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	BB->SetValueAsFloat(AEnemyAIController::BB_ManeuverHoldUntil,
+		World->GetTimeSeconds() + DA->ManeuverDisengageHoldTime);
+}
+
 AEnemyCharacter* UEnemySquad::PickBoundingCandidate(bool bPreferLOS, AEnemyCharacter* Exclude) const
 {
 	AEnemyCharacter* Best = nullptr;
@@ -607,6 +629,10 @@ bool UEnemySquad::IsEligibleForManeuver(const TWeakObjectPtr<AEnemyCharacter>& M
 
 	UBlackboardComponent* BB = AIC->GetBlackboardComponent();
 	if (!IsValid(BB) || !BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget)) return false;
+
+	// Morale gate: only Confident enemies are eligible for bounding maneuvers.
+	UEnemyMoraleComponent* MoraleComp = Member->GetMoraleComponent();
+	if (!IsValid(MoraleComp) || MoraleComp->GetMoraleState() != EMoraleState::Confident) return false;
 
 	return true;
 }

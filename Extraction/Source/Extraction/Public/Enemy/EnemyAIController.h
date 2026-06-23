@@ -35,6 +35,7 @@ public:
 	static const FName BB_PatrolRoute;
 	static const FName BB_MoraleState;
 	static const FName BB_ManeuverRole;
+	static const FName BB_ManeuverHoldUntil;
 	static const FName BB_PostLocation;
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|AI")

@@ -60,9 +60,10 @@ private:
 		// --- No-LOS give-up accumulator ---
 		float NoLosAccumulator = 0.f;
 
-		// --- Suppression ---
-		bool bSuppressedCrouched = false;
-		bool bSuppressedHoldingPosition = false;
+		// --- Pursue mode (bMoveAndShootPursue archetypes only) ---
+		bool bPursuing = false;
+		float PursueRePathTimer = 0.f;
+
 	};
 
 	/** Acceptance radius for strafe MoveToLocation commands. */

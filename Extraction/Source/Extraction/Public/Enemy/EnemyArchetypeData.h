@@ -465,6 +465,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Squad", meta = (ClampMin = "0.0"))
 	float MinAllySpacing = 300.f;
 
+	/** Seconds after a bounding maneuver ends during which the grunt fights in place
+	 *  (Flank/seek-cover branches skipped) instead of cold re-acquiring — smooths the
+	 *  handoff when the maneuver is torn down (e.g. officer dies mid-maneuver). 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Squad", meta = (ClampMin = "0.0"))
+	float ManeuverDisengageHoldTime = 3.0f;
+
 	// --- Threat-Scored Targeting (Phase 5) ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0"))
@@ -529,6 +535,12 @@ public:
 	/** Enables the tight cover-anchored strafe-while-firing combat behaviour. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot")
 	bool bUsesMoveAndShoot = false;
+
+	/** When true, beyond MoveAndShootMaxRange the enemy advances toward the target at CombatSpeed while
+	 *  firing (relentless pursuer — shotgun) instead of failing out. Grunts leave false to fall through
+	 *  to their cover branch. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot")
+	bool bMoveAndShootPursue = false;
 
 	/** Below this range the point-blank fire-in-place branch handles combat. Must be < MoveAndShootMaxRange (and >= PointBlankFireRange). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|MoveAndShoot", meta = (ClampMin = "0.0"))

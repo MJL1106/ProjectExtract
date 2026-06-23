@@ -4,6 +4,7 @@
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
+#include "EnemyMoraleComponent.h"
 #include "EnemySquad.h"
 #include "EnemySquadSubsystem.h"
 #include "SuppressionComponent.h"
@@ -150,6 +151,16 @@ void UBTTask_EnemyBoundingAdvance::TickTask(UBehaviorTreeComponent& OwnerComp, u
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
+	// Morale pre-empt: rattled flanker aborts maneuver.
+	const UEnemyMoraleComponent* MoraleComp = Enemy->GetMoraleComponent();
+	if (IsValid(MoraleComp) && MoraleComp->GetMoraleState() != EMoraleState::Confident)
+	{
+		Controller->StopMovement();
+		StopFireAndAim(OwnerComp, Mem);
+		NotifyBlocked(Enemy, Mem);
+		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	}
+
 	// Keep aim on target
 	Enemy->SetAimTarget(Target);
 
@@ -229,9 +240,13 @@ bool UBTTask_EnemyBoundingAdvance::SolveBoundPoint(APawn* Pawn, AActor* Target, 
 
 	const FVector Lateral = FVector::CrossProduct(FVector::UpVector, ToTarget).GetSafeNormal2D();
 	const float LateralSign = FMath::RandBool() ? 1.f : -1.f;
-	const FVector AdvanceDir = (ToTarget + Lateral * LateralSign * 0.3f).GetSafeNormal2D();
+	const FVector AdvanceDir = (ToTarget + Lateral * LateralSign * LateralBias).GetSafeNormal2D();
 
-	const FVector Candidate = PawnLoc + AdvanceDir * HopDistance;
+	const float DistToTarget = FVector::Dist2D(PawnLoc, TargetLoc);
+	const float ClampedHop = FMath::Min(HopDistance, FMath::Max(0.f, DistToTarget - MinBoundStandoff));
+	if (ClampedHop < ArrivalAcceptance) return false;
+
+	const FVector Candidate = PawnLoc + AdvanceDir * ClampedHop;
 
 	FNavLocation NavLoc;
 	if (!NavSys->ProjectPointToNavigation(Candidate, NavLoc, FVector(300.f, 300.f, 300.f)))

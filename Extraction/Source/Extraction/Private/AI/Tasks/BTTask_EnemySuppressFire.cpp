@@ -4,6 +4,7 @@
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
+#include "EnemyMoraleComponent.h"
 #include "EnemySquad.h"
 #include "EnemySquadSubsystem.h"
 #include "WeaponBase.h"
@@ -149,6 +150,21 @@ void UBTTask_EnemySuppressFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 				UEnemySquad* Squad = SquadSub ? SquadSub->GetSquadFor(Enemy) : nullptr;
 				if (Squad) Squad->NotifyManeuverMemberBlocked(Enemy);
 			}
+		}
+		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	}
+
+	// Morale pre-empt: rattled suppressor aborts maneuver (mirrors low-HP / suppressed pre-empts in bounding advance).
+	const UEnemyMoraleComponent* MoraleComp = Enemy->GetMoraleComponent();
+	if (IsValid(MoraleComp) && MoraleComp->GetMoraleState() != EMoraleState::Confident)
+	{
+		CleanUp(OwnerComp, Mem);
+		UWorld* World = Enemy->GetWorld();
+		if (World)
+		{
+			UEnemySquadSubsystem* SquadSub = World->GetSubsystem<UEnemySquadSubsystem>();
+			UEnemySquad* Squad = SquadSub ? SquadSub->GetSquadFor(Enemy) : nullptr;
+			if (Squad) Squad->NotifyManeuverMemberBlocked(Enemy);
 		}
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}

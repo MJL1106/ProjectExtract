@@ -45,6 +45,15 @@ private:
 	UPROPERTY(EditDefaultsOnly, Category = "Combat|Bounding", meta = (ClampMin = "0.0"))
 	float ArrivalSlack = 200.f;
 
+	/** Lateral arc bias for each hop. 1.0 gives ~45 degrees of strafe vs straight charge (was 0.3). */
+	UPROPERTY(EditDefaultsOnly, Category = "Combat|Bounding", meta = (ClampMin = "0.0", ClampMax = "3.0"))
+	float LateralBias = 1.0f;
+
+	/** Minimum distance to keep from the target when clamping the hop endpoint.
+	 *  Prevents the bound point from landing on or past the player when already close. */
+	UPROPERTY(EditDefaultsOnly, Category = "Combat|Bounding", meta = (ClampMin = "50.0"))
+	float MinBoundStandoff = 250.f;
+
 	bool SolveBoundPoint(APawn* Pawn, AActor* Target, FVector& OutPoint) const;
 	void StopFireAndAim(UBehaviorTreeComponent& OwnerComp, FBoundingAdvanceMemory* Mem) const;
 	UEnemySquad* ResolveSquad(class AEnemyCharacter* Enemy, FBoundingAdvanceMemory* Mem) const;

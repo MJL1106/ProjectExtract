@@ -77,6 +77,7 @@ EBTNodeResult::Type UBTTask_EnemyFlank::ExecuteTask(UBehaviorTreeComponent& Owne
 
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 	Enemy->SetAimTarget(Target);
+	Controller->SetFocus(Target);
 
 	const EPathFollowingRequestResult::Type MoveResult =
 		Controller->MoveToLocation(FlankPoint, ArrivalAcceptance, false, true, false, true);
@@ -155,6 +156,7 @@ void UBTTask_EnemyFlank::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 
 	// Keep aim on target while moving
 	Enemy->SetAimTarget(Target);
+	Controller->SetFocus(Target);
 
 	// Check arrival
 	if (!Mem->bMoveIssued) return;
@@ -194,13 +196,21 @@ bool UBTTask_EnemyFlank::SolveFlankPoint(APawn* Pawn, AActor* Target, float Rang
 	const FVector PawnLoc = Pawn->GetActorLocation();
 	const FVector TargetFwd = Target->GetActorForwardVector().GetSafeNormal2D();
 	const FVector ToPawn = (PawnLoc - TargetLoc).GetSafeNormal2D();
+	// Enemy-to-player direction: dot(ToPoint, EnemyToPlayer) > 0 means point is on the far side
+	const FVector EnemyToPlayer = (TargetLoc - PawnLoc).GetSafeNormal2D();
+
+	// Two-pass: prefer near-side/perpendicular points; fall back to far-side only if geometry forces it
+	static constexpr float FarSideEpsilon = 0.1f;
 
 	const float InnerR = RangeMin;
 	const float OuterR = RangeMin + RingOuterPadding;
 
-	float BestScore = -FLT_MAX;
-	FVector BestPoint = FVector::ZeroVector;
-	bool bFoundAny = false;
+	float BestNearScore = -FLT_MAX;
+	float BestFarScore  = -FLT_MAX;
+	FVector BestNearPoint = FVector::ZeroVector;
+	FVector BestFarPoint  = FVector::ZeroVector;
+	bool bFoundNear = false;
+	bool bFoundFar  = false;
 
 	for (int32 i = 0; i < RingSampleCount; ++i)
 	{
@@ -217,26 +227,25 @@ bool UBTTask_EnemyFlank::SolveFlankPoint(APawn* Pawn, AActor* Target, float Rang
 		const FVector Point = NavLoc.Location;
 		const FVector ToPoint = (Point - TargetLoc).GetSafeNormal2D();
 
-		// Prefer points behind the target's facing (dot < 0 means behind)
-		const float BehindScore = -FVector::DotProduct(TargetFwd, ToPoint);
-
-		// Prefer angular displacement from current approach bearing
+		const float BehindScore      = -FVector::DotProduct(TargetFwd, ToPoint);
 		const float DisplacementScore = 1.f - FMath::Abs(FVector::DotProduct(ToPawn, ToPoint));
+		const float Score             = DisplacementScore * SideWeight + BehindScore * BehindWeight;
 
-		const float Score = BehindScore * 2.f + DisplacementScore;
-
-		if (Score > BestScore)
+		// Classify: far-side means the flanker would cross through/past the player to reach it
+		const float FarSideDot = FVector::DotProduct(ToPoint, EnemyToPlayer);
+		if (FarSideDot > FarSideEpsilon)
 		{
-			BestScore = Score;
-			BestPoint = Point;
-			bFoundAny = true;
+			if (Score > BestFarScore) { BestFarScore = Score; BestFarPoint = Point; bFoundFar = true; }
+		}
+		else
+		{
+			if (Score > BestNearScore) { BestNearScore = Score; BestNearPoint = Point; bFoundNear = true; }
 		}
 	}
 
-	if (!bFoundAny) return false;
-
-	OutPoint = BestPoint;
-	return true;
+	if (bFoundNear) { OutPoint = BestNearPoint; return true; }
+	if (bFoundFar)  { OutPoint = BestFarPoint;  return true; }
+	return false;
 }
 
 void UBTTask_EnemyFlank::ReleaseRoleAndStopFire(UBehaviorTreeComponent& OwnerComp, FFlankMemory* Mem) const
@@ -261,6 +270,7 @@ void UBTTask_EnemyFlank::ReleaseRoleAndStopFire(UBehaviorTreeComponent& OwnerCom
 	}
 
 	if (IsValid(Enemy)) Enemy->SetAimTarget(nullptr);
+	if (Controller) Controller->ClearFocus(EAIFocusPriority::Gameplay);
 }
 
 FString UBTTask_EnemyFlank::GetStaticDescription() const

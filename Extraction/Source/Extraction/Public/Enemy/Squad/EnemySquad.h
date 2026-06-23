@@ -150,6 +150,10 @@ private:
 	/** Pushes ManeuverRole onto a member's BB via its controller. Null-safe. */
 	void PushManeuverRoleToBB(AEnemyCharacter* Member, EEnemyManeuverRole Role);
 
+	/** Stamps ManeuverHoldUntil on a member's BB so the post-maneuver engage-in-place decorator holds.
+	 *  Uses the member's DA ManeuverDisengageHoldTime; 0 or missing DA = no stamp. */
+	void StampManeuverHold(AEnemyCharacter* Member);
+
 	/** Picks the best grunt member for a role. Suppressor prefers LOS to target; flanker prefers health > 0.5. */
 	AEnemyCharacter* PickBoundingCandidate(bool bPreferLOS, AEnemyCharacter* Exclude) const;
 

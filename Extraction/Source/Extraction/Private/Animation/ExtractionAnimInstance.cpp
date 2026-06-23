@@ -323,19 +323,19 @@ bool UExtractionAnimInstance::IsPlayingProneEntryMontage() const
 
 float UExtractionAnimInstance::PlayVaultMontage(float PlayRate)
 {
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayVaultMontage entered"));
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] PlayVaultMontage entered"));
 
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] AnimData=%s (CurrentWeaponType=%d)"),
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] AnimData=%s (CurrentWeaponType=%d)"),
 		*GetNameSafe(Data), (int32)CurrentWeaponType);
 	if (!IsValid(Data)) return 0.f;
 
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] VaultMontage on data=%s"),
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] VaultMontage on data=%s"),
 		*GetNameSafe(Data->VaultMontage));
 	if (!IsValid(Data->VaultMontage)) return 0.f;
 
 	const float Duration = PlayMontageInternal(Data->VaultMontage, PlayRate);
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayMontageInternal returned duration=%.2f"), Duration);
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] PlayMontageInternal returned duration=%.2f"), Duration);
 	return Duration;
 }
 
@@ -348,19 +348,19 @@ bool UExtractionAnimInstance::IsPlayingVaultMontage() const
 
 float UExtractionAnimInstance::PlayClimbMontage(float PlayRate)
 {
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayClimbMontage entered"));
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] PlayClimbMontage entered"));
 
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] AnimData=%s (CurrentWeaponType=%d)"),
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] AnimData=%s (CurrentWeaponType=%d)"),
 		*GetNameSafe(Data), (int32)CurrentWeaponType);
 	if (!IsValid(Data)) return 0.f;
 
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] ClimbMontage on data=%s"),
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] ClimbMontage on data=%s"),
 		*GetNameSafe(Data->ClimbMontage));
 	if (!IsValid(Data->ClimbMontage)) return 0.f;
 
 	const float Duration = PlayMontageInternal(Data->ClimbMontage, PlayRate);
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayMontageInternal returned duration=%.2f"), Duration);
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] PlayMontageInternal returned duration=%.2f"), Duration);
 	return Duration;
 }
 
@@ -373,19 +373,19 @@ bool UExtractionAnimInstance::IsPlayingClimbMontage() const
 
 float UExtractionAnimInstance::PlayMantleMontage(float PlayRate)
 {
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayMantleMontage entered"));
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] PlayMantleMontage entered"));
 
 	const UExtractionAnimDataAsset* Data = GetActiveAnimData();
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] AnimData=%s (CurrentWeaponType=%d)"),
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] AnimData=%s (CurrentWeaponType=%d)"),
 		*GetNameSafe(Data), (int32)CurrentWeaponType);
 	if (!IsValid(Data)) return 0.f;
 
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] MantleMontage on data=%s"),
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] MantleMontage on data=%s"),
 		*GetNameSafe(Data->MantleMontage));
 	if (!IsValid(Data->MantleMontage)) return 0.f;
 
 	const float Duration = PlayMontageInternal(Data->MantleMontage, PlayRate);
-	UE_LOG(LogExtractionAnim, Warning, TEXT("[VAULT_DEBUG] PlayMontageInternal returned duration=%.2f"), Duration);
+	UE_LOG(LogExtractionAnim, Verbose, TEXT("[VAULT_DEBUG] PlayMontageInternal returned duration=%.2f"), Duration);
 	return Duration;
 }
 

@@ -48,9 +48,11 @@ EBTNodeResult::Type UBTTask_EnemyMoveAndShoot::ExecuteTask(UBehaviorTreeComponen
 	AActor* Target = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
 	if (!IsValid(Target)) return EBTNodeResult::Failed;
 
-	// Range gate
+	// Range gate — widened by hysteresis to match TickTask's exit band, preventing
+	// repeated re-selection stutter when the player walks the boundary.
 	const float DistToTarget = FVector::Dist(Pawn->GetActorLocation(), Target->GetActorLocation());
-	if (DistToTarget < DA->MoveAndShootMinRange || DistToTarget > DA->MoveAndShootMaxRange)
+	if (DistToTarget < (DA->MoveAndShootMinRange - DA->MoveAndShootRangeHysteresis)
+		|| DistToTarget > (DA->MoveAndShootMaxRange + DA->MoveAndShootRangeHysteresis))
 		return EBTNodeResult::Failed;
 
 	// Suppression gate at entry
@@ -129,28 +131,49 @@ void UBTTask_EnemyMoveAndShoot::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
-	// Range check — exit gate is widened by hysteresis to prevent boundary churn
+	// Range check with zone branching
 	const float DistToTarget = FVector::Dist(Pawn->GetActorLocation(), Target->GetActorLocation());
-	if (DistToTarget < (DA->MoveAndShootMinRange - DA->MoveAndShootRangeHysteresis)
-		|| DistToTarget > (DA->MoveAndShootMaxRange + DA->MoveAndShootRangeHysteresis))
+	const float MinEdge = DA->MoveAndShootMinRange - DA->MoveAndShootRangeHysteresis;
+	const float MaxEdge = DA->MoveAndShootMaxRange + DA->MoveAndShootRangeHysteresis;
+
+	const bool bBeyondBand = DistToTarget > MaxEdge;
+	const bool bBelowBand = DistToTarget < MinEdge;
+
+	// Beyond max range: pursue if archetype opts in, else fail (grunt falls through to cover branch).
+	if (bBeyondBand && !DA->bMoveAndShootPursue)
 	{
 		CleanUp(OwnerComp, Mem);
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
-	// No-LOS give-up: accumulate time without LOS, bail if exceeded
-	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
-	if (!bHasLOS)
+	// Below min range: hold-and-fire if pursue archetype, else fail.
+	if (bBelowBand && !DA->bMoveAndShootPursue)
 	{
-		Mem->NoLosAccumulator += DeltaSeconds;
-		if (Mem->NoLosAccumulator >= DA->MoveAndShootNoLosGiveUpTime)
+		CleanUp(OwnerComp, Mem);
+		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	}
+
+	// No-LOS give-up: only applies when not actively pursuing (pursuing IS the response to lost contact).
+	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
+	if (!bBeyondBand || !DA->bMoveAndShootPursue)
+	{
+		if (!bHasLOS)
 		{
-			CleanUp(OwnerComp, Mem);
-			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			Mem->NoLosAccumulator += DeltaSeconds;
+			if (Mem->NoLosAccumulator >= DA->MoveAndShootNoLosGiveUpTime)
+			{
+				CleanUp(OwnerComp, Mem);
+				return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			}
+		}
+		else
+		{
+			Mem->NoLosAccumulator = 0.f;
 		}
 	}
 	else
 	{
+		// Pursuing: reset the no-LOS accumulator so we don't time out while chasing.
 		Mem->NoLosAccumulator = 0.f;
 	}
 
@@ -158,61 +181,7 @@ void UBTTask_EnemyMoveAndShoot::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 	Enemy->SetAimTarget(Target);
 	Controller->SetFocus(Target);
 
-	// Suppression state
-	USuppressionComponent* SupprComp = Enemy->GetSuppressionComponent();
-	const bool bSuppressed = IsValid(SupprComp) && SupprComp->IsSuppressed();
-
-	// === SUPPRESSION GATE ===
-	if (bSuppressed)
-	{
-		// Stop firing if currently firing
-		if (Mem->bFiring)
-		{
-			AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
-			if (IsValid(Weapon)) Weapon->StopFiring();
-			Mem->bFiring = false;
-		}
-
-		// Stop movement
-		if (Mem->StrafePhase == EMoveShootStrafePhase::Moving)
-		{
-			Controller->StopMovement();
-			Mem->StrafePhase = EMoveShootStrafePhase::Waiting;
-		}
-
-		// Crouch if in cover vicinity and not already crouched
-		if (!Mem->bSuppressedCrouched)
-		{
-			const bool bHasCoverSuppr = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
-			if (bHasCoverSuppr)
-			{
-				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
-				Mem->bSuppressedCrouched = true;
-			}
-		}
-		Mem->bSuppressedHoldingPosition = true;
-
-		// Reset fire phase to Acquire so we have a reaction delay when suppression clears
-		Mem->FirePhase = EMoveShootFirePhase::Acquire;
-		Mem->FireTimer = DA->ReactionDelay;
-		return; // hold position, wait for suppression to clear
-	}
-
-	// Recover from suppression
-	if (Mem->bSuppressedHoldingPosition)
-	{
-		Mem->bSuppressedHoldingPosition = false;
-		if (Mem->bSuppressedCrouched)
-		{
-			if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
-			Mem->bSuppressedCrouched = false;
-		}
-		// Re-seed strafe timer so we start moving again soon
-		Mem->StrafeTimer = FMath::RandRange(0.2f, 0.6f);
-		Mem->StrafePhase = EMoveShootStrafePhase::Waiting;
-	}
-
-	// === FIRE SUB-LOOP ===
+	// === FIRE SUB-LOOP (runs in both pursue and strafe paths) ===
 	Mem->FireTimer -= DeltaSeconds;
 
 	switch (Mem->FirePhase)
@@ -249,6 +218,44 @@ void UBTTask_EnemyMoveAndShoot::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 			Mem->FireTimer = 0.f; // no reaction delay on subsequent loops
 		}
 		break;
+	}
+
+	// === PURSUE PATH (beyond band, pursue opt-in) ===
+	if (bBeyondBand && DA->bMoveAndShootPursue)
+	{
+		const bool bWasPursuing = Mem->bPursuing;
+		Mem->bPursuing = true;
+
+		// Only set combat speed on the tick that enters pursue (avoid redundant writes).
+		if (!bWasPursuing)
+			Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
+
+		// Issue a re-path every ~0.5s so the enemy corners around obstacles.
+		Mem->PursueRePathTimer -= DeltaSeconds;
+		if (Mem->PursueRePathTimer <= 0.f)
+		{
+			Controller->MoveToActor(Target, DA->MoveAndShootMaxRange, false, true, false, nullptr, true);
+			Mem->PursueRePathTimer = 0.5f;
+		}
+
+		// When first entering pursue from in-band strafe, stop any lingering strafe move.
+		if (!bWasPursuing && Mem->StrafePhase == EMoveShootStrafePhase::Moving)
+		{
+			Controller->StopMovement();
+			Mem->StrafePhase = EMoveShootStrafePhase::Waiting;
+		}
+
+		return; // fire sub-loop already ran above; skip strafe sub-loop
+	}
+
+	// === IN-BAND / BELOW-MIN PATH ===
+	// Transition out of pursue: switch back to strafe speed and reseed strafe timer.
+	if (Mem->bPursuing)
+	{
+		Mem->bPursuing = false;
+		Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Strafe);
+		Mem->StrafePhase = EMoveShootStrafePhase::Waiting;
+		Mem->StrafeTimer = FMath::RandRange(0.2f, 0.6f);
 	}
 
 	// === STRAFE SUB-LOOP ===
@@ -354,13 +361,32 @@ bool UBTTask_EnemyMoveAndShoot::SolveStrafePoint(APawn* Pawn, AActor* Target,
 	LOSParams.AddIgnoredActor(Pawn);
 	LOSParams.AddIgnoredActor(Target);
 
+	// Current bearing of this pawn around the target — used by the pursue orbit mode.
+	const FVector ToPawn = (Pawn->GetActorLocation() - TargetLoc).GetSafeNormal2D();
+	const float BaseAngle = FMath::Atan2(ToPawn.Y, ToPawn.X);
+
 	for (int32 Attempt = 0; Attempt < DA->StrafeLosRetryCount; ++Attempt)
 	{
-		// Random point within StrafeRadius of anchor
-		const float RandAngle = FMath::FRandRange(0.f, 2.f * UE_PI);
-		const float RandRadius = FMath::FRandRange(Radius * 0.3f, Radius);
-		const FVector Candidate = Anchor + FVector(FMath::Cos(RandAngle) * RandRadius,
-			FMath::Sin(RandAngle) * RandRadius, 0.f);
+		FVector Candidate;
+
+		if (DA->bMoveAndShootPursue)
+		{
+			// Pursue/orbit mode: sidestep around the TARGET at a radius within [Min, Max].
+			// Picks a random lateral angle step so the enemy circles the player.
+			const float Side = FMath::RandBool() ? 1.f : -1.f;
+			const float Delta = FMath::DegreesToRadians(FMath::FRandRange(20.f, 90.f));
+			const float Ang = BaseAngle + Side * Delta;
+			const float R = FMath::FRandRange(DA->MoveAndShootMinRange, DA->MoveAndShootMaxRange);
+			Candidate = TargetLoc + FVector(FMath::Cos(Ang) * R, FMath::Sin(Ang) * R, 0.f);
+		}
+		else
+		{
+			// Default mode: random point within StrafeRadius of anchor (grunt/cover-anchored).
+			const float RandAngle = FMath::FRandRange(0.f, 2.f * UE_PI);
+			const float RandRadius = FMath::FRandRange(Radius * 0.3f, Radius);
+			Candidate = Anchor + FVector(FMath::Cos(RandAngle) * RandRadius,
+				FMath::Sin(RandAngle) * RandRadius, 0.f);
+		}
 
 		// Nav-project
 		FNavLocation NavLoc;
@@ -410,12 +436,6 @@ void UBTTask_EnemyMoveAndShoot::CleanUp(UBehaviorTreeComponent& OwnerComp, FMove
 		// Restore combat speed via the canonical single-writer API
 		Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 
-		// Un-crouch if we crouched due to suppression
-		if (Mem->bSuppressedCrouched)
-		{
-			if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
-			Mem->bSuppressedCrouched = false;
-		}
 	}
 
 	if (Controller)

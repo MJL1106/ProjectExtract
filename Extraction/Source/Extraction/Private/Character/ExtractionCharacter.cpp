@@ -1276,7 +1276,7 @@ void AExtractionCharacter::DebugApplyDamage()
 	if (!IsValid(HealthComponent)) return;
 
 	HealthComponent->TakeDamage(25.f);
-	UE_LOG(LogExtraction, Log, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
+	UE_LOG(LogExtraction, Verbose, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
 		HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
 		HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
 }
@@ -1305,7 +1305,7 @@ void AExtractionCharacter::InteractStop(const FInputActionValue& Value)
 
 void AExtractionCharacter::TakedownInput(const FInputActionValue& Value)
 {
-	UE_LOG(LogExtraction, Warning, TEXT("[Takedown] AExtractionCharacter::TakedownInput fired (LEGACY class) — HasAuthority=%d"), HasAuthority());
+	UE_LOG(LogExtraction, Verbose, TEXT("[Takedown] AExtractionCharacter::TakedownInput fired (LEGACY class) — HasAuthority=%d"), HasAuthority());
 
 	if (!HasAuthority()) return;
 

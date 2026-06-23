@@ -557,9 +557,9 @@ void AWeaponBase::PerformHitscan()
 	if (!IsValid(OwnerChar)) return;
 
 	FVector TraceStart;
-	FVector TraceEnd;
+	FVector AimDirection;
 
-	// Player: trace from camera. AI/enemy: trace from muzzle along actor forward.
+	// Player: trace from camera. AI/enemy: trace from eye height.
 	APlayerController* PC = Cast<APlayerController>(OwnerChar->GetController());
 	if (IsValid(PC))
 	{
@@ -567,15 +567,15 @@ void AWeaponBase::PerformHitscan()
 		FRotator CameraRot;
 		PC->GetPlayerViewPoint(CameraLoc, CameraRot);
 		TraceStart = CameraLoc;
-		TraceEnd = CameraLoc + CameraRot.Vector() * WeaponData->MaxRange;
+		AimDirection = CameraRot.Vector();
 	}
 	else
 	{
 		// AI path: trace from eye height (GetPawnViewLocation) so damage agrees with LOS checks
 		// in BTService_EnemyCombat and EnemyAwarenessComponent. Muzzle socket is kept for FX/noise only.
 		TraceStart = OwnerChar->GetPawnViewLocation();
+		AimDirection = OwnerChar->GetActorForwardVector(); // fallback
 
-		FVector AimDirection = OwnerChar->GetActorForwardVector(); // fallback
 		float InaccuracyDeg = 0.0f;
 		AActor* AimTarget = nullptr;
 
@@ -606,124 +606,181 @@ void AWeaponBase::PerformHitscan()
 			}
 		}
 
-		// Bug 5b: uniform cone spread — single random angle + magnitude within InaccuracyDeg.
-		// The old per-axis approach doubled the effective cone (independent Yaw+Pitch).
+		// Bug 5b: uniform cone spread for AI inaccuracy — reuses ApplyConeSpread.
 		if (InaccuracyDeg > 0.0f)
-		{
-			const float RandAngle = FMath::RandRange(0.f, 360.f);
-			const float RandMagnitude = FMath::RandRange(0.f, InaccuracyDeg);
-			FRotator SpreadRot = AimDirection.Rotation();
-			SpreadRot.Yaw += FMath::Cos(FMath::DegreesToRadians(RandAngle)) * RandMagnitude;
-			SpreadRot.Pitch += FMath::Sin(FMath::DegreesToRadians(RandAngle)) * RandMagnitude;
-			AimDirection = SpreadRot.Vector();
-		}
-
-		TraceEnd = TraceStart + AimDirection * WeaponData->MaxRange;
+			AimDirection = ApplyConeSpread(AimDirection, InaccuracyDeg);
 	}
 
-	FHitResult HitResult;
+	// Build QueryParams once — reused for every pellet.
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 	QueryParams.AddIgnoredActor(OwnerChar);
 	QueryParams.bReturnPhysicalMaterial = false;
 
-	// Friendly-fire prevention for ALL shooters (player + AI): ignore pawns on the SAME team as the
-	// shooter (via IGenericTeamAgentInterface), so the bullet passes through allies to whatever is
-	// behind. Player (team 0) won't hit the companion; an enemy (team 1) won't hit other enemies.
-	// The ignore list is team-based and rebuilt at most once per ~1s (iterating all pawns per shot is costly).
-	// NOTE: this is intentionally weapon-trace-only — grenades stay team-blind by design.
+	// Friendly-fire prevention for ALL shooters: built once per burst, refreshed at most every 1s.
 	const bool bAIOwned = !IsValid(PC);
 	{
 		const UWorld* QueryWorld = GetWorld();
 		if (QueryWorld && (QueryWorld->GetTimeSeconds() - FFIgnoreListBuiltTime) > 1.f)
 			RebuildFFIgnoreList();
-
 		QueryParams.AddIgnoredActors(CachedFFIgnoreList);
 	}
 
-	if (UWorld* World = GetWorld())
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	const int32 NumPellets = FMath::Max(1, WeaponData->PelletCount);
+
+	// Collected pellet hits — trace pass only, no TakeDamage during traces.
+	struct FPelletRecord
 	{
-		const bool bHit = World->LineTraceSingleByChannel(HitResult, TraceStart, TraceEnd, ECC_Visibility, QueryParams);
+		TWeakObjectPtr<AActor> Victim;
+		FHitResult Hit;
+		FVector Dir;
+		float Damage;
+	};
+	TArray<FPelletRecord, TInlineAllocator<8>> PelletRecords;
 
-		if (bAIOwned && CVarAIWeaponTraceDebug.GetValueOnGameThread() != 0)
+	// Per-victim dedup for morale — populated on first hit per victim, caches the HealthComponent.
+	struct FVictimRecord
+	{
+		TWeakObjectPtr<AActor> Victim;
+		UHealthComponent* Health; // cached once, reused in morale pass
+		bool bWasAlive;
+	};
+	TArray<FVictimRecord, TInlineAllocator<4>> VictimRecords;
+
+	// Center-pellet result — used for FX, near-miss, and debug logging.
+	bool bCenterHit = false;
+	FVector CenterImpactOrEnd = TraceStart + AimDirection * WeaponData->MaxRange;
+	AActor* CenterHitActor = nullptr;
+
+	// === TRACE PASS (no TakeDamage — avoids re-entrancy during traces) ===
+	for (int32 P = 0; P < NumPellets; ++P)
+	{
+		const FVector PelletDir = (P == 0) ? AimDirection : ApplyConeSpread(AimDirection, WeaponData->PelletSpreadDeg);
+		const FVector PelletEnd = TraceStart + PelletDir * WeaponData->MaxRange;
+
+		FHitResult PelletHit;
+		const bool bHit = World->LineTraceSingleByChannel(PelletHit, TraceStart, PelletEnd, ECC_Visibility, QueryParams);
+
+		if (P == 0)
 		{
-			const IAIShooterInterface* DebugShooter = Cast<IAIShooterInterface>(OwnerChar);
-			const AActor* AILogAimTarget = DebugShooter ? DebugShooter->GetAIAimTarget() : nullptr;
-			UE_LOG(LogExtraction, Verbose,
-				TEXT("AI-FIRE owner=%s eye=%s end=%s aimTarget=%s bHit=%d hitActor=%s hitDist=%.0f"),
-				*GetNameSafe(OwnerChar), *TraceStart.ToCompactString(), *TraceEnd.ToCompactString(),
-				*GetNameSafe(AILogAimTarget), (int32)bHit,
-				*GetNameSafe(bHit ? HitResult.GetActor() : nullptr),
-				bHit ? HitResult.Distance : 0.f);
+			bCenterHit = bHit;
+			CenterImpactOrEnd = bHit ? PelletHit.ImpactPoint : PelletEnd;
+			CenterHitActor = bHit ? PelletHit.GetActor() : nullptr;
 		}
 
-		// Bug 6b: player trace diagnostics
-		if (!bAIOwned && CVarPlayerTraceDebug.GetValueOnGameThread() != 0)
+		if (!bHit) continue;
+
+		AActor* HitActor = PelletHit.GetActor();
+		if (!IsValid(HitActor)) continue;
+
+		// Record this victim the first time it's hit (cache HealthComponent + alive state).
+		bool bAlreadySeen = false;
+		for (const FVictimRecord& VR : VictimRecords)
 		{
-			AActor* DbgHitActor = bHit ? HitResult.GetActor() : nullptr;
-			UE_LOG(LogExtraction, Log,
-				TEXT("PLAYER-FIRE start=%s end=%s bHit=%d hitActor=%s hitComp=%s dist=%.0f"),
-				*TraceStart.ToCompactString(), *TraceEnd.ToCompactString(),
-				(int32)bHit, *GetNameSafe(DbgHitActor),
-				bHit ? *GetNameSafe(HitResult.GetComponent()) : TEXT("none"),
-				bHit ? HitResult.Distance : 0.f);
-			if (bHit && IsValid(DbgHitActor) && !DbgHitActor->FindComponentByClass<UHealthComponent>())
-				UE_LOG(LogExtraction, Warning, TEXT("PLAYER-FIRE hit %s but it has NO UHealthComponent — damage will be ignored"), *GetNameSafe(DbgHitActor));
+			if (VR.Victim.Get() == HitActor) { bAlreadySeen = true; break; }
+		}
+		if (!bAlreadySeen)
+		{
+			UHealthComponent* VH = HitActor->FindComponentByClass<UHealthComponent>();
+			VictimRecords.Add({ HitActor, VH, VH && VH->IsAlive() });
 		}
 
-		if (bHit)
+		const float PelletDamage = WeaponData->BaseDamage * ComputeFalloffScale(PelletHit.Distance);
+		PelletRecords.Add({ HitActor, PelletHit, PelletDir, PelletDamage });
+	}
+
+	// === DAMAGE PASS (per-pellet TakeDamage preserves per-bone hitbox multipliers) ===
+	if (!WeaponData->DamageTypeClass)
+		UE_LOG(LogExtraction, Warning, TEXT("'%s': WeaponData has no DamageTypeClass — hitbox multipliers won't apply."), *GetNameSafe(this));
+
+	for (const FPelletRecord& PR : PelletRecords)
+	{
+		AActor* HitActor = PR.Victim.Get();
+		if (!IsValid(HitActor)) continue;
+
+		FPointDamageEvent DamageEvent;
+		DamageEvent.Damage = PR.Damage;
+		DamageEvent.HitInfo = PR.Hit;
+		DamageEvent.ShotDirection = PR.Dir;
+		if (WeaponData->DamageTypeClass) DamageEvent.DamageTypeClass = WeaponData->DamageTypeClass;
+
+		UE_LOG(LogExtraction, Verbose, TEXT("%s hit %s for %.1f damage"),
+			*GetNameSafe(OwnerChar), *GetNameSafe(HitActor), PR.Damage);
+
+		HitActor->TakeDamage(PR.Damage, DamageEvent, OwnerChar->GetController(), this);
+	}
+
+	// === MORALE PASS (once per victim per shot, reusing cached HealthComponent) ===
+	AEnemyCharacter* OwnerEnemy = Cast<AEnemyCharacter>(OwnerChar);
+	if (IsValid(OwnerEnemy))
+	{
+		if (UEnemyMoraleComponent* Morale = OwnerEnemy->GetMoraleComponent())
 		{
-			AActor* HitActor = HitResult.GetActor();
-			if (IsValid(HitActor))
+			for (const FVictimRecord& VR : VictimRecords)
 			{
-				FPointDamageEvent DamageEvent;
-				DamageEvent.Damage = WeaponData->BaseDamage;
-				DamageEvent.HitInfo = HitResult;
-				DamageEvent.ShotDirection = (TraceEnd - TraceStart).GetSafeNormal();
-
-				if (WeaponData->DamageTypeClass)
-					DamageEvent.DamageTypeClass = WeaponData->DamageTypeClass;
-				else
-					UE_LOG(LogExtraction, Warning, TEXT("'%s': WeaponData has no DamageTypeClass — hitbox multipliers won't apply."), *GetNameSafe(this));
-
-				UE_LOG(LogExtraction, Log, TEXT("%s hit %s for %.1f damage"),
-					*GetNameSafe(OwnerChar), *GetNameSafe(HitActor), WeaponData->BaseDamage);
-
-				UHealthComponent* VictimHealth = HitActor->FindComponentByClass<UHealthComponent>();
-				const bool bVictimWasAlive = VictimHealth && VictimHealth->IsAlive();
-
-				HitActor->TakeDamage(
-					WeaponData->BaseDamage,
-					DamageEvent,
-					OwnerChar->GetController(),
-					this
-				);
-
-				if (bVictimWasAlive)
-				{
-					AEnemyCharacter* OwnerEnemy = Cast<AEnemyCharacter>(OwnerChar);
-					if (IsValid(OwnerEnemy))
-					{
-						if (UEnemyMoraleComponent* Morale = OwnerEnemy->GetMoraleComponent())
-						{
-							Morale->NotifyDamagedTarget();
-							if (VictimHealth->IsDead())
-								Morale->NotifyTargetDowned();
-						}
-					}
-				}
+				if (!VR.bWasAlive) continue;
+				Morale->NotifyDamagedTarget();
+				if (VR.Health && VR.Health->IsDead()) Morale->NotifyTargetDowned();
 			}
 		}
-
-		// Near-miss suppression: report to hostile AI pawns close to the bullet segment.
-		ReportNearMisses(TraceStart, bHit ? HitResult.ImpactPoint : TraceEnd, bHit ? HitResult.GetActor() : nullptr);
-
-		Multicast_PlayFireFX(GetMuzzleLocation(), bHit ? HitResult.ImpactPoint : TraceEnd, bHit);
-
-		// AI hearing: every shot is a noise event (suppressed weapons set low loudness/range on their data asset)
-		if (WeaponData->NoiseRange > 0.f)
-			UAISense_Hearing::ReportNoiseEvent(World, GetMuzzleLocation(), WeaponData->NoiseLoudness, OwnerChar, WeaponData->NoiseRange, TEXT("WeaponFire"));
 	}
+
+	// Debug logging — tied to the center pellet.
+	if (bAIOwned && CVarAIWeaponTraceDebug.GetValueOnGameThread() != 0)
+	{
+		const IAIShooterInterface* DebugShooter = Cast<IAIShooterInterface>(OwnerChar);
+		const AActor* AILogAimTarget = DebugShooter ? DebugShooter->GetAIAimTarget() : nullptr;
+		UE_LOG(LogExtraction, Verbose,
+			TEXT("AI-FIRE owner=%s eye=%s end=%s aimTarget=%s bHit=%d hitActor=%s hitDist=%.0f"),
+			*GetNameSafe(OwnerChar), *TraceStart.ToCompactString(),
+			*(TraceStart + AimDirection * WeaponData->MaxRange).ToCompactString(),
+			*GetNameSafe(AILogAimTarget), (int32)bCenterHit,
+			*GetNameSafe(CenterHitActor), bCenterHit ? FVector::Dist(TraceStart, CenterImpactOrEnd) : 0.f);
+	}
+	if (!bAIOwned && CVarPlayerTraceDebug.GetValueOnGameThread() != 0)
+	{
+		UE_LOG(LogExtraction, Log,
+			TEXT("PLAYER-FIRE start=%s end=%s bHit=%d hitActor=%s dist=%.0f"),
+			*TraceStart.ToCompactString(),
+			*(TraceStart + AimDirection * WeaponData->MaxRange).ToCompactString(),
+			(int32)bCenterHit, *GetNameSafe(CenterHitActor),
+			bCenterHit ? FVector::Dist(TraceStart, CenterImpactOrEnd) : 0.f);
+		if (bCenterHit && IsValid(CenterHitActor) && !CenterHitActor->FindComponentByClass<UHealthComponent>())
+			UE_LOG(LogExtraction, Verbose, TEXT("PLAYER-FIRE hit %s but it has NO UHealthComponent — damage will be ignored"), *GetNameSafe(CenterHitActor));
+	}
+
+	// FX and noise — one per shot, using the center pellet.
+	ReportNearMisses(TraceStart, CenterImpactOrEnd, CenterHitActor);
+	Multicast_PlayFireFX(GetMuzzleLocation(), CenterImpactOrEnd, bCenterHit);
+
+	if (WeaponData->NoiseRange > 0.f)
+		UAISense_Hearing::ReportNoiseEvent(World, GetMuzzleLocation(), WeaponData->NoiseLoudness, OwnerChar, WeaponData->NoiseRange, TEXT("WeaponFire"));
+}
+
+float AWeaponBase::ComputeFalloffScale(float Distance) const
+{
+	if (!IsValid(WeaponData) || !WeaponData->bUseDamageFalloff) return 1.f;
+	if (WeaponData->DamageFalloffEndRange <= WeaponData->DamageFalloffStartRange) return 1.f;
+	if (Distance <= WeaponData->DamageFalloffStartRange) return 1.f;
+	if (Distance >= WeaponData->DamageFalloffEndRange) return WeaponData->MinDamageFraction;
+	return FMath::GetMappedRangeValueClamped(
+		FVector2D(WeaponData->DamageFalloffStartRange, WeaponData->DamageFalloffEndRange),
+		FVector2D(1.f, WeaponData->MinDamageFraction),
+		Distance);
+}
+
+FVector AWeaponBase::ApplyConeSpread(const FVector& Dir, float HalfAngleDeg)
+{
+	if (HalfAngleDeg <= 0.f) return Dir;
+	const float RandAngle = FMath::RandRange(0.f, 360.f);
+	const float RandMagnitude = FMath::RandRange(0.f, HalfAngleDeg);
+	FRotator SpreadRot = Dir.Rotation();
+	SpreadRot.Yaw += FMath::Cos(FMath::DegreesToRadians(RandAngle)) * RandMagnitude;
+	SpreadRot.Pitch += FMath::Sin(FMath::DegreesToRadians(RandAngle)) * RandMagnitude;
+	return SpreadRot.Vector();
 }
 
 // ---- FX RPCs ----
@@ -1541,22 +1598,22 @@ void AWeaponBase::KitFire_HitScan_Implementation()
 
 void AWeaponBase::KitInspect_Implementation()
 {
-	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitInspect — no-op stub"), *GetNameSafe(this));
+	UE_LOG(LogExtraction, Verbose, TEXT("[KitWeapon] %s KitInspect — no-op stub"), *GetNameSafe(this));
 }
 
 void AWeaponBase::KitMelee_Implementation()
 {
-	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitMelee — no-op stub"), *GetNameSafe(this));
+	UE_LOG(LogExtraction, Verbose, TEXT("[KitWeapon] %s KitMelee — no-op stub"), *GetNameSafe(this));
 }
 
 void AWeaponBase::KitChangeFireMode_Implementation()
 {
-	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitChangeFireMode — no-op stub"), *GetNameSafe(this));
+	UE_LOG(LogExtraction, Verbose, TEXT("[KitWeapon] %s KitChangeFireMode — no-op stub"), *GetNameSafe(this));
 }
 
 void AWeaponBase::KitBurstFire_Implementation()
 {
-	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitBurstFire — no-op stub"), *GetNameSafe(this));
+	UE_LOG(LogExtraction, Verbose, TEXT("[KitWeapon] %s KitBurstFire — no-op stub"), *GetNameSafe(this));
 }
 
 void AWeaponBase::KitFinishFire_Implementation()
@@ -1568,12 +1625,12 @@ void AWeaponBase::KitFinishFire_Implementation()
 
 void AWeaponBase::KitTrigger_Implementation()
 {
-	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitTrigger — no-op stub"), *GetNameSafe(this));
+	UE_LOG(LogExtraction, Verbose, TEXT("[KitWeapon] %s KitTrigger — no-op stub"), *GetNameSafe(this));
 }
 
 void AWeaponBase::KitSpawnAttachments_Implementation()
 {
-	UE_LOG(LogExtraction, Log, TEXT("[KitWeapon] %s KitSpawnAttachments — no-op stub"), *GetNameSafe(this));
+	UE_LOG(LogExtraction, Verbose, TEXT("[KitWeapon] %s KitSpawnAttachments — no-op stub"), *GetNameSafe(this));
 }
 
 void AWeaponBase::KitUnequip_Implementation()

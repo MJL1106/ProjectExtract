@@ -49,7 +49,6 @@ private:
 		float PhaseTimer = 0.f;
 		float BurstDuration = 0.f;
 		float PauseDuration = 0.f;
-		bool bSuppressCrouchedNoCover = false;
 		/** World time of last suppressed-reseek-cover attempt (guards thrashing). */
 		float LastReseekCoverTime = -1e9f;
 		/** The cover slot claimed during SeekingCover (released on cleanup). */

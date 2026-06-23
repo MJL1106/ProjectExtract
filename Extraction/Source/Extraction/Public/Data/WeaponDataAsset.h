@@ -75,6 +75,8 @@ class EXTRACTION_API UWeaponDataAsset : public UDataAsset
 
 public:
 
+	virtual void PostLoad() override;
+
 	// ---- Fire ----
 
 	/** Rounds per second (e.g. 10.0 = 600 RPM) */
@@ -92,6 +94,30 @@ public:
 	/** Maximum hitscan trace range in cm */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "100.0"))
 	float MaxRange = 10000.0f;
+
+	/** Hitscan pellets per shot. 1 = single trace (default — every non-shotgun weapon is unchanged). >1 = shotgun spread. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "1"))
+	int32 PelletCount = 1;
+
+	/** Cone half-angle (deg) applied to pellets beyond the center one. 0 = no spread. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0"))
+	float PelletSpreadDeg = 0.f;
+
+	/** Enable range-based per-pellet damage falloff. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire")
+	bool bUseDamageFalloff = false;
+
+	/** Full damage up to this distance (cm). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0"))
+	float DamageFalloffStartRange = 0.f;
+
+	/** Damage reaches MinDamageFraction at/after this distance (cm). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0"))
+	float DamageFalloffEndRange = 0.f;
+
+	/** Per-pellet damage fraction at/after DamageFalloffEndRange. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MinDamageFraction = 1.f;
 
 	/** Damage type class applied on hit */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire")

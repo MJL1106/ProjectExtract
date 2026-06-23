@@ -42,7 +42,7 @@ EBTNodeResult::Type UBTTask_MoveToCover::ExecuteTask(UBehaviorTreeComponent& Own
 		*Pawn->GetName(), *Pawn->GetName(),
 		(int32)BB->GetValueAsBool(HasCoverPositionKey.SelectedKeyName),
 		*GetNameSafe(Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName))));
-	if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-ENTER hasCoverPos=%d combatTarget=%s"),
+	if (bDebugLogging) UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MOVE-TO-COVER-ENTER hasCoverPos=%d combatTarget=%s"),
 		*Pawn->GetName(),
 		(int32)BB->GetValueAsBool(HasCoverPositionKey.SelectedKeyName),
 		*GetNameSafe(Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName))));
@@ -171,7 +171,7 @@ void UBTTask_MoveToCover::StartMoveTo(const FVector& ArrivalPos, AAIController* 
 	LastTickDist = Pawn ? FVector::Dist(Pawn->GetActorLocation(), ArrivalPos) : 0.f;
 	Controller->MoveToLocation(ArrivalPos, AcceptableRadius, false, true, false, true);
 	bMoveIssued = true;
-	if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-GOTO loc=%s dist=%.0f"),
+	if (bDebugLogging) UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MOVE-TO-COVER-GOTO loc=%s dist=%.0f"),
 		*GetNameSafe(Pawn), *ArrivalPos.ToString(), LastTickDist);
 }
 
@@ -243,10 +243,10 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 			!Companion->bIsCrouched &&
 			!bTraversing)
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=MoveToCoverEarlyCrouch action=Crouch"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=MoveToCoverEarlyCrouch action=Crouch"),
 				*Companion->GetName(), Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Companion->Crouch();
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-EARLY-CROUCH dist=%.0f"), *Companion->GetName(), DistMoving);
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MOVE-TO-COVER-EARLY-CROUCH dist=%.0f"), *Companion->GetName(), DistMoving);
 		}
 
 		return;
@@ -263,7 +263,7 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	{
 		UE_LOG(LogCompanionAI, Log, TEXT("%s: MoveToCover ARRIVED result=S status=Idle dist=%.0f radius=%.0f reason=ReachedGoal"),
 			*Pawn->GetName(), DistToCover, AcceptableRadius);
-		if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=%s dist=%.0f reason=ReachedGoal"),
+		if (bDebugLogging) UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=%s dist=%.0f reason=ReachedGoal"),
 			*Pawn->GetName(), StatusStr, DistToCover);
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
@@ -274,7 +274,7 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 		UE_LOG(LogCompanionAI, Log,
 			TEXT("%s: MoveToCover ARRIVED result=S status=Idle dist=%.0f radius=%.0f reason=StoppedShortAccepted"),
 			*Pawn->GetName(), DistToCover, AcceptableRadius);
-		if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=Idle dist=%.0f reason=StoppedShortAccepted"),
+		if (bDebugLogging) UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=Idle dist=%.0f reason=StoppedShortAccepted"),
 			*Pawn->GetName(), DistToCover);
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
@@ -288,7 +288,7 @@ void UBTTask_MoveToCover::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 	UE_LOG(LogCompanionAI, Log,
 		TEXT("%s: MoveToCover ARRIVED result=S status=%s dist=%.0f radius=%.0f reason=%s"),
 		*Pawn->GetName(), StatusStr, DistToCover, AcceptableRadius, ReasonStr);
-	if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=%s dist=%.0f reason=%s"),
+	if (bDebugLogging) UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MOVE-TO-COVER-DONE result=Succeeded status=%s dist=%.0f reason=%s"),
 		*Pawn->GetName(), StatusStr, DistToCover, ReasonStr);
 	// Path couldn't reach this slot — stamp the post-vacate cooldown so the open-engage re-seek and the
 	// picker stop re-selecting an unreachable slot every interval (anti-thrash). Idle-only: Waiting/Paused

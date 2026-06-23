@@ -76,16 +76,17 @@ actor-vs-`ChildActorComponent` choice).
 script and **hard-crashes the editor**. Trigger restarts/level transitions from inside the game's **own
 Blueprint** (e.g. a button `OnClicked → OpenLevel`), never from editor Python. Recover per §1.7.
 
-### 1.3 Cross-tool: screenshots & actor rotation go through UnrealClaude, not VibeUE/Python
-- **Viewport screenshots that you can SEE inline** → UnrealClaude `unreal_capture_viewport`
-  (returns base64) for the 3D scene. ⚠️ **UMG/Slate is NOT in viewport screenshots**, and
-  `get_all_widgets_of_class` can't be called from Python (§1.10) — that route is a dead end. To actually
-  **see the HUD/menus**, use VibeUE `ScreenshotService.capture_editor_window("<abs>.png")` then **`Read`
-  the PNG file** (it renders inline in this harness). ⚠️ That capture **swaps R/B channels** (red↔blue,
-  gold→cyan) — colors are correct in-game; confirm a true value with
-  `WidgetService.get_property(p, comp, "ColorAndOpacity")`. (`capture_viewport` from Python never lands a file.)
-- **Yaw / actor rotation:** Python `set_actor_rotation` hits gimbal lock — use UnrealClaude
-  `unreal_move_actor` with a `rotation` param instead.
+### 1.3 Cross-tool: screenshots & actor rotation
+- **Viewport / HUD screenshots you can SEE inline** → VibeUE `ScreenshotService.capture_editor_window("<abs>.png")`
+  then **`Read` the PNG file** (it renders inline in this harness). This grabs the whole editor window, so it
+  covers both the 3D viewport and UMG/HUD. ⚠️ `get_all_widgets_of_class` can't be called from Python (§1.10)
+  and `capture_viewport` from Python never lands a file — `capture_editor_window` is the route. ⚠️ That capture
+  **swaps R/B channels** (red↔blue, gold→cyan) — colors are correct in-game; confirm a true value with
+  `WidgetService.get_property(p, comp, "ColorAndOpacity")`. For a clean 3D-scene-only grab, NeoStack's
+  screenshot capture also works (see the `neostack-game-testing` skill).
+- **Yaw / actor rotation:** Python `set_actor_rotation` can hit gimbal lock — set the full transform with an
+  absolute `FRotator` via `set_actor_transform`, or drive the move/rotate through NeoStack LevelDesign
+  (`execute_script`), which is gimbal-free.
 
 ### 1.4 VibeUE `execute_python_code` swallows output on exception
 Start every script with `import warnings; warnings.simplefilter("ignore")` or an uncaught exception
@@ -363,12 +364,14 @@ MCP servers come from `.mcp.json` (need the editor running + Claude launched fro
   `ScreenshotService`), `manage_asset` (search/find/open/save/duplicate/move/delete). Best for
   Blueprint graphs, materials, UMG, assets. (`.mcp.json` connects **directly** to the in-editor
   server on :8088; :8089 is only the optional `vibeue-proxy.py` that forwards to :8088.)
-- **UnrealClaude** (HTTP :3000) — inline viewport **screenshots** (`unreal_capture_viewport`) and
-  gimbal-lock-free actor **rotation/move** (`unreal_move_actor`). Use for the two things in §1.3.
+- **NeoStack** (HTTP :9315, the `unreal-editor` server) — fallback when VibeUE lacks the capability,
+  **especially in-engine AI systems: Behavior Trees, Blackboards, EQS, AI Blueprint wiring** (VibeUE has
+  no BT/Blackboard skill). Also gimbal-free actor move/rotate and 3D-scene screenshots (§1.3). Driven via
+  `mcp__unreal-editor__execute_script` (Lua) or raw curl (`ns.sh`) per the `neostack-loop` skill.
 - **ue-python-cli** via Bash — `ue-python.exe exec "<python>"` for PIE control, asset creation, any
   `unreal.*` when MCP isn't exposing what you need.
 
-If VibeUE is NOT connected, its skills are unreachable — say so and fall back to UnrealClaude +
+If VibeUE is NOT connected, its skills are unreachable — say so and fall back to NeoStack +
 ue-python-cli + this file.
 
 ---
@@ -385,7 +388,7 @@ ue-python-cli + this file.
    `obj.get_editor_property("MyVar")`. **Reading** a live PIE instance works; only **writing** raises
    "cannot be edited on instances" (§1.10). ⚠️ `EditorAssetLibrary.load_asset()` can return `None` during
    PIE — do asset/CDO introspection with PIE **stopped**.
-6. Screenshot: UnrealClaude `unreal_capture_viewport` for the 3D scene (wait 4–5 s after scene changes);
-   for **UMG/HUD** use `ScreenshotService.capture_editor_window(png)` + `Read` the file (§1.3).
+6. Screenshot: VibeUE `ScreenshotService.capture_editor_window(png)` + `Read` the file for the viewport or
+   **UMG/HUD** (wait 4–5 s after scene changes); NeoStack's capture is the alternative for a 3D-scene grab (§1.3).
 7. Read `Saved/Logs/<Project>.log` for PrintString/UE_LOG output.
 8. End PIE + wait 2–3 s before the next BP edit.

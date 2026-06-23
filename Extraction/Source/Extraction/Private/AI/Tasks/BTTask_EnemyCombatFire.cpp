@@ -19,6 +19,8 @@
 #include "CoverSlotTypes.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/World.h"
+#include "EnemyMoraleComponent.h"
+#include "EnemyDebug.h"
 
 static constexpr float ExposePhaseDuration  = 0.2f;  // settle before first shot
 static constexpr float RecoverPhaseDuration = 0.15f; // re-crouch settle after burst
@@ -31,6 +33,14 @@ static constexpr float FlankSlotArrivalRadius = 120.f;
 static constexpr int32 CompromiseDebounceRequired = 2;
 /** Chest height (cm) for the body-protection trace from a candidate's behind-cover position. */
 static constexpr float BodyProtectChestHeight = 60.f;
+
+// --- Hunkered timing scalars (Broken morale) ---
+/** Multiplier on ExposePhaseDuration when hunkered — shorter peeks. */
+static constexpr float HunkerExposeScale = 0.7f;
+/** Multiplier on burst duration (BurstDurationMin/Max) when hunkered — shorter bursts. */
+static constexpr float HunkerBurstScale = 0.7f;
+/** Multiplier on pause duration (BurstPauseMin/Max) when hunkered — longer pauses between peeks. */
+static constexpr float HunkerPauseScale = 1.5f;
 
 /** True when the candidate slot's hunkered body position is geometry-shielded from ThreatLoc:
  *  a chest-height trace from GetBehindCoverPosition(...) to the threat is BLOCKED by world geometry
@@ -57,9 +67,13 @@ static bool IsSlotBodyProtected(UWorld* World, const AAICoverSlot* Slot, float A
 /** Returns true when the current cover slot no longer protects against Target.
  *  Arc test uses the same IsTargetInFireArc the registry picker uses (GetActorForwardVector),
  *  widened by ArcSlackDeg so a recently-selected slot doesn't immediately re-trigger.
- *  Body-LOS test probes from the enemy's chest (capsule-derived) to the target. */
+ *  Body-shield test reuses IsSlotBodyProtected from the stable hunkered-position (same as the
+ *  candidate picker), so the signal doesn't oscillate as the peek loop ducks and pops up.
+ *  Optional out-params are filled when non-null, letting callers log geometry details without
+ *  duplicating the arc/shield math. */
 static bool IsSlotCompromised(const AAICoverSlot* Slot, const FVector& PawnLoc,
-	const AActor* Target, float ArcSlackDeg, UWorld* World, APawn* Pawn)
+	const AActor* Target, float ArcSlackDeg, UWorld* World, APawn* Pawn, float Standoff,
+	bool* OutOutsideArc = nullptr, bool* OutBodyExposed = nullptr, float* OutAngleDeg = nullptr)
 {
 	if (!IsValid(Slot) || !IsValid(Target) || !World) return false;
 
@@ -72,20 +86,19 @@ static bool IsSlotCompromised(const AAICoverSlot* Slot, const FVector& PawnLoc,
 	const float Dot = FVector::DotProduct(SlotFwd, ToTarget);
 	const float WidenedHalfArcDeg = Slot->FireArcDegrees * 0.5f + ArcSlackDeg;
 	const bool bOutsideArc = Dot < FMath::Cos(FMath::DegreesToRadians(WidenedHalfArcDeg));
+	const float AngleDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Dot, -1.f, 1.f)));
 
-	// Body-LOS test: trace from enemy chest to target — if clear, cover no longer interposed.
-	// Chest height derived from the pawn's capsule so crouched/short archetypes probe correctly (fix #8).
-	const ACharacter* PawnChar = Cast<ACharacter>(Pawn);
-	const UCapsuleComponent* Cap = PawnChar ? PawnChar->GetCapsuleComponent() : nullptr;
-	const float ChestOffset = Cap ? Cap->GetScaledCapsuleHalfHeight() * 0.6f : 80.f;
-	const FVector ChestPos = PawnLoc + FVector(0.f, 0.f, ChestOffset);
-	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyFlankCompromise), false);
-	QueryParams.AddIgnoredActor(Pawn);
-	QueryParams.AddIgnoredActor(Target);
-	// ECC_Visibility — the channel cover walls provably block (matches the weapon/LOS traces).
-	const bool bBodyLOSClear = !World->LineTraceTestByChannel(ChestPos, TargetLoc, ECC_Visibility, QueryParams);
+	// Body-shield test: probe from the STABLE hunkered position (GetBehindCoverPosition) rather than
+	// the pawn's live chest, which oscillates during the peek loop and causes flickering verdicts.
+	// IsSlotBodyProtected returns true when a wall is interposed (= body protected, not exposed).
+	const float Alpha = Slot->GetAlphaFromLocation(PawnLoc);
+	const bool bBodyExposed = !IsSlotBodyProtected(World, Slot, Alpha, Standoff, TargetLoc, Target, Pawn);
 
-	return bOutsideArc || bBodyLOSClear;
+	if (OutOutsideArc)  *OutOutsideArc  = bOutsideArc;
+	if (OutBodyExposed) *OutBodyExposed  = bBodyExposed;
+	if (OutAngleDeg)    *OutAngleDeg     = AngleDeg;
+
+	return bOutsideArc || bBodyExposed;
 }
 
 /** Enemy-only protective relocate pick. Iterates unclaimed in-radius slots; keeps those in-arc +
@@ -235,16 +248,51 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 		BB->GetValueAsEnum(AEnemyAIController::BB_AwarenessState));
 
 	AActor* Target = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
+
+	// Morale read — gates pursue and timing adjustments.
+	const UEnemyMoraleComponent* MoraleComp = Enemy->GetMoraleComponent();
+	const EMoraleState Morale = IsValid(MoraleComp) ? MoraleComp->GetMoraleState() : EMoraleState::Confident;
+	const bool bAggressive = (Morale == EMoraleState::Confident);
+	const bool bHunkered = (Morale == EMoraleState::Broken);
+
 	if (!IsValid(Target))
 	{
 		if (Awareness == EEnemyAwarenessState::Combat)
 		{
-			// No target yet but combat aware — pursue last known location.
-			Mem->Phase = EFireTaskPhase::Pursuing;
-			Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
-			const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
-			if (!LastKnown.IsNearlyZero())
-				Controller->MoveToLocation(LastKnown, 100.f, false, true, false, true);
+			if (bAggressive)
+			{
+				// No target yet but combat aware — pursue last known location.
+				Mem->Phase = EFireTaskPhase::Pursuing;
+				Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
+				const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
+				if (!LastKnown.IsNearlyZero())
+					Controller->MoveToLocation(LastKnown, 100.f, false, true, false, true);
+			}
+			else
+			{
+				// Shaken/Broken: hold position, seek cover if exposed (cooldown-gated).
+				Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
+				const bool bHasCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+				if (!bHasCover)
+				{
+					const UWorld* World = Pawn->GetWorld();
+					const float Now = World ? World->GetTimeSeconds() : 0.f;
+					if ((Now - Mem->LastReseekCoverTime) >= SuppressedReseekCooldown)
+					{
+						Mem->LastReseekCoverTime = Now;
+						TryReseekCover(OwnerComp, Mem, Controller, Pawn, Enemy, nullptr, DA, false);
+					}
+				}
+
+				if (Mem->Phase != EFireTaskPhase::SeekingCover)
+				{
+					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+					Mem->Phase = EFireTaskPhase::Pause;
+					const float PauseScale = bHunkered ? HunkerPauseScale : 1.f;
+					Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin * PauseScale, DA->BurstPauseMax * PauseScale);
+					Mem->PhaseTimer = Mem->PauseDuration;
+				}
+			}
 			return EBTNodeResult::InProgress;
 		}
 		return EBTNodeResult::Failed;
@@ -256,12 +304,40 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 	{
 		if (Awareness == EEnemyAwarenessState::Combat)
 		{
-			// Out of range/LOS but combat — pursue.
-			Mem->Phase = EFireTaskPhase::Pursuing;
-			Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
-			const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
-			const FVector PursueTarget = LastKnown.IsNearlyZero() ? Target->GetActorLocation() : LastKnown;
-			Controller->MoveToLocation(PursueTarget, 100.f, false, true, false, true);
+			if (bAggressive)
+			{
+				// Out of range/LOS but combat — pursue.
+				Mem->Phase = EFireTaskPhase::Pursuing;
+				Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
+				const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
+				const FVector PursueTarget = LastKnown.IsNearlyZero() ? Target->GetActorLocation() : LastKnown;
+				Controller->MoveToLocation(PursueTarget, 100.f, false, true, false, true);
+			}
+			else
+			{
+				// Shaken/Broken: hold position, seek cover if exposed (cooldown-gated).
+				Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
+				const bool bHasCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+				if (!bHasCover)
+				{
+					const UWorld* World = Pawn->GetWorld();
+					const float Now = World ? World->GetTimeSeconds() : 0.f;
+					if ((Now - Mem->LastReseekCoverTime) >= SuppressedReseekCooldown)
+					{
+						Mem->LastReseekCoverTime = Now;
+						TryReseekCover(OwnerComp, Mem, Controller, Pawn, Enemy, Target, DA, false);
+					}
+				}
+
+				if (Mem->Phase != EFireTaskPhase::SeekingCover)
+				{
+					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+					Mem->Phase = EFireTaskPhase::Pause;
+					const float PauseScale = bHunkered ? HunkerPauseScale : 1.f;
+					Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin * PauseScale, DA->BurstPauseMax * PauseScale);
+					Mem->PhaseTimer = Mem->PauseDuration;
+				}
+			}
 			return EBTNodeResult::InProgress;
 		}
 		return EBTNodeResult::Failed;
@@ -298,6 +374,12 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 	AActor* Target = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
 
+	// Morale read — gates pursue and timing adjustments.
+	const UEnemyMoraleComponent* MoraleComp = Enemy->GetMoraleComponent();
+	const EMoraleState Morale = IsValid(MoraleComp) ? MoraleComp->GetMoraleState() : EMoraleState::Confident;
+	const bool bAggressive = (Morale == EMoraleState::Confident);
+	const bool bHunkered = (Morale == EMoraleState::Broken);
+
 	// Bug 2 fix: only allow Failed when NOT in Combat.
 	if (!IsValid(Target))
 	{
@@ -305,11 +387,37 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (Awareness != EEnemyAwarenessState::Combat)
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 
-		// Still in Combat with no target — pursue last known.
-		Mem->Phase = EFireTaskPhase::Pursuing;
-		const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
-		if (!LastKnown.IsNearlyZero() && Controller->GetMoveStatus() != EPathFollowingStatus::Moving)
-			Controller->MoveToLocation(LastKnown, 100.f, false, true, false, true);
+		if (bAggressive)
+		{
+			// Still in Combat with no target — pursue last known.
+			Mem->Phase = EFireTaskPhase::Pursuing;
+			const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
+			if (!LastKnown.IsNearlyZero() && Controller->GetMoveStatus() != EPathFollowingStatus::Moving)
+				Controller->MoveToLocation(LastKnown, 100.f, false, true, false, true);
+		}
+		else
+		{
+			// Shaken/Broken: hold position, seek cover if exposed (cooldown-gated).
+			const bool bHasCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+			if (!bHasCover && Mem->Phase != EFireTaskPhase::SeekingCover)
+			{
+				const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+				if ((Now - Mem->LastReseekCoverTime) >= SuppressedReseekCooldown)
+				{
+					Mem->LastReseekCoverTime = Now;
+					TryReseekCover(OwnerComp, Mem, Controller, Pawn, Enemy, nullptr, DA, false);
+				}
+			}
+
+			if (Mem->Phase != EFireTaskPhase::SeekingCover)
+			{
+				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				Mem->Phase = EFireTaskPhase::Pause;
+				const float PauseScale = bHunkered ? HunkerPauseScale : 1.f;
+				Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin * PauseScale, DA->BurstPauseMax * PauseScale);
+				Mem->PhaseTimer = Mem->PauseDuration;
+			}
+		}
 		return;
 	}
 
@@ -329,12 +437,39 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 		}
 
-		// Transition to pursue.
 		StopFireAndCleanUp(OwnerComp, Mem);
-		Mem->Phase = EFireTaskPhase::Pursuing;
-		const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
-		const FVector PursueTarget = LastKnown.IsNearlyZero() ? Target->GetActorLocation() : LastKnown;
-		Controller->MoveToLocation(PursueTarget, 100.f, false, true, false, true);
+
+		if (bAggressive)
+		{
+			// Transition to pursue.
+			Mem->Phase = EFireTaskPhase::Pursuing;
+			const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
+			const FVector PursueTarget = LastKnown.IsNearlyZero() ? Target->GetActorLocation() : LastKnown;
+			Controller->MoveToLocation(PursueTarget, 100.f, false, true, false, true);
+		}
+		else
+		{
+			// Shaken/Broken: hold position, seek cover if exposed (cooldown-gated).
+			const bool bHasCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+			if (!bHasCover)
+			{
+				const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+				if ((Now - Mem->LastReseekCoverTime) >= SuppressedReseekCooldown)
+				{
+					Mem->LastReseekCoverTime = Now;
+					TryReseekCover(OwnerComp, Mem, Controller, Pawn, Enemy, Target, DA, false);
+				}
+			}
+
+			if (Mem->Phase != EFireTaskPhase::SeekingCover)
+			{
+				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				Mem->Phase = EFireTaskPhase::Pause;
+				const float PauseScale = bHunkered ? HunkerPauseScale : 1.f;
+				Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin * PauseScale, DA->BurstPauseMax * PauseScale);
+				Mem->PhaseTimer = Mem->PauseDuration;
+			}
+		}
 		return;
 	}
 
@@ -345,6 +480,32 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			Controller->StopMovement();
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		}
+
+		// Morale dropped while pursuing — abort pursue, hold position (cooldown-gated reseek).
+		if (!bAggressive)
+		{
+			Controller->StopMovement();
+			const bool bHasCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+			if (!bHasCover)
+			{
+				const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+				if ((Now - Mem->LastReseekCoverTime) >= SuppressedReseekCooldown)
+				{
+					Mem->LastReseekCoverTime = Now;
+					TryReseekCover(OwnerComp, Mem, Controller, Pawn, Enemy, Target, DA, false);
+				}
+			}
+
+			if (Mem->Phase != EFireTaskPhase::SeekingCover)
+			{
+				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				Mem->Phase = EFireTaskPhase::Pause;
+				const float PauseScale = bHunkered ? HunkerPauseScale : 1.f;
+				Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin * PauseScale, DA->BurstPauseMax * PauseScale);
+				Mem->PhaseTimer = Mem->PauseDuration;
+			}
+			return;
 		}
 
 		// Check if we regained LOS + range — resume firing.
@@ -411,12 +572,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
 			if (IsValid(Weapon)) Weapon->StopFiring();
 
-			if (Mem->bSuppressCrouchedNoCover)
-			{
-				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
-				Mem->bSuppressCrouchedNoCover = false;
-			}
-
 			// Part B: reset dwell tracking on fresh arrival.
 			Mem->bArrivedAtSlot = false;
 			Mem->SlotDwellTime = 0.f;
@@ -439,10 +594,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			if (bSeekStalled)
 			{
 				if (Controller) Controller->StopMovement();
-				UE_LOG(LogEnemyAI, Log, TEXT("[COVER] %s stalled relocating to cover (dist=%.0f) — crouch-in-place, re-seeking"), *Pawn->GetName(), DistToSlot);
+				UE_LOG(LogEnemyAI, Log, TEXT("[COVER] %s stalled relocating to cover (dist=%.0f) — re-seeking"), *Pawn->GetName(), DistToSlot);
 			}
 
-			// Release the unreachable slot and fall back to crouch-in-place.
+			// Release the unreachable slot and hold position standing, re-seek next loop.
 			AAICoverSlot* BadSlot = Mem->ReseekSlot.Get();
 			if (IsValid(BadSlot) && IsValid(Pawn))
 			{
@@ -453,8 +608,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			BB->SetValueAsObject(AEnemyAIController::BB_CoverSlot, nullptr);
 			BB->SetValueAsBool(AEnemyAIController::BB_HasCover, false);
 
-			if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
-			Mem->bSuppressCrouchedNoCover = true;
+			if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
 
 			AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
 			if (IsValid(Weapon)) Weapon->StopFiring();
@@ -525,16 +679,63 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				const bool bEvalDue    = Mem->CompromiseEvalTimer >= DA->CoverCompromiseEvalInterval;
 				const bool bCooledDown = (Now - Mem->LastRelocateCompletedTime) >= DA->CoverRelocateCooldown;
 
+				// ~1 Hz gate-state log so we see WHY the eval doesn't fire (before the eval gate).
+				if (GetFlankBreakLogLevel() > 0 && FMath::Fmod(Now, 1.0f) < DeltaSeconds)
+				{
+					const float CooldownRem = DA->CoverRelocateCooldown - (Now - Mem->LastRelocateCompletedTime);
+					UE_LOG(LogEnemyAI, Log,
+						TEXT("[FLANKDBG-GATE] %s flankEnabled=%d hasCover=%d slot=%s(h=%d) arrived=%d dwell=%.2f dwellMet=%d evalTimer=%.2f cooldownRem=%.2f cooledDown=%d phase=%d"),
+						*Pawn->GetName(),
+						DA->bCoverFlankBreakEnabled ? 1 : 0,
+						bHasCoverNow ? 1 : 0,
+						*CurSlot->GetName(),
+						static_cast<int32>(CurSlot->Height),
+						Mem->bArrivedAtSlot ? 1 : 0,
+						Mem->SlotDwellTime,
+						bDwellMet ? 1 : 0,
+						Mem->CompromiseEvalTimer,
+						CooldownRem,
+						bCooledDown ? 1 : 0,
+						static_cast<int32>(Mem->Phase));
+				}
+
 				// FIX 2 — Detection: runs every eval interval regardless of phase / firing state
 				// so flank compromise is detected even mid-burst.
 				if (bDwellMet && bEvalDue && bCooledDown)
 				{
 					Mem->CompromiseEvalTimer = 0.f;
 
-					if (IsSlotCompromised(CurSlot, Pawn->GetActorLocation(), Target, DA->CoverFlankArcSlackDeg, GetWorld(), Pawn))
+					const UCapsuleComponent* Cap = Enemy->GetCapsuleComponent();
+					const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
+
+					bool bOutsideArc   = false;
+					bool bBodyExposed  = false;
+					float AngleDeg     = 0.f;
+					const bool bCompromised = IsSlotCompromised(CurSlot, Pawn->GetActorLocation(), Target,
+						DA->CoverFlankArcSlackDeg, GetWorld(), Pawn, Standoff,
+						&bOutsideArc, &bBodyExposed, &AngleDeg);
+
+					if (bCompromised)
 						++Mem->CompromiseConsecutiveCount;
 					else
-						Mem->CompromiseConsecutiveCount = 0;
+						Mem->CompromiseConsecutiveCount = FMath::Max(0, Mem->CompromiseConsecutiveCount - 1);
+
+					if (GetFlankBreakLogLevel() > 0)
+					{
+						const float CooldownRemaining = DA->CoverRelocateCooldown - (Now - Mem->LastRelocateCompletedTime);
+						UE_LOG(LogEnemyAI, Log,
+							TEXT("[FLANKDBG] %s slot=%s(h=%d) angle=%.1f bOutsideArc=%d bBodyProtected=%d consec=%d cooldownRem=%.2f phase=%d arrived=%d"),
+							*Pawn->GetName(),
+							*CurSlot->GetName(),
+							static_cast<int32>(CurSlot->Height),
+							AngleDeg,
+							bOutsideArc ? 1 : 0,
+							bBodyExposed ? 0 : 1,
+							Mem->CompromiseConsecutiveCount,
+							CooldownRemaining,
+							static_cast<int32>(Mem->Phase),
+							Mem->bArrivedAtSlot ? 1 : 0);
+					}
 
 					if (Mem->CompromiseConsecutiveCount >= CompromiseDebounceRequired)
 					{
@@ -564,6 +765,14 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			Mem->bArrivedAtSlot = false;
 			Mem->SlotDwellTime = 0.f;
 			Mem->CompromiseConsecutiveCount = 0;
+
+			if (GetFlankBreakLogLevel() > 0 && FMath::Fmod(Now, 1.0f) < DeltaSeconds)
+			{
+				UE_LOG(LogEnemyAI, Log,
+					TEXT("[FLANKDBG-GATE] %s NO COVER SLOT (hasCover=%d)"),
+					*Pawn->GetName(),
+					bHasCoverNow ? 1 : 0);
+			}
 
 			if (bSafePhase && bNotFiring && bHasLOS)
 			{
@@ -605,21 +814,16 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						Mem->LastReseekCoverTime = Now;
 						if (TryReseekCover(OwnerComp, Mem, Controller, Pawn, Enemy, Target, DA, bHasLOS)) break;
 					}
-					// No cover found or cooldown active — fall back to crouch-in-place (safe).
-					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
-					Mem->bSuppressCrouchedNoCover = true;
+					// No cover found or cooldown active — no cover, stay standing, hold in Pause.
+					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
 				}
-				Mem->Phase = EFireTaskPhase::Pause;
-				Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin, DA->BurstPauseMax);
-				Mem->PhaseTimer = Mem->PauseDuration;
+				{
+					const float PauseScale = bHunkered ? HunkerPauseScale : 1.f;
+					Mem->Phase = EFireTaskPhase::Pause;
+					Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin * PauseScale, DA->BurstPauseMax * PauseScale);
+					Mem->PhaseTimer = Mem->PauseDuration;
+				}
 				break;
-			}
-
-			// Un-crouch if we previously crouched without cover due to suppression
-			if (Mem->bSuppressCrouchedNoCover)
-			{
-				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
-				Mem->bSuppressCrouchedNoCover = false;
 			}
 
 			// Expose: un-crouch if in crouch cover; step sideways otherwise
@@ -649,7 +853,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 			Mem->ExposeLosWaitTimer = 0.f;
 			Mem->Phase = EFireTaskPhase::Expose;
-			Mem->PhaseTimer = ExposePhaseDuration;
+			Mem->PhaseTimer = bHunkered ? ExposePhaseDuration * HunkerExposeScale : ExposePhaseDuration;
 		}
 		break;
 
@@ -702,7 +906,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			if (IsValid(Weapon)) Weapon->StartFiring();
 
 			Mem->NoLosGraceTimer = 0.f;
-			Mem->BurstDuration = FMath::RandRange(DA->BurstDurationMin, DA->BurstDurationMax);
+			{
+				const float BurstScale = bHunkered ? HunkerBurstScale : 1.f;
+				Mem->BurstDuration = FMath::RandRange(DA->BurstDurationMin * BurstScale, DA->BurstDurationMax * BurstScale);
+			}
 			Mem->Phase = EFireTaskPhase::Fire;
 			Mem->PhaseTimer = Mem->BurstDuration;
 		}
@@ -763,7 +970,8 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	case EFireTaskPhase::Recover:
 		if (Mem->PhaseTimer <= 0.f)
 		{
-			Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin, DA->BurstPauseMax);
+			const float PauseScale = bHunkered ? HunkerPauseScale : 1.f;
+			Mem->PauseDuration = FMath::RandRange(DA->BurstPauseMin * PauseScale, DA->BurstPauseMax * PauseScale);
 			Mem->Phase = EFireTaskPhase::Pause;
 			Mem->PhaseTimer = Mem->PauseDuration;
 		}
@@ -808,14 +1016,10 @@ void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerCo
 
 	Enemy->SetAimTarget(nullptr);
 
+	if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+
 	if (Mem)
 	{
-		if (Mem->bSuppressCrouchedNoCover)
-		{
-			if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
-			Mem->bSuppressCrouchedNoCover = false;
-		}
-
 		// Release any cover slot we claimed during SeekingCover.
 		AAICoverSlot* ReseekSlotPtr = Mem->ReseekSlot.Get();
 		if (IsValid(ReseekSlotPtr) && IsValid(Pawn))
@@ -878,11 +1082,7 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 
 	Mem->ReseekArrivalPos = ArrivalPos;
 
-	if (Mem->bSuppressCrouchedNoCover)
-	{
-		if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
-		Mem->bSuppressCrouchedNoCover = false;
-	}
+	if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
 
 	Controller->MoveToLocation(ArrivalPos, 50.f, false, true, true, true);
 
@@ -910,7 +1110,10 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	if (!BB) return;
 
-	const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	const float Now = World->GetTimeSeconds();
 
 	if (IsValid(CurSlot))
 	{
@@ -921,11 +1124,13 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 	BB->SetValueAsBool(AEnemyAIController::BB_HasCover, false);
 	Mem->ReseekSlot = nullptr;
 
-	UCoverRegistrySubsystem* Registry = GetWorld()->GetSubsystem<UCoverRegistrySubsystem>();
+	if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+
+	UCoverRegistrySubsystem* Registry = World->GetSubsystem<UCoverRegistrySubsystem>();
 	const UCapsuleComponent* Capsule = Enemy->GetCapsuleComponent();
 	const float Standoff = (Capsule ? Capsule->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
 
-	AAICoverSlot* NewSlot = FindProtectiveCover(Registry, GetWorld(), Pawn, Target, DA, Standoff);
+	AAICoverSlot* NewSlot = FindProtectiveCover(Registry, World, Pawn, Target, DA, Standoff);
 	if (IsValid(NewSlot) && NewSlot->TryClaim(Pawn))
 	{
 		BB->SetValueAsObject(AEnemyAIController::BB_CoverSlot, NewSlot);
@@ -946,6 +1151,9 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 		Enemy->SetAimTarget(Target);
 		Mem->SeekStallBestDist = TNumericLimits<float>::Max(); Mem->SeekStallAccum = 0.f;
 		Mem->Phase = EFireTaskPhase::SeekingCover;
+
+		if (GetFlankBreakLogLevel() > 0)
+			UE_LOG(LogEnemyAI, Log, TEXT("[FLANKDBG] %s relocate -> protective slot %s"), *Pawn->GetName(), *NewSlot->GetName());
 	}
 	else
 	{
@@ -953,13 +1161,14 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 		if (TryOpenGroundStrafe(Pawn, Target, DA->OpenGroundStrafeRadius, StrafePoint, DA->FlankBreakRetreatBias))
 			Controller->MoveToLocation(StrafePoint, 80.f, false, true, false, true);
 		Mem->LastRelocateCompletedTime = Now;
-		// No protective slot found — re-enter the fire loop cleanly so the enemy doesn't hang
-		// in Expose with bHasCover==false and re-accumulate ExposeLosWaitTimer next tick.
-		if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
-		Mem->bSuppressCrouchedNoCover = true;
+		// No protective slot found — re-enter the fire loop standing (top-of-function UnCrouch
+		// already ensured we're upright) so the enemy doesn't hang in Expose with bHasCover==false.
 		Mem->bArrivedAtSlot = false;
 		Mem->Phase = EFireTaskPhase::Pause;
 		Mem->PhaseTimer = FMath::RandRange(DA->BurstPauseMin, DA->BurstPauseMax);
+
+		if (GetFlankBreakLogLevel() > 0)
+			UE_LOG(LogEnemyAI, Log, TEXT("[FLANKDBG] %s relocate -> no protective cover, strafe / hold standing"), *Pawn->GetName());
 	}
 }
 

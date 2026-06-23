@@ -36,7 +36,7 @@ void UCompanionAnimInstance::NativeUninitializeAnimation()
 void UCompanionAnimInstance::OnReloadMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted)
 {
 	if (Montage != ReloadMontage && Montage != ReloadMontage_Crouch) return;
-	UE_LOG(LogCompanionDiag, Log, TEXT("%s: MONTAGE-RELOAD-END reason=blend-out interrupted=%d"),
+	UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MONTAGE-RELOAD-END reason=blend-out interrupted=%d"),
 		IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
 		(int32)bInterrupted);
 }
@@ -63,7 +63,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			if (Now - LastApplyLogTime > 0.25f)
 			{
 				const float DiagDir = UKismetAnimationLibrary::CalculateDirection(EffectiveVelocity, OwningCompanion->GetActorRotation());
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: COVERSTRAFE-APPLY effSpeed=%.0f effDir=%.1f rawCmcSpeed=%.0f"),
+				UE_LOG(LogCompanionAI, Verbose, TEXT("%s: COVERSTRAFE-APPLY effSpeed=%.0f effDir=%.1f rawCmcSpeed=%.0f"),
 					IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("?"),
 					EffectiveVelocity.Size2D(),
 					DiagDir,
@@ -96,7 +96,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			const float Now = W->GetTimeSeconds();
 			if (Now - LastSpeedLogTime > 0.25f)
 			{
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: SPEED speed=%.0f maxWalk=%.0f norm=%.2f dir=%.1f sprint=%d coverStrafe=%d"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: SPEED speed=%.0f maxWalk=%.0f norm=%.2f dir=%.1f sprint=%d coverStrafe=%d"),
 					IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("?"),
 					Speed, MaxSpeed, NormalizedSpeed, Direction,
 					(int32)OwningCompanion->IsSprinting(),
@@ -173,7 +173,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	{
 		if (UE_LOG_ACTIVE(LogCompanionDiag, Log))
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: MONTAGE-RELOAD-TOGGLE isReloading=%d vel=%.1f"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MONTAGE-RELOAD-TOGGLE isReloading=%d vel=%.1f"),
 				IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
 				(int32)bIsReloading,
 				IsValid(MovementComponent) ? MovementComponent->Velocity.Size() : 0.f);
@@ -209,7 +209,7 @@ void UCompanionAnimInstance::PlayReloadMontage(float PlayRate)
 	if (!IsValid(MontageToPlay)) return;
 
 	Montage_Play(MontageToPlay, PlayRate);
-	UE_LOG(LogCompanionDiag, Log, TEXT("%s: MONTAGE-RELOAD-START len=%.2f playRate=%.2f"),
+	UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MONTAGE-RELOAD-START len=%.2f playRate=%.2f"),
 		IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
 		MontageToPlay->GetPlayLength(),
 		PlayRate);
@@ -289,7 +289,7 @@ void UCompanionAnimInstance::SetCoverStrafeVelocity(const FVector& Velocity)
 		const float Now = W->GetTimeSeconds();
 		if (Now - LastSetLogTime > 0.25f)
 		{
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: COVERSTRAFE-SET vel=%s speed=%.0f"),
+			UE_LOG(LogCompanionAI, Verbose, TEXT("%s: COVERSTRAFE-SET vel=%s speed=%.0f"),
 				IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("?"),
 				*Velocity.ToString(), Velocity.Size2D());
 			LastSetLogTime = Now;

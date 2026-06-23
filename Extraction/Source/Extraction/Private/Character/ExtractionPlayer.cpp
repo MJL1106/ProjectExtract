@@ -415,7 +415,7 @@ void AExtractionPlayer::ADSStop(const FInputActionValue& Value)
 
 void AExtractionPlayer::VaultStart(const FInputActionValue& Value)
 {
-	UE_LOG(LogExtraction, Warning, TEXT("[VAULT_DEBUG] VaultStart fired on '%s'"), *GetNameSafe(this));
+	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] VaultStart fired on '%s'"), *GetNameSafe(this));
 	TryStartTraversal();
 }
 
@@ -443,25 +443,25 @@ void AExtractionPlayer::HandleTraversalStarted(ETraversalType Type, float PlayRa
 {
 	if (bIsDBNO) return;
 
-	UE_LOG(LogExtraction, Warning, TEXT("[VAULT_DEBUG] HandleTraversalStarted type=%d playRate=%.2f"), (int32)Type, PlayRate);
+	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] HandleTraversalStarted type=%d playRate=%.2f"), (int32)Type, PlayRate);
 
 	UExtractionAnimInstance* AnimInst = CachedAnimInstance;
-	UE_LOG(LogExtraction, Warning, TEXT("[VAULT_DEBUG] CachedAnimInstance is %s"), *GetNameSafe(AnimInst));
+	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] CachedAnimInstance is %s"), *GetNameSafe(AnimInst));
 	if (!IsValid(AnimInst)) return;
 
 	switch (Type)
 	{
 	case ETraversalType::Vault:
 		AnimInst->PlayVaultMontage(PlayRate);
-		UE_LOG(LogExtraction, Warning, TEXT("[VAULT_DEBUG] PlayVaultMontage called"));
+		UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] PlayVaultMontage called"));
 		break;
 	case ETraversalType::Climb:
 		AnimInst->PlayClimbMontage(PlayRate);
-		UE_LOG(LogExtraction, Warning, TEXT("[VAULT_DEBUG] PlayClimbMontage called"));
+		UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] PlayClimbMontage called"));
 		break;
 	case ETraversalType::Mantle:
 		AnimInst->PlayMantleMontage(PlayRate);
-		UE_LOG(LogExtraction, Warning, TEXT("[VAULT_DEBUG] PlayMantleMontage called"));
+		UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] PlayMantleMontage called"));
 		break;
 	default: break;
 	}
@@ -469,7 +469,7 @@ void AExtractionPlayer::HandleTraversalStarted(ETraversalType Type, float PlayRa
 	FOnMontageEnded EndDelegate;
 	EndDelegate.BindUObject(this, &AExtractionPlayer::OnTraversalMontageEnded);
 	AnimInst->Montage_SetEndDelegate(EndDelegate, AnimInst->GetCurrentActiveMontage());
-	UE_LOG(LogExtraction, Warning, TEXT("[VAULT_DEBUG] End delegate bound to active montage=%s"),
+	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] End delegate bound to active montage=%s"),
 		*GetNameSafe(AnimInst->GetCurrentActiveMontage()));
 }
 
@@ -593,7 +593,7 @@ void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 
 void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
 {
-	UE_LOG(LogExtraction, Warning, TEXT("[Takedown] AExtractionPlayer::TakedownInput fired — HasAuthority=%d MontageActive=%d TakedownMontage=%s"),
+	UE_LOG(LogExtraction, Verbose, TEXT("[Takedown] AExtractionPlayer::TakedownInput fired — HasAuthority=%d MontageActive=%d TakedownMontage=%s"),
 		HasAuthority(), bTakedownMontageActive, *GetNameSafe(TakedownMontage));
 
 	if (!HasAuthority()) return;
@@ -627,16 +627,16 @@ void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
 		if (DistSq < BestDistSq) { BestDistSq = DistSq; Best = Enemy; }
 	}
 
-	UE_LOG(LogExtraction, Warning, TEXT("[Takedown] scan complete: %d enemies, %d takeable, %d facing-rejected, Best=%s"),
+	UE_LOG(LogExtraction, Verbose, TEXT("[Takedown] scan complete: %d enemies, %d takeable, %d facing-rejected, Best=%s"),
 		DbgTotal, DbgTakeable, DbgFacingRejected, *GetNameSafe(Best));
 
 	if (!IsValid(Best))
 	{
-		UE_LOG(LogExtraction, Warning, TEXT("Takedown: no target (need Unaware enemy within range, behind it)"));
+		UE_LOG(LogExtraction, Verbose, TEXT("Takedown: no target (need Unaware enemy within range, behind it)"));
 		return;
 	}
 
-	UE_LOG(LogExtraction, Warning, TEXT("Takedown: %s"), *GetNameSafe(Best));
+	UE_LOG(LogExtraction, Verbose, TEXT("Takedown: %s"), *GetNameSafe(Best));
 
 	if (!IsValid(TakedownMontage))
 	{
@@ -712,6 +712,10 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 	FOnMontageEnded EndDelegate;
 	EndDelegate.BindUObject(this, &AExtractionPlayer::OnTakedownMontageEnded);
 	AnimInst->Montage_SetEndDelegate(EndDelegate, TakedownMontage);
+
+	// Notify BP now that the montage is confirmed running and the end delegate is bound.
+	// Must NOT be called on the early-return failure paths above (no montage = no restore needed).
+	OnTakedownStarted(Victim);
 }
 
 void AExtractionPlayer::FinishPendingTakedown()
@@ -725,6 +729,10 @@ void AExtractionPlayer::FinishPendingTakedown()
 
 void AExtractionPlayer::OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
+	// Restore camera/gun/knife regardless of whether the kill already fired via notify.
+	// The started/finished pair is always balanced: this delegate only binds after OnTakedownStarted fires.
+	OnTakedownFinished();
+
 	// Fallback: if the notify didn't fire before the montage ended/was interrupted, apply the kill now.
 	if (bTakedownMontageActive) FinishPendingTakedown();
 }
@@ -900,7 +908,7 @@ void AExtractionPlayer::DebugApplyDamage()
 	if (!IsValid(HealthComponent)) return;
 
 	HealthComponent->TakeDamage(25.f);
-	UE_LOG(LogExtraction, Log, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
+	UE_LOG(LogExtraction, Verbose, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
 		HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
 		HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
 }

@@ -14,6 +14,7 @@
 #include "AIController.h"
 #include "GameFramework/Pawn.h"
 #include "NavigationSystem.h"
+#include "Navigation/PathFollowingComponent.h"
 #include "EngineUtils.h"
 
 UBTTask_OfficerCommand::UBTTask_OfficerCommand()
@@ -86,6 +87,36 @@ void UBTTask_OfficerCommand::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* 
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
+	// Tick cooldown timers unconditionally so re-entry after a mode flip doesn't see stale zeros
+	Mem->FocusCooldownTimer = FMath::Max(0.f, Mem->FocusCooldownTimer - DeltaSeconds);
+	Mem->RallyCooldownTimer = FMath::Max(0.f, Mem->RallyCooldownTimer - DeltaSeconds);
+
+	// Determine whether the officer is alone (no living squadmates other than itself)
+	UEnemySquadSubsystem* SquadSub = Pawn->GetWorld()->GetSubsystem<UEnemySquadSubsystem>();
+	UEnemySquad* Squad = SquadSub ? SquadSub->GetSquadFor(Enemy) : nullptr;
+	const bool bAlone = !Squad || Squad->NumAlive() <= 1;
+
+	// not-alone → alone edge: cancel stale hold move so EngageDirectly can pursue immediately
+	if (bAlone && !Mem->bWasAlone)
+		Controller->StopMovement();
+
+	// alone → not-alone edge: force immediate reposition so the officer doesn't over-commit
+	if (!bAlone && Mem->bWasAlone)
+	{
+		Controller->StopMovement();
+		Mem->RepositionTimer = 0.f;
+	}
+
+	Mem->bWasAlone = bAlone;
+
+	if (bAlone)
+	{
+		EngageDirectly(OwnerComp, Mem, Controller, Enemy, Target, BB);
+		return;
+	}
+
+	// --- Squad command path ---
+
 	// Opportunistic fire when LOS is available
 	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
@@ -109,80 +140,70 @@ void UBTTask_OfficerCommand::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* 
 		Enemy->SetAimTarget(nullptr);
 	}
 
-	// Tick cooldown timers
-	Mem->FocusCooldownTimer = FMath::Max(0.f, Mem->FocusCooldownTimer - DeltaSeconds);
-	Mem->RallyCooldownTimer = FMath::Max(0.f, Mem->RallyCooldownTimer - DeltaSeconds);
-
 	// Re-evaluate hold position on interval
 	Mem->RepositionTimer -= DeltaSeconds;
-	if (Mem->RepositionTimer <= 0.f)
+	if (Mem->RepositionTimer > 0.f) return;
+
+	FVector HoldPos;
+	if (ComputeHoldPosition(Pawn, Target, Squad, HoldPos))
+		Controller->MoveToLocation(HoldPos, 80.f, false, true, false, true);
+
+	Mem->RepositionTimer = RepositionInterval;
+
+	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+	if (!IsValid(DA)) return;
+
+	// Focus-fire: re-call on cooldown (officer always overrides)
+	if (Mem->FocusCooldownTimer <= 0.f && IsValid(Target))
 	{
-		UEnemySquadSubsystem* SquadSub = Pawn->GetWorld()->GetSubsystem<UEnemySquadSubsystem>();
-		UEnemySquad* Squad = SquadSub ? SquadSub->GetSquadFor(Enemy) : nullptr;
+		Squad->SetFocusTarget(Target, Enemy, true);
+		Mem->FocusCooldownTimer = DA->FocusCallCooldown;
 
-		FVector HoldPos;
-		if (ComputeHoldPosition(Pawn, Target, Squad, HoldPos))
-			Controller->MoveToLocation(HoldPos, 80.f, false, true, false, true);
+		UBarkSubsystem* Barks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
+		if (Barks && Squad->TryClaimSquadBark(EBarkType::FocusTarget))
+			Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::FocusTarget, DA->DisplayName);
+	}
 
-		Mem->RepositionTimer = RepositionInterval;
-
-		const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
-
-		if (IsValid(DA) && Squad)
+	// Rally: if any living (non-dead) member is Broken and rally cooldown elapsed
+	if (Mem->RallyCooldownTimer <= 0.f)
+	{
+		bool bNeedsRally = false;
+		const TArray<TWeakObjectPtr<AEnemyCharacter>>& Members = Squad->GetMembers();
+		for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
 		{
-			// Focus-fire: re-call on cooldown (officer always overrides)
-			if (Mem->FocusCooldownTimer <= 0.f && IsValid(Target))
+			AEnemyCharacter* Ally = M.Get();
+			if (!IsValid(Ally) || Ally == Enemy) continue;
+			UHealthComponent* AllyHP = Ally->GetHealthComponent();
+			if (IsValid(AllyHP) && AllyHP->IsDead()) continue;
+			UEnemyMoraleComponent* Morale = Ally->GetMoraleComponent();
+			if (!IsValid(Morale)) continue;
+			if (Morale->GetMoraleState() == EMoraleState::Broken)
 			{
-				Squad->SetFocusTarget(Target, Enemy, true);
-				Mem->FocusCooldownTimer = DA->FocusCallCooldown;
-
-				UBarkSubsystem* Barks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
-				if (Barks && Squad->TryClaimSquadBark(EBarkType::FocusTarget))
-					Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::FocusTarget, DA->DisplayName);
+				bNeedsRally = true;
+				break;
 			}
+		}
 
-			// Rally: if any living (non-dead) member is Broken and rally cooldown elapsed
-			if (Mem->RallyCooldownTimer <= 0.f)
+		if (bNeedsRally)
+		{
+			Squad->Rally(Enemy);
+			Mem->RallyCooldownTimer = DA->RallyCooldown;
+		}
+	}
+
+	// Bounding overwatch trigger (Phase 7) — cooldown is squad-persisted (survives task restarts)
+	if (!Squad->IsBoundingActive())
+	{
+		const float WorldTime = Pawn->GetWorld()->GetTimeSeconds();
+		const float TimeSinceLast = WorldTime - Squad->GetLastBoundingAttemptTime();
+		if (TimeSinceLast >= DA->BoundingCooldown)
+		{
+			Squad->RecordBoundingAttempt();
+			if (Squad->StartBounding(Enemy))
 			{
-				bool bNeedsRally = false;
-				const TArray<TWeakObjectPtr<AEnemyCharacter>>& Members = Squad->GetMembers();
-				for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
-				{
-					AEnemyCharacter* Ally = M.Get();
-					if (!IsValid(Ally) || Ally == Enemy) continue;
-					UHealthComponent* AllyHP = Ally->GetHealthComponent();
-					if (IsValid(AllyHP) && AllyHP->IsDead()) continue;
-					UEnemyMoraleComponent* Morale = Ally->GetMoraleComponent();
-					if (!IsValid(Morale)) continue;
-					if (Morale->GetMoraleState() == EMoraleState::Broken)
-					{
-						bNeedsRally = true;
-						break;
-					}
-				}
-
-				if (bNeedsRally)
-				{
-					Squad->Rally(Enemy);
-					Mem->RallyCooldownTimer = DA->RallyCooldown;
-				}
-			}
-
-			// Bounding overwatch trigger (Phase 7) — cooldown is squad-persisted (survives task restarts)
-			if (!Squad->IsBoundingActive())
-			{
-				const float WorldTime = Pawn->GetWorld()->GetTimeSeconds();
-				const float TimeSinceLast = WorldTime - Squad->GetLastBoundingAttemptTime();
-				if (TimeSinceLast >= DA->BoundingCooldown)
-				{
-					Squad->RecordBoundingAttempt();
-					if (Squad->StartBounding(Enemy))
-					{
-						UBarkSubsystem* BoundingBarks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
-						if (BoundingBarks && Squad->TryClaimSquadBark(EBarkType::CoveringGo))
-							BoundingBarks->RequestBark(Enemy, DA->BarkSet, EBarkType::CoveringGo, DA->DisplayName);
-					}
-				}
+				UBarkSubsystem* BoundingBarks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
+				if (BoundingBarks && Squad->TryClaimSquadBark(EBarkType::CoveringGo))
+					BoundingBarks->RequestBark(Enemy, DA->BarkSet, EBarkType::CoveringGo, DA->DisplayName);
 			}
 		}
 	}
@@ -272,6 +293,47 @@ bool UBTTask_OfficerCommand::ComputeHoldPosition(APawn* Pawn, AActor* Target, UE
 		OutPos = Candidate;
 
 	return true;
+}
+
+void UBTTask_OfficerCommand::EngageDirectly(UBehaviorTreeComponent& OwnerComp, FOfficerCommandMemory* Mem,
+	AAIController* Controller, AEnemyCharacter* Enemy, AActor* Target, UBlackboardComponent* BB)
+{
+	Controller->SetFocus(Target);
+
+	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
+	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
+
+	if (bHasLOS)
+	{
+		Enemy->SetAimTarget(Target);
+		if (IsValid(Weapon) && !Mem->bFiring)
+		{
+			Weapon->StartFiring();
+			Mem->bFiring = true;
+		}
+
+		// Regained LOS — stop any pursuit move so we settle and fire
+		if (Controller->GetMoveStatus() == EPathFollowingStatus::Moving)
+			Controller->StopMovement();
+	}
+	else
+	{
+		if (IsValid(Weapon) && Mem->bFiring)
+		{
+			Weapon->StopFiring();
+			Mem->bFiring = false;
+		}
+		Enemy->SetAimTarget(nullptr);
+
+		// Pursue toward last known location
+		Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
+		if (Controller->GetMoveStatus() != EPathFollowingStatus::Moving)
+		{
+			const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
+			const FVector PursueTarget = LastKnown.IsNearlyZero() ? Target->GetActorLocation() : LastKnown;
+			Controller->MoveToLocation(PursueTarget, 100.f, false, true, false, true);
+		}
+	}
 }
 
 FString UBTTask_OfficerCommand::GetStaticDescription() const

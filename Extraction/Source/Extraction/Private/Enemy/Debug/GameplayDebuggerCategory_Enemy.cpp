@@ -14,9 +14,17 @@
 #include "SquadAuraComponent.h"
 #include "EnemySquad.h"
 #include "EnemyTypes.h"
+#include "AICoverSlot.h"
 #include "BehaviorTree/BehaviorTreeComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"
+#include "Components/CapsuleComponent.h"
 #include "GameFramework/PlayerController.h"
+
+/** Chest height (cm) for the body-protection trace — mirror of BodyProtectChestHeight in BTTask_EnemyCombatFire.cpp. */
+static constexpr float FlankBodyChestHeight = 60.f;
+
+/** Fallback capsule radius when the component is missing (matches BTTask_EnemyCombatFire.cpp). */
+static constexpr float DefaultCapsuleRadius = 34.f;
 
 FGameplayDebuggerCategory_Enemy::FGameplayDebuggerCategory_Enemy()
 {
@@ -53,6 +61,12 @@ void FGameplayDebuggerCategory_Enemy::FRepData::Serialize(FArchive& Ar)
 	Ar << SquadId;
 	Ar << SquadAlive;
 	Ar << ArchetypeExtra;
+	Ar << bFlankEnabled;
+	Ar << bFlankSlotValid;
+	Ar << FlankAngleDeg;
+	Ar << bFlankOutsideArc;
+	Ar << bFlankBodyProtected;
+	Ar << bFlankCompromised;
 	Ar << bHasValidEnemy;
 }
 
@@ -117,6 +131,41 @@ void FGameplayDebuggerCategory_Enemy::CollectData(APlayerController* OwnerPC, AA
 		DataPack.CoverSlotName = TEXT("No BB");
 		DataPack.MoraleStateBB = TEXT("No BB");
 		DataPack.ManeuverRole = TEXT("No BB");
+	}
+
+	// Flank-break diagnostics — live replication of the compromise geometry from BTTask_EnemyCombatFire
+	DataPack.bFlankEnabled = IsValid(DA) && DA->bCoverFlankBreakEnabled;
+	DataPack.bFlankSlotValid = false;
+	DataPack.FlankAngleDeg = 0.f;
+	DataPack.bFlankOutsideArc = false;
+	DataPack.bFlankBodyProtected = false;
+	DataPack.bFlankCompromised = false;
+
+	if (DataPack.bFlankEnabled && IsValid(BB))
+	{
+		AAICoverSlot* Slot = Cast<AAICoverSlot>(BB->GetValueAsObject(AEnemyAIController::BB_CoverSlot));
+		AActor* FlankTarget = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
+
+		if (IsValid(Slot) && IsValid(FlankTarget) && IsValid(DA))
+		{
+			DataPack.bFlankSlotValid = true;
+
+			const FVector ToTarget = (FlankTarget->GetActorLocation() - Slot->GetActorLocation()).GetSafeNormal2D();
+			const FVector SlotFwd = Slot->GetActorForwardVector().GetSafeNormal2D();
+			const float Dot = FVector::DotProduct(SlotFwd, ToTarget);
+			DataPack.FlankAngleDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Dot, -1.f, 1.f)));
+
+			const float WidenedHalfArc = Slot->FireArcDegrees * 0.5f + DA->CoverFlankArcSlackDeg;
+			DataPack.bFlankOutsideArc = DataPack.FlankAngleDeg > WidenedHalfArc;
+
+			const float Alpha = Slot->GetAlphaFromLocation(Enemy->GetActorLocation());
+			const UCapsuleComponent* Cap = Enemy->GetCapsuleComponent();
+			const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
+			DataPack.bFlankBodyProtected = Slot->IsBodyShieldedFrom(
+				FlankTarget->GetActorLocation(), Alpha, Standoff, FlankBodyChestHeight, FlankTarget, Enemy);
+
+			DataPack.bFlankCompromised = DataPack.bFlankOutsideArc || !DataPack.bFlankBodyProtected;
+		}
 	}
 
 	// Active BT task
@@ -269,6 +318,15 @@ void FGameplayDebuggerCategory_Enemy::DrawData(APlayerController* OwnerPC, FGame
 			DataPack.bHasCover ? TEXT("{green}Y") : TEXT("{red}N"),
 			*DataPack.CoverSlotName);
 	}
+
+	// Flank-break
+	CanvasContext.Printf(TEXT("FlankBreak: enabled=%s | slot=%s | angle=%.0f | outsideArc=%s | bodyProtected=%s | COMPROMISED=%s"),
+		DataPack.bFlankEnabled ? TEXT("{green}Y") : TEXT("{red}N"),
+		DataPack.bFlankSlotValid ? TEXT("{green}Y") : TEXT("{red}N"),
+		DataPack.FlankAngleDeg,
+		DataPack.bFlankOutsideArc ? TEXT("{red}Y") : TEXT("{green}N"),
+		DataPack.bFlankBodyProtected ? TEXT("{green}Y") : TEXT("{red}N"),
+		DataPack.bFlankCompromised ? TEXT("{red}Y") : TEXT("{green}N"));
 
 	// Active BT task
 	CanvasContext.Printf(TEXT("BT Task: {yellow}%s"), *DataPack.ActiveTaskName);

@@ -401,6 +401,15 @@ private:
 	void PerformHitscan();
 	void OnAutoFireTimer();
 
+	/** Returns a [MinDamageFraction, 1] scale for a pellet at Distance based on the weapon's falloff curve.
+	 *  Returns 1.f when bUseDamageFalloff is false or End <= Start (no falloff). */
+	float ComputeFalloffScale(float Distance) const;
+
+	/** Applies a uniform cone offset to Dir by HalfAngleDeg, returning the deflected unit vector.
+	 *  Uses a single random angle in [0,360) and a random magnitude in [0, HalfAngleDeg].
+	 *  HalfAngleDeg == 0 returns Dir unchanged. */
+	static FVector ApplyConeSpread(const FVector& Dir, float HalfAngleDeg);
+
 	/** Rebuilds CachedFFIgnoreList from current world pawns sharing the owner's team. AI path only. */
 	void RebuildFFIgnoreList();
 

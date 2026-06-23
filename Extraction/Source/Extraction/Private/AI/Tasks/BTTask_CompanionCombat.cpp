@@ -125,13 +125,13 @@ namespace
 			if (!IsValid(C)) return;
 			if (bShouldCrouch && !C->bIsCrouched)
 			{
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=DeferCoverPosture action=Crouch"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=DeferCoverPosture action=Crouch"),
 					*GetNameSafe(C), C->GetWorld() ? C->GetWorld()->GetTimeSeconds() : 0.f);
 				C->Crouch();
 			}
 			else if (!bShouldCrouch && C->bIsCrouched)
 			{
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=DeferCoverPosture action=UnCrouch"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=DeferCoverPosture action=UnCrouch"),
 					*GetNameSafe(C), C->GetWorld() ? C->GetWorld()->GetTimeSeconds() : 0.f);
 				C->UnCrouch();
 			}
@@ -315,7 +315,7 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 			< FVector::DistSquared(Current, CurrentLoc);
 		if (bCloserToTarget) CurrentAlpha = *RepositionTargetAlpha;
 		if (bDebugLogging && bRepositionStartLogged)
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
 				*Companion->GetName(), FVector::Dist(Current, RepositionTargetWorldLoc), RepositionElapsed);
 		Companion->SetLowReadyAim(false);
 		Companion->SetAimTarget(nullptr);
@@ -390,7 +390,7 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 	if (bArrived)
 	{
 		if (bDebugLogging && bRepositionStartLogged)
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=arrived dist=%.0f elapsed=%.2f"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: REPOSITION-DONE result=arrived dist=%.0f elapsed=%.2f"),
 				*Companion->GetName(), Dist, RepositionElapsed);
 		Companion->SetLowReadyAim(false);
 		Companion->SetAimTarget(nullptr);
@@ -424,7 +424,7 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 	{
 		if (bDebugLogging && bRepositionStartLogged)
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: REPOSITION-DONE result=aborted dist=%.0f elapsed=%.2f"),
 				*Companion->GetName(), FVector::Dist(Companion->GetActorLocation(), RepositionTargetWorldLoc), RepositionElapsed);
 		}
 		ReturnToCover(Companion, Anim, Slot, true, bLowHp);
@@ -466,7 +466,7 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 				CMC->StopMovementImmediately();
 
 			if (bDebugLogging)
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: STANDUP-REPOSITION-DRY-ABORT alpha=%.2f"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: STANDUP-REPOSITION-DRY-ABORT alpha=%.2f"),
 					*Companion->GetName(), CurrentAlpha);
 
 			// Defer reload until after the snap completes so the reload montage doesn't start
@@ -543,7 +543,7 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 	if (bArrived)
 	{
 		if (bDebugLogging && bRepositionStartLogged)
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-DONE result=arrived dist=%.0f elapsed=%.2f"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: REPOSITION-DONE result=arrived dist=%.0f elapsed=%.2f"),
 				*Companion->GetName(), Dist, RepositionElapsed);
 		CurrentAlpha = *RepositionTargetAlpha;
 		RepositionTargetAlpha.Reset();
@@ -763,7 +763,7 @@ bool UBTTask_CompanionCombat::TryPrePeekReloadGate(ACompanionCharacter* Companio
 	// any capsule stand-up that results, keeping the companion behind cover during the reload.
 	if (IsValid(Slot) && Slot->Height == ECoverHeight::Crouch && !Companion->bIsCrouched)
 	{
-		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=PrePeekReloadGate action=Crouch"),
+		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=PrePeekReloadGate action=Crouch"),
 			*GetNameSafe(Companion), World ? World->GetTimeSeconds() : 0.f);
 		Companion->Crouch();
 	}
@@ -1331,7 +1331,7 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 		Companion->SetLowReadyAim(false);
 		if (bSmoothSnapping)
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [SnapAborted] t=%.3f elapsed=%.3f reason=%s"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [SnapAborted] t=%.3f elapsed=%.3f reason=%s"),
 				*GetNameSafe(Companion),
 				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
 				SmoothSnapElapsed,
@@ -1341,13 +1341,13 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 		{
 			if (bSmoothSnapping && bPendingCrouchAfterSnap)
 			{
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState_SkippedForPendingCrouch action=NoOp"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState_SkippedForPendingCrouch action=NoOp"),
 					*GetNameSafe(Companion),
 					Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			}
 			else
 			{
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState action=UnCrouch"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState action=UnCrouch"),
 					*GetNameSafe(Companion),
 					Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 				Companion->UnCrouch();
@@ -1458,7 +1458,7 @@ void UBTTask_CompanionCombat::BeginSmoothSnap(ACompanionCharacter* Companion, co
 				CrouchedHalfH = CMC->GetCrouchedHalfHeight();
 			SmoothSnapTargetLoc.Z -= (StandingHalfH - CrouchedHalfH);
 
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ImmediateOnShortSnap action=Crouch"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ImmediateOnShortSnap action=Crouch"),
 				*GetNameSafe(Companion),
 				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Companion->Crouch();
@@ -1476,7 +1476,7 @@ void UBTTask_CompanionCombat::BeginSmoothSnap(ACompanionCharacter* Companion, co
 			}
 			SmoothSnapTargetLoc.Z += (StandingHalfH_Target - CrouchedHalfH_Now);
 
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=ImmediateOnShortSnap action=UnCrouch"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ImmediateOnShortSnap action=UnCrouch"),
 				*GetNameSafe(Companion),
 				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Companion->UnCrouch();
@@ -1492,7 +1492,7 @@ void UBTTask_CompanionCombat::BeginSmoothSnap(ACompanionCharacter* Companion, co
 		bPendingCrouchAfterSnap = bShouldCrouchAfter;
 	}
 
-	UE_LOG(LogCompanionDiag, Log, TEXT("%s: [BeginSmoothSnap] t=%.3f initialDist=%.1f effectiveDur=%.3f yawDelta=%.1f crouchAfter=%d reason=%s"),
+	UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [BeginSmoothSnap] t=%.3f initialDist=%.1f effectiveDur=%.3f yawDelta=%.1f crouchAfter=%d reason=%s"),
 		*GetNameSafe(Companion),
 		Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
 		SmoothSnapInitialDist,
@@ -1517,7 +1517,7 @@ bool UBTTask_CompanionCombat::TickSmoothSnap(ACompanionCharacter* Companion, flo
 		const bool bWasCrouched = Companion->bIsCrouched;
 		const bool bWillCrouch = (bPendingCrouchAfterSnap && !Companion->bIsCrouched);
 		const bool bWillUncrouch = (!bPendingCrouchAfterSnap && Companion->bIsCrouched);
-		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [SnapComplete] t=%.3f elapsed=%.3f effectiveDur=%.3f initialDist=%.1f linear=%d crouchPending=%d wasCrouched=%d willCrouch=%d willUncrouch=%d reason=%s"),
+		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [SnapComplete] t=%.3f elapsed=%.3f effectiveDur=%.3f initialDist=%.1f linear=%d crouchPending=%d wasCrouched=%d willCrouch=%d willUncrouch=%d reason=%s"),
 			*GetNameSafe(Companion),
 			Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
 			SmoothSnapElapsed,
@@ -1533,14 +1533,14 @@ bool UBTTask_CompanionCombat::TickSmoothSnap(ACompanionCharacter* Companion, flo
 		// Apply pending posture change on snap completion (avoids crouch pop mid-snap).
 		if (bWillCrouch)
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=PostSnapApply action=Crouch"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=PostSnapApply action=Crouch"),
 				*GetNameSafe(Companion),
 				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Companion->Crouch();
 		}
 		else if (bWillUncrouch)
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=PostSnapApply action=UnCrouch"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=PostSnapApply action=UnCrouch"),
 				*GetNameSafe(Companion),
 				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Companion->UnCrouch();
@@ -1548,7 +1548,7 @@ bool UBTTask_CompanionCombat::TickSmoothSnap(ACompanionCharacter* Companion, flo
 		bPendingCrouchAfterSnap = false;
 		if (bPendingReloadAfterSnap && IsValid(Companion))
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [ReloadAfterSnap] t=%.3f"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [ReloadAfterSnap] t=%.3f"),
 				*GetNameSafe(Companion),
 				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Companion->ReloadWeapon();
@@ -1679,7 +1679,7 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 							: (St == EPathFollowingStatus::Waiting) ? TEXT("Waiting")
 							:                                          TEXT("Paused");
 					}
-					UE_LOG(LogCompanionDiag, Log, TEXT("%s: FINALAPPROACH-KICK target=%s current=%s dist=%.0f pathStatus=%s"),
+					UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: FINALAPPROACH-KICK target=%s current=%s dist=%.0f pathStatus=%s"),
 						*Companion->GetName(), *SubSlotLoc.ToString(), *ArrivalLoc.ToString(), DistToSubSlot, PFStatus);
 				}
 			}
@@ -1721,12 +1721,12 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 		{
 			const FVector SlotLoc = Slot->GetLocationAtAlpha(CurrentAlpha);
 			const float DistToSlot = FVector::Dist(Companion->GetActorLocation(), SlotLoc);
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=%d slot=%s alpha=%.2f distToSlot=%.1f"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=%d slot=%s alpha=%.2f distToSlot=%.1f"),
 				*Companion->GetName(), *Target->GetName(), Distance, 1, *GetNameSafe(Slot), CurrentAlpha, DistToSlot);
 		}
 		else
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=0 slot=None alpha=-1 distToSlot=-1"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: TASK-ENTER target=%s dist=%.0f hasCover=0 slot=None alpha=-1 distToSlot=-1"),
 				*Companion->GetName(), *Target->GetName(), Distance);
 		}
 	}
@@ -1826,7 +1826,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			if (bDebugLogging)
 			{
 				const float WarpDist = FVector::Dist(Ctx.Companion->GetActorLocation(), SnapLoc);
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: FINALAPPROACH-SNAP arrived=%d timedOut=%d stalled=%d elapsed=%.2f dist=%.0f warped=%.0f"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: FINALAPPROACH-SNAP arrived=%d timedOut=%d stalled=%d elapsed=%.2f dist=%.0f warped=%.0f"),
 					*Ctx.Companion->GetName(), (int32)bArrived, (int32)bTimedOut, (int32)bStalled, FinalApproachElapsed, Dist, WarpDist);
 			}
 			BeginSmoothSnap(Ctx.Companion, SnapLoc, SlotYawRot, ApproachSlot->Height == ECoverHeight::Crouch, TEXT("FinalApproach"));
@@ -1853,7 +1853,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			// isn't stranded clicking-on-empty until a new slot is acquired.
 			if (bPendingReloadAfterSnap && IsValid(Ctx.Companion))
 			{
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: [ReloadAfterSlotLoss] t=%.3f"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [ReloadAfterSlotLoss] t=%.3f"),
 					*GetNameSafe(Ctx.Companion),
 					Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 				Ctx.Companion->ReloadWeapon();
@@ -1935,7 +1935,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	{
 		if (Ctx.Companion->bIsCrouched)
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=SlotLossGuard action=UnCrouch"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=SlotLossGuard action=UnCrouch"),
 				*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Ctx.Companion->UnCrouch();
 		}
@@ -1962,13 +1962,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		const bool bShouldCrouch = (Slot->Height == ECoverHeight::Crouch);
 		if (bShouldCrouch && !Ctx.Companion->bIsCrouched)
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=CoverIdlePostureSync action=Crouch"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=CoverIdlePostureSync action=Crouch"),
 				*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Ctx.Companion->Crouch();
 		}
 		else if (!bShouldCrouch && Ctx.Companion->bIsCrouched)
 		{
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=CoverIdlePostureSync action=UnCrouch"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=CoverIdlePostureSync action=UnCrouch"),
 				*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Ctx.Companion->UnCrouch();
 		}
@@ -2235,7 +2235,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						const FVector NewSubSlotLoc = Slot->GetLocationAtAlpha(CurrentAlpha);
 						const FRotator SlotYawRot(0.f, Slot->GetForwardDirection().Rotation().Yaw, 0.f);
 						const FVector TeleportDest(NewSubSlotLoc.X, NewSubSlotLoc.Y, Ctx.Companion->GetActorLocation().Z);
-						if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: MID-COMBAT-ALPHA-TELEPORT fromAlpha=%.2f toAlpha=%.2f dist=%.0f isReloading=%d"),
+						if (bDebugLogging) UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MID-COMBAT-ALPHA-TELEPORT fromAlpha=%.2f toAlpha=%.2f dist=%.0f isReloading=%d"),
 							*Ctx.Companion->GetName(), PrevAlpha, CurrentAlpha, FVector::Dist(Ctx.Companion->GetActorLocation(), TeleportDest), (int32)Ctx.Companion->IsReloading());
 						Ctx.Companion->TeleportTo(TeleportDest, SlotYawRot, false, false);
 						LastPeekResolveCoverLoc = FVector::ZeroVector;
@@ -2243,13 +2243,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						BlockedRecheckHits = 0;
 						if (Slot->Height == ECoverHeight::Crouch)
 						{
-							UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=SubSlotTeleport action=Crouch"),
+							UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=SubSlotTeleport action=Crouch"),
 								*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 							Ctx.Companion->Crouch();
 						}
 						else
 						{
-							UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=SubSlotTeleport action=UnCrouch"),
+							UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=SubSlotTeleport action=UnCrouch"),
 								*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 							Ctx.Companion->UnCrouch();
 						}
@@ -2269,7 +2269,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				AWeaponBase* W = Ctx.Companion->GetCurrentWeapon();
 				const float ReloadTime = (W && W->GetWeaponData()) ? W->GetWeaponData()->ReloadTime : -1.f;
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-START gate=697 ammo=%d/%d reserve=%d vel=%.1f hasCover=%d slot=%s reloadTime=%.2f"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: RELOAD-START gate=697 ammo=%d/%d reserve=%d vel=%.1f hasCover=%d slot=%s reloadTime=%.2f"),
 					*Ctx.Companion->GetName(),
 					W ? W->GetCurrentAmmo() : -1,
 					W && W->GetWeaponData() ? W->GetWeaponData()->MagazineSize : -1,
@@ -2483,7 +2483,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				if (bDebugLogging)
 				{
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: REPOSITION alpha %.2f -> %.2f"), *Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha);
-					UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=silent fromAlpha=%.2f toAlpha=%.2f fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
+					UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: REPOSITION-START kind=silent fromAlpha=%.2f toAlpha=%.2f fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
 						*Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha,
 						*Ctx.Companion->GetActorLocation().ToString(), *RepositionTargetWorldLoc.ToString(),
 						LastRepositionDist, (int32)Ctx.Companion->IsReloading());
@@ -2503,7 +2503,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				AIC->StopMovement();
 			if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
 				CMC->StopMovementImmediately();
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=StandUpRepoCommit action=UnCrouch"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=StandUpRepoCommit action=UnCrouch"),
 				*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Ctx.Companion->UnCrouch();
 			if (Anim)
@@ -2527,7 +2527,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					ResolvedPeekSide == EPeekSide::Right ? TEXT("Right") : TEXT("Left"),
 					*Slot->GetName());
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: STANDUP-REPOSITION alpha %.2f -> %.2f burst=%.2fs"), *Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha, BurstTimer);
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: REPOSITION-START kind=standup fromAlpha=%.2f toAlpha=%.2f fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: REPOSITION-START kind=standup fromAlpha=%.2f toAlpha=%.2f fromLoc=%s toLoc=%s dist=%.0f isReloading=%d"),
 					*Ctx.Companion->GetName(), CurrentAlpha, *RepositionTargetAlpha,
 					*Ctx.Companion->GetActorLocation().ToString(), *RepositionTargetWorldLoc.ToString(),
 					LastRepositionDist, (int32)Ctx.Companion->IsReloading());
@@ -2599,7 +2599,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			ActivePeekMontage = PeekMontage;
 		}
 
-		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=StandQuickPeekCommit action=UnCrouch"),
+		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=StandQuickPeekCommit action=UnCrouch"),
 			*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 		Ctx.Companion->UnCrouch();
 		Ctx.Companion->StartWeaponFire();
@@ -2714,7 +2714,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				AWeaponBase* W = Ctx.Companion->GetCurrentWeapon();
 				const float ReloadTime = (W && W->GetWeaponData()) ? W->GetWeaponData()->ReloadTime : -1.f;
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-START gate=945 ammo=%d/%d reserve=%d vel=%.1f hasCover=%d slot=%s reloadTime=%.2f"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: RELOAD-START gate=945 ammo=%d/%d reserve=%d vel=%.1f hasCover=%d slot=%s reloadTime=%.2f"),
 					*Ctx.Companion->GetName(),
 					W ? W->GetCurrentAmmo() : -1,
 					W && W->GetWeaponData() ? W->GetWeaponData()->MagazineSize : -1,
@@ -2724,7 +2724,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					*GetNameSafe(Slot),
 					ReloadTime);
 				const FVector B1ReloadLoc = IsValid(Slot) ? Slot->GetLocationAtAlpha(CurrentAlpha) : FVector::ZeroVector;
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RETURN-TO-COVER reason=reload moveTarget=%s dist=%.0f isReloading=%d"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: RETURN-TO-COVER reason=reload moveTarget=%s dist=%.0f isReloading=%d"),
 					*Ctx.Companion->GetName(), *B1ReloadLoc.ToString(),
 					FVector::Dist(Ctx.Companion->GetActorLocation(), B1ReloadLoc),
 					(int32)Ctx.Companion->IsReloading());
@@ -2750,7 +2750,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			if (bDebugLogging)
 			{
 				const FVector B1BurstEndLoc = IsValid(Slot) ? Slot->GetLocationAtAlpha(CurrentAlpha) : FVector::ZeroVector;
-				UE_LOG(LogCompanionDiag, Log, TEXT("%s: RETURN-TO-COVER reason=burst-end moveTarget=%s dist=%.0f isReloading=%d"),
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: RETURN-TO-COVER reason=burst-end moveTarget=%s dist=%.0f isReloading=%d"),
 					*Ctx.Companion->GetName(), *B1BurstEndLoc.ToString(),
 					FVector::Dist(Ctx.Companion->GetActorLocation(), B1BurstEndLoc),
 					(int32)Ctx.Companion->IsReloading());
@@ -2772,7 +2772,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->StopWeaponFire();
 		bIsFiringBurst = false;
 		BurstTimer = 0.f;
-		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=CoverFlippedMidBurst action=UnCrouch"),
+		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=CoverFlippedMidBurst action=UnCrouch"),
 			*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 		Ctx.Companion->UnCrouch();
 		bCornerPeekFiring = false;
@@ -2791,7 +2791,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// Idempotent — UnCrouch is a no-op if not crouched.
 	if (Ctx.Companion->bIsCrouched)
 	{
-		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CrouchCall] t=%.3f site=OpenEngageDefensive action=UnCrouch"),
+		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=OpenEngageDefensive action=UnCrouch"),
 			*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 		Ctx.Companion->UnCrouch();
 	}
@@ -2990,7 +2990,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			AWeaponBase* W = Ctx.Companion->GetCurrentWeapon();
 			const float ReloadTime = (W && W->GetWeaponData()) ? W->GetWeaponData()->ReloadTime : -1.f;
-			UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-START gate=1063 ammo=%d/%d reserve=%d vel=%.1f hasCover=%d slot=%s reloadTime=%.2f"),
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: RELOAD-START gate=1063 ammo=%d/%d reserve=%d vel=%.1f hasCover=%d slot=%s reloadTime=%.2f"),
 				*Ctx.Companion->GetName(),
 				W ? W->GetCurrentAmmo() : -1,
 				W && W->GetWeaponData() ? W->GetWeaponData()->MagazineSize : -1,

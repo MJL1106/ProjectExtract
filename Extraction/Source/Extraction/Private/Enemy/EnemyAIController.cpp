@@ -34,6 +34,7 @@ const FName AEnemyAIController::BB_HasCover(TEXT("HasCover"));
 const FName AEnemyAIController::BB_PatrolRoute(TEXT("PatrolRoute"));
 const FName AEnemyAIController::BB_MoraleState(TEXT("MoraleState"));
 const FName AEnemyAIController::BB_ManeuverRole(TEXT("ManeuverRole"));
+const FName AEnemyAIController::BB_ManeuverHoldUntil(TEXT("ManeuverHoldUntil"));
 const FName AEnemyAIController::BB_PostLocation(TEXT("PostLocation"));
 
 AEnemyAIController::AEnemyAIController()
