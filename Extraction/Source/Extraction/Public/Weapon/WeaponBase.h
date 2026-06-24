@@ -225,6 +225,32 @@ public:
 	/** True once SetupPatrolAlign succeeded (non-zero DA offsets present). */
 	bool IsPatrolAlignReady() const { return bPatrolAlignReady; }
 
+	// ---- Hand-swap settle (two-socket weapon carry) ----
+
+	/**
+	 * Starts easing the weapon from its current KeepWorldTransform-inherited relative pose
+	 * to identity (seated on the new socket). The settle writes WeaponMesh->SetRelativeTransform
+	 * per-frame while active. Fire/melee/recoil align take priority and suppress the settle
+	 * writer when they are active, so the settle never fights combat-time transforms.
+	 * Called by AEnemyCharacter::SetWeaponHandSocket after the KeepWorldTransform re-attach.
+	 */
+	void BeginHandSwapSettle();
+
+	/**
+	 * Advances the hand-swap settle interpolation toward identity.
+	 * Called per-frame by UEnemyAnimInstance::NativeUpdateAnimation for weapons with hand-swap enabled.
+	 * Returns true while the settle is still in progress. No-ops when not settling.
+	 */
+	bool UpdateHandSwapSettle(float DeltaSeconds);
+
+	/** True while the hand-swap settle is actively interpolating toward the socket rest. */
+	bool IsHandSwapSettling() const { return bHandSwapSettling; }
+
+	/** Immediately cancels any active settle and snaps WeaponMesh to identity relative (seated rest).
+	 *  Called by SetWeaponHandSocket(bImmediate=true) after a SnapToTarget re-attach, and by
+	 *  HandleDeath to ensure corpses never show a frozen mid-settle offset. */
+	void ResetHandSwapSettle();
+
 	// ---- Weapon recoil offset (enemy body-kick visual) ----
 
 	/**
@@ -358,6 +384,22 @@ private:
 
 	/** True when SetupPatrolAlign succeeded — non-zero DA offsets were found. */
 	bool bPatrolAlignReady = false;
+
+	// ---- Hand-swap settle runtime state ----
+
+	/** Relative transform captured at the start of the settle (KeepWorldTransform residual). */
+	FTransform HandSwapSettleStart = FTransform::Identity;
+
+	/** Current interpolation alpha (0=start, 1=seated). */
+	float HandSwapSettleAlpha = 0.f;
+
+	/** True while the settle ease is in progress. */
+	bool bHandSwapSettling = false;
+
+	/** Interpolation speed for the hand-swap settle. Tunable via the weapon DA category if needed;
+	 *  kept as a compile-time default here since the settle is a short cosmetic ease and doesn't
+	 *  need per-weapon tuning. Matches PatrolAlignBlendSpeed (8). */
+	static constexpr float HandSwapSettleSpeed = 8.f;
 
 	// ---- Fire alignment runtime state ----
 

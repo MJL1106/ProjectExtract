@@ -439,4 +439,27 @@ private:
 
 	/** True once SetupPatrolAlign has been called successfully for the current weapon. Reset on weapon rebind. */
 	bool bPatrolAlignSetup = false;
+
+	// --- Hand-swap tracking (two-socket weapon carry) ---
+
+	/** Eased alpha for the hand-swap decision. Driven toward 1 (patrol) or 0 (combat) per-frame.
+	 *  Hysteresis thresholds prevent flicker from the bIsAiming toggle on bIsPatrolling. */
+	float HandSwapAlpha = 0.f;
+
+	/** True when the weapon is logically wanted on the patrol hand (hysteresis-gated). */
+	bool bWantPatrolHand = false;
+
+	/** True when the equipped weapon's DA has a valid EnemyPatrolHandSocket (enables hand-swap).
+	 *  Cached on weapon rebind to avoid per-frame DA access. */
+	bool bHandSwapEnabled = false;
+
+	/** Interpolation speed for the hand-swap decision alpha. Tune to match the ABP arm blend. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|HandSwap")
+	float HandSwapBlendSpeed = 8.f;
+
+	/** Alpha threshold (rising) at which the weapon moves to the patrol hand. */
+	static constexpr float HandSwapRiseThreshold = 0.55f;
+
+	/** Alpha threshold (falling) at which the weapon moves back to the combat hand. */
+	static constexpr float HandSwapFallThreshold = 0.45f;
 };

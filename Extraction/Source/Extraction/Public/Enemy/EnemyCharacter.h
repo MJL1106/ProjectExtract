@@ -268,6 +268,14 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Weapon")
 	AWeaponBase* GetCurrentWeapon() const { return CurrentWeapon.Get(); }
 
+	/** Moves the held weapon between the patrol-hand and combat-hand sockets (data-driven from
+	 *  the weapon's UWeaponDataAsset EnemyPatrolHandSocket / EnemyCombatHandSocket fields).
+	 *  No-ops when the DA has no patrol socket set (all non-pistol archetypes).
+	 *  bImmediate=false (default): KeepWorldTransform + BeginHandSwapSettle for a smooth ease.
+	 *  bImmediate=true: SnapToTargetNotIncludingScale + reset settle for instant seat (firing override / death).
+	 *  Authority-only, edge-guarded (idempotent on repeated same-state calls). */
+	void SetWeaponHandSocket(bool bUsePatrolHand, bool bImmediate = false);
+
 	// --- Config ---
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Data")
@@ -340,6 +348,9 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<AWeaponBase> CurrentWeapon;
+
+	/** True when the weapon is currently attached to the patrol-hand socket (DA-driven hand-swap). */
+	bool bWeaponOnPatrolHand = false;
 
 	TWeakObjectPtr<AActor> CurrentAimTarget;
 	TWeakObjectPtr<AController> LastDamageInstigator;

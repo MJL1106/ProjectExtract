@@ -73,6 +73,14 @@ private:
 	/** Fallback wait duration (seconds) when PlayRandomPatrolIdle returns 0 (empty pool). */
 	static constexpr float StationaryIdleFallbackWait = 3.f;
 
+	/** Random pause (seconds) inserted between consecutive patrol-idle fidget clips; the enemy holds its base idle during the gap. */
+	UPROPERTY(EditAnywhere, Category = "Patrol|Idle", meta = (ClampMin = "0.0"))
+	float MinIdleGap = 1.0f;
+
+	/** Random pause (seconds) inserted between consecutive patrol-idle fidget clips; the enemy holds its base idle during the gap. */
+	UPROPERTY(EditAnywhere, Category = "Patrol|Idle", meta = (ClampMin = "0.0"))
+	float MaxIdleGap = 3.0f;
+
 	/** Pick the next waypoint index according to PatrolOrder and update Mem accordingly. */
 	void PickNextIndex(FPatrolMemory& Mem, const APatrolRoute& Route) const;
 

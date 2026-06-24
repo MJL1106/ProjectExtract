@@ -1018,6 +1018,53 @@ void AWeaponBase::SetPatrolAlignAlpha(float Alpha)
 	WeaponMesh->SetRelativeTransform(Blended);
 }
 
+// ---- Hand-swap settle ----
+
+void AWeaponBase::BeginHandSwapSettle()
+{
+	if (!IsValid(WeaponMesh)) return;
+
+	HandSwapSettleStart = WeaponMesh->GetRelativeTransform();
+	HandSwapSettleAlpha = 0.f;
+	bHandSwapSettling = true;
+}
+
+bool AWeaponBase::UpdateHandSwapSettle(float DeltaSeconds)
+{
+	if (!bHandSwapSettling) return false;
+	if (!IsValid(WeaponMesh))
+	{
+		bHandSwapSettling = false;
+		return false;
+	}
+
+	HandSwapSettleAlpha = FMath::FInterpTo(HandSwapSettleAlpha, 1.f, DeltaSeconds, HandSwapSettleSpeed);
+
+	FTransform Blended;
+	Blended.SetLocation(FMath::Lerp(HandSwapSettleStart.GetLocation(), FVector::ZeroVector, HandSwapSettleAlpha));
+	Blended.SetRotation(FQuat::Slerp(HandSwapSettleStart.GetRotation(), FQuat::Identity, HandSwapSettleAlpha));
+	Blended.SetScale3D(FMath::Lerp(HandSwapSettleStart.GetScale3D(), FVector::OneVector, HandSwapSettleAlpha));
+
+	WeaponMesh->SetRelativeTransform(Blended);
+
+	if (HandSwapSettleAlpha >= 1.f - KINDA_SMALL_NUMBER)
+	{
+		WeaponMesh->SetRelativeTransform(FTransform::Identity);
+		bHandSwapSettling = false;
+		return false;
+	}
+
+	return true;
+}
+
+void AWeaponBase::ResetHandSwapSettle()
+{
+	bHandSwapSettling = false;
+	HandSwapSettleAlpha = 0.f;
+	if (IsValid(WeaponMesh))
+		WeaponMesh->SetRelativeTransform(FTransform::Identity);
+}
+
 // ---- Weapon recoil offset ----
 
 void AWeaponBase::SetRecoilOffset(const FTransform& Offset)

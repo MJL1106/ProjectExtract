@@ -51,6 +51,9 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	bMeleeAlignSetup = false;
 	PatrolAlignAlpha = 0.f;
 	bPatrolAlignSetup = false;
+	HandSwapAlpha = 0.f;
+	bWantPatrolHand = false;
+	bHandSwapEnabled = false;
 	bGripSocketValid = false;
 	CachedGripMesh.Reset();
 	CachedGripSocketName = NAME_None;
@@ -159,6 +162,7 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bPrevIsReloading = false;
 		FireAlignAlpha = 0.f;
 		PatrolAlignAlpha = 0.f;
+		HandSwapAlpha = 0.f;
 		StopPatrolIdle();
 		return;
 	}
@@ -238,6 +242,27 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				RecoilSpineRotation = FRotator::ZeroRotator;
 				RecoilSpineOffset = FVector::ZeroVector;
 
+				// Cache hand-swap enablement from the DA. Validate configured sockets
+				// exist on the enemy mesh at equip time — if the patrol socket is absent,
+				// disable the feature entirely rather than retrying + logging every frame.
+				bHandSwapEnabled = false;
+				if (!DA->EnemyPatrolHandSocket.IsNone())
+				{
+					USkeletalMeshComponent* EnemyMesh = OwningEnemy->GetMesh();
+					if (IsValid(EnemyMesh) && EnemyMesh->DoesSocketExist(DA->EnemyPatrolHandSocket))
+					{
+						const FName CombatSock = DA->EnemyCombatHandSocket.IsNone()
+							? OwningEnemy->WeaponSocket : DA->EnemyCombatHandSocket;
+						if (EnemyMesh->DoesSocketExist(CombatSock))
+							bHandSwapEnabled = true;
+					}
+				}
+				if (!bHandSwapEnabled)
+				{
+					HandSwapAlpha = 0.f;
+					bWantPatrolHand = false;
+				}
+
 				const FName SocketName = DA->LeftHandGripSocket;
 				if (!SocketName.IsNone())
 				{
@@ -263,6 +288,9 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			RecoilCurrentKickback = 0.f;
 			RecoilSpineRotation = FRotator::ZeroRotator;
 			RecoilSpineOffset = FVector::ZeroVector;
+			bHandSwapEnabled = false;
+			HandSwapAlpha = 0.f;
+			bWantPatrolHand = false;
 		}
 
 		// Fire-align setup: compute rest→fire offset once on equip so per-frame cost is just a lerp.
@@ -368,6 +396,47 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		const bool bAlphaSettled = FMath::IsNearlyEqual(PatrolAlignAlpha, PrevAlpha, KINDA_SMALL_NUMBER);
 		if (!bAlphaSettled || PatrolAlignAlpha > KINDA_SMALL_NUMBER)
 			Weapon->SetPatrolAlignAlpha(PatrolAlignAlpha);
+	}
+
+	// --- Hand-swap: ease the weapon between patrol and combat hand sockets ---
+	// Runs AFTER patrol-align and BEFORE fire/melee align. The settle writes
+	// WeaponMesh->SetRelativeTransform to ease from the KeepWorldTransform residual to identity
+	// (seated on the new socket). Fire/melee/recoil align are dormant while patrolling, and
+	// during the combat transition they overwrite the settle once they activate. The settle
+	// defers to any active fire/melee/recoil align by stopping when it detects those are writing.
+	// NativeUpdateAnimation runs on server/listen-host, which is the authority for this
+	// single-player project. SetWeaponHandSocket early-returns off-authority.
+	if (bHandSwapEnabled && IsValid(Weapon) && IsValid(OwningEnemy))
+	{
+		// Hard override: if firing has started, force the weapon to the combat hand immediately.
+		// The gun must never fire from the patrol hand — snap it back before the first shot's
+		// fire-align and hitscan run. Bypass the eased hysteresis entirely.
+		if (bIsFiring && bWantPatrolHand)
+		{
+			bWantPatrolHand = false;
+			HandSwapAlpha = 0.f;
+			OwningEnemy->SetWeaponHandSocket(false, /*bImmediate=*/true);
+		}
+
+		const float SwapTarget = bIsPatrolling ? 1.f : 0.f;
+		HandSwapAlpha = FMath::FInterpTo(HandSwapAlpha, SwapTarget, DeltaSeconds, HandSwapBlendSpeed);
+
+		// Hysteresis: only commit the socket swap when the alpha crosses a threshold,
+		// preventing flicker from the bIsAiming toggle that drives bIsPatrolling.
+		const bool bPrevWantPatrol = bWantPatrolHand;
+		if (!bWantPatrolHand && HandSwapAlpha > HandSwapRiseThreshold)
+			bWantPatrolHand = true;
+		else if (bWantPatrolHand && HandSwapAlpha < HandSwapFallThreshold)
+			bWantPatrolHand = false;
+
+		if (bWantPatrolHand != bPrevWantPatrol)
+			OwningEnemy->SetWeaponHandSocket(bWantPatrolHand);
+
+		// Drive the settle interpolation. Skip when fire/melee align are actively writing
+		// (those have priority and would fight the settle).
+		const bool bCombatAlignActive = (FireAlignAlpha > KINDA_SMALL_NUMBER) || (MeleeMontageWeight > KINDA_SMALL_NUMBER);
+		if (!bCombatAlignActive)
+			Weapon->UpdateHandSwapSettle(DeltaSeconds);
 	}
 
 	// --- Fire-align: smoothly blend weapon offset while the fire-loop montage plays ---

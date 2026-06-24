@@ -356,7 +356,11 @@ void UBTTask_EnemyPatrol::StartStationaryIdle(FPatrolMemory& Mem, float Fallback
 		}
 	}
 
-	Mem.WaitTarget = (Len > KINDA_SMALL_NUMBER) ? Len : FallbackWait;
+	const float BaseWait = (Len > KINDA_SMALL_NUMBER) ? Len : FallbackWait;
+	const float Gap = Mem.bGuardScanActive
+		? FMath::FRandRange(MinIdleGap, FMath::Max(MinIdleGap, MaxIdleGap))
+		: 0.f;
+	Mem.WaitTarget = BaseWait + Gap;
 	Mem.WaitElapsed = 0.f;
 }
 

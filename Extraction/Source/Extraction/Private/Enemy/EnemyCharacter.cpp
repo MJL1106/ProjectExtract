@@ -15,6 +15,7 @@
 #include "PatrolRoute.h"
 #include "HealthComponent.h"
 #include "WeaponBase.h"
+#include "WeaponDataAsset.h"
 #include "ExtractionDamageType.h"
 #include "ExtractionTypes.h"
 #include "EnemyArmourComponent.h"
@@ -603,6 +604,52 @@ void AEnemyCharacter::SetMoveSpeedMode(EEnemyMoveSpeedMode Mode)
 	}
 }
 
+// --- Hand-swap ---
+
+void AEnemyCharacter::SetWeaponHandSocket(bool bUsePatrolHand, bool bImmediate)
+{
+	if (!HasAuthority()) return;
+	if (bUsePatrolHand == bWeaponOnPatrolHand) return;
+
+	AWeaponBase* Weapon = CurrentWeapon.Get();
+	if (!IsValid(Weapon)) return;
+
+	const UWeaponDataAsset* DA = Weapon->GetWeaponData();
+	if (!IsValid(DA)) return;
+
+	const FName PatrolSock = DA->EnemyPatrolHandSocket;
+	if (PatrolSock.IsNone()) return;
+
+	const FName CombatSock = DA->EnemyCombatHandSocket.IsNone() ? WeaponSocket : DA->EnemyCombatHandSocket;
+	const FName TargetSocket = bUsePatrolHand ? PatrolSock : CombatSock;
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!IsValid(MeshComp) || !MeshComp->DoesSocketExist(TargetSocket))
+	{
+		UE_LOG(LogEnemyAI, Warning, TEXT("%s: SetWeaponHandSocket — socket '%s' not found on mesh"),
+			*GetName(), *TargetSocket.ToString());
+		return;
+	}
+
+	if (bImmediate)
+	{
+		// Hard seat: snap directly onto the socket with identity relative (no glide).
+		// Used by the firing override and death path where visual continuity is less
+		// important than correctness (gun must be on the right socket NOW).
+		Weapon->AttachToComponent(MeshComp, FAttachmentTransformRules::SnapToTargetNotIncludingScale, TargetSocket);
+		Weapon->ResetHandSwapSettle();
+	}
+	else
+	{
+		// Smooth path: keep world transform so there is no visual pop on the swap frame,
+		// then ease to the seated rest via BeginHandSwapSettle.
+		Weapon->AttachToComponent(MeshComp, FAttachmentTransformRules::KeepWorldTransform, TargetSocket);
+		Weapon->BeginHandSwapSettle();
+	}
+
+	bWeaponOnPatrolHand = bUsePatrolHand;
+}
+
 // --- Archetype ---
 
 void AEnemyCharacter::ApplyArchetypeData()
@@ -752,7 +799,14 @@ void AEnemyCharacter::HandleDeath()
 		Weapon->ReattachMagazine();
 		Weapon->SetFireAlignAlpha(0.f);
 		Weapon->SetMeleeAlignAlpha(0.f);
+		Weapon->SetPatrolAlignAlpha(0.f);
 		Weapon->StopVisualWeaponFire();
+
+		// Ensure the corpse shows the combat-hand grip with no frozen settle offset.
+		// Snap immediately so the death montage (authored for the combat hand) lines up.
+		Weapon->ResetHandSwapSettle();
+		if (bWeaponOnPatrolHand)
+			SetWeaponHandSocket(false, /*bImmediate=*/true);
 	}
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())

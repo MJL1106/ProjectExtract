@@ -270,4 +270,23 @@ public:
 		meta = (DisplayName = "Patrol Align Rotation Offset"))
 	FRotator PatrolAlignRotationOffset = FRotator::ZeroRotator;
 
+	// ---- Enemy Hand-Swap (two-socket weapon carry) ----
+
+	/** Skeleton socket used when the weapon is in the COMBAT hand (aim/fire/melee).
+	 *  NAME_None (default) falls back to the character's WeaponSocket member, so existing
+	 *  archetypes are completely unaffected. Set this to the same socket name as WeaponSocket
+	 *  on the character when using hand-swap so the DA is the single source of truth. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation",
+		meta = (DisplayName = "Enemy Combat Hand Socket"))
+	FName EnemyCombatHandSocket = NAME_None;
+
+	/** Skeleton socket used when the weapon is in the PATROL/IDLE hand.
+	 *  NAME_None (default) disables the hand-swap feature entirely — no re-attach ever happens,
+	 *  making every archetype without this field set completely unaffected.
+	 *  When set, the weapon eases between this socket and EnemyCombatHandSocket as the enemy
+	 *  transitions between patrol and combat awareness states. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation",
+		meta = (DisplayName = "Enemy Patrol Hand Socket"))
+	FName EnemyPatrolHandSocket = NAME_None;
+
 };
