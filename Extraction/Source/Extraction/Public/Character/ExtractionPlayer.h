@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
+#include "Camera/CameraTypes.h"
 #include "ExtractionTypes.h"
 #include "Logging/LogMacros.h"
 #include "Character/ExtractionPlayerInterface.h"
@@ -60,6 +61,7 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaTime) override;
+	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 	virtual float TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser) override;
 	virtual void NotifyControllerChanged() override;
@@ -168,7 +170,7 @@ public:
 	/** True while the takedown finisher montage is playing.
 	 *  AnimBP reads this to gate the procedural FP-arm layer off during the finisher. */
 	UFUNCTION(BlueprintPure, Category = "Takedown")
-	bool IsInTakedown() const { return bTakedownMontageActive; }
+	virtual bool IsInTakedown() const override { return bTakedownMontageActive; }
 
 protected:
 
@@ -236,6 +238,10 @@ protected:
 	/** Distance (cm) in front of the player to place the victim when bAlignTakedownVictim is true. */
 	UPROPERTY(EditAnywhere, Category = "Takedown", meta = (ClampMin = "0.0", EditCondition = "bAlignTakedownVictim"))
 	float TakedownVictimForwardOffset = 90.f;
+
+	/** Near clip plane (cm) applied to the player view while a takedown finisher montage plays, so the head-bone camera does not render the victim's interior geometry at point blank. Set <= 0 to disable. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Takedown")
+	float TakedownNearClipPlane = 2.f;
 
 	// ---- DBNO / Revive Config ----
 

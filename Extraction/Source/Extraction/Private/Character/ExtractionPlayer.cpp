@@ -348,6 +348,7 @@ void AExtractionPlayer::LookInput(const FInputActionValue& Value)
 void AExtractionPlayer::DoAim(float Yaw, float Pitch)
 {
 	if (!IsValid(GetController())) return;
+	if (bTakedownMontageActive) return;
 
 	AddControllerYawInput(Yaw);
 	AddControllerPitchInput(Pitch);
@@ -361,6 +362,13 @@ void AExtractionPlayer::DoMove(float Right, float Forward)
 
 	AddMovementInput(GetActorRightVector(), Right);
 	AddMovementInput(GetActorForwardVector(), Forward);
+}
+
+void AExtractionPlayer::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
+{
+	Super::CalcCamera(DeltaTime, OutResult);
+	if (bTakedownMontageActive && TakedownNearClipPlane > 0.f)
+		OutResult.PerspectiveNearClipPlane = TakedownNearClipPlane;
 }
 
 // ---- Weapon Input ----

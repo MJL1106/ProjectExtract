@@ -58,6 +58,11 @@ public:
 	virtual bool GetIsSliding() const { return false; }
 	virtual bool GetIsProne() const { return false; }
 
+	/** True while a takedown finisher montage is playing — recoil pauses so its
+	 *  camera pushes are not swallowed by the finisher input-lock. Default false;
+	 *  AExtractionPlayer overrides with bTakedownMontageActive. */
+	virtual bool IsInTakedown() const { return false; }
+
 	/** Notify the implementing character that a weapon was equipped — kit BPs
 	 *  use this to push pose data into AC_ProceduralAnimation. Default no-op. */
 	virtual void NotifyWeaponEquipped(AWeaponBase* /*EquippedWeapon*/) {}

@@ -1415,6 +1415,7 @@ void AWeaponBase::ApplyRecoil()
 
 	IExtractionPlayerInterface* OwnerIface = IsValid(GetOwner()) ? Cast<IExtractionPlayerInterface>(GetOwner()) : nullptr;
 	if (!OwnerIface) return;
+	if (OwnerIface->IsInTakedown()) return;
 
 	// Get current recoil point
 	const int32 PatternIndex = FMath::Min(RecoilIndex, Pattern.Points.Num() - 1);
@@ -1456,6 +1457,9 @@ void AWeaponBase::UpdateRecoilRecovery(float DeltaTime)
 {
 	if (!bIsRecoveringRecoil || !IsValid(WeaponData)) return;
 
+	IExtractionPlayerInterface* OwnerIface = IsValid(GetOwner()) ? Cast<IExtractionPlayerInterface>(GetOwner()) : nullptr;
+	if (OwnerIface && OwnerIface->IsInTakedown()) return;
+
 	const float RecoveryTime = WeaponData->RecoilPattern.RecoveryTime;
 	if (RecoveryTime <= 0.f)
 	{
@@ -1474,7 +1478,6 @@ void AWeaponBase::UpdateRecoilRecovery(float DeltaTime)
 	const float DeltaPitch = TargetPitch - RecoilRecoveryPitchApplied;
 	const float DeltaYaw = TargetYaw - RecoilRecoveryYawApplied;
 
-	IExtractionPlayerInterface* OwnerIface = IsValid(GetOwner()) ? Cast<IExtractionPlayerInterface>(GetOwner()) : nullptr;
 	if (OwnerIface)
 		OwnerIface->DoAim(-DeltaYaw, -DeltaPitch);
 
