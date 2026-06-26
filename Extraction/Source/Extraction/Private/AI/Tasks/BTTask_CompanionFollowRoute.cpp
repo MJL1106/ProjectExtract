@@ -27,6 +27,38 @@ uint16 UBTTask_CompanionFollowRoute::GetInstanceMemorySize() const
 }
 
 // ---------------------------------------------------------------------------
+// ComputeRouteStartIndex — find the forward waypoint nearest to the pawn's
+// projected position on the route polyline. Returns the endpoint index of
+// the closest segment so the companion walks forward, never backtracks.
+// ---------------------------------------------------------------------------
+
+static int32 ComputeRouteStartIndex(const ACompanionRoute& Route, const FVector& PawnLocation)
+{
+	const int32 NumPoints = Route.NumPoints();
+	if (NumPoints <= 1) return 0;
+
+	float BestDistSq = TNumericLimits<float>::Max();
+	int32 BestSegment = 0;
+
+	for (int32 i = 0; i < NumPoints - 1; ++i)
+	{
+		const FVector A = Route.GetWorldPoint(i);
+		const FVector B = Route.GetWorldPoint(i + 1);
+		const FVector Closest = FMath::ClosestPointOnSegment(PawnLocation, A, B);
+		const float DistSq = FVector::DistSquared(PawnLocation, Closest);
+
+		if (DistSq < BestDistSq)
+		{
+			BestDistSq = DistSq;
+			BestSegment = i;
+		}
+	}
+
+	// Forward endpoint of the best segment, clamped to valid range
+	return FMath::Clamp(BestSegment + 1, 0, NumPoints - 1);
+}
+
+// ---------------------------------------------------------------------------
 // ExecuteTask
 // ---------------------------------------------------------------------------
 
@@ -59,8 +91,10 @@ EBTNodeResult::Type UBTTask_CompanionFollowRoute::ExecuteTask(
 	Mem->CachedRoute = Route;
 	Mem->CachedCharacter = Companion;
 	Mem->CachedController = Controller;
-	Mem->CurrentIndex = 0;
-	Mem->Phase = ERoutePhase::MovingToStart;
+
+	const int32 StartIndex = ComputeRouteStartIndex(*Route, Companion->GetActorLocation());
+	Mem->CurrentIndex = StartIndex;
+	Mem->Phase = (StartIndex == 0) ? ERoutePhase::MovingToStart : ERoutePhase::Moving;
 
 	// Fix 11: cancel sprint, then snapshot locomotion state for restore
 	Companion->SetSprinting(false);
@@ -71,16 +105,15 @@ EBTNodeResult::Type UBTTask_CompanionFollowRoute::ExecuteTask(
 		Mem->OriginalMaxWalkSpeedCrouched = CMC->MaxWalkSpeedCrouched;
 	}
 
-	// Fix 6: use WP.Stance directly — no DefaultStance substitution
-	const FCompanionRouteWaypoint& FirstWP = Route->GetWaypoint(0);
-	ApplyStance(*Mem, FirstWP.Stance, FirstWP.SpeedOverride);
+	const FCompanionRouteWaypoint& StartWP = Route->GetWaypoint(StartIndex);
+	ApplyStance(*Mem, StartWP.Stance, StartWP.SpeedOverride);
 
-	if (!IssueMoveToWaypoint(*Controller, *Mem, 0))
+	if (!IssueMoveToWaypoint(*Controller, *Mem, StartIndex))
 		return EBTNodeResult::Failed;
 
 	UE_LOG(LogCompanionRoute, Log,
-		TEXT("%s: starting route %s (%d pts)"),
-		*Companion->GetName(), *Route->GetName(), Route->NumPoints());
+		TEXT("%s: starting route %s (%d pts, start WP %d)"),
+		*Companion->GetName(), *Route->GetName(), Route->NumPoints(), StartIndex);
 
 	return EBTNodeResult::InProgress;
 }
