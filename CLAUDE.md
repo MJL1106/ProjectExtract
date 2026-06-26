@@ -205,8 +205,9 @@ Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a c
 
 - **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, MCP :8088 — `execute_python_code`, `manage_skills`, `manage_asset`). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). To get it done autonomously, **dispatch `ue5-inengine-agent`** (via the `inengine-agent` skill) — it drives the editor MCP itself with all the tooling/skill/doc pointers pre-loaded. Alternatively hand off to a human via `inengine-checklist` (small) / `inengine-prompt` (large) in plain English. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. **NeoStack (:9315) is the fallback when VibeUE lacks the capability — especially in-engine AI systems: Behavior Trees, Blackboards, EQS, and AI Blueprint wiring (VibeUE has no BT/Blackboard skill).** Drive it via the `neostack-loop` / `neostack-blueprint` skills.
 - **Companion manual QA scenarios** live in `agent_docs/companion_testing.md` — refer there before claiming an AI feature works. When automation tests land, mirror the scenarios.
+- **Roadmap / feature checklist:** `agent_docs/project_roadmap.md` is the live build checklist — every remaining feature broken down by system with status (`[ ]` to-do / `[~]` in progress / `[x]` done) and *soft* week tags toward the 19 Aug deadline. Consult it for current state, and **tick items off as you complete them**. It also auto-reconciles from each commit via a git `post-commit` hook (`.githooks/roadmap-update.sh`); if hooks ever get reset, re-run `sh .githooks/install.sh`. Week tags/ordering are soft — don't treat the sequence as fixed. It carries the full week-by-week with enough per-item detail to act on cold.
 - **Branching:** feature-by-feature on user-managed branches. User handles PRs to `main`. No CI/CD assumptions. Don't auto-merge or push without explicit instruction.
-- **Commits:** never add `Co-Authored-By: Claude` trailer. Never `git push` without explicit instruction.
+- **Commits:** never add `Co-Authored-By: Claude` trailer. Never `git push` without explicit instruction. **Before any commit, reconcile `agent_docs/project_roadmap.md`** against the staged diff (flip items to `[~]`/`[x]`) so the checklist ships inside the work commit — this is the reliable path (uses session auth, and works when one chat commits another chat's work). The `post-commit` hook is an automatic backstop on top, for environments where headless `claude` is authenticated.
 
 ## Shortcuts (project-specific — `QPLAN`/`QCHECK`/`QPERF` in global)
 
@@ -217,7 +218,7 @@ Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a c
 ## Session Start
 
 At session start, on a fresh task, do this in order before responding:
-1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + NeoStack tooling map + gotchas); `companion_testing.md` for companion QA
+1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + NeoStack tooling map + gotchas); `companion_testing.md` for companion QA; **`project_roadmap.md` for the live feature checklist (what's done / in progress / to-do)**
 2. Confirm the active branch matches the feature being worked on (`git status`)
 3. If the task touches AI / movement / animation / replication / UI, **invoke the matching skill from the table above before any tool calls**
 4. **Invoke `ue5-team`** to decide solo vs team for the task — this is Step 0 of the workflow

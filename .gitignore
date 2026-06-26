@@ -80,4 +80,9 @@ build_*.log
 # ----------------------------------------------------------------------------
 Extraction/Content/ProceduralFPSKIT/Demo/Lyra_Content/Effects/Textures/Flipbooks/T_SmokeSwirl_3_Flipbook_CHANNELPACK.uasset
 /Extraction/SSs
-/agent_docs
+/agent_docs/*
+# Exceptions: the live roadmap checklist (auto-updated by the post-commit hook,
+# see .githooks/roadmap-update.sh) and the full brainstorm/timeline doc are
+# tracked so they live on the repo.
+!/agent_docs/project_roadmap.md
+!/agent_docs/project_brainstorm_timeline.md
