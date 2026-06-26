@@ -11,6 +11,8 @@
 #include "CompanionAnimInstance.h"
 #include "SuppressionComponent.h"
 #include "ExtractionTypes.h"
+#include "Character/ExtractionPlayer.h"
+#include "EnemyCharacter.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/WidgetComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -135,8 +137,13 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		TraversalComponent->OnTraversalEnded.RemoveAll(this);
 	}
 
+	DisarmCommandedTakedown();
+
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(DestroyTimerHandle);
+		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
+	}
 
 	if (HealthComponent)
 	{
@@ -264,6 +271,13 @@ void ACompanionCharacter::SetLowReadyAim(bool bNewLowReady)
 void ACompanionCharacter::OnRep_LowReadyAim()
 {
 	OnLowReadyAimChanged.Broadcast(bLowReadyAim);
+}
+
+// --- Scripted Aim ---
+
+void ACompanionCharacter::SetScriptedAim(bool bNewScriptedAim)
+{
+	bScriptedAim = bNewScriptedAim;
 }
 
 // --- Sprint API ---
@@ -396,6 +410,11 @@ void ACompanionCharacter::HandleDeath()
 {
 	UE_LOG(LogCompanion, Log, TEXT("%s died"), *GetName());
 
+	// FIX 1: Tear down any armed takedown immediately on death
+	DisarmCommandedTakedown();
+	if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController()))
+		CompAIC->ClearActiveCommand();
+
 	SetActorTickEnabled(false);
 
 	if (IsValid(TraversalComponent))
@@ -475,4 +494,224 @@ void ACompanionCharacter::OnTraversalMontageEnded(UAnimMontage* Montage, bool bI
 void ACompanionCharacter::HandleTraversalEnded()
 {
 	SetSprinting(false);
+}
+
+// --- Commanded Takedown ---
+
+void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod Method)
+{
+	if (bTakedownArmed) DisarmCommandedTakedown();
+	if (!IsValid(Victim)) return;
+
+	TakedownVictim = Victim;
+	TakedownActiveMethod = Method;
+	bTakedownArmed = true;
+	bTakedownPlayerCommitted = false;
+	bTakedownInPosition = false;
+	bTakedownExecuting = false;
+	bTakedownMontagePlaying = false;
+
+	// Aim at the victim
+	SetAimTarget(Victim);
+
+	// Bind to the player's commit delegate
+	ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController());
+	APawn* PlayerPawn = IsValid(CompAIC) ? CompAIC->GetPlayerCharacter() : nullptr;
+	AExtractionPlayer* Player = Cast<AExtractionPlayer>(PlayerPawn);
+	if (IsValid(Player))
+	{
+		TakedownPlayerRef = Player;
+		Player->OnPlayerTakedownCommitted.AddDynamic(this, &ACompanionCharacter::OnPlayerTakedownCommittedHandler);
+	}
+
+	UE_LOG(LogCompanion, Log, TEXT("Takedown armed: victim=%s method=%s"),
+		*GetNameSafe(Victim), Method == ETakedownMethod::Knife ? TEXT("Knife") : TEXT("Shoot"));
+}
+
+void ACompanionCharacter::DisarmCommandedTakedown()
+{
+	if (!bTakedownArmed && !bTakedownMontagePlaying) return;
+
+	// Unbind delegate
+	AExtractionPlayer* Player = TakedownPlayerRef.Get();
+	if (IsValid(Player))
+		Player->OnPlayerTakedownCommitted.RemoveDynamic(this, &ACompanionCharacter::OnPlayerTakedownCommittedHandler);
+
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
+
+	TakedownVictim.Reset();
+	TakedownPlayerRef.Reset();
+	bTakedownArmed = false;
+	bTakedownPlayerCommitted = false;
+	bTakedownInPosition = false;
+	bTakedownExecuting = false;
+	bTakedownCrouchApproach = false;
+	bTakedownMontagePlaying = false;
+
+	UE_LOG(LogCompanion, Log, TEXT("Takedown disarmed"));
+}
+
+void ACompanionCharacter::OnPlayerTakedownCommittedHandler()
+{
+	if (!bTakedownArmed) return;
+
+	bTakedownPlayerCommitted = true;
+	UE_LOG(LogCompanion, Log, TEXT("Takedown: player committed signal received (inPosition=%d)"),
+		(int32)bTakedownInPosition);
+
+	if (bTakedownInPosition) ExecuteCommandedTakedown();
+}
+
+void ACompanionCharacter::SetTakedownInPosition(bool bInPos)
+{
+	bTakedownInPosition = bInPos;
+
+	if (bInPos && bTakedownPlayerCommitted && bTakedownArmed)
+	{
+		UE_LOG(LogCompanion, Log, TEXT("Takedown: in position with pending player commit — executing now"));
+		ExecuteCommandedTakedown();
+	}
+}
+
+void ACompanionCharacter::ExecuteCommandedTakedown()
+{
+	if (!bTakedownPlayerCommitted || !bTakedownInPosition || !bTakedownArmed) return;
+
+	bTakedownExecuting = true;
+
+	AActor* Victim = TakedownVictim.Get();
+	if (!IsValid(Victim))
+	{
+		FinishCommandedTakedown();
+		return;
+	}
+
+	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Victim);
+	if (!IsValid(Enemy))
+	{
+		FinishCommandedTakedown();
+		return;
+	}
+
+	if (TakedownActiveMethod == ETakedownMethod::Knife)
+	{
+		// Face the victim
+		const FVector ToVictim = Victim->GetActorLocation() - GetActorLocation();
+		SetActorRotation(FRotator(0.f, ToVictim.Rotation().Yaw, 0.f));
+
+		// FIX 4: Kill first, only play montage if kill succeeded (no stab-on-air)
+		if (!Enemy->ExecuteTakedown(this))
+		{
+			UE_LOG(LogCompanion, Warning, TEXT("Takedown: knife ExecuteTakedown returned false — aborting"));
+			FinishCommandedTakedown();
+			return;
+		}
+
+		UAnimInstance* AnimInst = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+		const float MontageLen = IsValid(AnimInst) ? AnimInst->Montage_Play(KnifeTakedownMontage) : 0.f;
+		if (MontageLen <= 0.f)
+		{
+			UE_LOG(LogCompanion, Warning, TEXT("Takedown: knife montage did not play (null or skeleton-incompatible) — instant-kill fallback"));
+			FinishCommandedTakedown();
+			return;
+		}
+
+		bTakedownMontagePlaying = true;
+		FOnMontageEnded EndDelegate;
+		EndDelegate.BindUObject(this, &ACompanionCharacter::OnTakedownMontageEnded);
+		AnimInst->Montage_SetEndDelegate(EndDelegate, KnifeTakedownMontage);
+		UE_LOG(LogCompanion, Log, TEXT("Takedown: knife montage playing, victim killed"));
+	}
+	else // Shoot
+	{
+		SetAimTarget(Victim);
+
+		// FIX 5: Gate on ammo + LoS before committing the shot
+		if (!CanFire())
+		{
+			UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot aborted — cannot fire (no ammo or weapon)"));
+			FinishCommandedTakedown();
+			return;
+		}
+
+		// LoS trace from companion eyes to victim
+		if (const UWorld* World = GetWorld())
+		{
+			FVector EyesLoc;
+			FRotator EyesRot;
+			GetActorEyesViewPoint(EyesLoc, EyesRot);
+
+			FHitResult Hit;
+			FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(CompanionShootTakedown), false, this);
+			TraceParams.AddIgnoredActor(Victim);
+			if (IsValid(CurrentWeapon)) TraceParams.AddIgnoredActor(CurrentWeapon);
+
+			const FVector TraceEnd = GetAimPointForTarget(Victim);
+			const bool bBlocked = World->LineTraceSingleByChannel(
+				Hit, EyesLoc, TraceEnd, ECC_Visibility, TraceParams);
+
+			if (bBlocked)
+			{
+				UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot aborted — LoS blocked by %s"), *GetNameSafe(Hit.GetActor()));
+				FinishCommandedTakedown();
+				return;
+			}
+
+			World->GetTimerManager().SetTimer(ShootDelayTimerHandle, FTimerDelegate::CreateWeakLambda(this,
+				[this, Enemy]()
+				{
+					if (!IsValid(Enemy))
+					{
+						FinishCommandedTakedown();
+						return;
+					}
+					StartWeaponFire();
+					Enemy->ExecuteTakedown(this);
+					StopWeaponFire();
+					UE_LOG(LogCompanion, Log, TEXT("Takedown: shoot executed"));
+					FinishCommandedTakedown();
+				}), ShootAimSettleDelay, false);
+		}
+		else
+		{
+			FinishCommandedTakedown();
+		}
+	}
+}
+
+void ACompanionCharacter::OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted)
+{
+	bTakedownMontagePlaying = false;
+	FinishCommandedTakedown();
+}
+
+void ACompanionCharacter::FinishCommandedTakedown()
+{
+	const bool bWasArmed = bTakedownArmed;
+
+	// Unbind before broadcast to avoid re-entry
+	AExtractionPlayer* Player = TakedownPlayerRef.Get();
+	if (IsValid(Player))
+		Player->OnPlayerTakedownCommitted.RemoveDynamic(this, &ACompanionCharacter::OnPlayerTakedownCommittedHandler);
+
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
+
+	TakedownVictim.Reset();
+	TakedownPlayerRef.Reset();
+	bTakedownArmed = false;
+	bTakedownPlayerCommitted = false;
+	bTakedownInPosition = false;
+	bTakedownExecuting = false;
+	bTakedownCrouchApproach = false;
+	bTakedownMontagePlaying = false;
+
+	SetAimTarget(nullptr);
+
+	if (bWasArmed)
+	{
+		UE_LOG(LogCompanion, Log, TEXT("Takedown: finished, broadcasting completion"));
+		OnCommandedTakedownFinished.Broadcast();
+	}
 }

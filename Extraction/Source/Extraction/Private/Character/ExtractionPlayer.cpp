@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionPlayer.h"
+#include "Components/CompanionCommandComponent.h"
 #include "AI/AITargetingStatics.h"
 #include "Perception/AISightTargetInterface.h"
 #include "Perception/AISense_Sight.h"
@@ -47,6 +48,7 @@ AExtractionPlayer::AExtractionPlayer()
 	FootstepNoiseComponent = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepNoiseComponent"));
 	WeaponComponent   = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
+	CompanionCommandComponent = CreateDefaultSubobject<UCompanionCommandComponent>(TEXT("CompanionCommandComponent"));
 
 	// Bug 6: weapon hitscan traces ECC_Visibility, which the inherited CharacterMesh profile ignores —
 	// block it on the mesh so enemy fire registers on the player.
@@ -299,6 +301,18 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 	if (TakedownAction)
 		EnhancedInput->BindAction(TakedownAction, ETriggerEvent::Started, this, &AExtractionPlayer::TakedownInput);
+
+	if (IA_CompanionPing)
+		EnhancedInput->BindAction(IA_CompanionPing, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionPingInput);
+
+	if (IA_CompanionTakedownKnife)
+		EnhancedInput->BindAction(IA_CompanionTakedownKnife, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionConfirmTakedownKnifeInput);
+
+	if (IA_CompanionTakedownShoot)
+		EnhancedInput->BindAction(IA_CompanionTakedownShoot, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionConfirmTakedownShootInput);
+
+	if (IA_CompanionBreach)
+		EnhancedInput->BindAction(IA_CompanionBreach, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionConfirmBreachInput);
 
 	// Temp debug: H key applies 25 damage
 	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionPlayer::DebugApplyDamage);
@@ -649,6 +663,7 @@ void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
 	if (!IsValid(TakedownMontage))
 	{
 		// Instant path: enemy stays in place, snap/align is skipped entirely.
+		OnPlayerTakedownCommitted.Broadcast();
 		Best->ExecuteTakedown(this);
 		return;
 	}
@@ -699,6 +714,7 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 
 	PendingTakedownVictim = Victim;
 	bTakedownMontageActive = true;
+	OnPlayerTakedownCommitted.Broadcast();
 
 	UAnimInstance* AnimInst = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
 	if (!IsValid(AnimInst))
@@ -724,6 +740,32 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 	// Notify BP now that the montage is confirmed running and the end delegate is bound.
 	// Must NOT be called on the early-return failure paths above (no montage = no restore needed).
 	OnTakedownStarted(Victim);
+}
+
+// ---- Companion command input handlers ----
+
+void AExtractionPlayer::CompanionPingInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->IssuePing();
+}
+
+void AExtractionPlayer::CompanionConfirmTakedownKnifeInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->ConfirmTakedownKnife();
+}
+
+void AExtractionPlayer::CompanionConfirmTakedownShootInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->ConfirmTakedownShoot();
+}
+
+void AExtractionPlayer::CompanionConfirmBreachInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->ConfirmBreach();
 }
 
 void AExtractionPlayer::FinishPendingTakedown()

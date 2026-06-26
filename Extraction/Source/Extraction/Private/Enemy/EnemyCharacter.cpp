@@ -1028,6 +1028,33 @@ bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator) const
 	return Dot <= ArcThreshold;
 }
 
+bool AEnemyCharacter::IsTakedownEligible() const
+{
+	if (TakedownVolumeRefCount <= 0) return false;
+
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	const UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
+	if (!IsValid(Awareness)) return false;
+
+	return Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware;
+}
+
+bool AEnemyCharacter::HasDetectedPlayer() const
+{
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return false;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return false;
+
+	return Awareness->GetAwarenessState() == EEnemyAwarenessState::Combat;
+}
+
+void AEnemyCharacter::SetInTakedownVolume(bool bInVolume)
+{
+	TakedownVolumeRefCount = FMath::Max(0, TakedownVolumeRefCount + (bInVolume ? 1 : -1));
+}
+
 bool AEnemyCharacter::BeginTakedownHold(AActor* TakedownInstigator, FVector SnapLocation, float SnapYaw, float WatchdogTimeout)
 {
 	if (!CanBeTakenDown(TakedownInstigator)) return false;

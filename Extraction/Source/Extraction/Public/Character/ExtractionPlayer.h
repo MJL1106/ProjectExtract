@@ -24,12 +24,16 @@ class UHealthComponent;
 class UFootstepNoiseComponent;
 class UWeaponComponent;
 class UTraversalComponent;
+class UCompanionCommandComponent;
 class UAnimMontage;
 struct FInputActionValue;
 
 // Distinct name from the legacy AExtractionCharacter declaration to avoid linker conflicts during the migration period.
 // Rename to FOnDBNOStateChanged once AExtractionCharacter is retired (Phase 5).
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPlayerDBNOStateChanged, bool, bNewIsDBNO, float, BleedoutDuration);
+
+/** Broadcast the moment the player commits their own takedown (both montage and instant paths). */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnPlayerTakedownCommitted);
 
 /**
  * Minimal C++ base for the kit-reparented player Blueprint.
@@ -72,6 +76,10 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
 	FOnPlayerDBNOStateChanged OnDBNOStateChanged;
+
+	/** Fires the moment the player commits their own takedown. Companion BT tasks listen here for sync. */
+	UPROPERTY(BlueprintAssignable, Category = "Takedown|Events")
+	FOnPlayerTakedownCommitted OnPlayerTakedownCommitted;
 
 	// ---- BlueprintImplementableEvents ----
 
@@ -188,6 +196,9 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UTraversalComponent> TraversalComponent;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UCompanionCommandComponent> CompanionCommandComponent;
+
 	// ---- Input Mapping Context (assigned in BP child class) ----
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
@@ -221,6 +232,24 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> TakedownAction;
+
+	// ---- Companion Command Input Actions (assigned in BP child class) ----
+
+	/** Middle-mouse ping — camera traces and classifies a pending companion command. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionPing;
+
+	/** Confirm a companion takedown with knife method. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionTakedownKnife;
+
+	/** Confirm a companion takedown with shoot method. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionTakedownShoot;
+
+	/** Confirm a companion breach command. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionBreach;
 
 	// ---- Takedown Config ----
 
@@ -348,6 +377,12 @@ private:
 
 	void TakedownInput(const FInputActionValue& Value);
 	void StartMontageDeferred(AEnemyCharacter* Victim);
+
+	// ---- Companion command input handlers ----
+	void CompanionPingInput(const FInputActionValue& Value);
+	void CompanionConfirmTakedownKnifeInput(const FInputActionValue& Value);
+	void CompanionConfirmTakedownShootInput(const FInputActionValue& Value);
+	void CompanionConfirmBreachInput(const FInputActionValue& Value);
 
 	UFUNCTION()
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);

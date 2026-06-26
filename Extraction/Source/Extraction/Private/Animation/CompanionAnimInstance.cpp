@@ -48,6 +48,8 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	if (!IsValid(OwningCompanion) || !IsValid(MovementComponent)) return;
 
 	CurrentPosture = OwningCompanion->GetPosture();
+	bTakedownCrouchApproach = OwningCompanion->IsInTakedownApproach();
+	bTakedownMontagePlaying = OwningCompanion->IsTakedownMontagePlaying();
 
 	const FVector RawVelocity = MovementComponent->Velocity;
 	FVector EffectiveVelocity = RawVelocity;
@@ -128,6 +130,16 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		const FRotator AimRot = ToTarget.Rotation();
 		const FRotator ActorRot = OwningCompanion->GetActorRotation();
 		const FRotator Delta = (AimRot - ActorRot).GetNormalized();
+		AimPitch = Delta.Pitch;
+		AimYaw = Delta.Yaw;
+		bIsAiming = true;
+	}
+	else if (OwningCompanion->IsScriptedAiming())
+	{
+		// Weapon up with no actor target (e.g. route Alert/Crouch leg):
+		// aim along where the AIController is looking (focal point drives control rotation).
+		const FRotator AimRot = OwningCompanion->GetBaseAimRotation();
+		const FRotator Delta = (AimRot - OwningCompanion->GetActorRotation()).GetNormalized();
 		AimPitch = Delta.Pitch;
 		AimYaw = Delta.Yaw;
 		bIsAiming = true;

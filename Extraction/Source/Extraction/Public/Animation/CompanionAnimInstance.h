@@ -225,6 +225,16 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Companion")
 	ECompanionPosture CurrentPosture = ECompanionPosture::Exploration;
 
+	// --- Takedown (read each tick in NativeUpdateAnimation) ---
+
+	/** True while the companion is crouched-sneaking toward a knife takedown anchor. */
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Takedown")
+	bool bTakedownCrouchApproach = false;
+
+	/** True while a takedown montage is actively playing. */
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Takedown")
+	bool bTakedownMontagePlaying = false;
+
 private:
 	UFUNCTION()
 	void OnReloadMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);

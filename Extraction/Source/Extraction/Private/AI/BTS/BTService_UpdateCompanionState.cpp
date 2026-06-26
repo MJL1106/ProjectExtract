@@ -14,6 +14,7 @@
 #include "Character/ExtractionPlayerInterface.h"
 #include "HealthComponent.h"
 #include "ExtractionTypes.h"
+#include "EnemyCharacter.h"
 #include "GameplayTagAssetInterface.h"
 #include "Kismet/GameplayStatics.h"
 #include "AI/Cover/AICoverSlot.h"
@@ -104,6 +105,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		UHealthComponent* EnemyHealth = Actor->FindComponentByClass<UHealthComponent>();
 		if (EnemyHealth && EnemyHealth->IsDead()) continue;
 
+		// Don't engage enemies that haven't detected the player (stealth preservation).
+		// Non-AEnemyCharacter actors with the enemy tag keep current behavior (treat as engageable).
+		if (const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Actor))
+			if (!Enemy->HasDetectedPlayer()) continue;
+
 		const float DistSq = FVector::DistSquared(MyLocation, Actor->GetActorLocation());
 
 		if (DistSq < BestDistSq)
@@ -158,6 +164,10 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 				UHealthComponent* ProxHealth = ProxActor->FindComponentByClass<UHealthComponent>();
 				if (ProxHealth && ProxHealth->IsDead()) continue;
+
+				// Don't engage enemies that haven't detected the player (stealth preservation).
+				if (const AEnemyCharacter* ProxEnemy = Cast<AEnemyCharacter>(ProxActor))
+					if (!ProxEnemy->HasDetectedPlayer()) continue;
 
 				// LoS check from eye height — must be unobstructed or hit the candidate directly.
 				// Fix B: ignore list mirrors the combat task (self + weapon + attached actors).

@@ -198,6 +198,21 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Takedown")
 	bool CanBeTakenDown(const AActor* TakedownInstigator) const;
 
+	/** True when this enemy is both Unaware AND inside at least one ATakedownVolume.
+	 *  Consumed by teammate A's ping classification and any companion BT task. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Takedown")
+	bool IsTakedownEligible() const;
+
+	/** True when this enemy's awareness state indicates it has detected the player
+	 *  (Combat). Returns false for Unaware, Suspicious, and Searching — and false
+	 *  if the controller or awareness component is missing (unknown = don't engage).
+	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it; only the companion BT service calls it. */
+	bool HasDetectedPlayer() const;
+
+	/** Called by ATakedownVolume on overlap begin/end. Increments/decrements an internal
+	 *  counter so overlapping more than one volume is handled correctly. */
+	void SetInTakedownVolume(bool bInVolume);
+
 	/**
 	 * Phase 1 of a montage-deferred takedown: validates CanBeTakenDown, sets pending-death flag,
 	 * broadcasts OnTakedownExecuted, snaps victim position/facing, and freezes the enemy
@@ -418,6 +433,9 @@ private:
 
 	bool bPendingTakedownDeath = false;
 	bool bTakedownFrozen = false;
+
+	/** Number of ATakedownVolumes currently containing this enemy. Positive = in at least one volume. */
+	int32 TakedownVolumeRefCount = 0;
 
 	/** Generic damage amount guaranteed to kill through any shield (takedown path). */
 	static constexpr float TakedownDamage = 1.e6f;
