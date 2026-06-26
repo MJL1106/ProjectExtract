@@ -33,7 +33,7 @@ Target: whole list done by end of W7 (Sun 9/8). `[Core]` ships in every scenario
 - [ ] [Core] **Marketplace level + blockout.** Buy a pre-built level (factory or apartment complex; cluttered/tight spacing) and rough-block the single polished level: a neutral no-enemy start → fight from point A → B → point of interest → extract back out. Need a stage to demo everything on.
 - [ ] [Core] **Companion control framework — the "ping" system.** The player marks something in the world (a "ping") — an enemy, a door, a loot spot — and the companion acts on that ping. This input layer is the spine every later companion command (takedown, breach, loot, mode-swap) plugs into. *(Follow / stay-behind movement already exists — not in scope.)*
 - [ ] [Core] **Pre-authored companion route tool.** A way to hand-place a path in the level that the companion follows on cue — e.g. a cinematic "companion takes the lead off the rooftop at mission start, follows the set path, then breaks off." Reused later for combat-mode lead.
-- [ ] [Core] **Fix player sprint-arm bug.** Holding sprint, then stopping while still holding the sprint key, leaves the player's arms animating as if sprinting while stationary.
+- [x] [Core] **Fix player sprint-arm bug.** Holding sprint, then stopping while still holding the sprint key, leaves the player's arms animating as if sprinting while stationary.
 
 ### Week 29/06 (W2) — Prototype 2 build → deliver Tue 7/7
 - [ ] [Core] **Companion-synced takedown.** Player pings an enemy for a close-range takedown and the companion plays a paired/synced takedown animation alongside. *(The base player takedown already exists; the companion-side sync is the new part.)*
