@@ -60,6 +60,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Command")
 	ECompanionCommand GetPendingCommand() const { return PendingCommand; }
 
+	/** Returns the resolved companion, or null if not yet spawned. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Command")
+	ACompanionCharacter* GetCompanion() { return ResolveCompanion(); }
+
 	// ---- Delegates ----
 
 	/** Broadcast whenever the pending target or command changes (including clears). */

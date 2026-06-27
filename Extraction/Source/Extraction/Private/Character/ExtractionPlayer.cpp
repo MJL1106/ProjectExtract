@@ -21,6 +21,7 @@
 #include "HealthComponent.h"
 #include "FootstepNoiseComponent.h"
 #include "EnemyCharacter.h"
+#include "Companion/CompanionCharacter.h"
 #include "EngineUtils.h"
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
@@ -232,6 +233,8 @@ void AExtractionPlayer::Tick(float DeltaTime)
 
 		AutoLeanAlpha = FMath::FInterpTo(AutoLeanAlpha, AutoLeanTargetAlpha, DeltaTime, AutoLeanInterpSpeed);
 	}
+
+	if (IsLocallyControlled()) UpdateCompanionSoftCollision();
 }
 
 void AExtractionPlayer::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -534,6 +537,66 @@ float AExtractionPlayer::GetVaultSurfaceHeight() const
 {
 	if (!IsValid(TraversalComponent)) return 0.f;
 	return TraversalComponent->GetVaultSurfaceHeight();
+}
+
+// ---- Companion Soft Collision ----
+
+namespace
+{
+	/** Strip the component of Push that opposes the player's input so they can walk through. */
+	FVector StripOpposingPush(const FVector& Push, const FVector& RawInput)
+	{
+		FVector InputDir = RawInput;
+		InputDir.Z = 0.f;
+		if (InputDir.IsNearlyZero()) return Push;
+		InputDir = InputDir.GetSafeNormal();
+		const float Opposing = FVector::DotProduct(Push, InputDir);
+		return (Opposing < 0.f) ? (Push - InputDir * Opposing) : Push;
+	}
+}
+
+void AExtractionPlayer::UpdateCompanionSoftCollision()
+{
+	if (GetIsDBNO() || bIsReviving) return;
+	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy()) return;
+
+	if (!IsValid(CompanionCommandComponent)) return;
+	ACompanionCharacter* Companion = CompanionCommandComponent->GetCompanion();
+	if (!IsValid(Companion)) return;
+
+	UCapsuleComponent* CompCapsule = Companion->GetCapsuleComponent();
+	if (!IsValid(CompCapsule) || CompCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) return;
+
+	if (WiredCompanion.Get() != Companion)
+	{
+		if (ACompanionCharacter* Old = WiredCompanion.Get())
+		{
+			if (UCapsuleComponent* OldCap = Old->GetCapsuleComponent())
+				OldCap->IgnoreActorWhenMoving(this, false);
+			GetCapsuleComponent()->IgnoreActorWhenMoving(Old, false);
+		}
+		GetCapsuleComponent()->IgnoreActorWhenMoving(Companion, true);
+		CompCapsule->IgnoreActorWhenMoving(this, true);
+		WiredCompanion = Companion;
+	}
+
+	FVector Delta = GetActorLocation() - Companion->GetActorLocation();
+	Delta.Z = 0.f;
+
+	const float CombinedRadius = GetCapsuleComponent()->GetScaledCapsuleRadius()
+		+ CompCapsule->GetScaledCapsuleRadius()
+		+ CompanionPushPadding;
+
+	const float Dist = Delta.Size();
+	if (Dist >= CombinedRadius) return;
+
+	FVector PushDir = (Dist > KINDA_SMALL_NUMBER) ? (Delta / Dist) : GetActorRightVector();
+	PushDir.Z = 0.f;
+	PushDir = PushDir.GetSafeNormal();
+
+	const float DepthFraction = 1.f - (Dist / CombinedRadius);
+	const FVector Push = StripOpposingPush(PushDir * (CompanionPushStrength * DepthFraction), GetLastMovementInputVector());
+	AddMovementInput(Push, 1.f);
 }
 
 // ---- Auto-Lean ----

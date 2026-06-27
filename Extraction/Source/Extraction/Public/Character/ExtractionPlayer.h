@@ -16,6 +16,7 @@
 
 class AWeaponBase;
 class AEnemyCharacter;
+class ACompanionCharacter;
 class UInputComponent;
 class UInputAction;
 class UInputMappingContext;
@@ -328,6 +329,16 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean")
 	bool bDrawLeanDebug = false;
 
+	// ---- Companion Soft Collision ----
+
+	/** AddMovementInput scale applied when the player overlaps the companion capsule. Values above 1 push harder. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|SoftCollision", meta = (ClampMin = "0.0"))
+	float CompanionPushStrength = 1.75f;
+
+	/** Extra personal-space padding (cm) added on top of the combined capsule radii before the push kicks in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|SoftCollision", meta = (ClampMin = "0.0"))
+	float CompanionPushPadding = 0.f;
+
 	// ---- Hitbox Config ----
 
 	/** Maps skeleton bone names to hit regions for damage multiplier lookup.
@@ -344,6 +355,13 @@ protected:
 	float BleedoutTimeRemaining = 0.f;
 
 private:
+
+	// ---- Companion Soft Collision State ----
+
+	/** Tracks which companion instance has its IgnoreActorWhenMoving wired, so respawns re-wire correctly. */
+	TWeakObjectPtr<ACompanionCharacter> WiredCompanion;
+
+	void UpdateCompanionSoftCollision();
 
 	// ---- Auto-Lean State ----
 
