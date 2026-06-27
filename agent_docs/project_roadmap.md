@@ -37,7 +37,7 @@ Target: whole list done by end of W7 (Sun 9/8). `[Core]` ships in every scenario
 
 ### Week 29/06 (W2) — Prototype 2 build → deliver Tue 7/7
 - [x] [Core] **Companion-synced takedown.** Player pings an enemy for a close-range takedown and the companion plays a paired/synced takedown animation alongside. *(The base player takedown already exists; the companion-side sync is the new part.)* — shoot/gun path done: ranged headshot kill synced to player gunfire (2-enemy) / autonomous 2–4s (lone), with face → aim-in → 2 shots → drop → lower presentation. Knife paired path runs via instant-kill fallback (stab anim still missing).
-- [~] [Core] **Door breach v1 (loud).** Player pings a room/door; the companion kicks it down and goes in guns-blazing. Just the loud style for P2 — the other styles come in W5.
+- [x] [Core] **Door breach v1 (loud).** Player pings a room/door; the companion kicks it down and goes in guns-blazing. Just the loud style for P2 — the other styles come in W5. *(Breach door has a mesh + collision; companion paths to it, breaches on arrival, door swings open, companion holds ~3s then resumes follow.)*
 - [ ] [Core] **Enemy model swap.** Replace the enemy character models and wire a few enemy types into the level.
 - [ ] [Core] **Tune the loop.** Get 2–5 minutes of gameplay reading well; test and finalise for the Tuesday 7/7 delivery.
 

@@ -43,9 +43,10 @@ private:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door", meta = (AllowPrivateAccess))
 	TObjectPtr<UStaticMeshComponent> DoorMesh;
 
-	/** Yaw rotation when fully open (degrees, relative to closed). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "1.0", ClampMax = "180.0"))
-	float OpenAngle = 90.f;
+	/** Yaw rotation when fully open (degrees, relative to closed). Sign sets the swing
+	 *  direction: positive opens one way, negative the other. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "-180.0", ClampMax = "180.0"))
+	float OpenAngle = -90.f;
 
 	/** Time to swing from closed to open (seconds). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "0.1"))

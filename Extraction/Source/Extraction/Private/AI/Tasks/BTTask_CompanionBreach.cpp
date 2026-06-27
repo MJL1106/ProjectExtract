@@ -9,6 +9,16 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogCompanionBreach, Log, All);
 
+// Distance from pawn to the nearest point on the door's collision bounds (not its actor origin).
+// This makes the range check robust to large doors whose pivot sits at the hinge edge.
+static float DistanceFromPawnToDoor(const APawn* Pawn, const AActor* Door)
+{
+	if (!IsValid(Pawn) || !IsValid(Door)) return TNumericLimits<float>::Max();
+	const FBox Bounds = Door->GetComponentsBoundingBox(false);
+	if (!Bounds.IsValid) return FVector::Dist(Pawn->GetActorLocation(), Door->GetActorLocation());
+	return FMath::Sqrt(Bounds.ComputeSquaredDistanceToPoint(Pawn->GetActorLocation()));
+}
+
 UBTTask_CompanionBreach::UBTTask_CompanionBreach()
 {
 	NodeName = TEXT("Companion Breach");
@@ -20,6 +30,7 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 {
 	bMoveRequested = false;
 	bBreachTriggered = false;
+	BreachWaitElapsed = 0.f;
 	CachedDoor.Reset();
 
 	ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
@@ -65,7 +76,7 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 	APawn* Pawn = AIC->GetPawn();
 	if (IsValid(Pawn))
 	{
-		const float Dist = FVector::Dist(Pawn->GetActorLocation(), Door->GetActorLocation());
+		const float Dist = DistanceFromPawnToDoor(Pawn, Door);
 		if (Dist <= InteractionRange)
 		{
 			// Already close enough — breach immediately in TickTask.
@@ -93,7 +104,21 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 
 void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
-	if (bBreachTriggered) return;
+	// Post-breach: hold at the door for PostBreachWaitTime, then finish so Follow resumes.
+	if (bBreachTriggered)
+	{
+		BreachWaitElapsed += DeltaSeconds;
+		if (BreachWaitElapsed >= PostBreachWaitTime)
+		{
+			if (ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner()))
+			{
+				AIC->ClearActiveCommand();
+			}
+			CachedDoor.Reset();
+			FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		}
+		return;
+	}
 
 	ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
 	if (!IsValid(AIC))
@@ -129,34 +154,35 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		return;
 	}
 
-	// Check if the move request failed asynchronously (path blocked, etc.).
-	if (bMoveRequested && AIC->GetMoveStatus() == EPathFollowingStatus::Idle)
+	const float Dist = DistanceFromPawnToDoor(Pawn, Door);
+	const bool bPathDone = (AIC->GetMoveStatus() == EPathFollowingStatus::Idle);
+
+	// Breach when genuinely adjacent (nav reached the door), OR when the path has completed and
+	// we're within the generous arrival cap (free-standing door / nav gap — got as close as we can).
+	const bool bShouldBreach = (Dist <= InteractionRange) || (bPathDone && Dist <= ArrivalBreachRange);
+
+	if (!bShouldBreach)
 	{
-		const float Dist = FVector::Dist(Pawn->GetActorLocation(), Door->GetActorLocation());
-		if (Dist > InteractionRange)
+		// If the path is done but we're still beyond the arrival cap, the companion genuinely
+		// couldn't reach the door — fail. Otherwise keep moving/waiting.
+		if (bMoveRequested && bPathDone)
 		{
-			UE_LOG(LogCompanionBreach, Warning, TEXT("TickTask: path completed but still out of range (%.0f > %.0f)"),
-				Dist, InteractionRange);
+			UE_LOG(LogCompanionBreach, Warning, TEXT("TickTask: path completed but too far to breach (%.0f > %.0f)"),
+				Dist, ArrivalBreachRange);
 			FailAndClear(OwnerComp);
 			FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-			return;
 		}
+		return;
 	}
 
-	// Distance check.
-	const float Dist = FVector::Dist(Pawn->GetActorLocation(), Door->GetActorLocation());
-	if (Dist > InteractionRange) return;
-
-	// Within range — execute breach.
+	// Within range (or arrived as close as possible) — execute breach.
 	AIC->StopMovement();
 	bBreachTriggered = true;
 	IBreachable::Execute_Breach(Door, Pawn);
-
-	UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: breached %s at dist=%.0f"), *GetNameSafe(Door), Dist);
-
-	AIC->ClearActiveCommand();
-	CachedDoor.Reset();
-	FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+	UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: breached %s at dist=%.0f (pathDone=%d), holding %.1fs"),
+		*GetNameSafe(Door), Dist, bPathDone ? 1 : 0, PostBreachWaitTime);
+	BreachWaitElapsed = 0.f;
+	return;
 }
 
 EBTNodeResult::Type UBTTask_CompanionBreach::AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
@@ -181,4 +207,5 @@ void UBTTask_CompanionBreach::FailAndClear(UBehaviorTreeComponent& OwnerComp)
 	CachedDoor.Reset();
 	bMoveRequested = false;
 	bBreachTriggered = false;
+	BreachWaitElapsed = 0.f;
 }

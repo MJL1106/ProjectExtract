@@ -30,6 +30,17 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "10.0"))
 	float MoveAcceptRadius = 120.f;
 
+	/** If the move-to path completes (companion got as close as the navmesh allows) within this
+	 *  distance of the door, breach anyway. Covers free-standing doors / nav gaps where the pawn
+	 *  can't reach InteractionRange. Should be >= InteractionRange. (cm) */
+	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "10.0"))
+	float ArrivalBreachRange = 300.f;
+
+	/** Seconds the companion holds at the door after breaching, before the task finishes and
+	 *  it returns to following the player. (s) */
+	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "0.0"))
+	float PostBreachWaitTime = 3.f;
+
 private:
 	/** Cached door from the blackboard. Weak — the door may be destroyed mid-task. */
 	TWeakObjectPtr<AActor> CachedDoor;
@@ -39,6 +50,9 @@ private:
 
 	/** True once Breach has been called — waiting for the task to wrap up. */
 	bool bBreachTriggered = false;
+
+	/** Time accumulated since the breach fired, while holding at the door. */
+	float BreachWaitElapsed = 0.f;
 
 	/** Clean up and fail. */
 	void FailAndClear(UBehaviorTreeComponent& OwnerComp);
