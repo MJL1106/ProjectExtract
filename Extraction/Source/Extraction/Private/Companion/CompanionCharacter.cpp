@@ -14,6 +14,7 @@
 #include "Character/ExtractionPlayer.h"
 #include "EnemyCharacter.h"
 #include "Components/CapsuleComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/WidgetComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
@@ -50,6 +51,14 @@ ACompanionCharacter::ACompanionCharacter()
 	// Bug 6: weapon hitscan traces ECC_Visibility, which the inherited CharacterMesh profile ignores —
 	// block it on the mesh so enemy fire actually registers on the companion.
 	GetMesh()->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+
+	TakedownKnifeMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("TakedownKnifeMesh"));
+	TakedownKnifeMesh->SetupAttachment(GetMesh(), KnifeAttachSocket);
+	TakedownKnifeMesh->SetHiddenInGame(true);
+	TakedownKnifeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	TakedownKnifeMesh->SetCastShadow(false);
+	TakedownKnifeMesh->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::OnlyTickPoseWhenRendered;
+	TakedownKnifeMesh->SetComponentTickEnabled(false);
 
 	OwnedTags.AddTag(TAG_Character_Companion);
 
@@ -514,14 +523,17 @@ void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod M
 	// Aim at the victim
 	SetAimTarget(Victim);
 
-	// Bind to the player's commit delegate
+	// Bind to the player's commit delegate — method-specific
 	ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController());
 	APawn* PlayerPawn = IsValid(CompAIC) ? CompAIC->GetPlayerCharacter() : nullptr;
 	AExtractionPlayer* Player = Cast<AExtractionPlayer>(PlayerPawn);
 	if (IsValid(Player))
 	{
 		TakedownPlayerRef = Player;
-		Player->OnPlayerTakedownCommitted.AddDynamic(this, &ACompanionCharacter::OnPlayerTakedownCommittedHandler);
+		if (Method == ETakedownMethod::Shoot)
+			Player->OnPlayerFiredWeapon.AddDynamic(this, &ACompanionCharacter::OnPlayerFiredWeaponHandler);
+		else
+			Player->OnPlayerTakedownCommitted.AddDynamic(this, &ACompanionCharacter::OnPlayerTakedownCommittedHandler);
 	}
 
 	UE_LOG(LogCompanion, Log, TEXT("Takedown armed: victim=%s method=%s"),
@@ -532,13 +544,31 @@ void ACompanionCharacter::DisarmCommandedTakedown()
 {
 	if (!bTakedownArmed && !bTakedownMontagePlaying) return;
 
-	// Unbind delegate
+	// Unbind both delegates — safe even if only one was bound
 	AExtractionPlayer* Player = TakedownPlayerRef.Get();
 	if (IsValid(Player))
+	{
 		Player->OnPlayerTakedownCommitted.RemoveDynamic(this, &ACompanionCharacter::OnPlayerTakedownCommittedHandler);
+		Player->OnPlayerFiredWeapon.RemoveDynamic(this, &ACompanionCharacter::OnPlayerFiredWeaponHandler);
+	}
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
+
+	if (AActor* IgnoredVictim = TakedownVictim.Get())
+	{
+		if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+			Capsule->IgnoreActorWhenMoving(IgnoredVictim, false);
+		if (ACharacter* VictimChar = Cast<ACharacter>(IgnoredVictim))
+			if (UCapsuleComponent* VictimCapsule = VictimChar->GetCapsuleComponent())
+				VictimCapsule->IgnoreActorWhenMoving(this, false);
+	}
+
+	// If we tear down mid-stab (companion death / BT abort), kill the frozen victim now — attributed to
+	// us — instead of leaving it frozen-alive until the enemy's own watchdog fires with no instigator.
+	if (bTakedownMontagePlaying)
+		if (AEnemyCharacter* DyingVictim = Cast<AEnemyCharacter>(TakedownVictim.Get()))
+			DyingVictim->FinishTakedownKill(this);
 
 	TakedownVictim.Reset();
 	TakedownPlayerRef.Reset();
@@ -548,18 +578,31 @@ void ACompanionCharacter::DisarmCommandedTakedown()
 	bTakedownExecuting = false;
 	bTakedownCrouchApproach = false;
 	bTakedownMontagePlaying = false;
+	if (IsValid(CurrentWeapon)) CurrentWeapon->SetWeaponHidden(false);
+	if (IsValid(TakedownKnifeMesh)) TakedownKnifeMesh->SetHiddenInGame(true);
 
-	UE_LOG(LogCompanion, Log, TEXT("Takedown disarmed"));
+	UE_LOG(LogCompanion, Log, TEXT("Takedown disarmed — broadcasting finished"));
+	OnCommandedTakedownFinished.Broadcast();
 }
 
 void ACompanionCharacter::OnPlayerTakedownCommittedHandler()
 {
+	UE_LOG(LogCompanion, Warning, TEXT("[Takedown-Companion] player-commit signal received (armed=%d inPosition=%d)"),
+		(int32)bTakedownArmed, (int32)bTakedownInPosition);
 	if (!bTakedownArmed) return;
 
 	bTakedownPlayerCommitted = true;
-	UE_LOG(LogCompanion, Log, TEXT("Takedown: player committed signal received (inPosition=%d)"),
-		(int32)bTakedownInPosition);
+	if (bTakedownInPosition) ExecuteCommandedTakedown();
+	else UE_LOG(LogCompanion, Warning, TEXT("[Takedown-Companion] committed but NOT in position yet — will execute on arrival"));
+}
 
+void ACompanionCharacter::OnPlayerFiredWeaponHandler()
+{
+	UE_LOG(LogCompanion, Log, TEXT("[Takedown-Companion] player-fired signal received (armed=%d inPosition=%d)"),
+		(int32)bTakedownArmed, (int32)bTakedownInPosition);
+	if (!bTakedownArmed) return;
+
+	bTakedownPlayerCommitted = true;
 	if (bTakedownInPosition) ExecuteCommandedTakedown();
 }
 
@@ -574,8 +617,20 @@ void ACompanionCharacter::SetTakedownInPosition(bool bInPos)
 	}
 }
 
+void ACompanionCharacter::CommitTakedownNow()
+{
+	if (!bTakedownArmed || bTakedownExecuting) return;
+	bTakedownPlayerCommitted = true;
+	if (bTakedownInPosition) ExecuteCommandedTakedown();
+	// If not yet in position, SetTakedownInPosition(true) will fire it (committed already set).
+}
+
 void ACompanionCharacter::ExecuteCommandedTakedown()
 {
+	if (bTakedownExecuting) return;   // re-entry guard
+
+	UE_LOG(LogCompanion, Warning, TEXT("[Takedown-Companion] ExecuteCommandedTakedown: committed=%d inPos=%d armed=%d method=%d"),
+		(int32)bTakedownPlayerCommitted, (int32)bTakedownInPosition, (int32)bTakedownArmed, (int32)TakedownActiveMethod);
 	if (!bTakedownPlayerCommitted || !bTakedownInPosition || !bTakedownArmed) return;
 
 	bTakedownExecuting = true;
@@ -596,32 +651,85 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 
 	if (TakedownActiveMethod == ETakedownMethod::Knife)
 	{
-		// Face the victim
-		const FVector ToVictim = Victim->GetActorLocation() - GetActorLocation();
-		SetActorRotation(FRotator(0.f, ToVictim.Rotation().Yaw, 0.f));
-
-		// FIX 4: Kill first, only play montage if kill succeeded (no stab-on-air)
-		if (!Enemy->ExecuteTakedown(this))
+		// No montage assigned → instant kill BEFORE we freeze/teleport anyone (a paired hold with no
+		// attacker animation would leave the victim reacting to a T-posing companion).
+		if (!IsValid(KnifeTakedownMontage))
 		{
-			UE_LOG(LogCompanion, Warning, TEXT("Takedown: knife ExecuteTakedown returned false — aborting"));
+			UE_LOG(LogCompanion, Warning, TEXT("Takedown: no KnifeTakedownMontage assigned — instant-kill fallback"));
+			Enemy->FinishTakedownKill(this);
 			FinishCommandedTakedown();
 			return;
 		}
 
+		OnCommandedTakedownStarted.Broadcast();
+		if (IsValid(CurrentWeapon)) CurrentWeapon->SetWeaponHidden(true);
+		if (IsValid(TakedownKnifeMesh)) TakedownKnifeMesh->SetHiddenInGame(false);
+
+		// Authored placement, measured from the StealthFinishers pack's own demo map: for
+		// Paired_Knife_Stealth_ClavicleStabDown the victim sits 115cm along the attacker MESH's +Y,
+		// same facing (dYaw 0). Both characters carry a -90 mesh yaw, which maps that mesh-+Y onto
+		// actor FORWARD — so the layout is: the companion stands CommandedTakedownOffset BEHIND the
+		// (stationary) victim, both sharing the victim's facing, and the stab lands as the Att pose
+		// lunges in. Offset is victim-relative-to-attacker in that shared frame (X fwd, Y right, Z up).
+		UnCrouch();
+		SetTakedownCrouchApproach(false);
+
+		const float SnapYaw = Enemy->GetActorRotation().Yaw;
+		const FVector SnapLoc = Enemy->GetActorLocation();   // victim stays where it stands
+		const float WatchdogTimeout = KnifeTakedownMontage->GetPlayLength() + 1.f;
+
+		// Hold the victim FIRST (freeze in place + play its Vic reaction, broadcasts OnTakedownExecuted);
+		// relocate ourselves only once that succeeds, so a failed hold never strands the companion.
+		if (!Enemy->BeginTakedownHold(this, SnapLoc, SnapYaw, WatchdogTimeout))
+		{
+			UE_LOG(LogCompanion, Warning, TEXT("Takedown: BeginTakedownHold failed — aborting"));
+			FinishCommandedTakedown();
+			return;
+		}
+
+		// Companion stands behind the victim (victim − offset). Keep our OWN grounded Z (capsule
+		// half-heights can differ), and sweep from the victim toward the spot so an enemy backed
+		// against a wall can't embed us in geometry — mirrors AExtractionPlayer::StartMontageDeferred.
+		const FVector OffsetWorld = FRotator(0.f, SnapYaw, 0.f).RotateVector(CommandedTakedownOffset);
+		FVector CompLoc(SnapLoc.X - OffsetWorld.X, SnapLoc.Y - OffsetWorld.Y, GetActorLocation().Z);
+		if (const UWorld* World = GetWorld())
+		{
+			static constexpr float SweepRadius = 30.f;
+			FHitResult Hit;
+			FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionTakedownPlace), false, this);
+			Params.AddIgnoredActor(Victim);
+			if (World->SweepSingleByChannel(Hit, FVector(SnapLoc.X, SnapLoc.Y, CompLoc.Z), CompLoc,
+				FQuat::Identity, ECC_WorldStatic, FCollisionShape::MakeSphere(SweepRadius), Params))
+				CompLoc = Hit.Location;
+		}
+		SetActorLocation(CompLoc, false, nullptr, ETeleportType::TeleportPhysics);
+		SetActorRotation(FRotator(0.f, SnapYaw, 0.f));
+
+		// Mutually ignore capsule collision so the two never shove apart — lets the bodies sit as close
+		// as CommandedTakedownOffset asks, even when the gap is below the summed capsule radii. Both
+		// directions are cleared in FinishCommandedTakedown / DisarmCommandedTakedown.
+		if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+			Capsule->IgnoreActorWhenMoving(Victim, true);
+		if (UCapsuleComponent* VictimCapsule = Enemy->GetCapsuleComponent())
+			VictimCapsule->IgnoreActorWhenMoving(this, true);
+
+		// Kill at the stab/montage end, NOT instantly (instant ragdolls the victim mid-grapple).
 		UAnimInstance* AnimInst = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
 		const float MontageLen = IsValid(AnimInst) ? AnimInst->Montage_Play(KnifeTakedownMontage) : 0.f;
 		if (MontageLen <= 0.f)
 		{
-			UE_LOG(LogCompanion, Warning, TEXT("Takedown: knife montage did not play (null or skeleton-incompatible) — instant-kill fallback"));
+			UE_LOG(LogCompanion, Warning, TEXT("Takedown: knife montage did not play — instant-kill fallback"));
+			Enemy->FinishTakedownKill(this);   // never leave the victim frozen-alive
 			FinishCommandedTakedown();
 			return;
 		}
 
+		Enemy->SetTakedownWasMontageDriven(true);
 		bTakedownMontagePlaying = true;
 		FOnMontageEnded EndDelegate;
 		EndDelegate.BindUObject(this, &ACompanionCharacter::OnTakedownMontageEnded);
 		AnimInst->Montage_SetEndDelegate(EndDelegate, KnifeTakedownMontage);
-		UE_LOG(LogCompanion, Log, TEXT("Takedown: knife montage playing, victim killed"));
+		UE_LOG(LogCompanion, Warning, TEXT("[Takedown-Companion] knife executed (behind victim) on victim=%s"), *GetNameSafe(Victim));
 	}
 	else // Shoot
 	{
@@ -666,8 +774,13 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 						FinishCommandedTakedown();
 						return;
 					}
-					StartWeaponFire();
+					// Commit the kill while the enemy is still Unaware. A real weapon hitscan calls
+					// NotifyDamaged -> EnterCombat synchronously, which makes CanBeTakenDown reject the
+					// takedown — the enemy survives the shot, spins to face us, opens fire, and only
+					// dies to follow-up. Kill FIRST (Unaware -> succeeds), THEN fire purely for the
+					// muzzle flash / fire montage (the shot lands on a now-dead enemy and is a no-op).
 					Enemy->ExecuteTakedown(this);
+					StartWeaponFire();
 					StopWeaponFire();
 					UE_LOG(LogCompanion, Log, TEXT("Takedown: shoot executed"));
 					FinishCommandedTakedown();
@@ -683,6 +796,9 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 void ACompanionCharacter::OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
 	bTakedownMontagePlaying = false;
+	// Montage-driven death: the kill lands at the END of the stab montage, not mid-grapple.
+	if (AEnemyCharacter* DeadVictim = Cast<AEnemyCharacter>(TakedownVictim.Get()))
+		DeadVictim->FinishTakedownKill(this);
 	FinishCommandedTakedown();
 }
 
@@ -690,13 +806,25 @@ void ACompanionCharacter::FinishCommandedTakedown()
 {
 	const bool bWasArmed = bTakedownArmed;
 
-	// Unbind before broadcast to avoid re-entry
+	// Unbind both delegates before broadcast to avoid re-entry
 	AExtractionPlayer* Player = TakedownPlayerRef.Get();
 	if (IsValid(Player))
+	{
 		Player->OnPlayerTakedownCommitted.RemoveDynamic(this, &ACompanionCharacter::OnPlayerTakedownCommittedHandler);
+		Player->OnPlayerFiredWeapon.RemoveDynamic(this, &ACompanionCharacter::OnPlayerFiredWeaponHandler);
+	}
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
+
+	if (AActor* IgnoredVictim = TakedownVictim.Get())
+	{
+		if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+			Capsule->IgnoreActorWhenMoving(IgnoredVictim, false);
+		if (ACharacter* VictimChar = Cast<ACharacter>(IgnoredVictim))
+			if (UCapsuleComponent* VictimCapsule = VictimChar->GetCapsuleComponent())
+				VictimCapsule->IgnoreActorWhenMoving(this, false);
+	}
 
 	TakedownVictim.Reset();
 	TakedownPlayerRef.Reset();
@@ -708,6 +836,8 @@ void ACompanionCharacter::FinishCommandedTakedown()
 	bTakedownMontagePlaying = false;
 
 	SetAimTarget(nullptr);
+	if (IsValid(CurrentWeapon)) CurrentWeapon->SetWeaponHidden(false);
+	if (IsValid(TakedownKnifeMesh)) TakedownKnifeMesh->SetHiddenInGame(true);
 
 	if (bWasArmed)
 	{

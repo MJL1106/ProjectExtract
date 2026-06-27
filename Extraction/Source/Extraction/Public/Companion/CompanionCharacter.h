@@ -27,6 +27,7 @@ DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionPostureChanged, ECompanionPosture, NewPosture);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLowReadyAimChanged, bool, bIsLowReady);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCommandedTakedownFinished);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCommandedTakedownStarted);
 
 UCLASS(Blueprintable)
 class EXTRACTION_API ACompanionCharacter : public ACharacter, public IGameplayTagAssetInterface, public IAIShooterInterface, public IGenericTeamAgentInterface
@@ -193,9 +194,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
 	bool IsCommandedTakedownExecuting() const { return bTakedownExecuting; }
 
+	/** Autonomous (no player sync) execution trigger — used when the companion is
+	 *  commanded to solo a lone target (no paired takedown partner). */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Takedown")
+	void CommitTakedownNow();
+
 	void SetTakedownCrouchApproach(bool bApproach) { bTakedownCrouchApproach = bApproach; }
 	void SetTakedownInPosition(bool bInPos);
 
+
+	/** Broadcast when a KNIFE commanded takedown begins executing — BP shows the knife mesh here. */
+	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
+	FOnCommandedTakedownStarted OnCommandedTakedownStarted;
 
 	/** Broadcast when the companion's takedown execution completes (kill applied or shot fired). */
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
@@ -279,9 +289,26 @@ protected:
 
 	// --- Takedown ---
 
+	/** Knife mesh shown only during a knife takedown. Designer assigns SKM_Knife to it on BP_Companion.
+	 *  Attached to KnifeAttachSocket on the body mesh, hidden + no-collision by default. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Takedown")
+	TObjectPtr<USkeletalMeshComponent> TakedownKnifeMesh;
+
+	/** Socket on the companion body mesh the takedown knife attaches to. */
+	UPROPERTY(EditDefaultsOnly, Category = "Takedown")
+	FName KnifeAttachSocket = TEXT("KnifeSocket");
+
 	/** Knife takedown montage — designer assigns in BP. */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown")
 	TObjectPtr<UAnimMontage> KnifeTakedownMontage;
+
+	/** Victim-relative-to-attacker placement for the knife takedown, in the shared facing frame:
+	 *  X = forward gap (the companion stands this far BEHIND the victim), Y = lateral, Z = height.
+	 *  Default 90 = the contact spacing the player takedown uses for this same ClavicleStabDown pair
+	 *  (root motion is off, so the bodies are placed at the already-closed distance, not the demo's
+	 *  wider at-rest spacing). Tunable per finisher on BP_Companion. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Takedown")
+	FVector CommandedTakedownOffset = FVector(90.f, 0.f, 0.f);
 
 	/** Shoot takedown: how many frames to hold aim before firing the lethal shot. */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
@@ -341,6 +368,9 @@ private:
 
 	UFUNCTION()
 	void OnPlayerTakedownCommittedHandler();
+
+	UFUNCTION()
+	void OnPlayerFiredWeaponHandler();
 
 	void ExecuteCommandedTakedown();
 	void FinishCommandedTakedown();
