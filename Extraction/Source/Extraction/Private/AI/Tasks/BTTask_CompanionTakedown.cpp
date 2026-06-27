@@ -7,8 +7,11 @@
 #include "CompanionCharacter.h"
 #include "CompanionAIController.h"
 #include "EnemyCharacter.h"
+#include "TakedownVolume.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
+#include "HealthComponent.h"
+#include "EngineUtils.h"
 
 UBTTask_CompanionTakedown::UBTTask_CompanionTakedown()
 {
@@ -19,6 +22,8 @@ UBTTask_CompanionTakedown::UBTTask_CompanionTakedown()
 
 EBTNodeResult::Type UBTTask_CompanionTakedown::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
+	UE_LOG(LogCompanion, Warning, TEXT("[TakedownTask] ExecuteTask CALLED (BT command branch consumed the command)"));
+
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	if (!BB) return EBTNodeResult::Failed;
 
@@ -29,10 +34,12 @@ EBTNodeResult::Type UBTTask_CompanionTakedown::ExecuteTask(UBehaviorTreeComponen
 	if (!IsValid(Companion)) return EBTNodeResult::Failed;
 
 	AActor* Victim = Cast<AActor>(BB->GetValueAsObject(CommandTargetActorKey.SelectedKeyName));
-	if (!IsValid(Victim)) return EBTNodeResult::Failed;
+	if (!IsValid(Victim)) { UE_LOG(LogCompanion, Warning, TEXT("[TakedownTask] no victim in BB (key='%s') -> Fail"), *CommandTargetActorKey.SelectedKeyName.ToString()); return EBTNodeResult::Failed; }
 
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Victim);
-	if (!IsValid(Enemy) || !Enemy->IsTakedownEligible()) return EBTNodeResult::Failed;
+	if (!IsValid(Enemy) || !Enemy->IsTakedownEligible()) { UE_LOG(LogCompanion, Warning, TEXT("[TakedownTask] %s not eligible at execute -> Fail"), *GetNameSafe(Victim)); return EBTNodeResult::Failed; }
+
+	UE_LOG(LogCompanion, Warning, TEXT("[TakedownTask] proceeding on %s"), *GetNameSafe(Victim));
 
 	const uint8 MethodRaw = BB->GetValueAsEnum(TakedownMethodKey.SelectedKeyName);
 	CachedMethod = static_cast<ETakedownMethod>(MethodRaw);
@@ -41,6 +48,24 @@ EBTNodeResult::Type UBTTask_CompanionTakedown::ExecuteTask(UBehaviorTreeComponen
 	ArmedHoldElapsed = 0.f;
 	bMoveRequestSent = false;
 	CachedKnifeAnchor = FVector::ZeroVector;
+
+	// Decide autonomous vs synced: union eligible enemies across all volumes containing this
+	// victim. 2+ eligible sharing a volume = synced double-takedown; lone = autonomous solo.
+	bAutonomous = true;
+	{
+		TSet<AEnemyCharacter*> EligibleShared;
+		if (UWorld* W = Companion->GetWorld())
+			for (TActorIterator<ATakedownVolume> It(W); It; ++It)
+				if (It->ContainsEnemy(Enemy))
+					It->AppendEligibleEnemies(EligibleShared);
+		if (EligibleShared.Num() >= 2)
+			bAutonomous = false;
+	}
+	AutonomousShootElapsed = 0.f;
+	AutonomousShootDelay = FMath::RandRange(AutonomousShootDelayMin, AutonomousShootDelayMax);
+
+	UE_LOG(LogCompanion, Warning, TEXT("[TakedownTask] %s method=%d autonomous=%d (shootDelay=%.2f)"),
+		*GetNameSafe(Victim), (int32)CachedMethod, (int32)bAutonomous, AutonomousShootDelay);
 
 	Companion->StopWeaponFire();
 
@@ -99,7 +124,8 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 
 	// Eligibility + timeout only checked pre-execution (Approaching / Armed).
 	// Once Executing, the kill is committed — don't re-validate or timeout.
-	if (Phase == EPhase::Approaching || Phase == EPhase::Armed)
+	if ((Phase == EPhase::Approaching || Phase == EPhase::Armed)
+		&& !Companion->IsCommandedTakedownExecuting())
 	{
 		AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Victim);
 		if (!IsValid(Enemy) || !Enemy->IsTakedownEligible())
@@ -122,16 +148,35 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 		}
 
-		const float DistToAnchor = FVector::Dist2D(Companion->GetActorLocation(), CachedKnifeAnchor);
-		if (DistToAnchor <= KnifeApproachAcceptRadius)
+		const float DistToVictim = FVector::Dist2D(Companion->GetActorLocation(), Victim->GetActorLocation());
+
+		// "In position" is gated on proximity to the VICTIM, not to the behind-anchor.
+		// KnifeAnchorDistance is comfortably under the enemy's takedown accept range, so
+		// being within it guarantees ExecuteTakedown won't range-reject the knife.
+		if (DistToVictim <= KnifeAnchorDistance)
 		{
 			AIC->StopMovement();
 			Companion->SetTakedownCrouchApproach(false);
 			Phase = EPhase::Armed;
 			ArmedHoldElapsed = 0.f;
 			Companion->SetTakedownInPosition(true);
+			UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: knife in position on %s (distToVictim=%.0f)"),
+				*GetNameSafe(Victim), DistToVictim);
+			break;
+		}
 
-			UE_LOG(LogCompanion, Log, TEXT("CompanionTakedown: knife in position on %s"), *GetNameSafe(Victim));
+		// The behind-anchor move finished (reached or stalled) but the companion is still
+		// out of knife range — close the remaining gap by pathing straight at the victim.
+		// Re-issued only once the prior move has settled, so it doesn't thrash every frame.
+		const bool bMoveSettled = bMoveRequestSent
+			&& AIC->GetMoveStatus() == EPathFollowingStatus::Idle
+			&& ApproachElapsed > 0.25f;
+		if (bMoveSettled)
+		{
+			UE_LOG(LogCompanion, Verbose, TEXT("CompanionTakedown: settled at distToVictim=%.0f (> KnifeAnchorDistance=%.0f) — closing in on victim"),
+				DistToVictim, KnifeAnchorDistance);
+			AIC->MoveToActor(Victim, KnifeApproachAcceptRadius, /*bStopOnOverlap=*/true,
+				/*bUsePathfinding=*/true, /*bCanStrafe=*/false);
 		}
 		break;
 	}
@@ -146,7 +191,36 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 			break;
 		}
 
-		// Armed-phase timeout (only while waiting, not during execution)
+		// --- Autonomous path: solo takedown without waiting for player commit ---
+		if (bAutonomous)
+		{
+			if (!bAutonomousCommitSent)
+			{
+				bool bFire = (CachedMethod == ETakedownMethod::Knife);   // knife: execute on arrival
+				if (CachedMethod == ETakedownMethod::Shoot)
+				{
+					AutonomousShootElapsed += DeltaSeconds;
+					bFire = (AutonomousShootElapsed >= AutonomousShootDelay);
+				}
+
+				if (bFire)
+				{
+					Companion->CommitTakedownNow();
+					bAutonomousCommitSent = true;
+				}
+			}
+
+			// Instant-complete safety (e.g. shoot with zero settle)
+			if (!Companion->IsCommandedTakedownArmed())
+			{
+				Phase = EPhase::Done;
+				CleanupTask(Companion);
+				return FinishLatentTask(OwnerComp, CompletionResult());
+			}
+			break;
+		}
+
+		// --- Synced path: wait for player commit (existing behaviour) ---
 		ArmedHoldElapsed += DeltaSeconds;
 		if (ArmedHoldElapsed > ArmedHoldTimeout)
 		{
@@ -161,7 +235,7 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 			Phase = EPhase::Done;
 			CleanupTask(Companion);
 			UE_LOG(LogCompanion, Log, TEXT("CompanionTakedown: completed"));
-			return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+			return FinishLatentTask(OwnerComp, CompletionResult());
 		}
 		break;
 	}
@@ -174,7 +248,7 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 			Phase = EPhase::Done;
 			CleanupTask(Companion);
 			UE_LOG(LogCompanion, Log, TEXT("CompanionTakedown: execution completed"));
-			return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+			return FinishLatentTask(OwnerComp, CompletionResult());
 		}
 		break;
 	}
@@ -182,7 +256,7 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 	case EPhase::Done:
 	{
 		CleanupTask(Companion);
-		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		return FinishLatentTask(OwnerComp, CompletionResult());
 	}
 	}
 }
@@ -226,8 +300,12 @@ void UBTTask_CompanionTakedown::CleanupTask(ACompanionCharacter* Companion)
 	CachedVictim.Reset();
 	Phase = EPhase::Done;
 	bMoveRequestSent = false;
+	bAutonomous = false;
+	bAutonomousCommitSent = false;
 	ApproachElapsed = 0.f;
 	ArmedHoldElapsed = 0.f;
+	AutonomousShootElapsed = 0.f;
+	AutonomousShootDelay = 0.f;
 	CachedKnifeAnchor = FVector::ZeroVector;
 }
 
@@ -268,6 +346,16 @@ FVector UBTTask_CompanionTakedown::ComputeAnchorCandidate(const FVector& VictimL
 	const FRotator OffsetRot(0.f, AngleDeg, 0.f);
 	const FVector AnchorDir = OffsetRot.RotateVector(Behind).GetSafeNormal2D();
 	return VictimLoc + AnchorDir * KnifeAnchorDistance;
+}
+
+EBTNodeResult::Type UBTTask_CompanionTakedown::CompletionResult() const
+{
+	const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(CachedVictim.Get());
+	// Destroyed/invalid victim = killed (Succeeded). Otherwise check the health component.
+	if (!IsValid(Enemy)) return EBTNodeResult::Succeeded;
+	const UHealthComponent* HC = Enemy->GetHealthComponent();
+	const bool bKilled = !IsValid(HC) || HC->IsDead();
+	return bKilled ? EBTNodeResult::Succeeded : EBTNodeResult::Failed;
 }
 
 FString UBTTask_CompanionTakedown::GetStaticDescription() const

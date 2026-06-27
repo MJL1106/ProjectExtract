@@ -36,6 +36,9 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPlayerDBNOStateChanged, bool, bN
 /** Broadcast the moment the player commits their own takedown (both montage and instant paths). */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnPlayerTakedownCommitted);
 
+/** Broadcast the moment the player pulls their fire trigger. Companion shoot-takedowns listen here for sync. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnPlayerFiredWeapon);
+
 /**
  * Minimal C++ base for the kit-reparented player Blueprint.
  * The BP (duplicate of BP_FPCharacter) owns mesh, camera, spring arm, slide,
@@ -81,6 +84,10 @@ public:
 	/** Fires the moment the player commits their own takedown. Companion BT tasks listen here for sync. */
 	UPROPERTY(BlueprintAssignable, Category = "Takedown|Events")
 	FOnPlayerTakedownCommitted OnPlayerTakedownCommitted;
+
+	/** Fires the moment the player pulls their fire trigger. Companion shoot-takedowns listen here for sync. */
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FOnPlayerFiredWeapon OnPlayerFiredWeapon;
 
 	// ---- BlueprintImplementableEvents ----
 

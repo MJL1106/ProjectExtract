@@ -19,7 +19,8 @@ void UPingPromptWidget::NativeConstruct()
 	if (!IsValid(Pawn)) return;
 
 	UCompanionCommandComponent* Comp = Pawn->FindComponentByClass<UCompanionCommandComponent>();
-	if (!IsValid(Comp)) return;
+	if (!IsValid(Comp)) { UE_LOG(LogTemp, Warning, TEXT("[PingPrompt] NativeConstruct: NO command component on pawn %s"), *GetNameSafe(Pawn)); return; }
+	UE_LOG(LogTemp, Warning, TEXT("[PingPrompt] NativeConstruct: bound OK (BreachCont=%d TakedownCont=%d)"), IsValid(BreachContainer), IsValid(TakedownContainer));
 
 	CachedCommandComp = Comp;
 	if (!Comp->OnPingChanged.IsAlreadyBound(this, &UPingPromptWidget::HandlePingChanged))
@@ -45,6 +46,9 @@ void UPingPromptWidget::HandlePingChanged(ECompanionCommand PendingCommand, AAct
 {
 	const bool bBreach    = (PendingCommand == ECompanionCommand::Breach);
 	const bool bTakedown  = (PendingCommand == ECompanionCommand::Takedown);
+
+	UE_LOG(LogTemp, Warning, TEXT("[PingPrompt] HandlePingChanged: cmd=%d target=%s -> show=%d"),
+		(int32)PendingCommand, *GetNameSafe(PingedTarget), (bBreach || bTakedown));
 
 	if (IsValid(BreachContainer))
 	{

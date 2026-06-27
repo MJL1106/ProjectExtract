@@ -60,6 +60,8 @@ void UCompanionCommandComponent::IssuePing()
 	ACharacter* Owner = Cast<ACharacter>(GetOwner());
 	if (!IsValid(Owner)) return;
 
+	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] IssuePing: owner=%s range=%.0f"), *GetNameSafe(Owner), PingTraceRange);
+
 	// Lazily cache the camera component — avoids FindComponentByClass every ping press.
 	if (!CachedCamera.IsValid())
 		CachedCamera = Owner->FindComponentByClass<UCameraComponent>();
@@ -75,9 +77,12 @@ void UCompanionCommandComponent::IssuePing()
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionPing), false, Owner);
 	Params.AddIgnoredActor(Owner);
 	const bool bHit = World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params);
+	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] trace hit=%d actor=%s class=%s"), bHit,
+		*GetNameSafe(Hit.GetActor()), Hit.GetActor() ? *Hit.GetActor()->GetClass()->GetName() : TEXT("None"));
 
 	if (!bHit || !IsValid(Hit.GetActor()))
 	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] no hit -> clear"));
 		ClearPending();
 		return;
 	}
@@ -90,19 +95,28 @@ void UCompanionCommandComponent::IssuePing()
 		PendingCommand = ECompanionCommand::Breach;
 		PendingTarget  = HitActor;
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
-		UE_LOG(LogCompanionCommand, Verbose, TEXT("Ping: Breach target %s"), *GetNameSafe(HitActor));
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> BREACH %s (broadcast)"), *GetNameSafe(HitActor));
 		return;
 	}
 
 	// Priority 2: Takedown-eligible enemy
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(HitActor);
-	if (IsValid(Enemy) && Enemy->IsTakedownEligible())
+	if (IsValid(Enemy))
 	{
-		PendingCommand = ECompanionCommand::Takedown;
-		PendingTarget  = Enemy;
-		OnPingChanged.Broadcast(PendingCommand, Enemy);
-		UE_LOG(LogCompanionCommand, Verbose, TEXT("Ping: Takedown target %s"), *GetNameSafe(Enemy));
-		return;
+		const bool bElig = Enemy->IsTakedownEligible();
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] hit enemy %s eligible=%d"), *GetNameSafe(Enemy), bElig);
+		if (bElig)
+		{
+			PendingCommand = ECompanionCommand::Takedown;
+			PendingTarget  = Enemy;
+			OnPingChanged.Broadcast(PendingCommand, Enemy);
+			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> TAKEDOWN %s (broadcast)"), *GetNameSafe(Enemy));
+			return;
+		}
+	}
+	else
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] hit %s is neither breachable door nor enemy -> clear"), *GetNameSafe(HitActor));
 	}
 
 	ClearPending();
@@ -119,17 +133,20 @@ void UCompanionCommandComponent::ClearPending()
 
 void UCompanionCommandComponent::ConfirmTakedown(ETakedownMethod Method)
 {
-	if (PendingCommand != ECompanionCommand::Takedown) return;
+	UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] ConfirmTakedown method=%d pending=%d target=%s"),
+		(int32)Method, (int32)PendingCommand, *GetNameSafe(PendingTarget.Get()));
+	if (PendingCommand != ECompanionCommand::Takedown) { UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] no takedown pending -> ignore")); return; }
 	AActor* Target = PendingTarget.Get();
-	if (!IsValid(Target)) { ClearPending(); return; }
+	if (!IsValid(Target)) { UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] target invalid -> clear")); ClearPending(); return; }
 
 	ACompanionAIController* Controller = GetCompanionController();
 	if (!IsValid(Controller))
 	{
-		UE_LOG(LogCompanionCommand, Warning, TEXT("ConfirmTakedown: companion controller not found"));
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] companion controller NOT FOUND (no companion in level?)"));
 		return;
 	}
 
+	UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] -> IssueCommand Takedown on %s via %s"), *GetNameSafe(Target), *GetNameSafe(Controller));
 	Controller->IssueCommand(ECompanionCommand::Takedown, Method, Target, Target->GetActorLocation());
 	ClearPending();
 }

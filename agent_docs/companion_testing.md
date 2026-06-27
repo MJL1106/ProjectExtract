@@ -97,6 +97,22 @@ Test scenarios for the AI Companion Prototype on the `AI-Companion-Prototype` br
 
 ---
 
+## Test 7 — Shoot Takedown + Headshot Damage
+**Goal:** Companion executes a marked enemy with a clean ranged "headshot"; player headshots deal 65% of max health.
+
+| Scenario | Expected |
+|----------|----------|
+| Headshot a full-HP (100) enemy with your gun | ~65 dmg; **2 headshots kill**. Body/limb shots unchanged |
+| Ping (MMB) a **lone** unaware enemy + press U (shoot) | Companion turns to face → aims in ~1s → fires 2 shots → enemy **drops promptly** → companion lowers. Fires solo after a 2–4s beat |
+| Ping the companion's target with a **2nd** eligible enemy in the same takedown volume + U | Companion holds aim; kills the marked enemy the instant **you fire your own gun** |
+| Watch the marked enemy during the kill | Must **not** spin 180 / return fire before dying — clean execution, no firefight |
+| Knife takedown (Y) | Unchanged — still triggers off your own melee takedown (T) |
+| Let an enemy headshot the player | Flat body damage, **no** headshot spike (player is immune) |
+
+Tuning (no rebuild): `BP_Companion` → `ShootAimInDuration` / `ShootShotInterval` / `ShootShotCount` / `ShootLowerDelay`; enemy archetype → `HeadshotMaxHealthFraction` (0.65), `RangedTakedownRagdollDelay` (fall speed). The aim-in/lower *pose blend* lives in the companion AnimBP.
+
+---
+
 ## Known Limitations (prototype scope)
 - Cylinder mesh only — no animations
 - No squad coordination (single companion)

@@ -523,6 +523,15 @@ void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod M
 	// Aim at the victim
 	SetAimTarget(Victim);
 
+	// Shoot: raise weapon + face immediately so the companion lines up the instant it's commanded
+	// (and stays aimed through the autonomous 2-4s wait / until the player's synced shot).
+	if (Method == ETakedownMethod::Shoot)
+	{
+		SetLowReadyAim(false);
+		if (AAIController* AIC = Cast<AAIController>(GetController()))
+			AIC->SetFocus(Victim, EAIFocusPriority::Gameplay);
+	}
+
 	// Bind to the player's commit delegate — method-specific
 	ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController());
 	APawn* PlayerPawn = IsValid(CompAIC) ? CompAIC->GetPlayerCharacter() : nullptr;
@@ -543,6 +552,8 @@ void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod M
 void ACompanionCharacter::DisarmCommandedTakedown()
 {
 	if (!bTakedownArmed && !bTakedownMontagePlaying) return;
+
+	StopWeaponFire();
 
 	// Unbind both delegates — safe even if only one was bound
 	AExtractionPlayer* Player = TakedownPlayerRef.Get();
@@ -578,8 +589,12 @@ void ACompanionCharacter::DisarmCommandedTakedown()
 	bTakedownExecuting = false;
 	bTakedownCrouchApproach = false;
 	bTakedownMontagePlaying = false;
+	SetAimTarget(nullptr);
+	SetLowReadyAim(true);
 	if (IsValid(CurrentWeapon)) CurrentWeapon->SetWeaponHidden(false);
 	if (IsValid(TakedownKnifeMesh)) TakedownKnifeMesh->SetHiddenInGame(true);
+	if (AAIController* AIC = Cast<AAIController>(GetController()))
+		AIC->ClearFocus(EAIFocusPriority::Gameplay);
 
 	UE_LOG(LogCompanion, Log, TEXT("Takedown disarmed — broadcasting finished"));
 	OnCommandedTakedownFinished.Broadcast();
@@ -731,11 +746,8 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 		AnimInst->Montage_SetEndDelegate(EndDelegate, KnifeTakedownMontage);
 		UE_LOG(LogCompanion, Warning, TEXT("[Takedown-Companion] knife executed (behind victim) on victim=%s"), *GetNameSafe(Victim));
 	}
-	else // Shoot
+	else // Shoot — phased aim-in → cosmetic fire → kill → lower
 	{
-		SetAimTarget(Victim);
-
-		// FIX 5: Gate on ammo + LoS before committing the shot
 		if (!CanFire())
 		{
 			UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot aborted — cannot fire (no ammo or weapon)"));
@@ -744,51 +756,50 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 		}
 
 		// LoS trace from companion eyes to victim
-		if (const UWorld* World = GetWorld())
+		const UWorld* World = GetWorld();
+		if (!World)
 		{
-			FVector EyesLoc;
-			FRotator EyesRot;
-			GetActorEyesViewPoint(EyesLoc, EyesRot);
+			FinishCommandedTakedown();
+			return;
+		}
 
-			FHitResult Hit;
-			FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(CompanionShootTakedown), false, this);
-			TraceParams.AddIgnoredActor(Victim);
-			if (IsValid(CurrentWeapon)) TraceParams.AddIgnoredActor(CurrentWeapon);
+		FVector EyesLoc;
+		FRotator EyesRot;
+		GetActorEyesViewPoint(EyesLoc, EyesRot);
 
-			const FVector TraceEnd = GetAimPointForTarget(Victim);
-			const bool bBlocked = World->LineTraceSingleByChannel(
-				Hit, EyesLoc, TraceEnd, ECC_Visibility, TraceParams);
+		FHitResult Hit;
+		FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(CompanionShootTakedown), false, this);
+		TraceParams.AddIgnoredActor(Victim);
+		if (IsValid(CurrentWeapon)) TraceParams.AddIgnoredActor(CurrentWeapon);
 
-			if (bBlocked)
-			{
-				UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot aborted — LoS blocked by %s"), *GetNameSafe(Hit.GetActor()));
-				FinishCommandedTakedown();
-				return;
-			}
+		const FVector TraceEnd = GetAimPointForTarget(Victim);
+		if (World->LineTraceSingleByChannel(Hit, EyesLoc, TraceEnd, ECC_Visibility, TraceParams))
+		{
+			UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot aborted — LoS blocked by %s"), *GetNameSafe(Hit.GetActor()));
+			FinishCommandedTakedown();
+			return;
+		}
 
-			World->GetTimerManager().SetTimer(ShootDelayTimerHandle, FTimerDelegate::CreateWeakLambda(this,
-				[this, Enemy]()
-				{
-					if (!IsValid(Enemy))
-					{
-						FinishCommandedTakedown();
-						return;
-					}
-					// Commit the kill while the enemy is still Unaware. A real weapon hitscan calls
-					// NotifyDamaged -> EnterCombat synchronously, which makes CanBeTakenDown reject the
-					// takedown — the enemy survives the shot, spins to face us, opens fire, and only
-					// dies to follow-up. Kill FIRST (Unaware -> succeeds), THEN fire purely for the
-					// muzzle flash / fire montage (the shot lands on a now-dead enemy and is a no-op).
-					Enemy->ExecuteTakedown(this);
-					StartWeaponFire();
-					StopWeaponFire();
-					UE_LOG(LogCompanion, Log, TEXT("Takedown: shoot executed"));
-					FinishCommandedTakedown();
-				}), ShootAimSettleDelay, false);
+		// Phase 0: aim in — face + raise weapon
+		SetAimTarget(Victim);
+		SetLowReadyAim(false);
+		if (AAIController* AIC = Cast<AAIController>(GetController()))
+			AIC->SetFocus(Victim, EAIFocusPriority::Gameplay);
+
+		TakedownShotsRemaining = FMath::Max(ShootShotCount, 0);
+
+		// Skip straight to kill if no shots requested
+		if (TakedownShotsRemaining <= 0)
+		{
+			World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+				FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownKill),
+				ShootAimInDuration, false);
 		}
 		else
 		{
-			FinishCommandedTakedown();
+			World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+				FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownAimedIn),
+				ShootAimInDuration, false);
 		}
 	}
 }
@@ -802,9 +813,93 @@ void ACompanionCharacter::OnTakedownMontageEnded(UAnimMontage* Montage, bool bIn
 	FinishCommandedTakedown();
 }
 
+void ACompanionCharacter::FireCosmeticShotAt(const FVector& AimEndPoint)
+{
+	if (!IsValid(CurrentWeapon)) return;
+
+	// Ensure the fire arms montage is running (idempotent — won't restart if already playing)
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+		if (UCompanionAnimInstance* AnimInst = Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()))
+			AnimInst->PlayFireMontage(1.0f);
+
+	CurrentWeapon->FireCosmetic(AimEndPoint);
+}
+
+void ACompanionCharacter::HandleTakedownAimedIn()
+{
+	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(TakedownVictim.Get());
+	if (!IsValid(Enemy))
+	{
+		FinishCommandedTakedown();
+		return;
+	}
+
+	// Fire one cosmetic shot
+	FireCosmeticShotAt(GetAimPointForTarget(Enemy));
+	--TakedownShotsRemaining;
+
+	const UWorld* World = GetWorld();
+	if (!World) { FinishCommandedTakedown(); return; }
+
+	if (TakedownShotsRemaining > 0)
+	{
+		// More shots — re-arm for the next one
+		World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+			FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownAimedIn),
+			ShootShotInterval, false);
+	}
+	else
+	{
+		// All shots fired — proceed to kill
+		World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+			FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownKill),
+			ShootShotInterval, false);
+	}
+}
+
+void ACompanionCharacter::HandleTakedownKill()
+{
+	StopWeaponFire();
+
+	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(TakedownVictim.Get());
+	if (!IsValid(Enemy))
+	{
+		FinishCommandedTakedown();
+		return;
+	}
+
+	if (!Enemy->ExecuteTakedown(this, /*bIgnoreRangeAndArc=*/true))
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot kill rejected (enemy no longer Unaware)"));
+		FinishCommandedTakedown();
+		return;
+	}
+
+	UE_LOG(LogCompanion, Log, TEXT("Takedown: shoot executed"));
+
+	const UWorld* World = GetWorld();
+	if (!World) { FinishCommandedTakedown(); return; }
+
+	World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+		FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownLower),
+		ShootLowerDelay, false);
+}
+
+void ACompanionCharacter::HandleTakedownLower()
+{
+	SetLowReadyAim(true);
+	SetAimTarget(nullptr);
+	if (AAIController* AIC = Cast<AAIController>(GetController()))
+		AIC->ClearFocus(EAIFocusPriority::Gameplay);
+
+	FinishCommandedTakedown();
+}
+
 void ACompanionCharacter::FinishCommandedTakedown()
 {
 	const bool bWasArmed = bTakedownArmed;
+
+	StopWeaponFire();
 
 	// Unbind both delegates before broadcast to avoid re-entry
 	AExtractionPlayer* Player = TakedownPlayerRef.Get();
@@ -838,6 +933,8 @@ void ACompanionCharacter::FinishCommandedTakedown()
 	SetAimTarget(nullptr);
 	if (IsValid(CurrentWeapon)) CurrentWeapon->SetWeaponHidden(false);
 	if (IsValid(TakedownKnifeMesh)) TakedownKnifeMesh->SetHiddenInGame(true);
+	if (AAIController* AIC = Cast<AAIController>(GetController()))
+		AIC->ClearFocus(EAIFocusPriority::Gameplay);
 
 	if (bWasArmed)
 	{

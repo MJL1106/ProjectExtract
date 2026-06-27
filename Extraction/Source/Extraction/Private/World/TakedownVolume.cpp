@@ -23,6 +23,23 @@ void ATakedownVolume::BeginPlay()
 
 	OverlapBox->OnComponentBeginOverlap.AddDynamic(this, &ATakedownVolume::OnBoxBeginOverlap);
 	OverlapBox->OnComponentEndOverlap.AddDynamic(this, &ATakedownVolume::OnBoxEndOverlap);
+
+	// BeginOverlap does NOT fire for actors already inside the volume at start (designer-placed
+	// enemies). Register them explicitly so they're flagged in-volume from the first frame.
+	OverlapBox->UpdateOverlaps();
+	TArray<AActor*> AlreadyInside;
+	OverlapBox->GetOverlappingActors(AlreadyInside, AEnemyCharacter::StaticClass());
+	for (AActor* A : AlreadyInside)
+	{
+		if (AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(A))
+		{
+			if (ContainedEnemies.Contains(Enemy)) continue;   // already registered by the overlap delegate
+			ContainedEnemies.Add(Enemy);
+			Enemy->SetInTakedownVolume(true);
+		}
+	}
+	UE_LOG(LogTemp, Warning, TEXT("[TakedownVolume] %s BeginPlay: registered %d already-inside enemies"),
+		*GetNameSafe(this), AlreadyInside.Num());
 }
 
 void ATakedownVolume::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -57,4 +74,20 @@ void ATakedownVolume::OnBoxEndOverlap(UPrimitiveComponent* /*OverlappedComp*/, A
 
 	ContainedEnemies.Remove(Enemy);
 	Enemy->SetInTakedownVolume(false);
+}
+
+bool ATakedownVolume::ContainsEnemy(const AEnemyCharacter* Enemy) const
+{
+	if (!Enemy) return false;
+	// TSet<TWeakObjectPtr> uses hash/equality on the raw pointer, so construct a temporary for lookup.
+	return ContainedEnemies.Contains(TWeakObjectPtr<AEnemyCharacter>(const_cast<AEnemyCharacter*>(Enemy)));
+}
+
+void ATakedownVolume::AppendEligibleEnemies(TSet<AEnemyCharacter*>& Out) const
+{
+	for (const TWeakObjectPtr<AEnemyCharacter>& WeakEnemy : ContainedEnemies)
+	{
+		if (WeakEnemy.IsValid() && WeakEnemy->IsTakedownEligible())
+			Out.Add(WeakEnemy.Get());
+	}
 }

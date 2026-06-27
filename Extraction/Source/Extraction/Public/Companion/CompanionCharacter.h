@@ -310,9 +310,25 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Takedown")
 	FVector CommandedTakedownOffset = FVector(90.f, 0.f, 0.f);
 
-	/** Shoot takedown: how many frames to hold aim before firing the lethal shot. */
+	/** Shoot takedown: how many frames to hold aim before firing the lethal shot (legacy, unused). */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
 	float ShootAimSettleDelay = 0.15f;
+
+	/** Hold duration after aiming-in before the first cosmetic shot. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float ShootAimInDuration = 1.0f;
+
+	/** Number of cosmetic (visual-only) shots fired before the kill. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "1"))
+	int32 ShootShotCount = 2;
+
+	/** Gap between cosmetic shots. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float ShootShotInterval = 0.12f;
+
+	/** Delay after the kill before lowering the weapon and releasing facing. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float ShootLowerDelay = 1.0f;
 
 private:
 	UPROPERTY(ReplicatedUsing = OnRep_LowReadyAim)
@@ -375,6 +391,14 @@ private:
 	void ExecuteCommandedTakedown();
 	void FinishCommandedTakedown();
 
+	/** Cosmetic fire: plays the fire montage + weapon muzzle FX with no hitscan/damage/alert. */
+	void FireCosmeticShotAt(const FVector& AimEndPoint);
+
+	// Shoot takedown phased helpers (each phase re-arms ShootDelayTimerHandle for the next)
+	void HandleTakedownAimedIn();
+	void HandleTakedownKill();
+	void HandleTakedownLower();
+
 	UFUNCTION()
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
@@ -388,4 +412,7 @@ private:
 	bool bTakedownExecuting = false;
 	bool bTakedownCrouchApproach = false;
 	bool bTakedownMontagePlaying = false;
+
+	/** Remaining cosmetic shots in the shoot takedown sequence. Transient runtime counter. */
+	int32 TakedownShotsRemaining = 0;
 };

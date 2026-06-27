@@ -48,13 +48,13 @@ protected:
 	// --- Designer-editable hint labels ---
 
 	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
-	FText BreachHint = NSLOCTEXT("PingPrompt", "Breach", "[E] Breach");
+	FText BreachHint = NSLOCTEXT("PingPrompt", "Breach", "[I] Breach");
 
 	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
-	FText KnifeHint = NSLOCTEXT("PingPrompt", "Knife", "[F] Knife");
+	FText KnifeHint = NSLOCTEXT("PingPrompt", "Knife", "[Y] Knife");
 
 	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
-	FText ShootHint = NSLOCTEXT("PingPrompt", "Shoot", "[G] Shot");
+	FText ShootHint = NSLOCTEXT("PingPrompt", "Shoot", "[U] Shot");
 
 private:
 	UFUNCTION()

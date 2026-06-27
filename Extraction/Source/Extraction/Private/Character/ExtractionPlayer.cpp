@@ -397,6 +397,7 @@ void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 	if (!IsValid(WeaponComponent)) return;
 
 	WeaponComponent->StartFire();
+	OnPlayerFiredWeapon.Broadcast();
 }
 
 void AExtractionPlayer::FireStop(const FInputActionValue& Value)
@@ -717,15 +718,16 @@ void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
 
 	if (!IsValid(Best))
 	{
-		UE_LOG(LogExtraction, Verbose, TEXT("Takedown: no target (need Unaware enemy within range, behind it)"));
+		UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] T pressed but NO victim found (need an Unaware enemy you're BEHIND, in range) — companion will NOT sync"));
 		return;
 	}
 
-	UE_LOG(LogExtraction, Verbose, TEXT("Takedown: %s"), *GetNameSafe(Best));
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] victim=%s -> committing"), *GetNameSafe(Best));
 
 	if (!IsValid(TakedownMontage))
 	{
 		// Instant path: enemy stays in place, snap/align is skipped entirely.
+		UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] COMMIT (instant path) -> broadcast OnPlayerTakedownCommitted"));
 		OnPlayerTakedownCommitted.Broadcast();
 		Best->ExecuteTakedown(this);
 		return;
@@ -773,10 +775,11 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 	}
 #endif
 
-	if (!Victim->BeginTakedownHold(this, VictimLoc, SnapYaw, MontageDuration)) return;
+	if (!Victim->BeginTakedownHold(this, VictimLoc, SnapYaw, MontageDuration)) { UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] BeginTakedownHold FAILED on %s — no broadcast"), *GetNameSafe(Victim)); return; }
 
 	PendingTakedownVictim = Victim;
 	bTakedownMontageActive = true;
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] COMMIT (montage path) -> broadcast OnPlayerTakedownCommitted"));
 	OnPlayerTakedownCommitted.Broadcast();
 
 	UAnimInstance* AnimInst = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
@@ -795,6 +798,11 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 		return;
 	}
 
+	Victim->SetTakedownWasMontageDriven(true);
+
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] montage PLAYING len=%.2f on victim=%s (mesh=%s)"),
+		PlayedLength, *GetNameSafe(Victim), *GetNameSafe(GetMesh()));
+
 	// End delegate fires on natural end AND interruption — fallback kill so no frozen enemy survives.
 	FOnMontageEnded EndDelegate;
 	EndDelegate.BindUObject(this, &AExtractionPlayer::OnTakedownMontageEnded);
@@ -809,12 +817,14 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 
 void AExtractionPlayer::CompanionPingInput(const FInputActionValue& /*Value*/)
 {
+	UE_LOG(LogExtraction, Warning, TEXT("[CompanionPing] MMB input received; cmdComp valid=%d"), IsValid(CompanionCommandComponent));
 	if (!IsValid(CompanionCommandComponent)) return;
 	CompanionCommandComponent->IssuePing();
 }
 
 void AExtractionPlayer::CompanionConfirmTakedownKnifeInput(const FInputActionValue& /*Value*/)
 {
+	UE_LOG(LogExtraction, Warning, TEXT("[CompanionConfirm] KNIFE (Y) input received; cmdComp valid=%d"), IsValid(CompanionCommandComponent));
 	if (!IsValid(CompanionCommandComponent)) return;
 	CompanionCommandComponent->ConfirmTakedownKnife();
 }
@@ -842,6 +852,9 @@ void AExtractionPlayer::FinishPendingTakedown()
 
 void AExtractionPlayer::OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] montage ENDED interrupted=%d montage=%s"),
+		(int32)bInterrupted, *GetNameSafe(Montage));
+
 	// Restore camera/gun/knife regardless of whether the kill already fired via notify.
 	// The started/finished pair is always balanced: this delegate only binds after OnTakedownStarted fires.
 	OnTakedownFinished();
@@ -878,6 +891,10 @@ float AExtractionPlayer::GetHitboxDamageMultiplier(const FDamageEvent& DamageEve
 
 	const EHitRegion* Region = BoneToHitRegionMap.Find(PointDamage.HitInfo.BoneName);
 	if (!Region) return 1.0f;
+
+	// Headshots deal no bonus to the player — head lethality is enemy-class-driven, not weapon-driven,
+	// and the player is out of scope for it. Limb (Arms/Legs) scaling below is unchanged.
+	if (*Region == EHitRegion::Head) return 1.0f;
 
 	if (!PointDamage.DamageTypeClass) return 1.0f;
 

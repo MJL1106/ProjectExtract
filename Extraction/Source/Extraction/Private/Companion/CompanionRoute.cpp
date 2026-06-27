@@ -5,6 +5,7 @@
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
 
 static TAutoConsoleVariable<int32> CVarCompanionRouteDebug(
 	TEXT("companion.RouteDebug"),
@@ -45,11 +46,17 @@ void ACompanionRoute::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Resolve the cvar by name with a null-guard. A Live Coding patch can leave the static
+	// TAutoConsoleVariable's internal IConsoleVariable* dangling/null (this crashed BeginPlay on
+	// 2026-06-26); a console-manager lookup + guard is robust to that.
+	IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.RouteDebug"));
+	if (!CVar) return;
+
 	// Honour the current cvar state at spawn time.
-	SetActorTickEnabled(CVarCompanionRouteDebug.GetValueOnGameThread() != 0);
+	SetActorTickEnabled(CVar->GetInt() != 0);
 
 	// SetOnChangedCallback replaces (not appends), so re-calling across PIE restarts is safe.
-	CVarCompanionRouteDebug->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnRouteDebugCVarChanged));
+	CVar->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&OnRouteDebugCVarChanged));
 }
 
 void ACompanionRoute::EndPlay(const EEndPlayReason::Type EndPlayReason)

@@ -36,7 +36,7 @@ Target: whole list done by end of W7 (Sun 9/8). `[Core]` ships in every scenario
 - [x] [Core] **Fix player sprint-arm bug.** Holding sprint, then stopping while still holding the sprint key, leaves the player's arms animating as if sprinting while stationary.
 
 ### Week 29/06 (W2) — Prototype 2 build → deliver Tue 7/7
-- [~] [Core] **Companion-synced takedown.** Player pings an enemy for a close-range takedown and the companion plays a paired/synced takedown animation alongside. *(The base player takedown already exists; the companion-side sync is the new part.)*
+- [x] [Core] **Companion-synced takedown.** Player pings an enemy for a close-range takedown and the companion plays a paired/synced takedown animation alongside. *(The base player takedown already exists; the companion-side sync is the new part.)* — shoot/gun path done: ranged headshot kill synced to player gunfire (2-enemy) / autonomous 2–4s (lone), with face → aim-in → 2 shots → drop → lower presentation. Knife paired path runs via instant-kill fallback (stab anim still missing).
 - [~] [Core] **Door breach v1 (loud).** Player pings a room/door; the companion kicks it down and goes in guns-blazing. Just the loud style for P2 — the other styles come in W5.
 - [ ] [Core] **Enemy model swap.** Replace the enemy character models and wire a few enemy types into the level.
 - [ ] [Core] **Tune the loop.** Get 2–5 minutes of gameplay reading well; test and finalise for the Tuesday 7/7 delivery.
@@ -63,7 +63,7 @@ Target: whole list done by end of W7 (Sun 9/8). `[Core]` ships in every scenario
 - [ ] [Core] **Companion looting.** Player pings a lootable spot (cupboard, table…); the companion goes and loots it, then moves to the next if there's more. Loot goes into a shared objective inventory — e.g. a keycard you "use" later, not a hands-on item.
 - [ ] [Core] **Objectives + distance marker.** A simple objective system (collect item X / explore room Y / extract person to location Z) with a visible on-screen distance marker showing where to go.
 - [ ] [Stretch] **Breach styles (tactical + quiet)** on top of loud. *Tactical:* kick the door, then fall back behind the wall connecting to it and play it cautious before entering. *Quiet:* silently unlock the handle and open the door. Player picks the style.
-- [ ] [Stretch] **Takedown variants.** Hand-to-hand vs gun takedown: no suppressor forces a hand-to-hand takedown; on a gun takedown the companion one-taps the head, and if the player misses their shot the companion assists with a headshot after ~1.5s.
+- [~] [Stretch] **Takedown variants.** Hand-to-hand vs gun takedown: no suppressor forces a hand-to-hand takedown; on a gun takedown the companion one-taps the head, and if the player misses their shot the companion assists with a headshot after ~1.5s. — gun takedown (companion head-tap) + headshot damage (65% of max HP, enemies-only, shield-first) done. Pending: suppressor-gated hand-to-hand-vs-gun selection + the player-miss → companion-assist timing.
 - [ ] [Core] **Light game-feel polish.** Muzzle flash + core weapon sounds so the demo reads well; capture demo footage.
 
 ### Week 27/07 (W6) — Arsenal + extraction person + 2nd half (home Mon–Thu, NY from Fri 31/7)

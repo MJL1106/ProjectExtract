@@ -54,6 +54,14 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Takedown", meta = (ClampMin = "1.0"))
 	float ArmedHoldTimeout = 10.f;
 
+	/** Min seconds the autonomous shoot waits (after armed) before firing. */
+	UPROPERTY(EditAnywhere, Category = "Takedown|Shoot", meta = (ClampMin = "0.5"))
+	float AutonomousShootDelayMin = 2.f;
+
+	/** Max seconds the autonomous shoot waits (after armed) before firing. */
+	UPROPERTY(EditAnywhere, Category = "Takedown|Shoot", meta = (ClampMin = "0.5"))
+	float AutonomousShootDelayMax = 4.f;
+
 private:
 	enum class EPhase : uint8
 	{
@@ -71,6 +79,9 @@ private:
 	/** Single-candidate helper for ComputeKnifeAnchor. */
 	FVector ComputeAnchorCandidate(const FVector& VictimLoc, const FVector& Behind, float AngleDeg) const;
 
+	/** Returns Succeeded if the victim is dead/destroyed, Failed otherwise. */
+	EBTNodeResult::Type CompletionResult() const;
+
 	TWeakObjectPtr<AActor> CachedVictim;
 	ETakedownMethod CachedMethod = ETakedownMethod::Knife;
 	EPhase Phase = EPhase::Approaching;
@@ -78,4 +89,11 @@ private:
 	float ArmedHoldElapsed = 0.f;
 	FVector CachedKnifeAnchor = FVector::ZeroVector;
 	bool bMoveRequestSent = false;
+
+	/** True when this is a solo takedown (lone eligible enemy in the volume). */
+	bool bAutonomous = false;
+	/** Guards autonomous knife/shoot so CommitTakedownNow fires exactly once. */
+	bool bAutonomousCommitSent = false;
+	float AutonomousShootElapsed = 0.f;
+	float AutonomousShootDelay = 0.f;
 };

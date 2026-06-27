@@ -428,8 +428,8 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 	BB->SetValueAsVector(BB_CommandTargetLocation, TargetLocation);
 	BB->SetValueAsEnum(BB_TakedownMethod,         static_cast<uint8>(Method));
 
-	UE_LOG(LogCompanionAI, Log,
-		TEXT("IssueCommand: Command=%d Method=%d Target=%s Loc=%s"),
+	UE_LOG(LogCompanionAI, Warning,
+		TEXT("[IssueCommand] BB written: Command=%d Method=%d Target=%s Loc=%s"),
 		static_cast<int32>(Command),
 		static_cast<int32>(Method),
 		*GetNameSafe(TargetActor),
