@@ -141,6 +141,9 @@ scope by the `.uproject` in the command line (`Get-CimInstance Win32_Process -Fi
 booted once the process memory climbs past ~1.8 GB, and the VibeUE MCP **auto-reconnects** (no manual step).
 **Never delete `Binaries/`/`Intermediate/`** — triggers a long missing-modules rebuild.
 
+**⭐ Trigger Live Coding from the CLI — skip the close→rebuild→reboot for patchable C++.** For .cpp-body edits and new *plain* (non-reflected) functions/members, hot-patch the running editor instead:
+`unreal.SystemLibrary.execute_console_command(unreal.get_editor_subsystem(unreal.UnrealEditorSubsystem).get_editor_world(), "LiveCoding.Compile")` via `execute_python_code`. It's **async** — confirm with `read_logs(action="filter", file="main", pattern="Live coding")` and look for `Live coding succeeded` (vs compile errors / `could not be applied`). Live Coding **cannot** add or change reflected symbols (new `UFUNCTION`/`UPROPERTY`/`UCLASS`/`USTRUCT`/`UENUM`, new class, new module) — those still need a full editor-closed rebuild; if only C++ calls a new method, drop the `UFUNCTION` to make it LC-patchable. Confirmed 2026-06-26.
+
 ### 1.8 General editor timing
 After any scene change wait **4–5 s** before screenshots (viewport/HISM refresh).
 
