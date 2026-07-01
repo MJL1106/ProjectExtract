@@ -11,6 +11,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.h"
+#include "Companion/CompanionRoute.h"
 #include "WeaponBase.h"
 #include "Movement/TraversalComponent.h"
 #include "GameFramework/Pawn.h"
@@ -46,6 +47,13 @@ const FName ACompanionAIController::BB_ScoringWeight_AvoidEnemy(TEXT("ScoringWei
 const FName ACompanionAIController::BB_ScoringWeight_CoverFromTarget(TEXT("ScoringWeight_CoverFromTarget"));
 const FName ACompanionAIController::BB_CoverSlot(TEXT("CoverSlot"));
 const FName ACompanionAIController::BB_NextCoverSlot(TEXT("NextCoverSlot"));
+const FName ACompanionAIController::BB_ActiveRoute(TEXT("ActiveRoute"));
+const FName ACompanionAIController::BB_RouteActive(TEXT("RouteActive"));
+const FName ACompanionAIController::BB_RouteBlocksCombat(TEXT("RouteBlocksCombat"));
+const FName ACompanionAIController::BB_CompanionCommand(TEXT("CompanionCommand"));
+const FName ACompanionAIController::BB_CommandTargetActor(TEXT("CommandTargetActor"));
+const FName ACompanionAIController::BB_CommandTargetLocation(TEXT("CommandTargetLocation"));
+const FName ACompanionAIController::BB_TakedownMethod(TEXT("TakedownMethod"));
 
 ACompanionAIController::ACompanionAIController()
 {
@@ -396,6 +404,51 @@ void ACompanionAIController::ReleaseNextCoverSlotIfClaimed()
 	BB->SetValueAsObject(BB_NextCoverSlot, nullptr);
 }
 
+void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor, const FVector& TargetLocation)
+{
+	// Tear down any armed takedown from a prior command before overwriting BB keys.
+	// Guarantees "latest ping replaces previous" even if the BT branch lacks an observer-abort.
+	if (ACompanionCharacter* Comp = Cast<ACompanionCharacter>(GetPawn()))
+		Comp->DisarmCommandedTakedown();
+
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	const bool bNeedsTarget = (Command == ECompanionCommand::Breach || Command == ECompanionCommand::Takedown);
+	if (bNeedsTarget && !IsValid(TargetActor))
+	{
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("IssueCommand: command %d requires a valid TargetActor — command rejected."),
+			static_cast<int32>(Command));
+		return;
+	}
+
+	BB->SetValueAsEnum(BB_CompanionCommand,       static_cast<uint8>(Command));
+	BB->SetValueAsObject(BB_CommandTargetActor,   TargetActor);
+	BB->SetValueAsVector(BB_CommandTargetLocation, TargetLocation);
+	BB->SetValueAsEnum(BB_TakedownMethod,         static_cast<uint8>(Method));
+
+	UE_LOG(LogCompanionAI, Warning,
+		TEXT("[IssueCommand] BB written: Command=%d Method=%d Target=%s Loc=%s"),
+		static_cast<int32>(Command),
+		static_cast<int32>(Method),
+		*GetNameSafe(TargetActor),
+		*TargetLocation.ToString());
+}
+
+void ACompanionAIController::ClearActiveCommand()
+{
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	BB->SetValueAsEnum(BB_CompanionCommand,       static_cast<uint8>(ECompanionCommand::None));
+	BB->SetValueAsObject(BB_CommandTargetActor,   nullptr);
+	BB->ClearValue(BB_CommandTargetLocation);
+	BB->SetValueAsEnum(BB_TakedownMethod,         static_cast<uint8>(ETakedownMethod::Knife));
+
+	UE_LOG(LogCompanionAI, Verbose, TEXT("ClearActiveCommand: companion command cleared."));
+}
+
 void ACompanionAIController::ClearTraversalBlackboard()
 {
 	UBlackboardComponent* BB = GetBlackboardComponent();
@@ -405,4 +458,50 @@ void ACompanionAIController::ClearTraversalBlackboard()
 	BB->ClearValue(BB_PlayerTraversalObstacle);
 	BB->ClearValue(BB_PlayerTraversalLanding);
 	BB->ClearValue(BB_PlayerTraversalType);
+}
+
+void ACompanionAIController::StartRoute(ACompanionRoute* Route)
+{
+	if (!IsValid(Route) || Route->NumPoints() == 0)
+	{
+		UE_LOG(LogCompanionAI, Warning, TEXT("%s: StartRoute called with %s route"),
+			*GetName(), IsValid(Route) ? TEXT("empty") : TEXT("null"));
+		return;
+	}
+
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	// Fix 7: guard against double-start — if a route is already active, ignore
+	if (BB->GetValueAsBool(BB_RouteActive))
+	{
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("%s: StartRoute ignored — BB_RouteActive already true (route %s)"),
+			*GetName(), *Route->GetName());
+		return;
+	}
+
+	ClearTraversalBlackboard();
+	StopMovement();
+
+	BB->SetValueAsObject(BB_ActiveRoute, Route);
+	BB->SetValueAsBool(BB_RouteActive, true);
+	BB->SetValueAsBool(BB_RouteBlocksCombat, !Route->bInterruptibleByCombat);
+
+	UE_LOG(LogCompanionAI, Log, TEXT("%s: StartRoute %s (%d pts, interruptible=%d)"),
+		*GetName(), *Route->GetName(), Route->NumPoints(),
+		Route->bInterruptibleByCombat ? 1 : 0);
+}
+
+void ACompanionAIController::StopRoute(bool bAborted)
+{
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	BB->SetValueAsBool(BB_RouteActive, false);
+	BB->SetValueAsBool(BB_RouteBlocksCombat, false);
+	BB->SetValueAsObject(BB_ActiveRoute, nullptr);
+
+	UE_LOG(LogCompanionAI, Log, TEXT("%s: StopRoute (aborted=%d)"),
+		*GetName(), bAborted ? 1 : 0);
 }

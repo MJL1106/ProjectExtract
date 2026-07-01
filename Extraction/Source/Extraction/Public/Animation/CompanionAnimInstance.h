@@ -7,9 +7,11 @@
 #include "Movement/TraversalTypes.h"
 #include "Companion/CompanionTypes.h"
 #include "AI/Cover/CoverSlotTypes.h"
+#include "Enemy/EnemyTypes.h"
 #include "CompanionAnimInstance.generated.h"
 
 class ACompanionCharacter;
+class AWeaponBase;
 class UCharacterMovementComponent;
 class UAnimMontage;
 
@@ -51,6 +53,43 @@ public:
 	 *  end-delegate to the correct montage even when another montage (e.g. fire) is currently active. */
 	UFUNCTION(BlueprintPure, Category = "Animation|Actions")
 	UAnimMontage* GetMontageForType(ETraversalType Type) const;
+
+	// --- Left-Hand IK ---
+
+	/**
+	 * World-space transform of the equipped weapon's left-hand grip socket, updated each frame
+	 * when bHasLeftHandIK is true. The ABP's Two Bone IK node reads this directly.
+	 * Auto-disables during reloads so the left hand follows the reload montage (mag grab).
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Weapon|LeftHandIK")
+	FTransform LeftHandIKTarget;
+
+	/**
+	 * True when the equipped weapon has a valid LeftHandGripSocket on its ThirdPersonGripMesh
+	 * AND we are not reloading. The ABP gates its Two Bone IK node on this flag.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Weapon|LeftHandIK")
+	bool bHasLeftHandIK = false;
+
+	// --- Recoil Output (ABP reads via spine_03 Modify Bone) ---
+
+	/**
+	 * Additive spine rotation output. Positive Pitch = upward kick (sign negated in UpdateRecoilSolver
+	 * same as the enemy). ABP applies this with a component-space Transform(Modify)Bone on spine_03.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Recoil")
+	FRotator RecoilSpineRotation = FRotator::ZeroRotator;
+
+	/**
+	 * Additive spine translation output (cm, component space). Backward = -Y in spine_03 component
+	 * space (companion mesh is also yawed -90 deg). ABP applies via Translation channel of the same
+	 * Modify Bone node as RecoilSpineRotation.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Recoil")
+	FVector RecoilSpineOffset = FVector::ZeroVector;
+
+	/** Called by the character's OnWeaponFiredCallback to add one shot's impulse to the spring. */
+	void AddRecoilImpulse();
 
 	// --- Cover Pose Interface ---
 
@@ -209,6 +248,29 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	TObjectPtr<UAnimMontage> CoverPeekRightMontage;
 
+	// --- Fire-Align Config (dormant until designer sets FireAlignSocketName on ABP defaults) ---
+
+	/**
+	 * Socket on the companion skeleton to blend the weapon toward while the fire montage plays.
+	 * Leave NAME_None (default) to keep fire-align dormant for this ABP.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Weapon|FireAlign")
+	FName FireAlignSocketName = NAME_None;
+
+	/** Interpolation speed (1/s) for the fire-align offset blend. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|FireAlign")
+	float FireAlignBlendSpeed = 12.f;
+
+	// --- Idle-Carry (Patrol-Align) Config ---
+
+	/** Interpolation speed for easing the weapon between idle (relaxed) and ADS transforms.
+	 *  Driven by bIsAiming: not aiming = relaxed carry (alpha 1), aiming = ADS (alpha 0). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Weapon|IdleCarry")
+	float PatrolAlignBlendSpeed = 8.f;
+
+	/** Integrate the recoil spring and push outputs to RecoilSpineRotation + RecoilSpineOffset. */
+	void UpdateRecoilSolver(float DeltaSeconds);
+
 	// --- Cover strafe override ---
 
 	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Cover")
@@ -225,9 +287,47 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Companion")
 	ECompanionPosture CurrentPosture = ECompanionPosture::Exploration;
 
+	// --- Takedown (read each tick in NativeUpdateAnimation) ---
+
+	/** True while the companion is crouched-sneaking toward a knife takedown anchor. */
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Takedown")
+	bool bTakedownCrouchApproach = false;
+
+	/** True while a takedown montage is actively playing. */
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Takedown")
+	bool bTakedownMontagePlaying = false;
+
 private:
 	UFUNCTION()
 	void OnReloadMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
+
+	// --- Recoil spring state ---
+	FEnemyRecoilProfile RecoilProfile;
+	bool bHasRecoilProfile = false;
+
+	FRotator RecoilTargetRot = FRotator::ZeroRotator;
+	FRotator RecoilCurrentRot = FRotator::ZeroRotator;
+	float RecoilTargetKickback = 0.f;
+	float RecoilCurrentKickback = 0.f;
+
+	// --- Fire-align state ---
+	float FireAlignAlpha = 0.f;
+	bool bFireAlignSetup = false;
+
+	// --- Patrol-align (idle-carry) state ---
+	float PatrolAlignAlpha = 0.f;
+	bool bPatrolAlignSetup = false;
+
+	// --- Weapon cache ---
+	TWeakObjectPtr<AWeaponBase> CachedWeapon;
+
+	// --- Left-Hand IK cache (resolved once on weapon equip) ---
+	bool bGripSocketValid = false;
+	TWeakObjectPtr<USkeletalMeshComponent> CachedGripMesh;
+	FName CachedGripSocketName = NAME_None;
+
+	// --- Death-edge ---
+	bool bWasAlive = true;
 
 	EPeekSide ActivePeekSide = EPeekSide::Right;
 	bool bPrevIsReloading = false;

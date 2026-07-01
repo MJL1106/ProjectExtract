@@ -6,12 +6,14 @@
 #include "AIController.h"
 #include "GenericTeamAgentInterface.h"
 #include "Movement/TraversalTypes.h"
+#include "Companion/CompanionCommandTypes.h"
 #include "CompanionAIController.generated.h"
 
 class UAISenseConfig_Sight;
 class UAISenseConfig_Hearing;
 class UCompanionTuningDataAsset;
 class UTraversalComponent;
+class ACompanionRoute;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanionAI, Log, All);
 
@@ -39,6 +41,22 @@ public:
 	static const FName BB_ScoringWeight_CoverFromTarget; // float
 	static const FName BB_CoverSlot;                     // Object (AAICoverSlot)
 	static const FName BB_NextCoverSlot;                 // Object (AAICoverSlot) — set by CoverSwitchMonitor, consumed by MoveToCover
+	static const FName BB_ActiveRoute;                   // Object (ACompanionRoute)
+	static const FName BB_RouteActive;                   // bool
+	static const FName BB_RouteBlocksCombat;              // bool
+	static const FName BB_CompanionCommand;              // enum ECompanionCommand
+	static const FName BB_CommandTargetActor;            // Object
+	static const FName BB_CommandTargetLocation;         // Vector
+	static const FName BB_TakedownMethod;                // enum ETakedownMethod
+
+	/**
+	 * Write a command into the companion blackboard.
+	 * Breach and Takedown both require a valid TargetActor — logs and early-returns if missing.
+	 */
+	void IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor, const FVector& TargetLocation);
+
+	/** Reset BB_CompanionCommand to None and clear related keys. */
+	void ClearActiveCommand();
 
 	UFUNCTION(BlueprintPure, Category = "Companion|AI")
 	APawn* GetPlayerCharacter() const { return CachedPlayerCharacter.Get(); }
@@ -49,6 +67,13 @@ public:
 
 	/** Resets the BB_PlayerTraversal* keys. Public so BT tasks can call on early-finish paths. */
 	void ClearTraversalBlackboard();
+
+	/** Activates a pre-authored companion route. Sets BB keys so the BT route branch activates. */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Route")
+	void StartRoute(ACompanionRoute* Route);
+
+	/** Clears route BB keys. Does NOT broadcast OnRouteCompleted — the BT task owns that. */
+	void StopRoute(bool bAborted);
 
 	/**
 	 * AI-safe teleport: cancels any active traversal, stops movement, projects the

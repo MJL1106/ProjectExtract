@@ -170,6 +170,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
 	float ProximityAwarenessRadius = 700.f;
 
+	// Radius (cm) around the player for alerted enemies that should make the companion ready its weapon.
+	// Searching and Combat enemies count; only Combat enemies can become CombatTarget.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
+	float PlayerThreatAwarenessRadius = 2500.f;
+
 	// Companion avoids standing in the player's ADS firing line during combat.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat")
 	bool bAvoidPlayerADSCone = true;

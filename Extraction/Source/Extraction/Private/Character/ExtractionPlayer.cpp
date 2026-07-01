@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionPlayer.h"
+#include "Components/CompanionCommandComponent.h"
 #include "AI/AITargetingStatics.h"
 #include "Perception/AISightTargetInterface.h"
 #include "Perception/AISense_Sight.h"
@@ -20,6 +21,7 @@
 #include "HealthComponent.h"
 #include "FootstepNoiseComponent.h"
 #include "EnemyCharacter.h"
+#include "Companion/CompanionCharacter.h"
 #include "EngineUtils.h"
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
@@ -32,6 +34,8 @@
 #include "ExtractionTypes.h"
 #include "Extraction.h"
 #include "AnimNotify_TakedownKill.h"
+#include "AIController.h"
+#include "BrainComponent.h"
 #include "EnemyDebug.h"
 
 AExtractionPlayer::AExtractionPlayer()
@@ -47,6 +51,7 @@ AExtractionPlayer::AExtractionPlayer()
 	FootstepNoiseComponent = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepNoiseComponent"));
 	WeaponComponent   = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
+	CompanionCommandComponent = CreateDefaultSubobject<UCompanionCommandComponent>(TEXT("CompanionCommandComponent"));
 
 	// Bug 6: weapon hitscan traces ECC_Visibility, which the inherited CharacterMesh profile ignores —
 	// block it on the mesh so enemy fire registers on the player.
@@ -230,6 +235,8 @@ void AExtractionPlayer::Tick(float DeltaTime)
 
 		AutoLeanAlpha = FMath::FInterpTo(AutoLeanAlpha, AutoLeanTargetAlpha, DeltaTime, AutoLeanInterpSpeed);
 	}
+
+	if (IsLocallyControlled()) UpdateCompanionSoftCollision();
 }
 
 void AExtractionPlayer::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -299,6 +306,18 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 	if (TakedownAction)
 		EnhancedInput->BindAction(TakedownAction, ETriggerEvent::Started, this, &AExtractionPlayer::TakedownInput);
+
+	if (IA_CompanionPing)
+		EnhancedInput->BindAction(IA_CompanionPing, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionPingInput);
+
+	if (IA_CompanionTakedownKnife)
+		EnhancedInput->BindAction(IA_CompanionTakedownKnife, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionConfirmTakedownKnifeInput);
+
+	if (IA_CompanionTakedownShoot)
+		EnhancedInput->BindAction(IA_CompanionTakedownShoot, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionConfirmTakedownShootInput);
+
+	if (IA_CompanionBreach)
+		EnhancedInput->BindAction(IA_CompanionBreach, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionConfirmBreachInput);
 
 	// Temp debug: H key applies 25 damage
 	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionPlayer::DebugApplyDamage);
@@ -380,6 +399,7 @@ void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 	if (!IsValid(WeaponComponent)) return;
 
 	WeaponComponent->StartFire();
+	OnPlayerFiredWeapon.Broadcast();
 }
 
 void AExtractionPlayer::FireStop(const FInputActionValue& Value)
@@ -522,6 +542,66 @@ float AExtractionPlayer::GetVaultSurfaceHeight() const
 	return TraversalComponent->GetVaultSurfaceHeight();
 }
 
+// ---- Companion Soft Collision ----
+
+namespace
+{
+	/** Strip the component of Push that opposes the player's input so they can walk through. */
+	FVector StripOpposingPush(const FVector& Push, const FVector& RawInput)
+	{
+		FVector InputDir = RawInput;
+		InputDir.Z = 0.f;
+		if (InputDir.IsNearlyZero()) return Push;
+		InputDir = InputDir.GetSafeNormal();
+		const float Opposing = FVector::DotProduct(Push, InputDir);
+		return (Opposing < 0.f) ? (Push - InputDir * Opposing) : Push;
+	}
+}
+
+void AExtractionPlayer::UpdateCompanionSoftCollision()
+{
+	if (GetIsDBNO() || bIsReviving) return;
+	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy()) return;
+
+	if (!IsValid(CompanionCommandComponent)) return;
+	ACompanionCharacter* Companion = CompanionCommandComponent->GetCompanion();
+	if (!IsValid(Companion)) return;
+
+	UCapsuleComponent* CompCapsule = Companion->GetCapsuleComponent();
+	if (!IsValid(CompCapsule) || CompCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) return;
+
+	if (WiredCompanion.Get() != Companion)
+	{
+		if (ACompanionCharacter* Old = WiredCompanion.Get())
+		{
+			if (UCapsuleComponent* OldCap = Old->GetCapsuleComponent())
+				OldCap->IgnoreActorWhenMoving(this, false);
+			GetCapsuleComponent()->IgnoreActorWhenMoving(Old, false);
+		}
+		GetCapsuleComponent()->IgnoreActorWhenMoving(Companion, true);
+		CompCapsule->IgnoreActorWhenMoving(this, true);
+		WiredCompanion = Companion;
+	}
+
+	FVector Delta = GetActorLocation() - Companion->GetActorLocation();
+	Delta.Z = 0.f;
+
+	const float CombinedRadius = GetCapsuleComponent()->GetScaledCapsuleRadius()
+		+ CompCapsule->GetScaledCapsuleRadius()
+		+ CompanionPushPadding;
+
+	const float Dist = Delta.Size();
+	if (Dist >= CombinedRadius) return;
+
+	FVector PushDir = (Dist > KINDA_SMALL_NUMBER) ? (Delta / Dist) : GetActorRightVector();
+	PushDir.Z = 0.f;
+	PushDir = PushDir.GetSafeNormal();
+
+	const float DepthFraction = 1.f - (Dist / CombinedRadius);
+	const FVector Push = StripOpposingPush(PushDir * (CompanionPushStrength * DepthFraction), GetLastMovementInputVector());
+	AddMovementInput(Push, 1.f);
+}
+
 // ---- Auto-Lean ----
 
 void AExtractionPlayer::UpdateAutoLean(float DeltaTime)
@@ -640,15 +720,17 @@ void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
 
 	if (!IsValid(Best))
 	{
-		UE_LOG(LogExtraction, Verbose, TEXT("Takedown: no target (need Unaware enemy within range, behind it)"));
+		UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] T pressed but NO victim found (need an Unaware enemy you're BEHIND, in range) — companion will NOT sync"));
 		return;
 	}
 
-	UE_LOG(LogExtraction, Verbose, TEXT("Takedown: %s"), *GetNameSafe(Best));
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] victim=%s -> committing"), *GetNameSafe(Best));
 
 	if (!IsValid(TakedownMontage))
 	{
 		// Instant path: enemy stays in place, snap/align is skipped entirely.
+		UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] COMMIT (instant path) -> broadcast OnPlayerTakedownCommitted"));
+		OnPlayerTakedownCommitted.Broadcast();
 		Best->ExecuteTakedown(this);
 		return;
 	}
@@ -695,10 +777,12 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 	}
 #endif
 
-	if (!Victim->BeginTakedownHold(this, VictimLoc, SnapYaw, MontageDuration)) return;
+	if (!Victim->BeginTakedownHold(this, VictimLoc, SnapYaw, MontageDuration)) { UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] BeginTakedownHold FAILED on %s — no broadcast"), *GetNameSafe(Victim)); return; }
 
 	PendingTakedownVictim = Victim;
 	bTakedownMontageActive = true;
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] COMMIT (montage path) -> broadcast OnPlayerTakedownCommitted"));
+	OnPlayerTakedownCommitted.Broadcast();
 
 	UAnimInstance* AnimInst = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
 	if (!IsValid(AnimInst))
@@ -716,6 +800,11 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 		return;
 	}
 
+	Victim->SetTakedownWasMontageDriven(true);
+
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] montage PLAYING len=%.2f on victim=%s (mesh=%s)"),
+		PlayedLength, *GetNameSafe(Victim), *GetNameSafe(GetMesh()));
+
 	// End delegate fires on natural end AND interruption — fallback kill so no frozen enemy survives.
 	FOnMontageEnded EndDelegate;
 	EndDelegate.BindUObject(this, &AExtractionPlayer::OnTakedownMontageEnded);
@@ -724,6 +813,34 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 	// Notify BP now that the montage is confirmed running and the end delegate is bound.
 	// Must NOT be called on the early-return failure paths above (no montage = no restore needed).
 	OnTakedownStarted(Victim);
+}
+
+// ---- Companion command input handlers ----
+
+void AExtractionPlayer::CompanionPingInput(const FInputActionValue& /*Value*/)
+{
+	UE_LOG(LogExtraction, Warning, TEXT("[CompanionPing] MMB input received; cmdComp valid=%d"), IsValid(CompanionCommandComponent));
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->IssuePing();
+}
+
+void AExtractionPlayer::CompanionConfirmTakedownKnifeInput(const FInputActionValue& /*Value*/)
+{
+	UE_LOG(LogExtraction, Warning, TEXT("[CompanionConfirm] KNIFE (Y) input received; cmdComp valid=%d"), IsValid(CompanionCommandComponent));
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->ConfirmTakedownKnife();
+}
+
+void AExtractionPlayer::CompanionConfirmTakedownShootInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->ConfirmTakedownShoot();
+}
+
+void AExtractionPlayer::CompanionConfirmBreachInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->ConfirmBreach();
 }
 
 void AExtractionPlayer::FinishPendingTakedown()
@@ -737,6 +854,9 @@ void AExtractionPlayer::FinishPendingTakedown()
 
 void AExtractionPlayer::OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted)
 {
+	UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] montage ENDED interrupted=%d montage=%s"),
+		(int32)bInterrupted, *GetNameSafe(Montage));
+
 	// Restore camera/gun/knife regardless of whether the kill already fired via notify.
 	// The started/finished pair is always balanced: this delegate only binds after OnTakedownStarted fires.
 	OnTakedownFinished();
@@ -773,6 +893,10 @@ float AExtractionPlayer::GetHitboxDamageMultiplier(const FDamageEvent& DamageEve
 
 	const EHitRegion* Region = BoneToHitRegionMap.Find(PointDamage.HitInfo.BoneName);
 	if (!Region) return 1.0f;
+
+	// Headshots deal no bonus to the player — head lethality is enemy-class-driven, not weapon-driven,
+	// and the player is out of scope for it. Limb (Arms/Legs) scaling below is unchanged.
+	if (*Region == EHitRegion::Head) return 1.0f;
 
 	if (!PointDamage.DamageTypeClass) return 1.0f;
 
@@ -1020,4 +1144,66 @@ void AExtractionPlayer::Server_CompleteRevive_Implementation(AExtractionPlayer* 
 
 	// TODO: Validate team membership when team system exists
 	Target->ExitDBNO();
+}
+
+// ---- Companion Debug Exec Commands ----
+
+ACompanionCharacter* AExtractionPlayer::ResolveDebugCompanion() const
+{
+	if (WiredCompanion.IsValid()) return WiredCompanion.Get();
+
+	for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It) return *It;
+
+	return nullptr;
+}
+
+void AExtractionPlayer::CompAim(bool bEnable)
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompAim: no companion found")); return; }
+
+	Comp->SetScriptedAim(bEnable);
+	UE_LOG(LogCompanion, Log, TEXT("CompAim -> %d"), bEnable);
+}
+
+void AExtractionPlayer::CompFire(bool bEnable)
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompFire: no companion found")); return; }
+
+	bEnable ? Comp->StartWeaponFire() : Comp->StopWeaponFire();
+	UE_LOG(LogCompanion, Log, TEXT("CompFire -> %d"), bEnable);
+}
+
+void AExtractionPlayer::CompReload()
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompReload: no companion found")); return; }
+
+	Comp->ReloadWeapon();
+	UE_LOG(LogCompanion, Log, TEXT("CompReload triggered"));
+}
+
+void AExtractionPlayer::CompLowReady(bool bEnable)
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompLowReady: no companion found")); return; }
+
+	Comp->SetLowReadyAim(bEnable);
+	UE_LOG(LogCompanion, Log, TEXT("CompLowReady -> %d"), bEnable);
+}
+
+void AExtractionPlayer::CompDebug(bool bFreeze)
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompDebug: no companion found")); return; }
+
+	AAIController* AIC = Cast<AAIController>(Comp->GetController());
+	UBrainComponent* Brain = AIC ? AIC->GetBrainComponent() : nullptr;
+	if (!Brain) { UE_LOG(LogCompanion, Warning, TEXT("CompDebug: no brain component")); return; }
+
+	if (bFreeze) Brain->StopLogic(TEXT("CompDebug"));
+	else Brain->RestartLogic();
+
+	UE_LOG(LogCompanion, Log, TEXT("CompDebug freeze -> %d"), bFreeze);
 }

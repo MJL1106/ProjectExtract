@@ -108,6 +108,10 @@ private:
 	 *  Returns the highest-scoring perceived hostile, or nullptr if none qualify. */
 	AActor* ScoreAndSelectTarget() const;
 
+	bool IsCompanionActor(const AActor* Actor) const;
+	bool ShouldIgnoreCompanionStimulus(const AActor* Actor) const;
+	bool CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, bool bHasVisibleNonCompanionTarget, float WorldTime) const;
+
 	/** Egress: report our current combat target + last-known to the squad (rate-limited by the squad). */
 	void BroadcastSightingToSquad();
 

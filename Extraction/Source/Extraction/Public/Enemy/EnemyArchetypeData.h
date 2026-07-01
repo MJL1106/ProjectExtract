@@ -35,6 +35,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Stats", meta = (ClampMin = "0.0"))
 	float MaxShield = 0.f;
 
+	/** Headshot damage as a fraction of this enemy's max health. 0 = disabled (falls back to the weapon DamageType HeadMultiplier). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Stats", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float HeadshotMaxHealthFraction = 0.65f;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Stats", meta = (ClampMin = "1.0"))
 	float PatrolSpeed = 200.f;
 

@@ -10,6 +10,7 @@
 #include "EnemyDirectorSubsystem.generated.h"
 
 class AEnemyCharacter;
+class AEnemyDirectorScopeVolume;
 class AEnemySpawnZone;
 class UDirectorConfigData;
 class UHealthComponent;
@@ -91,6 +92,9 @@ public:
 	void RegisterSpawnZone(AEnemySpawnZone* Zone);
 	void UnregisterSpawnZone(AEnemySpawnZone* Zone);
 
+	void RegisterScopeVolume(AEnemyDirectorScopeVolume* ScopeVolume);
+	void UnregisterScopeVolume(AEnemyDirectorScopeVolume* ScopeVolume);
+
 private:
 
 	// ---------- v1 internals ----------
@@ -162,6 +166,14 @@ private:
 
 	TArray<TWeakObjectPtr<AEnemySpawnZone>> SpawnZones;
 	void PruneStaleZones();
+
+	// ---------- v2: optional director scope volumes ----------
+
+	TArray<TWeakObjectPtr<AEnemyDirectorScopeVolume>> ScopeVolumes;
+	void PruneStaleScopeVolumes();
+	bool HasActiveScopeVolumes() const;
+	bool IsActorInsideAnyScope(const AActor* Actor) const;
+	bool IsPointInsideAnyScope(const FVector& Point) const;
 
 	// ---------- v2: spawn pipeline ----------
 

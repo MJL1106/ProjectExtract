@@ -289,6 +289,13 @@ USkeletalMeshComponent* AWeaponBase::GetThirdPersonGripMesh() const
 	return IsValid(WeaponMesh) ? WeaponMesh.Get() : nullptr;
 }
 
+void AWeaponBase::SetWeaponHidden(bool bNewHidden)
+{
+	SetActorHiddenInGame(bNewHidden);
+	if (IsValid(SpawnedVisualActor))
+		SpawnedVisualActor->SetActorHiddenInGame(bNewHidden);
+}
+
 // ---- Fire Control ----
 
 bool AWeaponBase::CanFire() const
@@ -547,6 +554,15 @@ void AWeaponBase::FireShot()
 
 	OnWeaponFired.Broadcast();
 	PlayVisualWeaponFire();
+}
+
+void AWeaponBase::FireCosmetic(const FVector& AimEndPoint)
+{
+	if (!IsValid(WeaponData)) return;
+
+	OnWeaponFired.Broadcast();
+	PlayVisualWeaponFire();
+	Multicast_PlayFireFX(GetMuzzleLocation(), AimEndPoint, true);
 }
 
 void AWeaponBase::PerformHitscan()

@@ -16,6 +16,7 @@
 
 class AWeaponBase;
 class AEnemyCharacter;
+class ACompanionCharacter;
 class UInputComponent;
 class UInputAction;
 class UInputMappingContext;
@@ -24,12 +25,19 @@ class UHealthComponent;
 class UFootstepNoiseComponent;
 class UWeaponComponent;
 class UTraversalComponent;
+class UCompanionCommandComponent;
 class UAnimMontage;
 struct FInputActionValue;
 
 // Distinct name from the legacy AExtractionCharacter declaration to avoid linker conflicts during the migration period.
 // Rename to FOnDBNOStateChanged once AExtractionCharacter is retired (Phase 5).
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPlayerDBNOStateChanged, bool, bNewIsDBNO, float, BleedoutDuration);
+
+/** Broadcast the moment the player commits their own takedown (both montage and instant paths). */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnPlayerTakedownCommitted);
+
+/** Broadcast the moment the player pulls their fire trigger. Companion shoot-takedowns listen here for sync. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnPlayerFiredWeapon);
 
 /**
  * Minimal C++ base for the kit-reparented player Blueprint.
@@ -72,6 +80,14 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
 	FOnPlayerDBNOStateChanged OnDBNOStateChanged;
+
+	/** Fires the moment the player commits their own takedown. Companion BT tasks listen here for sync. */
+	UPROPERTY(BlueprintAssignable, Category = "Takedown|Events")
+	FOnPlayerTakedownCommitted OnPlayerTakedownCommitted;
+
+	/** Fires the moment the player pulls their fire trigger. Companion shoot-takedowns listen here for sync. */
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FOnPlayerFiredWeapon OnPlayerFiredWeapon;
 
 	// ---- BlueprintImplementableEvents ----
 
@@ -188,6 +204,9 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UTraversalComponent> TraversalComponent;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UCompanionCommandComponent> CompanionCommandComponent;
+
 	// ---- Input Mapping Context (assigned in BP child class) ----
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
@@ -221,6 +240,24 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> TakedownAction;
+
+	// ---- Companion Command Input Actions (assigned in BP child class) ----
+
+	/** Middle-mouse ping — camera traces and classifies a pending companion command. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionPing;
+
+	/** Confirm a companion takedown with knife method. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionTakedownKnife;
+
+	/** Confirm a companion takedown with shoot method. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionTakedownShoot;
+
+	/** Confirm a companion breach command. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionBreach;
 
 	// ---- Takedown Config ----
 
@@ -299,6 +336,16 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Lean")
 	bool bDrawLeanDebug = false;
 
+	// ---- Companion Soft Collision ----
+
+	/** AddMovementInput scale applied when the player overlaps the companion capsule. Values above 1 push harder. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|SoftCollision", meta = (ClampMin = "0.0"))
+	float CompanionPushStrength = 1.75f;
+
+	/** Extra personal-space padding (cm) added on top of the combined capsule radii before the push kicks in. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|SoftCollision", meta = (ClampMin = "0.0"))
+	float CompanionPushPadding = 0.f;
+
 	// ---- Hitbox Config ----
 
 	/** Maps skeleton bone names to hit regions for damage multiplier lookup.
@@ -315,6 +362,13 @@ protected:
 	float BleedoutTimeRemaining = 0.f;
 
 private:
+
+	// ---- Companion Soft Collision State ----
+
+	/** Tracks which companion instance has its IgnoreActorWhenMoving wired, so respawns re-wire correctly. */
+	TWeakObjectPtr<ACompanionCharacter> WiredCompanion;
+
+	void UpdateCompanionSoftCollision();
 
 	// ---- Auto-Lean State ----
 
@@ -348,6 +402,12 @@ private:
 
 	void TakedownInput(const FInputActionValue& Value);
 	void StartMontageDeferred(AEnemyCharacter* Victim);
+
+	// ---- Companion command input handlers ----
+	void CompanionPingInput(const FInputActionValue& Value);
+	void CompanionConfirmTakedownKnifeInput(const FInputActionValue& Value);
+	void CompanionConfirmTakedownShootInput(const FInputActionValue& Value);
+	void CompanionConfirmBreachInput(const FInputActionValue& Value);
 
 	UFUNCTION()
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);
@@ -383,6 +443,32 @@ private:
 	// Edge-triggered map: tracks the last logged CanBeSeenFrom result per observer to avoid log spam.
 	TMap<TWeakObjectPtr<const AActor>, bool> DebugLastCanBeSeenResult;
 #endif
+
+	// ---- Companion Debug Exec Commands ----
+	// (UHT forbids UFUNCTION inside preprocessor blocks — kept unguarded; console exec is dev-only at runtime.)
+
+	/** Resolve the companion to drive from console (cached wired ref, else first in world). */
+	ACompanionCharacter* ResolveDebugCompanion() const;
+
+	/** console: CompAim 1|0 — force the companion into/out of aim (ADS grip pose). */
+	UFUNCTION(Exec)
+	void CompAim(bool bEnable);
+
+	/** console: CompFire 1|0 — start/stop the companion firing. */
+	UFUNCTION(Exec)
+	void CompFire(bool bEnable);
+
+	/** console: CompReload — trigger a companion reload. */
+	UFUNCTION(Exec)
+	void CompReload();
+
+	/** console: CompLowReady 1|0 — lower/raise the companion's weapon. */
+	UFUNCTION(Exec)
+	void CompLowReady(bool bEnable);
+
+	// console: CompDebug 1 — pause the companion's AI so CompAim/CompFire/CompReload stick; CompDebug 0 — resume.
+	UFUNCTION(Exec)
+	void CompDebug(bool bFreeze);
 
 	// ---- Takedown state ----
 

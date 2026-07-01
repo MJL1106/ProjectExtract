@@ -21,6 +21,8 @@ class AEnemyAIController;
 class UWidgetComponent;
 class UEnemyAnimInstance;
 
+class ATakedownVolume;
+
 // Phase 3 bolt-on components — forward-declared; headers live in Enemy/Components/ (authored by slices B/C).
 class UEnemyArmourComponent;
 class UEnemyGrenadierComponent;
@@ -194,17 +196,39 @@ public:
 
 	// --- Silent takedown ---
 
-	/** True when alive, Unaware, and the instigator is within range in the rear arc (design §4). */
+	/** True when alive, Unaware, and the instigator is within range in the rear arc (design §4).
+	 *  bIgnoreRangeAndArc=true for ranged takedowns (e.g. companion shoot) — skips melee proximity/rear-arc gate but still requires Unaware. */
 	UFUNCTION(BlueprintPure, Category = "Enemy|Takedown")
-	bool CanBeTakenDown(const AActor* TakedownInstigator) const;
+	bool CanBeTakenDown(const AActor* TakedownInstigator, bool bIgnoreRangeAndArc = false) const;
+
+	/** True when this enemy is both Unaware AND inside at least one ATakedownVolume.
+	 *  Consumed by teammate A's ping classification and any companion BT task. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Takedown")
+	bool IsTakedownEligible() const;
+
+	/** True when this enemy's awareness state indicates it has detected the player
+	 *  (Combat). Returns false for Unaware, Suspicious, and Searching — and false
+	 *  if the controller or awareness component is missing (unknown = don't engage).
+	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it; only the companion BT service calls it. */
+	bool HasDetectedPlayer() const;
+
+	/** True when this enemy is alert enough for the companion to ready its weapon.
+	 *  Searching and Combat count; Suspicious does not. */
+	bool IsAlertedForCompanionReadiness() const;
+
+	/** Called by ATakedownVolume on overlap begin/end. Increments/decrements an internal
+	 *  counter so overlapping more than one volume is handled correctly. */
+	void SetInTakedownVolume(bool bInVolume);
+
 
 	/**
 	 * Phase 1 of a montage-deferred takedown: validates CanBeTakenDown, sets pending-death flag,
 	 * broadcasts OnTakedownExecuted, snaps victim position/facing, and freezes the enemy
 	 * (AI brain + movement disabled). Does NOT apply damage. Returns false if cannot start.
 	 */
+	/** bIgnoreRangeAndArc=true for ranged takedowns (e.g. companion shoot) — forwarded to CanBeTakenDown. */
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Takedown")
-	bool BeginTakedownHold(AActor* TakedownInstigator, FVector SnapLocation, float SnapYaw, float WatchdogTimeout = 5.f);
+	bool BeginTakedownHold(AActor* TakedownInstigator, FVector SnapLocation, float SnapYaw, float WatchdogTimeout = 5.f, bool bIgnoreRangeAndArc = false);
 
 	/**
 	 * Phase 2: applies lethal damage to the frozen enemy.
@@ -213,9 +237,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Takedown")
 	void FinishTakedownKill(AActor* TakedownInstigator);
 
-	/** Instant path (no montage): BeginTakedownHold + FinishTakedownKill in one call. */
+	/** Instant path (no montage): BeginTakedownHold + FinishTakedownKill in one call.
+	 *  bIgnoreRangeAndArc=true for ranged takedowns (e.g. companion shoot) — also keeps current facing instead of spinning toward instigator. */
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Takedown")
-	bool ExecuteTakedown(AActor* TakedownInstigator);
+	bool ExecuteTakedown(AActor* TakedownInstigator, bool bIgnoreRangeAndArc = false);
 
 	/**
 	 * Cancels an in-progress montage-deferred hold: re-enables movement, restarts the AI brain,
@@ -225,6 +250,10 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Takedown")
 	void AbortTakedownHold();
+
+	/** Set true by the takedown instigator once its finisher montage is confirmed playing,
+	 *  so the victim ragdolls immediately on kill (no reaction-beat delay / pose snap). */
+	void SetTakedownWasMontageDriven(bool bDriven) { bTakedownWasMontageDriven = bDriven; }
 
 	/** Fired when a takedown begins (BeginTakedownHold succeeds) — animation/FX hook for BP. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Takedown")
@@ -419,12 +448,28 @@ private:
 	bool bPendingTakedownDeath = false;
 	bool bTakedownFrozen = false;
 
+	/** True if the current/last takedown hold was driven by a finisher montage (watchdog>0),
+	 *  vs an instant kill. Montage-driven kills ragdoll immediately (no reaction-beat delay). */
+	bool bTakedownWasMontageDriven = false;
+
+	/** True when a ranged (shoot) takedown — ragdoll uses the shorter RangedTakedownRagdollDelay
+	 *  instead of the grapple-reaction-beat TakedownRagdollDelay. */
+	bool bTakedownRagdollImmediate = false;
+
+	/** Number of ATakedownVolumes currently containing this enemy. Positive = in at least one volume. */
+	int32 TakedownVolumeRefCount = 0;
+
 	/** Generic damage amount guaranteed to kill through any shield (takedown path). */
 	static constexpr float TakedownDamage = 1.e6f;
 
 	/** Seconds to delay ragdoll after a takedown kill so the BP takedown animation can play. */
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Takedown")
 	float TakedownRagdollDelay = 0.8f;
+
+	/** Shorter ragdoll delay for ranged (shoot) takedowns — the enemy drops near-instantly
+	 *  instead of standing frozen for the full grapple-reaction beat. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Takedown", meta = (ClampMin = "0.0"))
+	float RangedTakedownRagdollDelay = 0.05f;
 
 	// --- Corpse lifecycle tuning ---
 
@@ -495,6 +540,8 @@ private:
 
 	/** Resolves hitbox multiplier from the damage event's bone + damage type. */
 	float GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const;
+	/** Overload that accepts an already-resolved region — avoids a second ResolveHitRegion call. */
+	float GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent, EHitRegion Region) const;
 
 	UFUNCTION()
 	void HandleDeath();

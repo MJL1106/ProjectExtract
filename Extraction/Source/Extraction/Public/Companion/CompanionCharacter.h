@@ -9,6 +9,7 @@
 #include "GenericTeamAgentInterface.h"
 #include "Movement/TraversalTypes.h"
 #include "Companion/CompanionTypes.h"
+#include "Companion/CompanionCommandTypes.h"
 #include "AIShooterInterface.h"
 #include "CompanionCharacter.generated.h"
 
@@ -19,11 +20,14 @@ class UCompanionAnimInstance;
 class UTraversalComponent;
 class UWidgetComponent;
 class UUserWidget;
+class AExtractionPlayer;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionPostureChanged, ECompanionPosture, NewPosture);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLowReadyAimChanged, bool, bIsLowReady);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCommandedTakedownFinished);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCommandedTakedownStarted);
 
 UCLASS(Blueprintable)
 class EXTRACTION_API ACompanionCharacter : public ACharacter, public IGameplayTagAssetInterface, public IAIShooterInterface, public IGenericTeamAgentInterface
@@ -118,6 +122,14 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Combat")
 	FOnLowReadyAimChanged OnLowReadyAimChanged;
 
+	// --- Scripted Aim (route Alert/Crouch legs — weapon up along control rotation, no actor target) ---
+
+	UFUNCTION(BlueprintCallable, Category = "Companion|Combat")
+	void SetScriptedAim(bool bNewScriptedAim);
+
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	bool IsScriptedAiming() const { return bScriptedAim; }
+
 	// --- Sprint API ---
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Movement")
@@ -151,6 +163,53 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Companion")
 	FOnCompanionPostureChanged OnPostureChanged;
+
+	// --- Commanded Takedown (synced to player commit) ---
+
+	/** Arms the companion for a coordinated takedown. Binds to the player's OnPlayerTakedownCommitted.
+	 *  Knife: companion faces victim and waits at its current position.
+	 *  Shoot: companion aims at the victim immediately.
+	 *  Execution fires when the player commits (or deferred until in-position for knife). */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Takedown")
+	void ArmCommandedTakedown(AActor* Victim, ETakedownMethod Method);
+
+	/** Disarms without executing. Unbinds delegate, clears state. Safe to call when not armed. */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Takedown")
+	void DisarmCommandedTakedown();
+
+	/** True while armed and waiting for (or executing) a coordinated takedown. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
+	bool IsCommandedTakedownArmed() const { return bTakedownArmed; }
+
+	/** True while the companion is in a crouched knife approach. Readable by the AnimInstance. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
+	bool IsInTakedownApproach() const { return bTakedownCrouchApproach; }
+
+	/** True while a takedown montage is actively playing. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
+	bool IsTakedownMontagePlaying() const { return bTakedownMontagePlaying; }
+
+	/** True from ExecuteCommandedTakedown entry until FinishCommandedTakedown/Disarm.
+	 *  BT task uses this to transition Armed -> Executing and stop the hold timeout. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
+	bool IsCommandedTakedownExecuting() const { return bTakedownExecuting; }
+
+	/** Autonomous (no player sync) execution trigger — used when the companion is
+	 *  commanded to solo a lone target (no paired takedown partner). */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Takedown")
+	void CommitTakedownNow();
+
+	void SetTakedownCrouchApproach(bool bApproach) { bTakedownCrouchApproach = bApproach; }
+	void SetTakedownInPosition(bool bInPos);
+
+
+	/** Broadcast when a KNIFE commanded takedown begins executing — BP shows the knife mesh here. */
+	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
+	FOnCommandedTakedownStarted OnCommandedTakedownStarted;
+
+	/** Broadcast when the companion's takedown execution completes (kill applied or shot fired). */
+	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
+	FOnCommandedTakedownFinished OnCommandedTakedownFinished;
 
 protected:
 
@@ -228,9 +287,55 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
 	float CrouchedWalkSpeed = 150.f;
 
+	// --- Takedown ---
+
+	/** Knife mesh shown only during a knife takedown. Designer assigns SKM_Knife to it on BP_Companion.
+	 *  Attached to KnifeAttachSocket on the body mesh, hidden + no-collision by default. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Takedown")
+	TObjectPtr<USkeletalMeshComponent> TakedownKnifeMesh;
+
+	/** Socket on the companion body mesh the takedown knife attaches to. */
+	UPROPERTY(EditDefaultsOnly, Category = "Takedown")
+	FName KnifeAttachSocket = TEXT("KnifeSocket");
+
+	/** Knife takedown montage — designer assigns in BP. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown")
+	TObjectPtr<UAnimMontage> KnifeTakedownMontage;
+
+	/** Victim-relative-to-attacker placement for the knife takedown, in the shared facing frame:
+	 *  X = forward gap (the companion stands this far BEHIND the victim), Y = lateral, Z = height.
+	 *  Default 90 = the contact spacing the player takedown uses for this same ClavicleStabDown pair
+	 *  (root motion is off, so the bodies are placed at the already-closed distance, not the demo's
+	 *  wider at-rest spacing). Tunable per finisher on BP_Companion. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Takedown")
+	FVector CommandedTakedownOffset = FVector(90.f, 0.f, 0.f);
+
+	/** Shoot takedown: how many frames to hold aim before firing the lethal shot (legacy, unused). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float ShootAimSettleDelay = 0.15f;
+
+	/** Hold duration after aiming-in before the first cosmetic shot. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float ShootAimInDuration = 1.0f;
+
+	/** Number of cosmetic (visual-only) shots fired before the kill. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "1"))
+	int32 ShootShotCount = 2;
+
+	/** Gap between cosmetic shots. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float ShootShotInterval = 0.12f;
+
+	/** Delay after the kill before lowering the weapon and releasing facing. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float ShootLowerDelay = 1.0f;
+
 private:
 	UPROPERTY(ReplicatedUsing = OnRep_LowReadyAim)
 	bool bLowReadyAim = false;
+
+	/** Scripted weapon-up: aim along control rotation with no actor target (e.g. route Alert/Crouch legs). Not replicated — single-player feature. */
+	bool bScriptedAim = false;
 
 	UFUNCTION()
 	void OnRep_LowReadyAim();
@@ -274,4 +379,40 @@ private:
 	float LastDamageWorldTime = -1e9f;
 
 	FTimerHandle DestroyTimerHandle;
+
+	// --- Commanded takedown state ---
+
+	UFUNCTION()
+	void OnPlayerTakedownCommittedHandler();
+
+	UFUNCTION()
+	void OnPlayerFiredWeaponHandler();
+
+	void ExecuteCommandedTakedown();
+	void FinishCommandedTakedown();
+
+	/** Cosmetic fire: plays the fire montage + weapon muzzle FX with no hitscan/damage/alert. */
+	void FireCosmeticShotAt(const FVector& AimEndPoint);
+
+	// Shoot takedown phased helpers (each phase re-arms ShootDelayTimerHandle for the next)
+	void HandleTakedownAimedIn();
+	void HandleTakedownKill();
+	void HandleTakedownLower();
+
+	UFUNCTION()
+	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	TWeakObjectPtr<AActor> TakedownVictim;
+	TWeakObjectPtr<AExtractionPlayer> TakedownPlayerRef;
+	ETakedownMethod TakedownActiveMethod = ETakedownMethod::Knife;
+	FTimerHandle ShootDelayTimerHandle;
+	bool bTakedownArmed = false;
+	bool bTakedownPlayerCommitted = false;
+	bool bTakedownInPosition = false;
+	bool bTakedownExecuting = false;
+	bool bTakedownCrouchApproach = false;
+	bool bTakedownMontagePlaying = false;
+
+	/** Remaining cosmetic shots in the shoot takedown sequence. Transient runtime counter. */
+	int32 TakedownShotsRemaining = 0;
 };

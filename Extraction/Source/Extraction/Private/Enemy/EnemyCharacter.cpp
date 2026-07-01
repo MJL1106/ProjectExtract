@@ -737,6 +737,11 @@ EHitRegion AEnemyCharacter::ResolveHitRegion(const FDamageEvent& DamageEvent) co
 
 float AEnemyCharacter::GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const
 {
+	return GetHitboxDamageMultiplier(DamageEvent, ResolveHitRegion(DamageEvent));
+}
+
+float AEnemyCharacter::GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent, EHitRegion Region) const
+{
 	if (!DamageEvent.IsOfType(FPointDamageEvent::ClassID)) return 1.f;
 
 	const FPointDamageEvent& PointDamage = static_cast<const FPointDamageEvent&>(DamageEvent);
@@ -746,7 +751,7 @@ float AEnemyCharacter::GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent
 		PointDamage.DamageTypeClass->GetDefaultObject());
 	if (!IsValid(DmgType)) return 1.f;
 
-	return DmgType->GetMultiplierForRegion(ResolveHitRegion(DamageEvent));
+	return DmgType->GetMultiplierForRegion(Region);
 }
 
 float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -755,8 +760,18 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 
 	float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 
-	// Apply hitbox multiplier, then armour directional reduction.
-	float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent);
+	const EHitRegion HitRegion = ResolveHitRegion(DamageEvent);
+
+	// Headshot: fraction-of-max-health path (bullet point damage to Head only).
+	float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent, HitRegion);
+	if (HitRegion == EHitRegion::Head &&
+		DamageEvent.IsOfType(FPointDamageEvent::ClassID) &&
+		IsValid(HealthComponent))
+	{
+		const float HeadshotFraction = IsValid(ArchetypeData) ? ArchetypeData->HeadshotMaxHealthFraction : 0.65f;
+		if (HeadshotFraction > 0.f)
+			FinalDamage = HeadshotFraction * HealthComponent->GetMaxHealth();
+	}
 
 	UEnemyArmourComponent* Armour = ArmourComponent.Get();
 	if (IsValid(Armour))
@@ -780,7 +795,7 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 
 	// Phase 4: broadcast hit-react for flinch montages (only while alive)
 	if (FinalDamage > 0.f && IsValid(HealthComponent) && !HealthComponent->IsDead())
-		OnHitReact.Broadcast(ResolveHitRegion(DamageEvent));
+		OnHitReact.Broadcast(HitRegion);
 
 	return FinalDamage;
 }
@@ -849,18 +864,23 @@ void AEnemyCharacter::HandleDeath()
 		}
 	}
 
-	if (bPendingTakedownDeath)
+	if (bPendingTakedownDeath && !bTakedownWasMontageDriven)
 	{
+		// Instant takedown: ranged (shoot) uses the short delay so the enemy drops promptly;
+		// melee grapple keeps the longer beat for the reaction montage.
+		const float Delay = bTakedownRagdollImmediate ? RangedTakedownRagdollDelay : TakedownRagdollDelay;
 		if (UWorld* W = GetWorld())
 		{
 			W->GetTimerManager().SetTimer(
 				TakedownRagdollTimerHandle, this,
 				&AEnemyCharacter::ApplyRagdoll,
-				TakedownRagdollDelay, false);
+				Delay, false);
 		}
 	}
 	else
 	{
+		// Normal death OR a montage-driven takedown whose finisher already played -> ragdoll now,
+		// so there's no pose-snap gap between the finisher ending and physics taking over.
 		ApplyRagdoll();
 	}
 
@@ -942,7 +962,7 @@ void AEnemyCharacter::DestroyAfterDeath()
 
 // --- Silent takedown ---
 
-bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator) const
+bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator, bool bIgnoreRangeAndArc) const
 {
 #if !UE_BUILD_SHIPPING
 	const bool bLogTakedown = IsValid(TakedownInstigator) &&
@@ -994,48 +1014,92 @@ bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator) const
 		return false;
 	}
 
-	const FVector ToInstigator = TakedownInstigator->GetActorLocation() - GetActorLocation();
-	const float DistSq = ToInstigator.SizeSquared();
-	if (DistSq > FMath::Square(ArchetypeData->TakedownRange))
+	// Range and rear-arc checks apply only to melee takedowns. Ranged takedowns
+	// (e.g. companion shoot) pass bIgnoreRangeAndArc=true and skip straight to success.
+	if (!bIgnoreRangeAndArc)
 	{
+		const FVector ToInstigator = TakedownInstigator->GetActorLocation() - GetActorLocation();
+		const float DistSq = ToInstigator.SizeSquared();
+		if (DistSq > FMath::Square(ArchetypeData->TakedownRange))
+		{
 #if !UE_BUILD_SHIPPING
-		if (bLogTakedown) UE_LOG(LogEnemyAI, Warning,
-			TEXT("[Takedown] %s reject: out of range (dist=%.0f > TakedownRange=%.0f)"),
-			*GetNameSafe(this), FMath::Sqrt(DistSq), ArchetypeData->TakedownRange);
+			if (bLogTakedown) UE_LOG(LogEnemyAI, Verbose,
+				TEXT("[Takedown] %s reject: out of range (dist=%.0f > TakedownRange=%.0f)"),
+				*GetNameSafe(this), FMath::Sqrt(DistSq), ArchetypeData->TakedownRange);
 #endif
-		return false;
+			return false;
+		}
+
+		// Instigator must sit inside the rear arc (centred on backward).
+		const float Dot = FVector::DotProduct(GetActorForwardVector(), ToInstigator.GetSafeNormal2D());
+		const float ArcThreshold = -FMath::Cos(FMath::DegreesToRadians(ArchetypeData->TakedownRearArcDeg * 0.5f));
+
+#if !UE_BUILD_SHIPPING
+		if (bLogTakedown)
+		{
+			if (Dot <= ArcThreshold)
+			{
+				UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s TAKEABLE (dist ok, dot=%.2f)"), *GetNameSafe(this), Dot);
+			}
+			else
+			{
+				UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: outside rear arc (dot=%.2f, need <= %.2f)"),
+					*GetNameSafe(this), Dot, ArcThreshold);
+			}
+		}
+#endif
+
+		return Dot <= ArcThreshold;
 	}
 
-	// Instigator must sit inside the rear arc (centred on backward).
-	const float Dot = FVector::DotProduct(GetActorForwardVector(), ToInstigator.GetSafeNormal2D());
-	const float ArcThreshold = -FMath::Cos(FMath::DegreesToRadians(ArchetypeData->TakedownRearArcDeg * 0.5f));
-
-#if !UE_BUILD_SHIPPING
-	if (bLogTakedown)
-	{
-		if (Dot <= ArcThreshold)
-		{
-			UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s TAKEABLE (dist ok, dot=%.2f)"), *GetNameSafe(this), Dot);
-		}
-		else
-		{
-			UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: outside rear arc (dot=%.2f, need <= %.2f)"),
-				*GetNameSafe(this), Dot, ArcThreshold);
-		}
-	}
-#endif
-
-	return Dot <= ArcThreshold;
+	return true;
 }
 
-bool AEnemyCharacter::BeginTakedownHold(AActor* TakedownInstigator, FVector SnapLocation, float SnapYaw, float WatchdogTimeout)
+bool AEnemyCharacter::IsTakedownEligible() const
 {
-	if (!CanBeTakenDown(TakedownInstigator)) return false;
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	const UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
+	return (TakedownVolumeRefCount > 0) && IsValid(Awareness)
+		&& (Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware);
+}
+
+bool AEnemyCharacter::HasDetectedPlayer() const
+{
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return false;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return false;
+
+	return Awareness->GetAwarenessState() == EEnemyAwarenessState::Combat;
+}
+
+bool AEnemyCharacter::IsAlertedForCompanionReadiness() const
+{
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return false;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return false;
+
+	const EEnemyAwarenessState State = Awareness->GetAwarenessState();
+	return State == EEnemyAwarenessState::Searching || State == EEnemyAwarenessState::Combat;
+}
+
+void AEnemyCharacter::SetInTakedownVolume(bool bInVolume)
+{
+	TakedownVolumeRefCount = FMath::Max(0, TakedownVolumeRefCount + (bInVolume ? 1 : -1));
+}
+
+bool AEnemyCharacter::BeginTakedownHold(AActor* TakedownInstigator, FVector SnapLocation, float SnapYaw, float WatchdogTimeout, bool bIgnoreRangeAndArc)
+{
+	if (!CanBeTakenDown(TakedownInstigator, bIgnoreRangeAndArc)) return false;
 
 	UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s BeginTakedownHold OK (watchdog=%.1f)"), *GetNameSafe(this), WatchdogTimeout);
 
 	bPendingTakedownDeath = true;
 	bTakedownFrozen = true;
+	bTakedownWasMontageDriven = false;
 
 	// Stop any active body anim (walk/idle/fidget) so it doesn't play through the finisher.
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
@@ -1096,22 +1160,36 @@ void AEnemyCharacter::FinishTakedownKill(AActor* TakedownInstigator)
 	const APawn* InstigatorPawn = Cast<APawn>(TakedownInstigator);
 	AController* InstigatorController = InstigatorPawn ? InstigatorPawn->GetController() : nullptr;
 
-	UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s FinishTakedownKill applying %.0f damage"), *GetNameSafe(this), TakedownDamage);
+	UE_LOG(LogEnemyAI, Warning, TEXT("[Takedown] %s KILLED by instigator=%s (%.0f dmg)"), *GetNameSafe(this), *GetNameSafe(TakedownInstigator), TakedownDamage);
 	TakeDamage(TakedownDamage, FDamageEvent(), InstigatorController, TakedownInstigator);
 }
 
-bool AEnemyCharacter::ExecuteTakedown(AActor* TakedownInstigator)
+bool AEnemyCharacter::ExecuteTakedown(AActor* TakedownInstigator, bool bIgnoreRangeAndArc)
 {
-	UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s ExecuteTakedown (instant path)"), *GetNameSafe(this));
+	UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s ExecuteTakedown (instant path, ranged=%s)"),
+		*GetNameSafe(this), bIgnoreRangeAndArc ? TEXT("true") : TEXT("false"));
+
+	// Ranged shoot takedown: flag for near-instant ragdoll instead of the grapple-reaction beat.
+	if (bIgnoreRangeAndArc) bTakedownRagdollImmediate = true;
 
 	// Instant path: no snap (enemy stays in place), no watchdog (kill follows immediately).
 	const FVector SnapLoc = GetActorLocation();
-	const FVector ToInstigator = IsValid(TakedownInstigator)
-		? (TakedownInstigator->GetActorLocation() - SnapLoc).GetSafeNormal2D()
-		: -GetActorForwardVector();
-	const float SnapYaw = FRotationMatrix::MakeFromX(-ToInstigator).Rotator().Yaw;
 
-	if (!BeginTakedownHold(TakedownInstigator, SnapLoc, SnapYaw, 0.f))
+	// Melee: face away from instigator so finisher lines up. Ranged: keep current facing (no spin).
+	float SnapYaw;
+	if (bIgnoreRangeAndArc)
+	{
+		SnapYaw = GetActorRotation().Yaw;
+	}
+	else
+	{
+		const FVector ToInstigator = IsValid(TakedownInstigator)
+			? (TakedownInstigator->GetActorLocation() - SnapLoc).GetSafeNormal2D()
+			: -GetActorForwardVector();
+		SnapYaw = FRotationMatrix::MakeFromX(-ToInstigator).Rotator().Yaw;
+	}
+
+	if (!BeginTakedownHold(TakedownInstigator, SnapLoc, SnapYaw, 0.f, bIgnoreRangeAndArc))
 	{
 		UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s ExecuteTakedown aborted (BeginTakedownHold failed)"), *GetNameSafe(this));
 		return false;
@@ -1126,6 +1204,7 @@ void AEnemyCharacter::AbortTakedownHold()
 
 	bTakedownFrozen = false;
 	bPendingTakedownDeath = false;
+	bTakedownWasMontageDriven = false;
 
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(TakedownWatchdogTimerHandle);
@@ -1205,6 +1284,11 @@ void AEnemyCharacter::CacheCorpseLocation()
 void AEnemyCharacter::BeginCorpseRemoval()
 {
 	if (bCorpseRemovalStarted) return;
+
+	// Takedown victims persist to the full corpse lifespan — don't fast-remove them when a
+	// living enemy reaches the body (keeps player/companion takedown kills consistent).
+	if (bPendingTakedownDeath) return;
+
 	bCorpseRemovalStarted = true;
 
 	UWorld* World = GetWorld();

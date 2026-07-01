@@ -36,6 +36,10 @@ public:
 	void StopFiring();
 	bool CanFire() const;
 
+	/** Cosmetic-only fire: muzzle flash + tracer + fire montage broadcast, NO hitscan/damage/alert/ammo.
+	 *  Used by the companion shoot takedown so the 2 visual shots never call NotifyDamaged->EnterCombat. */
+	void FireCosmetic(const FVector& AimEndPoint);
+
 	// ---- Reload ----
 
 	void Reload();
@@ -95,6 +99,11 @@ public:
 	bool IsReloading() const { return CurrentState == EWeaponState::Reloading; }
 
 	USkeletalMeshComponent* GetWeaponMesh() const { return WeaponMesh; }
+
+	/** Hides or shows the entire held weapon visual — both the weapon actor and its optional
+	 *  ThirdPersonVisualActor child. Used to clear the gun during a knife takedown. Idempotent. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Visual")
+	void SetWeaponHidden(bool bNewHidden);
 
 	/**
 	 * Returns the skeletal mesh component that the enemy's left-hand IK should target.
