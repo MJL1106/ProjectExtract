@@ -4,6 +4,7 @@
 #include "AI/CompanionDiag.h"
 #include "CompanionCharacter.h"
 #include "WeaponBase.h"
+#include "WeaponDataAsset.h"
 #include "HealthComponent.h"
 #include "TraversalComponent.h"
 #include "Animation/AnimMontage.h"
@@ -24,6 +25,28 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 	MovementComponent = OwningCompanion->GetCharacterMovement();
 
 	OnMontageBlendingOut.AddDynamic(this, &UCompanionAnimInstance::OnReloadMontageBlendingOut);
+
+	// Left-hand IK initial state
+	bGripSocketValid = false;
+	CachedGripMesh.Reset();
+	CachedGripSocketName = NAME_None;
+	bHasLeftHandIK = false;
+	LeftHandIKTarget = FTransform::Identity;
+
+	// Recoil + fire-align initial state
+	bHasRecoilProfile = false;
+	RecoilTargetRot = FRotator::ZeroRotator;
+	RecoilCurrentRot = FRotator::ZeroRotator;
+	RecoilTargetKickback = 0.f;
+	RecoilCurrentKickback = 0.f;
+	RecoilSpineRotation = FRotator::ZeroRotator;
+	RecoilSpineOffset = FVector::ZeroVector;
+	FireAlignAlpha = 0.f;
+	bFireAlignSetup = false;
+	PatrolAlignAlpha = 0.f;
+	bPatrolAlignSetup = false;
+	CachedWeapon.Reset();
+	bWasAlive = true;
 }
 
 void UCompanionAnimInstance::NativeUninitializeAnimation()
@@ -35,10 +58,17 @@ void UCompanionAnimInstance::NativeUninitializeAnimation()
 
 void UCompanionAnimInstance::OnReloadMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted)
 {
-	if (Montage != ReloadMontage && Montage != ReloadMontage_Crouch) return;
+	AWeaponBase* W = IsValid(OwningCompanion) ? OwningCompanion->GetCurrentWeapon() : nullptr;
+	const UWeaponDataAsset* DA = IsValid(W) ? W->GetWeaponData() : nullptr;
+	const bool bIsPerWeaponReload = DA && Montage == DA->EnemyAnimSet.Reload;
+	if (Montage != ReloadMontage && Montage != ReloadMontage_Crouch && !bIsPerWeaponReload) return;
+
 	UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MONTAGE-RELOAD-END reason=blend-out interrupted=%d"),
 		IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
 		(int32)bInterrupted);
+
+	if (IsValid(W))
+		W->StopVisualWeaponReload();
 }
 
 void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
@@ -134,9 +164,10 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		AimYaw = Delta.Yaw;
 		bIsAiming = true;
 	}
-	else if (OwningCompanion->IsScriptedAiming())
+	else if (OwningCompanion->IsScriptedAiming() ||
+		(CurrentPosture == ECompanionPosture::Combat && !OwningCompanion->IsLowReadyAim()))
 	{
-		// Weapon up with no actor target (e.g. route Alert/Crouch leg):
+		// Weapon up with no actor target (route Alert/Crouch legs, cover holds, blocked combat):
 		// aim along where the AIController is looking (focal point drives control rotation).
 		const FRotator AimRot = OwningCompanion->GetBaseAimRotation();
 		const FRotator Delta = (AimRot - OwningCompanion->GetActorRotation()).GetNormalized();
@@ -181,6 +212,136 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsReloading = false;
 	}
 
+	// --- Death edge: zero recoil + fire-align + patrol-align on the frame we die ---
+	if (!bIsAlive && bWasAlive)
+	{
+		RecoilTargetRot = FRotator::ZeroRotator;
+		RecoilCurrentRot = FRotator::ZeroRotator;
+		RecoilTargetKickback = 0.f;
+		RecoilCurrentKickback = 0.f;
+		RecoilSpineRotation = FRotator::ZeroRotator;
+		RecoilSpineOffset = FVector::ZeroVector;
+		FireAlignAlpha = 0.f;
+		PatrolAlignAlpha = 0.f;
+		bHasLeftHandIK = false;
+		LeftHandIKTarget = FTransform::Identity;
+	}
+	bWasAlive = bIsAlive;
+
+	if (bIsAlive)
+	{
+		// --- Equip block: rebind when the wielded weapon changes ---
+		if (Weapon != CachedWeapon.Get())
+		{
+			CachedWeapon = Weapon;
+			bFireAlignSetup = false;
+			FireAlignAlpha = 0.f;
+			bPatrolAlignSetup = false;
+			PatrolAlignAlpha = 0.f;
+
+			// Reset left-hand IK cache for the new weapon.
+			bGripSocketValid = false;
+			CachedGripMesh.Reset();
+			CachedGripSocketName = NAME_None;
+
+			if (IsValid(Weapon))
+			{
+				if (const UWeaponDataAsset* DA = Weapon->GetWeaponData())
+				{
+					RecoilProfile = DA->EnemyRecoilProfile;
+					bHasRecoilProfile = true;
+
+					// Cache left-hand IK socket — resolved once on equip, not per frame.
+					const FName GripSocket = DA->LeftHandGripSocket;
+					if (!GripSocket.IsNone())
+					{
+						if (USkeletalMeshComponent* GripMesh = Weapon->GetThirdPersonGripMesh())
+						{
+							if (GripMesh->DoesSocketExist(GripSocket))
+							{
+								bGripSocketValid = true;
+								CachedGripMesh = GripMesh;
+								CachedGripSocketName = GripSocket;
+							}
+						}
+					}
+				}
+				else
+				{
+					bHasRecoilProfile = false;
+				}
+				RecoilTargetRot = FRotator::ZeroRotator;
+				RecoilCurrentRot = FRotator::ZeroRotator;
+				RecoilTargetKickback = 0.f;
+				RecoilCurrentKickback = 0.f;
+				RecoilSpineRotation = FRotator::ZeroRotator;
+				RecoilSpineOffset = FVector::ZeroVector;
+
+				// Patrol-align (idle-carry) setup: cache DA-driven offset once on equip.
+				Weapon->SetupPatrolAlign();
+				bPatrolAlignSetup = Weapon->IsPatrolAlignReady();
+			}
+			else
+			{
+				bHasRecoilProfile = false;
+				RecoilTargetRot = FRotator::ZeroRotator;
+				RecoilCurrentRot = FRotator::ZeroRotator;
+				RecoilTargetKickback = 0.f;
+				RecoilCurrentKickback = 0.f;
+				RecoilSpineRotation = FRotator::ZeroRotator;
+				RecoilSpineOffset = FVector::ZeroVector;
+			}
+		}
+
+		// Fire-align setup: run once after an equip when the socket name is configured.
+		if (IsValid(Weapon) && !FireAlignSocketName.IsNone() && !bFireAlignSetup)
+		{
+			Weapon->SetupFireAlign(GetOwningComponent(), FireAlignSocketName);
+			bFireAlignSetup = true;
+		}
+
+		// --- Fire-align per-frame: ease the weapon toward its fire socket while the montage plays ---
+		if (bFireAlignSetup && IsValid(Weapon))
+		{
+			const bool bFirePlaying = IsValid(FireMontage) && Montage_IsPlaying(FireMontage);
+			const float AlphaTarget = bFirePlaying ? 1.f : 0.f;
+			FireAlignAlpha = FMath::FInterpTo(FireAlignAlpha, AlphaTarget, DeltaSeconds, FireAlignBlendSpeed);
+
+			// Skip the call when fully settled at rest to avoid fighting the rest transform each frame.
+			if (FireAlignAlpha > KINDA_SMALL_NUMBER || bFirePlaying)
+				Weapon->SetFireAlignAlpha(FireAlignAlpha);
+		}
+
+		// --- Patrol-align (idle-carry): ease weapon between relaxed idle and ADS pose ---
+		// Mirrors the enemy patrol-align drive but keyed on aim instead of patrol state.
+		if (bPatrolAlignSetup && IsValid(Weapon))
+		{
+			const float AlphaTarget = bIsAiming ? 0.f : 1.f;
+			const float PrevAlpha = PatrolAlignAlpha;
+			PatrolAlignAlpha = FMath::FInterpTo(PatrolAlignAlpha, AlphaTarget, DeltaSeconds, PatrolAlignBlendSpeed);
+
+			const bool bAlphaSettled = FMath::IsNearlyEqual(PatrolAlignAlpha, PrevAlpha, KINDA_SMALL_NUMBER);
+			if (!bAlphaSettled || PatrolAlignAlpha > KINDA_SMALL_NUMBER)
+				Weapon->SetPatrolAlignAlpha(PatrolAlignAlpha);
+		}
+
+		// --- Left-Hand IK (socket transform — cheap once validity is cached) ---
+		// Disabled during reloads so the left hand follows the reload montage (mag grab).
+		if (bGripSocketValid && CachedGripMesh.IsValid() && !bIsReloading)
+		{
+			LeftHandIKTarget = CachedGripMesh->GetSocketTransform(CachedGripSocketName, RTS_World);
+			bHasLeftHandIK = true;
+		}
+		else
+		{
+			LeftHandIKTarget = FTransform::Identity;
+			bHasLeftHandIK = false;
+		}
+
+		// --- Recoil solver ---
+		UpdateRecoilSolver(DeltaSeconds);
+	}
+
 	if (bIsReloading != bPrevIsReloading)
 	{
 		if (UE_LOG_ACTIVE(LogCompanionDiag, Log))
@@ -192,7 +353,9 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		}
 		// Fire the reload montage on the false→true transition.
 		if (bIsReloading)
+		{
 			PlayReloadMontage(1.f);
+		}
 		bPrevIsReloading = bIsReloading;
 	}
 }
@@ -215,16 +378,37 @@ void UCompanionAnimInstance::StopFireMontage(float BlendOutTime)
 
 void UCompanionAnimInstance::PlayReloadMontage(float PlayRate)
 {
+	AWeaponBase* Weapon = IsValid(OwningCompanion) ? OwningCompanion->GetCurrentWeapon() : nullptr;
 	UAnimMontage* MontageToPlay = (bIsCrouched && IsValid(ReloadMontage_Crouch))
 		? ReloadMontage_Crouch.Get()
 		: ReloadMontage.Get();
-	if (!IsValid(MontageToPlay)) return;
 
-	Montage_Play(MontageToPlay, PlayRate);
+	float EffectiveRate = PlayRate;
+	if (IsValid(Weapon))
+	{
+		if (const UWeaponDataAsset* DA = Weapon->GetWeaponData())
+		{
+			if (IsValid(DA->EnemyAnimSet.Reload))
+				MontageToPlay = DA->EnemyAnimSet.Reload.Get();
+
+			const float ReloadTime = DA->ReloadTime;
+			const float MontageLength = IsValid(MontageToPlay) ? MontageToPlay->GetPlayLength() : 0.f;
+			if (ReloadTime > 0.f && MontageLength > 0.f)
+				EffectiveRate = FMath::Clamp(MontageLength / ReloadTime, 0.5f, 2.0f);
+		}
+	}
+
+	if (!IsValid(MontageToPlay)) return;
+	if (Montage_IsPlaying(MontageToPlay)) return;
+
+	Montage_Play(MontageToPlay, EffectiveRate);
+	if (IsValid(Weapon))
+		Weapon->PlayVisualWeaponReload(EffectiveRate);
+
 	UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: MONTAGE-RELOAD-START len=%.2f playRate=%.2f"),
 		IsValid(OwningCompanion) ? *OwningCompanion->GetName() : TEXT("Unknown"),
 		MontageToPlay->GetPlayLength(),
-		PlayRate);
+		EffectiveRate);
 }
 
 void UCompanionAnimInstance::PlayHitReactMontage(float PlayRate)
@@ -381,4 +565,75 @@ UAnimMontage* UCompanionAnimInstance::PlayPeekFire(EPeekSide Side, float PlayRat
 
 	Montage_Play(PeekMontage, PlayRate);
 	return PeekMontage;
+}
+
+// --- Recoil Solver ---
+
+void UCompanionAnimInstance::AddRecoilImpulse()
+{
+	if (!bHasRecoilProfile) return;
+
+	const float AimScale = bIsAiming ? RecoilProfile.AimRecoilScale : 1.f;
+
+	// Pitch: positive Pitch on FRotator = nose down in UE; we negate so PitchKick > 0 = upward kick.
+	RecoilTargetRot.Pitch -= RecoilProfile.PitchKick * AimScale;
+	RecoilTargetRot.Pitch = FMath::Clamp(RecoilTargetRot.Pitch, -RecoilProfile.MaxAccumulatedPitch, 0.f);
+
+	// Yaw and roll wander both directions — random sign per shot so bursts don't walk sideways.
+	const float YawSign = FMath::RandBool() ? 1.f : -1.f;
+	const float RollSign = FMath::RandBool() ? 1.f : -1.f;
+	const float YawLo = FMath::Min(RecoilProfile.YawKickMin, RecoilProfile.YawKickMax);
+	const float YawHi = FMath::Max(RecoilProfile.YawKickMin, RecoilProfile.YawKickMax);
+	RecoilTargetRot.Yaw += FMath::RandRange(YawLo, YawHi) * YawSign * AimScale;
+	RecoilTargetRot.Roll += RecoilProfile.RollKick * RollSign * AimScale;
+
+	// Clamp yaw and roll so a long LMG belt can't drift the gun off-screen.
+	const float YawMax = 2.f * RecoilProfile.YawKickMax;
+	const float RollMax = 2.f * RecoilProfile.RollKick;
+	RecoilTargetRot.Yaw = FMath::Clamp(RecoilTargetRot.Yaw, -YawMax, YawMax);
+	RecoilTargetRot.Roll = FMath::Clamp(RecoilTargetRot.Roll, -RollMax, RollMax);
+
+	// Kickback: accumulate and clamp to 3x single-shot to prevent extreme offsets on LMG bursts.
+	RecoilTargetKickback += RecoilProfile.WeaponKickback * AimScale;
+	RecoilTargetKickback = FMath::Min(RecoilTargetKickback, RecoilProfile.WeaponKickback * 3.f);
+}
+
+// NOTE: runs on the game thread (called from NativeUpdateAnimation).
+void UCompanionAnimInstance::UpdateRecoilSolver(float DeltaSeconds)
+{
+	if (!bHasRecoilProfile)
+	{
+		RecoilSpineRotation = FRotator::ZeroRotator;
+		RecoilSpineOffset = FVector::ZeroVector;
+		return;
+	}
+
+	// Settle-guard: skip integration when the spring is at rest.
+	const bool bRecoilActive =
+		!RecoilCurrentRot.IsNearlyZero(KINDA_SMALL_NUMBER) ||
+		!RecoilTargetRot.IsNearlyZero(KINDA_SMALL_NUMBER) ||
+		!FMath::IsNearlyZero(RecoilCurrentKickback, KINDA_SMALL_NUMBER) ||
+		!FMath::IsNearlyZero(RecoilTargetKickback, KINDA_SMALL_NUMBER);
+
+	if (!bRecoilActive)
+	{
+		RecoilSpineRotation = FRotator::ZeroRotator;
+		RecoilSpineOffset = FVector::ZeroVector;
+		return;
+	}
+
+	// Ease current → target (attack transient).
+	RecoilCurrentRot = FMath::RInterpTo(RecoilCurrentRot, RecoilTargetRot, DeltaSeconds, RecoilProfile.Sharpness);
+	RecoilCurrentKickback = FMath::FInterpTo(RecoilCurrentKickback, RecoilTargetKickback, DeltaSeconds, RecoilProfile.Sharpness);
+
+	// Decay target → zero (recovery between shots / on cease-fire).
+	RecoilTargetRot = FMath::RInterpTo(RecoilTargetRot, FRotator::ZeroRotator, DeltaSeconds, RecoilProfile.RecoverySpeed);
+	RecoilTargetKickback = FMath::FInterpTo(RecoilTargetKickback, 0.f, DeltaSeconds, RecoilProfile.RecoverySpeed);
+
+	// Spine rotation output: fraction of the rotation routed to the body additive.
+	RecoilSpineRotation = RecoilCurrentRot * RecoilProfile.SpineKickScale;
+
+	// Forward/back piston: route the eased kickback (cm) to a backward spine translation.
+	// Component-space -Y = backward along the aim axis (companion mesh also yawed -90 deg).
+	RecoilSpineOffset = FVector(0.f, -RecoilCurrentKickback, 0.f);
 }
