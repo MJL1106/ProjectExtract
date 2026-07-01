@@ -10,6 +10,7 @@
 #include "Squad/EnemySquad.h"
 #include "BarkSubsystem.h"
 #include "BarkSetData.h"
+#include "CompanionCharacter.h"
 #include "HealthComponent.h"
 #include "SuppressionComponent.h"
 #include "EnemyMoraleComponent.h"
@@ -112,6 +113,11 @@ void UEnemyAwarenessComponent::OnTargetPerceptionUpdated(AActor* Actor, FAIStimu
 		}
 	}
 
+	static const FName WeaponFireTag(TEXT("WeaponFire"));
+	const bool bCompanionWeaponFireNoise = IsCompanionActor(Actor)
+		&& Stimulus.Type == UAISense::GetSenseID<UAISense_Hearing>()
+		&& Stimulus.Tag == WeaponFireTag;
+	if (ShouldIgnoreCompanionStimulus(Actor) && !bCompanionWeaponFireNoise) return;
 	if (!IsHostile(Actor)) return;
 
 	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>())
@@ -213,6 +219,17 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 
 	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain;
 	Track.Suspicion = FMath::Min(Track.Suspicion + Gain, NoiseSuspicionCap);
+
+	static const FName WeaponFireTag(TEXT("WeaponFire"));
+	if (Stimulus.Tag == WeaponFireTag && Track.Suspicion >= ArchetypeData->SuspiciousThreshold)
+	{
+		Track.Suspicion = FMath::Max(Track.Suspicion, ArchetypeData->SearchingThreshold);
+		SetInvestigateLocation(Stimulus.StimulusLocation);
+		TimeSpentSearching = 0.f;
+		if (CurrentState < EEnemyAwarenessState::Searching)
+			Bark(EBarkType::SearchArea);
+		SetState(EEnemyAwarenessState::Searching);
+	}
 }
 
 // --- Damage Notification ---
@@ -224,6 +241,7 @@ void UEnemyAwarenessComponent::NotifyDamaged(AController* Instigator)
 
 	APawn* InstigatorPawn = Instigator->GetPawn();
 	if (!IsValid(InstigatorPawn)) return;
+	if (ShouldIgnoreCompanionStimulus(InstigatorPawn)) return;
 	if (!IsHostile(InstigatorPawn)) return;
 
 	RecentDamageInstigatorPawn = InstigatorPawn;
@@ -256,6 +274,7 @@ void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVecto
 {
 	if (bStopped) return;
 	if (!IsValid(InstigatorPawn)) return;
+	if (ShouldIgnoreCompanionStimulus(InstigatorPawn)) return;
 	if (!IsHostile(InstigatorPawn)) return;
 	if (!IsValid(ArchetypeData) || !ArchetypeData->bReactsToBeingShotAt) return;
 
@@ -645,6 +664,7 @@ void UEnemyAwarenessComponent::UpdateSuspicion()
 	{
 		AActor* Actor = It.Key().Get();
 		if (!Actor) { It.RemoveCurrent(); continue; }
+		if (ShouldIgnoreCompanionStimulus(Actor)) { It.RemoveCurrent(); continue; }
 
 		FSuspicionTrack& Track = It.Value();
 		if (Track.bSighted && IsActorAlive(Actor))
@@ -752,6 +772,8 @@ float UEnemyAwarenessComponent::ComputeSightFillRate(const APawn* MyPawn, const 
 
 void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual)
 {
+	if (ShouldIgnoreCompanionStimulus(Target)) return;
+
 	if (CurrentState != EEnemyAwarenessState::Combat && GetDetectionLogLevel() > 0)
 	{
 		const AAIController* DbgC = Cast<AAIController>(GetOwner());
@@ -904,7 +926,8 @@ bool UEnemyAwarenessComponent::IsAnyHostileSighted() const
 	{
 		if (!Pair.Value.bSighted) continue;
 		AActor* Actor = Pair.Key.Get();
-		if (IsValid(Actor) && IsActorAlive(Actor)) return true;
+		if (IsValid(Actor) && IsActorAlive(Actor) && IsHostile(Actor) && !ShouldIgnoreCompanionStimulus(Actor))
+			return true;
 	}
 	return false;
 }
@@ -959,6 +982,29 @@ bool UEnemyAwarenessComponent::IsActorAlive(const AActor* Actor)
 	return !HC || !HC->IsDead();
 }
 
+bool UEnemyAwarenessComponent::IsCompanionActor(const AActor* Actor) const
+{
+	return Cast<const ACompanionCharacter>(Actor) != nullptr;
+}
+
+bool UEnemyAwarenessComponent::ShouldIgnoreCompanionStimulus(const AActor* Actor) const
+{
+	return IsCompanionActor(Actor) && CurrentState != EEnemyAwarenessState::Combat;
+}
+
+bool UEnemyAwarenessComponent::CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, bool bHasVisibleNonCompanionTarget, float WorldTime) const
+{
+	if (!IsCompanionActor(Candidate)) return true;
+	if (CurrentState != EEnemyAwarenessState::Combat) return false;
+
+	const bool bRecentlyDamagedByCompanion = RecentDamageInstigatorPawn.Get() == Candidate
+		&& (WorldTime - RecentDamageWorldTime) < RecentDamageWindow;
+	if (!Track.bSighted && !bRecentlyDamagedByCompanion) return false;
+	if (bHasVisibleNonCompanionTarget && !bRecentlyDamagedByCompanion) return false;
+
+	return true;
+}
+
 // --- Threat-Scored Target Selection (design §10) ---
 
 AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
@@ -968,6 +1014,21 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 	const AAIController* MyController = Cast<AAIController>(GetOwner());
 	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
 	if (!IsValid(MyPawn)) return nullptr;
+
+	const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	bool bHasVisibleNonCompanionTarget = false;
+	for (const auto& Pair : SuspicionTracks)
+	{
+		AActor* Candidate = Pair.Key.Get();
+		if (!IsValid(Candidate)) continue;
+		if (IsCompanionActor(Candidate)) continue;
+		if (!Pair.Value.bSighted) continue;
+		if (!IsActorAlive(Candidate)) continue;
+		if (!IsHostile(Candidate)) continue;
+
+		bHasVisibleNonCompanionTarget = true;
+		break;
+	}
 
 	// Officer focus-fire override: if squad has a focus target we can perceive, it wins outright
 	if (UEnemySquadSubsystem* SquadSS = SquadSubsystem.Get())
@@ -982,14 +1043,17 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 				if (IsValid(FocusTarget) && IsActorAlive(FocusTarget))
 				{
 					const FSuspicionTrack* FocusTrack = SuspicionTracks.Find(FocusTarget);
-					if (FocusTrack && FocusTrack->bSighted) return FocusTarget;
+					if (FocusTrack && FocusTrack->bSighted
+						&& CanSelectCompanionTarget(FocusTarget, *FocusTrack, bHasVisibleNonCompanionTarget, WorldTime))
+					{
+						return FocusTarget;
+					}
 				}
 			}
 		}
 	}
 
 	const float SightRadiusInv = 1.f / FMath::Max(ArchetypeData->SightRadius, 1.f);
-	const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 
 	AActor* BestTarget = nullptr;
 	float BestScore = -1.f;
@@ -1003,6 +1067,7 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 		if (!IsHostile(Candidate)) continue;
 
 		const FSuspicionTrack& Track = Pair.Value;
+		if (!CanSelectCompanionTarget(Candidate, Track, bHasVisibleNonCompanionTarget, WorldTime)) continue;
 
 		const float Dist = FVector::Dist(MyPawn->GetActorLocation(), Candidate->GetActorLocation());
 		const float ProximityTerm = ArchetypeData->ThreatWeightProximity * (1.f - FMath::Clamp(Dist * SightRadiusInv, 0.f, 1.f));
@@ -1064,6 +1129,7 @@ void UEnemyAwarenessComponent::ReportSquadSighting(AActor* Target, const FVector
 {
 	if (bStopped) return;
 	if (!IsValid(Target)) return;
+	if (ShouldIgnoreCompanionStimulus(Target)) return;
 
 	// Guard: set flag to prevent re-broadcast from any combat-entry path this call triggers
 	TGuardValue<bool> RelayGuard(bInSquadSightingRelay, true);

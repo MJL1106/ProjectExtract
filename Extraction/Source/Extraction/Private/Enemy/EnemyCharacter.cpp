@@ -1074,6 +1074,18 @@ bool AEnemyCharacter::HasDetectedPlayer() const
 	return Awareness->GetAwarenessState() == EEnemyAwarenessState::Combat;
 }
 
+bool AEnemyCharacter::IsAlertedForCompanionReadiness() const
+{
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return false;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return false;
+
+	const EEnemyAwarenessState State = Awareness->GetAwarenessState();
+	return State == EEnemyAwarenessState::Searching || State == EEnemyAwarenessState::Combat;
+}
+
 void AEnemyCharacter::SetInTakedownVolume(bool bInVolume)
 {
 	TakedownVolumeRefCount = FMath::Max(0, TakedownVolumeRefCount + (bInVolume ? 1 : -1));

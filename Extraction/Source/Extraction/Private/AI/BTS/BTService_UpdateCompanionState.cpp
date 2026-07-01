@@ -88,6 +88,19 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	AActor* BestTarget = nullptr;
 	float BestDistSq = MAX_FLT;
 	const FVector MyLocation = Companion->GetActorLocation();
+	bool bHasAlertedThreat = false;
+	FVector AlertedThreatLocation = FVector::ZeroVector;
+	float BestAlertDistSq = MAX_FLT;
+
+	auto NoteAlertedThreat = [&](const AEnemyCharacter* Enemy, float DistSq)
+	{
+		if (!IsValid(Enemy) || !Enemy->IsAlertedForCompanionReadiness()) return;
+		if (DistSq >= BestAlertDistSq) return;
+
+		BestAlertDistSq = DistSq;
+		AlertedThreatLocation = Enemy->GetActorLocation();
+		bHasAlertedThreat = true;
+	};
 
 	for (AActor* Actor : PerceivedActors)
 	{
@@ -105,12 +118,15 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		UHealthComponent* EnemyHealth = Actor->FindComponentByClass<UHealthComponent>();
 		if (EnemyHealth && EnemyHealth->IsDead()) continue;
 
+		const float DistSq = FVector::DistSquared(MyLocation, Actor->GetActorLocation());
+
 		// Don't engage enemies that haven't detected the player (stealth preservation).
 		// Non-AEnemyCharacter actors with the enemy tag keep current behavior (treat as engageable).
 		if (const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Actor))
+		{
+			NoteAlertedThreat(Enemy, DistSq);
 			if (!Enemy->HasDetectedPlayer()) continue;
-
-		const float DistSq = FVector::DistSquared(MyLocation, Actor->GetActorLocation());
+		}
 
 		if (DistSq < BestDistSq)
 		{
@@ -165,9 +181,14 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				UHealthComponent* ProxHealth = ProxActor->FindComponentByClass<UHealthComponent>();
 				if (ProxHealth && ProxHealth->IsDead()) continue;
 
+				const float ProxDistSq = FVector::DistSquared(MyLocation, ProxActor->GetActorLocation());
+
 				// Don't engage enemies that haven't detected the player (stealth preservation).
 				if (const AEnemyCharacter* ProxEnemy = Cast<AEnemyCharacter>(ProxActor))
+				{
+					NoteAlertedThreat(ProxEnemy, ProxDistSq);
 					if (!ProxEnemy->HasDetectedPlayer()) continue;
+				}
 
 				// LoS check from eye height — must be unobstructed or hit the candidate directly.
 				// Fix B: ignore list mirrors the combat task (self + weapon + attached actors).
@@ -181,7 +202,6 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 					ProxLosHit, ProxAimOrigin, AITargeting::GetSightLocation(ProxActor), ECC_Visibility, ProxLosParams);
 				if (bProxBlocked && ProxLosHit.GetActor() != ProxActor) continue;
 
-				const float ProxDistSq = FVector::DistSquared(MyLocation, ProxActor->GetActorLocation());
 				if (ProxDistSq < BestDistSq)
 				{
 					BestDistSq = ProxDistSq;
@@ -191,7 +211,63 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		}
 	}
 
-	// LoS filter — treat blocked target as no engageable target this tick
+	// Player-centered threat awareness: ready on enemies pressuring the player, but only target them with companion LoS.
+	{
+		const UCompanionTuningDataAsset* ThreatTuning = Controller->GetTuning();
+		const float PlayerThreatRadius = ThreatTuning ? ThreatTuning->PlayerThreatAwarenessRadius : 2500.f;
+		if (IsValid(PlayerPawn) && PlayerThreatRadius > 0.f)
+		{
+			TArray<FOverlapResult> ThreatOverlaps;
+			ThreatOverlaps.Reserve(16);
+			FCollisionObjectQueryParams ObjParams(ECC_Pawn);
+			FCollisionQueryParams ThreatParams(SCENE_QUERY_STAT(CompanionPlayerThreatAwareness), false);
+			ThreatParams.AddIgnoredActor(Companion);
+			ThreatParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+			ThreatParams.AddIgnoredActor(PlayerPawn);
+
+			Companion->GetWorld()->OverlapMultiByObjectType(
+				ThreatOverlaps, PlayerPawn->GetActorLocation(), FQuat::Identity,
+				ObjParams, FCollisionShape::MakeSphere(PlayerThreatRadius), ThreatParams);
+
+			TArray<AActor*, TInlineAllocator<4>> ThreatIgnoredAttached;
+			Companion->ForEachAttachedActors([&](AActor* A) { ThreatIgnoredAttached.Add(A); return true; });
+
+			const FVector ThreatAimOrigin = Companion->GetPawnViewLocation();
+			for (const FOverlapResult& Overlap : ThreatOverlaps)
+			{
+				AActor* ThreatActor = Overlap.GetActor();
+				const AEnemyCharacter* ThreatEnemy = Cast<AEnemyCharacter>(ThreatActor);
+				if (!IsValid(ThreatEnemy)) continue;
+
+				const UHealthComponent* ThreatHealth = ThreatEnemy->GetHealthComponent();
+				if (ThreatHealth && ThreatHealth->IsDead()) continue;
+
+				const float PlayerDistSq = FVector::DistSquared(PlayerPawn->GetActorLocation(), ThreatActor->GetActorLocation());
+				NoteAlertedThreat(ThreatEnemy, PlayerDistSq);
+				if (!ThreatEnemy->HasDetectedPlayer()) continue;
+
+				FHitResult ThreatLosHit;
+				FCollisionQueryParams ThreatLosParams(SCENE_QUERY_STAT(CompanionPlayerThreatLoS), true);
+				ThreatLosParams.AddIgnoredActor(Companion);
+				ThreatLosParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+				for (AActor* Attached : ThreatIgnoredAttached)
+					ThreatLosParams.AddIgnoredActor(Attached);
+
+				const bool bThreatBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+					ThreatLosHit, ThreatAimOrigin, AITargeting::GetSightLocation(ThreatActor), ECC_Visibility, ThreatLosParams);
+				if (bThreatBlocked && ThreatLosHit.GetActor() != ThreatActor) continue;
+
+				const float CompanionDistSq = FVector::DistSquared(MyLocation, ThreatActor->GetActorLocation());
+				if (CompanionDistSq < BestDistSq)
+				{
+					BestDistSq = CompanionDistSq;
+					BestTarget = ThreatActor;
+				}
+			}
+		}
+	}
+
+	// Final LoS filter for the selected combat target.
 	if (BestTarget)
 	{
 		FCollisionQueryParams LosParams(SCENE_QUERY_STAT(CompanionServiceLoS), true);
@@ -298,6 +374,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	const ECompanionPosture CurrentPosture = Companion->GetPosture();
 	const AActor* TargetAfterUpdate = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName));
 	const bool bHasTarget = IsValid(TargetAfterUpdate);
+	const bool bReadyOnlyThreat = bHasAlertedThreat && !bHasTarget;
 
 	auto PostureName = [](ECompanionPosture P) -> const TCHAR*
 	{
@@ -310,12 +387,18 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		}
 	};
 
-	if (bHasTarget && CurrentPosture != ECompanionPosture::Combat && CurrentPosture != ECompanionPosture::Stealth)
+	if (bHasTarget || bReadyOnlyThreat)
 	{
-		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
-				*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Combat));
-		Companion->SetPosture(ECompanionPosture::Combat);
+		if (CurrentPosture != ECompanionPosture::Combat)
+		{
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
+					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Combat));
+			Companion->SetPosture(ECompanionPosture::Combat);
+		}
+		Companion->SetLowReadyAim(false);
+		if (bReadyOnlyThreat)
+			Controller->SetFocalPoint(AlertedThreatLocation, EAIFocusPriority::Gameplay);
 		OutOfCombatTimer = 0.f;
 	}
 	else if (!bHasTarget && CurrentPosture == ECompanionPosture::Combat)
@@ -327,13 +410,10 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
 					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Exploration));
 			Companion->SetPosture(ECompanionPosture::Exploration);
+			Companion->SetLowReadyAim(true);
+			Controller->ClearFocus(EAIFocusPriority::Gameplay);
 			OutOfCombatTimer = 0.f;
 		}
-	}
-	else if (bHasTarget)
-	{
-		// Target re-acquired (either already in Combat or in Stealth which never auto-transitions).
-		OutOfCombatTimer = 0.f;
 	}
 
 	// --- Posture-driven scoring weights + posture mirror to BB ---

@@ -212,6 +212,10 @@ public:
 	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it; only the companion BT service calls it. */
 	bool HasDetectedPlayer() const;
 
+	/** True when this enemy is alert enough for the companion to ready its weapon.
+	 *  Searching and Combat count; Suspicious does not. */
+	bool IsAlertedForCompanionReadiness() const;
+
 	/** Called by ATakedownVolume on overlap begin/end. Increments/decrements an internal
 	 *  counter so overlapping more than one volume is handled correctly. */
 	void SetInTakedownVolume(bool bInVolume);
