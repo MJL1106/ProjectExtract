@@ -328,8 +328,9 @@ void ACompanionCharacter::StartWeaponFire()
 
 void ACompanionCharacter::OnWeaponFiredCallback()
 {
-	// Per-shot callback hook — reserved for future use (recoil kicks, casing ejection, etc.).
-	// Note: the loop fire montage is driven from StartWeaponFire / StopWeaponFire, not per-shot.
+	if (USkeletalMeshComponent* M = GetMesh())
+		if (UCompanionAnimInstance* A = Cast<UCompanionAnimInstance>(M->GetAnimInstance()))
+			A->AddRecoilImpulse();
 }
 
 void ACompanionCharacter::StopWeaponFire()
@@ -430,7 +431,10 @@ void ACompanionCharacter::HandleDeath()
 		TraversalComponent->CancelTraversal();
 
 	if (IsValid(CurrentWeapon))
+	{
 		CurrentWeapon->StopFiring();
+		CurrentWeapon->CancelReload();
+	}
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
 		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);

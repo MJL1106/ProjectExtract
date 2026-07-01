@@ -34,6 +34,8 @@
 #include "ExtractionTypes.h"
 #include "Extraction.h"
 #include "AnimNotify_TakedownKill.h"
+#include "AIController.h"
+#include "BrainComponent.h"
 #include "EnemyDebug.h"
 
 AExtractionPlayer::AExtractionPlayer()
@@ -1142,4 +1144,66 @@ void AExtractionPlayer::Server_CompleteRevive_Implementation(AExtractionPlayer* 
 
 	// TODO: Validate team membership when team system exists
 	Target->ExitDBNO();
+}
+
+// ---- Companion Debug Exec Commands ----
+
+ACompanionCharacter* AExtractionPlayer::ResolveDebugCompanion() const
+{
+	if (WiredCompanion.IsValid()) return WiredCompanion.Get();
+
+	for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It) return *It;
+
+	return nullptr;
+}
+
+void AExtractionPlayer::CompAim(bool bEnable)
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompAim: no companion found")); return; }
+
+	Comp->SetScriptedAim(bEnable);
+	UE_LOG(LogCompanion, Log, TEXT("CompAim -> %d"), bEnable);
+}
+
+void AExtractionPlayer::CompFire(bool bEnable)
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompFire: no companion found")); return; }
+
+	bEnable ? Comp->StartWeaponFire() : Comp->StopWeaponFire();
+	UE_LOG(LogCompanion, Log, TEXT("CompFire -> %d"), bEnable);
+}
+
+void AExtractionPlayer::CompReload()
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompReload: no companion found")); return; }
+
+	Comp->ReloadWeapon();
+	UE_LOG(LogCompanion, Log, TEXT("CompReload triggered"));
+}
+
+void AExtractionPlayer::CompLowReady(bool bEnable)
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompLowReady: no companion found")); return; }
+
+	Comp->SetLowReadyAim(bEnable);
+	UE_LOG(LogCompanion, Log, TEXT("CompLowReady -> %d"), bEnable);
+}
+
+void AExtractionPlayer::CompDebug(bool bFreeze)
+{
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompDebug: no companion found")); return; }
+
+	AAIController* AIC = Cast<AAIController>(Comp->GetController());
+	UBrainComponent* Brain = AIC ? AIC->GetBrainComponent() : nullptr;
+	if (!Brain) { UE_LOG(LogCompanion, Warning, TEXT("CompDebug: no brain component")); return; }
+
+	if (bFreeze) Brain->StopLogic(TEXT("CompDebug"));
+	else Brain->RestartLogic();
+
+	UE_LOG(LogCompanion, Log, TEXT("CompDebug freeze -> %d"), bFreeze);
 }

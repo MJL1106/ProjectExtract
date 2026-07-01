@@ -444,6 +444,32 @@ private:
 	TMap<TWeakObjectPtr<const AActor>, bool> DebugLastCanBeSeenResult;
 #endif
 
+	// ---- Companion Debug Exec Commands ----
+	// (UHT forbids UFUNCTION inside preprocessor blocks — kept unguarded; console exec is dev-only at runtime.)
+
+	/** Resolve the companion to drive from console (cached wired ref, else first in world). */
+	ACompanionCharacter* ResolveDebugCompanion() const;
+
+	/** console: CompAim 1|0 — force the companion into/out of aim (ADS grip pose). */
+	UFUNCTION(Exec)
+	void CompAim(bool bEnable);
+
+	/** console: CompFire 1|0 — start/stop the companion firing. */
+	UFUNCTION(Exec)
+	void CompFire(bool bEnable);
+
+	/** console: CompReload — trigger a companion reload. */
+	UFUNCTION(Exec)
+	void CompReload();
+
+	/** console: CompLowReady 1|0 — lower/raise the companion's weapon. */
+	UFUNCTION(Exec)
+	void CompLowReady(bool bEnable);
+
+	// console: CompDebug 1 — pause the companion's AI so CompAim/CompFire/CompReload stick; CompDebug 0 — resume.
+	UFUNCTION(Exec)
+	void CompDebug(bool bFreeze);
+
 	// ---- Takedown state ----
 
 	/** Victim held during a montage-deferred takedown. Cleared after kill or montage abort. */

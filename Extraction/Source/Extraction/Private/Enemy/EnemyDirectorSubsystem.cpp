@@ -6,6 +6,7 @@
 #include "EnemyArchetypeData.h"
 #include "EnemyAwarenessComponent.h"
 #include "DirectorConfigData.h"
+#include "EnemyDirectorScopeVolume.h"
 #include "EnemySpawnZone.h"
 #include "HealthComponent.h"
 #include "EnemySquadSubsystem.h"
@@ -41,6 +42,7 @@ void UEnemyDirectorSubsystem::Deinitialize()
 	OnEnemyDied.RemoveDynamic(this, &UEnemyDirectorSubsystem::HandleEnemyKilled);
 
 	SpawnZones.Empty();
+	ScopeVolumes.Empty();
 	Corpses.Empty();
 
 	Super::Deinitialize();
@@ -233,6 +235,62 @@ void UEnemyDirectorSubsystem::PruneStaleZones()
 	SpawnZones.RemoveAll([](const TWeakObjectPtr<AEnemySpawnZone>& Entry) { return !Entry.IsValid(); });
 }
 
+void UEnemyDirectorSubsystem::RegisterScopeVolume(AEnemyDirectorScopeVolume* ScopeVolume)
+{
+	if (!IsValid(ScopeVolume)) return;
+
+	ScopeVolumes.AddUnique(ScopeVolume);
+	UE_LOG(LogEnemyAI, Verbose, TEXT("Director scope registered: %s"), *ScopeVolume->GetName());
+}
+
+void UEnemyDirectorSubsystem::UnregisterScopeVolume(AEnemyDirectorScopeVolume* ScopeVolume)
+{
+	ScopeVolumes.RemoveAll([&ScopeVolume](const TWeakObjectPtr<AEnemyDirectorScopeVolume>& Entry)
+	{
+		return !Entry.IsValid() || Entry.Get() == ScopeVolume;
+	});
+
+	UE_LOG(LogEnemyAI, Verbose, TEXT("Director scope unregistered: %s"), IsValid(ScopeVolume) ? *ScopeVolume->GetName() : TEXT("null"));
+}
+
+void UEnemyDirectorSubsystem::PruneStaleScopeVolumes()
+{
+	ScopeVolumes.RemoveAll([](const TWeakObjectPtr<AEnemyDirectorScopeVolume>& Entry) { return !Entry.IsValid(); });
+}
+
+bool UEnemyDirectorSubsystem::HasActiveScopeVolumes() const
+{
+	for (const TWeakObjectPtr<AEnemyDirectorScopeVolume>& WeakScope : ScopeVolumes)
+	{
+		const AEnemyDirectorScopeVolume* Scope = WeakScope.Get();
+		if (IsValid(Scope) && Scope->IsScopeEnabled())
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+bool UEnemyDirectorSubsystem::IsActorInsideAnyScope(const AActor* Actor) const
+{
+	return IsValid(Actor) && IsPointInsideAnyScope(Actor->GetActorLocation());
+}
+
+bool UEnemyDirectorSubsystem::IsPointInsideAnyScope(const FVector& Point) const
+{
+	for (const TWeakObjectPtr<AEnemyDirectorScopeVolume>& WeakScope : ScopeVolumes)
+	{
+		const AEnemyDirectorScopeVolume* Scope = WeakScope.Get();
+		if (IsValid(Scope) && Scope->ContainsPoint(Point))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
 // ============================================================
 // v2: Director Tick (1s cadence)
 // ============================================================
@@ -242,6 +300,7 @@ void UEnemyDirectorSubsystem::DirectorTick()
 	if (AlertLevel != EGlobalAlertLevel::Loud) return;
 
 	PruneStaleZones();
+	PruneStaleScopeVolumes();
 
 	const FEnemySweepResult Sweep = SweepEnemies();
 
@@ -262,6 +321,9 @@ void UEnemyDirectorSubsystem::DirectorTick()
 
 void UEnemyDirectorSubsystem::HandleEnemyKilled(AEnemyCharacter* DeadEnemy, FVector Location, bool bWasOfficer)
 {
+	const bool bUseScopeVolumes = HasActiveScopeVolumes();
+	if (bUseScopeVolumes && !IsPointInsideAnyScope(Location) && !IsActorInsideAnyScope(DeadEnemy)) return;
+
 	++RecentKills;
 }
 
@@ -279,11 +341,13 @@ UEnemyDirectorSubsystem::FEnemySweepResult UEnemyDirectorSubsystem::SweepEnemies
 	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
 	const FVector PlayerLoc = IsValid(PlayerPawn) ? PlayerPawn->GetActorLocation() : FVector::ZeroVector;
 	const float EngageRadiusSq = DefaultEngageRadius * DefaultEngageRadius;
+	const bool bUseScopeVolumes = HasActiveScopeVolumes();
 
 	for (TActorIterator<AEnemyCharacter> It(World); It; ++It)
 	{
 		AEnemyCharacter* Enemy = *It;
 		if (!IsValid(Enemy)) continue;
+		if (bUseScopeVolumes && !IsActorInsideAnyScope(Enemy)) continue;
 
 		UHealthComponent* HC = Enemy->GetHealthComponent();
 		if (!IsValid(HC) || HC->IsDead()) continue;
@@ -547,6 +611,7 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 	if (IsValid(PlayerPawn)) QueryParams.AddIgnoredActor(PlayerPawn);
 
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+	const bool bUseScopeVolumes = HasActiveScopeVolumes();
 
 	TArray<AEnemySpawnZone*> Candidates;
 	Candidates.Reserve(MaxZoneCandidates);
@@ -558,6 +623,8 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 		if (!Zone->IsActiveForPhase(CurrentMissionPhase)) continue;
 
 		const FVector ZoneLoc = Zone->GetZoneOrigin();
+		if (bUseScopeVolumes && !IsPointInsideAnyScope(ZoneLoc)) continue;
+
 		const float DistSq = FVector::DistSquared(PlayerLoc, ZoneLoc);
 		if (DistSq < DistMinSq || DistSq > DistMaxSq) continue;
 

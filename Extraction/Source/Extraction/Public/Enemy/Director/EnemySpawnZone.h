@@ -26,13 +26,13 @@ protected:
 public:
 	// --- Designer config ---
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ToolTip = "Optional designer label for this zone or area. Current director selection does not require it; use it for organization, logs, and future tuning."))
 	FName AreaTag;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ToolTip = "Mission phases allowed to use this zone. Empty means all phases. Use this to make route-, room-, or floor-specific spawn rooms."))
 	TArray<EMissionPhase> ActivePhases;
 
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone")
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ToolTip = "Optional config asset pushed to the world director when this zone registers and no explicit config has been set. Prefer using the same config for all zones in a level."))
 	TObjectPtr<UDirectorConfigData> DirectorConfig;
 
 	// --- API for the director ---
