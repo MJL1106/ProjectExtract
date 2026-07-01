@@ -1,7 +1,7 @@
 ---
 name: ue5-cpp-implementer
 description: Primary UE5 C++ code writer for ProjectExtract — a multiplayer FPS with AI companion. Deep knowledge of project conventions, replication, AI/BT, and engine API.
-model: claude-sonnet-4-6
+model: claude-sonnet-5[1m]
 tools:
   - Glob
   - Grep
