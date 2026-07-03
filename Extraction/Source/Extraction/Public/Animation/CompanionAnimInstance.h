@@ -91,6 +91,24 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Recoil")
 	FVector RecoilSpineOffset = FVector::ZeroVector;
 
+	/**
+	 * Captured spine_01 component-space rotation for the cover-reload tuck — the ABP reads this
+	 * as the target of a REPLACE component-space Transform(Modify)Bone on spine_01. Sampled every
+	 * frame while tucked in cover idle (the "tucked" torso), then HELD while reloading so the reload
+	 * montage's arms animate on top of the idle torso orientation. Component space is mesh-relative,
+	 * so this is facing-independent. Driven at CoverReloadSpineAlpha so it eases in/out.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	FRotator CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+
+	/**
+	 * Eased 0..1 alpha for the cover-reload spine Replace modify bone. Interpolates to 1 while
+	 * bInCover && bIsReloading, else to 0. The ABP feeds this into the modify bone's Alpha so the
+	 * captured torso orientation blends in when the reload starts and out when it ends.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	float CoverReloadSpineAlpha = 0.f;
+
 	/** Called by the character's OnWeaponFiredCallback to add one shot's impulse to the spring. */
 	void AddRecoilImpulse();
 
@@ -269,6 +287,44 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	float CoverAimGateSpeed = 8.f;
 
+	// --- Cover-Reload Spine Tuck (dynamic capture: reproduce cover-idle torso during reload) ---
+
+	/** FInterpTo speed for CoverReloadSpineAlpha ease-in/out. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|Cover")
+	float CoverReloadSpineBlendSpeed = 10.f;
+
+	// --- Cover-Align Config (weapon-socket poses for cover scenario alignment) ---
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FName CoverAlignBoneName = TEXT("hand_r");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignIdleTransform = FTransform(FRotator(21.496962, 96.317499, -2.231149), FVector(-20.773425, -0.492783, 8.053094));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignOverTopTransform = FTransform(FRotator(20.988338, 87.989429, -5.253666), FVector(-20.538873, 1.471584, 8.793081));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignPeekLeftTransform = FTransform(FRotator(21.298056, 92.214519, -3.730851), FVector(-20.684166, 1.605956, 8.089899));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignPeekRightTransform = FTransform(FRotator(20.942675, 95.956006, 1.921055), FVector(-19.839732, -0.012652, 6.100975));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignStandIdleLeftTransform = FTransform(FRotator(37.371757, 88.738964, -2.988765), FVector(-19.728897, -2.63442, 9.25047));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignStandIdleRightTransform = FTransform(FRotator(37.371757, 88.738964, -2.988765), FVector(-19.829018, -1.06718, 7.20189));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignStandPeekLeftTransform = FTransform(FRotator(19.891578, 89.147858, -3.965413), FVector(-19.577595, 0.723464, 7.839758));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignStandPeekRightTransform = FTransform(FRotator(19.430915, 82.007391, -5.116891), FVector(-19.577595, 0.723464, 7.839758));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	float CoverAlignBlendSpeed = 8.f;
+
 	// --- Fire-Align Config (dormant until designer sets FireAlignSocketName on ABP defaults) ---
 
 	/**
@@ -351,6 +407,9 @@ private:
 	float PatrolAlignAlpha = 0.f;
 	bool bPatrolAlignSetup = false;
 
+	// --- Cover-align state ---
+	bool bCoverAlignSetup = false;
+
 	// --- Cover pose cache (resolved at init, re-resolved if stale) ---
 	TWeakObjectPtr<UCoverPoseComponent> CachedCoverPoseComponent;
 
@@ -368,6 +427,9 @@ private:
 	EPeekSide ActivePeekSide = EPeekSide::Right;
 	bool bPrevIsReloading = false;
 
+	/** Throttle accumulator for the [RELOADTUCK] cover-reload-spine diagnostic line. */
+	float CoverReloadTuckLogAccum = 0.f;
+
 	/** Eased gate that scales AimPitch/AimYaw — 0 when in cover idle (not peeking). */
 	float CoverAimGate = 1.f;
 
@@ -378,4 +440,8 @@ private:
 	/** True while any of the four peek montages plays — companion-side peek signal for the aim gate
 	 *  (nothing companion-side sets the pose component's bPeeking). */
 	bool IsAnyCoverPeekMontagePlaying() const;
+
+	/** Capture spine_01 while tucked-idle, hold it while reloading in cover, and ease
+	 *  CoverReloadSpineAlpha 0..1 so the Replace modify bone blends in/out. */
+	void UpdateCoverReloadSpine(float DeltaSeconds);
 };

@@ -4,6 +4,16 @@
 #include "Engine/World.h"
 #include "CollisionQueryParams.h"
 
+ECoverHeight UCoverGeometryStatics::GetCoverHeight(const FCoverData& Data)
+{
+	// Stand when a standing side-peek exists AND no front-crouch flag (tall wall: concealed standing,
+	// side-peek possible, no fire-over-the-top). Everything else is Crouch.
+	const bool bHasStandingSide = Data.bLeftCoverStanding || Data.bRightCoverStanding;
+	if (bHasStandingSide && !Data.bFrontCoverCrouched)
+		return ECoverHeight::Stand;
+	return ECoverHeight::Crouch;
+}
+
 FVector UCoverGeometryStatics::GetHunkerPosition(const FCoverData& Data, float Standoff)
 {
 	return Data.Location - Data.DirectionToWall.GetSafeNormal2D() * Standoff;
@@ -104,6 +114,19 @@ bool UCoverGeometryStatics::IsSameWall(const FCoverData& A, const FCoverData& B,
 	const FVector DirB = B.DirectionToWall.GetSafeNormal2D();
 	const float Dot2D = FVector2D::DotProduct(FVector2D(DirA), FVector2D(DirB));
 	return Dot2D >= CosThreshold;
+}
+
+bool UCoverGeometryStatics::HasThreatFacingSideFlag(const FCoverData& Data, const FVector& ThreatLoc, bool bCrouched)
+{
+	const FVector Lateral = Data.Rotation.RotateVector(FVector::RightVector);
+	const FVector ToThreat2D = (ThreatLoc - Data.Location).GetSafeNormal2D();
+	const float LateralDot = FVector::DotProduct(Lateral, ToThreat2D);
+
+	// Positive dot = threat is toward +Right = Right lean side
+	if (LateralDot >= 0.f)
+		return bCrouched ? Data.bRightCoverCrouched : Data.bRightCoverStanding;
+
+	return bCrouched ? Data.bLeftCoverCrouched : Data.bLeftCoverStanding;
 }
 
 bool UCoverGeometryStatics::CanPeekShoot(const UObject* WorldContextObject, const FCoverData& Data,

@@ -13,6 +13,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "KismetAnimationLibrary.h"
 #include "CompanionAIController.h"
+#include "Enemy/Debug/EnemyDebug.h"
 
 void UCompanionAnimInstance::NativeInitializeAnimation()
 {
@@ -60,10 +61,13 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 	RecoilCurrentKickback = 0.f;
 	RecoilSpineRotation = FRotator::ZeroRotator;
 	RecoilSpineOffset = FVector::ZeroVector;
+	CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+	CoverReloadSpineAlpha = 0.f;
 	FireAlignAlpha = 0.f;
 	bFireAlignSetup = false;
 	PatrolAlignAlpha = 0.f;
 	bPatrolAlignSetup = false;
+	bCoverAlignSetup = false;
 	CachedWeapon.Reset();
 	bWasAlive = true;
 }
@@ -222,11 +226,14 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsAiming = false;
 	}
 
+	// Cache once per frame — used by both the aim gate and the cover-align block below.
+	const bool bPeekMontagePlaying = IsAnyCoverPeekMontagePlaying();
+
 	// --- Cover aim gate: ease AimPitch/AimYaw to zero when tucked in cover ---
 	// Nothing companion-side sets the pose component's bPeeking, so an actively playing peek
 	// montage is the peek signal — the gate opens for the finite peek-fire window.
 	{
-		const bool bGateOff = bInCover && !bCoverPeeking && !IsAnyCoverPeekMontagePlaying();
+		const bool bGateOff = bInCover && !bCoverPeeking && !bPeekMontagePlaying;
 		const float GateTarget = bGateOff ? 0.f : 1.f;
 		CoverAimGate = FMath::FInterpTo(CoverAimGate, GateTarget, DeltaSeconds, CoverAimGateSpeed);
 		AimPitch *= CoverAimGate;
@@ -271,6 +278,8 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		RecoilCurrentKickback = 0.f;
 		RecoilSpineRotation = FRotator::ZeroRotator;
 		RecoilSpineOffset = FVector::ZeroVector;
+		CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+		CoverReloadSpineAlpha = 0.f;
 		FireAlignAlpha = 0.f;
 		PatrolAlignAlpha = 0.f;
 		bHasLeftHandIK = false;
@@ -293,6 +302,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			FireAlignAlpha = 0.f;
 			bPatrolAlignSetup = false;
 			PatrolAlignAlpha = 0.f;
+			bCoverAlignSetup = false;
 
 			// Reset left-hand IK cache for the new weapon.
 			bGripSocketValid = false;
@@ -331,10 +341,27 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				RecoilCurrentKickback = 0.f;
 				RecoilSpineRotation = FRotator::ZeroRotator;
 				RecoilSpineOffset = FVector::ZeroVector;
+				CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+				CoverReloadSpineAlpha = 0.f;
 
 				// Patrol-align (idle-carry) setup: cache DA-driven offset once on equip.
 				Weapon->SetupPatrolAlign();
 				bPatrolAlignSetup = Weapon->IsPatrolAlignReady();
+
+				// Cover-align setup: compose the per-scenario ABP-tuned socket poses once on equip.
+				{
+					FCoverAlignPoses Poses;
+					Poses.Idle = CoverAlignIdleTransform;
+					Poses.OverTop = CoverAlignOverTopTransform;
+					Poses.PeekLeft = CoverAlignPeekLeftTransform;
+					Poses.PeekRight = CoverAlignPeekRightTransform;
+					Poses.StandIdleLeft = CoverAlignStandIdleLeftTransform;
+					Poses.StandIdleRight = CoverAlignStandIdleRightTransform;
+					Poses.StandPeekLeft = CoverAlignStandPeekLeftTransform;
+					Poses.StandPeekRight = CoverAlignStandPeekRightTransform;
+					Weapon->SetupCoverAlign(GetOwningComponent(), CoverAlignBoneName, Poses);
+					bCoverAlignSetup = Weapon->IsCoverAlignReady();
+				}
 			}
 			else
 			{
@@ -345,6 +372,8 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				RecoilCurrentKickback = 0.f;
 				RecoilSpineRotation = FRotator::ZeroRotator;
 				RecoilSpineOffset = FVector::ZeroVector;
+				CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+				CoverReloadSpineAlpha = 0.f;
 			}
 		}
 
@@ -380,6 +409,44 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				Weapon->SetPatrolAlignAlpha(PatrolAlignAlpha);
 		}
 
+		// --- Cover-align: ease the weapon to the per-scenario cover socket while posed ---
+		// Scenario by inference (no BT plumbing): peek montage playing selects the aim scenario,
+		// tucked in cover selects the idle scenario, out of cover eases home (None).
+		if (bCoverAlignSetup && IsValid(Weapon))
+		{
+			ECoverWeaponAlign Scenario = ECoverWeaponAlign::None;
+			if (bPeekMontagePlaying)
+			{
+				if (LatchedCoverHeight == ECoverHeight::Crouch && !bIsCrouched)
+				{
+					Scenario = ECoverWeaponAlign::OverTop;
+				}
+				else if (LatchedCoverHeight == ECoverHeight::Stand)
+				{
+					Scenario = (ActivePeekSide == EPeekSide::Left)
+						? ECoverWeaponAlign::StandPeekLeft : ECoverWeaponAlign::StandPeekRight;
+				}
+				else
+				{
+					Scenario = (ActivePeekSide == EPeekSide::Left)
+						? ECoverWeaponAlign::PeekLeft : ECoverWeaponAlign::PeekRight;
+				}
+			}
+			else if (bInCover)
+			{
+				if (LatchedCoverHeight == ECoverHeight::Stand)
+				{
+					Scenario = (ActivePeekSide == EPeekSide::Left)
+						? ECoverWeaponAlign::StandIdleLeft : ECoverWeaponAlign::StandIdleRight;
+				}
+				else
+				{
+					Scenario = ECoverWeaponAlign::Idle;
+				}
+			}
+			Weapon->UpdateCoverAlign(Scenario, DeltaSeconds, CoverAlignBlendSpeed);
+		}
+
 		// --- Left-Hand IK (socket transform — cheap once validity is cached) ---
 		// Disabled during reloads so the left hand follows the reload montage (mag grab).
 		if (bGripSocketValid && CachedGripMesh.IsValid() && !bIsReloading)
@@ -395,6 +462,9 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 		// --- Recoil solver ---
 		UpdateRecoilSolver(DeltaSeconds);
+
+		// --- Cover-reload spine tuck ---
+		UpdateCoverReloadSpine(DeltaSeconds);
 	}
 
 	if (bIsReloading != bPrevIsReloading)
@@ -708,6 +778,48 @@ bool UCompanionAnimInstance::IsAnyCoverPeekMontagePlaying() const
 	if (IsValid(CoverPeekLeftMontage_Stand) && Montage_IsPlaying(CoverPeekLeftMontage_Stand)) return true;
 	if (IsValid(CoverPeekRightMontage_Stand) && Montage_IsPlaying(CoverPeekRightMontage_Stand)) return true;
 	return false;
+}
+
+// --- Cover-Reload Spine Tuck ---
+
+namespace
+{
+	/** spine_01 is the bone captured/replaced — its parent chain carries the tucked torso, its
+	 *  children carry the reload arms, so a Replace here = idle torso + reload arms. */
+	const FName CompanionCoverReloadSpineBone = TEXT("spine_01");
+
+	/** Throttle for the [RELOADTUCK] diagnostic so it prints ~2Hz instead of per-frame. */
+	constexpr float CompanionCoverReloadTuckLogInterval = 0.5f;
+}
+
+void UCompanionAnimInstance::UpdateCoverReloadSpine(float DeltaSeconds)
+{
+	USkeletalMeshComponent* Mesh = GetOwningComponent();
+	if (!IsValid(Mesh)) return;
+
+	// Companion has no reliable bCoverPeeking mirror — infer peek from the montages. Capture the
+	// tucked idle torso only (never while reloading: hold the last tucked value; never while peeking).
+	const bool bPeeking = IsAnyCoverPeekMontagePlaying();
+	if (bInCover && !bIsReloading && !bPeeking)
+		CoverReloadSpineRefRotation = Mesh->GetSocketTransform(CompanionCoverReloadSpineBone, RTS_Component).Rotator();
+
+	const float TargetAlpha = (bInCover && bIsReloading) ? 1.f : 0.f;
+	CoverReloadSpineAlpha = FMath::FInterpTo(CoverReloadSpineAlpha, TargetAlpha, DeltaSeconds, CoverReloadSpineBlendSpeed);
+
+	if (GetCoverAnimLogLevel() > 0 && bInCover)
+	{
+		CoverReloadTuckLogAccum += DeltaSeconds;
+		if (CoverReloadTuckLogAccum >= CompanionCoverReloadTuckLogInterval)
+		{
+			CoverReloadTuckLogAccum = 0.f;
+			const FRotator Now = Mesh->GetSocketTransform(CompanionCoverReloadSpineBone, RTS_Component).Rotator();
+			UE_LOG(LogCompanionDiag, Log,
+				TEXT("[RELOADTUCK] %s reloading=%d alpha=%.2f spineNow=(P%.1f Y%.1f R%.1f) ref=(P%.1f Y%.1f R%.1f)"),
+				*GetNameSafe(OwningCompanion.Get()), bIsReloading ? 1 : 0, CoverReloadSpineAlpha,
+				Now.Pitch, Now.Yaw, Now.Roll,
+				CoverReloadSpineRefRotation.Pitch, CoverReloadSpineRefRotation.Yaw, CoverReloadSpineRefRotation.Roll);
+		}
+	}
 }
 
 // --- Recoil Solver ---

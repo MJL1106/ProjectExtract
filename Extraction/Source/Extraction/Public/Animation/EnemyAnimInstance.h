@@ -110,6 +110,24 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Recoil")
 	FVector RecoilSpineOffset = FVector::ZeroVector;
 
+	/**
+	 * Captured spine_01 component-space rotation for the cover-reload tuck — the ABP reads this
+	 * as the target of a REPLACE component-space Transform(Modify)Bone on spine_01. Sampled every
+	 * frame while tucked in cover idle (the "tucked" torso), then HELD while reloading so the reload
+	 * montage's arms animate on top of the idle torso orientation. Component space is mesh-relative,
+	 * so this is facing-independent. Driven at CoverReloadSpineAlpha so it eases in/out.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	FRotator CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+
+	/**
+	 * Eased 0..1 alpha for the cover-reload spine Replace modify bone. Interpolates to 1 while
+	 * bInCover && bIsReloading, else to 0. The ABP feeds this into the modify bone's Alpha so the
+	 * captured torso orientation blends in when the reload starts and out when it ends.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	float CoverReloadSpineAlpha = 0.f;
+
 protected:
 	// --- Cached Refs ---
 
@@ -209,6 +227,12 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
 	bool bCoverPeeking = false;
 
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	bool bCoverMoving = false;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	ECoverLean CoverMoveDirection = ECoverLean::None;
+
 	// --- Cover Montages (designer-assigned on the ABP) ---
 	// Back-to-cover set: side-specific idles hug the chosen corner; the finite peek montages
 	// (Out→Aim…→Return) own the step-out motion and rotation via root motion — code never
@@ -247,6 +271,22 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
 	TObjectPtr<UAnimMontage> CoverBlindFireMontage = nullptr;
 
+	// Move-along-wall montages (CoverSlot group, looping). When a montage is set AND bCoverMoving
+	// is true for the matching stance/direction, it plays looping and the velocity gate is exempted.
+	// Leave unset to retain normal locomotion during cover shuffles.
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> CoverMoveCrouchLeft = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> CoverMoveCrouchRight = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> CoverMoveStandLeft = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> CoverMoveStandRight = nullptr;
+
 	/** Grip layer alpha driven by C++ — ABP reads this as BlendWeights[0] on the grip LayeredBoneBlend.
 	 *  Eased to 0 during blind-fire (Kubold arms win), 1 otherwise. */
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
@@ -266,6 +306,12 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
 	float CoverAimGateSpeed = 8.f;
+
+	// --- Cover-Reload Spine Tuck (dynamic capture: reproduce cover-idle torso during reload) ---
+
+	/** FInterpTo speed for CoverReloadSpineAlpha ease-in/out. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	float CoverReloadSpineBlendSpeed = 10.f;
 
 	// Cover-align: per-scenario weapon-socket poses the gun eases toward while posed in cover.
 	// Each transform is the WeaponSocket pose in CoverAlignBoneName (hand_r) bone space — tune by
@@ -287,6 +333,18 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
 	FTransform CoverAlignPeekRightTransform = FTransform(FRotator(19.162533, 98.340626, -0.341529), FVector(-19.215839, 0.383116, 6.570972));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	FTransform CoverAlignStandIdleLeftTransform = FTransform(FRotator(12.925247, 92.850698, -0.202346), FVector(-20.586518, -1.317184, 9.726404));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	FTransform CoverAlignStandIdleRightTransform = FTransform(FRotator(37.360209, 85.948343, -0.422814), FVector(-21.02151, -1.598945, 8.526152));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	FTransform CoverAlignStandPeekLeftTransform = FTransform(FRotator(18.911719, 88.531414, -3.837036), FVector(-20.777953, 0.449693, 8.548291));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	FTransform CoverAlignStandPeekRightTransform = FTransform(FRotator(18.315925, 82.362116, -4.906405), FVector(-21.107093, 0.784755, 8.944418));
 
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
 	float CoverAlignBlendSpeed = 8.f;
@@ -566,6 +624,8 @@ private:
 	bool bPrevCoverBlindFiring = false;
 	ECoverHeight PrevCoverHeight = ECoverHeight::Stand;
 
+	bool bPrevCoverMoving = false;
+
 	/** Effective cover-animate flag: true only when in cover AND speed has settled. */
 	bool bPrevCoverAnimActive = false;
 
@@ -575,10 +635,21 @@ private:
 	/** Throttle accumulator for the 1Hz [COVERSTATE] diagnostic line. */
 	float CoverStateLogAccum = 0.f;
 
+	/** Throttle accumulator for the [RELOADTUCK] cover-reload-spine diagnostic line. */
+	float CoverReloadTuckLogAccum = 0.f;
+
 	/** Tracks last committed lean side so cover-idle has a valid direction when ECoverLean::None. */
 	ECoverLean LastCoverSide = ECoverLean::Right;
 
+	/** Active cover-move montage instance (set while bCoverMoving is true and a montage matched). */
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> ActiveCoverMoveMontage = nullptr;
+
 	void UpdateCoverAnimation(float DeltaSeconds);
+
+	/** Capture spine_01 while tucked-idle, hold it while reloading in cover, and ease
+	 *  CoverReloadSpineAlpha 0..1 so the Replace modify bone blends in/out. */
+	void UpdateCoverReloadSpine(float DeltaSeconds);
 
 	/** Height-keyed idle pick: crouch → CoverIdleCrouch, stand → CoverIdleStand. */
 	UAnimMontage* SelectCoverIdleMontage() const;

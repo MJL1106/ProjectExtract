@@ -98,6 +98,16 @@ private:
 		 *  prevents ping-ponging when no same-wall point carries the wanted side flag. */
 		bool bSidePeekHopTried = false;
 
+		/** True while a drift-correct nudge back to the hunker is in flight. The move steers the
+		 *  pawn toward the wall; this flag drives a per-tick re-assert of the back-to-cover facing
+		 *  so the body stays tucked facing out instead of swinging 180°. Cleared on arrival. */
+		bool bDriftCorrecting = false;
+		/** Cover data captured when the drift move was issued — supplies the WallYaw for the
+		 *  per-tick facing re-assert without a fresh BB read. */
+		FCoverData DriftFacingCover;
+		/** Hunker destination of the active drift move (2D arrival test for the facing re-assert). */
+		FVector DriftArrivalPos = FVector::ZeroVector;
+
 		// --- Blind-fire state (Feature A) ---
 
 		/** True once the per-suppression-episode roll has been made. Reset when suppression clears. */

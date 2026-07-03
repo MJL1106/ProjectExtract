@@ -318,7 +318,7 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 	StandBurstMuzzleCheckTimer = 0.f;
 	LastStandBurstResumeFireTime = 0.f;
 
-	const ECoverHeight Height = CoverData.bCrouchedCover ? ECoverHeight::Crouch : ECoverHeight::Stand;
+	const ECoverHeight Height = UCoverGeometryStatics::GetCoverHeight(CoverData);
 
 	if (IsValid(Companion))
 	{
@@ -558,14 +558,14 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 		bJustRepositioned = true;
 		PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 		TimeInCoverIdle = 0.f;
-		if (!ArrivedCover.Data.bCrouchedCover)
+		const ECoverHeight ArrivedHeight = UCoverGeometryStatics::GetCoverHeight(ArrivedCover.Data);
+		if (ArrivedHeight != ECoverHeight::Crouch)
 		{
 			if (UCompanionAnimInstance* CAI = Cast<UCompanionAnimInstance>(
 				Companion->GetMesh() ? Companion->GetMesh()->GetAnimInstance() : nullptr))
 				CAI->ClearCoverStrafeVelocity();
 		}
 		// Silent reposition: companion never left cover pose — skip the enter montage to avoid the bobbing animation.
-		const ECoverHeight ArrivedHeight = ArrivedCover.Data.bCrouchedCover ? ECoverHeight::Crouch : ECoverHeight::Stand;
 		if (Anim) Anim->EnterCoverPose(ResolvedPeekSide, ArrivedHeight, false);
 	}
 }
@@ -646,6 +646,19 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 	if (!bStandUpRepositionWalking)
 	{
 		bStandUpRepositionWalking = true;
+
+		// Stop any lingering peek montage so cover-align inference doesn't stay
+		// pinned to OverTop/StandPeek while walking.
+		if (UAnimMontage* M = ActivePeekMontage.Get())
+		{
+			if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
+			{
+				if (CAI->Montage_IsPlaying(M))
+					CAI->Montage_Stop(0.25f, M);
+			}
+		}
+		ActivePeekMontage.Reset();
+
 		UE_LOG(LogCompanionDiag, Warning, TEXT("%s: STANDUP-WALK-START burst-elapsed=%.2f dist=%.0f"),
 			*Companion->GetName(), FMath::RandRange(MinFireBurst, MaxFireBurst), FVector::Dist(Companion->GetActorLocation(), RepositionTargetWorldLoc));
 	}
@@ -909,7 +922,8 @@ FCover UBTTask_CompanionCombat::FindShuffleCover(ACompanionCharacter* Companion,
 		if (Dist < ShuffleDistanceMin || Dist > ShuffleDistanceMax) continue;
 
 		// Reject candidates that can't peek-shoot toward the threat (anti ping-pong).
-		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data, Candidate.Data.bCrouchedCover,
+		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
+			UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
 			ThreatLocation, StandFireEyeHeight, ThreatActor, Companion))
 			continue;
 
@@ -1006,7 +1020,7 @@ bool UBTTask_CompanionCombat::TryPrePeekReloadGate(ACompanionCharacter* Companio
 	// Re-assert crouch every tick while the gate holds. The AnimBP bIsReloading flag can
 	// drive a standing-pose transition if the graph isn't guarded — Crouch() here counteracts
 	// any capsule stand-up that results, keeping the companion behind cover during the reload.
-	if (CoverData.bCrouchedCover && !Companion->bIsCrouched)
+	if (UCoverGeometryStatics::GetCoverHeight(CoverData) == ECoverHeight::Crouch && !Companion->bIsCrouched)
 	{
 		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=PrePeekReloadGate action=Crouch"),
 			*GetNameSafe(Companion), World ? World->GetTimeSeconds() : 0.f);
@@ -1950,7 +1964,8 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 		LastTickCoverHandle = Cover.Handle;
 
 		const FVector ArrivalLoc = Companion->GetActorLocation();
-		CurrentLean = UCoverGeometryStatics::ResolveLeanSide(Cover.Data, Cover.Data.bCrouchedCover, Target->GetActorLocation());
+		const bool bExecCoverCrouched = UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch;
+		CurrentLean = UCoverGeometryStatics::ResolveLeanSide(Cover.Data, bExecCoverCrouched, Target->GetActorLocation());
 		ResolvedPeekSide = (CurrentLean == ECoverLean::Left) ? EPeekSide::Left : EPeekSide::Right;
 
 		const UCapsuleComponent* Cap = Companion->GetCapsuleComponent();
@@ -1984,7 +1999,7 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 					SnapLoc.Z = GroundHit.ImpactPoint.Z + CapsuleHalfHeight;
 				}
 			}
-			const ECoverHeight ArrivalHeight = Cover.Data.bCrouchedCover ? ECoverHeight::Crouch : ECoverHeight::Stand;
+			const ECoverHeight ArrivalHeight = UCoverGeometryStatics::GetCoverHeight(Cover.Data);
 			BeginSmoothSnap(Companion, SnapLoc, SlotYawRot, ArrivalHeight == ECoverHeight::Crouch, TEXT("AlreadyClose"));
 			if (UCompanionAnimInstance* Anim = GetCompanionAnim(Companion))
 				Anim->EnterCoverPose(ResolvedPeekSide, ArrivalHeight);
@@ -2020,7 +2035,7 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 		UE_LOG(LogCompanionAI, Log,
 			TEXT("%s: COVER-CLAIMED height=%s lean=%d canPeek=%d"),
 			*Companion->GetName(),
-			Cover.Data.bCrouchedCover ? TEXT("Crouch") : TEXT("Stand"),
+			(UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch) ? TEXT("Crouch") : TEXT("Stand"),
 			(int32)CurrentLean, (int32)(CurrentLean != ECoverLean::None));
 		if (CurrentLean == ECoverLean::None)
 		{
@@ -2147,7 +2162,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: FINALAPPROACH-SNAP arrived=%d timedOut=%d stalled=%d elapsed=%.2f dist=%.0f warped=%.0f"),
 					*Ctx.Companion->GetName(), (int32)bArrived, (int32)bTimedOut, (int32)bStalled, FinalApproachElapsed, Dist, WarpDist);
 			}
-			const ECoverHeight ApproachHeight = ApproachCover.Data.bCrouchedCover ? ECoverHeight::Crouch : ECoverHeight::Stand;
+			const ECoverHeight ApproachHeight = UCoverGeometryStatics::GetCoverHeight(ApproachCover.Data);
 			BeginSmoothSnap(Ctx.Companion, SnapLoc, SlotYawRot, ApproachHeight == ECoverHeight::Crouch, TEXT("FinalApproach"));
 			if (UCompanionAnimInstance* Anim = GetCompanionAnim(Ctx.Companion))
 				Anim->EnterCoverPose(ResolvedPeekSide, ApproachHeight);
@@ -2215,7 +2230,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// Reset dwell timers so the monitor-swapped point gets its dwell protection before the first validity eval.
 	if (Cover.IsValid() && Cover.Handle != LastTickCoverHandle)
 	{
-		CurrentLean = UCoverGeometryStatics::ResolveLeanSide(Cover.Data, Cover.Data.bCrouchedCover, TargetLocation);
+		CurrentLean = UCoverGeometryStatics::ResolveLeanSide(Cover.Data,
+			UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch, TargetLocation);
 		BlockedRecheckHits = 0;
 		RepositionTargetCover = FCover();
 		RepositionTargetWorldLoc = FVector::ZeroVector;
@@ -2308,7 +2324,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->SetAimTarget(nullptr);
 
 		// Idempotent posture sync — applies on first CoverIdle tick after entry, no-op afterward.
-		const bool bShouldCrouch = Cover.Data.bCrouchedCover;
+		const bool bShouldCrouch = UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch;
 		if (bShouldCrouch && !Ctx.Companion->bIsCrouched)
 		{
 			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=CoverIdlePostureSync action=Crouch"),
@@ -2360,7 +2376,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		const float TargetDeltaSq = FVector::DistSquared(TargetLocation, LastPeekResolveTargetLoc);
 		if (CoverDeltaSq > PeekResolveDistThresholdSq || TargetDeltaSq > PeekResolveDistThresholdSq)
 		{
-			CurrentLean = UCoverGeometryStatics::ResolveLeanSide(Cover.Data, Cover.Data.bCrouchedCover, TargetLocation);
+			CurrentLean = UCoverGeometryStatics::ResolveLeanSide(Cover.Data,
+				UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch, TargetLocation);
 			ResolvedPeekSide = (CurrentLean == ECoverLean::Left) ? EPeekSide::Left : EPeekSide::Right;
 			LastPeekResolveCoverLoc = CoverLoc;
 			LastPeekResolveTargetLoc = TargetLocation;
@@ -2408,7 +2425,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			// At least one lean side must be able to see the target (mirrors the old "peekable corner" gate).
 			// This is a genuine unusability of the point (not a transient flank) — instant invalidate is fine.
 			// Stamp MarkVacated so the EQS PostVacate filter blocks an immediate re-pick of the same blind point.
-			if (!UCoverGeometryStatics::CanPeekShoot(Ctx.Companion->GetWorld(), Cover.Data, Cover.Data.bCrouchedCover,
+			if (!UCoverGeometryStatics::CanPeekShoot(Ctx.Companion->GetWorld(), Cover.Data,
+				UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch,
 				TargetLocation, StandFireEyeHeight, Ctx.Target, Ctx.Companion))
 			{
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: Cover INVALIDATE reason=no-peek-los"), *Ctx.Companion->GetName());
@@ -2544,7 +2562,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// resolves the best lean side and traces from its peek position).
 		AActor* BlockedBy = nullptr;
 		bool bLosFromCover = UCoverGeometryStatics::CanPeekShoot(Ctx.Companion->GetWorld(), Cover.Data,
-			Cover.Data.bCrouchedCover, TargetLocation, StandFireEyeHeight, Ctx.Target, Ctx.Companion);
+			UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch,
+			TargetLocation, StandFireEyeHeight, Ctx.Target, Ctx.Companion);
 		if (bDebugLogging)
 		{
 			const bool bNowBlocked = !bLosFromCover;
@@ -2584,7 +2603,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if (BestCover.IsValid())
 					{
 						CommitCoverSwitch(Ctx.Blackboard, BestCover, Ctx.Companion->GetController());
-						CurrentLean = UCoverGeometryStatics::ResolveLeanSide(BestCover.Data, BestCover.Data.bCrouchedCover, TargetLocation);
+						const ECoverHeight NewHeight = UCoverGeometryStatics::GetCoverHeight(BestCover.Data);
+						CurrentLean = UCoverGeometryStatics::ResolveLeanSide(BestCover.Data,
+							NewHeight == ECoverHeight::Crouch, TargetLocation);
 						const UCapsuleComponent* TpCap = Ctx.Companion->GetCapsuleComponent();
 						const float TpStandoff = (TpCap ? TpCap->GetScaledCapsuleRadius() : 34.f) + 10.f;
 						const FVector NewHunkerLoc = UCoverGeometryStatics::GetHunkerPosition(BestCover.Data, TpStandoff);
@@ -2596,7 +2617,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						LastPeekResolveCoverLoc = FVector::ZeroVector;
 						LastPeekResolveTargetLoc = FVector::ZeroVector;
 						BlockedRecheckHits = 0;
-						if (BestCover.Data.bCrouchedCover)
+						if (NewHeight == ECoverHeight::Crouch)
 						{
 							UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=SubSlotTeleport action=Crouch"),
 								*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
@@ -2608,7 +2629,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 								*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 							Ctx.Companion->UnCrouch();
 						}
-						const ECoverHeight NewHeight = BestCover.Data.bCrouchedCover ? ECoverHeight::Crouch : ECoverHeight::Stand;
 						if (Anim) Anim->EnterCoverPose(ResolvedPeekSide, NewHeight);
 						return;
 					}
@@ -2645,7 +2665,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		// Gate 4: cover point supports a peek (CurrentLean resolved non-None). Points with no
 		// valid lean toward the target are unusable for combat (mirrors the old "no peekable corner" gate).
-		const bool bIsCrouchCover = Cover.Data.bCrouchedCover;
+		const bool bIsCrouchCover = UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch;
 		if (CurrentLean == ECoverLean::None)
 		{
 			if (bDebugLogging)
@@ -3147,7 +3167,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 			// Only defer the reload if we're actually returning to crouch cover (where the
 			// capsule resize would otherwise pop mid-reload-anim). Stand cover has no resize.
-			if (Cover.IsValid() && Cover.Data.bCrouchedCover)
+			if (Cover.IsValid() && UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch)
 			{
 				bPendingReloadAfterSnap = true;
 			}
@@ -3355,7 +3375,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if (ReseekArcDot < ReseekArcCos) continue;
 
 					// Peek-LoS gate: must be able to actually fire from this cover toward the threat.
-					if (!UCoverGeometryStatics::CanPeekShoot(CoverWorld, Candidate.Data, Candidate.Data.bCrouchedCover,
+					if (!UCoverGeometryStatics::CanPeekShoot(CoverWorld, Candidate.Data,
+						UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
 						TargetLocation, StandFireEyeHeight, Ctx.Target, Ctx.Companion))
 						continue;
 

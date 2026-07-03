@@ -735,6 +735,68 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "1.0"))
 	float ShuffleDistanceMax = 125.f;
 
+	/** Composite shuffle score weight for having a threat-facing side flag. 0 = ignore flags. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleSideFlagWeight = 1.5f;
+
+	/** Composite shuffle score weight for lateral projection toward the wall end. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleWallEndWeight = 0.75f;
+
+	/** Composite shuffle score weight for angle-to-threat improvement vs current point. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleAngleWeight = 1.0f;
+
+	/** Composite shuffle score penalty per unit of normalized distance. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleDistancePenalty = 0.5f;
+
+	/** Multiplier on the effective CoverShuffleWeight at Pause-exit when the current point
+	 *  lacks a threat-facing side flag but a flagged same-wall candidate exists. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "1.0"))
+	float CoverAngleShuffleMultiplier = 2.0f;
+
+	// --- Cover Timing (peek/hide variance) ---
+
+	/** Minimum Expose-phase settle duration (seconds) before opening fire. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.05"))
+	float ExposePhaseMin = 0.15f;
+
+	/** Maximum Expose-phase settle duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.05"))
+	float ExposePhaseMax = 0.45f;
+
+	/** Minimum Recover-phase re-crouch settle duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.05"))
+	float RecoverPhaseMin = 0.10f;
+
+	/** Maximum Recover-phase re-crouch settle duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.05"))
+	float RecoverPhaseMax = 0.40f;
+
+	/** Completed peek-fire cycles at a cover before shuffle/relocate may move on. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0"))
+	int32 MinPeekCyclesBeforeRelocate = 1;
+
+	/** Per-pause probability of a long-hide feint (multiplied into pause duration). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LongHideChance = 0.15f;
+
+	/** Multiplier on pause duration when the long-hide feint triggers. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "1.0"))
+	float LongHideMultiplier = 2.5f;
+
+	// --- Cover Reload (tucked reload gate) ---
+
+	/** When true, the enemy proactively reloads behind cover during the Pause phase
+	 *  if ammo is below TuckedReloadAmmoFraction. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Reload")
+	bool bReloadWhileTuckedWhenLow = true;
+
+	/** Ammo fraction (0-1) below which a proactive tucked reload triggers during Pause. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Reload", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TuckedReloadAmmoFraction = 0.34f;
+
 	// --- Cover Positioning & Advance Fire ---
 
 	/** Extra depth (cm) behind the cover line the enemy targets, beyond capsule radius.

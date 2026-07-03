@@ -20,11 +20,31 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAmmoChanged, int32, CurrentAmmo,
 /** Cover-align scenario — which tuned weapon-socket target the gun eases toward while posed in cover. */
 enum class ECoverWeaponAlign : uint8
 {
-	None,      // out of cover — ease home to the rest socket
-	Idle,      // tucked cover idle
-	OverTop,   // over-the-top stand-up peek from low cover
-	PeekLeft,  // left corner peek aim
-	PeekRight, // right corner peek aim
+	None,           // out of cover — ease home to the rest socket
+	Idle,           // tucked crouch cover idle (side-agnostic)
+	OverTop,        // over-the-top stand-up peek from low cover
+	PeekLeft,       // left corner peek aim (crouch)
+	PeekRight,      // right corner peek aim (crouch)
+	StandIdleLeft,  // tucked standing cover idle — left side
+	StandIdleRight, // tucked standing cover idle — right side
+	StandPeekLeft,  // standing left corner peek aim
+	StandPeekRight, // standing right corner peek aim
+};
+
+/** Total number of per-scenario targets (ECoverWeaponAlign minus None). */
+inline constexpr int32 CoverAlignScenarioCount = 8;
+
+/** Pack of per-scenario socket transforms for SetupCoverAlign. Plain C++ — tuned values live as ABP UPROPERTYs. */
+struct FCoverAlignPoses
+{
+	FTransform Idle;
+	FTransform OverTop;
+	FTransform PeekLeft;
+	FTransform PeekRight;
+	FTransform StandIdleLeft;
+	FTransform StandIdleRight;
+	FTransform StandPeekLeft;
+	FTransform StandPeekRight;
 };
 
 UCLASS(Blueprintable)
@@ -254,8 +274,7 @@ public:
 	 * ready when at least one target resolved.
 	 */
 	void SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName SocketSpaceBone,
-		const FTransform& IdlePose, const FTransform& OverTopPose,
-		const FTransform& PeekLeftPose, const FTransform& PeekRightPose);
+		const FCoverAlignPoses& Poses);
 
 	/**
 	 * Eases WeaponMesh's relative transform toward the target for Scenario (None = rest) and
@@ -464,12 +483,12 @@ private:
 	/** Relative transform of WeaponMesh at rest (captured by SetupCoverAlign). Scenario=None target. */
 	FTransform CoverAlignRestRelative = FTransform::Identity;
 
-	/** Pre-composed relative targets per scenario (index = ECoverWeaponAlign - 1: Idle, OverTop,
-	 *  PeekLeft, PeekRight). Same socket math as fire-align; bone-pose-invariant, cached at equip. */
-	FTransform CoverAlignTargets[4];
+	/** Pre-composed relative targets per scenario (index = ECoverWeaponAlign - 1). Same socket math
+	 *  as fire-align; bone-pose-invariant, cached at equip. */
+	FTransform CoverAlignTargets[CoverAlignScenarioCount];
 
 	/** Per-scenario resolve flags — a missing socket disables just that scenario (falls back to rest). */
-	bool bCoverAlignTargetReady[4] = { false, false, false, false };
+	bool bCoverAlignTargetReady[CoverAlignScenarioCount] = {};
 
 	/** Eased current relative transform — persists across target switches for continuity. */
 	FTransform CoverAlignCurrent = FTransform::Identity;

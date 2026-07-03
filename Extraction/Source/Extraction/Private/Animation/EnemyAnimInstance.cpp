@@ -47,6 +47,8 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	RecoilCurrentKickback = 0.f;
 	RecoilSpineRotation = FRotator::ZeroRotator;
 	RecoilSpineOffset = FVector::ZeroVector;
+	CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+	CoverReloadSpineAlpha = 0.f;
 	FireAlignAlpha = 0.f;
 	bFireAlignSetup = false;
 	MeleeMontageWeight = 0.f;
@@ -66,8 +68,10 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	// Cover animation state
 	ActiveCoverMontage = nullptr;
 	ActiveCoverBlindMontage = nullptr;
+	ActiveCoverMoveMontage = nullptr;
 	bPrevCoverPeeking = false;
 	bPrevCoverBlindFiring = false;
+	bPrevCoverMoving = false;
 	bPrevCoverAnimActive = false;
 	PrevCoverHeight = ECoverHeight::Stand;
 	LastCoverSide = DefaultCoverSide;
@@ -161,6 +165,8 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		RecoilCurrentKickback = 0.f;
 		RecoilSpineRotation = FRotator::ZeroRotator;
 		RecoilSpineOffset = FVector::ZeroVector;
+		CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+		CoverReloadSpineAlpha = 0.f;
 	}
 	bWasAlive = bIsAlive;
 
@@ -179,6 +185,8 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		CoverLeanDirection = ECoverLean::None;
 		bCoverBlindFiring = false;
 		bCoverPeeking = false;
+		bCoverMoving = false;
+		CoverMoveDirection = ECoverLean::None;
 		bHasLeftHandIK = false;
 		LeftHandIKTarget = FTransform::Identity;
 		bPrevIsFiring = false;
@@ -190,10 +198,12 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		StopCoverMontages(CoverBlendOut);
 		ActiveCoverMontage = nullptr;
 		ActiveCoverBlindMontage = nullptr;
+		ActiveCoverMoveMontage = nullptr;
 		bPrevCoverAnimActive = false;
 		CoverSettleAccum = 0.f;
 		bPrevCoverPeeking = false;
 		bPrevCoverBlindFiring = false;
+		bPrevCoverMoving = false;
 		CoverAimGate = 1.f;
 		GripPoseAlpha = 1.f;
 		return;
@@ -212,6 +222,8 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		CoverLeanDirection = CachedCoverPoseComponent->LeanDirection;
 		bCoverBlindFiring = CachedCoverPoseComponent->bBlindFiring;
 		bCoverPeeking = CachedCoverPoseComponent->bPeeking;
+		bCoverMoving = CachedCoverPoseComponent->bCoverMoving;
+		CoverMoveDirection = CachedCoverPoseComponent->CoverMoveDirection;
 	}
 	else
 	{
@@ -220,6 +232,8 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		CoverLeanDirection = ECoverLean::None;
 		bCoverBlindFiring = false;
 		bCoverPeeking = false;
+		bCoverMoving = false;
+		CoverMoveDirection = ECoverLean::None;
 	}
 
 	// --- Aim Offset ---
@@ -316,6 +330,8 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				RecoilCurrentKickback = 0.f;
 				RecoilSpineRotation = FRotator::ZeroRotator;
 				RecoilSpineOffset = FVector::ZeroVector;
+				CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+				CoverReloadSpineAlpha = 0.f;
 
 				// Cache hand-swap enablement from the DA. Validate configured sockets
 				// exist on the enemy mesh at equip time — if the patrol socket is absent,
@@ -363,6 +379,8 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			RecoilCurrentKickback = 0.f;
 			RecoilSpineRotation = FRotator::ZeroRotator;
 			RecoilSpineOffset = FVector::ZeroVector;
+			CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+			CoverReloadSpineAlpha = 0.f;
 			bHandSwapEnabled = false;
 			HandSwapAlpha = 0.f;
 			bWantPatrolHand = false;
@@ -400,8 +418,16 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bCoverAlignSetup = false;
 		if (IsValid(Weapon))
 		{
-			Weapon->SetupCoverAlign(GetOwningComponent(), CoverAlignBoneName, CoverAlignIdleTransform,
-				CoverAlignOverTopTransform, CoverAlignPeekLeftTransform, CoverAlignPeekRightTransform);
+			FCoverAlignPoses Poses;
+			Poses.Idle = CoverAlignIdleTransform;
+			Poses.OverTop = CoverAlignOverTopTransform;
+			Poses.PeekLeft = CoverAlignPeekLeftTransform;
+			Poses.PeekRight = CoverAlignPeekRightTransform;
+			Poses.StandIdleLeft = CoverAlignStandIdleLeftTransform;
+			Poses.StandIdleRight = CoverAlignStandIdleRightTransform;
+			Poses.StandPeekLeft = CoverAlignStandPeekLeftTransform;
+			Poses.StandPeekRight = CoverAlignStandPeekRightTransform;
+			Weapon->SetupCoverAlign(GetOwningComponent(), CoverAlignBoneName, Poses);
 			bCoverAlignSetup = Weapon->IsCoverAlignReady();
 		}
 	}
@@ -587,12 +613,24 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				{
 					ECoverLean Side = CoverLeanDirection;
 					if (Side != ECoverLean::Left && Side != ECoverLean::Right) Side = LastCoverSide;
-					Scenario = (Side == ECoverLean::Left) ? ECoverWeaponAlign::PeekLeft : ECoverWeaponAlign::PeekRight;
+					if (CoverHeight == ECoverHeight::Stand)
+						Scenario = (Side == ECoverLean::Left) ? ECoverWeaponAlign::StandPeekLeft : ECoverWeaponAlign::StandPeekRight;
+					else
+						Scenario = (Side == ECoverLean::Left) ? ECoverWeaponAlign::PeekLeft : ECoverWeaponAlign::PeekRight;
 				}
 			}
 			else
 			{
-				Scenario = ECoverWeaponAlign::Idle;
+				if (CoverHeight == ECoverHeight::Stand)
+				{
+					ECoverLean Side = CoverLeanDirection;
+					if (Side != ECoverLean::Left && Side != ECoverLean::Right) Side = LastCoverSide;
+					Scenario = (Side == ECoverLean::Left) ? ECoverWeaponAlign::StandIdleLeft : ECoverWeaponAlign::StandIdleRight;
+				}
+				else
+				{
+					Scenario = ECoverWeaponAlign::Idle;
+				}
 			}
 		}
 		Weapon->UpdateCoverAlign(Scenario, DeltaSeconds, CoverAlignBlendSpeed);
@@ -600,6 +638,9 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	// --- Recoil spring solver ---
 	UpdateRecoilSolver(DeltaSeconds);
+
+	// --- Cover-reload spine tuck ---
+	UpdateCoverReloadSpine(DeltaSeconds);
 
 	// --- Grip pose alpha: ease to 0 during blind-fire or tucked idle without grip arms ---
 	// Blind-fire suppression keys off the montage actually playing (bBlindMontagePlaying), not the
@@ -1102,6 +1143,49 @@ void UEnemyAnimInstance::UpdateRecoilSolver(float DeltaSeconds)
 }
 
 // ---------------------------------------------------------------------------
+// Cover-Reload Spine Tuck
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	/** spine_01 is the bone captured/replaced — its parent chain carries the tucked torso, its
+	 *  children carry the reload arms, so a Replace here = idle torso + reload arms. */
+	const FName CoverReloadSpineBone = TEXT("spine_01");
+
+	/** Throttle for the [RELOADTUCK] diagnostic so it prints ~2Hz instead of per-frame. */
+	constexpr float CoverReloadTuckLogInterval = 0.5f;
+}
+
+void UEnemyAnimInstance::UpdateCoverReloadSpine(float DeltaSeconds)
+{
+	USkeletalMeshComponent* Mesh = GetOwningComponent();
+	if (!IsValid(Mesh)) return;
+
+	// Capture the tucked idle torso only — never while reloading (hold the last tucked value) or
+	// peeking (a peek orientation isn't the tuck we want). The modify bone is inert here (alpha→0).
+	if (bInCover && !bIsReloading && !bCoverPeeking)
+		CoverReloadSpineRefRotation = Mesh->GetSocketTransform(CoverReloadSpineBone, RTS_Component).Rotator();
+
+	const float TargetAlpha = (bInCover && bIsReloading) ? 1.f : 0.f;
+	CoverReloadSpineAlpha = FMath::FInterpTo(CoverReloadSpineAlpha, TargetAlpha, DeltaSeconds, CoverReloadSpineBlendSpeed);
+
+	if (GetCoverAnimLogLevel() > 0 && bInCover)
+	{
+		CoverReloadTuckLogAccum += DeltaSeconds;
+		if (CoverReloadTuckLogAccum >= CoverReloadTuckLogInterval)
+		{
+			CoverReloadTuckLogAccum = 0.f;
+			const FRotator Now = Mesh->GetSocketTransform(CoverReloadSpineBone, RTS_Component).Rotator();
+			UE_LOG(LogTemp, Log,
+				TEXT("[RELOADTUCK] %s reloading=%d alpha=%.2f spineNow=(P%.1f Y%.1f R%.1f) ref=(P%.1f Y%.1f R%.1f)"),
+				*GetNameSafe(OwningEnemy.Get()), bIsReloading ? 1 : 0, CoverReloadSpineAlpha,
+				Now.Pitch, Now.Yaw, Now.Roll,
+				CoverReloadSpineRefRotation.Pitch, CoverReloadSpineRefRotation.Yaw, CoverReloadSpineRefRotation.Roll);
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Cover Animation
 // ---------------------------------------------------------------------------
 
@@ -1230,7 +1314,8 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 	const bool bCoverMontageMoves = IsValid(ActiveCoverMontage)
 		&& Montage_IsPlaying(ActiveCoverMontage) && ActiveCoverMontage->HasRootMotion();
 	const bool bRootMotionDriven = bCoverMontageMoves && MeshComp && MeshComp->IsPlayingRootMotion();
-	if (Speed > CoverAnimMaxSpeed && !bRootMotionDriven)
+	const bool bCoverMoveExempt = bCoverMoving && IsValid(ActiveCoverMoveMontage);
+	if (Speed > CoverAnimMaxSpeed && !bRootMotionDriven && !bCoverMoveExempt)
 		CoverSettleAccum = 0.f;
 	else
 		CoverSettleAccum = FMath::Min(CoverSettleAccum + DeltaSeconds, CoverAnimSettleTime);
@@ -1274,11 +1359,16 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 	if ((!bCoverAnimActive && bPrevCoverAnimActive) || !bIsAlive)
 	{
 		StopCoverMontages(CoverBlendOut);
+		// Death/init cleanup: stop the move montage too (normal fall uses the edge-detect below).
+		if (!bIsAlive && IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
+			Montage_Stop(CoverBlendOut, ActiveCoverMoveMontage);
 		ActiveCoverMontage = nullptr;
 		ActiveCoverBlindMontage = nullptr;
+		if (!bIsAlive) ActiveCoverMoveMontage = nullptr;
 		bPrevCoverAnimActive = bCoverAnimActive;
 		bPrevCoverPeeking = bCoverPeeking;
 		bPrevCoverBlindFiring = bCoverBlindFiring;
+		bPrevCoverMoving = bCoverMoving;
 		PrevCoverHeight = CoverHeight;
 		return;
 	}
@@ -1356,9 +1446,50 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 			PlayCoverIdleMontage(0.2f, TEXT("Loop"));
 	}
 
+	// --- Cover-move fall edge: stop the move montage when bCoverMoving drops ---
+	if (!bCoverMoving && bPrevCoverMoving)
+	{
+		if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
+			Montage_Stop(0.2f, ActiveCoverMoveMontage);
+		ActiveCoverMoveMontage = nullptr;
+	}
+
+	// --- Cover-move montages: play looping while bCoverMoving + a matching clip is set ---
+	{
+		UAnimMontage* DesiredMoveMontage = nullptr;
+		if (bCoverMoving && bIsAlive)
+		{
+			const bool bLeft = (CoverMoveDirection == ECoverLean::Left);
+			if (CoverHeight == ECoverHeight::Crouch)
+				DesiredMoveMontage = bLeft ? CoverMoveCrouchLeft.Get() : CoverMoveCrouchRight.Get();
+			else
+				DesiredMoveMontage = bLeft ? CoverMoveStandLeft.Get() : CoverMoveStandRight.Get();
+		}
+
+		if (IsValid(DesiredMoveMontage))
+		{
+			if (ActiveCoverMoveMontage != DesiredMoveMontage || !Montage_IsPlaying(DesiredMoveMontage))
+			{
+				if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
+					Montage_Stop(0.2f, ActiveCoverMoveMontage);
+				Montage_PlayWithBlendIn(DesiredMoveMontage, FAlphaBlendArgs(0.2f), 1.f,
+					EMontagePlayReturnType::MontageLength, 0.f, false);
+				if (DesiredMoveMontage->GetSectionIndex(TEXT("Loop")) != INDEX_NONE)
+					Montage_JumpToSection(TEXT("Loop"), DesiredMoveMontage);
+				ActiveCoverMoveMontage = DesiredMoveMontage;
+			}
+		}
+		else if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
+		{
+			Montage_Stop(0.2f, ActiveCoverMoveMontage);
+			ActiveCoverMoveMontage = nullptr;
+		}
+	}
+
 	// Latch previous-frame state for next tick's edge detection.
 	bPrevCoverAnimActive = bCoverAnimActive;
 	bPrevCoverPeeking = bCoverPeeking;
 	bPrevCoverBlindFiring = bCoverBlindFiring;
+	bPrevCoverMoving = bCoverMoving;
 	PrevCoverHeight = CoverHeight;
 }

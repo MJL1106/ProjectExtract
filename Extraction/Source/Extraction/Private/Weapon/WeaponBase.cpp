@@ -943,8 +943,7 @@ void AWeaponBase::SetFireAlignAlpha(float Alpha)
 // ---- Weapon cover alignment ----
 
 void AWeaponBase::SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName SocketSpaceBone,
-	const FTransform& IdlePose, const FTransform& OverTopPose,
-	const FTransform& PeekLeftPose, const FTransform& PeekRightPose)
+	const FCoverAlignPoses& Poses)
 {
 	bCoverAlignReady = false;
 	bCoverAlignWriting = false;
@@ -960,18 +959,17 @@ void AWeaponBase::SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName Socke
 		return;
 	}
 
-	// Same derivation as SetupFireAlign: target = Rest * (T_scenario * T_rest.Inverse()) with both
-	// transforms in component space. Scenario poses arrive in SocketSpaceBone bone space, so
-	// T_scenario = Pose * BoneComponentTransform; the bone transform cancels against T_rest when
-	// the rest socket shares the bone, keeping the cached targets bone-pose-invariant.
 	CoverAlignRestRelative = WeaponMesh->GetRelativeTransform();
 	const FTransform TRest = EnemyMesh->GetSocketTransform(RestSocket, RTS_Component);
 	const FTransform TBone = EnemyMesh->GetSocketTransform(SocketSpaceBone, RTS_Component);
 
-	const FTransform* ScenarioPoses[4] = { &IdlePose, &OverTopPose, &PeekLeftPose, &PeekRightPose };
-	for (int32 i = 0; i < 4; ++i)
+	const FTransform* ScenarioPoses[CoverAlignScenarioCount] = {
+		&Poses.Idle, &Poses.OverTop, &Poses.PeekLeft, &Poses.PeekRight,
+		&Poses.StandIdleLeft, &Poses.StandIdleRight, &Poses.StandPeekLeft, &Poses.StandPeekRight
+	};
+	for (int32 i = 0; i < CoverAlignScenarioCount; ++i)
 	{
-		if (ScenarioPoses[i]->Equals(FTransform::Identity)) continue; // identity = scenario disabled
+		if (ScenarioPoses[i]->Equals(FTransform::Identity)) continue;
 		const FTransform TScenario = *ScenarioPoses[i] * TBone;
 		CoverAlignTargets[i] = CoverAlignRestRelative * (TScenario * TRest.Inverse());
 		bCoverAlignTargetReady[i] = true;
@@ -990,6 +988,7 @@ void AWeaponBase::UpdateCoverAlign(ECoverWeaponAlign Scenario, float DeltaSecond
 	if (Scenario != ECoverWeaponAlign::None)
 	{
 		const int32 Index = static_cast<int32>(Scenario) - 1;
+		if (Index < 0 || Index >= CoverAlignScenarioCount) return;
 		if (bCoverAlignTargetReady[Index]) Target = &CoverAlignTargets[Index];
 	}
 

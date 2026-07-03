@@ -38,6 +38,12 @@ void UCoverPoseComponent::SetPeeking(bool bNewPeeking)
 	bPeeking = bNewPeeking;
 }
 
+void UCoverPoseComponent::SetCoverMoving(bool bMoving, ECoverLean Direction)
+{
+	bCoverMoving = bMoving;
+	CoverMoveDirection = bMoving ? Direction : ECoverLean::None;
+}
+
 void UCoverPoseComponent::ResetCoverPose()
 {
 	if (GetCoverAnimLogLevel() > 0 && bInCover)
@@ -47,4 +53,6 @@ void UCoverPoseComponent::ResetCoverPose()
 	LeanDirection = ECoverLean::None;
 	bBlindFiring = false;
 	bPeeking = false;
+	bCoverMoving = false;
+	CoverMoveDirection = ECoverLean::None;
 }

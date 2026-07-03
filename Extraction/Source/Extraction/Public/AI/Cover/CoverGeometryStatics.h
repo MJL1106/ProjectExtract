@@ -15,6 +15,12 @@ class EXTRACTION_API UCoverGeometryStatics : public UBlueprintFunctionLibrary
 
 public:
 
+	/** Derive the effective cover height from baked FCoverData flags.
+	 *  Stand when a standing side-peek exists AND no front-crouch (tall wall, side-peek only).
+	 *  Crouch otherwise. This replaces all raw bCrouchedCover height checks. */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static ECoverHeight GetCoverHeight(const FCoverData& Data);
+
 	/** Position behind cover wall at standoff distance, on the cover's Z plane. */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
 	static FVector GetHunkerPosition(const FCoverData& Data, float Standoff);
@@ -45,6 +51,11 @@ public:
 	/** True when two cover points share the same wall (within angular tolerance). */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
 	static bool IsSameWall(const FCoverData& A, const FCoverData& B, float CosThreshold = 0.9397f);
+
+	/** True when the cover point carries a stance-matched side flag on the threat-facing side
+	 *  (i.e. the lateral direction toward ThreatLoc has a valid lean flag for the given stance). */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static bool HasThreatFacingSideFlag(const FCoverData& Data, const FVector& ThreatLoc, bool bCrouched);
 
 	/** True when the pawn can see the threat from its resolved lean-peek position. */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry", meta = (WorldContext = "WorldContextObject"))

@@ -262,7 +262,8 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		if (ArcDot < FMath::Cos(FMath::DegreesToRadians(Tuning->CoverFlankArcHalfAngleDeg))) continue;
 
 		// Cover must offer a position with LoS to the target.
-		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data, Candidate.Data.bCrouchedCover,
+		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
+			UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
 			ThreatLoc, 150.f, CombatTarget, Pawn))
 			continue;
 

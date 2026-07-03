@@ -32,6 +32,12 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Cover|Pose")
 	bool bPeeking = false;
 
+	UPROPERTY(BlueprintReadOnly, Category = "Cover|Pose")
+	bool bCoverMoving = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Cover|Pose")
+	ECoverLean CoverMoveDirection = ECoverLean::None;
+
 	// --- Setters (BlueprintCallable so BTs and gameplay code can drive state) ---
 
 	UFUNCTION(BlueprintCallable, Category = "Cover|Pose")
@@ -45,6 +51,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Cover|Pose")
 	void SetPeeking(bool bNewPeeking);
+
+	UFUNCTION(BlueprintCallable, Category = "Cover|Pose")
+	void SetCoverMoving(bool bMoving, ECoverLean Direction);
 
 	UFUNCTION(BlueprintCallable, Category = "Cover|Pose")
 	void ResetCoverPose();

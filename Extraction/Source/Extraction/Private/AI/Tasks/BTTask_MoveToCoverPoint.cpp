@@ -442,8 +442,9 @@ void UBTTask_MoveToCoverPoint::HandleArrival(UBehaviorTreeComponent& OwnerComp,
 	if (HasCoverKey.SelectedKeyName != NAME_None)
 		BB->SetValueAsBool(HasCoverKey.SelectedKeyName, true);
 
-	// Crouch if this is a crouch cover
-	if (Data.bCrouchedCover)
+	// Crouch if this is a crouch-height cover
+	const ECoverHeight DerivedHeight = UCoverGeometryStatics::GetCoverHeight(Data);
+	if (DerivedHeight == ECoverHeight::Crouch)
 	{
 		if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
 	}
@@ -467,10 +468,9 @@ void UBTTask_MoveToCoverPoint::HandleArrival(UBehaviorTreeComponent& OwnerComp,
 		{
 			if (const AActor* Threat = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget)))
 				PoseComp->SetLean(UCoverGeometryStatics::ResolveLeanSide(
-					Data, Data.bCrouchedCover, Threat->GetActorLocation()));
+					Data, DerivedHeight == ECoverHeight::Crouch, Threat->GetActorLocation()));
 		}
-		const ECoverHeight Height = Data.bCrouchedCover ? ECoverHeight::Crouch : ECoverHeight::Stand;
-		PoseComp->SetInCover(true, Height);
+		PoseComp->SetInCover(true, DerivedHeight);
 	}
 
 	if (GetCoverAnimLogLevel() > 0 && Enemy)

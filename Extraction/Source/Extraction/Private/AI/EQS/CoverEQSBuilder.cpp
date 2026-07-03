@@ -22,6 +22,7 @@
 #include "EnvQueryTest_CoverPeekable.h"
 #include "EnvQueryTest_CoverAllySpacing.h"
 #include "EnvQueryTest_CoverSameWall.h"
+#include "EnvQueryTest_CoverSideFlag.h"
 #include "EnvQueryContext_CombatTarget.h"
 #include "EnvQueryTest_DistanceBand.h"
 
@@ -205,6 +206,15 @@ static UEnvQueryTest_CoverSameWall* MakeSameWall(UEnvQueryOption* Opt)
 	return T;
 }
 
+static UEnvQueryTest_CoverSideFlag* MakeSideFlag(UEnvQueryOption* Opt, float Factor)
+{
+	UEnvQueryTest_CoverSideFlag* T = NewObject<UEnvQueryTest_CoverSideFlag>(Opt);
+	T->TestPurpose = EEnvTestPurpose::Score;
+	T->ScoringEquation = EEnvTestScoreEquation::Linear;
+	T->ScoringFactor.DefaultValue = Factor;
+	return T;
+}
+
 // ---------------------------------------------------------------------------
 // Query builders
 // ---------------------------------------------------------------------------
@@ -226,9 +236,10 @@ static bool BuildDefensive(FString& OutLine)
 	Opt->Tests.Add(MakeCoverArc(Opt, 75.f));               // 3  (cheap dot math — before traces)
 	Opt->Tests.Add(MakePeekable(Opt));                     // 4
 	Opt->Tests.Add(MakeParallel(Opt));                     // 5
-	Opt->Tests.Add(MakeDistanceQuerier(Opt, 1.f));         // 6
-	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));      // 7
-	Opt->Tests.Add(MakeProvidesCover(Opt));                // 8
+	Opt->Tests.Add(MakeSideFlag(Opt, 1.5f));               // 6
+	Opt->Tests.Add(MakeDistanceQuerier(Opt, 1.f));         // 7
+	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));      // 8
+	Opt->Tests.Add(MakeProvidesCover(Opt));                // 9
 
 	Q->GetOptionsMutable().Add(Opt);
 
@@ -251,12 +262,13 @@ static bool BuildAdvance(FString& OutLine)
 	Opt->Tests.Add(MakePeekable(Opt));                                                   // 3
 	Opt->Tests.Add(MakeProvidesCover(Opt));                                              // 4
 	Opt->Tests.Add(MakeParallel(Opt));                                                   // 5
-	Opt->Tests.Add(MakeDistanceBand(Opt,                                                 // 6
+	Opt->Tests.Add(MakeSideFlag(Opt, 1.5f));                                             // 6
+	Opt->Tests.Add(MakeDistanceBand(Opt,                                                 // 7
 		UEnvQueryContext_CombatTarget::StaticClass(),
 		500.f, 1200.f,
 		EEnvTestPurpose::FilterAndScore, 0.15f, 1.5f));
-	Opt->Tests.Add(MakeDistanceQuerier(Opt, 0.3f));                                      // 7
-	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));                                    // 8
+	Opt->Tests.Add(MakeDistanceQuerier(Opt, 0.3f));                                      // 8
+	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));                                    // 9
 
 	Q->GetOptionsMutable().Add(Opt);
 

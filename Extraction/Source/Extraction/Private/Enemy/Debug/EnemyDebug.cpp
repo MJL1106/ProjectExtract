@@ -138,3 +138,14 @@ int32 GetForceCoverPeekSide()
 {
 	return CVarForceCoverPeekSide.GetValueOnGameThread();
 }
+
+static TAutoConsoleVariable<int32> CVarForceCoverHeight(
+	TEXT("enemy.ForceCoverHeight"),
+	0,
+	TEXT("Force cover-height selection for visual testing: 0=auto, 1=crouch-only cover points, 2=stand-only cover points. Mismatched points are rejected from EQS queries and hand-rolled cover searches."),
+	ECVF_Cheat);
+
+static int32 GetForceCoverHeight()
+{
+	return CVarForceCoverHeight.GetValueOnGameThread();
+}
