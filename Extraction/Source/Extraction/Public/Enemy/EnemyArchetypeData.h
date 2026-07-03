@@ -680,6 +680,39 @@ public:
 		ToolTip = "How many consecutive Expose LOS-timeouts (no shot fired) before the enemy relocates off this slot."))
 	int32 MaxExposeLosTimeouts = 2;
 
+	// --- Cover Peek (vision cone + endpoint options) ---
+
+	/** Half-angle (degrees) of the engagement cone centred on the current peek direction while the
+	 *  enemy is posed in cover. Targets outside this cone are treated as no-LOS for fire decisions
+	 *  only — perception and flank-break remain live. 180 = disabled (full sweep). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
+		meta = (ClampMin = "5.0", ClampMax = "180.0",
+		ToolTip = "Half-angle of the in-cover engagement cone (degrees). Targets outside it are treated as out-of-LOS for fire decisions. 180 disables the cone."))
+	float CoverPeekConeHalfAngleDeg = 55.f;
+
+	/** Degrees the cone centre is biased TOWARD the active lean side from the fire-arc forward.
+	 *  Right lean biases right, left lean biases left. 0 = unbiased (cone centred on fire-arc forward).
+	 *  Ignored for Front/over-top peeks and when the lean side is None. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
+		meta = (ClampMin = "0.0", ClampMax = "85.0",
+		ToolTip = "Degrees the peek cone rotates toward the active lean side. 0 = centred on fire-arc forward."))
+	float CoverPeekConeBiasDeg = 20.f;
+
+	/** Seconds bRelocatePending may linger before the task force-executes the relocate even if the
+	 *  enemy is still firing. Ensures a flanked enemy that keeps getting LOS eventually breaks cover. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
+		meta = (ClampMin = "0.5",
+		ToolTip = "Max seconds a flank-relocate stays pending before force-executing (stops a continuously-firing flanked enemy deferring forever)."))
+	float CoverRelocatePendingTimeout = 2.f;
+
+	/** Probability (0-1) that a crouch-cover peek at a wall end-point will swap from a side peek to
+	 *  a stand-up over-top peek. Applied at Expose entry and in the failed-peek escalation ladder.
+	 *  0 = never stand up; 1 = always stand up when the over-top path is physically valid. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
+		meta = (ClampMin = "0.0", ClampMax = "1.0",
+		ToolTip = "Roll chance for a crouch end-point to stand up and peek over the top instead of leaning sideways."))
+	float CoverEndpointStandPeekChance = 0.3f;
+
 	/** Flank-break relocate only accepts a slot whose hunkered body is geometry-shielded from the
 	 *  threat. Disable to fall back to can-shoot-only selection. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
@@ -750,6 +783,14 @@ public:
 	/** Composite shuffle score penalty per unit of normalized distance. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
 	float ShuffleDistancePenalty = 0.5f;
+
+	/** MaxWalkSpeed cap (cm/s) applied while a same-wall cover move (shuffle or ladder reposition)
+	 *  is in flight. Walk clip stride matches this speed — higher speeds cause foot-sliding.
+	 *  Original MaxWalkSpeed is restored on arrival, abort, task teardown, death, or relocate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle",
+		meta = (ClampMin = "50.0",
+		ToolTip = "Walk speed (cm/s) used during same-wall cover shuffles. Matches the walk clip stride to prevent foot-sliding."))
+	float CoverMoveSpeed = 170.f;
 
 	/** Multiplier on the effective CoverShuffleWeight at Pause-exit when the current point
 	 *  lacks a threat-facing side flag but a flagged same-wall candidate exists. */

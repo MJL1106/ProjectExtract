@@ -72,12 +72,16 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	bPrevCoverPeeking = false;
 	bPrevCoverBlindFiring = false;
 	bPrevCoverMoving = false;
+	bCoverMovePlayingStop = false;
+	RawAimYawDeg = 0.f;
+	CoverAimTrackAlpha = 1.f;
 	bPrevCoverAnimActive = false;
 	PrevCoverHeight = ECoverHeight::Stand;
 	LastCoverSide = DefaultCoverSide;
 	CoverSettleAccum = 0.f;
 	CoverAimGate = 1.f;
 	GripPoseAlpha = 1.f;
+	CoverAimScenario = 0;
 
 	APawn* PawnOwner = TryGetPawnOwner();
 	if (!IsValid(PawnOwner)) return;
@@ -187,6 +191,7 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bCoverPeeking = false;
 		bCoverMoving = false;
 		CoverMoveDirection = ECoverLean::None;
+		CoverAimScenario = 0;
 		bHasLeftHandIK = false;
 		LeftHandIKTarget = FTransform::Identity;
 		bPrevIsFiring = false;
@@ -199,6 +204,8 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		ActiveCoverMontage = nullptr;
 		ActiveCoverBlindMontage = nullptr;
 		ActiveCoverMoveMontage = nullptr;
+		bCoverMovePlayingStop = false;
+		CoverAimTrackAlpha = 1.f;
 		bPrevCoverAnimActive = false;
 		CoverSettleAccum = 0.f;
 		bPrevCoverPeeking = false;
@@ -270,7 +277,46 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				&& CoverLeanDirection == ECoverLean::Front
 				&& CoverHeight == ECoverHeight::Stand;
 			const float YawLimit = bOverTopPeek ? AimYawClampDeg : CoverAimYawClampDeg;
+
+			// Track-limit: evaluate the PRE-clamp raw yaw (captured in UpdateAimOffset
+			// before the AimYawClampDeg clamp). A persistent eased alpha fades toward 0
+			// while the raw magnitude exceeds CoverAimTrackLimitDeg, back to 1 otherwise.
+			// Multiplied into AimYaw/AimPitch AFTER the clamp so the spine eases off
+			// smoothly instead of popping at the limit.
+			const float RawAbsYaw = FMath::Abs(RawAimYawDeg);
+			const float TrackAlphaTarget = (RawAbsYaw > CoverAimTrackLimitDeg) ? 0.f : 1.f;
+			CoverAimTrackAlpha = FMath::FInterpTo(CoverAimTrackAlpha, TrackAlphaTarget, DeltaSeconds, CoverAimGateSpeed);
+
 			AimYaw = FMath::Clamp(AimYaw, -YawLimit, YawLimit);
+			AimYaw *= CoverAimTrackAlpha;
+			AimPitch *= CoverAimTrackAlpha;
+		}
+		else
+		{
+			// Outside cover: keep the alpha at 1 so re-entering cover starts clean.
+			CoverAimTrackAlpha = 1.f;
+		}
+	}
+
+	// --- Cover aim scenario export (feature 5) ---
+	// Mirrors the ECoverWeaponAlign mapping in the cover-align block; 0 = no active scenario.
+	{
+		CoverAimScenario = 0;
+		if (bInCover && bCoverPeeking && !bCoverBlindFiring)
+		{
+			if (CoverLeanDirection == ECoverLean::Front)
+			{
+				CoverAimScenario = 3; // CrouchOverTop (stand-up-over-top reuses same AO)
+			}
+			else
+			{
+				ECoverLean Side = CoverLeanDirection;
+				if (Side != ECoverLean::Left && Side != ECoverLean::Right) Side = LastCoverSide;
+				if (CoverHeight == ECoverHeight::Stand)
+					CoverAimScenario = (Side == ECoverLean::Left) ? 4 : 5; // StandPeekLeft / StandPeekRight
+				else
+					CoverAimScenario = (Side == ECoverLean::Left) ? 1 : 2; // CrouchPeekLeft / CrouchPeekRight
+			}
 		}
 	}
 
@@ -666,6 +712,7 @@ void UEnemyAnimInstance::UpdateAimOffset(const FVector& ToTarget, const FRotator
 	{
 		AimPitch = 0.f;
 		AimYaw = 0.f;
+		RawAimYawDeg = 0.f;
 		bIsAiming = false;
 		return;
 	}
@@ -673,6 +720,7 @@ void UEnemyAnimInstance::UpdateAimOffset(const FVector& ToTarget, const FRotator
 	// Clamp to the aim-offset asset's authored range — unclamped deltas (up to ±180 yaw while
 	// the body is cover-aligned rather than target-facing) extrapolate the spine into a wrench.
 	const FRotator Delta = (ToTarget.Rotation() - ActorRot).GetNormalized();
+	RawAimYawDeg = Delta.Yaw; // pre-clamp yaw for CoverAimTrackAlpha evaluation
 	AimPitch = FMath::Clamp(Delta.Pitch, -AimPitchClampDeg, AimPitchClampDeg);
 	AimYaw = FMath::Clamp(Delta.Yaw, -AimYawClampDeg, AimYawClampDeg);
 	bIsAiming = true;
@@ -1364,7 +1412,10 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 			Montage_Stop(CoverBlendOut, ActiveCoverMoveMontage);
 		ActiveCoverMontage = nullptr;
 		ActiveCoverBlindMontage = nullptr;
-		if (!bIsAlive) ActiveCoverMoveMontage = nullptr;
+		// Fix 8: clear on both gate-fall (alive) and death paths.
+		bCoverMovePlayingStop = false;
+		if (!bIsAlive)
+			ActiveCoverMoveMontage = nullptr;
 		bPrevCoverAnimActive = bCoverAnimActive;
 		bPrevCoverPeeking = bCoverPeeking;
 		bPrevCoverBlindFiring = bCoverBlindFiring;
@@ -1446,15 +1497,41 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 			PlayCoverIdleMontage(0.2f, TEXT("Loop"));
 	}
 
-	// --- Cover-move fall edge: stop the move montage when bCoverMoving drops ---
+	// --- Cover-move fall edge: play Stop section or hard-stop when bCoverMoving drops ---
 	if (!bCoverMoving && bPrevCoverMoving)
 	{
 		if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
-			Montage_Stop(0.2f, ActiveCoverMoveMontage);
-		ActiveCoverMoveMontage = nullptr;
+		{
+			if (ActiveCoverMoveMontage->GetSectionIndex(TEXT("Stop")) != INDEX_NONE)
+			{
+				// Let the authored Stop section play out naturally — no hard blend-out.
+				Montage_JumpToSection(TEXT("Stop"), ActiveCoverMoveMontage);
+				bCoverMovePlayingStop = true;
+				// ActiveCoverMoveMontage stays set until the montage finishes (cleared below).
+			}
+			else
+			{
+				Montage_Stop(0.2f, ActiveCoverMoveMontage);
+				ActiveCoverMoveMontage = nullptr;
+				bCoverMovePlayingStop = false;
+			}
+		}
+		else
+		{
+			ActiveCoverMoveMontage = nullptr;
+			bCoverMovePlayingStop = false;
+		}
 	}
 
-	// --- Cover-move montages: play looping while bCoverMoving + a matching clip is set ---
+	// Clear ActiveCoverMoveMontage once the Stop section finishes playing.
+	if (bCoverMovePlayingStop && IsValid(ActiveCoverMoveMontage)
+		&& !Montage_IsPlaying(ActiveCoverMoveMontage))
+	{
+		ActiveCoverMoveMontage = nullptr;
+		bCoverMovePlayingStop = false;
+	}
+
+	// --- Cover-move montages: play while bCoverMoving + a matching clip is set ---
 	{
 		UAnimMontage* DesiredMoveMontage = nullptr;
 		if (bCoverMoving && bIsAlive)
@@ -1468,21 +1545,39 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 
 		if (IsValid(DesiredMoveMontage))
 		{
-			if (ActiveCoverMoveMontage != DesiredMoveMontage || !Montage_IsPlaying(DesiredMoveMontage))
+			// bCoverMoving rose while Stop was playing — restart the montage cleanly.
+			const bool bNeedRestart = (ActiveCoverMoveMontage != DesiredMoveMontage)
+				|| !Montage_IsPlaying(DesiredMoveMontage)
+				|| bCoverMovePlayingStop;
+
+			if (bNeedRestart)
 			{
 				if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
 					Montage_Stop(0.2f, ActiveCoverMoveMontage);
+				bCoverMovePlayingStop = false;
+
 				Montage_PlayWithBlendIn(DesiredMoveMontage, FAlphaBlendArgs(0.2f), 1.f,
 					EMontagePlayReturnType::MontageLength, 0.f, false);
-				if (DesiredMoveMontage->GetSectionIndex(TEXT("Loop")) != INDEX_NONE)
+
+				// Play from Start if authored; else jump straight to Loop (legacy fallback).
+				if (DesiredMoveMontage->GetSectionIndex(TEXT("Start")) != INDEX_NONE)
+				{
+					// Start section transitions to Loop via montage section link (authored).
+					// No JumpToSection here — let it run from the beginning.
+				}
+				else if (DesiredMoveMontage->GetSectionIndex(TEXT("Loop")) != INDEX_NONE)
 					Montage_JumpToSection(TEXT("Loop"), DesiredMoveMontage);
+
 				ActiveCoverMoveMontage = DesiredMoveMontage;
 			}
 		}
-		else if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
+		else if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage)
+			&& !bCoverMovePlayingStop)
 		{
+			// No desired montage and not playing Stop — hard stop.
 			Montage_Stop(0.2f, ActiveCoverMoveMontage);
 			ActiveCoverMoveMontage = nullptr;
+			bCoverMovePlayingStop = false;
 		}
 	}
 

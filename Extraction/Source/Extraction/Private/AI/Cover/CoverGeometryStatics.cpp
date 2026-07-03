@@ -81,6 +81,43 @@ ECoverLean UCoverGeometryStatics::ResolveLeanSide(const FCoverData& Data, bool b
 	return BestLean;
 }
 
+ECoverLean UCoverGeometryStatics::ResolveLeanSideExplicit(const FCoverData& Data,
+	bool bLeftValid, bool bRightValid, bool bFrontValid, const FVector& ThreatLoc)
+{
+	if (!bLeftValid && !bRightValid && !bFrontValid)
+		return ECoverLean::None;
+
+	if (bLeftValid && !bRightValid && !bFrontValid) return ECoverLean::Left;
+	if (bRightValid && !bLeftValid && !bFrontValid) return ECoverLean::Right;
+	if (bFrontValid && !bLeftValid && !bRightValid) return ECoverLean::Front;
+
+	// Multiple valid: prefer the side whose peek position is angularly closest to the threat.
+	const FVector Lateral = Data.Rotation.RotateVector(FVector::RightVector);
+	const FVector CoverToThreat = (ThreatLoc - Data.Location).GetSafeNormal2D();
+
+	ECoverLean BestLean = ECoverLean::None;
+	float BestDot = -2.f;
+
+	if (bRightValid)
+	{
+		const float Dot = FVector::DotProduct(Lateral, CoverToThreat);
+		if (Dot > BestDot) { BestDot = Dot; BestLean = ECoverLean::Right; }
+	}
+	if (bLeftValid)
+	{
+		const float Dot = FVector::DotProduct(-Lateral, CoverToThreat);
+		if (Dot > BestDot) { BestDot = Dot; BestLean = ECoverLean::Left; }
+	}
+	if (bFrontValid)
+	{
+		const FVector FrontDir = Data.DirectionToWall.GetSafeNormal2D();
+		const float Dot = FVector::DotProduct(FrontDir, CoverToThreat);
+		if (Dot > BestDot) { BestDot = Dot; BestLean = ECoverLean::Front; }
+	}
+
+	return BestLean;
+}
+
 bool UCoverGeometryStatics::IsThreatCovered(const UObject* WorldContextObject, const FCoverData& Data,
 	const FVector& ThreatLoc, float Standoff, float ChestHeight,
 	const AActor* IgnoreThreatActor, const AActor* IgnorePawn)

@@ -37,6 +37,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
 	static ECoverLean ResolveLeanSide(const FCoverData& Data, bool bCrouched, const FVector& ThreatLoc);
 
+	/** Overload that accepts explicit per-side validity bools, allowing callers to pass
+	 *  flag-OR-runtime-verified validity (e.g. ChooseGapPeekSide with endpoint fallback).
+	 *  Not a UFUNCTION — C++ only; avoids blueprint overload ambiguity. */
+	static ECoverLean ResolveLeanSideExplicit(const FCoverData& Data,
+		bool bLeftValid, bool bRightValid, bool bFrontValid, const FVector& ThreatLoc);
+
 	/** True when a chest-height trace from the hunker position to ThreatLoc is BLOCKED by geometry
 	 *  (i.e. the cover wall protects the body). Ported from IsSlotBodyProtected. */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry", meta = (WorldContext = "WorldContextObject"))

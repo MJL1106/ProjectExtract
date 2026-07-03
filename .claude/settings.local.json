@@ -70,7 +70,8 @@
       "Bash(bash /tmp/vibe.sh C:/Users/matth/AppData/Local/Temp/nsloop/notif4.py)",
       "Bash(bash /tmp/vibe.sh C:/Users/matth/AppData/Local/Temp/nsloop/bodymag.py)",
       "Bash(bash /tmp/vibe.sh C:/Users/matth/AppData/Local/Temp/nsloop/sockets.py)",
-      "Bash(bash /tmp/vibe.sh C:/Users/matth/AppData/Local/Temp/nsloop/sockbone.py)"
+      "Bash(bash /tmp/vibe.sh C:/Users/matth/AppData/Local/Temp/nsloop/sockbone.py)",
+      "Bash(pandoc -t markdown \"C:\\\\Users\\\\matth\\\\Downloads\\\\Bugs_implementation_.docx\")"
     ]
   },
   "enableAllProjectMcpServers": true,

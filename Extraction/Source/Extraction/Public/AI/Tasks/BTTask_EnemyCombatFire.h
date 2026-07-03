@@ -98,6 +98,40 @@ private:
 		 *  prevents ping-ponging when no same-wall point carries the wanted side flag. */
 		bool bSidePeekHopTried = false;
 
+		/** World-time when bRelocatePending was last set to true (feature 1c timeout). */
+		float RelocatePendingSetTime = 0.f;
+
+		/** When true, the next Expose pick should force the opposite side (set by the failed-peek
+		 *  ladder, consumed once at Expose entry). */
+		bool bLadderForceOppositeSide = false;
+
+		/** When true, the next Expose pick should attempt an over-top stand peek (set by the
+		 *  failed-peek ladder, consumed once at Expose entry). */
+		bool bLadderForceOverTop = false;
+
+		/** The opposite lean side determined by the ladder to use on the next Expose (only valid
+		 *  while bLadderForceOppositeSide is true). */
+		ECoverLean LadderOppositeSide = ECoverLean::None;
+
+		/** Original MaxWalkSpeed before a cover shuffle/ladder move capped it.
+		 *  Restored on all exits; 0 = not currently overriding. */
+		float OriginalMaxWalkSpeed = 0.f;
+
+		/** Original MaxWalkSpeedCrouched before a cover shuffle/ladder move capped it. */
+		float OriginalMaxWalkSpeedCrouched = 0.f;
+
+		/** True while a same-wall cover move has capped MaxWalkSpeed. */
+		bool bCoverMoveSpeedCapped = false;
+
+		/** True while the shuffle/ladder move is in flight — drives per-tick wall-facing re-assert. */
+		bool bCoverMoveFacingActive = false;
+
+		/** Cover data captured when the cover-move facing lock was started. */
+		FCoverData CoverMoveFacingData;
+
+		/** Hunker destination of the active cover move (2D arrival test for the facing re-assert). */
+		FVector CoverMoveArrivalPos = FVector::ZeroVector;
+
 		/** True while a drift-correct nudge back to the hunker is in flight. The move steers the
 		 *  pawn toward the wall; this flag drives a per-tick re-assert of the back-to-cover facing
 		 *  so the body stays tucked facing out instead of swinging 180°. Cleared on arrival. */
@@ -126,6 +160,12 @@ private:
 		TWeakObjectPtr<UCoverReservationSubsystem> CachedResSub;
 		/** World-time of last mis-wiring warning log (throttle). */
 		float LastMiswiringLogTime = -10.f;
+
+		// --- Cached cone trig (PERF #10) ---
+		float CachedConeHalfCos = 0.f;
+		float CachedConeBiasTan = 0.f;
+		float CachedConeHalfAngle = -1.f;  // sentinel: recompute when DA value differs
+		float CachedConeBiasAngle = -1.f;
 	};
 
 	/** BB key holding the Cover type (FCover via AICS plugin). Default name "CoverTarget". */
@@ -167,6 +207,22 @@ private:
 	FCover FindSidePeekCover(UWorld* World, const APawn* Pawn, const FCover& CurrentCover,
 		ECoverLean Side, const FVector& ThreatLocation, const UEnemyArchetypeData* DA,
 		AController* Controller, AActor* Target) const;
+
+	/** Cap MaxWalkSpeed (and MaxWalkSpeedCrouched) to DA->CoverMoveSpeed, storing originals in Mem.
+	 *  No-op if already capped or DA field is <= 0. */
+	static void ApplyCoverMoveSpeed(AEnemyCharacter* Enemy, FFireMemory* Mem,
+		const UEnemyArchetypeData* DA);
+
+	/** Restore MaxWalkSpeed/MaxWalkSpeedCrouched from Mem originals and clear the cap flag. */
+	static void RestoreCoverMoveSpeed(AEnemyCharacter* Enemy, FFireMemory* Mem);
+
+	/** Commit a same-wall shuffle move: issue MoveToLocation first, then vacate/claim/BB/pose.
+	 *  Returns false if the move request was refused (caller should fall through to next option).
+	 *  Used by both the Pause-end shuffle roll and the failed-peek ladder. */
+	bool CommitSameWallShuffle(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
+		AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
+		const FCover& FromCover, const FCover& ToDest, AActor* Target,
+		const UEnemyArchetypeData* DA) const;
 
 	/** Read the current cover from the CoverTarget BB key. Returns an invalid FCover when unset. */
 	FCover ReadCoverFromBB(const UBlackboardComponent* BB) const;

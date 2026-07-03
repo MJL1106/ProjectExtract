@@ -299,6 +299,18 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
 	float CoverAimGate = 1.f;
 
+	/**
+	 * Active cover-aim scenario for the ABP's blend-by-int aim-offset selector.
+	 * 0 = None (out-of-cover, tucked, or blind-firing).
+	 * 1 = CrouchPeekLeft,  2 = CrouchPeekRight,  3 = CrouchOverTop.
+	 * 4 = StandPeekLeft,   5 = StandPeekRight.
+	 * Computed per-frame from bCoverPeeking + CoverLeanDirection + CoverHeight, mirroring the
+	 * UpdateCoverAlign scenario mapping. The ABP feeds this to a Blend Poses by int selecting
+	 * the appropriate cover aim-offset asset (in-engine wiring step).
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	int32 CoverAimScenario = 0;
+
 	// --- Cover Tunables ---
 
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
@@ -378,9 +390,17 @@ protected:
 	float AimYawClampDeg = 75.f;
 
 	/** Tighter AimYaw clamp applied while in cover — the peek montage owns the body rotation,
-	 *  the aim offset only fine-aims. Set to 0 to fully isolate the aim offset when debugging. */
+	 *  the aim offset only fine-aims. Raised to 75 to match the ±90 authored Kubold cover AOs.
+	 *  Set to 0 to fully isolate the aim offset when debugging. */
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|AimOffset")
-	float CoverAimYawClampDeg = 35.f;
+	float CoverAimYawClampDeg = 75.f;
+
+	/** While in cover, if the PRE-CLAMP raw aim yaw magnitude exceeds this limit, a persistent
+	 *  eased alpha (CoverAimTrackAlpha) fades toward 0, attenuating AimYaw and AimPitch after the
+	 *  clamp. Prevents the spine-twist pop when the target crosses an extreme bearing. Set above
+	 *  CoverAimYawClampDeg so normal aim still clamps; only absurd out-of-cone bearings ease out. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|AimOffset")
+	float CoverAimTrackLimitDeg = 80.f;
 
 	/** Clamp on AimPitch fed to the aim offset. */
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|AimOffset")
@@ -625,6 +645,19 @@ private:
 	ECoverHeight PrevCoverHeight = ECoverHeight::Stand;
 
 	bool bPrevCoverMoving = false;
+
+	/** True while the active move montage is playing out its authored Stop section.
+	 *  During this window the montage logic does not restart or hard-stop it. */
+	bool bCoverMovePlayingStop = false;
+
+	/** Unclamped aim yaw (degrees) captured in UpdateAimOffset BEFORE the AimYawClampDeg clamp.
+	 *  Used by the CoverAimTrackAlpha gate to detect when the target crosses the track limit. */
+	float RawAimYawDeg = 0.f;
+
+	/** Persistent eased 0..1 alpha for the cover aim track-limit. Fades toward 0 while
+	 *  the PRE-clamp raw |AimYaw| > CoverAimTrackLimitDeg, back to 1 otherwise.
+	 *  Multiplied into AimYaw/AimPitch AFTER the yaw clamp. Reset to 1 outside cover. */
+	float CoverAimTrackAlpha = 1.f;
 
 	/** Effective cover-animate flag: true only when in cover AND speed has settled. */
 	bool bPrevCoverAnimActive = false;
