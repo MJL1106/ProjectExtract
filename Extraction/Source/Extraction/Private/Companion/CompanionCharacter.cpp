@@ -10,6 +10,7 @@
 #include "TraversalComponent.h"
 #include "CompanionAnimInstance.h"
 #include "SuppressionComponent.h"
+#include "CoverPoseComponent.h"
 #include "ExtractionTypes.h"
 #include "Character/ExtractionPlayer.h"
 #include "EnemyCharacter.h"
@@ -32,6 +33,7 @@ ACompanionCharacter::ACompanionCharacter()
 
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
+	CoverPoseComponent = CreateDefaultSubobject<UCoverPoseComponent>(TEXT("CoverPoseComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
 
 	HealthWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("HealthWidget"));

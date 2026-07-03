@@ -7,6 +7,8 @@
 #include "WeaponDataAsset.h"
 #include "HealthComponent.h"
 #include "TraversalComponent.h"
+#include "AI/Cover/CoverPoseComponent.h"
+#include "AlphaBlend.h"
 #include "Animation/AnimMontage.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "KismetAnimationLibrary.h"
@@ -16,6 +18,20 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 {
 	Super::NativeInitializeAnimation();
 
+	// Cover state reset — mirrors the enemy's init block so a re-init never inherits stale
+	// cover pose. Placed before the pawn early-outs so it always runs.
+	bInCover = false;
+	CoverHeight = ECoverHeight::Stand;
+	CoverLeanDirection = ECoverLean::None;
+	bCoverPeeking = false;
+	bCoverBlindFiring = false;
+	ActivePeekSide = EPeekSide::Right;
+	LatchedCoverHeight = ECoverHeight::Crouch;
+	bCoverStrafeActive = false;
+	CoverStrafeVelocity = FVector::ZeroVector;
+	CoverStrafeStaleTimer = 0.f;
+	CoverAimGate = 1.f;
+
 	APawn* PawnOwner = TryGetPawnOwner();
 	if (!IsValid(PawnOwner)) return;
 
@@ -23,6 +39,9 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 	if (!IsValid(OwningCompanion)) return;
 
 	MovementComponent = OwningCompanion->GetCharacterMovement();
+
+	// Cache the cover pose component once — default subobject, always present.
+	CachedCoverPoseComponent = OwningCompanion->GetCoverPoseComponent();
 
 	OnMontageBlendingOut.AddDynamic(this, &UCompanionAnimInstance::OnReloadMontageBlendingOut);
 
@@ -52,6 +71,7 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 void UCompanionAnimInstance::NativeUninitializeAnimation()
 {
 	OnMontageBlendingOut.RemoveDynamic(this, &UCompanionAnimInstance::OnReloadMontageBlendingOut);
+	CachedCoverPoseComponent.Reset();
 
 	Super::NativeUninitializeAnimation();
 }
@@ -80,6 +100,26 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	CurrentPosture = OwningCompanion->GetPosture();
 	bTakedownCrouchApproach = OwningCompanion->IsInTakedownApproach();
 	bTakedownMontagePlaying = OwningCompanion->IsTakedownMontagePlaying();
+
+	// --- Cover Pose (mirror from UCoverPoseComponent — trivial copies, no traces) ---
+
+	if (!CachedCoverPoseComponent.IsValid())
+		CachedCoverPoseComponent = OwningCompanion->GetCoverPoseComponent();
+
+	if (CachedCoverPoseComponent.IsValid())
+	{
+		CoverHeight = CachedCoverPoseComponent->CoverHeight;
+		CoverLeanDirection = CachedCoverPoseComponent->LeanDirection;
+		bCoverBlindFiring = CachedCoverPoseComponent->bBlindFiring;
+		bCoverPeeking = CachedCoverPoseComponent->bPeeking;
+	}
+	else
+	{
+		CoverHeight = ECoverHeight::Stand;
+		CoverLeanDirection = ECoverLean::None;
+		bCoverBlindFiring = false;
+		bCoverPeeking = false;
+	}
 
 	const FVector RawVelocity = MovementComponent->Velocity;
 	FVector EffectiveVelocity = RawVelocity;
@@ -182,6 +222,16 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsAiming = false;
 	}
 
+	// --- Cover aim gate: ease AimPitch/AimYaw to zero when tucked in cover ---
+	// Nothing companion-side sets the pose component's bPeeking, so an actively playing peek
+	// montage is the peek signal — the gate opens for the finite peek-fire window.
+	{
+		const bool bGateOff = bInCover && !bCoverPeeking && !IsAnyCoverPeekMontagePlaying();
+		const float GateTarget = bGateOff ? 0.f : 1.f;
+		CoverAimGate = FMath::FInterpTo(CoverAimGate, GateTarget, DeltaSeconds, CoverAimGateSpeed);
+		AimPitch *= CoverAimGate;
+		AimYaw *= CoverAimGate;
+	}
 
 	// Traversal
 	UTraversalComponent* TC = OwningCompanion->GetTraversalComponent();
@@ -225,6 +275,11 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		PatrolAlignAlpha = 0.f;
 		bHasLeftHandIK = false;
 		LeftHandIKTarget = FTransform::Identity;
+
+		// Cover cleanup — symmetric with the enemy dead branch; don't rely on BT teardown alone.
+		if (bInCover)
+			ExitCoverPose();
+		CoverAimGate = 1.f;
 	}
 	bWasAlive = bIsAlive;
 
@@ -491,6 +546,20 @@ void UCompanionAnimInstance::SetCoverStrafeVelocity(const FVector& Velocity)
 			LastSetLogTime = Now;
 		}
 	}
+	// Stop cover-idle montage so locomotion blendspace animates the strafe.
+	// The BT re-calls EnterCoverPose on arrival — do NOT auto-restart here.
+	if (!bCoverStrafeActive)
+	{
+		if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage))
+			Montage_Stop(0.2f, CoverIdleLeftMontage);
+		if (IsValid(CoverIdleRightMontage) && Montage_IsPlaying(CoverIdleRightMontage))
+			Montage_Stop(0.2f, CoverIdleRightMontage);
+		if (IsValid(CoverIdleLeftMontage_Stand) && Montage_IsPlaying(CoverIdleLeftMontage_Stand))
+			Montage_Stop(0.2f, CoverIdleLeftMontage_Stand);
+		if (IsValid(CoverIdleRightMontage_Stand) && Montage_IsPlaying(CoverIdleRightMontage_Stand))
+			Montage_Stop(0.2f, CoverIdleRightMontage_Stand);
+	}
+
 	CoverStrafeVelocity = Velocity;
 	bCoverStrafeActive = true;
 	CoverStrafeStaleTimer = 0.1f;
@@ -512,20 +581,53 @@ namespace
 
 void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide, ECoverHeight Height, bool bPlayEnterMontage)
 {
-	// Stop any active cover/peek montage before switching pose.
-	if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage))
+	// Select the idle by height and side.
+	UAnimMontage* IdleMontage = (Height == ECoverHeight::Stand)
+		? ((DefaultSide == EPeekSide::Left) ? CoverIdleLeftMontage_Stand.Get() : CoverIdleRightMontage_Stand.Get())
+		: ((DefaultSide == EPeekSide::Left) ? CoverIdleLeftMontage.Get() : CoverIdleRightMontage.Get());
+
+	// bPlayEnterMontage=false means "don't re-bob an already-posed idle" — keep a matching idle
+	// running instead of restarting it. Post-strafe arrivals have none (the strafe stopped it),
+	// so the idle still starts below and the tucked pose survives every shuffle.
+	const bool bKeepRunningIdle = !bPlayEnterMontage && IsValid(IdleMontage) && Montage_IsPlaying(IdleMontage);
+	UAnimMontage* const KeptIdle = bKeepRunningIdle ? IdleMontage : nullptr;
+
+	// Stop any active cover/peek montage before switching pose (sparing a kept idle).
+	if (IsValid(CoverIdleLeftMontage) && CoverIdleLeftMontage != KeptIdle && Montage_IsPlaying(CoverIdleLeftMontage))
 		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage);
-	if (IsValid(CoverIdleRightMontage) && Montage_IsPlaying(CoverIdleRightMontage))
+	if (IsValid(CoverIdleRightMontage) && CoverIdleRightMontage != KeptIdle && Montage_IsPlaying(CoverIdleRightMontage))
 		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage);
 	if (IsValid(CoverPeekLeftMontage) && Montage_IsPlaying(CoverPeekLeftMontage))
 		Montage_Stop(CoverBlendOutTime, CoverPeekLeftMontage);
 	if (IsValid(CoverPeekRightMontage) && Montage_IsPlaying(CoverPeekRightMontage))
 		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage);
+	if (IsValid(CoverIdleLeftMontage_Stand) && CoverIdleLeftMontage_Stand != KeptIdle && Montage_IsPlaying(CoverIdleLeftMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage_Stand);
+	if (IsValid(CoverIdleRightMontage_Stand) && CoverIdleRightMontage_Stand != KeptIdle && Montage_IsPlaying(CoverIdleRightMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage_Stand);
+	if (IsValid(CoverPeekLeftMontage_Stand) && Montage_IsPlaying(CoverPeekLeftMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverPeekLeftMontage_Stand);
+	if (IsValid(CoverPeekRightMontage_Stand) && Montage_IsPlaying(CoverPeekRightMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage_Stand);
 
 	bInCover = true;
 	ActivePeekSide = DefaultSide;
+	LatchedCoverHeight = Height;
 
-	// Cover idle is driven by the AnimBP locomotion state machine via bIsCrouched + bInCover — no montage needed for any height.
+	// Keep the pose component in sync — it is the source of truth for the mirror fields
+	// (CoverHeight/CoverLeanDirection/etc.) read back in NativeUpdateAnimation.
+	if (UCoverPoseComponent* Pose = IsValid(OwningCompanion) ? OwningCompanion->GetCoverPoseComponent() : nullptr)
+	{
+		Pose->SetInCover(true, Height);
+		Pose->SetLean(DefaultSide == EPeekSide::Left ? ECoverLean::Left : ECoverLean::Right);
+	}
+
+	if (!bKeepRunningIdle && IsValid(IdleMontage))
+	{
+		Montage_PlayWithBlendIn(IdleMontage, FAlphaBlendArgs(0.4f), 1.f);
+		if (IdleMontage->GetSectionIndex(TEXT("Loop")) != INDEX_NONE)
+			Montage_JumpToSection(TEXT("Loop"), IdleMontage);
+	}
 }
 
 void UCompanionAnimInstance::ExitCoverPose()
@@ -538,33 +640,74 @@ void UCompanionAnimInstance::ExitCoverPose()
 		Montage_Stop(CoverBlendOutTime, CoverPeekLeftMontage);
 	if (IsValid(CoverPeekRightMontage) && Montage_IsPlaying(CoverPeekRightMontage))
 		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage);
+	if (IsValid(CoverIdleLeftMontage_Stand) && Montage_IsPlaying(CoverIdleLeftMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage_Stand);
+	if (IsValid(CoverIdleRightMontage_Stand) && Montage_IsPlaying(CoverIdleRightMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage_Stand);
+	if (IsValid(CoverPeekLeftMontage_Stand) && Montage_IsPlaying(CoverPeekLeftMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverPeekLeftMontage_Stand);
+	if (IsValid(CoverPeekRightMontage_Stand) && Montage_IsPlaying(CoverPeekRightMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage_Stand);
 
+	// CoverAimGate is left to ease back — its target returns to 1 once bInCover clears.
 	bInCover = false;
+
+	if (UCoverPoseComponent* Pose = IsValid(OwningCompanion) ? OwningCompanion->GetCoverPoseComponent() : nullptr)
+		Pose->ResetCoverPose();
 
 	UE_LOG(LogCompanionAI, Log, TEXT("Cover EXIT"));
 }
 
 bool UCompanionAnimInstance::IsCoverIdleMontagePlaying(EPeekSide Side) const
 {
-	UAnimMontage* M = (Side == EPeekSide::Left) ? CoverIdleLeftMontage : CoverIdleRightMontage;
-	return IsValid(M) && Montage_IsPlaying(M);
+	// Check both heights for the given side.
+	if (Side == EPeekSide::Left)
+	{
+		if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage)) return true;
+		if (IsValid(CoverIdleLeftMontage_Stand) && Montage_IsPlaying(CoverIdleLeftMontage_Stand)) return true;
+	}
+	else
+	{
+		if (IsValid(CoverIdleRightMontage) && Montage_IsPlaying(CoverIdleRightMontage)) return true;
+		if (IsValid(CoverIdleRightMontage_Stand) && Montage_IsPlaying(CoverIdleRightMontage_Stand)) return true;
+	}
+	return false;
 }
 
 UAnimMontage* UCompanionAnimInstance::PlayPeekFire(EPeekSide Side, float PlayRate)
 {
-	// Stop cover-idle montages so the peek montage owns the body slot.
+	// Stop all cover-idle montages so the peek montage owns the body slot.
 	if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage))
 		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage);
 	if (IsValid(CoverIdleRightMontage) && Montage_IsPlaying(CoverIdleRightMontage))
 		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage);
+	if (IsValid(CoverIdleLeftMontage_Stand) && Montage_IsPlaying(CoverIdleLeftMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage_Stand);
+	if (IsValid(CoverIdleRightMontage_Stand) && Montage_IsPlaying(CoverIdleRightMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage_Stand);
 
-	UAnimMontage* PeekMontage = (Side == EPeekSide::Left) ? CoverPeekLeftMontage : CoverPeekRightMontage;
+	// Select by height (latched at EnterCoverPose — the pose-component mirror can be stale) then side.
+	UAnimMontage* PeekMontage = nullptr;
+	if (LatchedCoverHeight == ECoverHeight::Stand)
+		PeekMontage = (Side == EPeekSide::Left) ? CoverPeekLeftMontage_Stand.Get() : CoverPeekRightMontage_Stand.Get();
+	else
+		PeekMontage = (Side == EPeekSide::Left) ? CoverPeekLeftMontage.Get() : CoverPeekRightMontage.Get();
+
 	ActivePeekSide = Side;
 
 	if (!IsValid(PeekMontage)) return nullptr;
 
 	Montage_Play(PeekMontage, PlayRate);
 	return PeekMontage;
+}
+
+bool UCompanionAnimInstance::IsAnyCoverPeekMontagePlaying() const
+{
+	if (IsValid(CoverPeekLeftMontage) && Montage_IsPlaying(CoverPeekLeftMontage)) return true;
+	if (IsValid(CoverPeekRightMontage) && Montage_IsPlaying(CoverPeekRightMontage)) return true;
+	if (IsValid(CoverPeekLeftMontage_Stand) && Montage_IsPlaying(CoverPeekLeftMontage_Stand)) return true;
+	if (IsValid(CoverPeekRightMontage_Stand) && Montage_IsPlaying(CoverPeekRightMontage_Stand)) return true;
+	return false;
 }
 
 // --- Recoil Solver ---

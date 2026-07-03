@@ -1,19 +1,25 @@
 // BT task — cover-aware companion combat. State machine drives EngageFromOpen, EngageFromCover, StandUpFire.
+// P3 AICS migration: cover source changed from AAICoverSlot line-segment slots to FCoverHandle/FCoverData points.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "BehaviorTree/BTTaskNode.h"
 #include "BehaviorTree/BehaviorTreeTypes.h"
+#include "BehaviorTree/BlackboardComponent.h"
 #include "Companion/CompanionTypes.h"
+#include "AI/Cover/CoverPoseTypes.h"
+#include "CoverSystemPublicData.h"
 #include "BTTask_CompanionCombat.generated.h"
 
 class UAnimMontage;
-class AAICoverSlot;
 class ACompanionCharacter;
 class UCompanionAnimInstance;
 class UCharacterMovementComponent;
 class AAIController;
+class AController;
+class ACoverSystem;
+class UCoverReservationSubsystem;
 
 UCLASS()
 class EXTRACTION_API UBTTask_CompanionCombat : public UBTTaskNode
@@ -27,6 +33,7 @@ public:
 	virtual void TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds) override;
 	virtual void OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult) override;
 	virtual FString GetStaticDescription() const override;
+	virtual void InitializeFromAsset(UBehaviorTree& Asset) override;
 
 protected:
 	UPROPERTY(EditAnywhere, Category = "Blackboard")
@@ -38,8 +45,9 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Blackboard")
 	FBlackboardKeySelector CoverLocationKey;
 
+	/** BB key holding the Cover type (FCover via AICS plugin). Default name "CoverTarget". */
 	UPROPERTY(EditAnywhere, Category = "Blackboard")
-	FBlackboardKeySelector CoverSlotKey;
+	FBlackboardKeySelector CoverTargetKey;
 
 	// --- Burst timing ---
 
@@ -233,10 +241,6 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.1"))
 	float SubSlotLosRecheckInterval = 0.6f;
 
-	/** Number of evenly-spaced Alpha samples swept along the cover line when picking the best LoS position. */
-	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "2", ClampMax = "20"))
-	int32 LosSweepSampleCount = 5;
-
 	/** Minimum time at current cover before a failed re-eval can abandon the slot. */
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float MinCoverDwellBeforeReEval = 2.0f;
@@ -263,13 +267,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float SmoothSnapDuration = 0.2f;
 
-	/** Minimum Alpha delta for a reposition (as fraction of line length). */
-	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "1.0"))
-	float RepositionAlphaMin = 0.2f;
+	/** Minimum distance (cm) to a shuffle destination cover point (replaces the old line-Alpha delta). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
+	float ShuffleDistanceMin = 50.f;
 
-	/** Maximum Alpha delta for a reposition (as fraction of line length). */
-	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "1.0"))
-	float RepositionAlphaMax = 0.6f;
+	/** Maximum distance (cm) to a shuffle destination cover point (replaces the old line-Alpha delta). */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
+	float ShuffleDistanceMax = 125.f;
 
 	// --- New action weights (crouch cover) ---
 
@@ -309,10 +313,6 @@ protected:
 
 	// --- Reposition / CornerPeek tunables ---
 
-	/** Lateral strafe distance past the cover edge during CornerPeek (cm). */
-	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "10.0"))
-	float CornerPeekStepDistance = 100.f;
-
 	/** Lateral interp speed for Reposition and StandUpAndReposition walk phase (cm/s). */
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
 	float RepositionWalkSpeed = 150.f;
@@ -347,14 +347,14 @@ private:
 
 	// Per-burst helpers
 	void ReturnToCover(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
-		class AAICoverSlot* Slot, bool bSuppressed, bool bLowHealth);
+		const FCoverData& CoverData, bool bSuppressed, bool bLowHealth);
 
-	void TickRepositionAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
-		AAICoverSlot* Slot, bool bSuppressed, bool bLowHp, float DeltaSeconds);
-	void TickStandUpAndRepositionAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
-		AAICoverSlot* Slot, bool bSuppressed, bool bLowHp, float DeltaSeconds);
+	void TickRepositionAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim, UBlackboardComponent* BB,
+		const FCoverData& CoverData, bool bSuppressed, bool bLowHp, float DeltaSeconds);
+	void TickStandUpAndRepositionAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim, UBlackboardComponent* BB,
+		const FCoverData& CoverData, bool bSuppressed, bool bLowHp, float DeltaSeconds);
 	void TickCornerPeekAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
-		AAICoverSlot* Slot, AActor* Target, bool bSuppressed, bool bLowHp,
+		const FCoverData& CoverData, AActor* Target, bool bSuppressed, bool bLowHp,
 		TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
 
 	/** Shared move-shoot entry: caches + lowers walk speed and focuses the target (single-source for the MaxWalkSpeed override). No-op if already active. */
@@ -465,7 +465,8 @@ private:
 	bool bJustRepositioned = false;
 
 	// Reposition / StandUpAndReposition state
-	TOptional<float> RepositionTargetAlpha;
+	/** Shuffle destination cover point, set on commit; invalid Handle = no reposition target picked. */
+	FCover RepositionTargetCover;
 	/** World-space target for the in-progress reposition walk, snapshotted at commit so mid-walk arrow drag does not retarget. */
 	FVector RepositionTargetWorldLoc = FVector::ZeroVector;
 	bool bRepositionStandPhase = false;
@@ -484,22 +485,46 @@ private:
 	// Debug-only rate limiter for stand-burst LoS trace
 	float DebugBurstLosCheckTimer = 0.f;
 
+	// Functional muzzle-LoS withhold during the in-place stand/quick burst: pauses the trigger (no shots)
+	// while the muzzle→target line is blocked, resuming when clear — burst timing is unaffected so FSM flow
+	// is unchanged. Throttled by StandBurstMuzzleCheckTimer (10 Hz). bStandBurstFireHeld = fire withheld.
+	float StandBurstMuzzleCheckTimer = 0.f;
+	bool bStandBurstFireHeld = false;
+
+	/** World time the muzzle-withhold last resumed fire. StartFiring() fires an instant shot on every call
+	 *  with no internal refire guard, so a 10 Hz blocked/clear flicker could resume-fire faster than the
+	 *  weapon's cadence. The resume path gates on this + the weapon fire interval. 0 = never resumed. */
+	float LastStandBurstResumeFireTime = 0.f;
+
 	// Rate limiter for CornerPeek LoS checks (fire-start and fire-stop), 10 Hz.
 	float CornerPeekLosCheckTimer = 0.f;
 
 	// Active peek montage (weak — anim owns it)
 	TWeakObjectPtr<UAnimMontage> ActivePeekMontage;
 
-	float CurrentAlpha = 0.5f;
-	/** Cached yaw of Slot->GetForwardDirection() at reposition commit; avoids per-tick cross+dot+atan2 in Phase B. */
+	/** Resolved lean side for the current cover point (replaces the old line-Alpha position).
+	 *  None = hunkered / no peek available from this point. */
+	ECoverLean CurrentLean = ECoverLean::None;
+	/** Cached yaw of GetFireArcForward(CoverData) at reposition commit; avoids per-tick recompute in Phase B. */
 	float CachedSlotForwardYaw = 0.f;
 
-	/** Consecutive cover-validity ticks where the slot has been detected compromised (flanked / body-exposed).
+	/** Consecutive cover-validity ticks where the point has been detected compromised (flanked / body-exposed).
 	 *  Trips the break-cover path once it reaches the tuning CoverCompromiseDebounce threshold.
-	 *  Reset to 0 on fresh slot arrival or when the compromise condition is NOT met. */
+	 *  Reset to 0 on fresh point arrival or when the compromise condition is NOT met. */
 	int32 CoverCompromiseConsecutiveCount = 0;
+
+	/** Combat target the compromise debounce counter is currently accruing against. When the combat
+	 *  target changes between validity evals, the counter is reset so a fresh target does not inherit
+	 *  violation counts accrued against the old one (prevents retarget-driven instant cover dumps). */
+	TWeakObjectPtr<AActor> LastValidatedTarget;
+
+	/** Target-agnostic starvation counter: accrues whenever the current target (any identity) is
+	 *  outside the widened arc at a validity eval. Reset on any in-arc eval. Trips the force-
+	 *  invalidate path when it reaches CoverArcStarvationEvals, preventing fast-flip deadlocks. */
+	int32 ArcStarvationCount = 0;
 	float SubSlotLosRecheckTimer = 0.f;
-	TWeakObjectPtr<AAICoverSlot> LastTickSlot;
+	/** Handle of the cover point occupied on the previous tick — detects a BB-driven cover swap without ExecuteTask re-running. */
+	FCoverHandle LastTickCoverHandle;
 	uint8 BlockedRecheckHits = 0;
 
 	bool bWaitingForFinalApproach = false;
@@ -530,14 +555,29 @@ private:
 	/** Returns true when the snap completes this tick (or is not active). */
 	bool TickSmoothSnap(ACompanionCharacter* Companion, float DeltaSeconds);
 
-	TOptional<float> PickBestAlphaByLos(AAICoverSlot* Slot, AActor* Target, ACompanionCharacter* Companion, float ExcludeAlpha, TArrayView<AActor* const> IgnoredAttached) const;
+	/** Finds a neighbouring cover point to shuffle to: same wall as CurrentCover, free, within
+	 *  [ShuffleDistanceMin, ShuffleDistanceMax] of the companion. Synchronous C++ pick (mirrors the
+	 *  enemy's flank-relocate pattern) — the EQS_Cover_Shuffle asset variant is a P4 A/B.
+	 *  Returns an invalid FCover when no candidate qualifies. */
+	FCover FindShuffleCover(ACompanionCharacter* Companion, const FCover& CurrentCover, const FVector& ThreatLocation) const;
+
+	/** Commits a cover switch: writes NewCover to the CoverTarget BB key (the plugin's Keep Cover
+	 *  Occupied service auto-occupies) and stamps the previously-held point (LastTickCoverHandle,
+	 *  if valid and different) as vacated on the reservation subsystem. Updates LastTickCoverHandle. */
+	void CommitCoverSwitch(UBlackboardComponent* BB, const FCover& NewCover, AController* Controller);
 
 	/** Returns true and triggers reload if ammo is too low to start a peek action. Caller must return immediately when true. */
-	bool TryPrePeekReloadGate(ACompanionCharacter* Companion, AAICoverSlot* Slot);
+	bool TryPrePeekReloadGate(ACompanionCharacter* Companion, const FCoverData& CoverData);
+
+	/** Muzzle-LoS withhold backstop for in-place stand-up fire: pauses the trigger while the muzzle→target
+	 *  line is blocked (no shots into our own wall), resuming when clear. Throttled to 10 Hz via
+	 *  StandBurstMuzzleCheckTimer; bStandBurstFireHeld latches the withheld state. Used by the plain
+	 *  Stand/Quick burst and by StandUpAndReposition Phase A (stand-fire-in-place). No-op if no weapon. */
+	void TickStandBurstMuzzleWithhold(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
 
 	virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 
-	void ResetTaskState(ACompanionCharacter* Companion, UBlackboardComponent* BB, AAICoverSlot* Slot, bool bReleaseSlot, bool bResetPosture = true);
+	void ResetTaskState(ACompanionCharacter* Companion, UBlackboardComponent* BB, const FCoverHandle& CoverHandle, bool bReleaseSlot, bool bResetPosture = true);
 
 	// --- Reload gate ---
 

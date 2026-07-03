@@ -69,6 +69,10 @@ void UCoverRegistrySubsystem::GetSlotsInRadius(const FVector& Origin, float Radi
 		if (Slot->IsClaimed())
 			continue;
 
+		// Per-instance kill-switch: slots tagged "CoverDisabled" in-editor sit out of all queries (AICS migration aid)
+		if (Slot->ActorHasTag(TEXT("CoverDisabled")))
+			continue;
+
 		if (FVector::DistSquared(Origin, Slot->GetActorLocation()) <= RadiusSq)
 			OutSlots.Add(Slot);
 	}
@@ -116,6 +120,10 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 
 		AAICoverSlot* Slot = WeakSlot.Get();
 		if (!IsValid(Slot))
+			continue;
+
+		// Per-instance kill-switch: slots tagged "CoverDisabled" in-editor sit out of all queries (AICS migration aid)
+		if (Slot->ActorHasTag(TEXT("CoverDisabled")))
 			continue;
 
 		++SlotCount;

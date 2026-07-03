@@ -68,8 +68,8 @@ ACompanionAIController::ACompanionAIController()
 
 	// Sight config
 	SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
-	SightConfig->SightRadius = 3000.0f;
-	SightConfig->LoseSightRadius = 3500.0f;
+	SightConfig->SightRadius = 4200.0f;
+	SightConfig->LoseSightRadius = 4900.0f;
 	SightConfig->PeripheralVisionAngleDegrees = 90.0f;
 	SightConfig->SetMaxAge(5.0f);
 	SightConfig->AutoSuccessRangeFromLastSeenLocation = 500.0f;

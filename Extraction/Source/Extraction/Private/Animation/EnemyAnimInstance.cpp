@@ -10,6 +10,8 @@
 #include "WeaponDataAsset.h"
 #include "SuppressionComponent.h"
 #include "HealthComponent.h"
+#include "AI/Cover/CoverPoseComponent.h"
+#include "AlphaBlend.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimSequence.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -61,6 +63,18 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	RolledRepertoire.Empty();
 	ActivePatrolIdleMontage = nullptr;
 
+	// Cover animation state
+	ActiveCoverMontage = nullptr;
+	ActiveCoverBlindMontage = nullptr;
+	bPrevCoverPeeking = false;
+	bPrevCoverBlindFiring = false;
+	bPrevCoverAnimActive = false;
+	PrevCoverHeight = ECoverHeight::Stand;
+	LastCoverSide = DefaultCoverSide;
+	CoverSettleAccum = 0.f;
+	CoverAimGate = 1.f;
+	GripPoseAlpha = 1.f;
+
 	APawn* PawnOwner = TryGetPawnOwner();
 	if (!IsValid(PawnOwner)) return;
 
@@ -72,6 +86,9 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 
 	// Cache the awareness component once — the controller is set by now at init.
 	CachedAwarenessComponent = ResolveAwarenessComponent(OwningEnemy.Get());
+
+	// Cache the cover pose component once — default subobject, always present.
+	CachedCoverPoseComponent = OwningEnemy->GetCoverPoseComponent();
 
 	OwningEnemy->OnHitReact.RemoveDynamic(this, &UEnemyAnimInstance::HandleHitReact);
 	OwningEnemy->OnMeleePerformed.RemoveDynamic(this, &UEnemyAnimInstance::HandleMeleePerformed);
@@ -101,6 +118,7 @@ void UEnemyAnimInstance::NativeUninitializeAnimation()
 	}
 
 	CachedAwarenessComponent.Reset();
+	CachedCoverPoseComponent.Reset();
 	CachedGripMesh.Reset();
 
 	Super::NativeUninitializeAnimation();
@@ -156,6 +174,11 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsPatrolling = false;
 		bIsAiming = false;
 		bIsSuppressed = false;
+		bInCover = false;
+		CoverHeight = ECoverHeight::Stand;
+		CoverLeanDirection = ECoverLean::None;
+		bCoverBlindFiring = false;
+		bCoverPeeking = false;
 		bHasLeftHandIK = false;
 		LeftHandIKTarget = FTransform::Identity;
 		bPrevIsFiring = false;
@@ -164,7 +187,39 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		PatrolAlignAlpha = 0.f;
 		HandSwapAlpha = 0.f;
 		StopPatrolIdle();
+		StopCoverMontages(CoverBlendOut);
+		ActiveCoverMontage = nullptr;
+		ActiveCoverBlindMontage = nullptr;
+		bPrevCoverAnimActive = false;
+		CoverSettleAccum = 0.f;
+		bPrevCoverPeeking = false;
+		bPrevCoverBlindFiring = false;
+		CoverAimGate = 1.f;
+		GripPoseAlpha = 1.f;
 		return;
+	}
+
+	// --- Cover Pose (mirror from UCoverPoseComponent — trivial copies, no traces) ---
+	// Runs BEFORE the aim gate below so the gate reads current-frame cover flags.
+
+	if (!CachedCoverPoseComponent.IsValid())
+		CachedCoverPoseComponent = OwningEnemy->GetCoverPoseComponent();
+
+	if (CachedCoverPoseComponent.IsValid())
+	{
+		bInCover = CachedCoverPoseComponent->bInCover;
+		CoverHeight = CachedCoverPoseComponent->CoverHeight;
+		CoverLeanDirection = CachedCoverPoseComponent->LeanDirection;
+		bCoverBlindFiring = CachedCoverPoseComponent->bBlindFiring;
+		bCoverPeeking = CachedCoverPoseComponent->bPeeking;
+	}
+	else
+	{
+		bInCover = false;
+		CoverHeight = ECoverHeight::Stand;
+		CoverLeanDirection = ECoverLean::None;
+		bCoverBlindFiring = false;
+		bCoverPeeking = false;
 	}
 
 	// --- Aim Offset ---
@@ -183,6 +238,26 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		AimPitch = 0.f;
 		AimYaw = 0.f;
 		bIsAiming = false;
+	}
+
+	// --- Cover aim gate: ease AimPitch/AimYaw to zero when tucked or blind-firing ---
+	{
+		const bool bGateOff = (bInCover && !bCoverPeeking) || bCoverBlindFiring;
+		const float GateTarget = bGateOff ? 0.f : 1.f;
+		CoverAimGate = FMath::FInterpTo(CoverAimGate, GateTarget, DeltaSeconds, CoverAimGateSpeed);
+		AimPitch *= CoverAimGate;
+		AimYaw *= CoverAimGate;
+
+		// In cover the peek montage owns the body rotation — the aim offset only fine-aims.
+		// Exception: over-top stand peek (Front lean, standing, peeking) tracks the player freely.
+		if (bInCover)
+		{
+			const bool bOverTopPeek = bCoverPeeking
+				&& CoverLeanDirection == ECoverLean::Front
+				&& CoverHeight == ECoverHeight::Stand;
+			const float YawLimit = bOverTopPeek ? AimYawClampDeg : CoverAimYawClampDeg;
+			AimYaw = FMath::Clamp(AimYaw, -YawLimit, YawLimit);
+		}
 	}
 
 	// --- Weapon state ---
@@ -320,6 +395,15 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			Weapon->SetupPatrolAlign();
 			bPatrolAlignSetup = Weapon->IsPatrolAlignReady();
 		}
+
+		// Cover-align setup: compose the per-scenario ABP-tuned socket poses once on equip.
+		bCoverAlignSetup = false;
+		if (IsValid(Weapon))
+		{
+			Weapon->SetupCoverAlign(GetOwningComponent(), CoverAlignBoneName, CoverAlignIdleTransform,
+				CoverAlignOverTopTransform, CoverAlignPeekLeftTransform, CoverAlignPeekRightTransform);
+			bCoverAlignSetup = Weapon->IsCoverAlignReady();
+		}
 	}
 
 	// --- Awareness (cached — no per-frame controller cast) ---
@@ -346,9 +430,15 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	else
 		bIsSuppressed = false;
 
-	// --- Left-Hand IK (socket transform — cheap once validity is cached) ---
+	// --- Cover Animation (edge-detected montage playback) ---
+	UpdateCoverAnimation(DeltaSeconds);
 
-	if (bGripSocketValid && CachedGripMesh.IsValid())
+	// --- Left-Hand IK (socket transform — cheap once validity is cached) ---
+	// Suppressed only while a blind-fire montage actually plays — v1 may ship with null blind
+	// montages (graceful skip), and the grip arms must stay glued in that case.
+
+	const bool bBlindMontagePlaying = IsValid(ActiveCoverBlindMontage) && Montage_IsPlaying(ActiveCoverBlindMontage);
+	if (bGripSocketValid && CachedGripMesh.IsValid() && !bBlindMontagePlaying)
 	{
 		LeftHandIKTarget = CachedGripMesh->GetSocketTransform(CachedGripSocketName, RTS_World);
 		bHasLeftHandIK = true;
@@ -361,7 +451,10 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	// --- Auto-trigger: fire / reload montages on state transitions ---
 
-	if (bIsFiring && !bPrevIsFiring)
+	// In cover the peek montage IS the fire pose (recoil spring + weapon-mesh bolt anim carry
+	// the shot feedback) — the full-body fire loop sits downstream of the Cover slot and would
+	// visually stomp the peek, dropping the body back behind the wall mid-burst.
+	if (bIsFiring && !bPrevIsFiring && !bCoverBlindFiring && !bInCover)
 		PlayFireMontage();
 	else if (!bIsFiring && bPrevIsFiring)
 		StopFireMontage();
@@ -432,9 +525,10 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		if (bWantPatrolHand != bPrevWantPatrol)
 			OwningEnemy->SetWeaponHandSocket(bWantPatrolHand);
 
-		// Drive the settle interpolation. Skip when fire/melee align are actively writing
+		// Drive the settle interpolation. Skip when fire/melee/cover align are actively writing
 		// (those have priority and would fight the settle).
-		const bool bCombatAlignActive = (FireAlignAlpha > KINDA_SMALL_NUMBER) || (MeleeMontageWeight > KINDA_SMALL_NUMBER);
+		const bool bCombatAlignActive = (FireAlignAlpha > KINDA_SMALL_NUMBER) || (MeleeMontageWeight > KINDA_SMALL_NUMBER)
+			|| Weapon->IsCoverAlignWriting();
 		if (!bCombatAlignActive)
 			Weapon->UpdateHandSwapSettle(DeltaSeconds);
 	}
@@ -474,8 +568,53 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			Weapon->SetMeleeAlignAlpha(MeleeMontageWeight);
 	}
 
+	// --- Cover-align: ease the weapon to the per-scenario cover socket while posed ---
+	// Runs AFTER fire/melee align so its write wins the frame while in cover (last-writer-wins);
+	// out of cover it eases home then goes dormant (stops writing entirely), handing the weapon
+	// back to patrol/fire/melee align. Scenario pick mirrors SelectCoverPeekMontage.
+	if (bCoverAlignSetup && IsValid(Weapon))
+	{
+		ECoverWeaponAlign Scenario = ECoverWeaponAlign::None;
+		if (bInCover)
+		{
+			if (bCoverPeeking)
+			{
+				if (CoverLeanDirection == ECoverLean::Front)
+				{
+					Scenario = ECoverWeaponAlign::OverTop;
+				}
+				else
+				{
+					ECoverLean Side = CoverLeanDirection;
+					if (Side != ECoverLean::Left && Side != ECoverLean::Right) Side = LastCoverSide;
+					Scenario = (Side == ECoverLean::Left) ? ECoverWeaponAlign::PeekLeft : ECoverWeaponAlign::PeekRight;
+				}
+			}
+			else
+			{
+				Scenario = ECoverWeaponAlign::Idle;
+			}
+		}
+		Weapon->UpdateCoverAlign(Scenario, DeltaSeconds, CoverAlignBlendSpeed);
+	}
+
 	// --- Recoil spring solver ---
 	UpdateRecoilSolver(DeltaSeconds);
+
+	// --- Grip pose alpha: ease to 0 during blind-fire or tucked idle without grip arms ---
+	// Blind-fire suppression keys off the montage actually playing (bBlindMontagePlaying), not the
+	// flag — with null blind montages the arms would otherwise detach with no spray anim.
+	{
+		const bool bTuckedIdle = bInCover && !bCoverPeeking && !bCoverBlindFiring;
+		// Peek: the montage owns the arms. The grip layer is a mesh-space clavicle-down blend of a
+		// STANDING ready idle — at alpha 1 it pins the gun to that fixed orientation, cancelling the
+		// montage's aim-over-cover arm raise (gun points low/forward while the torso aims).
+		const bool bWantGripOff = bBlindMontagePlaying
+			|| (bInCover && bCoverPeeking)
+			|| (bTuckedIdle && !bUseGripArmsInCoverIdle);
+		const float GripTarget = bWantGripOff ? 0.f : 1.f;
+		GripPoseAlpha = FMath::FInterpTo(GripPoseAlpha, GripTarget, DeltaSeconds, GripPoseBlendSpeed);
+	}
 }
 
 // --- Aim Offset Helper ---
@@ -490,9 +629,11 @@ void UEnemyAnimInstance::UpdateAimOffset(const FVector& ToTarget, const FRotator
 		return;
 	}
 
+	// Clamp to the aim-offset asset's authored range — unclamped deltas (up to ±180 yaw while
+	// the body is cover-aligned rather than target-facing) extrapolate the spine into a wrench.
 	const FRotator Delta = (ToTarget.Rotation() - ActorRot).GetNormalized();
-	AimPitch = Delta.Pitch;
-	AimYaw = Delta.Yaw;
+	AimPitch = FMath::Clamp(Delta.Pitch, -AimPitchClampDeg, AimPitchClampDeg);
+	AimYaw = FMath::Clamp(Delta.Yaw, -AimYawClampDeg, AimYawClampDeg);
 	bIsAiming = true;
 }
 
@@ -639,7 +780,8 @@ void UEnemyAnimInstance::PlayFireMontage(float PlayRate)
 	UAnimMontage* Montage = GetEffectiveFireLoopMontage();
 	if (!IsValid(Montage)) return;
 	if (Montage_IsPlaying(Montage)) return;
-	Montage_Play(Montage, PlayRate);
+	// bStopAllMontages=false: DefaultGroup fire must not kill the group-Cover pose montage.
+	Montage_Play(Montage, PlayRate, EMontagePlayReturnType::MontageLength, 0.f, false);
 
 	if (Montage->GetSectionIndex(FireMontageLoopSection) != INDEX_NONE)
 		Montage_SetNextSection(FireMontageLoopSection, FireMontageLoopSection, Montage);
@@ -677,7 +819,11 @@ void UEnemyAnimInstance::PlayReloadMontage(float PlayRate)
 		}
 	}
 
-	const float PlayResult = Montage_Play(Montage, EffectiveRate);
+	// bStopAllMontages=false: reload must not kill the group-Cover pose montage.
+	// NB: in cover this full-body reload (DefaultSlot, downstream of CoverSlot) visually overrides
+	// the tucked pose for its duration — accepted; a body-less reload read worse (gun reloading
+	// itself). A cover-authored reload montage is the eventual fix if the twist bothers.
+	const float PlayResult = Montage_Play(Montage, EffectiveRate, EMontagePlayReturnType::MontageLength, 0.f, false);
 
 	if (IsReloadDebugEnabled())
 	{
@@ -733,7 +879,8 @@ void UEnemyAnimInstance::PlayHitReactFlinch(float PlayRate)
 	UAnimMontage* Montage = GetEffectiveHitReactFlinchMontage();
 	if (!IsValid(Montage)) return;
 	if (Montage_IsPlaying(Montage)) return;
-	Montage_Play(Montage, PlayRate);
+	// bStopAllMontages=false: the additive flinch layers over whatever is playing.
+	Montage_Play(Montage, PlayRate, EMontagePlayReturnType::MontageLength, 0.f, false);
 }
 
 void UEnemyAnimInstance::PlayDeathMontage(float PlayRate)
@@ -791,6 +938,10 @@ void UEnemyAnimInstance::HandleWeaponFired()
 	if (!bIsAlive) return;
 
 	AddRecoilImpulse();
+
+	// Blind-fire owns the pose (Kubold arm-over-cover spray) — don't stomp it with the
+	// KINEMATION single-fire montage on DefaultSlot. Recoil already self-gates in AddRecoilImpulse.
+	if (bCoverBlindFiring) return;
 
 	UAnimMontage* LoopMontage = GetEffectiveFireLoopMontage();
 
@@ -877,6 +1028,7 @@ void UEnemyAnimInstance::HandleGrenadeThrow(FVector PredictedLanding, float Time
 void UEnemyAnimInstance::AddRecoilImpulse()
 {
 	if (!bHasRecoilProfile) return;
+	if (bCoverBlindFiring) return;
 
 	const float AimScale = bIsAiming ? RecoilProfile.AimRecoilScale : 1.f;
 
@@ -947,4 +1099,266 @@ void UEnemyAnimInstance::UpdateRecoilSolver(float DeltaSeconds)
 	// Component-space -Y = backward along the aim axis. (Component -X reads as lateral/side-to-side
 	// because the enemy mesh component is yawed -90 deg; if this ever kicks forward, flip the sign.)
 	RecoilSpineOffset = FVector(0.f, -RecoilCurrentKickback, 0.f);
+}
+
+// ---------------------------------------------------------------------------
+// Cover Animation
+// ---------------------------------------------------------------------------
+
+UAnimMontage* UEnemyAnimInstance::SelectCoverIdleMontage() const
+{
+	// Idle hugs the corner they'll peek from — None/Front fall back to the last committed side.
+	ECoverLean Side = CoverLeanDirection;
+	if (Side != ECoverLean::Left && Side != ECoverLean::Right) Side = LastCoverSide;
+
+	if (CoverHeight == ECoverHeight::Crouch)
+		return (Side == ECoverLean::Left) ? CrouchIdleLeft.Get() : CrouchIdleRight.Get();
+	return (Side == ECoverLean::Left) ? StandIdleLeft.Get() : StandIdleRight.Get();
+}
+
+UAnimMontage* UEnemyAnimInstance::SelectCoverPeekMontage() const
+{
+	// Front = no side gap → stand-up over-the-top pop-up; always the standing montage regardless of height.
+	if (CoverLeanDirection == ECoverLean::Front)
+		return PeekOverTop.Get();
+
+	ECoverLean Side = CoverLeanDirection;
+	if (Side != ECoverLean::Left && Side != ECoverLean::Right) Side = LastCoverSide;
+
+	if (CoverHeight == ECoverHeight::Crouch)
+		return (Side == ECoverLean::Left) ? CrouchPeekLeft.Get() : CrouchPeekRight.Get();
+	return (Side == ECoverLean::Left) ? StandPeekLeft.Get() : StandPeekRight.Get();
+}
+
+void UEnemyAnimInstance::StopCoverMontages(float BlendOut)
+{
+	if (IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage))
+		Montage_Stop(BlendOut, ActiveCoverMontage);
+	if (IsValid(ActiveCoverBlindMontage) && Montage_IsPlaying(ActiveCoverBlindMontage))
+		Montage_Stop(BlendOut, ActiveCoverBlindMontage);
+}
+
+void UEnemyAnimInstance::PlayCoverIdleMontage(float BlendIn, FName PreferredSection)
+{
+	UAnimMontage* Idle = SelectCoverIdleMontage();
+	if (!IsValid(Idle))
+	{
+		if (GetCoverAnimLogLevel() > 0)
+			UE_LOG(LogTemp, Warning, TEXT("[COVERANIM] %s idle slot EMPTY (height=%s)"),
+				*GetNameSafe(OwningEnemy.Get()),
+				CoverHeight == ECoverHeight::Crouch ? TEXT("Crouch") : TEXT("Stand"));
+		return;
+	}
+
+	// Already looping this exact idle — bail rather than stacking a second instance on the slot.
+	if (ActiveCoverMontage == Idle && Montage_IsPlaying(Idle))
+		return;
+
+	// bStopAllMontages=false does NOT auto-stop same-group montages — the previous cover
+	// montage must be stopped explicitly, or a looping idle keeps full weight on the
+	// CoverSlot and buries whatever plays next. false stays so DefaultGroup fire/reload
+	// are never touched by this play.
+	if (IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage))
+		Montage_Stop(BlendIn, ActiveCoverMontage);
+
+	const float PlayLen = Montage_PlayWithBlendIn(Idle, FAlphaBlendArgs(BlendIn), 1.f,
+		EMontagePlayReturnType::MontageLength, 0.f, false);
+	if (Idle->GetSectionIndex(PreferredSection) != INDEX_NONE)
+		Montage_JumpToSection(PreferredSection, Idle);
+	else if (Idle->GetSectionIndex(TEXT("Loop")) != INDEX_NONE)
+		Montage_JumpToSection(TEXT("Loop"), Idle);
+	ActiveCoverMontage = Idle;
+
+	if (GetCoverAnimLogLevel() > 0)
+		UE_LOG(LogTemp, Log, TEXT("[COVERANIM] %s idle play %s section=%s result=%.2f"),
+			*GetNameSafe(OwningEnemy.Get()), *Idle->GetName(), *PreferredSection.ToString(), PlayLen);
+}
+
+void UEnemyAnimInstance::PlayCoverPeekMontage(FName PreferredSection)
+{
+	UAnimMontage* Peek = SelectCoverPeekMontage();
+	if (!IsValid(Peek))
+	{
+		if (GetCoverAnimLogLevel() > 0)
+			UE_LOG(LogTemp, Warning, TEXT("[COVERANIM] %s peek slot EMPTY (height=%s lean=%d)"),
+				*GetNameSafe(OwningEnemy.Get()),
+				CoverHeight == ECoverHeight::Crouch ? TEXT("Crouch") : TEXT("Stand"),
+				static_cast<int32>(CoverLeanDirection));
+		return;
+	}
+
+	// Stop the tucked idle (or a stale peek) explicitly — bStopAllMontages=false does NOT
+	// auto-stop same-group montages, so without this the looping idle keeps full weight on
+	// the CoverSlot and the peek plays buried underneath it: the body never visibly stands,
+	// while its root motion and the opened aim gate still run (twisted crouch firing into
+	// the wall). A same-asset stop also covers peek re-entry — fresh replay from Out.
+	if (IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage))
+		Montage_Stop(0.2f, ActiveCoverMontage);
+
+	const float PlayLen = Montage_PlayWithBlendIn(Peek, FAlphaBlendArgs(0.2f), 1.f,
+		EMontagePlayReturnType::MontageLength, 0.f, false);
+	if (Peek->GetSectionIndex(PreferredSection) != INDEX_NONE)
+		Montage_JumpToSection(PreferredSection, Peek);
+	ActiveCoverMontage = Peek;
+
+	// Clear any running full-body fire loop — it plays downstream of the Cover slot and would
+	// visually override the peek (see the in-cover gate at the fire auto-trigger).
+	StopFireMontage(0.15f);
+
+	if (GetCoverAnimLogLevel() > 0)
+		UE_LOG(LogTemp, Log, TEXT("[COVERANIM] %s peek play %s section=%s result=%.2f"),
+			*GetNameSafe(OwningEnemy.Get()), *Peek->GetName(), *PreferredSection.ToString(), PlayLen);
+}
+
+void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
+{
+	// Track resolved side for fallback on ECoverLean::None.
+	if (CoverLeanDirection == ECoverLean::Left || CoverLeanDirection == ECoverLean::Right)
+		LastCoverSide = CoverLeanDirection;
+
+	// --- Velocity gate: cover montages only play while settled at the cover point ---
+	// The full-body Cover slot suppresses locomotion, so AI-driven capsule motion under a cover
+	// montage reads as floor-sliding (shuffle, relocate, stale-pose transit). Root-motion-driven
+	// speed is exempt — the peek montages move the capsule themselves and must keep playing.
+	// Gate closes the instant speed exceeds the threshold; re-opens only after the speed has
+	// stayed below it for CoverAnimSettleTime so deceleration doesn't flicker the montage.
+	// Only the peek montages drive root motion — key the exemption off the playing cover
+	// montage, NOT bCoverPeeking: the Return section runs after SetPeeking(false) and its
+	// root-motion speed must not close the gate mid-tuck. Idles are in-place (no root
+	// motion), so AI corrective moves under an idle still close the gate as intended.
+	USkeletalMeshComponent* MeshComp = GetOwningComponent();
+	const bool bCoverMontageMoves = IsValid(ActiveCoverMontage)
+		&& Montage_IsPlaying(ActiveCoverMontage) && ActiveCoverMontage->HasRootMotion();
+	const bool bRootMotionDriven = bCoverMontageMoves && MeshComp && MeshComp->IsPlayingRootMotion();
+	if (Speed > CoverAnimMaxSpeed && !bRootMotionDriven)
+		CoverSettleAccum = 0.f;
+	else
+		CoverSettleAccum = FMath::Min(CoverSettleAccum + DeltaSeconds, CoverAnimSettleTime);
+	const bool bCoverAnimActive = bInCover && CoverSettleAccum >= CoverAnimSettleTime;
+
+	if (GetCoverAnimLogLevel() > 0 && bCoverAnimActive != bPrevCoverAnimActive)
+		UE_LOG(LogTemp, Log, TEXT("[COVERANIM] %s gate %s (bInCover=%d speed=%.0f peek=%d height=%s)"),
+			*GetNameSafe(OwningEnemy.Get()), bCoverAnimActive ? TEXT("OPEN") : TEXT("CLOSED"),
+			bInCover ? 1 : 0, Speed, bCoverPeeking ? 1 : 0,
+			CoverHeight == ECoverHeight::Crouch ? TEXT("Crouch") : TEXT("Stand"));
+
+	// 1Hz twist/slide diagnostic: who owns the yaw (actor vs control vs focus), how much the aim
+	// offset contributes, whether root motion is live, and what the Cover slot is playing.
+	if (GetCoverAnimLogLevel() > 0 && bInCover)
+	{
+		CoverStateLogAccum += DeltaSeconds;
+		if (CoverStateLogAccum >= 1.f)
+		{
+			CoverStateLogAccum = 0.f;
+			const AController* Ctrl = OwningEnemy->GetController();
+			const AAIController* AIC = Cast<AAIController>(Ctrl);
+			const AActor* FocusActor = AIC ? AIC->GetFocusActor() : nullptr;
+			const FVector Focal = AIC ? AIC->GetFocalPoint() : FVector::ZeroVector;
+			const bool bMontagePlaying = IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage);
+			UE_LOG(LogTemp, Log,
+				TEXT("[COVERSTATE] %s yaw=%.0f ctrlYaw=%.0f focus=%s focalValid=%d aimYaw=%.1f aimPitch=%.1f gate=%.2f speed=%.0f rootMotion=%d peek=%d lean=%d montage=%s pos=%.2f"),
+				*GetNameSafe(OwningEnemy.Get()),
+				OwningEnemy->GetActorRotation().Yaw,
+				Ctrl ? Ctrl->GetControlRotation().Yaw : 0.f,
+				*GetNameSafe(FocusActor),
+				FAISystem::IsValidLocation(Focal) ? 1 : 0,
+				AimYaw, AimPitch, CoverAimGate, Speed,
+				bRootMotionDriven ? 1 : 0, bCoverPeeking ? 1 : 0,
+				static_cast<int32>(CoverLeanDirection),
+				bMontagePlaying ? *ActiveCoverMontage->GetName() : TEXT("NONE"),
+				bMontagePlaying ? Montage_GetPosition(ActiveCoverMontage) : -1.f);
+		}
+	}
+
+	// --- Gate fall or death: stop everything ---
+	if ((!bCoverAnimActive && bPrevCoverAnimActive) || !bIsAlive)
+	{
+		StopCoverMontages(CoverBlendOut);
+		ActiveCoverMontage = nullptr;
+		ActiveCoverBlindMontage = nullptr;
+		bPrevCoverAnimActive = bCoverAnimActive;
+		bPrevCoverPeeking = bCoverPeeking;
+		bPrevCoverBlindFiring = bCoverBlindFiring;
+		PrevCoverHeight = CoverHeight;
+		return;
+	}
+
+	// --- Gate rise: enter the cover pose (peek re-entry replays from Out — its root motion
+	// starts from the hug position, so a fresh step-out is the position-correct resume). ---
+	if (bCoverAnimActive && !bPrevCoverAnimActive)
+	{
+		if (bCoverPeeking)
+			PlayCoverPeekMontage(TEXT("Out"));
+		else
+			PlayCoverIdleMontage(CoverBlendIn, TEXT("Loop"));
+	}
+	// --- Peek rise: play peek montage from Out section ---
+	else if (bCoverPeeking && !bPrevCoverPeeking && bCoverAnimActive)
+	{
+		PlayCoverPeekMontage(TEXT("Out"));
+	}
+	// --- Peek fall: the montage owns the tuck-back — route it to Return (root motion carries
+	// the body home); once it ends, the backstop below re-asserts the idle. ---
+	else if (!bCoverPeeking && bPrevCoverPeeking && bCoverAnimActive)
+	{
+		if (IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage)
+			&& ActiveCoverMontage->GetSectionIndex(TEXT("Return")) != INDEX_NONE)
+			Montage_JumpToSection(TEXT("Return"), ActiveCoverMontage);
+		else
+			PlayCoverIdleMontage(0.2f, TEXT("Loop"));
+	}
+	// --- Height change while in cover (no peek/blind state change): crossfade the idle ---
+	// Idles are side-agnostic, so lean changes alone don't replay anything.
+	else if (bCoverAnimActive && bPrevCoverAnimActive
+		&& CoverHeight != PrevCoverHeight
+		&& !bCoverPeeking && !bCoverBlindFiring)
+	{
+		PlayCoverIdleMontage(CoverBlendOut, TEXT("Loop"));
+	}
+	// --- Backstop: posed and settled but nothing playing on the Cover slot — re-assert. ---
+	// Covers finite peeks running out mid-burst (auto Out→Aim→Return→end: pop back out) and
+	// anything that stopped the montage externally.
+	else if (bCoverAnimActive
+		&& !(IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage)))
+	{
+		if (bCoverPeeking)
+			PlayCoverPeekMontage(TEXT("Out"));
+		else
+			PlayCoverIdleMontage(0.2f, TEXT("Loop"));
+	}
+
+	// --- Blind-fire rise: play blind montage + stop active fire montage ---
+	// Gated like the rest: a blind edge that lands while the gate is closed is skipped for the
+	// episode (blind-fire only triggers from the stationary Pause phase, so this is a backstop).
+	if (bCoverBlindFiring && !bPrevCoverBlindFiring && bCoverAnimActive)
+	{
+		UAnimMontage* Blind = CoverBlindFireMontage.Get();
+		if (IsValid(Blind))
+		{
+			// bStopAllMontages=false: the blind additive lives in its own slot group (CoverAdd) and must
+			// layer OVER the tucked idle, not replace it — the body stays hunkered under the spray.
+			Montage_PlayWithBlendIn(Blind, FAlphaBlendArgs(0.2f), 1.f, EMontagePlayReturnType::MontageLength, 0.f, false);
+			ActiveCoverBlindMontage = Blind;
+		}
+		// Stop KINEMATION fire montage so it doesn't fight the blind-fire pose.
+		StopFireMontage(0.15f);
+	}
+	// --- Blind-fire fall: stop blind montage; backstop the idle if something displaced it ---
+	else if (!bCoverBlindFiring && bPrevCoverBlindFiring)
+	{
+		if (IsValid(ActiveCoverBlindMontage) && Montage_IsPlaying(ActiveCoverBlindMontage))
+			Montage_Stop(0.25f, ActiveCoverBlindMontage);
+		ActiveCoverBlindMontage = nullptr;
+
+		// The idle normally survives the blind window (separate group, bStopAllMontages=false above);
+		// replay only if it was lost anyway — e.g. a blind montage misauthored into the idle's group.
+		if (bCoverAnimActive && !bCoverPeeking && !(IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage)))
+			PlayCoverIdleMontage(0.2f, TEXT("Loop"));
+	}
+
+	// Latch previous-frame state for next tick's edge detection.
+	bPrevCoverAnimActive = bCoverAnimActive;
+	bPrevCoverPeeking = bCoverPeeking;
+	bPrevCoverBlindFiring = bCoverBlindFiring;
+	PrevCoverHeight = CoverHeight;
 }

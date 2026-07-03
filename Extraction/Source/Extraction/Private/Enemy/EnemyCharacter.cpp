@@ -24,6 +24,7 @@
 #include "EnemySniperTelegraphComponent.h"
 #include "SuppressionComponent.h"
 #include "EnemyMoraleComponent.h"
+#include "CoverPoseComponent.h"
 #include "EnemySquadSubsystem.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/WidgetComponent.h"
@@ -49,6 +50,7 @@ AEnemyCharacter::AEnemyCharacter()
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
 	MoraleComponent = CreateDefaultSubobject<UEnemyMoraleComponent>(TEXT("MoraleComponent"));
+	CoverPoseComponent = CreateDefaultSubobject<UCoverPoseComponent>(TEXT("CoverPoseComponent"));
 
 	AIControllerClass = AEnemyAIController::StaticClass();
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;

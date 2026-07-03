@@ -15,6 +15,7 @@
 
 class UHealthComponent;
 class USuppressionComponent;
+class UCoverPoseComponent;
 class AWeaponBase;
 class UCompanionAnimInstance;
 class UTraversalComponent;
@@ -100,6 +101,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Companion")
 	USuppressionComponent* GetSuppressionComponent() const { return SuppressionComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Companion")
+	UCoverPoseComponent* GetCoverPoseComponent() const { return CoverPoseComponent; }
 
 	UFUNCTION(BlueprintPure, Category = "Companion")
 	AWeaponBase* GetCurrentWeapon() const { return CurrentWeapon; }
@@ -232,6 +236,9 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
 	TObjectPtr<USuppressionComponent> SuppressionComponent;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
+	TObjectPtr<UCoverPoseComponent> CoverPoseComponent;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Movement")
 	TObjectPtr<UTraversalComponent> TraversalComponent;
 
@@ -260,7 +267,7 @@ protected:
 
 public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
-	float MaxEngageRange = 2500.0f;
+	float MaxEngageRange = 3500.0f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Combat", meta = (ClampMin = "1.0"))
 	float RotationInterpSpeed = 8.0f;

@@ -13,8 +13,11 @@ ABreachableDoor::ABreachableDoor()
 	HingeRoot = CreateDefaultSubobject<USceneComponent>(TEXT("HingeRoot"));
 	SetRootComponent(HingeRoot);
 
+	LeafPivot = CreateDefaultSubobject<USceneComponent>(TEXT("LeafPivot"));
+	LeafPivot->SetupAttachment(HingeRoot);
+
 	DoorMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("DoorMesh"));
-	DoorMesh->SetupAttachment(HingeRoot);
+	DoorMesh->SetupAttachment(LeafPivot);
 	// Ensure the door is visible to Visibility traces (camera ping).
 	DoorMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	DoorMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
@@ -23,7 +26,15 @@ ABreachableDoor::ABreachableDoor()
 void ABreachableDoor::BeginPlay()
 {
 	Super::BeginPlay();
-	ClosedYaw = HingeRoot->GetComponentRotation().Yaw;
+
+	// Self-heal: instances placed before LeafPivot existed kept DoorMesh attached to
+	// HingeRoot. Re-attach under LeafPivot so the breach swing actually moves the panel.
+	if (DoorMesh && LeafPivot && DoorMesh->GetAttachParent() != LeafPivot)
+	{
+		DoorMesh->AttachToComponent(LeafPivot, FAttachmentTransformRules::KeepRelativeTransform);
+	}
+
+	ClosedYaw = LeafPivot->GetComponentRotation().Yaw;
 }
 
 void ABreachableDoor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -43,9 +54,9 @@ void ABreachableDoor::Tick(float DeltaSeconds)
 	const float EasedAlpha = FMath::InterpEaseInOut(0.f, 1.f, Alpha, 2.f);
 	const float CurrentYaw = ClosedYaw + OpenAngle * EasedAlpha;
 
-	FRotator NewRot = HingeRoot->GetComponentRotation();
+	FRotator NewRot = LeafPivot->GetComponentRotation();
 	NewRot.Yaw = CurrentYaw;
-	HingeRoot->SetWorldRotation(NewRot);
+	LeafPivot->SetWorldRotation(NewRot);
 
 	if (Alpha >= 1.f) FinishSwing();
 }
@@ -78,7 +89,7 @@ void ABreachableDoor::BeginSwing()
 {
 	DoorState = EDoorState::Opening;
 	SwingElapsed = 0.f;
-	ClosedYaw = HingeRoot->GetComponentRotation().Yaw;
+	ClosedYaw = LeafPivot->GetComponentRotation().Yaw;
 	SetActorTickEnabled(true);
 }
 
@@ -88,9 +99,9 @@ void ABreachableDoor::FinishSwing()
 	SetActorTickEnabled(false);
 
 	// Snap to exact final rotation.
-	FRotator FinalRot = HingeRoot->GetComponentRotation();
+	FRotator FinalRot = LeafPivot->GetComponentRotation();
 	FinalRot.Yaw = ClosedYaw + OpenAngle;
-	HingeRoot->SetWorldRotation(FinalRot);
+	LeafPivot->SetWorldRotation(FinalRot);
 
 	UE_LOG(LogBreachableDoor, Log, TEXT("%s: Swing complete — door is now Open"), *GetName());
 }

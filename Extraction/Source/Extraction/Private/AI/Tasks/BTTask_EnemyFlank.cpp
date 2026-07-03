@@ -1,7 +1,9 @@
 // BTTask_EnemyFlank — flanker role: ring-sample a flank point, move+fire, release on arrival/abort.
 
 #include "BTTask_EnemyFlank.h"
+#include "CoverPoseComponent.h"
 #include "EnemyAIController.h"
+#include "EnemyDebug.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
 #include "EnemySquad.h"
@@ -40,6 +42,9 @@ EBTNodeResult::Type UBTTask_EnemyFlank::ExecuteTask(UBehaviorTreeComponent& Owne
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
 	if (!IsValid(Enemy)) return EBTNodeResult::Failed;
 
+	// enemy.ForceCover debug: keep enemies in the cover loop — non-cover branches fail outright.
+	if (GetForceCoverLevel() > 0) return EBTNodeResult::Failed;
+
 	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
 	if (!IsValid(DA)) return EBTNodeResult::Failed;
 
@@ -74,6 +79,11 @@ EBTNodeResult::Type UBTTask_EnemyFlank::ExecuteTask(UBehaviorTreeComponent& Owne
 		ReleaseRoleAndStopFire(OwnerComp, Mem);
 		return EBTNodeResult::Failed;
 	}
+
+	// Cover-pose hygiene: leaving cover for the flank — a latched pose would montage-slide the run.
+	if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
+	if (GetCoverAnimLogLevel() > 0)
+		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s TASK(Flank) start"), *GetNameSafe(Pawn));
 
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 	Enemy->SetAimTarget(Target);

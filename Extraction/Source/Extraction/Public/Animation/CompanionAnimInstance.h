@@ -7,8 +7,11 @@
 #include "Movement/TraversalTypes.h"
 #include "Companion/CompanionTypes.h"
 #include "AI/Cover/CoverSlotTypes.h"
+#include "AI/Cover/CoverPoseTypes.h"
 #include "Enemy/EnemyTypes.h"
 #include "CompanionAnimInstance.generated.h"
+
+class UCoverPoseComponent;
 
 class ACompanionCharacter;
 class AWeaponBase;
@@ -236,6 +239,7 @@ protected:
 
 	// --- Cover Montages (designer-assigned on ABP_Companion) ---
 
+	// Crouch-height cover montages (existing)
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	TObjectPtr<UAnimMontage> CoverIdleLeftMontage;
 
@@ -247,6 +251,23 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	TObjectPtr<UAnimMontage> CoverPeekRightMontage;
+
+	// Stand-height cover montages
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverIdleLeftMontage_Stand;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverIdleRightMontage_Stand;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekLeftMontage_Stand;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekRightMontage_Stand;
+
+	/** Eased aim gate speed — scales AimPitch/AimYaw to 0 while tucked in cover idle. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	float CoverAimGateSpeed = 8.f;
 
 	// --- Fire-Align Config (dormant until designer sets FireAlignSocketName on ABP defaults) ---
 
@@ -273,10 +294,22 @@ protected:
 
 	// --- Cover strafe override ---
 
-	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
 	bool bInCover = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	ECoverHeight CoverHeight = ECoverHeight::Stand;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	ECoverLean CoverLeanDirection = ECoverLean::None;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	bool bCoverBlindFiring = false;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	bool bCoverPeeking = false;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
 	bool bCoverStrafeActive = false;
 
 	FVector CoverStrafeVelocity = FVector::ZeroVector;
@@ -318,6 +351,9 @@ private:
 	float PatrolAlignAlpha = 0.f;
 	bool bPatrolAlignSetup = false;
 
+	// --- Cover pose cache (resolved at init, re-resolved if stale) ---
+	TWeakObjectPtr<UCoverPoseComponent> CachedCoverPoseComponent;
+
 	// --- Weapon cache ---
 	TWeakObjectPtr<AWeaponBase> CachedWeapon;
 
@@ -331,4 +367,15 @@ private:
 
 	EPeekSide ActivePeekSide = EPeekSide::Right;
 	bool bPrevIsReloading = false;
+
+	/** Eased gate that scales AimPitch/AimYaw — 0 when in cover idle (not peeking). */
+	float CoverAimGate = 1.f;
+
+	/** Cover height latched at EnterCoverPose — PlayPeekFire selects from this rather than the
+	 *  pose-component mirror, which can be stale right after an ExitCoverPose reset. */
+	ECoverHeight LatchedCoverHeight = ECoverHeight::Crouch;
+
+	/** True while any of the four peek montages plays — companion-side peek signal for the aim gate
+	 *  (nothing companion-side sets the pose component's bPeeking). */
+	bool IsAnyCoverPeekMontagePlaying() const;
 };

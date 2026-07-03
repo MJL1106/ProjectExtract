@@ -110,7 +110,7 @@ private:
 
 	bool IsCompanionActor(const AActor* Actor) const;
 	bool ShouldIgnoreCompanionStimulus(const AActor* Actor) const;
-	bool CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, bool bHasVisibleNonCompanionTarget, float WorldTime) const;
+	bool CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, float WorldTime) const;
 
 	/** Egress: report our current combat target + last-known to the squad (rate-limited by the squad). */
 	void BroadcastSightingToSquad();

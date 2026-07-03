@@ -6,6 +6,7 @@
 #include "Animation/AnimInstance.h"
 #include "ExtractionTypes.h"
 #include "EnemyTypes.h"
+#include "AI/Cover/CoverPoseTypes.h"
 #include "EnemyAnimInstance.generated.h"
 
 class AEnemyCharacter;
@@ -16,6 +17,7 @@ class UAnimMontage;
 class UEnemyAwarenessComponent;
 class USkeletalMeshComponent;
 class UAnimSequence;
+class UCoverPoseComponent;
 
 UCLASS()
 class EXTRACTION_API UEnemyAnimInstance : public UAnimInstance
@@ -189,6 +191,142 @@ protected:
 	 *  (AimAlpha = 1 - MeleeMontageWeight) so the arms match the raw montage pose. */
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Combat")
 	float MeleeMontageWeight = 0.f;
+
+	// --- Cover Pose (mirrored from UCoverPoseComponent each tick) ---
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	bool bInCover = false;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	ECoverHeight CoverHeight = ECoverHeight::Stand;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	ECoverLean CoverLeanDirection = ECoverLean::None;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	bool bCoverBlindFiring = false;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	bool bCoverPeeking = false;
+
+	// --- Cover Montages (designer-assigned on the ABP) ---
+	// Back-to-cover set: side-specific idles hug the chosen corner; the finite peek montages
+	// (Out→Aim…→Return) own the step-out motion and rotation via root motion — code never
+	// moves the capsule during a peek. Null slots are skipped gracefully.
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> CrouchIdleLeft = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> CrouchIdleRight = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> CrouchPeekLeft = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> CrouchPeekRight = nullptr;
+
+	/** Stand-up over-the-top peek for low (crouch) cover when neither corner has a gap (lean=Front). */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> PeekOverTop = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> StandIdleLeft = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> StandIdleRight = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> StandPeekLeft = nullptr;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> StandPeekRight = nullptr;
+
+	/** Optional blind-fire additive (group CoverAdd). Deferred feature — leave unset until the
+	 *  re-exported additive clips land. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> CoverBlindFireMontage = nullptr;
+
+	/** Grip layer alpha driven by C++ — ABP reads this as BlendWeights[0] on the grip LayeredBoneBlend.
+	 *  Eased to 0 during blind-fire (Kubold arms win), 1 otherwise. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	float GripPoseAlpha = 1.f;
+
+	/** Eased 0..1 gate, 0 while tucked in cover or blind-firing — already scales AimPitch/AimYaw in
+	 *  C++; the ABP also multiplies it into the aim-offset layer WEIGHT, because the AO's centre
+	 *  sample is not identity (companion-rifle ADS delta) and at full weight it bends the tucked
+	 *  idle's arms into an ADS hold even with the aim angles at zero. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Enemy|Animation|Cover")
+	float CoverAimGate = 1.f;
+
+	// --- Cover Tunables ---
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	float GripPoseBlendSpeed = 10.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	float CoverAimGateSpeed = 8.f;
+
+	// Cover-align: per-scenario weapon-socket poses the gun eases toward while posed in cover.
+	// Each transform is the WeaponSocket pose in CoverAlignBoneName (hand_r) bone space — tune by
+	// dragging the skeleton's WeaponSocket gizmo on the target pose in Persona and copying the
+	// Socket Parameters values here (UI order: Rotation X=Roll, Y=Pitch, Z=Yaw). Identity = scenario
+	// disabled (falls back to the rest socket pose).
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	FName CoverAlignBoneName = TEXT("hand_r");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	FTransform CoverAlignIdleTransform = FTransform(FRotator(21.690085, 96.329381, -8.072317), FVector(-19.132527, 0.11764, 8.008986));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	FTransform CoverAlignOverTopTransform = FTransform(FRotator(18.644954, 85.498146, -4.51658), FVector(-19.159786, 1.250684, 8.86404));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	FTransform CoverAlignPeekLeftTransform = FTransform(FRotator(18.828378, 88.21273, -3.644527), FVector(-19.154787, 0.071277, 9.155164));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	FTransform CoverAlignPeekRightTransform = FTransform(FRotator(19.162533, 98.340626, -0.341529), FVector(-19.215839, 0.383116, 6.570972));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	float CoverAlignBlendSpeed = 8.f;
+
+	/** When true, the grip arm layer stays at alpha 1 during cover idle (project weapon grip).
+	 *  When false, eases to 0 (Kubold tucked arms). Designer A/B toggle. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	bool bUseGripArmsInCoverIdle = true;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	float CoverBlendIn = 0.4f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	float CoverBlendOut = 0.3f;
+
+	/** Side used when entering cover with ECoverLean::None (e.g. first enter before a peek direction is chosen). */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	ECoverLean DefaultCoverSide = ECoverLean::Right;
+
+	/** Cover montage is suppressed while capsule speed exceeds this threshold (cm/s). */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	float CoverAnimMaxSpeed = 15.f;
+
+	/** Seconds the speed must remain <= CoverAnimMaxSpeed before gate re-opens (hysteresis). */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	float CoverAnimSettleTime = 0.15f;
+
+	/** Clamp on AimYaw fed to the aim offset — raw target deltas reach ±180 while the body is
+	 *  cover-aligned, extrapolating the spine past the aim-offset asset's authored range. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|AimOffset")
+	float AimYawClampDeg = 75.f;
+
+	/** Tighter AimYaw clamp applied while in cover — the peek montage owns the body rotation,
+	 *  the aim offset only fine-aims. Set to 0 to fully isolate the aim offset when debugging. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|AimOffset")
+	float CoverAimYawClampDeg = 35.f;
+
+	/** Clamp on AimPitch fed to the aim offset. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|AimOffset")
+	float AimPitchClampDeg = 55.f;
 
 	// --- Weapon Animation Type ---
 
@@ -383,6 +521,9 @@ private:
 	// --- Perf: cached awareness component — resolved at init + weapon rebind, not per frame ---
 	TWeakObjectPtr<UEnemyAwarenessComponent> CachedAwarenessComponent;
 
+	// --- Perf: cached cover pose component — resolved at init, not per frame ---
+	TWeakObjectPtr<UCoverPoseComponent> CachedCoverPoseComponent;
+
 	// --- Perf: IK socket validity cached on weapon rebind ---
 	// True when the current weapon's grip socket exists on its ThirdPersonGripMesh.
 	bool bGripSocketValid = false;
@@ -413,6 +554,49 @@ private:
 
 	// bRecoilWroteWeapon removed — weapon offset path retired; kickback now routes to RecoilSpineOffset.
 
+	// --- Cover animation private state ---
+
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> ActiveCoverMontage = nullptr;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UAnimMontage> ActiveCoverBlindMontage = nullptr;
+
+	bool bPrevCoverPeeking = false;
+	bool bPrevCoverBlindFiring = false;
+	ECoverHeight PrevCoverHeight = ECoverHeight::Stand;
+
+	/** Effective cover-animate flag: true only when in cover AND speed has settled. */
+	bool bPrevCoverAnimActive = false;
+
+	/** Seconds the speed has been continuously <= CoverAnimMaxSpeed (velocity-gate settle accumulator). */
+	float CoverSettleAccum = 0.f;
+
+	/** Throttle accumulator for the 1Hz [COVERSTATE] diagnostic line. */
+	float CoverStateLogAccum = 0.f;
+
+	/** Tracks last committed lean side so cover-idle has a valid direction when ECoverLean::None. */
+	ECoverLean LastCoverSide = ECoverLean::Right;
+
+	void UpdateCoverAnimation(float DeltaSeconds);
+
+	/** Height-keyed idle pick: crouch → CoverIdleCrouch, stand → CoverIdleStand. */
+	UAnimMontage* SelectCoverIdleMontage() const;
+
+	/** Crouch cover peeks over the top; stand cover leans by CoverLeanDirection
+	 *  (LastCoverSide fallback when None/Front). */
+	UAnimMontage* SelectCoverPeekMontage() const;
+
+	void StopCoverMontages(float BlendOut);
+
+	/** Plays the resolved cover-idle montage with the given blend-in; jumps to PreferredSection
+	 *  when authored, falling back to Loop. Updates ActiveCoverMontage. */
+	void PlayCoverIdleMontage(float BlendIn, FName PreferredSection);
+
+	/** Plays the resolved cover-peek montage, jumping to PreferredSection when authored
+	 *  (Out = full step-out lean, Aim = resume already-exposed). Updates ActiveCoverMontage. */
+	void PlayCoverPeekMontage(FName PreferredSection);
+
 	// --- Auto-trigger tracking ---
 
 	bool bPrevIsFiring = false;
@@ -439,6 +623,9 @@ private:
 
 	/** True once SetupPatrolAlign has been called successfully for the current weapon. Reset on weapon rebind. */
 	bool bPatrolAlignSetup = false;
+
+	/** True once SetupCoverAlign resolved at least one scenario socket for the current weapon. Reset on weapon rebind. */
+	bool bCoverAlignSetup = false;
 
 	// --- Hand-swap tracking (two-socket weapon carry) ---
 

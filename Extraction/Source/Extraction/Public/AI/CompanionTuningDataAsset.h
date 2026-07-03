@@ -144,6 +144,23 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
 	float CoverSearchRadius = 1200.f;
 
+	// Cover-commit gate: max distance (cm) to a cover point worth committing to. Candidates farther
+	// than this are declined at commit time and the companion stand-fights instead. The old hand-placed
+	// slots were sparse, so "no slot in range" implicitly meant stand-fight — the AICS bake coats every
+	// wall, so worth-the-trip is an explicit policy now.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
+	float CoverCommitMaxDistance = 650.f;
+
+	// Cover-commit gate: only commit to cover while under fire (active near-miss suppression, or damage
+	// within CoverCommitUnderFireWindow). False = distance gate only.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
+	bool bCoverCommitRequiresUnderFire = true;
+
+	// Window (s) for the damage half of the under-fire check. Near-miss suppression has its own
+	// hysteresis and is checked independently.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float CoverCommitUnderFireWindow = 4.f;
+
 	// When true, FindBestCoverFor rejects any slot whose hunkered body position is NOT shielded from
 	// the target by world geometry. Slots that are off to the side or behind the companion relative
 	// to the threat are discarded. Disable to revert to the old unfiltered pick.
@@ -154,15 +171,44 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0"))
 	float CoverProtectionChestHeight = 60.f;
 
-	// Arc slack (degrees) added to a slot's FireArcDegrees when testing whether the current slot has
-	// been flanked. Prevents freshly-entered slots from immediately re-triggering.
+	// Arc slack (degrees) added to CoverFlankArcHalfAngleDeg when testing whether the current cover
+	// point has been flanked. Prevents freshly-entered points from immediately re-triggering.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0"))
 	float CoverCompromiseArcSlackDeg = 15.f;
+
+	// Half-angle (degrees) of the fire arc a cover point protects, measured from GetFireArcForward.
+	// Default 60 matches the old per-slot FireArcDegrees=120 default (full arc = 2x half-angle).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0", ClampMax = "180"))
+	float CoverFlankArcHalfAngleDeg = 60.f;
 
 	// Consecutive evaluations where the slot is detected compromised before the companion breaks cover.
 	// Higher = less reactive to transient flanks; 1 = immediate.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1"))
 	int32 CoverCompromiseDebounce = 2;
+
+	// Target-agnostic starvation backstop: when the combat target keeps flipping faster than the
+	// per-target debounce can accrue, this counter accrues across ALL targets whenever the current
+	// target is out of the widened arc. When it reaches this threshold, the companion force-invalidates
+	// (MarkVacated + BB clear) regardless of target identity. Higher = more tolerant of fast flips.
+	// 0 disables the backstop entirely.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0", ClampMax = "16"))
+	int32 CoverArcStarvationEvals = 4;
+
+	// --- Multi-threat cover scoring ---
+
+	// Score multiplier applied per EXTRA known threat (beyond the focused CombatTarget) whose clear
+	// angle defeats a candidate cover point during the switch-monitor's candidate scoring. 1.0 = no
+	// penalty (single-threat behaviour); lower = more strongly prefer covers that shield every threat.
+	// Applied multiplicatively per uncovered extra threat, so N uncovered threats scale the score by
+	// pow(MultiThreatExposurePenalty, N).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MultiThreatExposurePenalty = 0.5f;
+
+	// Cap on how many of the closest known threats the cover scoring / validity checks test against
+	// (bounds the added per-candidate trace cost). The focused CombatTarget is always tested; this caps
+	// the total threat set considered. 1 = single-threat behaviour (only the focused target).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 MaxThreatsForCoverScoring = 3;
 
 	// Detection radius (cm) for 360° close-range threat awareness, independent of the sight cone.
 	// Any enemy within this sphere with clear LoS is treated as a valid combat target even if
@@ -173,7 +219,18 @@ public:
 	// Radius (cm) around the player for alerted enemies that should make the companion ready its weapon.
 	// Searching and Combat enemies count; only Combat enemies can become CombatTarget.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
-	float PlayerThreatAwarenessRadius = 2500.f;
+	float PlayerThreatAwarenessRadius = 3500.f;
+
+	// Hysteresis band for target retention: acquire within MaxEngageRange, drop only beyond
+	// MaxEngageRange * this multiplier. Floor of 1.05 guarantees a minimum anti-flicker band
+	// (~175cm at default 3500 range); 1.0 would make acquire and drop thresholds identical.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat", meta = (ClampMin = "1.05", ClampMax = "1.5"))
+	float EngageRangeRetentionMultiplier = 1.15f;
+
+	// When true, enemies that have detected the player and are within PlayerThreatAwarenessRadius
+	// keep their combat target status through LoS blocks (the combat task repositions for an angle).
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat")
+	bool bRetainPlayerThreatTargetsWhileLosBlocked = true;
 
 	// Companion avoids standing in the player's ADS firing line during combat.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat")

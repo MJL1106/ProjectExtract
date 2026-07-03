@@ -1,27 +1,26 @@
-// EQS context — provides the companion's current combat target from the blackboard.
+// EQS context — provides the querier's current combat target from the blackboard.
+// Works for both enemy and companion AI controllers.
 
 #include "EnvQueryContext_CombatTarget.h"
 #include "EnvironmentQuery/EnvQueryTypes.h"
 #include "EnvironmentQuery/Items/EnvQueryItemType_Actor.h"
+#include "EnemyAIController.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
-#include "CompanionAIController.h"
 
 void UEnvQueryContext_CombatTarget::ProvideContext(FEnvQueryInstance& QueryInstance, FEnvQueryContextData& ContextData) const
 {
-	const AActor* QuerierActor = Cast<AActor>(QueryInstance.Owner.Get());
-	if (!QuerierActor) return;
-
-	const APawn* QuerierPawn = Cast<APawn>(QuerierActor);
+	const APawn* QuerierPawn = Cast<APawn>(QueryInstance.Owner.Get());
 	if (!QuerierPawn) return;
 
-	const ACompanionAIController* Controller = Cast<ACompanionAIController>(QuerierPawn->GetController());
+	const AAIController* Controller = Cast<AAIController>(QuerierPawn->GetController());
 	if (!Controller) return;
 
 	const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
 	if (!BB) return;
 
-	AActor* CombatTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+	// Single source of truth: AEnemyAIController::BB_CombatTarget (both enemy and companion use the same literal)
+	AActor* CombatTarget = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
 	if (IsValid(CombatTarget))
 	{
 		UEnvQueryItemType_Actor::SetContextHelper(ContextData, CombatTarget);

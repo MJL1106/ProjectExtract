@@ -95,6 +95,28 @@ bool IsReloadDebugEnabled()
 	return CVarReloadDebug.GetValueOnGameThread() != 0;
 }
 
+static TAutoConsoleVariable<int32> CVarForceCover(
+	TEXT("enemy.ForceCover"),
+	0,
+	TEXT("Cover debug: 0=off, 1=enemies always seek cover in combat (reseek from open every 0.5s regardless of morale) and PLANT there — shuffle, flank-break relocate and compromise invalidation disabled so cover anims can be observed."),
+	ECVF_Cheat);
+
+int32 GetForceCoverLevel()
+{
+	return CVarForceCover.GetValueOnGameThread();
+}
+
+static TAutoConsoleVariable<int32> CVarCoverAnimLog(
+	TEXT("enemy.CoverAnimLog"),
+	0,
+	TEXT("Cover animation diagnostic: 0=off, 1=log [COVERANIM] pose mirror edges, velocity-gate open/close, montage selection (including NULL slots) and play results."),
+	ECVF_Cheat);
+
+int32 GetCoverAnimLogLevel()
+{
+	return CVarCoverAnimLog.GetValueOnGameThread();
+}
+
 static TAutoConsoleVariable<int32> CVarFlankBreakLog(
 	TEXT("enemy.FlankBreakLog"),
 	0,
@@ -104,4 +126,15 @@ static TAutoConsoleVariable<int32> CVarFlankBreakLog(
 int32 GetFlankBreakLogLevel()
 {
 	return CVarFlankBreakLog.GetValueOnGameThread();
+}
+
+static TAutoConsoleVariable<int32> CVarForceCoverPeekSide(
+	TEXT("enemy.ForceCoverPeekSide"),
+	0,
+	TEXT("Force the cover peek side for testing: 0=auto (baked flags + LOS verify), 1=left corner peek, 2=right corner peek, 3=over-top. Bypasses the gap/LOS side checks."),
+	ECVF_Cheat);
+
+int32 GetForceCoverPeekSide()
+{
+	return CVarForceCoverPeekSide.GetValueOnGameThread();
 }

@@ -992,17 +992,17 @@ bool UEnemyAwarenessComponent::ShouldIgnoreCompanionStimulus(const AActor* Actor
 	return IsCompanionActor(Actor) && CurrentState != EEnemyAwarenessState::Combat;
 }
 
-bool UEnemyAwarenessComponent::CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, bool bHasVisibleNonCompanionTarget, float WorldTime) const
+bool UEnemyAwarenessComponent::CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, float WorldTime) const
 {
 	if (!IsCompanionActor(Candidate)) return true;
 	if (CurrentState != EEnemyAwarenessState::Combat) return false;
+	if (IsValid(ArchetypeData) && ArchetypeData->CompanionThreatScoreMultiplier <= 0.f) return false;
 
+	// Selectable while sighted or when it recently hurt us; the score multiplier (not a hard veto)
+	// decides how it competes with the player.
 	const bool bRecentlyDamagedByCompanion = RecentDamageInstigatorPawn.Get() == Candidate
 		&& (WorldTime - RecentDamageWorldTime) < RecentDamageWindow;
-	if (!Track.bSighted && !bRecentlyDamagedByCompanion) return false;
-	if (bHasVisibleNonCompanionTarget && !bRecentlyDamagedByCompanion) return false;
-
-	return true;
+	return Track.bSighted || bRecentlyDamagedByCompanion;
 }
 
 // --- Threat-Scored Target Selection (design §10) ---
@@ -1016,19 +1016,6 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 	if (!IsValid(MyPawn)) return nullptr;
 
 	const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
-	bool bHasVisibleNonCompanionTarget = false;
-	for (const auto& Pair : SuspicionTracks)
-	{
-		AActor* Candidate = Pair.Key.Get();
-		if (!IsValid(Candidate)) continue;
-		if (IsCompanionActor(Candidate)) continue;
-		if (!Pair.Value.bSighted) continue;
-		if (!IsActorAlive(Candidate)) continue;
-		if (!IsHostile(Candidate)) continue;
-
-		bHasVisibleNonCompanionTarget = true;
-		break;
-	}
 
 	// Officer focus-fire override: if squad has a focus target we can perceive, it wins outright
 	if (UEnemySquadSubsystem* SquadSS = SquadSubsystem.Get())
@@ -1044,7 +1031,7 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 				{
 					const FSuspicionTrack* FocusTrack = SuspicionTracks.Find(FocusTarget);
 					if (FocusTrack && FocusTrack->bSighted
-						&& CanSelectCompanionTarget(FocusTarget, *FocusTrack, bHasVisibleNonCompanionTarget, WorldTime))
+						&& CanSelectCompanionTarget(FocusTarget, *FocusTrack, WorldTime))
 					{
 						return FocusTarget;
 					}
@@ -1067,7 +1054,7 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 		if (!IsHostile(Candidate)) continue;
 
 		const FSuspicionTrack& Track = Pair.Value;
-		if (!CanSelectCompanionTarget(Candidate, Track, bHasVisibleNonCompanionTarget, WorldTime)) continue;
+		if (!CanSelectCompanionTarget(Candidate, Track, WorldTime)) continue;
 
 		const float Dist = FVector::Dist(MyPawn->GetActorLocation(), Candidate->GetActorLocation());
 		const float ProximityTerm = ArchetypeData->ThreatWeightProximity * (1.f - FMath::Clamp(Dist * SightRadiusInv, 0.f, 1.f));
@@ -1077,7 +1064,9 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 		if (RecentDamageInstigatorPawn.Get() == Candidate && (WorldTime - RecentDamageWorldTime) < RecentDamageWindow)
 			DamageTerm = ArchetypeData->ThreatWeightRecentDamage;
 
-		const float Score = ProximityTerm + LOSTerm + DamageTerm;
+		float Score = ProximityTerm + LOSTerm + DamageTerm;
+		// Companion competes on score, biased by the archetype multiplier (player stays preferred < 1).
+		if (IsCompanionActor(Candidate)) Score *= ArchetypeData->CompanionThreatScoreMultiplier;
 
 		if (Candidate == CombatTarget.Get())
 			IncumbentScore = Score;

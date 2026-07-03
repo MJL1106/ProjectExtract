@@ -35,9 +35,13 @@ protected:
 	virtual void Tick(float DeltaSeconds) override;
 
 private:
-	/** Scene component at the hinge edge — the door mesh is offset so it swings about this pivot. */
+	/** Scene component at the hinge edge — actor root. Stays rigid so the whole actor can be rotated in the level. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door", meta = (AllowPrivateAccess))
 	TObjectPtr<USceneComponent> HingeRoot;
+
+	/** Sub-pivot that actually swings during a breach. Child of HingeRoot; DoorMesh is attached here. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door", meta = (AllowPrivateAccess))
+	TObjectPtr<USceneComponent> LeafPivot;
 
 	/** The door panel. Assign the mesh in the Blueprint subclass. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door", meta = (AllowPrivateAccess))
@@ -57,7 +61,7 @@ private:
 	/** Elapsed time since the swing started. */
 	float SwingElapsed = 0.f;
 
-	/** Yaw at the start of the swing (world yaw of HingeRoot). */
+	/** Yaw at the start of the swing (world yaw of LeafPivot). */
 	float ClosedYaw = 0.f;
 
 	/** Begin the opening swing. Enables Tick for the duration. */

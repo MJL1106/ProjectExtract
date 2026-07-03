@@ -44,7 +44,7 @@ Target: whole list done by end of W7 (Sun 9/8). `[Core]` ships in every scenario
 ### Week 6/07 (W3) — Ship P2 (Tue), start cover rework, dissertation draft (Wed 9/7)
 - [ ] [Core] **Deliver Prototype 2** (Tue 7/7) — release objectives in the note below.
 - [ ] [Diss] **Dissertation draft structure** (due Wed 9/7). Section skeleton (intro / companion-AI design / implementation-to-date / evaluation / conclusion) pre-filled from what's built so far.
-- [ ] [Stretch] **Start cover-animation rework.** Shared by enemies + companion; new COD/BF-style animations — shoot over cover, shoot around cover, crouch + standing cover locomotion. *(Cover behaviour already works as a mechanic; this replaces the static-looking animations.)*
+- [~] [Stretch] **Start cover-animation rework.** Shared by enemies + companion; new COD/BF-style animations — shoot over cover, shoot around cover, crouch + standing cover locomotion. *(Cover behaviour already works as a mechanic; this replaces the static-looking animations.)* *(Enemy CROUCH cover shipped on Cover-system-revamp: Kubold montage system, root-motion over-top + corner peeks, per-scenario weapon align, solid cover-wall collision, Confident-morale cover reseek, force-peek debug cvars. Remaining: standing-cover peeks (sockets ready), companion pass, cover repositioning for angles, reload-gated peeks, randomized peek timings.)*
 - [ ] [Core] **Enemy AI-director review + test.** The existing enemy director needs a review/tuning/test pass.
 - [ ] [Core] **Companion locomotion / grip polish.** Tidy the companion's gun grip and stance by reusing the enemy animation setup.
 

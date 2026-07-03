@@ -1,4 +1,5 @@
-// EQS context — provides the companion's current combat target from the blackboard.
+// EQS context — provides the querier's current combat target from the blackboard.
+// Works for both enemy and companion AI controllers.
 
 #pragma once
 

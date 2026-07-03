@@ -21,8 +21,17 @@ public class Extraction : ModuleRules
 			"GameplayTags",
 			"AIModule",
 			"GameplayTasks",
-			"NavigationSystem"
+			"NavigationSystem",
+			"AICoverSystem"
 		});
+
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[] {
+				"UnrealEd",
+				"AssetTools"
+			});
+		}
 
 		SetupGameplayDebuggerSupport(Target);
 

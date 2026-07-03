@@ -116,6 +116,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "100.0"))
 	float CoverSearchRadius = 1200.f;
 
+	/** When true, enemies fighting WITHOUT cover try to claim one on CombatReseekCooldown even at
+	 *  Confident morale (Shaken/Broken already reseek in their hold branches). Turn off for
+	 *  commit-rush archetypes that should stay in the open. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover")
+	bool bCombatReseeksCover = true;
+
+	/** Seconds between exposed-in-combat cover reseek attempts (bCombatReseeksCover). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.5"))
+	float CombatReseekCooldown = 5.f;
+
 	/** Within this range the enemy skips cover-seeking and fires in place (selector falls through to the open-ground fire branch). 0 = always seek cover. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
 	float PointBlankFireRange = 0.f;
@@ -490,6 +500,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "1.0"))
 	float TargetSwitchHysteresis = 1.25f;
 
+	/** Threat-score multiplier for companion candidates once in Combat. 1 = equal priority to the
+	 *  player, 0 = never target the companion. Companions still cannot TRIGGER combat on an unaware
+	 *  enemy regardless of this value (stealth rule). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CompanionThreatScoreMultiplier = 0.75f;
+
 	// --- Flanking (Phase 5) ---
 
 	/** Minimum seconds between flank attempts (cooldown tracked in BT NodeMemory). */
@@ -602,6 +618,13 @@ public:
 
 	// --- Cover Flank Break (Part B) ---
 
+	/** Half-angle (degrees) of the cover's usable fire arc — replaces the old per-slot FireArcDegrees.
+	 *  60 = 120° total arc (old default). Used by the compromise arc test in BTTask_EnemyCombatFire. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ClampMin = "10.0", ClampMax = "180.0",
+		ToolTip = "Half-angle of the cover fire arc (degrees). 60 = old 120 degree default."))
+	float CoverFlankArcHalfAngleDeg = 60.f;
+
 	/** When true, the enemy will leave a compromised cover slot and seek a new one when flanked. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
 		meta = (ToolTip = "Enable cover-flank detection: enemy relocates when the current slot no longer protects against the combat target."))
@@ -674,6 +697,43 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
 		ToolTip = "Min extra distance (cm) away from the threat a fallback strafe should add when no protective cover exists."))
 	float FlankBreakRetreatBias = 250.f;
+
+	// --- Cover Blind Fire (suppression response) ---
+
+	/** Weight for hiding when suppressed (stay hunkered, wait). Default is the only non-zero
+	 *  weight, so all existing archetypes keep today's hide-only behaviour. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.0"))
+	float SuppressedHideWeight = 1.f;
+
+	/** Weight for blind-firing when suppressed (fire from hunker without LOS). 0 = never blind-fire. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.0"))
+	float SuppressedBlindFireWeight = 0.f;
+
+	/** Extra spread (degrees) applied during a blind-fire burst. Restored to 0 after burst ends. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.0"))
+	float BlindFireExtraSpreadDeg = 12.f;
+
+	/** Minimum blind-fire burst duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.05"))
+	float BlindFireBurstMin = 0.3f;
+
+	/** Maximum blind-fire burst duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.05"))
+	float BlindFireBurstMax = 0.8f;
+
+	// --- Cover Shuffle (move within cover) ---
+
+	/** Weight (0-1) for shuffling to a neighbouring cover point during the Pause phase. 0 = never shuffle. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverShuffleWeight = 0.f;
+
+	/** Minimum distance (cm) for a shuffle destination from the current point. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleDistanceMin = 50.f;
+
+	/** Maximum distance (cm) for a shuffle destination from the current point. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "1.0"))
+	float ShuffleDistanceMax = 125.f;
 
 	// --- Cover Positioning & Advance Fire ---
 

@@ -1,7 +1,7 @@
 ---
 name: ue5-ui-specialist
 description: UE5 UMG/Slate widget expert for ProjectExtract. Handles widget creation, BindWidget patterns, input mode management, and HUD/menu lifecycle.
-model: claude-sonnet-5[1m]
+model: claude-sonnet-4-6
 tools:
   - Glob
   - Grep

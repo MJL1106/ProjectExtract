@@ -940,6 +940,79 @@ void AWeaponBase::SetFireAlignAlpha(float Alpha)
 	}
 }
 
+// ---- Weapon cover alignment ----
+
+void AWeaponBase::SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName SocketSpaceBone,
+	const FTransform& IdlePose, const FTransform& OverTopPose,
+	const FTransform& PeekLeftPose, const FTransform& PeekRightPose)
+{
+	bCoverAlignReady = false;
+	bCoverAlignWriting = false;
+	for (bool& bReady : bCoverAlignTargetReady) bReady = false;
+
+	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+
+	const FName RestSocket = WeaponMesh->GetAttachSocketName();
+	if (!EnemyMesh->DoesSocketExist(RestSocket) || !EnemyMesh->DoesSocketExist(SocketSpaceBone))
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("SetupCoverAlign: %s — rest socket '%s' or bone '%s' not found on enemy mesh (cover-align disabled)"),
+			*GetNameSafe(this), *RestSocket.ToString(), *SocketSpaceBone.ToString());
+		return;
+	}
+
+	// Same derivation as SetupFireAlign: target = Rest * (T_scenario * T_rest.Inverse()) with both
+	// transforms in component space. Scenario poses arrive in SocketSpaceBone bone space, so
+	// T_scenario = Pose * BoneComponentTransform; the bone transform cancels against T_rest when
+	// the rest socket shares the bone, keeping the cached targets bone-pose-invariant.
+	CoverAlignRestRelative = WeaponMesh->GetRelativeTransform();
+	const FTransform TRest = EnemyMesh->GetSocketTransform(RestSocket, RTS_Component);
+	const FTransform TBone = EnemyMesh->GetSocketTransform(SocketSpaceBone, RTS_Component);
+
+	const FTransform* ScenarioPoses[4] = { &IdlePose, &OverTopPose, &PeekLeftPose, &PeekRightPose };
+	for (int32 i = 0; i < 4; ++i)
+	{
+		if (ScenarioPoses[i]->Equals(FTransform::Identity)) continue; // identity = scenario disabled
+		const FTransform TScenario = *ScenarioPoses[i] * TBone;
+		CoverAlignTargets[i] = CoverAlignRestRelative * (TScenario * TRest.Inverse());
+		bCoverAlignTargetReady[i] = true;
+		bCoverAlignReady = true;
+	}
+
+	CoverAlignCurrent = CoverAlignRestRelative;
+}
+
+void AWeaponBase::UpdateCoverAlign(ECoverWeaponAlign Scenario, float DeltaSeconds, float InterpSpeed)
+{
+	if (!bCoverAlignReady) return;
+	if (!IsValid(WeaponMesh)) return;
+
+	const FTransform* Target = &CoverAlignRestRelative;
+	if (Scenario != ECoverWeaponAlign::None)
+	{
+		const int32 Index = static_cast<int32>(Scenario) - 1;
+		if (bCoverAlignTargetReady[Index]) Target = &CoverAlignTargets[Index];
+	}
+
+	// Dormant: settled at rest with no off-rest blend in flight — write nothing so fire/melee/
+	// patrol align and the hand-swap settle own the weapon out of cover.
+	const bool bWantsRest = (Target == &CoverAlignRestRelative);
+	if (bWantsRest && !bCoverAlignWriting) return;
+
+	CoverAlignCurrent.SetLocation(FMath::VInterpTo(CoverAlignCurrent.GetLocation(), Target->GetLocation(), DeltaSeconds, InterpSpeed));
+	CoverAlignCurrent.SetRotation(FMath::QInterpTo(CoverAlignCurrent.GetRotation(), Target->GetRotation(), DeltaSeconds, InterpSpeed));
+	CoverAlignCurrent.SetScale3D(Target->GetScale3D());
+
+	WeaponMesh->SetRelativeTransform(CoverAlignCurrent);
+	bCoverAlignWriting = true;
+
+	// Settled home — release the write so out-of-cover writers resume.
+	if (bWantsRest && CoverAlignCurrent.Equals(CoverAlignRestRelative, 0.05f))
+	{
+		WeaponMesh->SetRelativeTransform(CoverAlignRestRelative);
+		bCoverAlignWriting = false;
+	}
+}
+
 // ---- Weapon melee alignment ----
 
 void AWeaponBase::SetupMeleeAlign(USkeletalMeshComponent* EnemyMesh, FName MeleeSocket)

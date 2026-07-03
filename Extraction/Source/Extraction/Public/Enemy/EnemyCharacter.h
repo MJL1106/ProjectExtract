@@ -29,6 +29,9 @@ class UEnemyGrenadierComponent;
 class USquadAuraComponent;
 class UEnemySniperTelegraphComponent;
 
+// Cover pose (AICS migration — default subobject)
+class UCoverPoseComponent;
+
 // Phase 4 — suppression & morale (default subobjects, not bolt-ons)
 class USuppressionComponent;
 class UEnemyMoraleComponent;
@@ -150,6 +153,11 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
 	UEnemySniperTelegraphComponent* GetSniperTelegraphComponent() const { return SniperTelegraphComp.Get(); }
+
+	// --- Cover pose (AICS migration — default subobject, always present) ---
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	UCoverPoseComponent* GetCoverPoseComponent() const { return CoverPoseComponent; }
 
 	// --- Phase 4: suppression & morale accessors (default subobjects — always present) ---
 
@@ -425,6 +433,10 @@ private:
 
 	UPROPERTY()
 	TObjectPtr<UEnemySniperTelegraphComponent> SniperTelegraphComp;
+
+	// Cover pose — AICS migration (default subobject, every enemy gets it)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
+	TObjectPtr<UCoverPoseComponent> CoverPoseComponent;
 
 	// Phase 4 — default subobjects (every enemy gets both)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))

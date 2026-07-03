@@ -17,6 +17,16 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponFired);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnReloadComplete);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAmmoChanged, int32, CurrentAmmo, int32, ReserveAmmo);
 
+/** Cover-align scenario — which tuned weapon-socket target the gun eases toward while posed in cover. */
+enum class ECoverWeaponAlign : uint8
+{
+	None,      // out of cover — ease home to the rest socket
+	Idle,      // tucked cover idle
+	OverTop,   // over-the-top stand-up peek from low cover
+	PeekLeft,  // left corner peek aim
+	PeekRight, // right corner peek aim
+};
+
 UCLASS(Blueprintable)
 class EXTRACTION_API AWeaponBase : public AActor, public IKitWeaponInterface
 {
@@ -234,6 +244,33 @@ public:
 	/** True once SetupPatrolAlign succeeded (non-zero DA offsets present). */
 	bool IsPatrolAlignReady() const { return bPatrolAlignReady; }
 
+	// ---- Weapon cover alignment (per-scenario cover pose visual) ----
+
+	/**
+	 * One-time setup: captures the rest relative transform and computes one align target per
+	 * cover scenario from ABP-tuned socket poses expressed in SocketSpaceBone bone space (the
+	 * values read straight off the skeleton's WeaponSocket panel). Same bone-pose-invariant math
+	 * as SetupFireAlign, cached at equip. Identity transforms disable just their scenario;
+	 * ready when at least one target resolved.
+	 */
+	void SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName SocketSpaceBone,
+		const FTransform& IdlePose, const FTransform& OverTopPose,
+		const FTransform& PeekLeftPose, const FTransform& PeekRightPose);
+
+	/**
+	 * Eases WeaponMesh's relative transform toward the target for Scenario (None = rest) and
+	 * writes it while off-rest. Continuous across target switches (idle→peek mid-blend is fine).
+	 * Call per-frame from the anim instance. Runs after fire/melee align in the frame, so while
+	 * it is writing it owns the weapon (last-writer-wins).
+	 */
+	void UpdateCoverAlign(ECoverWeaponAlign Scenario, float DeltaSeconds, float InterpSpeed);
+
+	/** True once SetupCoverAlign resolved at least one scenario socket. */
+	bool IsCoverAlignReady() const { return bCoverAlignReady; }
+
+	/** True while cover-align is actively writing WeaponMesh's relative transform. */
+	bool IsCoverAlignWriting() const { return bCoverAlignWriting; }
+
 	// ---- Hand-swap settle (two-socket weapon carry) ----
 
 	/**
@@ -421,6 +458,27 @@ private:
 
 	/** True when SetupFireAlign succeeded — both sockets found and targets computed. */
 	bool bFireAlignReady = false;
+
+	// ---- Cover alignment runtime state ----
+
+	/** Relative transform of WeaponMesh at rest (captured by SetupCoverAlign). Scenario=None target. */
+	FTransform CoverAlignRestRelative = FTransform::Identity;
+
+	/** Pre-composed relative targets per scenario (index = ECoverWeaponAlign - 1: Idle, OverTop,
+	 *  PeekLeft, PeekRight). Same socket math as fire-align; bone-pose-invariant, cached at equip. */
+	FTransform CoverAlignTargets[4];
+
+	/** Per-scenario resolve flags — a missing socket disables just that scenario (falls back to rest). */
+	bool bCoverAlignTargetReady[4] = { false, false, false, false };
+
+	/** Eased current relative transform — persists across target switches for continuity. */
+	FTransform CoverAlignCurrent = FTransform::Identity;
+
+	/** True once at least one scenario target resolved. */
+	bool bCoverAlignReady = false;
+
+	/** True while UpdateCoverAlign is writing WeaponMesh's relative transform (off-rest). */
+	bool bCoverAlignWriting = false;
 
 	// ---- Recoil offset runtime state ----
 
