@@ -12,6 +12,8 @@
 #include "CompanionAIController.h"
 #include "CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
+#include "EnemyCharacter.h"
+#include "EnemyArchetypeData.h"
 #include "WeaponBase.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/Character.h"
@@ -178,9 +180,18 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	{
 		const ACharacter* PawnChar = Cast<ACharacter>(Pawn);
 		const UCapsuleComponent* Cap = PawnChar ? PawnChar->GetCapsuleComponent() : nullptr;
-		const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + 10.f;
+		const float CapRadius = Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+		const float Standoff = CapRadius + 10.f;
 		const FVector PawnLoc = Pawn->GetActorLocation();
-		const FVector HunkerLoc = UCoverGeometryStatics::GetHunkerPosition(CurrentCover.Data, Standoff);
+		// Enemies arrive edge-aligned (corner-snapped) — the arrival test must use the same position
+		// or dwell never starts at endpoint covers. Companions keep the plain hunker (their combat
+		// task doesn't edge-align).
+		const AEnemyCharacter* MonEnemy = Cast<AEnemyCharacter>(Pawn);
+		const UEnemyArchetypeData* MonDA = MonEnemy ? MonEnemy->GetArchetypeData() : nullptr;
+		const FVector HunkerLoc = MonDA
+			? UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+				Pawn->GetWorld(), CurrentCover.Data, Standoff, CapRadius, MonDA->CoverCornerGap, Pawn)
+			: UCoverGeometryStatics::GetHunkerPosition(CurrentCover.Data, Standoff);
 		const bool bArrivedNow = FVector::Dist2D(PawnLoc, HunkerLoc) <= ArrivalRadius;
 		if (!bArrivedNow)
 		{

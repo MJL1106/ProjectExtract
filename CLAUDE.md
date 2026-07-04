@@ -94,7 +94,7 @@ Current agent model assignments live in `.claude/agents/*.md` frontmatter.
 Prefer custom subagents wherever the task matches an agent description. Main chat should rarely be the one writing code — its role is orchestration and review.
 
 - Solo C++ work → dispatch `ue5-cpp-implementer`. Never freelance edits from main chat for anything beyond trivial typos / renames / single-line tweaks.
-- For parallelisable dispatches (safety + performance reviewers, multiple plan agents), issue them in a single message, not sequentially.
+- For parallelisable dispatches (reviewer + multiple plan agents), issue them in a single message, not sequentially.
 - Pure research / "where does X live" → use `Glob` / `Grep` directly. Don't spawn an agent for a one-line answer.
 
 ### The loop in detail
@@ -103,10 +103,8 @@ Prefer custom subagents wherever the task matches an agent description. Main cha
 1. **Implement:**
    - Solo → `ue5-cpp-implementer`
    - Team → `agent-teams:team-spawn` preset `feature` (parallel implementers with file ownership)
-2. **Review (parallel, single message):**
-   - `ue5-safety-reviewer` — always, every C++ change
-   - `ue5-performance-reviewer` — always, every C++ change
-   - `ue5-edge-case-reviewer` — always, every C++ change. MUST be briefed with: (a) the task goal in one or two sentences, (b) the list of changed files with brief description, (c) the plan file path if one exists. Without the goal it can't review functional correctness — it will refuse.
+2. **Review (single consolidated reviewer, covers safety + performance + edge-case in one pass):**
+   - `ue5-reviewer` — always, every C++ change. MUST be briefed with: (a) the task goal in one or two sentences, (b) the list of changed files with brief description, (c) the plan file path if one exists. Without the goal the edge-case dimension is degraded (safety/performance still run).
    - `ue5-ui-specialist` — if UMG / Slate / widget code touched
    - `ue5-build-specialist` — if `Build.cs` / `Target.cs` / `.uproject` / plugin config / include paths touched
 3. **Fix review findings:** any `CRITICAL` or `WARNING` → re-dispatch `ue5-cpp-implementer` with the consolidated findings. **Do NOT fix in main chat.** Loop back to step 2 if the fix is non-trivial.
@@ -181,7 +179,7 @@ If unsure whether to invoke, **bias toward invoking the skill** (cheap — just 
 
 ## Model rule — no Haiku for substantive work
 
-The custom subagents in `.claude/agents/` (Opus 4.8 (1M context) / Sonnet 4.6) are the right tool for any UE5 work. The default `Explore` and `general-purpose` agents fall back to Haiku, which is too weak for this codebase.
+The custom subagents in `.claude/agents/` (Opus 4.8 / Sonnet 5, both 1M context) are the right tool for any UE5 work. The default `Explore` and `general-purpose` agents fall back to Haiku, which is too weak for this codebase.
 
 - **For UE5 codebase exploration / research / implementation / review** → use the custom agents above. Never use the generic `Explore` agent for substantive work.
 - **For trivial file-path lookups** ("what file lives at X", "find all callers of Y") → `Glob` / `Grep` directly in the main session, no agent needed.
@@ -211,9 +209,7 @@ Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a c
 
 ## Shortcuts (project-specific — `QPLAN`/`QCHECK`/`QPERF` in global)
 
-- **QSAFETY**: Run `ue5-safety-reviewer` over the current change.
-- **QEDGE**: Run `ue5-edge-case-reviewer` over the current change. Must brief it with the task goal.
-- **QFULL**: Run safety + performance + edge-case reviewers in parallel over the current change.
+- **QSAFETY / QEDGE / QFULL**: Run `ue5-reviewer` over the current change (single consolidated pass covers safety + performance + edge-case). Brief it with the task goal for a full edge-case pass.
 
 ## Session Start
 

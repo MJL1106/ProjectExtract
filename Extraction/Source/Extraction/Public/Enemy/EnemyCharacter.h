@@ -137,6 +137,11 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Grenadier")
 	FOnGrenadeThrow OnGrenadeThrow;
 
+	// --- Target LOS flag (written by BTService_EnemyCombat, read by anim instance) ---
+
+	void SetHasTargetLOS(bool bInLOS) { bHasTargetLOS = bInLOS; }
+	bool HasTargetLOS() const { return bHasTargetLOS; }
+
 	/** Resolves which hit region a damage event maps to (used by armour component and internal hitbox path). */
 	EHitRegion ResolveHitRegion(const FDamageEvent& DamageEvent) const;
 
@@ -388,6 +393,9 @@ private:
 
 	/** True when the weapon is currently attached to the patrol-hand socket (DA-driven hand-swap). */
 	bool bWeaponOnPatrolHand = false;
+
+	/** True while the combat service's eye-to-target trace is clear. AI-side only (not replicated). */
+	bool bHasTargetLOS = false;
 
 	TWeakObjectPtr<AActor> CurrentAimTarget;
 	TWeakObjectPtr<AController> LastDamageInstigator;

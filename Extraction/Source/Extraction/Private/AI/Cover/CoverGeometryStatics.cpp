@@ -26,6 +26,64 @@ FVector UCoverGeometryStatics::GetApproachPosition(const FCoverData& Data, const
 	return Pos;
 }
 
+FVector UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(const UWorld* World, const FCoverData& Data,
+	float Standoff, float CapsuleRadius, float CornerGap, const AActor* IgnoreActor)
+{
+	const FVector Base = GetHunkerPosition(Data, Standoff);
+	if (!World) return Base;
+
+	// Only endpoint points (exactly one side flag for the derived stance) have a corner to align to.
+	const bool bCrouched = GetCoverHeight(Data) == ECoverHeight::Crouch;
+	const bool bLeft  = bCrouched ? Data.bLeftCoverCrouched  : Data.bLeftCoverStanding;
+	const bool bRight = bCrouched ? Data.bRightCoverCrouched : Data.bRightCoverStanding;
+	if (bLeft == bRight) return Base;
+
+	const FVector WallDir = Data.DirectionToWall.GetSafeNormal2D();
+	const FVector Lateral = Data.Rotation.RotateVector(FVector::RightVector).GetSafeNormal2D()
+		* (bRight ? 1.f : -1.f);
+
+	constexpr float StepSize = 25.f;   // lateral march resolution — corner resolved to ±half step
+	constexpr float MarchMax = 300.f;  // how far past the baked point a corner may be found
+	constexpr float MarchMin = -100.f; // how far back to search when the point is already past the edge
+	constexpr float ProbeZ = 60.f;     // chest-ish height: under crouch walls (118), above ground clutter
+	const float TraceLen = Standoff + 60.f;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(CoverEdgeAlign), false);
+	if (IgnoreActor) Params.AddIgnoredActor(IgnoreActor);
+
+	auto WallAt = [&](float D) -> bool
+	{
+		const FVector Start = Base + Lateral * D + FVector(0.f, 0.f, ProbeZ);
+		FHitResult Hit;
+		return World->LineTraceSingleByChannel(Hit, Start, Start + WallDir * TraceLen, ECC_Visibility, Params);
+	};
+
+	// Contiguous scan from the baked point so a parallel wall further along can't fake the corner.
+	float CornerLat;
+	if (WallAt(0.f))
+	{
+		float D = 0.f;
+		while (D + StepSize <= MarchMax && WallAt(D + StepSize)) D += StepSize;
+		CornerLat = D + StepSize * 0.5f;
+	}
+	else
+	{
+		// Baked point already past the corner — walk back until the wall reappears.
+		float D = 0.f;
+		bool bFound = false;
+		while (D - StepSize >= MarchMin)
+		{
+			D -= StepSize;
+			if (WallAt(D)) { bFound = true; break; }
+		}
+		if (!bFound) return Base;
+		CornerLat = D + StepSize * 0.5f;
+	}
+
+	const float DesiredLat = FMath::Clamp(CornerLat - (CapsuleRadius + CornerGap), MarchMin, MarchMax);
+	return Base + Lateral * DesiredLat;
+}
+
 FVector UCoverGeometryStatics::GetLeanPeekPosition(const FCoverData& Data, ECoverLean Lean, float LeanOffset)
 {
 	if (Lean == ECoverLean::None || Lean == ECoverLean::Front)

@@ -29,6 +29,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
 	static FVector GetApproachPosition(const FCoverData& Data, const FVector& PawnLoc, float Standoff);
 
+	/** Hunker position laterally normalised to the wall's actual end. AICS bake spacing leaves
+	 *  endpoint points at inconsistent distances from the corner (too deep on some walls, past the
+	 *  edge on others); for exactly-one-side-flag points this marches chest-height traces along the
+	 *  wall to find the corner and places the capsule so its edge sits CornerGap inside it.
+	 *  Mid-wall / double-flag points and trace failures return the plain hunker. All systems that
+	 *  define "standing at this cover" (arrival targets, drift-correct, arrival detection) must use
+	 *  THIS, not GetHunkerPosition, or they will disagree about the slot by up to the snap distance. */
+	static FVector GetEdgeAlignedHunkerPosition(const UWorld* World, const FCoverData& Data,
+		float Standoff, float CapsuleRadius, float CornerGap, const AActor* IgnoreActor = nullptr);
+
 	/** Lateral peek position for a given lean side. */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
 	static FVector GetLeanPeekPosition(const FCoverData& Data, ECoverLean Lean, float LeanOffset = 65.f);

@@ -72,7 +72,6 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 	bPrevCoverPeeking = false;
 	bPrevCoverBlindFiring = false;
 	bPrevCoverMoving = false;
-	bCoverMovePlayingStop = false;
 	RawAimYawDeg = 0.f;
 	CoverAimTrackAlpha = 1.f;
 	bPrevCoverAnimActive = false;
@@ -204,7 +203,6 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		ActiveCoverMontage = nullptr;
 		ActiveCoverBlindMontage = nullptr;
 		ActiveCoverMoveMontage = nullptr;
-		bCoverMovePlayingStop = false;
 		CoverAimTrackAlpha = 1.f;
 		bPrevCoverAnimActive = false;
 		CoverSettleAccum = 0.f;
@@ -281,10 +279,19 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			// Track-limit: evaluate the PRE-clamp raw yaw (captured in UpdateAimOffset
 			// before the AimYawClampDeg clamp). A persistent eased alpha fades toward 0
 			// while the raw magnitude exceeds CoverAimTrackLimitDeg, back to 1 otherwise.
+			// Also fade to 0 when in cover and the owning enemy has no LOS to its target
+			// — prevents the through-wall stare where the spine tracks a target behind geometry.
 			// Multiplied into AimYaw/AimPitch AFTER the clamp so the spine eases off
 			// smoothly instead of popping at the limit.
 			const float RawAbsYaw = FMath::Abs(RawAimYawDeg);
-			const float TrackAlphaTarget = (RawAbsYaw > CoverAimTrackLimitDeg) ? 0.f : 1.f;
+			const bool bNoLOSInCover = IsValid(OwningEnemy) && !OwningEnemy->HasTargetLOS();
+			// Track limit shares the fire gate's per-archetype aim cap (MaxAimYawDeg, 0 = unlimited)
+			// so the torso never tracks a bearing the fire decision would reject — looking == can fire.
+			float TrackLimit = CoverAimTrackLimitDeg;
+			if (IsValid(OwningEnemy))
+				if (const UEnemyArchetypeData* DA = OwningEnemy->GetArchetypeData(); DA && DA->MaxAimYawDeg > 0.f)
+					TrackLimit = FMath::Min(TrackLimit, DA->MaxAimYawDeg);
+			const float TrackAlphaTarget = (RawAbsYaw > TrackLimit || bNoLOSInCover) ? 0.f : 1.f;
 			CoverAimTrackAlpha = FMath::FInterpTo(CoverAimTrackAlpha, TrackAlphaTarget, DeltaSeconds, CoverAimGateSpeed);
 
 			AimYaw = FMath::Clamp(AimYaw, -YawLimit, YawLimit);
@@ -1251,8 +1258,14 @@ UAnimMontage* UEnemyAnimInstance::SelectCoverIdleMontage() const
 UAnimMontage* UEnemyAnimInstance::SelectCoverPeekMontage() const
 {
 	// Front = no side gap → stand-up over-the-top pop-up; always the standing montage regardless of height.
+	// Variant follows the side of the LAST PERFORMED peek (right corner peek → right-entry over-top),
+	// not LastCoverSide, which mid-cycle lean writes can flip without a peek ever playing.
 	if (CoverLeanDirection == ECoverLean::Front)
+	{
+		if (LastPeekedSide == ECoverLean::Left && IsValid(PeekOverTopLeft))
+			return PeekOverTopLeft.Get();
 		return PeekOverTop.Get();
+	}
 
 	ECoverLean Side = CoverLeanDirection;
 	if (Side != ECoverLean::Left && Side != ECoverLean::Right) Side = LastCoverSide;
@@ -1345,8 +1358,32 @@ void UEnemyAnimInstance::PlayCoverPeekMontage(FName PreferredSection)
 void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 {
 	// Track resolved side for fallback on ECoverLean::None.
-	if (CoverLeanDirection == ECoverLean::Left || CoverLeanDirection == ECoverLean::Right)
+	// While a cover-move is active, sync idle side to the move direction so arrival faces
+	// the direction just walked (the task pre-sets lean to the move direction for the swap hold).
+	if (bCoverMoving && (CoverMoveDirection == ECoverLean::Left || CoverMoveDirection == ECoverLean::Right))
+		LastCoverSide = CoverMoveDirection;
+	else if (CoverLeanDirection == ECoverLean::Left || CoverLeanDirection == ECoverLean::Right)
 		LastCoverSide = CoverLeanDirection;
+
+	// Remember the side of the peek that actually plays; on the peek-fall edge force the idle
+	// back to that side — a right corner peek recovers into the right idle regardless of any
+	// lean rewritten mid-cycle (side-swap hold, gap re-pick that rolled into an over-top).
+	if (bCoverPeeking && (CoverLeanDirection == ECoverLean::Left || CoverLeanDirection == ECoverLean::Right))
+		LastPeekedSide = CoverLeanDirection;
+	if (!bCoverPeeking && bPrevCoverPeeking)
+		LastCoverSide = LastPeekedSide;
+
+	// Pre-select the desired cover-move montage (hoisted above the gate so the exemption
+	// can test whether a valid walk clip exists — null slots fall back to normal locomotion).
+	UAnimMontage* DesiredMoveMontage = nullptr;
+	if (bCoverMoving && bIsAlive)
+	{
+		const bool bLeft = (CoverMoveDirection == ECoverLean::Left);
+		if (CoverHeight == ECoverHeight::Crouch)
+			DesiredMoveMontage = bLeft ? CoverMoveCrouchLeft.Get() : CoverMoveCrouchRight.Get();
+		else
+			DesiredMoveMontage = bLeft ? CoverMoveStandLeft.Get() : CoverMoveStandRight.Get();
+	}
 
 	// --- Velocity gate: cover montages only play while settled at the cover point ---
 	// The full-body Cover slot suppresses locomotion, so AI-driven capsule motion under a cover
@@ -1362,7 +1399,10 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 	const bool bCoverMontageMoves = IsValid(ActiveCoverMontage)
 		&& Montage_IsPlaying(ActiveCoverMontage) && ActiveCoverMontage->HasRootMotion();
 	const bool bRootMotionDriven = bCoverMontageMoves && MeshComp && MeshComp->IsPlayingRootMotion();
-	const bool bCoverMoveExempt = bCoverMoving && IsValid(ActiveCoverMoveMontage);
+	// Exempt the cover-move window when a matching walk clip exists — keeps the first-tick
+	// fix while restoring the null-slot locomotion fallback (unassigned slots retain normal
+	// locomotion because the gate closes on speed as designed).
+	const bool bCoverMoveExempt = bCoverMoving && IsValid(DesiredMoveMontage);
 	if (Speed > CoverAnimMaxSpeed && !bRootMotionDriven && !bCoverMoveExempt)
 		CoverSettleAccum = 0.f;
 	else
@@ -1412,8 +1452,6 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 			Montage_Stop(CoverBlendOut, ActiveCoverMoveMontage);
 		ActiveCoverMontage = nullptr;
 		ActiveCoverBlindMontage = nullptr;
-		// Fix 8: clear on both gate-fall (alive) and death paths.
-		bCoverMovePlayingStop = false;
 		if (!bIsAlive)
 			ActiveCoverMoveMontage = nullptr;
 		bPrevCoverAnimActive = bCoverAnimActive;
@@ -1426,11 +1464,13 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 
 	// --- Gate rise: enter the cover pose (peek re-entry replays from Out — its root motion
 	// starts from the hug position, so a fresh step-out is the position-correct resume). ---
+	// Idle plays are suppressed while bCoverMoving — the walk montage owns the CoverSlot
+	// during a move, and a replayed idle stomps it (visible body-twist + montage churn).
 	if (bCoverAnimActive && !bPrevCoverAnimActive)
 	{
 		if (bCoverPeeking)
 			PlayCoverPeekMontage(TEXT("Out"));
-		else
+		else if (!bCoverMoving)
 			PlayCoverIdleMontage(CoverBlendIn, TEXT("Loop"));
 	}
 	// --- Peek rise: play peek montage from Out section ---
@@ -1445,21 +1485,29 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 		if (IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage)
 			&& ActiveCoverMontage->GetSectionIndex(TEXT("Return")) != INDEX_NONE)
 			Montage_JumpToSection(TEXT("Return"), ActiveCoverMontage);
-		else
+		else if (!bCoverMoving)
 			PlayCoverIdleMontage(0.2f, TEXT("Loop"));
 	}
 	// --- Height change while in cover (no peek/blind state change): crossfade the idle ---
-	// Idles are side-agnostic, so lean changes alone don't replay anything.
-	else if (bCoverAnimActive && bPrevCoverAnimActive
+	else if (bCoverAnimActive && bPrevCoverAnimActive && !bCoverMoving
 		&& CoverHeight != PrevCoverHeight
 		&& !bCoverPeeking && !bCoverBlindFiring)
 	{
 		PlayCoverIdleMontage(CoverBlendOut, TEXT("Loop"));
 	}
+	// --- Lean-change idle re-select: the selected idle montage changed (side swap) while
+	// settled and not peeking/blind — crossfade to the new idle so the pre-move hold animates. ---
+	else if (bCoverAnimActive && !bCoverPeeking && !bCoverBlindFiring && !bCoverMoving
+		&& IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage)
+		&& !ActiveCoverMontage->HasRootMotion()
+		&& SelectCoverIdleMontage() != ActiveCoverMontage)
+	{
+		PlayCoverIdleMontage(0.2f, TEXT("Loop"));
+	}
 	// --- Backstop: posed and settled but nothing playing on the Cover slot — re-assert. ---
 	// Covers finite peeks running out mid-burst (auto Out→Aim→Return→end: pop back out) and
 	// anything that stopped the montage externally.
-	else if (bCoverAnimActive
+	else if (bCoverAnimActive && !bCoverMoving
 		&& !(IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage)))
 	{
 		if (bCoverPeeking)
@@ -1497,87 +1545,48 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 			PlayCoverIdleMontage(0.2f, TEXT("Loop"));
 	}
 
-	// --- Cover-move fall edge: play Stop section or hard-stop when bCoverMoving drops ---
+	// --- Cover-move fall edge: blend-out stop when bCoverMoving drops ---
 	if (!bCoverMoving && bPrevCoverMoving)
 	{
 		if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
-		{
-			if (ActiveCoverMoveMontage->GetSectionIndex(TEXT("Stop")) != INDEX_NONE)
-			{
-				// Let the authored Stop section play out naturally — no hard blend-out.
-				Montage_JumpToSection(TEXT("Stop"), ActiveCoverMoveMontage);
-				bCoverMovePlayingStop = true;
-				// ActiveCoverMoveMontage stays set until the montage finishes (cleared below).
-			}
-			else
-			{
-				Montage_Stop(0.2f, ActiveCoverMoveMontage);
-				ActiveCoverMoveMontage = nullptr;
-				bCoverMovePlayingStop = false;
-			}
-		}
-		else
-		{
-			ActiveCoverMoveMontage = nullptr;
-			bCoverMovePlayingStop = false;
-		}
-	}
-
-	// Clear ActiveCoverMoveMontage once the Stop section finishes playing.
-	if (bCoverMovePlayingStop && IsValid(ActiveCoverMoveMontage)
-		&& !Montage_IsPlaying(ActiveCoverMoveMontage))
-	{
+			Montage_Stop(0.2f, ActiveCoverMoveMontage);
 		ActiveCoverMoveMontage = nullptr;
-		bCoverMovePlayingStop = false;
 	}
 
 	// --- Cover-move montages: play while bCoverMoving + a matching clip is set ---
+	// DesiredMoveMontage was pre-selected above (hoisted for the gate exemption).
 	{
-		UAnimMontage* DesiredMoveMontage = nullptr;
-		if (bCoverMoving && bIsAlive)
-		{
-			const bool bLeft = (CoverMoveDirection == ECoverLean::Left);
-			if (CoverHeight == ECoverHeight::Crouch)
-				DesiredMoveMontage = bLeft ? CoverMoveCrouchLeft.Get() : CoverMoveCrouchRight.Get();
-			else
-				DesiredMoveMontage = bLeft ? CoverMoveStandLeft.Get() : CoverMoveStandRight.Get();
-		}
-
 		if (IsValid(DesiredMoveMontage))
 		{
-			// bCoverMoving rose while Stop was playing — restart the montage cleanly.
 			const bool bNeedRestart = (ActiveCoverMoveMontage != DesiredMoveMontage)
-				|| !Montage_IsPlaying(DesiredMoveMontage)
-				|| bCoverMovePlayingStop;
+				|| !Montage_IsPlaying(DesiredMoveMontage);
 
 			if (bNeedRestart)
 			{
 				if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
 					Montage_Stop(0.2f, ActiveCoverMoveMontage);
-				bCoverMovePlayingStop = false;
+
+				// Stop the active idle montage before starting the walk — same slot group,
+				// but bStopAllMontages=false does NOT auto-stop it, and a looping idle at
+				// full weight buries the walk montage (visible body twist + churn).
+				if (IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage))
+					Montage_Stop(0.2f, ActiveCoverMontage);
+				ActiveCoverMontage = nullptr;
 
 				Montage_PlayWithBlendIn(DesiredMoveMontage, FAlphaBlendArgs(0.2f), 1.f,
 					EMontagePlayReturnType::MontageLength, 0.f, false);
 
-				// Play from Start if authored; else jump straight to Loop (legacy fallback).
-				if (DesiredMoveMontage->GetSectionIndex(TEXT("Start")) != INDEX_NONE)
-				{
-					// Start section transitions to Loop via montage section link (authored).
-					// No JumpToSection here — let it run from the beginning.
-				}
-				else if (DesiredMoveMontage->GetSectionIndex(TEXT("Loop")) != INDEX_NONE)
+				// Always start in Loop — montages keep their sections on disk but we skip Start.
+				if (DesiredMoveMontage->GetSectionIndex(TEXT("Loop")) != INDEX_NONE)
 					Montage_JumpToSection(TEXT("Loop"), DesiredMoveMontage);
 
 				ActiveCoverMoveMontage = DesiredMoveMontage;
 			}
 		}
-		else if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage)
-			&& !bCoverMovePlayingStop)
+		else if (IsValid(ActiveCoverMoveMontage) && Montage_IsPlaying(ActiveCoverMoveMontage))
 		{
-			// No desired montage and not playing Stop — hard stop.
 			Montage_Stop(0.2f, ActiveCoverMoveMontage);
 			ActiveCoverMoveMontage = nullptr;
-			bCoverMovePlayingStop = false;
 		}
 	}
 

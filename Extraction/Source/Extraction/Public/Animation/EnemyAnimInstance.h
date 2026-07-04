@@ -87,6 +87,15 @@ public:
 	 *  edge-of-FOV detection flicker during Searching while the enemy scans. */
 	bool IsInCombat() const { return bInCombat; }
 
+	/** Accessor for the last committed cover lean side (task reads this to decide pre-move hold). */
+	ECoverLean GetLastCoverSide() const { return LastCoverSide; }
+
+	/** Debug: name of the active cover-pose montage (idle/peek). */
+	UAnimMontage* GetActiveCoverMontage() const { return ActiveCoverMontage; }
+
+	/** Debug: name of the active cover-move montage (shuffle walk). */
+	UAnimMontage* GetActiveCoverMoveMontage() const { return ActiveCoverMoveMontage; }
+
 	// --- Recoil (C++ spring solver) ---
 
 	/**
@@ -250,9 +259,14 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
 	TObjectPtr<UAnimMontage> CrouchPeekRight = nullptr;
 
-	/** Stand-up over-the-top peek for low (crouch) cover when neither corner has a gap (lean=Front). */
+	/** Stand-up over-the-top peek for low (crouch) cover when neither corner has a gap (lean=Front).
+	 *  Used when entering the over-top from the RIGHT-side idle (default). */
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
 	TObjectPtr<UAnimMontage> PeekOverTop = nullptr;
+
+	/** Over-top peek entered from the LEFT-side idle. Falls back to PeekOverTop when unset. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
+	TObjectPtr<UAnimMontage> PeekOverTopLeft = nullptr;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Cover")
 	TObjectPtr<UAnimMontage> StandIdleLeft = nullptr;
@@ -646,10 +660,6 @@ private:
 
 	bool bPrevCoverMoving = false;
 
-	/** True while the active move montage is playing out its authored Stop section.
-	 *  During this window the montage logic does not restart or hard-stop it. */
-	bool bCoverMovePlayingStop = false;
-
 	/** Unclamped aim yaw (degrees) captured in UpdateAimOffset BEFORE the AimYawClampDeg clamp.
 	 *  Used by the CoverAimTrackAlpha gate to detect when the target crosses the track limit. */
 	float RawAimYawDeg = 0.f;
@@ -673,6 +683,11 @@ private:
 
 	/** Tracks last committed lean side so cover-idle has a valid direction when ECoverLean::None. */
 	ECoverLean LastCoverSide = ECoverLean::Right;
+
+	/** Side of the last side-peek that actually PLAYED. Drives the over-top variant pick and the
+	 *  post-peek idle side — a right corner peek must recover into the right idle / right-entry
+	 *  over-top even if a lean was rewritten in between (side-swap hold, gap re-pick). */
+	ECoverLean LastPeekedSide = ECoverLean::Right;
 
 	/** Active cover-move montage instance (set while bCoverMoving is true and a montage matched). */
 	UPROPERTY(Transient)

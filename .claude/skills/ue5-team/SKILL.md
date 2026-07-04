@@ -42,7 +42,7 @@ Run through these checks in order — first match wins:
 - Task touches fewer than 3 files
 - Task is a single bug fix in one system
 - Task is scaffolding (use `ue5-class-scaffold` skill instead)
-- Task is a simple code review of 1–5 files (single `ue5-safety-reviewer` + `ue5-performance-reviewer` in parallel is enough)
+- Task is a simple code review of 1–5 files (single `ue5-reviewer` dispatch is enough)
 - Task is a question or explanation request
 
 ## Team Compositions (use ProjectExtract's custom agents)
@@ -54,26 +54,25 @@ Lead (you): Coordinator. Owns AExtractionPlayerController / AExtractionGameMode 
             and cross-system integration. Writes the plan, integrates parts.
 Implementer A: subagent_type=ue5-cpp-implementer. Owns primary system files (backend / logic).
 Implementer B (if UI work):  subagent_type=ue5-cpp-implementer. Owns UI widgets and HUD.
-Reviewer: subagent_type=ue5-safety-reviewer. Plan mode. Reviews work as it progresses.
+Reviewer: subagent_type=ue5-reviewer. Plan mode. Reviews work as it progresses (safety + performance + edge-case in one pass).
 ```
 
 Use 3 agents (no Implementer B) if the feature has minimal UI. Use 4 when there's substantial widget work.
 
-### QA Review Team (3 agents — all reviewers in plan mode)
+### QA Review Team (2 agents — reviewer in plan mode)
 
 ```
 Lead (you): Collates findings, prioritises fixes, re-dispatches ue5-cpp-implementer to apply.
-Safety: subagent_type=ue5-safety-reviewer. Plan mode. Crash patterns, replication safety.
-Performance: subagent_type=ue5-performance-reviewer. Plan mode. Hot paths, allocations.
+Reviewer: subagent_type=ue5-reviewer. Plan mode. Safety, performance, and edge-case in a single consolidated pass.
 ```
 
-Add a 4th agent (`ue5-ui-specialist` or `ue5-build-specialist`) when the diff includes substantial widget or build-config changes.
+Add a 2nd/3rd agent (`ue5-ui-specialist` or `ue5-build-specialist`) when the diff includes substantial widget or build-config changes.
 
 ### Performance Audit Team (2 agents)
 
 ```
 Lead (you): Identifies hot paths via grep for Tick/Timer patterns, coordinates review.
-Auditor: subagent_type=ue5-performance-reviewer. Plan mode. Systematic audit.
+Auditor: subagent_type=ue5-reviewer. Plan mode. Systematic audit (performance dimension).
 ```
 
 ### Bug Investigation Team (2–3 agents — parallel hypotheses)

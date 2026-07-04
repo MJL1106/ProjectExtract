@@ -1,7 +1,7 @@
 ---
 name: ue5-doc-researcher
 description: Documentation and API research agent for ProjectExtract. Fetches UE5 API docs via context7, researches best practices, and generates reference documents in the project's agent_docs style.
-model: claude-sonnet-4-6
+model: claude-sonnet-5
 tools:
   - Glob
   - Grep

@@ -139,6 +139,17 @@ int32 GetForceCoverPeekSide()
 	return CVarForceCoverPeekSide.GetValueOnGameThread();
 }
 
+static TAutoConsoleVariable<int32> CVarForceCoverReposition(
+	TEXT("enemy.ForceCoverReposition"),
+	0,
+	TEXT("Force cover repositioning every pause cycle for visual testing. 0=off, 1=same-wall shuffle, 2=relocate to new cover."),
+	ECVF_Cheat);
+
+int32 GetForceCoverRepositionLevel()
+{
+	return CVarForceCoverReposition.GetValueOnGameThread();
+}
+
 static TAutoConsoleVariable<int32> CVarForceCoverHeight(
 	TEXT("enemy.ForceCoverHeight"),
 	0,
@@ -148,4 +159,15 @@ static TAutoConsoleVariable<int32> CVarForceCoverHeight(
 static int32 GetForceCoverHeight()
 {
 	return CVarForceCoverHeight.GetValueOnGameThread();
+}
+
+static TAutoConsoleVariable<int32> CVarCoverMoveDebug(
+	TEXT("enemy.CoverMoveDebug"),
+	0,
+	TEXT("Cover-move diagnostic: 0=off, 1=per-tick [COVERMOVEDBG] log + directional arrows during cover-move windows (shuffle hold, facing-active transit, SeekingCover, post-arrival soak)."),
+	ECVF_Cheat);
+
+int32 GetCoverMoveDebugLevel()
+{
+	return CVarCoverMoveDebug.GetValueOnGameThread();
 }

@@ -53,3 +53,12 @@ int32 GetCoverAnimLogLevel();
  *  2=force right corner peek, 3=force over-top). Skips the gap/LOS side checks entirely so the
  *  side-peek montages and weapon-align poses can be observed regardless of baked cover flags. */
 int32 GetForceCoverPeekSide();
+
+/** Returns the current enemy.ForceCoverReposition cvar value (0=off, 1=same-wall shuffle every
+ *  pause cycle, 2=full relocate every pause cycle). For visual testing of cover movement. */
+int32 GetForceCoverRepositionLevel();
+
+/** Returns the current enemy.CoverMoveDebug cvar value (0=off, 1=per-tick [COVERMOVEDBG] log +
+ *  directional arrows during cover-move windows: shuffle hold, facing-active transit, SeekingCover
+ *  phase, and a post-arrival soak window). */
+int32 GetCoverMoveDebugLevel();

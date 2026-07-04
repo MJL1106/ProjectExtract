@@ -25,6 +25,7 @@
 #include "Engine/World.h"
 #include "EnemyMoraleComponent.h"
 #include "EnemyDebug.h"
+#include "EnemyAnimInstance.h"
 #include "DrawDebugHelpers.h"
 #include "GameFramework/CharacterMovementComponent.h"
 
@@ -38,6 +39,10 @@ static constexpr float FlankSlotArrivalRadius = 120.f;
 static constexpr int32 CompromiseDebounceRequired = 2;
 /** Chest height (cm) for the body-protection trace from a candidate's behind-cover position. */
 static constexpr float BodyProtectChestHeight = 60.f;
+/** Perpendicular-offset cap (cm) for same-wall candidate gates: IsSameWall is direction-only
+ *  (dot >= 0.94), so a nearby parallel wall sharing the same facing would otherwise pass.
+ *  Shared by FindShuffleCover and FindSidePeekCover. */
+static constexpr float SameWallMaxPerpOffset = 150.f;
 
 // --- Hunkered timing scalars (Broken morale) ---
 /** Multiplier on ExposePhaseDuration when hunkered — shorter peeks. */
@@ -103,7 +108,11 @@ static void ApplyCoverFacing(AAIController* Controller, APawn* Pawn, const FCove
 {
 	if (!Controller || !IsValid(Pawn)) return;
 	const FRotator WallYaw(0.f, UCoverGeometryStatics::GetFireArcForward(Data).Rotation().Yaw, 0.f);
+	// Clear BOTH Gameplay and Move priorities — PathFollowingComponent::UpdateMoveFocus sets a
+	// Move-priority focal point along the path every tick; leaving it active lets
+	// UpdateControlRotation fight the wall yaw after the Gameplay slot is empty.
 	Controller->ClearFocus(EAIFocusPriority::Gameplay);
+	Controller->ClearFocus(EAIFocusPriority::Move);
 	Pawn->SetActorRotation(WallYaw);
 	Controller->SetControlRotation(WallYaw);
 }
@@ -119,6 +128,7 @@ static void UpdateCombatFocus(AAIController* Controller, const AEnemyCharacter* 
 	if (IsValid(Pose) && Pose->bInCover)
 	{
 		Controller->ClearFocus(EAIFocusPriority::Gameplay);
+		Controller->ClearFocus(EAIFocusPriority::Move);
 		return;
 	}
 	if (IsValid(Target)) Controller->SetFocus(Target);
@@ -296,6 +306,7 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
 
 	const int32 ForcedHeight = GetForceCoverHeightLocal();
+	const float FlankArcCos = FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg));
 
 	FCover BestCover;
 	float BestScore = -1.f;
@@ -325,7 +336,7 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 		const FVector ToThreat = (ThreatLoc - Data.Location).GetSafeNormal2D();
 		const FVector FireFwd = UCoverGeometryStatics::GetFireArcForward(Data);
 		const float ArcDot = FVector::DotProduct(FireFwd, ToThreat);
-		if (ArcDot < FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg)))
+		if (ArcDot < FlankArcCos)
 			continue;
 
 		// Must be able to peek-shoot
@@ -455,12 +466,125 @@ void UBTTask_EnemyCombatFire::RestoreCoverMoveSpeed(AEnemyCharacter* Enemy, FFir
 	Mem->OriginalMaxWalkSpeedCrouched = 0.f;
 }
 
-// --- CommitSameWallShuffle (feature 3 + Pause-end refactor) ---
-// Shared shuffle-commit used by both the Pause-end roll and the failed-peek ladder.
-// Issues MoveToLocation FIRST and only commits vacate/claim/BB on acceptance (mirrors
-// the side-peek-hop move-first pattern). Returns false if the path request was refused.
+// --- ClearPendingShuffle ---
 
-bool UBTTask_EnemyCombatFire::CommitSameWallShuffle(UBehaviorTreeComponent& OwnerComp,
+void UBTTask_EnemyCombatFire::ClearPendingShuffle(AEnemyCharacter* Enemy, FFireMemory* Mem) const
+{
+	if (!Mem) return;
+	if (Mem->bShufflePending)
+	{
+		UCoverPoseComponent* PoseComp = IsValid(Enemy) ? Enemy->GetCoverPoseComponent() : nullptr;
+		if (IsValid(PoseComp)) PoseComp->SetLean(ECoverLean::None);
+	}
+	Mem->bShufflePending = false;
+	Mem->ShuffleHoldTimer = 0.f;
+}
+
+// --- TryLadderSwapMove: wall-walk to the opposite-side end point ---
+// Extracted from the forced side-peek-hop pattern. Sets bLadderSwapMovePending so the
+// arrival reset preserves LadderStage = 2 instead of resetting to 0.
+
+bool UBTTask_EnemyCombatFire::TryLadderSwapMove(UBehaviorTreeComponent& OwnerComp,
+	FFireMemory* Mem, AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
+	const FCover& CurrentCover, ECoverLean OppositeSide, AActor* Target,
+	const UEnemyArchetypeData* DA) const
+{
+	UWorld* World = OwnerComp.GetWorld();
+	if (!World || !IsValid(Pawn) || !IsValid(Enemy) || !IsValid(DA)) return false;
+	if (!CurrentCover.IsValid() || !IsValid(Target)) return false;
+
+	FCover HopDest = FindSidePeekCover(World, Pawn, CurrentCover, OppositeSide,
+		Target->GetActorLocation(), DA, Controller, Target);
+	if (!HopDest.IsValid()) return false;
+
+	const UCapsuleComponent* Cap = Enemy->GetCapsuleComponent();
+	const float CapRadius = Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+	const float Standoff = CapRadius + DA->CoverStandoffPadding;
+	const FVector HopArrival = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+		World, HopDest.Data, Standoff, CapRadius, DA->CoverCornerGap, Pawn);
+
+	LogCoverMove(TEXT("ladder-swap"), Pawn, Enemy);
+	const EPathFollowingRequestResult::Type MoveResult =
+		Controller->MoveToLocation(HopArrival, 25.f, false, true, true, true);
+	if (MoveResult != EPathFollowingRequestResult::RequestSuccessful
+		&& MoveResult != EPathFollowingRequestResult::AlreadyAtGoal)
+	{
+		UE_LOG(LogEnemyAI, Log, TEXT("[COVER] %s ladder-swap move refused (result=%d)"),
+			*Pawn->GetName(), static_cast<int32>(MoveResult));
+		return false;
+	}
+
+	// Move accepted — commit the cover swap (mirrors side-peek hop pattern).
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	UCoverReservationSubsystem* ResSub = Mem->CachedResSub.Get();
+	if (!ResSub) ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
+	if (IsValid(ResSub))
+	{
+		ResSub->MarkVacated(CurrentCover.Handle, Controller);
+		ResSub->SetIntendedCover(Controller, HopDest.Handle);
+	}
+	if (BB) WriteCoverToBB(BB, HopDest);
+
+	Mem->ReseekCover = HopDest.Handle;
+	Mem->ReseekCoverData = HopDest.Data;
+	Mem->ReseekArrivalPos = HopArrival;
+	Mem->bArrivedAtSlot = false;
+	Mem->SlotDwellTime = 0.f;
+	Mem->CompromiseConsecutiveCount = 0;
+	Mem->CompromiseEvalTimer = 0.f;
+	Mem->bRelocatePending = false;
+	Mem->ExposeLosTimeoutCount = 0;
+	Mem->bLadderForceOppositeSide = false;
+	Mem->bLadderForceOverTop = false;
+	Mem->LadderOppositeSide = ECoverLean::None;
+	// Stage 2 will be set on arrival via bLadderSwapMovePending.
+	Mem->bLadderSwapMovePending = true;
+	Mem->bShufflePending = false;
+	Mem->ShuffleHoldTimer = 0.f;
+	Mem->SeekStallBestDist = TNumericLimits<float>::Max();
+	Mem->SeekStallAccum = 0.f;
+
+	// Pose for transit — mirror ExecuteShuffleMove's same-height treatment so the anim gate
+	// stays open and the walk montage plays (FindSidePeekCover gates same-height).
+	const FVector SwapLateral = CurrentCover.Data.Rotation.RotateVector(FVector::RightVector);
+	const FVector SwapMoveDir2D = (HopArrival - Pawn->GetActorLocation()).GetSafeNormal2D();
+	const float SwapMoveDot = FVector::DotProduct(SwapMoveDir2D, SwapLateral);
+	const ECoverLean SwapMoveDirection = (SwapMoveDot >= 0.f) ? ECoverLean::Right : ECoverLean::Left;
+	const bool bSwapCrouched = UCoverGeometryStatics::GetCoverHeight(CurrentCover.Data) == ECoverHeight::Crouch;
+
+	UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent();
+	if (IsValid(PoseComp))
+	{
+		PoseComp->SetPeeking(false);
+		PoseComp->SetLean(ECoverLean::None);
+		if (bSwapCrouched)
+			PoseComp->SetInCover(true, ECoverHeight::Crouch);
+		else
+			PoseComp->SetInCover(true, ECoverHeight::Stand);
+		PoseComp->SetCoverMoving(true, SwapMoveDirection);
+	}
+	// Stay crouched for crouch→crouch; no UnCrouch needed for stand→stand.
+	if (bSwapCrouched)
+		if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+
+	// Per-tick wall-facing lock during the move (no SetFocus — the facing lock clears it).
+	Mem->bCoverMoveFacingActive = true;
+	Mem->CoverMoveFacingData = CurrentCover.Data;
+	Mem->CoverMoveArrivalPos = HopArrival;
+	ApplyCoverMoveSpeed(Enemy, Mem, DA);
+
+	Mem->Phase = EFireTaskPhase::SeekingCover;
+	UE_LOG(LogEnemyAI, Log, TEXT("[COVER] %s ladder-swap (%s) -> (%.0f,%.0f,%.0f)"),
+		*Pawn->GetName(), OppositeSide == ECoverLean::Left ? TEXT("L") : TEXT("R"),
+		HopDest.Data.Location.X, HopDest.Data.Location.Y, HopDest.Data.Location.Z);
+	return true;
+}
+
+// --- ExecuteShuffleMove (the "full commit" helper) ---
+// Issues MoveToLocation, vacate/claim/BB/pose, phase=SeekingCover.
+// Shared between the immediate same-side path and the hold-expiry path.
+
+bool UBTTask_EnemyCombatFire::ExecuteShuffleMove(UBehaviorTreeComponent& OwnerComp,
 	FFireMemory* Mem, AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
 	const FCover& FromCover, const FCover& ToDest, AActor* Target,
 	const UEnemyArchetypeData* DA) const
@@ -470,8 +594,10 @@ bool UBTTask_EnemyCombatFire::CommitSameWallShuffle(UBehaviorTreeComponent& Owne
 	if (!BB || !World) return false;
 
 	const UCapsuleComponent* Cap = Enemy->GetCapsuleComponent();
-	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
-	const FVector ShuffleArrival = UCoverGeometryStatics::GetHunkerPosition(ToDest.Data, Standoff);
+	const float CapRadius = Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+	const float Standoff = CapRadius + DA->CoverStandoffPadding;
+	const FVector ShuffleArrival = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+		World, ToDest.Data, Standoff, CapRadius, DA->CoverCornerGap, Pawn);
 
 	// Move-first: issue the request BEFORE committing the cover swap so a refusal
 	// does not strand the pawn with both covers on post-vacate cooldown.
@@ -512,6 +638,10 @@ bool UBTTask_EnemyCombatFire::CommitSameWallShuffle(UBehaviorTreeComponent& Owne
 	Mem->bLadderForceOppositeSide = false;
 	Mem->bLadderForceOverTop = false;
 	Mem->LadderOppositeSide = ECoverLean::None;
+	Mem->LadderStage = 0;
+	Mem->bLadderSwapMovePending = false;
+	Mem->bShufflePending = false;
+	Mem->ShuffleHoldTimer = 0.f;
 	Mem->SeekStallBestDist = TNumericLimits<float>::Max();
 	Mem->SeekStallAccum = 0.f;
 
@@ -531,13 +661,25 @@ bool UBTTask_EnemyCombatFire::CommitSameWallShuffle(UBehaviorTreeComponent& Owne
 	{
 		if (bFromCrouch && bToCrouch)
 		{
-			// Keep crouched pose alive — only update moving state.
+			// Keep crouched pose alive — re-assert height (over-top peek may have set Stand).
 			PoseComp->SetPeeking(false);
 			PoseComp->SetLean(ECoverLean::None);
+			PoseComp->SetInCover(true, ECoverHeight::Crouch);
+			PoseComp->SetCoverMoving(true, MoveDirection);
+		}
+		else if (!bFromCrouch && !bToCrouch)
+		{
+			// Stand→stand: keep the standing cover pose alive so the anim gate stays open
+			// for the walk montage (resetting drops bInCover, closing the gate mid-move).
+			PoseComp->SetPeeking(false);
+			PoseComp->SetLean(ECoverLean::None);
+			PoseComp->SetInCover(true, ECoverHeight::Stand);
 			PoseComp->SetCoverMoving(true, MoveDirection);
 		}
 		else
 		{
+			// Mixed-height transition (crouch→stand / stand→crouch): full reset + UnCrouch
+			// handled below.
 			PoseComp->ResetCoverPose();
 			PoseComp->SetCoverMoving(true, MoveDirection);
 		}
@@ -551,8 +693,19 @@ bool UBTTask_EnemyCombatFire::CommitSameWallShuffle(UBehaviorTreeComponent& Owne
 	// Cap walk speed to DA->CoverMoveSpeed while the strafe move is in flight (feature 6 task).
 	ApplyCoverMoveSpeed(Enemy, Mem, DA);
 
-	Controller->SetFocus(Target);
-	if (!(bFromCrouch && bToCrouch))
+	// Do NOT set focus on the target during the move window — ApplyCoverFacing clears
+	// focus, and the per-tick wall-facing re-assert (bCoverMoveFacingActive) keeps the body
+	// aligned to the wall. Target focus resumes at the next Expose via existing code.
+	if (bFromCrouch && bToCrouch)
+	{
+		// Re-crouch: an over-top peek may have un-crouched the pawn before this commit.
+		if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+	}
+	else if (!bFromCrouch && !bToCrouch)
+	{
+		// Stand→stand: no crouch state change needed.
+	}
+	else
 	{
 		if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
 	}
@@ -560,6 +713,76 @@ bool UBTTask_EnemyCombatFire::CommitSameWallShuffle(UBehaviorTreeComponent& Owne
 
 	UE_LOG(LogEnemyAI, Log, TEXT("[COVER] %s shuffle -> (%.0f,%.0f,%.0f)"),
 		*Pawn->GetName(), ToDest.Data.Location.X, ToDest.Data.Location.Y, ToDest.Data.Location.Z);
+	return true;
+}
+
+// --- CommitSameWallShuffle (decision stage) ---
+// Computes move direction. Same-side or unavailable anim instance: immediate full commit.
+// Opposite-side: defer move behind a hold timer for the idle-side swap animation.
+
+bool UBTTask_EnemyCombatFire::CommitSameWallShuffle(UBehaviorTreeComponent& OwnerComp,
+	FFireMemory* Mem, AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
+	const FCover& FromCover, const FCover& ToDest, AActor* Target,
+	const UEnemyArchetypeData* DA) const
+{
+	if (!Mem || !IsValid(Enemy) || !IsValid(DA)) return false;
+
+	// Compute move direction (lateral projection on wall axis).
+	const UCapsuleComponent* Cap = Enemy->GetCapsuleComponent();
+	const float CapRadius = Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+	const float Standoff = CapRadius + DA->CoverStandoffPadding;
+	const FVector ShuffleArrival = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+		Pawn->GetWorld(), ToDest.Data, Standoff, CapRadius, DA->CoverCornerGap, Pawn);
+	const FVector ShuffleLateral = FromCover.Data.Rotation.RotateVector(FVector::RightVector);
+	const FVector MoveDir2D = (ShuffleArrival - Pawn->GetActorLocation()).GetSafeNormal2D();
+	const float MoveDot = FVector::DotProduct(MoveDir2D, ShuffleLateral);
+	const ECoverLean MoveDirection = (MoveDot >= 0.f) ? ECoverLean::Right : ECoverLean::Left;
+
+	// Read the anim instance's last cover side to decide whether a pre-move hold is needed.
+	ECoverLean AnimLastSide = ECoverLean::None;
+	if (USkeletalMeshComponent* MeshComp = Enemy->GetMesh())
+	{
+		if (UEnemyAnimInstance* AnimInst = Cast<UEnemyAnimInstance>(MeshComp->GetAnimInstance()))
+			AnimLastSide = AnimInst->GetLastCoverSide();
+	}
+
+	// Same side (or anim instance unavailable): proceed with the full commit immediately.
+	const bool bNeedsSwap = (AnimLastSide == ECoverLean::Left || AnimLastSide == ECoverLean::Right)
+		&& (MoveDirection != AnimLastSide)
+		&& DA->CoverMoveSideSwapDelay > 0.f;
+
+	if (!bNeedsSwap)
+		return ExecuteShuffleMove(OwnerComp, Mem, Controller, Pawn, Enemy, FromCover, ToDest, Target, DA);
+
+	// Opposite side: defer the move behind a hold timer so the idle-side swap animates first.
+	Mem->bShufflePending = true;
+	Mem->PendingShuffleDest = ToDest;
+	Mem->PendingShuffleFrom = FromCover;
+	Mem->ShuffleHoldTimer = DA->CoverMoveSideSwapDelay;
+
+	// Re-crouch if both covers are crouch height — an over-top peek may have un-crouched the pawn.
+	const bool bPendFromCrouch = UCoverGeometryStatics::GetCoverHeight(FromCover.Data) == ECoverHeight::Crouch;
+	const bool bPendToCrouch = UCoverGeometryStatics::GetCoverHeight(ToDest.Data) == ECoverHeight::Crouch;
+	if (bPendFromCrouch && bPendToCrouch)
+		if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+
+	// Flip the idle side via SetLean while NOT peeking — existing idle-selection logic swaps the idle montage.
+	UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent();
+	if (IsValid(PoseComp))
+	{
+		PoseComp->SetPeeking(false);
+		if (bPendFromCrouch && bPendToCrouch)
+			PoseComp->SetInCover(true, ECoverHeight::Crouch);
+		PoseComp->SetLean(MoveDirection);
+	}
+
+	// Park in Pause with enough timer to cover the hold (+ small epsilon so nothing else rolls).
+	Mem->Phase = EFireTaskPhase::Pause;
+	Mem->PhaseTimer = DA->CoverMoveSideSwapDelay + 0.05f;
+
+	if (GetCoverAnimLogLevel() > 0)
+		UE_LOG(LogEnemyAI, Log, TEXT("[COVERSTATE] %s shuffle pending side-swap hold=%.2f dir=%d"),
+			*Pawn->GetName(), DA->CoverMoveSideSwapDelay, static_cast<int32>(MoveDirection));
 	return true;
 }
 
@@ -616,6 +839,9 @@ void UBTTask_EnemyCombatFire::CleanupMemory(UBehaviorTreeComponent& OwnerComp, u
 	// MaxWalkSpeed capped at CoverMoveSpeed indefinitely.
 	if (Mem->bCoverMoveSpeedCapped && IsValid(Enemy))
 		RestoreCoverMoveSpeed(Enemy, Mem);
+
+	if (Mem->bShufflePending && IsValid(Enemy))
+		ClearPendingShuffle(Enemy, Mem);
 
 	Mem->~FFireMemory();
 	Super::CleanupMemory(OwnerComp, NodeMemory, CleanupType);
@@ -827,7 +1053,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (!bStillTucked || bDriftDone)
 			Mem->bDriftCorrecting = false;
 		else
+		{
 			ApplyCoverFacing(Controller, Pawn, Mem->DriftFacingCover);
+			Mem->bFacingReassertedThisTick = true;
+		}
 	}
 
 	// Cover-move facing lock (feature 6 task): while a same-wall shuffle/ladder move is in flight,
@@ -836,12 +1065,226 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	if (Mem->bCoverMoveFacingActive)
 	{
 		const float MoveDist = FVector::Dist2D(Pawn->GetActorLocation(), Mem->CoverMoveArrivalPos);
-		const bool bMoveArrived = (MoveDist <= SeekCoverArrivalIdleRadius)
-			|| (Controller->GetMoveStatus() == EPathFollowingStatus::Idle);
-		if (bMoveArrived)
+		const bool bWithinArrivalProximity = MoveDist <= SeekCoverArrivalIdleRadius;
+		const bool bPathIdle = Controller->GetMoveStatus() == EPathFollowingStatus::Idle;
+		if (bWithinArrivalProximity || bPathIdle)
+		{
+			// Releasing on proximity while the path is still Moving leaves the engine's Move-priority
+			// focal point alive (ApplyCoverFacing only clears it while re-asserted each tick); the next
+			// tick's UpdateControlRotation then swings yaw to the walk direction during deceleration.
+			// Stop the move so OnPathFinished clears that focal point — the pawn is already within
+			// the acceptance envelope, so ending the move early doesn't cost distance.
+			if (bWithinArrivalProximity && !bPathIdle)
+				Controller->StopMovement();
 			Mem->bCoverMoveFacingActive = false;
+		}
 		else
+		{
 			ApplyCoverFacing(Controller, Pawn, Mem->CoverMoveFacingData);
+			Mem->bFacingReassertedThisTick = true;
+		}
+	}
+
+	// --- Cover-move diagnostic (enemy.CoverMoveDebug) ---
+	if (GetCoverMoveDebugLevel() > 0)
+	{
+		const float PostArrivalSoak = 2.f;
+		const bool bInSoakWindow = (TickNow - Mem->CoverMoveArrivalTime) < PostArrivalSoak;
+		const bool bShouldLog = Mem->bShufflePending
+			|| Mem->bCoverMoveFacingActive
+			|| Mem->Phase == EFireTaskPhase::SeekingCover
+			|| bInSoakWindow;
+
+		if (bShouldLog)
+		{
+			const float ActorYaw = Pawn->GetActorRotation().Yaw;
+			const float CtrlYaw = Controller->GetControlRotation().Yaw;
+
+			float WallYaw = -999.f;
+			if (Mem->bCoverMoveFacingActive)
+				WallYaw = UCoverGeometryStatics::GetFireArcForward(Mem->CoverMoveFacingData).Rotation().Yaw;
+			else if (Mem->bDriftCorrecting)
+				WallYaw = UCoverGeometryStatics::GetFireArcForward(Mem->DriftFacingCover).Rotation().Yaw;
+
+			const FVector FocG = Controller->GetFocalPointForPriority(EAIFocusPriority::Gameplay);
+			const FVector FocM = Controller->GetFocalPointForPriority(EAIFocusPriority::Move);
+			const FVector FocD = Controller->GetFocalPointForPriority(EAIFocusPriority::Default);
+			const FVector FocResolved = Controller->GetFocalPoint();
+			const bool bFocGValid = FAISystem::IsValidLocation(FocG);
+			const bool bFocMValid = FAISystem::IsValidLocation(FocM);
+			const bool bFocDValid = FAISystem::IsValidLocation(FocD);
+
+			const bool bReasserted = Mem->bFacingReassertedThisTick;
+
+			const EPathFollowingStatus::Type PathStatus = Controller->GetMoveStatus();
+			const FVector Vel2D = FVector(Pawn->GetVelocity().X, Pawn->GetVelocity().Y, 0.f);
+			const float Speed2D = Vel2D.Size();
+			const float VelYaw = (Speed2D > 5.f) ? Vel2D.Rotation().Yaw : -999.f;
+
+			const UCoverPoseComponent* PoseDbg = Enemy->GetCoverPoseComponent();
+			const bool bInCov = IsValid(PoseDbg) && PoseDbg->bInCover;
+			const int32 Height = IsValid(PoseDbg) ? static_cast<int32>(PoseDbg->CoverHeight) : -1;
+			const int32 Lean = IsValid(PoseDbg) ? static_cast<int32>(PoseDbg->LeanDirection) : -1;
+			const bool bMoving = IsValid(PoseDbg) && PoseDbg->bCoverMoving;
+
+			FString CoverMontName = TEXT("none");
+			FString MoveMontName = TEXT("none");
+			if (USkeletalMeshComponent* MeshComp = Enemy->GetMesh())
+			{
+				if (UEnemyAnimInstance* AnimInst = Cast<UEnemyAnimInstance>(MeshComp->GetAnimInstance()))
+				{
+					if (IsValid(AnimInst->GetActiveCoverMontage()))
+						CoverMontName = AnimInst->GetActiveCoverMontage()->GetName();
+					if (IsValid(AnimInst->GetActiveCoverMoveMontage()))
+						MoveMontName = AnimInst->GetActiveCoverMoveMontage()->GetName();
+				}
+			}
+
+			UE_LOG(LogEnemyAI, Log,
+				TEXT("[COVERMOVEDBG] %s yaw=%.1f ctrl=%.1f wall=%.1f focG=%d focM=%d focD=%d focLoc=(%.0f,%.0f) reassert=%d path=%d velYaw=%.1f speed=%.0f inCov=%d h=%d lean=%d moving=%d pend=%d phase=%d covMont=%s moveMont=%s"),
+				*Pawn->GetName(),
+				ActorYaw, CtrlYaw, WallYaw,
+				bFocGValid ? 1 : 0, bFocMValid ? 1 : 0, bFocDValid ? 1 : 0,
+				FocResolved.X, FocResolved.Y,
+				bReasserted ? 1 : 0,
+				static_cast<int32>(PathStatus),
+				VelYaw, Speed2D,
+				bInCov ? 1 : 0, Height, Lean, bMoving ? 1 : 0,
+				Mem->bShufflePending ? 1 : 0,
+				static_cast<int32>(Mem->Phase),
+				*CoverMontName, *MoveMontName);
+
+			// Directional arrows: green=forward, blue=controlRot, red=focalPoint, yellow=wallTarget
+			if (TickWorld)
+			{
+				const FVector ChestLoc = Pawn->GetActorLocation() + FVector(0.f, 0.f, 80.f);
+				const float ArrowLen = 80.f;
+				const float Life = -1.f; // single frame
+
+				// Green: actor forward
+				DrawDebugDirectionalArrow(TickWorld, ChestLoc,
+					ChestLoc + Pawn->GetActorForwardVector() * ArrowLen,
+					8.f, FColor::Green, false, Life);
+
+				// Blue: control rotation
+				const FVector CtrlFwd = Controller->GetControlRotation().Vector();
+				DrawDebugDirectionalArrow(TickWorld, ChestLoc,
+					ChestLoc + CtrlFwd * ArrowLen,
+					8.f, FColor::Blue, false, Life);
+
+				// Red: line to focal point (when valid)
+				if (FAISystem::IsValidLocation(FocResolved))
+				{
+					const FVector ToFocal = (FocResolved - ChestLoc).GetSafeNormal() * ArrowLen;
+					DrawDebugDirectionalArrow(TickWorld, ChestLoc,
+						ChestLoc + ToFocal,
+						8.f, FColor::Red, false, Life);
+				}
+
+				// Yellow: wall-facing target
+				if (WallYaw > -998.f)
+				{
+					const FVector WallFwd = FRotator(0.f, WallYaw, 0.f).Vector();
+					DrawDebugDirectionalArrow(TickWorld, ChestLoc,
+						ChestLoc + WallFwd * ArrowLen,
+						8.f, FColor::Yellow, false, Life);
+				}
+			}
+		}
+	}
+	Mem->bFacingReassertedThisTick = false;
+
+	// --- Pending shuffle hold-expiry: pre-move idle-side swap wait ---
+	if (Mem->bShufflePending)
+	{
+		Mem->ShuffleHoldTimer -= DeltaSeconds;
+		if (Mem->ShuffleHoldTimer <= 0.f)
+		{
+			// Hold expired — clear pending state and attempt the full commit.
+			const FCover PendDest = Mem->PendingShuffleDest;
+			const FCover PendFrom = Mem->PendingShuffleFrom;
+			Mem->bShufflePending = false;
+			Mem->ShuffleHoldTimer = 0.f;
+
+			// Abort helper: reset lean, re-roll pause so the inflated hold timer doesn't hang.
+			auto AbortPending = [&](const TCHAR* Reason)
+			{
+				UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent();
+				if (IsValid(PoseComp)) PoseComp->SetLean(ECoverLean::None);
+				const UEnemyMoraleComponent* MC = Enemy->GetMoraleComponent();
+				const bool bHunk = IsValid(MC) && MC->GetMoraleState() == EMoraleState::Broken;
+				Mem->PhaseTimer = RollPauseDuration(DA, bHunk);
+				if (GetCoverAnimLogLevel() > 0)
+					UE_LOG(LogEnemyAI, Log, TEXT("[COVERSTATE] %s pending shuffle aborted (%s)"), *Pawn->GetName(), Reason);
+			};
+
+			// Gate: phase must still be Pause and current cover must match the origin.
+			// A reseek/relocate mid-hold reassigns the cover; committing would shuffle
+			// from the wrong point.
+			if (Mem->Phase != EFireTaskPhase::Pause || ReadCoverFromBB(BB).Handle != PendFrom.Handle)
+			{
+				AbortPending(TEXT("phase/cover changed"));
+			}
+			// Gate: dest must still be valid.
+			else if (!PendDest.IsValid())
+			{
+				AbortPending(TEXT("invalid dest"));
+			}
+			else
+			{
+				// Gate: suppression check — natural shuffle is gated !bSuppressed; honour that here.
+				USuppressionComponent* PendSuppr = Enemy->GetSuppressionComponent();
+				const bool bPendSuppressed = IsValid(PendSuppr) && PendSuppr->IsSuppressed();
+				if (bPendSuppressed)
+				{
+					AbortPending(TEXT("suppressed"));
+				}
+				else
+				{
+					// Gate: target must be valid.
+					AActor* PendTarget = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
+					if (!IsValid(PendTarget))
+					{
+						AbortPending(TEXT("no target"));
+					}
+					else
+					{
+						// Re-validate occupancy.
+						bool bOccupied = false;
+						ACoverSystem* CoverSys = Mem->CachedCoverSys.Get();
+						if (IsValid(CoverSys))
+						{
+							AController* Occupant = CoverSys->GetOccupyingController(PendDest.Handle);
+							if (Occupant && Occupant != Controller) bOccupied = true;
+						}
+						UCoverReservationSubsystem* ResSub = Mem->CachedResSub.Get();
+						if (!bOccupied && IsValid(ResSub) && ResSub->IsCoverIntendedByOther(PendDest.Handle, Controller))
+							bOccupied = true;
+
+						if (bOccupied)
+						{
+							AbortPending(TEXT("occupancy"));
+						}
+						else
+						{
+							UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent();
+							if (IsValid(PoseComp)) PoseComp->SetLean(ECoverLean::None);
+
+							if (!ExecuteShuffleMove(OwnerComp, Mem, Controller, Pawn, Enemy,
+								PendFrom, PendDest, PendTarget, DA))
+							{
+								// Move refused — re-roll pause.
+								const UEnemyMoraleComponent* MC = Enemy->GetMoraleComponent();
+								const bool bHunk = IsValid(MC) && MC->GetMoraleState() == EMoraleState::Broken;
+								Mem->PhaseTimer = RollPauseDuration(DA, bHunk);
+								if (GetCoverAnimLogLevel() > 0)
+									UE_LOG(LogEnemyAI, Log, TEXT("[COVERSTATE] %s pending shuffle aborted (move refused)"), *Pawn->GetName());
+							}
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// In-world cover debug (enemy.CoverAnimLog): line pawn→its BB cover point, sphere at the
@@ -947,39 +1390,33 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 			if (bConeDataValid)
 			{
-				// Cache trig when DA angles change (avoids per-tick cos/tan).
+				// Cache trig when the DA angle changes (avoids per-tick cos).
 				if (Mem->CachedConeHalfAngle != DA->CoverPeekConeHalfAngleDeg)
 				{
 					Mem->CachedConeHalfAngle = DA->CoverPeekConeHalfAngleDeg;
 					Mem->CachedConeHalfCos = FMath::Cos(FMath::DegreesToRadians(DA->CoverPeekConeHalfAngleDeg));
 				}
-				if (Mem->CachedConeBiasAngle != DA->CoverPeekConeBiasDeg)
-				{
-					Mem->CachedConeBiasAngle = DA->CoverPeekConeBiasDeg;
-					Mem->CachedConeBiasTan = FMath::Tan(FMath::DegreesToRadians(DA->CoverPeekConeBiasDeg));
-				}
 
 				const FVector FireFwd2D = UCoverGeometryStatics::GetFireArcForward(ConeData).GetSafeNormal2D();
-				const FVector Lateral2D = ConeData.Rotation.RotateVector(FVector::RightVector).GetSafeNormal2D();
 
-				const ECoverLean LeanNow = PoseConeComp->LeanDirection;
-				const float BiasScale = (LeanNow == ECoverLean::Left || LeanNow == ECoverLean::Right)
-					? Mem->CachedConeBiasTan : 0.f;
-				const float BiasSign = (LeanNow == ECoverLean::Right) ? 1.f : -1.f;
-				const FVector ConeCentre2D = (FireFwd2D + Lateral2D * BiasScale * BiasSign).GetSafeNormal2D();
+				// Origin: the pawn's 2D location (not the cover point). Single unbiased cone —
+				// the fire reach must never exceed what the torso AO can point at (the old
+				// lean-biased extension fired at bearings the gun model couldn't reach).
+				const FVector ConeOrigin2D = FVector(Pawn->GetActorLocation().X, Pawn->GetActorLocation().Y, 0.f);
+				const FVector TargetLoc2D = FVector(Target->GetActorLocation().X, Target->GetActorLocation().Y, 0.f);
+				const FVector ToTarget2D = (TargetLoc2D - ConeOrigin2D).GetSafeNormal();
 
-				const FVector ToTarget2D = (Target->GetActorLocation() - ConeData.Location).GetSafeNormal2D();
-				const float Dot = FVector::DotProduct(ConeCentre2D, ToTarget2D);
-				bTargetInPeekCone = (Dot >= Mem->CachedConeHalfCos);
+				const float DotFwd = FVector::DotProduct(FireFwd2D, ToTarget2D);
+				bTargetInPeekCone = (DotFwd >= Mem->CachedConeHalfCos);
 
 				if (!bTargetInPeekCone && GetFlankBreakLogLevel() > 0)
 				{
-					const float AngleDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(Dot, -1.f, 1.f)));
+					const float AngleDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(DotFwd, -1.f, 1.f)));
 					if (FMath::Fmod(TickNow, 1.f) < (TickWorld ? TickWorld->GetDeltaSeconds() : 0.016f))
 						UE_LOG(LogEnemyAI, Log,
 							TEXT("[FLANKDBG] %s coneBlocked angle=%.1f halfCone=%.1f lean=%d"),
 							*Pawn->GetName(), AngleDeg, DA->CoverPeekConeHalfAngleDeg,
-							static_cast<int32>(LeanNow));
+							static_cast<int32>(PoseConeComp->LeanDirection));
 				}
 			}
 		}
@@ -987,7 +1424,16 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 	// Feature 1b: bEffectiveLOS applies the cone gate ONLY at fire-decision sites.
 	// Do NOT use bEffectiveLOS for the pursue guard or any out-of-cover logic.
-	const bool bEffectiveLOS = bHasLOS && bTargetInPeekCone;
+	// Heavy gate: when MaxAimYawDeg > 0, reject bearings beyond the aim resolver's yaw cap.
+	bool bWithinAimYaw = true;
+	if (IsValid(DA) && DA->MaxAimYawDeg > 0.f && IsValid(Target))
+	{
+		const FVector ToTarget2D = (Target->GetActorLocation() - Pawn->GetActorLocation()).GetSafeNormal2D();
+		const float YawDelta = FMath::RadiansToDegrees(
+			FMath::Acos(FMath::Clamp(FVector::DotProduct(Pawn->GetActorForwardVector().GetSafeNormal2D(), ToTarget2D), -1.f, 1.f)));
+		bWithinAimYaw = (YawDelta <= DA->MaxAimYawDeg);
+	}
+	const bool bEffectiveLOS = bHasLOS && bTargetInPeekCone && bWithinAimYaw;
 
 	// Feature 1c: pending-relocate timeout — a flanked enemy continuously firing can never reach
 	// bNotFiring, so bRelocatePending defers forever. After CoverRelocatePendingTimeout, force it.
@@ -1213,8 +1659,11 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 
 			const bool bArrivalCrouched = UCoverGeometryStatics::GetCoverHeight(ArrivalData) == ECoverHeight::Crouch;
-			if (bArrivalCrouched)
-				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+			if (ACharacter* Char = Cast<ACharacter>(Pawn))
+			{
+				if (bArrivalCrouched) Char->Crouch();
+				else Char->UnCrouch();
+			}
 
 			AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
 			if (IsValid(Weapon)) Weapon->StopFiring();
@@ -1255,7 +1704,22 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			Mem->bLadderForceOppositeSide = false;
 			Mem->bLadderForceOverTop = false;
 			Mem->LadderOppositeSide = ECoverLean::None;
+			// Ladder swap-move arrival: continue at stage 2 instead of resetting.
+			if (Mem->bLadderSwapMovePending)
+			{
+				Mem->LadderStage = 2;
+				Mem->ExposeLosTimeoutCount = 0;
+				Mem->bLadderSwapMovePending = false;
+			}
+			else
+			{
+				Mem->LadderStage = 0;
+				Mem->bLadderSwapMovePending = false;
+			}
+			Mem->bShufflePending = false;
+			Mem->ShuffleHoldTimer = 0.f;
 			Mem->SeekStallBestDist = TNumericLimits<float>::Max(); Mem->SeekStallAccum = 0.f;
+			Mem->CoverMoveArrivalTime = TickNow;
 
 			if (GetCoverAnimLogLevel() > 0)
 				UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s ARRIVE dist=%.0f coverLoc=(%.0f,%.0f,%.0f)"),
@@ -1283,6 +1747,8 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			// Vacate the unreachable cover and hold position standing, re-seek next loop.
 			RestoreCoverMoveSpeed(Enemy, Mem);
 			Mem->bCoverMoveFacingActive = false;
+			Mem->LadderStage = 0;
+			Mem->bLadderSwapMovePending = false;
 			UCoverReservationSubsystem* ResSub = Mem->CachedResSub.Get();
 			if (IsValid(ResSub) && Mem->ReseekCover.IsValid())
 			{
@@ -1309,6 +1775,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			if (IsValid(Weapon)) Weapon->StopFiring();
 
 			Enemy->SetAimTarget(Target);
+			Controller->ClearFocus(EAIFocusPriority::Move);
 			Controller->SetFocus(Target);
 			Mem->Phase = EFireTaskPhase::Pause;
 			Mem->PauseDuration = RollPauseDuration(DA, bHunkered);
@@ -1441,8 +1908,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				}
 
 				// FIX 2 — Detection: runs every eval interval regardless of phase / firing state
-				// so flank compromise is detected even mid-burst.
-				if (bDwellMet && bEvalDue && bCooledDown)
+				// so flank compromise is detected even mid-burst. Cooldown gates the SLOW
+				// relocate decision, not the detection itself — the fast path bypasses cooldown.
+				if (bDwellMet && bEvalDue)
 				{
 					Mem->CompromiseEvalTimer = 0.f;
 
@@ -1459,7 +1927,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						&bOutsideArc, &bBodyExposed, &AngleDeg);
 
 					if (bCompromised)
-						++Mem->CompromiseConsecutiveCount;
+						Mem->CompromiseConsecutiveCount = FMath::Min(Mem->CompromiseConsecutiveCount + 1, CompromiseDebounceRequired);
 					else
 						Mem->CompromiseConsecutiveCount = FMath::Max(0, Mem->CompromiseConsecutiveCount - 1);
 
@@ -1467,7 +1935,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					{
 						const float CooldownRemaining = DA->CoverRelocateCooldown - (Now - Mem->LastRelocateCompletedTime);
 						UE_LOG(LogEnemyAI, Log,
-							TEXT("[FLANKDBG] %s cover=(%.0f,%.0f,%.0f)(bCrouch=%d) angle=%.1f bOutsideArc=%d bBodyProtected=%d consec=%d cooldownRem=%.2f phase=%d arrived=%d"),
+							TEXT("[FLANKDBG] %s cover=(%.0f,%.0f,%.0f)(bCrouch=%d) angle=%.1f bOutsideArc=%d bBodyProtected=%d consec=%d cooldownRem=%.2f phase=%d arrived=%d eLOS=%d"),
 							*Pawn->GetName(),
 							CurCoverData.Location.X, CurCoverData.Location.Y, CurCoverData.Location.Z,
 							(UCoverGeometryStatics::GetCoverHeight(CurCoverData) == ECoverHeight::Crouch) ? 1 : 0,
@@ -1477,10 +1945,45 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 							Mem->CompromiseConsecutiveCount,
 							CooldownRemaining,
 							static_cast<int32>(Mem->Phase),
-							Mem->bArrivedAtSlot ? 1 : 0);
+							Mem->bArrivedAtSlot ? 1 : 0,
+							bEffectiveLOS ? 1 : 0);
 					}
 
-					if (Mem->CompromiseConsecutiveCount >= CompromiseDebounceRequired)
+					// Fast path: instant break when compromised + enemy sees the threat.
+					// Bypasses safe-phase/not-firing/cooldown/min-peek-cycles gates.
+					// Anti-flicker: requires 2 consecutive positive evals (~0.8s at default cadence)
+					// so a single-frame flicker (e.g. player jump crossing the arc) can't trigger a vacate.
+					// Skipped when ForceCover debug pin is on, or when DA opts out.
+					if (bCompromised && DA->bCoverInstantBreakWithLOS && GetForceCoverLevel() == 0
+						&& Mem->CompromiseConsecutiveCount >= 2 && bEffectiveLOS)
+					{
+						if (GetFlankBreakLogLevel() > 0)
+							UE_LOG(LogEnemyAI, Log, TEXT("[FLANKDBG] %s INSTANT BREAK (compromised + LOS)"), *Pawn->GetName());
+
+						Mem->CompromiseConsecutiveCount = 0;
+						Mem->bRelocatePending = false;
+
+						// Stop firing if active so the pawn is clean for relocate.
+						AWeaponBase* InstW = Enemy->GetCurrentWeapon();
+						if (IsValid(InstW) && InstW->IsFiring()) InstW->StopFiring();
+
+						// Reset cover pose + uncrouch so ExecuteRelocate's transit is clean.
+						UCoverPoseComponent* InstPose = Enemy->GetCoverPoseComponent();
+						if (IsValid(InstPose))
+						{
+							InstPose->SetCoverMoving(false, ECoverLean::None);
+							InstPose->ResetCoverPose();
+						}
+						if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+
+						ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
+							CurCover.Handle, CurCoverData, DA, bHasLOS);
+						return;
+					}
+
+					// Slow path: debounced relocate (no LOS, or LOS fast path disabled).
+					// Cooldown gate only applies here — fast path bypasses it.
+					if (bCooledDown && Mem->CompromiseConsecutiveCount >= CompromiseDebounceRequired)
 					{
 						Mem->CompromiseConsecutiveCount = 0;
 						if (bSafePhase && bNotFiring && Mem->PeekCyclesAtCover >= DA->MinPeekCyclesBeforeRelocate)
@@ -1705,8 +2208,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if (HopDest.IsValid())
 					{
 						const UCapsuleComponent* HopCap = Enemy->GetCapsuleComponent();
-						const float HopStandoff = (HopCap ? HopCap->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
-						const FVector HopArrival = UCoverGeometryStatics::GetHunkerPosition(HopDest.Data, HopStandoff);
+						const float HopCapRadius = HopCap ? HopCap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+						const float HopStandoff = HopCapRadius + DA->CoverStandoffPadding;
+						const FVector HopArrival = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+							TickWorld, HopDest.Data, HopStandoff, HopCapRadius, DA->CoverCornerGap, Pawn);
 
 						// Issue the move FIRST and only commit the cover swap when the request is
 						// accepted — committing first strands the pawn in the open when the corner
@@ -1739,6 +2244,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 							Mem->bLadderForceOppositeSide = false;
 							Mem->bLadderForceOverTop = false;
 							Mem->LadderOppositeSide = ECoverLean::None;
+							Mem->LadderStage = 0;
+							Mem->bLadderSwapMovePending = false;
+							Mem->bShufflePending = false;
+							Mem->ShuffleHoldTimer = 0.f;
 							Mem->SeekStallBestDist = TNumericLimits<float>::Max();
 							Mem->SeekStallAccum = 0.f;
 
@@ -1818,8 +2327,16 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			const bool bSuppCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
 			FCover SuppCover;
 			if (bSuppCover) SuppCover = ReadCoverFromBB(BB);
-			if (SuppCover.IsValid() && UCoverGeometryStatics::GetCoverHeight(SuppCover.Data) == ECoverHeight::Crouch)
-				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+			const bool bSuppCrouchHeight = SuppCover.IsValid()
+				&& UCoverGeometryStatics::GetCoverHeight(SuppCover.Data) == ECoverHeight::Crouch;
+			if (SuppCover.IsValid())
+			{
+				if (ACharacter* Char = Cast<ACharacter>(Pawn))
+				{
+					if (bSuppCrouchHeight) Char->Crouch();
+					else Char->UnCrouch();
+				}
+			}
 
 			// Pose component: leaving Expose on suppression
 			UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent();
@@ -1829,11 +2346,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				PoseComp->SetLean(ECoverLean::None);
 				if (SuppCover.IsValid())
 				{
-					if (UCoverGeometryStatics::GetCoverHeight(SuppCover.Data) == ECoverHeight::Crouch)
-					{
-						PoseComp->SetInCover(true, ECoverHeight::Crouch);
-						ApplyCoverFacing(Controller, Pawn, SuppCover.Data);
-					}
+					const ECoverHeight SuppHeight = bSuppCrouchHeight ? ECoverHeight::Crouch : ECoverHeight::Stand;
+					PoseComp->SetInCover(true, SuppHeight);
+					ApplyCoverFacing(Controller, Pawn, SuppCover.Data);
 				}
 				else
 				{
@@ -1857,98 +2372,255 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					Mem->ExposeLosWaitTimer = 0.f;
 					++Mem->ExposeLosTimeoutCount;
 
-					// Feature 3: failed-peek escalation ladder.
-					// (Skipped under enemy.ForceCover — debug pin holds position.)
-					if (Mem->ExposeLosTimeoutCount >= DA->MaxExposeLosTimeouts && DA->bCoverFlankBreakEnabled
-						&& GetForceCoverLevel() == 0)
+					// Feature 3: failed-peek ladder — deterministic per-cover stage machine.
+					// Threshold for the CURRENT stage; advance when the in-stage counter reaches it.
 					{
-						Mem->ExposeLosTimeoutCount = 0;
-
-						const bool bHasCoverLadder = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
-						FCover LadderCover;
-						FCoverData LadderCoverData;
-						if (bHasCoverLadder)
+						int32 StageThreshold = DA->MaxExposeLosTimeouts;
+						switch (Mem->LadderStage)
 						{
-							LadderCover = ReadCoverFromBB(BB);
-							if (LadderCover.IsValid()) LadderCoverData = LadderCover.Data;
+						case 1: StageThreshold = DA->LadderOverTopTimeouts; break;
+						case 2: StageThreshold = DA->LadderSecondSideTimeouts; break;
+						case 3: StageThreshold = DA->LadderOverTopTimeouts; break;
+						default: break; // stage 0 uses MaxExposeLosTimeouts
 						}
 
-						bool bLadderHandled = false;
-
-						// Step 1: same-wall reposition (uses cover-move montage).
-						if (LadderCover.IsValid() && IsValid(Target))
+						if (Mem->ExposeLosTimeoutCount >= StageThreshold && DA->bCoverFlankBreakEnabled)
 						{
-							FCover LadderShuffleDest = FindShuffleCover(TickWorld, Pawn, LadderCover,
-								Target->GetActorLocation(), DA, Controller, Target);
-							if (LadderShuffleDest.IsValid())
+							Mem->ExposeLosTimeoutCount = 0;
+
+							const bool bHasCoverLadder = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+							FCover LadderCover;
+							FCoverData LadderCoverData;
+							if (bHasCoverLadder)
 							{
-								if (GetCoverAnimLogLevel() > 0)
-									UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER step=1 same-wall shuffle"), *GetNameSafe(Pawn));
-								if (CommitSameWallShuffle(OwnerComp, Mem, Controller, Pawn, Enemy,
-									LadderCover, LadderShuffleDest, Target, DA))
+								LadderCover = ReadCoverFromBB(BB);
+								if (LadderCover.IsValid()) LadderCoverData = LadderCover.Data;
+							}
+
+							const bool bLadderCrouched = LadderCover.IsValid()
+								? UCoverGeometryStatics::GetCoverHeight(LadderCoverData) == ECoverHeight::Crouch
+								: false;
+							const bool bHasOverTop = bLadderCrouched && LadderCoverData.bFrontCoverCrouched;
+
+							// --- Lambda: side-swap action (enters stage 2) ---
+							// Try in-place opposite side first, then wall-walk, then relocate.
+							auto DoSideSwap = [&]() -> bool
+							{
+								if (!LadderCover.IsValid() || !IsValid(Target)) return false;
+
+								// Determine the currently baked side to swap FROM.
+								const bool bSwCrouched = bLadderCrouched;
+								const bool bSWLeft  = bSwCrouched ? LadderCoverData.bLeftCoverCrouched  : LadderCoverData.bLeftCoverStanding;
+								const bool bSWRight = bSwCrouched ? LadderCoverData.bRightCoverCrouched : LadderCoverData.bRightCoverStanding;
+								const bool bExactlyOne = (bSWLeft != bSWRight);
+
+								// 1) In-place opposite side via TryOppositeEndpointSide.
+								if (bExactlyOne)
 								{
-									bLadderHandled = true;
+									const ECoverLean BakedSide = bSWLeft ? ECoverLean::Left : ECoverLean::Right;
+									const ECoverLean OppSide = TryOppositeEndpointSide(TickWorld, LadderCoverData,
+										bSwCrouched, Target->GetActorLocation(), Target, Pawn, BakedSide);
+									if (OppSide != ECoverLean::None)
+									{
+										if (GetCoverAnimLogLevel() > 0)
+											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=%d action=swap-inplace side=%d"),
+												*GetNameSafe(Pawn), Mem->LadderStage, static_cast<int32>(OppSide));
+										Mem->bLadderForceOppositeSide = true;
+										Mem->LadderOppositeSide = OppSide;
+										Mem->LadderStage = 2;
+										return true; // fall through to Recover
+									}
+								}
+
+								// 2) Wall-walk to opposite-side end point via FindSidePeekCover + move.
+								// Determine the side we want to walk TOWARD (opposite of the current peek).
+								ECoverLean WalkSide = ECoverLean::None;
+								if (bExactlyOne)
+									WalkSide = bSWLeft ? ECoverLean::Right : ECoverLean::Left;
+								else if (bSWLeft && bSWRight)
+								{
+									// Both sides baked — pick the one the pawn is NOT currently on.
+									const ECoverLean CurSide = ChooseGapPeekSide(TickWorld, LadderCoverData,
+										bSwCrouched, Target->GetActorLocation(), Target, Pawn);
+									if (CurSide == ECoverLean::Left)  WalkSide = ECoverLean::Right;
+									else if (CurSide == ECoverLean::Right) WalkSide = ECoverLean::Left;
+								}
+
+								if (WalkSide != ECoverLean::None)
+								{
+									if (TryLadderSwapMove(OwnerComp, Mem, Controller, Pawn, Enemy,
+										LadderCover, WalkSide, Target, DA))
+									{
+										if (GetCoverAnimLogLevel() > 0)
+											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=%d action=swap-move side=%d"),
+												*GetNameSafe(Pawn), Mem->LadderStage, static_cast<int32>(WalkSide));
+										return true; // move in flight — break below
+									}
+								}
+
+								// 3) Neither possible — relocate (or ForceCover-skip + reset).
+								if (GetForceCoverLevel() != 0)
+								{
+									if (GetCoverAnimLogLevel() > 0)
+										UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=%d action=relocate skipped (ForceCover)"),
+											*GetNameSafe(Pawn), Mem->LadderStage);
+									Mem->LadderStage = 0;
+									Mem->ExposeLosTimeoutCount = 0;
+									return true; // fall through to Recover
+								}
+								if (GetCoverAnimLogLevel() > 0)
+									UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=%d action=relocate"),
+										*GetNameSafe(Pawn), Mem->LadderStage);
+								ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
+									LadderCover.Handle, LadderCoverData, DA, bHasLOS);
+								return false; // break handled by caller (relocate already changes phase)
+							};
+
+							// --- Stage machine: evaluate the current stage's advance action ---
+							bool bLadderHandled = false;
+							bool bLadderBreak = false; // true = must break out of the Expose switch
+
+							if (bLadderCrouched)
+							{
+								// CROUCH cover: stages 0→1(overtop)→2(second side)→3(overtop)→relocate.
+								switch (Mem->LadderStage)
+								{
+								case 0:
+									if (bHasOverTop)
+									{
+										if (GetCoverAnimLogLevel() > 0)
+											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=0 action=overtop"), *GetNameSafe(Pawn));
+										Mem->bLadderForceOverTop = true;
+										Mem->LadderStage = 1;
+										bLadderHandled = true;
+									}
+									else
+									{
+										// No over-top: go straight to side-swap.
+										bLadderHandled = DoSideSwap();
+										// Break if phase changed (move or relocate); stay if nothing was possible.
+										if (Mem->Phase != EFireTaskPhase::Expose) bLadderBreak = true;
+									}
+									break;
+								case 1:
+									// Over-top A done → side-swap action.
+									bLadderHandled = DoSideSwap();
+									// Break if phase changed (move or relocate); stay if nothing was possible.
+									if (Mem->Phase != EFireTaskPhase::Expose)
+										bLadderBreak = true;
+									break;
+								case 2:
+									if (bHasOverTop)
+									{
+										if (GetCoverAnimLogLevel() > 0)
+											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=overtop"), *GetNameSafe(Pawn));
+										Mem->bLadderForceOverTop = true;
+										Mem->LadderStage = 3;
+										bLadderHandled = true;
+									}
+									else
+									{
+										// No over-top: relocate directly.
+										if (GetForceCoverLevel() != 0)
+										{
+											if (GetCoverAnimLogLevel() > 0)
+												UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=relocate skipped (ForceCover)"), *GetNameSafe(Pawn));
+											Mem->LadderStage = 0;
+											Mem->ExposeLosTimeoutCount = 0;
+											bLadderHandled = true;
+										}
+										else
+										{
+											if (GetCoverAnimLogLevel() > 0)
+												UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=relocate"), *GetNameSafe(Pawn));
+											ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
+												LadderCover.Handle, LadderCoverData, DA, bHasLOS);
+											bLadderBreak = true;
+										}
+									}
+									break;
+								case 3:
+									// Over-top B done → relocate.
+									if (GetForceCoverLevel() != 0)
+									{
+										if (GetCoverAnimLogLevel() > 0)
+											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=3 action=relocate skipped (ForceCover)"), *GetNameSafe(Pawn));
+										Mem->LadderStage = 0;
+										Mem->ExposeLosTimeoutCount = 0;
+										bLadderHandled = true;
+									}
+									else
+									{
+										if (GetCoverAnimLogLevel() > 0)
+											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=3 action=relocate"), *GetNameSafe(Pawn));
+										ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
+											LadderCover.Handle, LadderCoverData, DA, bHasLOS);
+										bLadderBreak = true;
+									}
+									break;
+								default:
 									break;
 								}
 							}
-						}
-
-						// Step 2: end-point — force opposite side in place, optionally stand-up peek.
-						if (!bLadderHandled && LadderCover.IsValid())
-						{
-							const bool bLadderCrouched = UCoverGeometryStatics::GetCoverHeight(LadderCoverData) == ECoverHeight::Crouch;
-							const bool bLCLeft  = bLadderCrouched ? LadderCoverData.bLeftCoverCrouched  : LadderCoverData.bLeftCoverStanding;
-							const bool bLCRight = bLadderCrouched ? LadderCoverData.bRightCoverCrouched : LadderCoverData.bRightCoverStanding;
-							const bool bExactlyOne = (bLCLeft != bLCRight);
-							if (bExactlyOne && IsValid(Target))
+							else
 							{
-								const ECoverLean BakedSide = bLCLeft ? ECoverLean::Left : ECoverLean::Right;
-								const ECoverLean OppSide = TryOppositeEndpointSide(TickWorld, LadderCoverData,
-									bLadderCrouched, Target->GetActorLocation(), Target, Pawn, BakedSide);
-								if (OppSide != ECoverLean::None)
+								// STAND cover: no over-top stages. Stage 0→swap→stage 2→relocate.
+								switch (Mem->LadderStage)
 								{
-									if (GetCoverAnimLogLevel() > 0)
-										UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER step=2 force opposite side=%d"), *GetNameSafe(Pawn), static_cast<int32>(OppSide));
-									Mem->bLadderForceOppositeSide = true;
-									Mem->LadderOppositeSide = OppSide;
-									bLadderHandled = true;
+								case 0:
+									bLadderHandled = DoSideSwap();
+									// Break if phase changed (move or relocate); stay if nothing was possible.
+									if (Mem->Phase != EFireTaskPhase::Expose)
+										bLadderBreak = true;
+									break;
+								case 2:
+									if (GetForceCoverLevel() != 0)
+									{
+										if (GetCoverAnimLogLevel() > 0)
+											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=relocate skipped (ForceCover)"), *GetNameSafe(Pawn));
+										Mem->LadderStage = 0;
+										Mem->ExposeLosTimeoutCount = 0;
+										bLadderHandled = true;
+									}
+									else
+									{
+										if (GetCoverAnimLogLevel() > 0)
+											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=relocate"), *GetNameSafe(Pawn));
+										ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
+											LadderCover.Handle, LadderCoverData, DA, bHasLOS);
+										bLadderBreak = true;
+									}
+									break;
+								default:
+									break;
 								}
 							}
-							// Sub-option 2b: crouch end-point roll to stand-up over-top.
-							if (!bLadderHandled && bLadderCrouched && LadderCoverData.bFrontCoverCrouched)
-							{
-								if (FMath::FRand() < DA->CoverEndpointStandPeekChance)
-								{
-									if (GetCoverAnimLogLevel() > 0)
-										UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER step=2b stand-up over-top"), *GetNameSafe(Pawn));
-									Mem->bLadderForceOverTop = true;
-									bLadderHandled = true;
-								}
-							}
-						}
 
-						// Step 3: full relocate.
-						if (!bLadderHandled)
-						{
-							if (GetCoverAnimLogLevel() > 0)
-								UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER step=3 full relocate"), *GetNameSafe(Pawn));
-							ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
-								LadderCover.Handle, LadderCoverData, DA, bHasLOS);
-							break;
+							if (bLadderBreak)
+								break;
+							// Ladder set flags — fall through to the Recover tuck below
+							// so the next Expose cycle consumes the forced side/overtop immediately.
 						}
-						// Steps 2/2b set flags — fall through to the Recover tuck below
-						// so the next Expose cycle consumes the forced side immediately.
 					}
 
 					// Normal timeout (or ladder step 2/2b) — recover and re-loop.
-					// Tuck back in: re-crouch if cover is crouch height.
+					// Tuck back in: re-crouch if cover is crouch height, else ensure uncrouched.
 					const bool bTimeoutCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
 					FCover TimeoutCover;
+					bool bTimeoutCrouchHeight = false;
 					if (bTimeoutCover)
 					{
 						TimeoutCover = ReadCoverFromBB(BB);
-						if (TimeoutCover.IsValid() && UCoverGeometryStatics::GetCoverHeight(TimeoutCover.Data) == ECoverHeight::Crouch)
-							if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+						bTimeoutCrouchHeight = TimeoutCover.IsValid()
+							&& UCoverGeometryStatics::GetCoverHeight(TimeoutCover.Data) == ECoverHeight::Crouch;
+						if (TimeoutCover.IsValid())
+						{
+							if (ACharacter* Char = Cast<ACharacter>(Pawn))
+							{
+								if (bTimeoutCrouchHeight) Char->Crouch();
+								else Char->UnCrouch();
+							}
+						}
 					}
 
 					// Pose component: leaving Expose on timeout
@@ -1959,11 +2631,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						PoseComp->SetLean(ECoverLean::None);
 						if (TimeoutCover.IsValid())
 						{
-							if (UCoverGeometryStatics::GetCoverHeight(TimeoutCover.Data) == ECoverHeight::Crouch)
-							{
-								PoseComp->SetInCover(true, ECoverHeight::Crouch);
-								ApplyCoverFacing(Controller, Pawn, TimeoutCover.Data);
-							}
+							const ECoverHeight TimeoutHeight = bTimeoutCrouchHeight ? ECoverHeight::Crouch : ECoverHeight::Stand;
+							PoseComp->SetInCover(true, TimeoutHeight);
+							ApplyCoverFacing(Controller, Pawn, TimeoutCover.Data);
 						}
 						else
 						{
@@ -1978,7 +2648,8 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 
 			Mem->ExposeLosWaitTimer = 0.f;
-			Mem->ExposeLosTimeoutCount = 0; // FIX 1: reset counter — LOS acquired, fire opening.
+			Mem->ExposeLosTimeoutCount = 0; // Contact regained — ladder starts over.
+			Mem->LadderStage = 0;
 			AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
 			if (IsValid(Weapon)) Weapon->StartFiring();
 
@@ -2021,11 +2692,20 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 			const bool bSuppCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
 			FCover SuppCover;
+			bool bSuppCrouchHeight = false;
 			if (bSuppCover)
 			{
 				SuppCover = ReadCoverFromBB(BB);
-				if (SuppCover.IsValid() && UCoverGeometryStatics::GetCoverHeight(SuppCover.Data) == ECoverHeight::Crouch)
-					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				bSuppCrouchHeight = SuppCover.IsValid()
+					&& UCoverGeometryStatics::GetCoverHeight(SuppCover.Data) == ECoverHeight::Crouch;
+				if (SuppCover.IsValid())
+				{
+					if (ACharacter* Char = Cast<ACharacter>(Pawn))
+					{
+						if (bSuppCrouchHeight) Char->Crouch();
+						else Char->UnCrouch();
+					}
+				}
 			}
 
 			// Pose component: leaving Expose on suppression during Fire
@@ -2036,11 +2716,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				PoseComp->SetLean(ECoverLean::None);
 				if (SuppCover.IsValid())
 				{
-					if (UCoverGeometryStatics::GetCoverHeight(SuppCover.Data) == ECoverHeight::Crouch)
-					{
-						PoseComp->SetInCover(true, ECoverHeight::Crouch);
-						ApplyCoverFacing(Controller, Pawn, SuppCover.Data);
-					}
+					const ECoverHeight SuppHeight = bSuppCrouchHeight ? ECoverHeight::Crouch : ECoverHeight::Stand;
+					PoseComp->SetInCover(true, SuppHeight);
+					ApplyCoverFacing(Controller, Pawn, SuppCover.Data);
 				}
 				else
 				{
@@ -2059,14 +2737,24 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				Weapon->StopFiring();
 
 			// Recover: re-crouch if cover is crouch height (the peek montage's Return section
-			// brings the body home — no step-back move needed).
+			// brings the body home — no step-back move needed); else ensure uncrouched and
+			// re-face the wall so stand covers don't drift onto the walk-in yaw.
 			const bool bHasCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
 			FCover RecCover;
+			bool bRecCrouchHeight = false;
 			if (bHasCover)
 			{
 				RecCover = ReadCoverFromBB(BB);
-				if (RecCover.IsValid() && UCoverGeometryStatics::GetCoverHeight(RecCover.Data) == ECoverHeight::Crouch)
-					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				bRecCrouchHeight = RecCover.IsValid()
+					&& UCoverGeometryStatics::GetCoverHeight(RecCover.Data) == ECoverHeight::Crouch;
+				if (RecCover.IsValid())
+				{
+					if (ACharacter* Char = Cast<ACharacter>(Pawn))
+					{
+						if (bRecCrouchHeight) Char->Crouch();
+						else Char->UnCrouch();
+					}
+				}
 
 				// One full peek-fire cycle completed at this cover — relocate/shuffle unlock.
 				++Mem->PeekCyclesAtCover;
@@ -2083,11 +2771,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				PoseComp->SetLean(ECoverLean::None);
 				if (RecCover.IsValid())
 				{
-					if (UCoverGeometryStatics::GetCoverHeight(RecCover.Data) == ECoverHeight::Crouch)
-					{
-						PoseComp->SetInCover(true, ECoverHeight::Crouch);
-						ApplyCoverFacing(Controller, Pawn, RecCover.Data);
-					}
+					const ECoverHeight RecHeight = bRecCrouchHeight ? ECoverHeight::Crouch : ECoverHeight::Stand;
+					PoseComp->SetInCover(true, RecHeight);
+					ApplyCoverFacing(Controller, Pawn, RecCover.Data);
 				}
 				else
 				{
@@ -2115,9 +2801,32 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			// --- Cover shuffle roll (Feature B) ---
 			// Fix 3: skip shuffle when a flank relocate is pending — shuffle moves same-wall
 			// (still flanked) and resets the debounce, delaying the legitimate relocate.
-			if (DA->CoverShuffleWeight > 0.f && !bSuppressed && !Mem->bRelocatePending
+			const int32 ForceRepo = GetForceCoverRepositionLevel();
+
+			// Mode 2: forced full relocate — stop firing, read cover, relocate.
+			if (ForceRepo == 2 && !Mem->bRelocatePending)
+			{
+				const bool bHasCoverForce = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+				if (bHasCoverForce)
+				{
+					FCover ForceCover = ReadCoverFromBB(BB);
+					if (ForceCover.IsValid() && IsValid(Target))
+					{
+						AWeaponBase* W = Enemy->GetCurrentWeapon();
+						if (IsValid(W) && W->IsFiring()) W->StopFiring();
+						if (GetCoverAnimLogLevel() > 0)
+							UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s FORCED reposition (mode=%d)"), *GetNameSafe(Pawn), ForceRepo);
+						ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
+							ForceCover.Handle, ForceCover.Data, DA, bHasLOS);
+						break;
+					}
+				}
+			}
+
+			if ((ForceRepo == 1 || (DA->CoverShuffleWeight > 0.f && !bSuppressed
 				&& GetForceCoverLevel() == 0
-				&& Mem->PeekCyclesAtCover >= DA->MinPeekCyclesBeforeRelocate)
+				&& Mem->PeekCyclesAtCover >= DA->MinPeekCyclesBeforeRelocate))
+				&& !Mem->bRelocatePending)
 			{
 				const bool bHasCoverPause = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
 				// Read cover once for both impulse check and shuffle search.
@@ -2139,25 +2848,32 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						bBoostedRoll = true;
 					}
 				}
-				if (bHasCoverPause && FMath::FRand() < EffectiveShuffleWeight)
+				if (bHasCoverPause && (ForceRepo == 1 || FMath::FRand() < EffectiveShuffleWeight))
 				{
 					if (PauseCover.IsValid() && IsValid(Target))
 					{
 						const FVector ThreatLoc = Target->GetActorLocation();
+						const bool bRelaxedSearch = (ForceRepo == 1);
 						FCover ShuffleDest = FindShuffleCover(TickWorld, Pawn, PauseCover,
-							ThreatLoc, DA, Controller, Target);
+							ThreatLoc, DA, Controller, Target, bRelaxedSearch);
 						// Discard boosted-roll shuffles to candidates that lack a
 						// threat-facing flag — the boost exists to reach flagged points,
 						// not to churn on flag-less walls.
 						const bool bShuffleValid = ShuffleDest.IsValid()
-							&& !(bBoostedRoll && !UCoverGeometryStatics::HasThreatFacingSideFlag(
+							&& !(bBoostedRoll && ForceRepo != 1 && !UCoverGeometryStatics::HasThreatFacingSideFlag(
 								ShuffleDest.Data, ThreatLoc,
 								UCoverGeometryStatics::GetCoverHeight(ShuffleDest.Data) == ECoverHeight::Crouch));
 						if (bShuffleValid)
 						{
+							if (GetCoverAnimLogLevel() > 0 && ForceRepo == 1)
+								UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s FORCED reposition (mode=%d)"), *GetNameSafe(Pawn), ForceRepo);
 							if (CommitSameWallShuffle(OwnerComp, Mem, Controller, Pawn, Enemy,
 								PauseCover, ShuffleDest, Target, DA))
 								break;
+						}
+						else if (ForceRepo == 1 && GetCoverAnimLogLevel() > 0)
+						{
+							UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s FORCED shuffle: no valid dest"), *GetNameSafe(Pawn));
 						}
 					}
 				}
@@ -2177,8 +2893,12 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if (DriftCover.IsValid())
 					{
 						const UCapsuleComponent* DriftCap = Enemy->GetCapsuleComponent();
-						const float DriftStandoff = (DriftCap ? DriftCap->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
-						const FVector DriftHunker = UCoverGeometryStatics::GetHunkerPosition(DriftCover.Data, DriftStandoff);
+						const float DriftCapRadius = DriftCap ? DriftCap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+						const float DriftStandoff = DriftCapRadius + DA->CoverStandoffPadding;
+						// MUST match the edge-aligned arrival position or a corner-snapped enemy reads
+						// as permanently drifted and step-corrects every pause cycle.
+						const FVector DriftHunker = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+							TickWorld, DriftCover.Data, DriftStandoff, DriftCapRadius, DA->CoverCornerGap, Pawn);
 						if (FVector::Dist2D(Pawn->GetActorLocation(), DriftHunker) > SeekCoverArrivalIdleRadius)
 						{
 							LogCoverMove(TEXT("drift-correct"), Pawn, Enemy);
@@ -2247,6 +2967,7 @@ void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerCo
 		Weapon->StopFiring();
 
 	Enemy->SetAimTarget(nullptr);
+	Enemy->SetHasTargetLOS(false);
 
 	if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
 
@@ -2258,8 +2979,11 @@ void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerCo
 		Mem->bLadderForceOppositeSide = false;
 		Mem->bLadderForceOverTop = false;
 		Mem->LadderOppositeSide = ECoverLean::None;
+		Mem->LadderStage = 0;
+		Mem->bLadderSwapMovePending = false;
 		Mem->bRelocatePending = false;
 		Mem->RelocatePendingSetTime = 0.f;
+		ClearPendingShuffle(Enemy, Mem);
 	}
 
 	// Reset cover pose on task end; drop any wall-facing focal point so the next branch
@@ -2270,7 +2994,11 @@ void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerCo
 		PoseComp->SetCoverMoving(false, ECoverLean::None);
 		PoseComp->ResetCoverPose();
 	}
-	if (Controller) Controller->ClearFocus(EAIFocusPriority::Gameplay);
+	if (Controller)
+	{
+		Controller->ClearFocus(EAIFocusPriority::Gameplay);
+		Controller->ClearFocus(EAIFocusPriority::Move);
+	}
 
 	if (Mem)
 	{
@@ -2358,6 +3086,7 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 	const FVector ThreatLoc = Target->GetActorLocation();
 
 	const int32 ReseekForcedHeight = GetForceCoverHeightLocal();
+	const float FlankArcCos = FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg));
 
 	for (const FCover& Candidate : Candidates)
 	{
@@ -2382,7 +3111,7 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 		// CRITICAL #1: fire-arc gate — same as FindProtectiveCover
 		const FVector ToThreat2D = (ThreatLoc - Data.Location).GetSafeNormal2D();
 		const FVector FireFwd = UCoverGeometryStatics::GetFireArcForward(Data);
-		if (FVector::DotProduct(FireFwd, ToThreat2D) < FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg)))
+		if (FVector::DotProduct(FireFwd, ToThreat2D) < FlankArcCos)
 			continue;
 
 		// Must be able to peek-shoot
@@ -2425,12 +3154,20 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 	// Arrival is always the hunker position — never the exposed corner; the peek montage's
 	// root motion steps out from there.
 	const FCoverData& FoundData = BestCover.Data;
-	const FVector ArrivalPos = UCoverGeometryStatics::GetHunkerPosition(FoundData, Standoff);
+	const UCapsuleComponent* ReseekCap = Enemy->GetCapsuleComponent();
+	const float ReseekCapRadius = ReseekCap ? ReseekCap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+	const FVector ArrivalPos = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+		Pawn->GetWorld(), FoundData, Standoff, ReseekCapRadius, DA->CoverCornerGap, Pawn);
 
 	Mem->ReseekArrivalPos = ArrivalPos;
 
 	// Transit hygiene: drop any latched pose (the montage would floor-slide the move) and
-	// resume target-tracking yaw for the walk.
+	// resume target-tracking yaw for the walk. Clear any in-flight cover-move state so a
+	// stale facing lock from a previous shuffle/ladder move doesn't keep the pawn wall-aligned.
+	RestoreCoverMoveSpeed(Enemy, Mem);
+	Mem->bCoverMoveFacingActive = false;
+	ClearPendingShuffle(Enemy, Mem);
+
 	UCoverPoseComponent* ReseekPose = Enemy->GetCoverPoseComponent();
 	if (IsValid(ReseekPose))
 	{
@@ -2452,6 +3189,8 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 
 	Mem->SeekStallBestDist = TNumericLimits<float>::Max();
 	Mem->SeekStallAccum = 0.f;
+	Mem->LadderStage = 0;
+	Mem->bLadderSwapMovePending = false;
 	Mem->Phase = EFireTaskPhase::SeekingCover;
 
 	UE_LOG(LogEnemyAI, Log, TEXT("[COVER] %s re-seeking cover from open -> (%.0f,%.0f,%.0f)"),
@@ -2473,6 +3212,9 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 	Mem->bLadderForceOppositeSide = false;
 	Mem->bLadderForceOverTop = false;
 	Mem->LadderOppositeSide = ECoverLean::None;
+	Mem->LadderStage = 0;
+	Mem->bLadderSwapMovePending = false;
+	ClearPendingShuffle(Enemy, Mem);
 
 	// Defensive: clear blind-fire if active before relocating
 	ClearBlindFireState(Enemy, Mem);
@@ -2500,12 +3242,14 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 	Mem->ReseekCoverData = FCoverData();
 
 	// Reset cover pose on relocate start; resume target-tracking yaw for the transit.
+	// Clear Move-priority focal point so the old path segment doesn't fight target focus.
 	UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent();
 	if (IsValid(PoseComp))
 	{
 		PoseComp->SetCoverMoving(false, ECoverLean::None);
 		PoseComp->ResetCoverPose();
 	}
+	Controller->ClearFocus(EAIFocusPriority::Move);
 	if (IsValid(Target)) Controller->SetFocus(Target);
 
 	if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
@@ -2528,7 +3272,10 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 		// Arrival is always the hunker position — never the exposed corner; the peek montage's
 		// root motion steps out from there.
 		const FCoverData& NewData = NewCover.Data;
-		const FVector ArrivalPos = UCoverGeometryStatics::GetHunkerPosition(NewData, Standoff);
+		const UCapsuleComponent* RelocCap = Enemy->GetCapsuleComponent();
+		const float RelocCapRadius = RelocCap ? RelocCap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+		const FVector ArrivalPos = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+			Pawn->GetWorld(), NewData, Standoff, RelocCapRadius, DA->CoverCornerGap, Pawn);
 
 		Mem->ReseekArrivalPos = ArrivalPos;
 		Mem->bArrivedAtSlot = false;
@@ -2625,7 +3372,7 @@ static float ScoreShuffleCandidate(const FCover& Candidate, const FVector& Threa
 FCover UBTTask_EnemyCombatFire::FindShuffleCover(UWorld* World, const APawn* Pawn,
 	const FCover& CurrentCover, const FVector& ThreatLocation,
 	const UEnemyArchetypeData* DA, AController* Controller,
-	AActor* Target) const
+	AActor* Target, bool bRelaxed) const
 {
 	if (!World || !IsValid(Pawn) || !CurrentCover.IsValid() || !IsValid(DA))
 		return FCover();
@@ -2644,16 +3391,22 @@ FCover UBTTask_EnemyCombatFire::FindShuffleCover(UWorld* World, const APawn* Paw
 
 	// Fix 7: clamp degenerate distance band (Min > Max) to avoid zero-width search.
 	const float EffectiveDistMax = FMath::Max(DA->ShuffleDistanceMin, DA->ShuffleDistanceMax);
-	if (DA->ShuffleDistanceMin > DA->ShuffleDistanceMax)
+	if (!bRelaxed && DA->ShuffleDistanceMin > DA->ShuffleDistanceMax)
 	{
 		UE_LOG(LogEnemyAI, Warning,
 			TEXT("[COVER] %s ShuffleDistanceMin (%.0f) > ShuffleDistanceMax (%.0f) — clamping Max to Min"),
 			*Pawn->GetName(), DA->ShuffleDistanceMin, DA->ShuffleDistanceMax);
 	}
 
+	// Relaxed mode: accept any distance > ~25cm, wide max to cover full wall widths (~325cm+).
+	static constexpr float RelaxedDistFloor = 25.f;
+	static constexpr float RelaxedDistMax = 600.f;
+	const float SearchDistMin = bRelaxed ? RelaxedDistFloor : DA->ShuffleDistanceMin;
+	const float SearchDistMax = bRelaxed ? RelaxedDistMax : EffectiveDistMax;
+
 	TArray<FCover> Candidates;
 	Candidates.Reserve(32);
-	const FBoxSphereBounds SearchBounds(PawnLoc, FVector(EffectiveDistMax), EffectiveDistMax);
+	const FBoxSphereBounds SearchBounds(PawnLoc, FVector(SearchDistMax), SearchDistMax);
 	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
 
 	// Precompute current-point angle to threat for improvement scoring
@@ -2661,6 +3414,15 @@ FCover UBTTask_EnemyCombatFire::FindShuffleCover(UWorld* World, const APawn* Paw
 	const FVector CurToThreat = (ThreatLocation - CurrentCover.Data.Location).GetSafeNormal2D();
 	const FVector CurFireFwd = UCoverGeometryStatics::GetFireArcForward(CurrentCover.Data);
 	const float CurAngleDot = FVector::DotProduct(CurFireFwd, CurToThreat);
+
+	// Perpendicular-offset gate (mirrors FindSidePeekCover): IsSameWall is direction-only, so a
+	// parallel wall a few metres over shares the facing and would otherwise pass. Applied in both
+	// natural and relaxed modes — relaxed's wider 600cm distance band makes a nearby parallel wall
+	// reachable, which is exactly the bug this gate closes.
+	const FVector WallNormal2D = CurrentCover.Data.DirectionToWall.GetSafeNormal2D();
+
+	// PERF: hoist trig out of the per-candidate loop.
+	const float FlankArcCos = FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg));
 
 	FCover BestCover;
 	float BestScore = -FLT_MAX;
@@ -2678,6 +3440,11 @@ FCover UBTTask_EnemyCombatFire::FindShuffleCover(UWorld* World, const APawn* Paw
 		// Same wall gate
 		if (!UCoverGeometryStatics::IsSameWall(CurrentCover.Data, Candidate.Data)) continue;
 
+		// Reject candidates on a parallel wall offset perpendicular to the current wall plane.
+		const FVector Delta2D = FVector(Candidate.Data.Location.X - CurrentCover.Data.Location.X,
+			Candidate.Data.Location.Y - CurrentCover.Data.Location.Y, 0.f);
+		if (FMath::Abs(FVector::DotProduct(Delta2D, WallNormal2D)) > SameWallMaxPerpOffset) continue;
+
 		// Occupancy gate
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
 		if (Occupant && Occupant != Controller) continue;
@@ -2690,36 +3457,40 @@ FCover UBTTask_EnemyCombatFire::FindShuffleCover(UWorld* World, const APawn* Paw
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, DA->CoverRelocateCooldown))
 			continue;
 
-		// Distance band gate (uses clamped EffectiveDistMax)
+		// Distance band gate
 		const float DistSq = FVector::DistSquared(PawnLoc, Candidate.Data.Location);
 		const float Dist = FMath::Sqrt(DistSq);
-		if (Dist < DA->ShuffleDistanceMin || Dist > EffectiveDistMax) continue;
+		if (Dist < SearchDistMin || Dist > SearchDistMax) continue;
 
 		// Fix 5: fire-arc gate — same as FindProtectiveCover/TryReseekCover. Shuffle
 		// neighbours outside the DA's fire arc arrive compromised and immediately thrash.
 		const FVector ToThreat2D = (ThreatLocation - Candidate.Data.Location).GetSafeNormal2D();
 		const FVector FireFwd = UCoverGeometryStatics::GetFireArcForward(Candidate.Data);
-		if (FVector::DotProduct(FireFwd, ToThreat2D) < FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg)))
+		if (FVector::DotProduct(FireFwd, ToThreat2D) < FlankArcCos)
 			continue;
 
 		// Fix 2: pass Target (not nullptr) so CanPeekShoot/IsThreatCovered don't read a
 		// trace-hit on the threat's own body as "blocked" or "covered" respectively.
-		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
-			UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
-			ThreatLocation, BodyProtectChestHeight, Target, Pawn))
-			continue;
-
-		// Body-protection gate (mirrors companion Finding 4 when archetype requires it)
-		if (DA->bRelocateRequiresBodyProtection)
+		// Relaxed mode skips both CanPeekShoot and body-protection gates.
+		if (!bRelaxed)
 		{
-			if (!UCoverGeometryStatics::IsThreatCovered(World, Candidate.Data, ThreatLocation,
-				Standoff, BodyProtectChestHeight, Target, Pawn))
+			if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
+				UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
+				ThreatLocation, BodyProtectChestHeight, Target, Pawn))
 				continue;
+
+			// Body-protection gate (mirrors companion Finding 4 when archetype requires it)
+			if (DA->bRelocateRequiresBodyProtection)
+			{
+				if (!UCoverGeometryStatics::IsThreatCovered(World, Candidate.Data, ThreatLocation,
+					Standoff, BodyProtectChestHeight, Target, Pawn))
+					continue;
+			}
 		}
 
 		// Composite score (replaces nearest-wins)
 		const float Score = ScoreShuffleCandidate(Candidate, ThreatLocation, Lateral,
-			CurrentCover.Data.Location, CurAngleDot, Dist, EffectiveDistMax, DA);
+			CurrentCover.Data.Location, CurAngleDot, Dist, SearchDistMax, DA);
 		if (Score > BestScore)
 		{
 			BestScore = Score;
@@ -2762,6 +3533,14 @@ FCover UBTTask_EnemyCombatFire::FindSidePeekCover(UWorld* World, const APawn* Pa
 	FCover BestFlagged, BestAny;
 	float BestFlaggedProj = 25.f, BestAnyProj = 25.f; // require meaningfully toward the side
 
+	// 2D distance cap: IsSameWall is direction-only (dot ≥ 0.94) so parallel walls across the
+	// map pass. Cap to SearchDist so candidates are genuinely on the same physical wall.
+	const float SameWallMaxDistSq = SearchDist * SearchDist;
+	// Perpendicular-offset cap: nearby parallel walls (e.g. second crate row behind) share
+	// the same facing and pass the distance cap; reject when the candidate is too far from the
+	// current cover's wall plane.
+	const FVector WallNormal2D = CurrentCover.Data.DirectionToWall.GetSafeNormal2D();
+
 	const int32 SidePeekForcedHeight = GetForceCoverHeightLocal();
 
 	for (const FCover& Candidate : Candidates)
@@ -2773,6 +3552,13 @@ FCover UBTTask_EnemyCombatFire::FindSidePeekCover(UWorld* World, const APawn* Pa
 		const FCoverData& Data = Candidate.Data;
 		if (UCoverGeometryStatics::GetCoverHeight(Data) != UCoverGeometryStatics::GetCoverHeight(CurrentCover.Data)) continue;
 		if (!UCoverGeometryStatics::IsSameWall(CurrentCover.Data, Candidate.Data)) continue;
+
+		// Reject candidates beyond the distance cap (parallel walls elsewhere in the level).
+		if (FVector::DistSquared2D(CurrentCover.Data.Location, Data.Location) > SameWallMaxDistSq) continue;
+
+		// Reject candidates on a parallel wall offset perpendicular to the current wall plane.
+		const FVector Delta2D = FVector(Data.Location.X - CurrentCover.Data.Location.X, Data.Location.Y - CurrentCover.Data.Location.Y, 0.f);
+		if (FMath::Abs(FVector::DotProduct(Delta2D, WallNormal2D)) > SameWallMaxPerpOffset) continue;
 
 		// Debug: forced cover height filter
 		if (ShouldSkipForForcedHeight(Data, SidePeekForcedHeight)) continue;

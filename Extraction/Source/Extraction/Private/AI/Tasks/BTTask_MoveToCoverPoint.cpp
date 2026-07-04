@@ -151,7 +151,14 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	const float StandoffPadding = IsValid(DA) ? DA->CoverStandoffPadding : DefaultStandoffPadding;
 	const float Standoff = CapsuleRadius + StandoffPadding;
 
-	FVector ArrivalPos = UCoverGeometryStatics::GetApproachPosition(Cover.Data, PawnLoc, Standoff);
+	// Enemies: edge-aligned — endpoint covers snap laterally to a fixed gap from the wall corner
+	// so peeks clear consistently regardless of bake spacing. Companions (no enemy DA) keep the
+	// plain approach position; their combat task doesn't edge-align. Z from the pawn (nav height).
+	FVector ArrivalPos = IsValid(DA)
+		? UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+			OwnerComp.GetWorld(), Cover.Data, Standoff, CapsuleRadius, DA->CoverCornerGap, Pawn)
+		: UCoverGeometryStatics::GetApproachPosition(Cover.Data, PawnLoc, Standoff);
+	ArrivalPos.Z = PawnLoc.Z;
 	Mem->ArrivalPos = ArrivalPos;
 
 	// Already at destination? (2D — ArrivalPos is on the cover Z plane, see arrival check below)

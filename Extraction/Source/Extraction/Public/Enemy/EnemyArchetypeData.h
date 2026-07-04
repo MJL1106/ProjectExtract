@@ -136,7 +136,7 @@ public:
 
 	/** Seconds of no LOS before transitioning from Combat to Searching. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
-	float LostContactGrace = 8.f;
+	float LostContactGrace = 45.f;
 
 	/** Maximum yaw offset (degrees) between actor forward and the aim target before GetAIAimTarget/GetAIAimLocation
 	 *  returns null/false — forces the weapon to fall back to forward-fire while the body rotates.
@@ -674,11 +674,21 @@ public:
 		ToolTip = "Cap (s) on how long Expose waits for LOS before recovering. Stops a permanently-blocked enemy hanging in Expose."))
 	float ExposeLosWaitMax = 1.5f;
 
-	/** Consecutive Expose-phase LOS timeouts before the enemy treats the slot as unworkable and
-	 *  forces a flank-break relocate (same path as a compromise). Resets to 0 when fire is opened. */
+	/** Ladder stage 0 threshold: consecutive Expose-phase LOS timeouts on the first peek side
+	 *  before the failed-peek ladder advances to the next stage. Resets to 0 when fire is opened. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "1",
-		ToolTip = "How many consecutive Expose LOS-timeouts (no shot fired) before the enemy relocates off this slot."))
+		ToolTip = "Ladder stage 0: consecutive Expose LOS-timeouts (no shot fired) on the first side before the failed-peek ladder advances."))
 	int32 MaxExposeLosTimeouts = 2;
+
+	/** Ladder stage 2: consecutive LOS-timeouts on the second side before advancing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "1",
+		ToolTip = "LOS-timeout threshold on the second side of the failed-peek ladder before the enemy advances to the next stage."))
+	int32 LadderSecondSideTimeouts = 1;
+
+	/** Ladder stage 1/3: consecutive LOS-timeouts while peeking over top before advancing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "1",
+		ToolTip = "LOS-timeout threshold for over-top peek stages of the failed-peek ladder before advancing."))
+	int32 LadderOverTopTimeouts = 1;
 
 	// --- Cover Peek (vision cone + endpoint options) ---
 
@@ -688,14 +698,14 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
 		meta = (ClampMin = "5.0", ClampMax = "180.0",
 		ToolTip = "Half-angle of the in-cover engagement cone (degrees). Targets outside it are treated as out-of-LOS for fire decisions. 180 disables the cone."))
-	float CoverPeekConeHalfAngleDeg = 55.f;
+	float CoverPeekConeHalfAngleDeg = 75.f;
 
-	/** Degrees the cone centre is biased TOWARD the active lean side from the fire-arc forward.
-	 *  Right lean biases right, left lean biases left. 0 = unbiased (cone centred on fire-arc forward).
-	 *  Ignored for Front/over-top peeks and when the lean side is None. */
+	/** DEPRECATED — no longer read by the fire test. The peek cone is a single unbiased cone about
+	 *  the fire-arc forward so fire reach always matches the torso aim-offset reach (a lean-biased
+	 *  extension let the enemy fire at bearings the gun model could not visually point at). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
 		meta = (ClampMin = "0.0", ClampMax = "85.0",
-		ToolTip = "Degrees the peek cone rotates toward the active lean side. 0 = centred on fire-arc forward."))
+		ToolTip = "DEPRECATED: unused. The peek cone is unbiased; fire reach matches torso aim reach."))
 	float CoverPeekConeBiasDeg = 20.f;
 
 	/** Seconds bRelocatePending may linger before the task force-executes the relocate even if the
@@ -712,6 +722,13 @@ public:
 		meta = (ClampMin = "0.0", ClampMax = "1.0",
 		ToolTip = "Roll chance for a crouch end-point to stand up and peek over the top instead of leaning sideways."))
 	float CoverEndpointStandPeekChance = 0.3f;
+
+	/** When true, a compromised cover is broken instantly (bypassing debounce/cooldown/safe-phase gates)
+	 *  when the enemy has effective LOS to the threat (cone-gated, i.e. they can actually see them).
+	 *  The slow-path debounce still applies when the enemy cannot see the threat (flanked from behind). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ToolTip = "Instant cover break when compromised AND the enemy has effective LOS to the threat. Slow path kept for blind flanks."))
+	bool bCoverInstantBreakWithLOS = true;
 
 	/** Flank-break relocate only accepts a slot whose hunkered body is geometry-shielded from the
 	 *  threat. Disable to fall back to can-shoot-only selection. */
@@ -799,6 +816,12 @@ public:
 
 	// --- Cover Timing (peek/hide variance) ---
 
+	/** Seconds the enemy holds its idle-side swap pose before executing a cover move that
+	 *  requires turning around (move direction != current LastCoverSide). Lets the idle
+	 *  montage blend to the new side before the walk starts. 0 = instant move. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float CoverMoveSideSwapDelay = 0.5f;
+
 	/** Minimum Expose-phase settle duration (seconds) before opening fire. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.05"))
 	float ExposePhaseMin = 0.15f;
@@ -845,6 +868,13 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
 		ToolTip = "Extra standoff padding behind the cover wall surface, in cm, added on top of capsule radius."))
 	float CoverStandoffPadding = 25.f;
+
+	/** Lateral gap (cm) between the capsule's edge and the wall's actual end at endpoint covers.
+	 *  Arrival positions are corner-snapped so the shoulder sits this far inside the edge regardless
+	 *  of how far from the corner the bake left the point (fixes too-deep / past-the-edge covers). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0", ClampMax = "100.0",
+		ToolTip = "Lateral gap in cm between the capsule edge and the wall corner at endpoint covers."))
+	float CoverCornerGap = 5.f;
 
 	/** When true the enemy fires at the combat target while advancing to cover (BTTask_EnemyMoveToCover only). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",

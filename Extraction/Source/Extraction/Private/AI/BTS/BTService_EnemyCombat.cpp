@@ -26,12 +26,14 @@ void UBTService_EnemyCombat::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* 
 	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
 	if (!Controller || !Pawn) return;
 
+	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
 	AActor* Target = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
 
 	if (!IsValid(Target))
 	{
 		BB->SetValueAsBool(AEnemyAIController::BB_HasLineOfSight, false);
 		BB->SetValueAsBool(AEnemyAIController::BB_TargetInRange, false);
+		if (Enemy) Enemy->SetHasTargetLOS(false);
 		return;
 	}
 
@@ -43,10 +45,13 @@ void UBTService_EnemyCombat::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* 
 	const bool bHasLOS = AITargeting::GetVisibleBodyPoint(Target, EyeLocation, Pawn, VisiblePoint, bAllowHead);
 	BB->SetValueAsBool(AEnemyAIController::BB_HasLineOfSight, bHasLOS);
 
+	// Mirror LOS to the character for the anim instance's in-cover aim gate.
+	if (Enemy) Enemy->SetHasTargetLOS(bHasLOS);
+
 	// Range check against archetype EngageRangeMax
 	const FVector TargetLoc = Target->GetActorLocation();
 	bool bInRange = false;
-	if (const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn))
+	if (IsValid(Enemy))
 	{
 		if (const UEnemyArchetypeData* DA = Enemy->GetArchetypeData())
 			bInRange = FVector::Dist(Pawn->GetActorLocation(), TargetLoc) <= DA->EngageRangeMax;

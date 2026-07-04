@@ -161,11 +161,30 @@ private:
 		/** World-time of last mis-wiring warning log (throttle). */
 		float LastMiswiringLogTime = -10.f;
 
+		// --- Ladder stage machine (deterministic per-cover failed-peek sequence) ---
+		/** Current ladder stage at this cover point. See stage machine in TickTask Expose timeout. */
+		int32 LadderStage = 0;
+		/** When true, a ladder side-swap wall-walk is in flight — the arrival reset must NOT
+		 *  wipe the stage back to 0; instead it sets stage 2 and clears this flag. */
+		bool bLadderSwapMovePending = false;
+
+		// --- Cover-move pending shuffle (pre-move idle-side swap hold) ---
+		bool bShufflePending = false;
+		FCover PendingShuffleDest;
+		FCover PendingShuffleFrom;
+		float ShuffleHoldTimer = 0.f;
+
+		// --- Cover-move debug (enemy.CoverMoveDebug) ---
+
+		/** World time of cover-move arrival (SeekingCover -> Acquire). Drives the post-arrival soak window. */
+		float CoverMoveArrivalTime = -1e9f;
+
+		/** Set to true each tick that ApplyCoverFacing runs inside the facing-lock block; read+cleared by the debug log. */
+		bool bFacingReassertedThisTick = false;
+
 		// --- Cached cone trig (PERF #10) ---
 		float CachedConeHalfCos = 0.f;
-		float CachedConeBiasTan = 0.f;
 		float CachedConeHalfAngle = -1.f;  // sentinel: recompute when DA value differs
-		float CachedConeBiasAngle = -1.f;
 	};
 
 	/** BB key holding the Cover type (FCover via AICS plugin). Default name "CoverTarget". */
@@ -195,10 +214,11 @@ private:
 	/** Clear blind-fire spread/pose state. Called on every exit path that ends or interrupts blind fire. */
 	void ClearBlindFireState(AEnemyCharacter* Enemy, FFireMemory* Mem) const;
 
-	/** Find a neighbouring cover point on the same wall for shuffle (mirrors companion's FindShuffleCover). */
+	/** Find a neighbouring cover point on the same wall for shuffle (mirrors companion's FindShuffleCover).
+	 *  bRelaxed: accept any dist > ~25cm, double max, skip CanPeekShoot + body-protection gates. */
 	FCover FindShuffleCover(UWorld* World, const APawn* Pawn, const FCover& CurrentCover,
 		const FVector& ThreatLocation, const UEnemyArchetypeData* DA, AController* Controller,
-		AActor* Target) const;
+		AActor* Target, bool bRelaxed = false) const;
 
 	/** enemy.ForceCoverPeekSide support: find the SIDE-EXTREME same-wall cover point toward Side
 	 *  (the wall end), preferring one baked with the matching lean flag. Natural combat never
@@ -222,6 +242,25 @@ private:
 	bool CommitSameWallShuffle(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
 		AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
 		const FCover& FromCover, const FCover& ToDest, AActor* Target,
+		const UEnemyArchetypeData* DA) const;
+
+	/** Execute the full same-wall shuffle move: MoveToLocation, vacate/claim, BB, pose, phase=SeekingCover.
+	 *  Shared between the immediate path (same-side moves) and the hold-expiry path (opposite-side). */
+	bool ExecuteShuffleMove(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
+		AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
+		const FCover& FromCover, const FCover& ToDest, AActor* Target,
+		const UEnemyArchetypeData* DA) const;
+
+	/** Clear bShufflePending and its associated lean override. */
+	void ClearPendingShuffle(AEnemyCharacter* Enemy, FFireMemory* Mem) const;
+
+	/** Ladder side-swap wall-walk: find the opposite-side end point via FindSidePeekCover,
+	 *  commit a move-first cover swap (same pattern as the forced side-peek hop), and set
+	 *  bLadderSwapMovePending so the arrival reset preserves stage 2.
+	 *  Returns true if the move was accepted (phase set to SeekingCover). */
+	bool TryLadderSwapMove(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
+		AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
+		const FCover& CurrentCover, ECoverLean OppositeSide, AActor* Target,
 		const UEnemyArchetypeData* DA) const;
 
 	/** Read the current cover from the CoverTarget BB key. Returns an invalid FCover when unset. */
