@@ -748,6 +748,67 @@ public:
 		ToolTip = "Min extra distance (cm) away from the threat a fallback strafe should add when no protective cover exists."))
 	float FlankBreakRetreatBias = 250.f;
 
+	// --- Cover Scoring (shared scorer — C++ picker paths AND the EQS scoring test) ---
+
+	/** Weight for closeness of the candidate to the enemy (1 at the enemy, 0 at CoverSearchRadius). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreProximityWeight = 1.f;
+
+	/** Weight for the candidate sitting at/beyond the ideal engagement distance from the threat. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreDistanceBandWeight = 0.7f;
+
+	/** Flat additive term (legacy cover bonus). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreFlatBonus = 0.15f;
+
+	/** Distance (cm) to the threat below which the distance-band term scores 0. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreIdealDistMin = 500.f;
+
+	/** Range (cm) over which the distance-band term ramps from 0 to 1 past CoverScoreIdealDistMin. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "1.0"))
+	float CoverScoreIdealDistRange = 700.f;
+
+	/** Bonus for a candidate with a stance-matched lean flag on the threat-facing side (a corner the
+	 *  enemy can peek around toward the threat). 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreSideFlagWeight = 0.f;
+
+	/** Fraction of CoverScoreSideFlagWeight granted when the candidate has a lean flag only on the
+	 *  side facing away from the threat. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverScoreSideFlagOpposite = 0.35f;
+
+	/** Bonus for a candidate with at least one other free cover point within
+	 *  CoverScoreRetreatViabilityRadius (an escape option exists). 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreRetreatViabilityWeight = 0.f;
+
+	/** Radius (cm) of the retreat-viability neighbour search. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "100.0"))
+	float CoverScoreRetreatViabilityRadius = 600.f;
+
+	/** A relocate candidate must beat the CURRENT cover's score by this margin before a voluntary
+	 *  (score-driven) relocate is taken. Never applied to compromise/flank breaks. 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreStickinessMargin = 0.f;
+
+	// --- Cover Path Exposure (route-safety penalty on relocate/reseek picks) ---
+
+	/** Score penalty at 100% route exposure (scaled by the exposed fraction of route samples).
+	 *  0 = off (no route traces run). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|PathExposure", meta = (ClampMin = "0.0"))
+	float PathExposureWeight = 0.f;
+
+	/** Sample points traced along the route to each evaluated candidate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|PathExposure", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 PathExposureSampleCount = 3;
+
+	/** Hard cap on route-exposure traces per selection round (spread across the top candidates). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|PathExposure", meta = (ClampMin = "3", ClampMax = "64"))
+	int32 PathExposureMaxTracesPerSelection = 24;
+
 	// --- Cover Blind Fire (suppression response) ---
 
 	/** Weight for hiding when suppressed (stay hunkered, wait). Default is the only non-zero
@@ -907,4 +968,67 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.05",
 		ToolTip = "Longest inter-burst pause while advancing to cover. Independent of BurstPauseMax."))
 	float AdvanceFireBurstPauseMax = 3.0f;
+
+	// --- Posture (pressure/advance — Hold / Press / FallBack) ---
+
+	/** Master gate for the posture system. Off = enemy holds today's fixed engagement band. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture")
+	bool bPostureSystemEnabled = false;
+
+	/** Whether this archetype may enter Press at all (snipers: false). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture")
+	bool bCanPress = true;
+
+	/** Seconds between posture evaluations (staggered per enemy by a random phase). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.1"))
+	float PostureEvalInterval = 0.5f;
+
+	/** Aggression (0-1) at or above which Press is entered (requires Confident morale, unsuppressed). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PressEnterThreshold = 0.65f;
+
+	/** Aggression below which Press is abandoned (hysteresis — keep below PressEnterThreshold). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PressExitThreshold = 0.45f;
+
+	/** Aggression at or below which the enemy falls back (also forced by Broken morale). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FallBackEnterThreshold = 0.25f;
+
+	/** Continuous seconds in Press before a proactive advance to closer cover is requested. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.5"))
+	float PressAdvanceHoldTime = 2.5f;
+
+	/** Minimum seconds between committed advance relocates. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "1.0"))
+	float AdvanceRelocateCooldown = 12.f;
+
+	/** Weight: the threat hasn't damaged this enemy within PostureRecentDamageWindow. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float PostureWeightNoDamageRecently = 1.f;
+
+	/** Weight: the threat is fully passive (no recent damage AND own suppression low). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float PostureWeightThreatPassive = 1.f;
+
+	/** Weight: squad numeric advantage (living members). 0 = ignore squad size. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float PostureWeightSquadAdvantage = 0.f;
+
+	/** Seconds of no incoming damage from the threat before it starts reading as passive. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "1.0"))
+	float PostureRecentDamageWindow = 4.f;
+
+	/** Delta (cm, negative = closer) applied to CoverScoreIdealDistMin while Pressing. Press also
+	 *  flips the distance-band term to prefer covers NEARER the threat, down to the shifted min. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture")
+	float PosturePressDistMinDelta = -300.f;
+
+	/** Delta (cm) applied to CoverScoreIdealDistMin while falling back — deeper covers score higher. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float PostureFallBackDistMinDelta = 400.f;
+
+	/** Minimum distance (cm) an advance relocate must close toward the threat vs the current cover. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "50.0"))
+	float PostureAdvanceMinGain = 200.f;
 };

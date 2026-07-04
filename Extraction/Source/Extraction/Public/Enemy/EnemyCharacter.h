@@ -35,6 +35,7 @@ class UCoverPoseComponent;
 // Phase 4 — suppression & morale (default subobjects, not bolt-ons)
 class USuppressionComponent;
 class UEnemyMoraleComponent;
+class UEnemyPostureComponent;
 
 // Phase 5 — squad coordination
 class UEnemySquadSubsystem;
@@ -171,6 +172,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
 	UEnemyMoraleComponent* GetMoraleComponent() const { return MoraleComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	UEnemyPostureComponent* GetPostureComponent() const { return PostureComponent; }
 
 	/** Broadcast when alive and taking damage — region resolved from the damage event. BP/ABP binds for flinch montages. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Combat")
@@ -452,6 +456,10 @@ private:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
 	TObjectPtr<UEnemyMoraleComponent> MoraleComponent;
+
+	// Posture (pressure/advance — default subobject, gated per-archetype by bPostureSystemEnabled)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
+	TObjectPtr<UEnemyPostureComponent> PostureComponent;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Enemy|Tags")
 	FGameplayTagContainer OwnedTags;

@@ -25,6 +25,7 @@
 #include "SuppressionComponent.h"
 #include "EnemyMoraleComponent.h"
 #include "CoverPoseComponent.h"
+#include "EnemyPostureComponent.h"
 #include "EnemySquadSubsystem.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/WidgetComponent.h"
@@ -51,6 +52,7 @@ AEnemyCharacter::AEnemyCharacter()
 	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
 	MoraleComponent = CreateDefaultSubobject<UEnemyMoraleComponent>(TEXT("MoraleComponent"));
 	CoverPoseComponent = CreateDefaultSubobject<UCoverPoseComponent>(TEXT("CoverPoseComponent"));
+	PostureComponent = CreateDefaultSubobject<UEnemyPostureComponent>(TEXT("PostureComponent"));
 
 	AIControllerClass = AEnemyAIController::StaticClass();
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
@@ -844,6 +846,9 @@ void AEnemyCharacter::HandleDeath()
 
 	if (IsValid(MoraleComponent))
 		MoraleComponent->DeactivateForDeath();
+
+	if (IsValid(PostureComponent))
+		PostureComponent->DeactivateForDeath();
 
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))

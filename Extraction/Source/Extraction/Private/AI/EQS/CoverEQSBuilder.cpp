@@ -7,7 +7,6 @@
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryOption.h"
 #include "EnvironmentQuery/EnvQueryTest.h"
-#include "EnvironmentQuery/Tests/EnvQueryTest_Distance.h"
 #include "EnvironmentQuery/Contexts/EnvQueryContext_Querier.h"
 
 // Plugin (AICoverSystem)
@@ -22,7 +21,7 @@
 #include "EnvQueryTest_CoverPeekable.h"
 #include "EnvQueryTest_CoverAllySpacing.h"
 #include "EnvQueryTest_CoverSameWall.h"
-#include "EnvQueryTest_CoverSideFlag.h"
+#include "EnvQueryTest_CoverScore.h"
 #include "EnvQueryContext_CombatTarget.h"
 #include "EnvQueryTest_DistanceBand.h"
 
@@ -144,25 +143,23 @@ static UEnvQueryTest_CoverPeekable* MakePeekable(UEnvQueryOption* Opt)
 
 static UEnvQueryTest_ParallelToCover* MakeParallel(UEnvQueryOption* Opt)
 {
+	// Filter only — its old scoring role is subsumed by EnvQueryTest_CoverScore.
 	UEnvQueryTest_ParallelToCover* T = NewObject<UEnvQueryTest_ParallelToCover>(Opt);
 	T->Context = UEnvQueryContext_CombatTarget::StaticClass();
 	T->TestMode = EEnvTestParallerCover::Dot2D;
-	T->TestPurpose = EEnvTestPurpose::FilterAndScore;
+	T->TestPurpose = EEnvTestPurpose::Filter;
 	T->FilterType = EEnvTestFilterType::Minimum;
 	T->FloatValueMin.DefaultValue = 0.f;
-	T->ScoringEquation = EEnvTestScoreEquation::Linear;
-	T->ScoringFactor.DefaultValue = 1.f;
 	return T;
 }
 
-static UEnvQueryTest_Distance* MakeDistanceQuerier(UEnvQueryOption* Opt, float Factor)
+static UEnvQueryTest_CoverScore* MakeCoverScore(UEnvQueryOption* Opt)
 {
-	UEnvQueryTest_Distance* T = NewObject<UEnvQueryTest_Distance>(Opt);
-	T->TestMode = EEnvTestDistance::Distance2D;
-	T->DistanceTo = UEnvQueryContext_Querier::StaticClass();
+	// The shared-formula scorer (weights resolved from the querier's archetype DA at run time).
+	UEnvQueryTest_CoverScore* T = NewObject<UEnvQueryTest_CoverScore>(Opt);
 	T->TestPurpose = EEnvTestPurpose::Score;
-	T->ScoringEquation = EEnvTestScoreEquation::InverseLinear;
-	T->ScoringFactor.DefaultValue = Factor;
+	T->ScoringEquation = EEnvTestScoreEquation::Linear;
+	T->ScoringFactor.DefaultValue = 1.f;
 	return T;
 }
 
@@ -206,15 +203,6 @@ static UEnvQueryTest_CoverSameWall* MakeSameWall(UEnvQueryOption* Opt)
 	return T;
 }
 
-static UEnvQueryTest_CoverSideFlag* MakeSideFlag(UEnvQueryOption* Opt, float Factor)
-{
-	UEnvQueryTest_CoverSideFlag* T = NewObject<UEnvQueryTest_CoverSideFlag>(Opt);
-	T->TestPurpose = EEnvTestPurpose::Score;
-	T->ScoringEquation = EEnvTestScoreEquation::Linear;
-	T->ScoringFactor.DefaultValue = Factor;
-	return T;
-}
-
 // ---------------------------------------------------------------------------
 // Query builders
 // ---------------------------------------------------------------------------
@@ -231,15 +219,18 @@ static bool BuildDefensive(FString& OutLine)
 	UEnvQueryOption* Opt = NewObject<UEnvQueryOption>(Q);
 	Opt->Generator = MakeGenerator(Opt, 1200.f, 500.f);
 
+	// Arc filter = CoverFlankArcHalfAngleDeg DA default (60) — matches the C++ pick path
+	// (FindProtectiveCover), so both pickers reject the same near-perpendicular corner points.
+	// The runtime compromise gate keeps its +15 slack, so a fresh 60-degree pick still can't be
+	// instantly re-flagged as flanked.
 	Opt->Tests.Add(MakeFreeCover(Opt, true));              // 1
 	Opt->Tests.Add(MakePostVacate(Opt, 6.f));              // 2
-	Opt->Tests.Add(MakeCoverArc(Opt, 75.f));               // 3  (cheap dot math — before traces)
+	Opt->Tests.Add(MakeCoverArc(Opt, 60.f));               // 3  (cheap dot math — before traces)
 	Opt->Tests.Add(MakePeekable(Opt));                     // 4
-	Opt->Tests.Add(MakeParallel(Opt));                     // 5
-	Opt->Tests.Add(MakeSideFlag(Opt, 1.5f));               // 6
-	Opt->Tests.Add(MakeDistanceQuerier(Opt, 1.f));         // 7
-	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));      // 8
-	Opt->Tests.Add(MakeProvidesCover(Opt));                // 9
+	Opt->Tests.Add(MakeParallel(Opt));                     // 5  (filter only)
+	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));      // 6
+	Opt->Tests.Add(MakeProvidesCover(Opt));                // 7
+	Opt->Tests.Add(MakeCoverScore(Opt));                   // 8  (shared formula — after filters)
 
 	Q->GetOptionsMutable().Add(Opt);
 
@@ -261,14 +252,15 @@ static bool BuildAdvance(FString& OutLine)
 	Opt->Tests.Add(MakePostVacate(Opt, 6.f));                                            // 2
 	Opt->Tests.Add(MakePeekable(Opt));                                                   // 3
 	Opt->Tests.Add(MakeProvidesCover(Opt));                                              // 4
-	Opt->Tests.Add(MakeParallel(Opt));                                                   // 5
-	Opt->Tests.Add(MakeSideFlag(Opt, 1.5f));                                             // 6
-	Opt->Tests.Add(MakeDistanceBand(Opt,                                                 // 7
+	Opt->Tests.Add(MakeParallel(Opt));                                                   // 5  (filter only)
+	// Filter-only band gate: scoring distance here would double-count against CoverScore's band
+	// term and fight the Press-negated weight. The 500-1200 gate still bounds the advance pick.
+	Opt->Tests.Add(MakeDistanceBand(Opt,                                                 // 6
 		UEnvQueryContext_CombatTarget::StaticClass(),
 		500.f, 1200.f,
-		EEnvTestPurpose::FilterAndScore, 0.15f, 1.5f));
-	Opt->Tests.Add(MakeDistanceQuerier(Opt, 0.3f));                                      // 8
-	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));                                    // 9
+		EEnvTestPurpose::Filter, 0.15f, 1.f));
+	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));                                    // 7
+	Opt->Tests.Add(MakeCoverScore(Opt));                                                 // 8  (shared formula)
 
 	Q->GetOptionsMutable().Add(Opt);
 
@@ -319,9 +311,9 @@ static bool BuildProtective(FString& OutLine)
 
 	Opt->Tests.Add(MakeFreeCover(Opt, true));              // 1
 	Opt->Tests.Add(MakePostVacate(Opt, 6.f));              // 2
-	Opt->Tests.Add(MakeParallel(Opt));                     // 3
-	Opt->Tests.Add(MakeDistanceQuerier(Opt, 1.f));         // 4
-	Opt->Tests.Add(MakeProvidesCover(Opt));                // 5
+	Opt->Tests.Add(MakeParallel(Opt));                     // 3  (filter only)
+	Opt->Tests.Add(MakeProvidesCover(Opt));                // 4
+	Opt->Tests.Add(MakeCoverScore(Opt));                   // 5  (shared formula)
 
 	Q->GetOptionsMutable().Add(Opt);
 

@@ -198,11 +198,21 @@ private:
 	void StopFireAndCleanUp(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem = nullptr) const;
 
 	/** Shared relocate path: vacate current cover, find protective cover or fall back to strafe.
-	 *  Used by both the compromise debounce and the Expose-LOS-timeout path. */
+	 *  Used by both the compromise debounce and the Expose-LOS-timeout path.
+	 *  PreselectedCover skips the find (posture advance passes its own validated pick). */
 	void ExecuteRelocate(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
 		AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy,
 		AActor* Target, const FCoverHandle& CurCoverHandle, const FCoverData& CurCoverData,
-		const UEnemyArchetypeData* DA, bool bHasLOS) const;
+		const UEnemyArchetypeData* DA, bool bHasLOS,
+		const FCover* PreselectedCover = nullptr) const;
+
+	/** Posture advance: proactively swap to a validated CLOSER protective cover while Pressing.
+	 *  Gates: must close >= PostureAdvanceMinGain toward the perceived threat, and beat the held
+	 *  cover's score by CoverScoreStickinessMargin. Commits via ExecuteRelocate (preselected).
+	 *  Returns true when the advance move is in flight. */
+	bool TryAdvanceRelocate(UBehaviorTreeComponent& OwnerComp, FFireMemory* Mem,
+		AAIController* Controller, APawn* Pawn, AEnemyCharacter* Enemy, AActor* Target,
+		const FCover& CurCover, const UEnemyArchetypeData* DA, bool bHasLOS) const;
 
 	/** Attempt to find cover via AICS bounds query, write it to the CoverTarget BB key,
 	 *  issue MoveToLocation, and enter SeekingCover.

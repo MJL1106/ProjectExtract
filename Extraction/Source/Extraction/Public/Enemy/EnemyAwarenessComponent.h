@@ -73,6 +73,22 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	bool IsAnyHostileSighted() const;
 
+	/** Current combat target, or nullptr outside Combat. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	AActor* GetCombatTarget() const { return CombatTarget.Get(); }
+
+	/** Last position the combat target was confirmed at — live while sighted, frozen once LOS is lost. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	FVector GetLastKnownLocation() const { return LastKnownLocation; }
+
+	/** True while the enemy currently has line of sight to its combat target. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	bool HasLOSToTarget() const { return bHadLOS; }
+
+	/** Seconds since the given pawn last damaged this enemy, or a large value if it never has (recently). */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	float GetTimeSinceDamagedBy(const AActor* Pawn) const;
+
 private:
 
 	/** Per-stimulus-source suspicion bookkeeping. */
@@ -174,6 +190,12 @@ private:
 	// Threat-scored targeting: track the actor that last damaged us and when
 	TWeakObjectPtr<AActor> RecentDamageInstigatorPawn;
 	float RecentDamageWorldTime = -1e9f;
+
+	// Per-attacker damage timestamps for GetTimeSinceDamagedBy — the single slot above is
+	// last-writer-wins, so a companion hit would otherwise erase the player's recent damage
+	// and make an actively-firing player read as passive to the posture system. Bounded by
+	// the hostile count (player + companion).
+	TMap<TWeakObjectPtr<const AActor>, float> DamageTimesByAttacker;
 
 	// Guard against squad sighting relay feedback loops: ReportSquadSighting must NOT re-broadcast
 	bool bInSquadSightingRelay = false;

@@ -246,6 +246,7 @@ void UEnemyAwarenessComponent::NotifyDamaged(AController* Instigator)
 
 	RecentDamageInstigatorPawn = InstigatorPawn;
 	RecentDamageWorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : -1e9f;
+	DamageTimesByAttacker.Add(InstigatorPawn, RecentDamageWorldTime);
 
 	// Ensure the instigator has a suspicion track so threat scoring can find it even when
 	// perception never delivered a stimulus (suppressed weapon, out of hearing range — QA #6).
@@ -930,6 +931,16 @@ bool UEnemyAwarenessComponent::IsAnyHostileSighted() const
 			return true;
 	}
 	return false;
+}
+
+float UEnemyAwarenessComponent::GetTimeSinceDamagedBy(const AActor* Pawn) const
+{
+	if (!Pawn) return BIG_NUMBER;
+	const float* Stamp = DamageTimesByAttacker.Find(Pawn);
+	if (!Stamp) return BIG_NUMBER;
+	const UWorld* World = GetWorld();
+	if (!World) return BIG_NUMBER;
+	return World->GetTimeSeconds() - *Stamp;
 }
 
 void UEnemyAwarenessComponent::Bark(EBarkType Type) const
