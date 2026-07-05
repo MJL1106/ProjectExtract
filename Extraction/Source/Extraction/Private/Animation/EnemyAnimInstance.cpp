@@ -1051,11 +1051,11 @@ void UEnemyAnimInstance::HandleWeaponFired()
 
 void UEnemyAnimInstance::HandleHitReact(EHitRegion Region)
 {
-	// Always attempt the additive flinch — not gated by combat state.
+	// Additive flinch only. The full-body react (PlayHitReactMontage) is intentionally not
+	// called: it only ever fired on out-of-combat hits, where it threw the head/torso so far
+	// off pose that a surviving headshot target (headshots deal 65% max HP) became impossible
+	// to follow up on — reading as the enemy dodging the second shot of a double takedown.
 	PlayHitReactFlinch();
-
-	// Full-body react still available for non-combat hits (gate unchanged).
-	PlayHitReactMontage();
 }
 
 void UEnemyAnimInstance::HandleMeleePerformed()
