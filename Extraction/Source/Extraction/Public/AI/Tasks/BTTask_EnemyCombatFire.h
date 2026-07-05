@@ -148,6 +148,10 @@ private:
 		/** Seconds LOS has been continuously absent while tucked (grenade trigger accumulate). */
 		float GrenadeLosBlockedAccum = 0.f;
 
+		/** True while a proactive pop-up cover lob is exposed: the Pause tick holds the stand+peek
+		 *  pose through the wind-up and ducks the enemy back into cover on release/cancel. */
+		bool bGrenadeLobPopUp = false;
+
 		// --- Blind-fire state (Feature A) ---
 
 		/** True once the per-suppression-episode roll has been made. Reset when suppression clears. */

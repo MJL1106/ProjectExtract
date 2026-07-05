@@ -2910,11 +2910,109 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	case EFireTaskPhase::Pause:
 		if (Mem->PhaseTimer <= 0.f && !Mem->bBlindFiringNow)
 		{
+			// --- Pop-up cover lob: hold the exposed pose through the wind-up, duck back on release ---
+			// Runs before the generic telegraph hold so we own the pop-up's duck-back. The pose was set
+			// stand+front+peek when the throw committed; keep it until the grenade leaves, then re-tuck.
+			if (Mem->bGrenadeLobPopUp)
+			{
+				if (IsGrenadeTelegraphing(Enemy))
+				{
+					Mem->PhaseTimer = 0.1f;
+					break;
+				}
+				// Released (or cancelled): duck back into cover and settle before the next peek.
+				if (UCoverPoseComponent* PopPose = Enemy->GetCoverPoseComponent())
+				{
+					PopPose->SetPeeking(false);
+					PopPose->SetLean(ECoverLean::None);
+					PopPose->SetInCover(true, ECoverHeight::Crouch);
+				}
+				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				Mem->bGrenadeLobPopUp = false;
+				Mem->Phase = EFireTaskPhase::Recover;
+				Mem->PhaseTimer = FMath::RandRange(DA->RecoverPhaseMin, DA->RecoverPhaseMax);
+				break;
+			}
+
 			// Hold the pause while a grenade wind-up plays — no shuffle/relocate/peek mid-throw.
 			if (IsGrenadeTelegraphing(Enemy))
 			{
 				Mem->PhaseTimer = 0.25f;
 				break;
+			}
+
+			// --- Grenadier proactive cover lob (chance-based, over the top) ---
+			// Fires during live engagement — independent of the LOS-blocked hiding lob above — when the
+			// enemy holds crouch cover with an over-the-top firing side. CanThrow()/cooldown/supply
+			// throttle the rate; the shared CanThrow() gate means it never double-throws with the hiding
+			// lob. Presentation splits tucked (crouch montage, stays hunkered) vs pop-up (stands over the
+			// wall, stand montage, ducks back) via the DA fields.
+			if (UEnemyGrenadierComponent* LobComp = Enemy->GetGrenadierComponent())
+			{
+				const bool bHasCoverLob = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+				const AWeaponBase* LobWeapon = Enemy->GetCurrentWeapon();
+				const bool bLobReloading = IsValid(LobWeapon) && LobWeapon->IsReloading();
+				if (bHasCoverLob && !bSuppressed && !bLobReloading && IsValid(Target)
+					&& LobComp->CanThrow() && DA->GrenadeCoverLobChance > 0.f)
+				{
+					const FCover LobCover = ReadCoverFromBB(BB);
+					const bool bCrouchOverTop = LobCover.IsValid()
+						&& UCoverGeometryStatics::GetCoverHeight(LobCover.Data) == ECoverHeight::Crouch
+						&& LobCover.Data.bFrontCoverCrouched;
+					if (bCrouchOverTop)
+					{
+						const FVector LobTarget = GetPerceivedThreatLoc(Controller, Target);
+						const float LobDistSq = FVector::DistSquared2D(Pawn->GetActorLocation(), LobTarget);
+						// Cheap range pre-check (TryThrowAt re-checks from the socket) — skips the pose
+						// churn of committing a pop-up only for the throw to fail out-of-range.
+						const bool bInLobRange = !LobTarget.IsNearlyZero()
+							&& LobDistSq >= FMath::Square(DA->GrenadeMinRange)
+							&& LobDistSq <= FMath::Square(DA->GrenadeMaxRange);
+						if (bInLobRange && FMath::FRand() < DA->GrenadeCoverLobChance)
+						{
+							if (FMath::FRand() < DA->GrenadeCoverLobPopUpChance)
+							{
+								// Pop up over the wall: stand + front + peek so the stand throw montage
+								// plays and the grenade clears the low cover. Pose is set BEFORE TryThrowAt
+								// because the telegraph → montage-select chain is synchronous and reads the
+								// cover pose height. bGrenadeLobPopUp holds it and drives the duck-back.
+								UCoverPoseComponent* LobPose = Enemy->GetCoverPoseComponent();
+								if (IsValid(LobPose))
+								{
+									LobPose->SetInCover(true, ECoverHeight::Stand);
+									LobPose->SetLean(ECoverLean::Front);
+									LobPose->SetPeeking(true);
+								}
+								if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+								ApplyCoverFacing(Controller, Pawn, LobCover.Data);
+
+								if (LobComp->TryThrowAt(LobTarget))
+								{
+									Mem->bGrenadeLobPopUp = true;
+									Mem->PhaseTimer = 0.1f;
+									break;
+								}
+
+								// Throw refused (arc unsolvable) — revert the pop-up pose, fall through.
+								if (IsValid(LobPose))
+								{
+									LobPose->SetPeeking(false);
+									LobPose->SetLean(ECoverLean::None);
+									LobPose->SetInCover(true, ECoverHeight::Crouch);
+								}
+								if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+							}
+							else if (LobComp->TryThrowAt(LobTarget))
+							{
+								// Tucked lob: stay hunkered. The generic telegraph hold above keeps the
+								// pause and blocks peeks until release; the crouch pose selects the crouch
+								// throw montage, and the grenade still arcs over the low wall.
+								Mem->PhaseTimer = 0.25f;
+								break;
+							}
+						}
+					}
+				}
 			}
 
 			// --- Cover shuffle roll (Feature B) ---
@@ -3113,6 +3211,7 @@ void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerCo
 	// no-op unless telegraphing. The cancel broadcast stops the throw montage.
 	if (UEnemyGrenadierComponent* GrenComp = Enemy->GetGrenadierComponent())
 		GrenComp->CancelThrow();
+	if (Mem) Mem->bGrenadeLobPopUp = false;
 
 	Enemy->SetAimTarget(nullptr);
 	Enemy->SetHasTargetLOS(false);
@@ -3330,6 +3429,7 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 	// Cancel an in-flight grenade wind-up before the transit — same reasoning as ExecuteRelocate.
 	if (UEnemyGrenadierComponent* GrenComp = Enemy->GetGrenadierComponent())
 		GrenComp->CancelThrow();
+	Mem->bGrenadeLobPopUp = false;
 
 	UCoverPoseComponent* ReseekPose = Enemy->GetCoverPoseComponent();
 	if (IsValid(ReseekPose))
@@ -3387,6 +3487,7 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 	// throw montage playing and StartFiring over it (the cancel broadcast stops the montage).
 	if (UEnemyGrenadierComponent* GrenComp = Enemy->GetGrenadierComponent())
 		GrenComp->CancelThrow();
+	Mem->bGrenadeLobPopUp = false;
 
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	if (!BB) return;

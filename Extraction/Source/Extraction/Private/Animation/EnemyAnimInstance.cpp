@@ -1078,7 +1078,17 @@ UAnimMontage* UEnemyAnimInstance::SelectGrenadeMontage() const
 	const UEnemyArchetypeData* DA = OwningEnemy->GetArchetypeData();
 	if (!IsValid(DA)) return GetEffectiveGrenadeMontage();
 
-	const bool bCrouched = OwningEnemy->bIsCrouched;
+	// Prefer the live cover pose height over ACharacter::bIsCrouched: SetInCover() updates the pose
+	// synchronously this frame, whereas bIsCrouched lags a frame behind UnCrouch(). A pop-up lob
+	// (un-crouch → stand over the wall, then throw) must pick a STAND montage the same frame, so read
+	// the pose the throw just set. Read the component directly — the anim-thread mirror is a frame
+	// stale here. Falls back to bIsCrouched when out of cover (open-ground throw).
+	bool bCrouched = OwningEnemy->bIsCrouched;
+	if (const UCoverPoseComponent* CoverPose = OwningEnemy->GetCoverPoseComponent())
+	{
+		if (CoverPose->bInCover)
+			bCrouched = (CoverPose->CoverHeight == ECoverHeight::Crouch);
+	}
 
 	if (bCrouched && IsValid(DA->GrenadeThrowCrouchMontage))
 		return DA->GrenadeThrowCrouchMontage.Get();

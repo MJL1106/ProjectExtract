@@ -345,6 +345,17 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float GrenadeLandingDistanceScale = 1.0f;
 
+	/** Per-Pause-cycle chance to proactively lob a grenade over the top while holding crouch cover
+	 *  during live engagement (independent of the LOS-blocked hiding lob). Naturally rate-limited by
+	 *  GrenadeCooldown + GrenadeSupply, so this just adds variety on top of the cooldown. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GrenadeCoverLobChance = 0.20f;
+
+	/** Of the proactive cover lobs, the fraction that pop up over the wall (stand + throw + duck) vs
+	 *  lobbing from the tucked crouch pose. 0.35 = ~35% pop-up, ~65% tucked. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GrenadeCoverLobPopUpChance = 0.35f;
+
 	// --- Officer aura (Phase 3) ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer")
