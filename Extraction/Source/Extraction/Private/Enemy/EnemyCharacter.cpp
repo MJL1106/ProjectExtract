@@ -28,7 +28,7 @@
 #include "EnemyPostureComponent.h"
 #include "EnemySquadSubsystem.h"
 #include "Components/CapsuleComponent.h"
-#include "Components/WidgetComponent.h"
+#include "UI/OverheadWidgetComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/DamageEvents.h"
 #include "TimerManager.h"
@@ -70,7 +70,7 @@ AEnemyCharacter::AEnemyCharacter()
 	static constexpr float AwarenessWidgetOffsetZ = 30.f;
 	static constexpr float AwarenessWidgetSize     = 64.f;
 
-	AwarenessWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("AwarenessWidget"));
+	AwarenessWidgetComponent = CreateDefaultSubobject<UOverheadWidgetComponent>(TEXT("AwarenessWidget"));
 	AwarenessWidgetComponent->SetupAttachment(GetMesh(), TEXT("head"));
 	AwarenessWidgetComponent->SetRelativeLocation(FVector(0.f, 0.f, AwarenessWidgetOffsetZ));
 	AwarenessWidgetComponent->SetWidgetSpace(EWidgetSpace::Screen);
