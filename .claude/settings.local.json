@@ -74,6 +74,9 @@
       "Bash(pandoc -t markdown \"C:\\\\Users\\\\matth\\\\Downloads\\\\Bugs_implementation_.docx\")"
     ]
   },
+  "enabledPlugins": {
+    "superpowers@claude-plugins-official": false
+  },
   "enableAllProjectMcpServers": true,
   "enabledMcpjsonServers": [
     "sequential-thinking",

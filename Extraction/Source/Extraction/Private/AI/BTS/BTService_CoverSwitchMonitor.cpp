@@ -3,6 +3,7 @@
 // P3 AICS migration: cover source changed from AAICoverSlot line-segment slots to FCoverHandle/FCoverData points.
 
 #include "BTService_CoverSwitchMonitor.h"
+#include "AI/AITargetingStatics.h"
 #include "AI/BlackboardKeyType_Cover.h"
 #include "AI/CompanionCoverStatics.h"
 #include "CoverSystem.h"
@@ -239,24 +240,26 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
 	const AController* CoverController = Pawn->GetController();
 	const FVector ThreatLoc = CombatTarget->GetActorLocation();
+	// Head-height LoS anchor for the peek tests — centre-mass traces read a standing shooter behind
+	// crouch cover as blocked (shared resolver with the state service and aim).
+	const FVector ThreatSightLoc = AITargeting::GetSightLocation(CombatTarget);
 
-	// Player-advance tracking (Normal/Stealth advance gate): accrue the player's ground gain toward
-	// the focused threat, decaying so it needs sustained pushing. A target switch resets the distance
-	// baseline — the jump between two threats' ranges is not player movement.
+	// Player-advance tracking (Normal/Stealth advance gate): accrue the PLAYER'S OWN displacement
+	// projected toward the focused threat, decaying so it needs sustained pushing. Raw range-to-threat
+	// deltas would open the gate when an enemy rushes a stationary player.
 	{
-		const float PlayerThreatDist = FVector::Dist2D(Player->GetActorLocation(), ThreatLoc);
-		if (Mem.LastAdvanceThreat.Get() != CombatTarget)
-		{
-			Mem.LastAdvanceThreat = CombatTarget;
-			Mem.LastPlayerThreatDist = -1.f;
-		}
+		const FVector PlayerLoc = Player->GetActorLocation();
 		Mem.PlayerAdvanceProgress *= PlayerAdvanceDecayPerReEval;
-		if (Mem.LastPlayerThreatDist >= 0.f)
+		if (Mem.bHasPlayerAdvanceSample)
 		{
-			const float Gain = Mem.LastPlayerThreatDist - PlayerThreatDist;
+			FVector PlayerDelta = PlayerLoc - Mem.LastPlayerAdvanceLoc;
+			PlayerDelta.Z = 0.f;
+			const FVector ToThreat2D = (ThreatLoc - Mem.LastPlayerAdvanceLoc).GetSafeNormal2D();
+			const float Gain = FVector::DotProduct(PlayerDelta, ToThreat2D);
 			if (Gain > 0.f) Mem.PlayerAdvanceProgress += Gain;
 		}
-		Mem.LastPlayerThreatDist = PlayerThreatDist;
+		Mem.LastPlayerAdvanceLoc = PlayerLoc;
+		Mem.bHasPlayerAdvanceSample = true;
 	}
 
 	const ACharacter* ProtectionChar = Cast<ACharacter>(Pawn);
@@ -278,6 +281,12 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	CompanionCover::GatherExtraThreatActors(Controller, Pawn, CombatTarget, MaxExtraThreats, ExtraThreatActors);
 	const float MultiThreatPenalty = FMath::Clamp(Tuning->MultiThreatExposurePenalty, 0.f, 1.f);
 	const bool bScoreMultiThreat = ExtraThreatActors.Num() > 0 && MultiThreatPenalty < 1.f && Tuning->bCoverRequiresBodyProtection;
+
+	// Hostile anchors gathered once per re-eval — enemy pawns + covers enemies have declared intent on.
+	FHostileAnchors HostileAnchors;
+	const bool bRejectHostileAdjacent = Tuning->MinHostileCoverDistance > 0.f || Tuning->MinHostilePawnDistance > 0.f;
+	if (bRejectHostileAdjacent)
+		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, CoverController, HostileAnchors);
 
 	FCover BestCover;
 	float BestScore = -1.f;
@@ -305,10 +314,16 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		const float   ArcDot     = FVector::DotProduct(FireFwd, ToTarget2D);
 		if (ArcDot < FMath::Cos(FMath::DegreesToRadians(Tuning->CoverFlankArcHalfAngleDeg))) continue;
 
+		// Hostile-adjacency reject (enemy-parity): never relocate onto a spot an enemy is holding
+		// or heading to. Pure 2D distance — runs before the trace-heavy peek gate.
+		if (bRejectHostileAdjacent && UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location,
+			HostileAnchors, Tuning->MinHostileCoverDistance, Tuning->MinHostilePawnDistance))
+			continue;
+
 		// Cover must offer a position with LoS to the target.
 		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
 			UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
-			ThreatLoc, 150.f, CombatTarget, Pawn))
+			ThreatSightLoc, 150.f, CombatTarget, Pawn))
 			continue;
 
 		// Body-protection hard reject: mirrors the old FindBestCoverFor bRequireBodyProtection gate.
@@ -339,7 +354,8 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 					++UncoveredExtra;
 			}
 			if (UncoveredExtra > 0)
-				Score *= FMath::Pow(MultiThreatPenalty, static_cast<float>(UncoveredExtra));
+				Score = UCoverScoringStatics::ApplyScorePenalty(Score,
+					FMath::Pow(MultiThreatPenalty, static_cast<float>(UncoveredExtra)));
 		}
 
 		const bool bBetter = Score > BestScore;
@@ -377,7 +393,8 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 				++CurUncoveredExtra;
 		}
 		if (CurUncoveredExtra > 0)
-			CurrentScore *= FMath::Pow(MultiThreatPenalty, static_cast<float>(CurUncoveredExtra));
+			CurrentScore = UCoverScoringStatics::ApplyScorePenalty(CurrentScore,
+				FMath::Pow(MultiThreatPenalty, static_cast<float>(CurUncoveredExtra)));
 	}
 
 	// Arc-violation penalty: if the focused target is outside the widened arc for the current cover,
@@ -388,19 +405,31 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		const float   CurArcDot     = FVector::DotProduct(CurFireFwd, CurToTarget2D);
 		const float   CurWidenedArc = Tuning->CoverFlankArcHalfAngleDeg + Tuning->CoverCompromiseArcSlackDeg;
 		if (CurArcDot < FMath::Cos(FMath::DegreesToRadians(CurWidenedArc)))
-			CurrentScore *= MultiThreatPenalty;
+			CurrentScore = UCoverScoringStatics::ApplyScorePenalty(CurrentScore, MultiThreatPenalty);
 	}
 
 	// Blind-current: no peek position at the current point has LoS to the focused target. Such a
 	// point can never earn peek cycles (the G5 gate would deadlock it — same rationale as the combat
 	// task's blind-shuffle exemption) and must not defend its score, or the companion camps a point
 	// it cannot shoot from. Every candidate above already passed the CanPeekShoot filter, so a commit
-	// here always lands on a point with a verified shot.
-	const bool bCurrentBlind = !UCoverGeometryStatics::CanPeekShoot(World, CurrentCover.Data,
+	// here always lands on a point with a verified shot. Persistence: an enemy's own peek cycle
+	// samples blind/visible alternately at re-eval cadence — require 2 consecutive blind re-evals
+	// before the penalty + G5 bypass, or the monitor flip-flops covers chasing moments.
+	const bool bBlindNow = !UCoverGeometryStatics::CanPeekShoot(World, CurrentCover.Data,
 		UCoverGeometryStatics::GetCoverHeight(CurrentCover.Data) == ECoverHeight::Crouch,
-		ThreatLoc, 150.f, CombatTarget, Pawn);
+		ThreatSightLoc, 150.f, CombatTarget, Pawn);
+	// Identity guard: a task-internal shuffle swaps the BB cover with no Mem reset, and a target
+	// switch changes what "blind" means — a stale count must not carry across either.
+	if (Mem.LastBlindEvalCover != CurrentCover.Handle || Mem.LastBlindEvalTarget.Get() != CombatTarget)
+	{
+		Mem.ConsecutiveBlindReEvals = 0;
+		Mem.LastBlindEvalCover = CurrentCover.Handle;
+		Mem.LastBlindEvalTarget = CombatTarget;
+	}
+	Mem.ConsecutiveBlindReEvals = bBlindNow ? Mem.ConsecutiveBlindReEvals + 1 : 0;
+	const bool bCurrentBlind = Mem.ConsecutiveBlindReEvals >= 2;
 	if (bCurrentBlind)
-		CurrentScore *= MultiThreatPenalty;
+		CurrentScore = UCoverScoringStatics::ApplyScorePenalty(CurrentScore, MultiThreatPenalty);
 
 	// Advance ("move up, take space"): a candidate that meaningfully gains ground toward the threat
 	// — and already passed the body-protection gate in the loop above — only needs AdvanceScoreMargin,

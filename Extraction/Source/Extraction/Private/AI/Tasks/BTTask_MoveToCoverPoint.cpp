@@ -1,6 +1,7 @@
 // BTTask_MoveToCoverPoint — latent move to an AICS cover point with advance-fire + stall detection.
 
 #include "BTTask_MoveToCoverPoint.h"
+#include "AI/AITargetingStatics.h"
 #include "AI/BlackboardKeyType_Cover.h"
 #include "AI/CompanionCoverStatics.h"
 #include "CoverScoringStatics.h"
@@ -107,7 +108,13 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 			&& IntendedHandle != Cover.Handle)
 		{
 			FCoverData IntendedData;
-			if (IntentCoverSys->GetCoverData(IntendedHandle, IntendedData))
+			// Reject intents pointing at a cover this controller deliberately vacated — a stale stamp
+			// must not walk the companion back onto its own post-vacate cooldown.
+			const ACompanionAIController* IntentCompCtrl = Cast<ACompanionAIController>(Controller);
+			const UCompanionTuningDataAsset* IntentTuning = IntentCompCtrl ? IntentCompCtrl->GetTuning() : nullptr;
+			const bool bIntentOnCooldown = IntentTuning
+				&& IntentSub->IsOnPostVacateCooldown(IntendedHandle, Controller, IntentTuning->CoverSwitchPostVacateCooldown);
+			if (!bIntentOnCooldown && IntentCoverSys->GetCoverData(IntendedHandle, IntendedData))
 			{
 				AController* IntentOccupant = IntentCoverSys->GetOccupyingController(IntendedHandle);
 				if (!IntentOccupant || IntentOccupant == Controller)
@@ -131,6 +138,10 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 		{
 			UE_LOG(LogEnemyAI, Log, TEXT("[COVER-AICS] %s picked cover already occupied by %s — failing for re-pick"),
 				*Pawn->GetName(), *GetNameSafe(Occupant->GetPawn()));
+			// Drop any lingering own intent (e.g. a monitor stamp) — leaving it stamped lets the
+			// intent-restore above resurrect a stale point on a later run.
+			if (UCoverReservationSubsystem* DeclineResSub = OwnerComp.GetWorld() ? OwnerComp.GetWorld()->GetSubsystem<UCoverReservationSubsystem>() : nullptr)
+				DeclineResSub->ClearIntendedCover(Controller);
 			BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
 			return EBTNodeResult::Failed;
 		}
@@ -160,6 +171,9 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 					TEXT("%s: cover-commit DECLINED dist=%.0f cap=%.0f triggers[fire=%d hp=%d ammo=%d out#=%d(n=%d)] — open-engage"),
 					*Pawn->GetName(), CommitDist, OuterCap, Triggers.bUnderFire ? 1 : 0, Triggers.bLowHealth ? 1 : 0,
 					Triggers.bLowAmmoOrReloading ? 1 : 0, Triggers.bOutnumbered ? 1 : 0, ThreatCount);
+				// Drop any lingering own intent — same stale-restore guard as the claim decline above.
+				if (UCoverReservationSubsystem* DeclineResSub = OwnerComp.GetWorld() ? OwnerComp.GetWorld()->GetSubsystem<UCoverReservationSubsystem>() : nullptr)
+					DeclineResSub->ClearIntendedCover(Controller);
 				BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
 				return EBTNodeResult::Failed;
 			}
@@ -706,15 +720,26 @@ FCover UBTTask_MoveToCoverPoint::RerankCoverForMultiThreat(UBehaviorTreeComponen
 	AController* CoverController = Pawn->GetController();
 	const FVector MyLoc = Pawn->GetActorLocation();
 	const FVector ThreatLoc = FocusTarget->GetActorLocation();
+	// Head-height LoS anchor for the peek test (centre-mass reads a standing shooter behind crouch
+	// cover as blocked — shared resolver with the state service and aim).
+	const FVector ThreatSightLoc = AITargeting::GetSightLocation(FocusTarget);
+
+	// Hostile-adjacency reject (enemy-parity) — never re-rank onto a spot an enemy holds or heads to.
+	FHostileAnchors HostileAnchors;
+	const bool bRejectHostileAdjacent = Tuning.MinHostileCoverDistance > 0.f || Tuning.MinHostilePawnDistance > 0.f;
+	if (bRejectHostileAdjacent)
+		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, CoverController, HostileAnchors);
 
 	FCoverScoreParams Params = UCoverScoringStatics::GetParamsForQuerier(Pawn);
 	Params.MaxSearchRadius = Tuning.CoverSearchRadius;
 
-	// Penalised score mirrors the switch monitor's multi-threat formula exactly.
+	// Penalised score mirrors the switch monitor's multi-threat formula exactly (sign-aware —
+	// Combat-mode advance params flip the band term, so raw scores go negative).
 	auto PenalizedScore = [&](const FCoverData& Data, int32 Uncovered)
 	{
-		return UCoverScoringStatics::ScoreCandidate(World, Data, MyLoc, ThreatLoc, /*bBodyProtected=*/false, Params)
-			* FMath::Pow(Penalty, static_cast<float>(Uncovered));
+		return UCoverScoringStatics::ApplyScorePenalty(
+			UCoverScoringStatics::ScoreCandidate(World, Data, MyLoc, ThreatLoc, /*bBodyProtected=*/false, Params),
+			FMath::Pow(Penalty, static_cast<float>(Uncovered)));
 	};
 
 	TArray<FCover> Candidates;
@@ -742,12 +767,15 @@ FCover UBTTask_MoveToCoverPoint::RerankCoverForMultiThreat(UBehaviorTreeComponen
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, CoverController, Tuning.CoverSwitchPostVacateCooldown))
 			continue;
 
-		// Same validity gates the switch monitor applies: fire arc, peekable LoS, focused-threat shield.
+		// Same validity gates the switch monitor applies: fire arc, hostile adjacency (cheap 2D,
+		// before the traces), peekable LoS, focused-threat shield.
 		const FVector ToTarget2D = (ThreatLoc - Candidate.Data.Location).GetSafeNormal2D();
 		if (FVector::DotProduct(UCoverGeometryStatics::GetFireArcForward(Candidate.Data), ToTarget2D) < ArcCos) continue;
+		if (bRejectHostileAdjacent && UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location,
+			HostileAnchors, Tuning.MinHostileCoverDistance, Tuning.MinHostilePawnDistance)) continue;
 		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
 			UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
-			ThreatLoc, 150.f, FocusTarget, Pawn)) continue;
+			ThreatSightLoc, 150.f, FocusTarget, Pawn)) continue;
 		if (!UCoverGeometryStatics::IsThreatCovered(World, Candidate.Data, ThreatLoc, Standoff,
 			Tuning.CoverProtectionChestHeight, FocusTarget, Pawn)) continue;
 

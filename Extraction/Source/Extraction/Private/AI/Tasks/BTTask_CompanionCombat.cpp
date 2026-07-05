@@ -11,6 +11,7 @@
 #include "AI/CompanionCoverStatics.h"
 #include "CoverSystem.h"
 #include "CoverGeometryStatics.h"
+#include "CoverScoringStatics.h"
 #include "CoverReservationSubsystem.h"
 #include "CoverPoseComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -18,6 +19,7 @@
 #include "CompanionAIController.h"
 #include "CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
+#include "EnemyCharacter.h"
 #include "Animation/CompanionAnimInstance.h"
 #include "WeaponBase.h"
 #include "HealthComponent.h"
@@ -384,6 +386,23 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 	// One completed expose/fire cycle at this point (enemy PeekCyclesAtCover parity).
 	++PeekCyclesAtCover;
 
+	// Enemy failed-peek parity: a peek burst that fired ZERO rounds is "looked and found no one" —
+	// consecutive fruitless peeks release the blind cover to open-engage. Any actual firing also
+	// clears the blind-hold clock: a point we shoot from is not a dead position.
+	if (AmmoAtBurstStart >= 0 && IsValid(Companion))
+	{
+		if (Companion->GetCurrentAmmo() == AmmoAtBurstStart)
+		{
+			++FruitlessPeeks;
+		}
+		else
+		{
+			FruitlessPeeks = 0;
+			BlindHoldTime = 0.f;
+		}
+	}
+	AmmoAtBurstStart = -1;
+
 	if (IsValid(Companion)) Companion->StopWeaponFire();
 
 	bIsFiringBurst = false;
@@ -572,7 +591,7 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 			// swap-detect resolve never fires for task-internal commits). Cycle counters reset
 			// AFTER the ReturnToCover below — its increment belongs to the point we left.
 			if (AActor* AbortTarget = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName)))
-				ResolvePeekSideForCover(Companion, AbortTarget, RepositionTargetCover.Data, AbortTarget->GetActorLocation());
+				ResolvePeekSideForCover(Companion, AbortTarget, RepositionTargetCover.Data, AITargeting::GetSightLocation(AbortTarget));
 		}
 		else
 		{
@@ -714,7 +733,7 @@ void UBTTask_CompanionCombat::TickRepositionAction(ACompanionCharacter* Companio
 		// Fresh point = fresh side, BEFORE EnterCoverPose below re-enters with the idle
 		// (the old path re-entered with the previous point's side).
 		if (AActor* ArrivalTarget = BB ? Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName)) : nullptr)
-			ResolvePeekSideForCover(Companion, ArrivalTarget, ArrivedCover.Data, ArrivalTarget->GetActorLocation());
+			ResolvePeekSideForCover(Companion, ArrivalTarget, ArrivedCover.Data, AITargeting::GetSightLocation(ArrivalTarget));
 		ResetPeekCycleCounters(Companion);
 		RepositionTargetCover = FCover();
 		RepositionStalledTime = 0.f;
@@ -925,7 +944,7 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 		if (BB) CommitCoverSwitch(BB, ArrivedCover, Companion->GetController());
 		// Fresh point = fresh side (see silent-arrival note).
 		if (AActor* ArrivalTarget = BB ? Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName)) : nullptr)
-			ResolvePeekSideForCover(Companion, ArrivalTarget, ArrivedCover.Data, ArrivalTarget->GetActorLocation());
+			ResolvePeekSideForCover(Companion, ArrivalTarget, ArrivedCover.Data, AITargeting::GetSightLocation(ArrivalTarget));
 		RepositionTargetCover = FCover();
 		bRepositionStandPhase = false;
 		bStandUpRepositionWalking = false;
@@ -985,7 +1004,7 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 				const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 				const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 					ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
-				if (!bCornerPeekReturning && bCanFire && !bCornerPeekFiring)
+				if (!bCornerPeekReturning && bCanFire && !bCornerPeekFiring && PeekFireDelayRemaining <= 0.f)
 				{
 					Companion->StartWeaponFire();
 					bCornerPeekFiring = true;
@@ -1051,7 +1070,7 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 			const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 			const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 				ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
-			if (bCanFire && !bCornerPeekFiring)
+			if (bCanFire && !bCornerPeekFiring && PeekFireDelayRemaining <= 0.f)
 			{
 				Companion->StartWeaponFire();
 				bCornerPeekFiring = true;
@@ -1144,11 +1163,22 @@ FCover UBTTask_CompanionCombat::FindShuffleCover(ACompanionCharacter* Companion,
 		if (UBlackboardComponent* BB = AIC->GetBlackboardComponent())
 			ThreatActor = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName));
 	}
+	// Peek-LoS anchor at the threat's head — centre-mass traces reject candidates that could in
+	// fact shoot a standing enemy over its cover. Body-protection stays on the passed ThreatLocation.
+	const FVector ThreatSightLoc = IsValid(ThreatActor) ? AITargeting::GetSightLocation(ThreatActor) : ThreatLocation;
 
 	TArray<FCover> Candidates;
 	Candidates.Reserve(32);
 	const FBoxSphereBounds SearchBounds(PawnLoc, FVector(ShuffleDistanceMax), ShuffleDistanceMax);
 	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
+
+	// Hostile-adjacency reject (enemy-parity): a shuffle must not slide the companion onto a spot
+	// an enemy is holding or heading to.
+	FHostileAnchors ShuffleHostileAnchors;
+	const bool bRejectHostileAdjacent = Tuning
+		&& (Tuning->MinHostileCoverDistance > 0.f || Tuning->MinHostilePawnDistance > 0.f);
+	if (bRejectHostileAdjacent)
+		UCoverScoringStatics::GatherHostileAnchors(World, Companion, Controller, ShuffleHostileAnchors);
 
 	FCover BestCover;
 	float BestDistSq = FLT_MAX;
@@ -1162,6 +1192,10 @@ FCover UBTTask_CompanionCombat::FindShuffleCover(ACompanionCharacter* Companion,
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
 		if (Occupant && Occupant != Controller) continue;
 
+		if (bRejectHostileAdjacent && UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location,
+			ShuffleHostileAnchors, Tuning->MinHostileCoverDistance, Tuning->MinHostilePawnDistance))
+			continue;
+
 		const float DistSq = FVector::DistSquared(PawnLoc, Candidate.Data.Location);
 		const float Dist = FMath::Sqrt(DistSq);
 		if (Dist < ShuffleDistanceMin || Dist > ShuffleDistanceMax) continue;
@@ -1169,7 +1203,7 @@ FCover UBTTask_CompanionCombat::FindShuffleCover(ACompanionCharacter* Companion,
 		// Reject candidates that can't peek-shoot toward the threat (anti ping-pong).
 		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
 			UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
-			ThreatLocation, StandFireEyeHeight, ThreatActor, Companion))
+			ThreatSightLoc, StandFireEyeHeight, ThreatActor, Companion))
 			continue;
 
 		// Body-protection gate (Finding 4): reject candidates that don't protect the body.
@@ -1211,6 +1245,9 @@ void UBTTask_CompanionCombat::CommitCoverSwitch(UBlackboardComponent* BB, const 
 	CoverCompromiseConsecutiveCount = 0;
 	TimeAtCurrentCover = 0.f;
 	CoverValidityCheckTimer = 0.f;
+	BlindHoldTime = 0.f;
+	FruitlessPeeks = 0;
+	AmmoAtBurstStart = -1;
 }
 
 bool UBTTask_CompanionCombat::TryPrePeekReloadGate(ACompanionCharacter* Companion, const FCoverData& CoverData)
@@ -1325,6 +1362,9 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 
 	if (!bBlocked && bStandBurstFireHeld)
 	{
+		// Peek fire delay still running — stay held; the animation hasn't reached exposure yet.
+		if (PeekFireDelayRemaining > 0.f) return;
+
 		// Fix 6: StartFiring() fires an instant shot on every call with no internal refire guard. A rapid
 		// blocked/clear flicker at this 10 Hz check would resume-fire faster than the weapon cadence.
 		// Gate the resume on the weapon's fire interval so back-to-back resumes can't out-pace it.
@@ -2056,6 +2096,11 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	CachedSlotForwardYaw = 0.f;
 	SubSlotLosRecheckTimer = 0.f;
 	BlockedRecheckHits = 0;
+	SpeculativePeekTimer = 0.f;
+	BlindHoldTime = 0.f;
+	FruitlessPeeks = 0;
+	AmmoAtBurstStart = -1;
+	PeekFireDelayRemaining = 0.f;
 	RepositionTargetCover = FCover();
 	RepositionTargetWorldLoc = FVector::ZeroVector;
 	bRepositionStandPhase = false;
@@ -2270,7 +2315,7 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 		LastTickCoverHandle = Cover.Handle;
 
 		const FVector ArrivalLoc = Companion->GetActorLocation();
-		ResolvePeekSideForCover(Companion, Target, Cover.Data, Target->GetActorLocation());
+		ResolvePeekSideForCover(Companion, Target, Cover.Data, AITargeting::GetSightLocation(Target));
 		// Cycles are per-physical-cover: re-claiming the point we just exited at (target died /
 		// switched → task restart) keeps its earned cycles, or the monitor's G5 gate starves on
 		// perpetual zeros. A genuinely different point starts fresh. Strikes always start fresh —
@@ -2542,6 +2587,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 	const FVector MyLocation = Ctx.Companion->GetActorLocation();
 	const FVector TargetLocation = Ctx.Target->GetActorLocation();
+	// Head-height LoS anchor for peek tests — the state service and aim already trace to this
+	// resolver; tracing to actor CENTRE reads a standing, firing enemy behind crouch cover as
+	// "blocked" and starves every peek/relocate decision (27s hold-never-shoot playtest).
+	const FVector TargetSightLoc = AITargeting::GetSightLocation(Ctx.Target);
 	const float Distance = FVector::Dist(MyLocation, TargetLocation);
 
 	const FCover Cover = Ctx.Blackboard->GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID());
@@ -2565,9 +2614,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (CovDbg())
 			UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s EXTERNAL-SWAP (monitor) newLoc=%s cyclesAtOld=%d"),
 				*Ctx.Companion->GetName(), *Cover.Data.Location.ToCompactString(), PeekCyclesAtCover);
-		ResolvePeekSideForCover(Ctx.Companion, Ctx.Target, Cover.Data, TargetLocation);
+		ResolvePeekSideForCover(Ctx.Companion, Ctx.Target, Cover.Data, TargetSightLoc);
 		ResetPeekCycleCounters(Ctx.Companion);
 		BlockedRecheckHits = 0;
+		BlindHoldTime = 0.f;
+		FruitlessPeeks = 0;
+		AmmoAtBurstStart = -1;
 		RepositionTargetCover = FCover();
 		RepositionTargetWorldLoc = FVector::ZeroVector;
 		bRepositionStandPhase = false;
@@ -2645,9 +2697,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			UE_LOG(LogCompanionAI, Log, TEXT("Slot replaced by monitor on companion %s — finishing Succeeded to preserve new target"), *GetNameSafe(Ctx.Companion));
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 		}
-		UE_LOG(LogCompanionAI, Warning, TEXT("Slot lost mid-task on companion %s — aborting cleanly"), *GetNameSafe(Ctx.Companion));
-		Ctx.Blackboard->ClearValue(CombatTargetKey.SelectedKeyName);
-		return FinishLatentTask(OwnerComp, EBTNodeResult::Aborted);
+		// Finish Succeeded, NOT Aborted: a spontaneous FinishLatentTask(Aborted) with no abort request
+		// in flight latches the BT component's abort bookkeeping and the branch never resumes — live
+		// PIE log showed the tree dead for 75s (services ticking, no task re-entry) after the monitor's
+		// trigger-clear vacate tripped this guard. Keep the target too: the state service owns target
+		// lifecycle, and the vacate is a deliberate transition to open-engage fighting.
+		UE_LOG(LogCompanionAI, Warning, TEXT("Slot lost mid-task on companion %s — finishing for re-pick"), *GetNameSafe(Ctx.Companion));
+		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
 
 	// =========================================================================
@@ -2726,7 +2782,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		const float TargetDeltaSq = FVector::DistSquared(TargetLocation, LastPeekResolveTargetLoc);
 		if (CoverDeltaSq > PeekResolveDistThresholdSq || TargetDeltaSq > PeekResolveDistThresholdSq)
 		{
-			ResolvePeekSideForCover(Ctx.Companion, Ctx.Target, Cover.Data, TargetLocation);
+			ResolvePeekSideForCover(Ctx.Companion, Ctx.Target, Cover.Data, TargetSightLoc);
 			LastPeekResolveCoverLoc = CoverLoc;
 			LastPeekResolveTargetLoc = TargetLocation;
 		}
@@ -2776,7 +2832,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			// Stamp MarkVacated so the EQS PostVacate filter blocks an immediate re-pick of the same blind point.
 			if (!UCoverGeometryStatics::CanPeekShoot(Ctx.Companion->GetWorld(), Cover.Data,
 				UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch,
-				TargetLocation, StandFireEyeHeight, Ctx.Target, Ctx.Companion))
+				TargetSightLoc, StandFireEyeHeight, Ctx.Target, Ctx.Companion))
 			{
 				// Frozen while suppressed — "pinned and can't peek" must not count as "blind point";
 				// invalidating here is exactly the fire-before-moving churn the gate exists to stop.
@@ -2959,7 +3015,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		AActor* BlockedBy = nullptr;
 		bool bLosFromCover = UCoverGeometryStatics::CanPeekShoot(Ctx.Companion->GetWorld(), Cover.Data,
 			UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch,
-			TargetLocation, StandFireEyeHeight, Ctx.Target, Ctx.Companion);
+			TargetSightLoc, StandFireEyeHeight, Ctx.Target, Ctx.Companion);
 		if (bDebugLogging)
 		{
 			const bool bNowBlocked = !bLosFromCover;
@@ -3015,9 +3071,76 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					}
 				}
 			}
-			return;
+
+			// Blind-hold release (enemy failed-peek relocate parity): the same-wall shuffle found
+			// nothing and peeks keep coming up empty — this position cannot fight this target.
+			// Release the cover to open-engage: move-shoot closes toward the fight and the EQS
+			// re-covers near it once triggers re-trip. Pressure on the player shortens the patience —
+			// the companion must not hide while the player is being pushed.
+			BlindHoldTime += DeltaSeconds;
+			{
+				bool bPlayerPressured = false;
+				if (PlayerPressureReleaseSeconds > 0.f)
+				{
+					if (const AEnemyCharacter* PressureEnemy = Cast<AEnemyCharacter>(Ctx.Target))
+					{
+						const AActor* PressurePlayer = Cast<AActor>(Ctx.Blackboard->GetValueAsObject(ACompanionAIController::BB_PlayerActor));
+						bPlayerPressured = PressureEnemy->HasDetectedPlayer() && IsValid(PressurePlayer)
+							&& FVector::DistSquared(PressurePlayer->GetActorLocation(), PressureEnemy->GetActorLocation())
+								<= FMath::Square(PlayerPressureRadius);
+					}
+				}
+				const bool bPressureTrip = bPlayerPressured && BlindHoldTime >= PlayerPressureReleaseSeconds;
+				const bool bFruitlessTrip = FruitlessPeeksBeforeRelease > 0 && FruitlessPeeks >= FruitlessPeeksBeforeRelease;
+				const bool bHoldTrip = BlindHoldReleaseSeconds > 0.f && BlindHoldTime >= BlindHoldReleaseSeconds;
+				if (bPressureTrip || bFruitlessTrip || bHoldTrip)
+				{
+					UE_LOG(LogCompanionAI, Log,
+						TEXT("%s: Cover RELEASE reason=%s blindHold=%.1f fruitless=%d — open-engage reposition"),
+						*Ctx.Companion->GetName(),
+						bPressureTrip ? TEXT("player-pressured") : bFruitlessTrip ? TEXT("fruitless-peeks") : TEXT("blind-hold"),
+						BlindHoldTime, FruitlessPeeks);
+					if (UWorld* ReleaseWorld = Ctx.Companion->GetWorld())
+					{
+						if (UCoverReservationSubsystem* ReleaseSub = ReleaseWorld->GetSubsystem<UCoverReservationSubsystem>())
+						{
+							if (AController* ReleaseCtrl = Ctx.Companion->GetController())
+								ReleaseSub->MarkVacated(Cover.Handle, ReleaseCtrl);
+						}
+					}
+					Ctx.Blackboard->ClearValue(CoverTargetKey.GetSelectedKeyID());
+					Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+					BlindHoldTime = 0.f;
+					FruitlessPeeks = 0;
+					return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+				}
+			}
+
+			// Speculative peek (enemy "peek for peeking's sake" parity): the target is known but
+			// unseen from here and no verified shuffle destination exists — occasionally run the
+			// normal peek decision anyway to LOOK. The burst-time muzzle/LoS gates withhold fire
+			// unless the enemy is actually exposed, so a losing roll just costs a cautious look.
+			bool bSpeculativePeek = false;
+			if (!bSuppressed && SpeculativePeekChance > 0.f)
+			{
+				SpeculativePeekTimer += DeltaSeconds;
+				if (SpeculativePeekTimer >= SpeculativePeekInterval)
+				{
+					SpeculativePeekTimer = 0.f;
+					bSpeculativePeek = FMath::FRand() < SpeculativePeekChance;
+				}
+			}
+			if (!bSpeculativePeek) return;
+			if (bDebugLogging || CovDbg())
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: SPECULATIVE-PEEK roll passed — peeking without verified LoS"),
+					*Ctx.Companion->GetName());
 		}
-		BlockedRecheckHits = 0;
+		else
+		{
+			BlockedRecheckHits = 0;
+			SpeculativePeekTimer = 0.f;
+			BlindHoldTime = 0.f;
+		}
 
 		// Gate 3: reload.
 		if (Ctx.Companion->NeedsReload() && !Ctx.Companion->IsReloading())
@@ -3284,6 +3407,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			bRepositionStandPhase = true;
 			bStandUpRepositionWalking = false;
 			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
+			AmmoAtBurstStart = Ctx.Companion->GetCurrentAmmo();
 			bIsFiringBurst = true;
 			if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
 				AIC->StopMovement();
@@ -3303,9 +3427,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					: Anim->PlayPeekFire(ResolvedPeekSide);
 			}
 			// Muzzle-verified first shot: the 10 Hz withhold only runs from the next tick — a blocked
-			// commit starts HELD and the withhold resumes fire when the muzzle clears.
+			// commit starts HELD and the withhold resumes fire when the muzzle clears. PeekFireDelaySeconds
+			// likewise starts HELD until the animation reaches exposure.
 			StandBurstMuzzleCheckTimer = 0.f;
-			if (IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickIgnoredAttached))
+			PeekFireDelayRemaining = PeekFireDelaySeconds;
+			if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickIgnoredAttached))
 			{
 				Ctx.Companion->StartWeaponFire();
 				bStandBurstFireHeld = false;
@@ -3356,6 +3482,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			CurrentBurstAction = EPeekAction::CornerPeek;
 			LastDecisionTime = Now;
 			bCornerPeekReturning = false;
+			AmmoAtBurstStart = Ctx.Companion->GetCurrentAmmo();
+			PeekFireDelayRemaining = PeekFireDelaySeconds;
 			bIsFiringBurst = true;
 			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
 			if (Cover.IsValid())
@@ -3428,9 +3556,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=StandQuickPeekCommit action=UnCrouch"),
 			*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 		Ctx.Companion->UnCrouch();
-		// Muzzle-verified first shot (mirrors the StandUpAndReposition commit).
+		// Muzzle-verified first shot (mirrors the StandUpAndReposition commit). PeekFireDelaySeconds
+		// starts the burst HELD so the withhold resumes fire once the animation has reached exposure.
 		StandBurstMuzzleCheckTimer = 0.f;
-		if (IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickIgnoredAttached))
+		AmmoAtBurstStart = Ctx.Companion->GetCurrentAmmo();
+		PeekFireDelayRemaining = PeekFireDelaySeconds;
+		if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickIgnoredAttached))
 		{
 			Ctx.Companion->StartWeaponFire();
 			bStandBurstFireHeld = false;
@@ -3462,6 +3593,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		LosBlockedAccum = 0.f;
 		TimeInOpenEngageNoCover = 0.f;
 		BurstTimer -= DeltaSeconds;
+		// Peek fire delay: hold the first shot until the peek animation has reached exposure.
+		if (PeekFireDelayRemaining > 0.f)
+			PeekFireDelayRemaining -= DeltaSeconds;
 
 		if (bDebugLogging)
 		{
@@ -3627,6 +3761,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		Ctx.Companion->StopWeaponFire();
 		bIsFiringBurst = false;
 		BurstTimer = 0.f;
+		// Burst ended without ReturnToCover — drop the fruitless-peek baseline or a later peek at a
+		// different point inherits it and counts a phantom fruitless.
+		AmmoAtBurstStart = -1;
 		UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=CoverFlippedMidBurst action=UnCrouch"),
 			*GetNameSafe(Ctx.Companion), Ctx.Companion->GetWorld() ? Ctx.Companion->GetWorld()->GetTimeSeconds() : 0.f);
 		Ctx.Companion->UnCrouch();
@@ -3793,7 +3930,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					// Peek-LoS gate: must be able to actually fire from this cover toward the threat.
 					if (!UCoverGeometryStatics::CanPeekShoot(CoverWorld, Candidate.Data,
 						UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
-						TargetLocation, StandFireEyeHeight, Ctx.Target, Ctx.Companion))
+						TargetSightLoc, StandFireEyeHeight, Ctx.Target, Ctx.Companion))
 						continue;
 
 					if (CoverTuning->bCoverRequiresBodyProtection)

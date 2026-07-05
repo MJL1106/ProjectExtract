@@ -271,6 +271,16 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0"))
 	float PlayerAdvanceGateDistance = 250.f;
 
+	// Hard reject for relocate candidates within this 2D distance (cm) of a cover an ENEMY has
+	// declared intent on (enemy MinHostileCoverDistance parity). 0 = off.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0"))
+	float MinHostileCoverDistance = 250.f;
+
+	// Hard reject for relocate candidates within this 2D distance (cm) of a living enemy pawn —
+	// never set up on a wall an enemy is standing at (enemy MinHostilePawnDistance parity). 0 = off.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0"))
+	float MinHostilePawnDistance = 300.f;
+
 	// When true, FindBestCoverFor rejects any slot whose hunkered body position is NOT shielded from
 	// the target by world geometry. Slots that are off to the side or behind the companion relative
 	// to the threat are discarded. Disable to revert to the old unfiltered pick.

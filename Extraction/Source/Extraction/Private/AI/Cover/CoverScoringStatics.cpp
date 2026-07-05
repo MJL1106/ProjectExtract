@@ -208,7 +208,13 @@ float UCoverScoringStatics::ApplyMultiThreatPenalty(float Score, const UWorld* W
 	const float Factor = FMath::Pow(ClampedPenalty, static_cast<float>(Uncovered));
 	// Press posture flips the band weight, so raw scores can be negative — multiply would then
 	// IMPROVE an exposed candidate. Scale away from zero on the negative side instead.
-	return Score >= 0.f ? Score * Factor : Score / Factor;
+	return ApplyScorePenalty(Score, Factor);
+}
+
+float UCoverScoringStatics::ApplyScorePenalty(float Score, float Penalty)
+{
+	const float ClampedPenalty = FMath::Clamp(Penalty, 0.01f, 1.f);
+	return Score >= 0.f ? Score * ClampedPenalty : Score / ClampedPenalty;
 }
 
 void UCoverScoringStatics::GatherHostileAnchors(UWorld* World, const APawn* QuerierPawn,

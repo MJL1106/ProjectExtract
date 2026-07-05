@@ -97,6 +97,14 @@ Prefer custom subagents wherever the task matches an agent description. Main cha
 - For parallelisable dispatches (reviewer + multiple plan agents), issue them in a single message, not sequentially.
 - Pure research / "where does X live" → use `Glob` / `Grep` directly. Don't spawn an agent for a one-line answer.
 
+### Engine state is a source of truth — check it, don't guess
+
+When planning, investigating a bug, or forming a picture of "what does this actually do right now" for anything in-engine (current BP graph wiring, DataAsset/DataTable values, live AnimBP state, level actor placement, EQS/BT authoring, widget layout) — this applies beyond explicit "wire this up" requests, including planning and bug investigation:
+- If the answer would be more reliable read from the running editor than inferred from `.uasset` diffs or memory, **check the engine** — dispatch `ue5-inengine-scout` (Sonnet, read-only) rather than guessing from C++ or asking the user to go look. Reserve `ue5-inengine-agent` (Opus) for when the inspection turns into an edit.
+- **Scale scouts to the question, favoring speed over conservatism.** If the recon splits into independent inspection threads (e.g. "check the BT, the Blackboard, and the EQS query" or "inspect 3 unrelated widgets"), dispatch one scout per thread **in a single message** so they run concurrently — up to 5 at once. Don't default to 1 scout doing everything sequentially when 3-5 parallel scouts would answer it faster; don't over-split a single-thread question into multiple scouts either. Judge the split by independence of the sub-questions, not by a fixed count.
+- If the editor isn't running, **boot it first** — route through `ue5-inengine-agent` (it self-boots via the `boot-engine` skill) since scouts can't boot the editor themselves. Don't skip the check just because the editor is currently down, and don't ask the user to open it.
+- This is read-only reconnaissance for planning purposes — it does not replace the implement/review/build loop, and it does not authorize edits during an investigation.
+
 ### The loop in detail
 
 0. **`ue5-team` skill** — decide solo vs team (mandatory Step 0 for every non-trivial task)
@@ -126,6 +134,7 @@ Prefer custom subagents wherever the task matches an agent description. Main cha
 | Task | Agent |
 |---|---|
 | In-engine asset/BP/material/UMG/Niagara/DataAsset/level wiring, asset import, **Behavior Trees/Blackboards/EQS** — via MCP, no C++ | `ue5-inengine-agent` (or invoke the `inengine-agent` skill) |
+| Read-only in-engine recon — "what's wired", "what does X currently look like", pre-flight brief before an edit, planning/bug-investigation lookups. Cheap, parallelizable (up to 5 at once) | `ue5-inengine-scout` |
 | Unresolved externals, IWYU warnings, missing API macros, Build.cs edits, linker errors | `ue5-build-specialist` |
 | Writing automation tests, scaffolding a test module | `ue5-qa-tester` |
 | UE5 API behaviour unclear / new engine feature / want to confirm best practice | `ue5-doc-researcher` |

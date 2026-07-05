@@ -8,6 +8,7 @@
 #include "ExtractionDamageType.h"
 #include "HealthComponent.h"
 #include "SuppressionComponent.h"
+#include "CompanionCharacter.h"
 #include "EnemyCharacter.h"
 #include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
@@ -495,6 +496,10 @@ void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& Tra
 
 	const float NearMissRadiusSq = NearMissRadius * NearMissRadius;
 
+	// Per-shooter weight: enemies acknowledge companion fire below player/enemy fire.
+	const bool bCompanionShooter = GetOwner() && GetOwner()->IsA<ACompanionCharacter>();
+	const float NearMissWeight = bCompanionShooter ? CompanionNearMissWeight : 1.f;
+
 	for (const FSuppressionTarget& Target : CachedSuppressionTargets)
 	{
 		APawn* Pawn = Target.Pawn.Get();
@@ -509,7 +514,10 @@ void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& Tra
 
 		if (DistSq <= NearMissRadiusSq)
 		{
-			Comp->RegisterNearMiss();
+			Comp->RegisterNearMiss(NearMissWeight);
+			if (bCompanionShooter)
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("COMPANION-NEARMISS -> %s w=%.2f supp=%.2f"),
+					*GetNameSafe(Pawn), NearMissWeight, Comp->GetSuppression01());
 
 			// Part A: notify enemy awareness so near-misses escalate alertness.
 			if (const AEnemyCharacter* EnemyChar = Cast<AEnemyCharacter>(Pawn))

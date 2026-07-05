@@ -22,10 +22,21 @@ struct FCoverSwitchMonitorMemory
 	FCoverHandle PendingBestCover;
 	int32 ConsecutiveBetterCount = 0;
 
-	// Player-advance tracking for the Normal/Stealth advance gate: accumulated player ground-gain
-	// toward the current threat, decayed per re-eval so stationary play bleeds back to zero.
-	TWeakObjectPtr<AActor> LastAdvanceThreat;
-	float LastPlayerThreatDist = -1.f;
+	// Blind-current persistence — the G5 bypass + score penalty need 2 consecutive blind re-evals
+	// AT THE SAME cover against the SAME target. Task-internal shuffles swap the BB cover without
+	// any Mem reset firing, and a target switch is likewise invisible — either would let one stale
+	// count + one fresh blind read trip the bypass on the first re-eval (the single-sample flip-flop
+	// this counter damps).
+	int32 ConsecutiveBlindReEvals = 0;
+	FCoverHandle LastBlindEvalCover;
+	TWeakObjectPtr<AActor> LastBlindEvalTarget;
+
+	// Player-advance tracking for the Normal/Stealth advance gate: accumulated PLAYER displacement
+	// projected toward the current threat, decayed per re-eval so stationary play bleeds back to
+	// zero. Displacement-based, not range-based — an enemy rushing a stationary player must not
+	// open the gate.
+	FVector LastPlayerAdvanceLoc = FVector::ZeroVector;
+	bool bHasPlayerAdvanceSample = false;
 	float PlayerAdvanceProgress = 0.f;
 };
 

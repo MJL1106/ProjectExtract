@@ -651,6 +651,11 @@ private:
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Suppression", meta = (ClampMin = "0.0"))
 	float NearMissRadius = 150.f;
 
+	/** Near-miss weight when the firing owner is the companion (player/enemy fire = 1). Enemies
+	 *  should acknowledge companion fire, weighted below the player's. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Suppression", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float CompanionNearMissWeight = 0.75f;
+
 	struct FSuppressionTarget
 	{
 		TWeakObjectPtr<APawn> Pawn;

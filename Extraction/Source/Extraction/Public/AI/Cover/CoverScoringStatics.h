@@ -118,6 +118,11 @@ public:
 		float Standoff, float ChestHeight, const APawn* IgnorePawn,
 		const TArray<FEnemyKnownThreat>& ExtraThreats, float Penalty);
 
+	/** Sign-aware multiplicative penalty primitive: scales positive scores down, negative scores away
+	 *  from zero — a plain multiply IMPROVES a negative score (Press-flipped bands go negative), which
+	 *  inverts the penalty exactly when it matters. Penalty clamped to [0.01, 1]. */
+	static float ApplyScorePenalty(float Score, float Penalty);
+
 	/** Hostile anchors for the claim-collision reject, from QuerierPawn's side (enemy vs rest —
 	 *  the split the awareness/tag systems encode). Covers hostiles intend + living hostile pawns.
 	 *  Shared by the EQS CoverIntent filter and the C++ picker loops so both reject identically. */

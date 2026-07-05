@@ -245,6 +245,42 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float MinCoverDwellBeforeReEval = 2.0f;
 
+	/** Enemy-parity "peek for peeking's sake": when cover LoS to the known target stays blocked and
+	 *  no shuffle destination exists, roll this chance every SpeculativePeekInterval to run the
+	 *  normal peek decision anyway — the burst-time muzzle/LoS gates withhold fire unless the enemy
+	 *  is actually exposed, so a losing peek is just a look. 0 disables. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float SpeculativePeekChance = 0.35f;
+
+	/** Seconds between speculative-peek rolls while cover LoS stays blocked. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.5"))
+	float SpeculativePeekInterval = 3.0f;
+
+	/** Enemy failed-peek parity: consecutive peek bursts that fired ZERO rounds before the blind
+	 *  cover is RELEASED to open-engage (reposition toward the fight). 0 disables. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0", ClampMax = "8"))
+	int32 FruitlessPeeksBeforeRelease = 2;
+
+	/** Total seconds of blocked cover-LoS holding before the cover is released to open-engage.
+	 *  0 disables. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0"))
+	float BlindHoldReleaseSeconds = 8.f;
+
+	/** Faster release while the target is actively pressuring the player (has detected them and is
+	 *  within PlayerPressureRadius of them) — the companion must not hide while the player is being
+	 *  pushed. 0 disables the fast path. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0"))
+	float PlayerPressureReleaseSeconds = 3.f;
+
+	/** Target-to-player distance (cm) inside which the target counts as pressuring the player. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0"))
+	float PlayerPressureRadius = 3500.f;
+
+	/** Delay (s) between committing a peek (Stand/Quick/CornerPeek/StandUpReposition) and the first
+	 *  shot, so the peek animation reaches exposure before the muzzle goes live. 0 = fire immediately. */
+	UPROPERTY(EditAnywhere, Category = "Cover", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float PeekFireDelaySeconds = 0.5f;
+
 	/** Toggle verbose exit-gate logs + debug draw under LogCompanionAI. */
 	UPROPERTY(EditAnywhere, Category = "Debug")
 	bool bDebugLogging = false;
@@ -430,6 +466,23 @@ private:
 	/** Consecutive failed no-peek-los validity evals (1 Hz) — invalidate only at the
 	 *  CoverCompromiseDebounce threshold instead of instantly. */
 	int32 NoPeekLosStrikes = 0;
+
+	/** Accrues while GATE2 stays blocked; a speculative-peek roll fires each SpeculativePeekInterval. */
+	float SpeculativePeekTimer = 0.f;
+
+	/** Total CoverIdle time with cover LoS blocked at this point vs this target — drives the
+	 *  blind-hold release. Reset on LoS clear, on firing, and on cover change. */
+	float BlindHoldTime = 0.f;
+
+	/** Consecutive peek bursts that fired zero rounds (enemy failed-peek parity). */
+	int32 FruitlessPeeks = 0;
+
+	/** Magazine count captured when a fire-action burst commits; -1 = no burst pending measurement.
+	 *  ReturnToCover compares against it to detect a fruitless (zero-shot) peek. */
+	int32 AmmoAtBurstStart = -1;
+
+	/** Counts down from PeekFireDelaySeconds after a peek commits; fire starts/resumes only at 0. */
+	float PeekFireDelayRemaining = 0.f;
 
 	/** Zero both cycle counters AND the character mirror in the same call — the monitor's G5 gate
 	 *  reads the mirror, and a one-frame stale value at a task-internal swap lets a pre-swap
