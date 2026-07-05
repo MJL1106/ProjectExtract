@@ -1115,7 +1115,9 @@ void UEnemyAnimInstance::HandleGrenadeThrow(FVector PredictedLanding, float Time
 	if (!IsValid(Montage)) return;
 	if (Montage_IsPlaying(Montage)) return;
 
-	Montage_Play(Montage);
+	// bStopAllMontages=false: the throw must not kill the group-Cover idle/peek montage — the
+	// UpperBody slot layers the throw over the tucked body, legs stay in the cover pose.
+	Montage_Play(Montage, 1.f, EMontagePlayReturnType::MontageLength, 0.f, false);
 	ActiveGrenadeMontage = Montage;
 }
 

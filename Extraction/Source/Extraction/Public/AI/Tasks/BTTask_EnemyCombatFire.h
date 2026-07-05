@@ -142,6 +142,12 @@ private:
 		/** Hunker destination of the active drift move (2D arrival test for the facing re-assert). */
 		FVector DriftArrivalPos = FVector::ZeroVector;
 
+		// --- In-task grenadier lob (replaces the BT lob branch, which aborted this task on
+		// every LOS loss — i.e. every tuck — and reset the cover pose) ---
+
+		/** Seconds LOS has been continuously absent while tucked (grenade trigger accumulate). */
+		float GrenadeLosBlockedAccum = 0.f;
+
 		// --- Blind-fire state (Feature A) ---
 
 		/** True once the per-suppression-episode roll has been made. Reset when suppression clears. */

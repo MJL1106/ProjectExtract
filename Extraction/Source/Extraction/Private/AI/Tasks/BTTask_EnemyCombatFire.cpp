@@ -8,6 +8,7 @@
 #include "EnemyArchetypeData.h"
 #include "EnemyAwarenessComponent.h"
 #include "EnemyCharacter.h"
+#include "EnemyGrenadierComponent.h"
 #include "SuppressionComponent.h"
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
@@ -248,6 +249,13 @@ static FVector GetPerceivedThreatLoc(const AController* Controller, const AActor
 	const UEnemyAwarenessComponent* Awareness = EnemyController ? EnemyController->GetAwarenessComponent() : nullptr;
 	bool bSighted = true;
 	return UCoverScoringStatics::GetPerceivedThreatLocation(Target, Awareness, bSighted);
+}
+
+/** True while the grenadier component is winding up a throw (non-grenadiers return false). */
+static bool IsGrenadeTelegraphing(const AEnemyCharacter* Enemy)
+{
+	const UEnemyGrenadierComponent* GrenComp = IsValid(Enemy) ? Enemy->GetGrenadierComponent() : nullptr;
+	return IsValid(GrenComp) && GrenComp->IsTelegraphing();
 }
 
 /** Returns true when the current cover point no longer protects against Target.
@@ -2093,6 +2101,42 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 	}
 
+	// --- Grenadier lob (in-task) ---
+	// Replaces the BT lob branch: its HasLineOfSight observer aborted this task on every tuck
+	// (tucked = no LOS), un-crouching and resetting the cover pose. The trigger now lives here so
+	// the grenadier stays posed: accumulate LOS-blocked time while tucked-stationary, throw from
+	// the tucked pose at the DA threshold. CanThrow() covers supply/cooldown/telegraph-in-progress.
+	if (UEnemyGrenadierComponent* GrenComp = Enemy->GetGrenadierComponent())
+	{
+		if (bHasLOS)
+		{
+			Mem->GrenadeLosBlockedAccum = 0.f;
+		}
+		else if (Mem->Phase == EFireTaskPhase::Pause || Mem->Phase == EFireTaskPhase::Acquire)
+		{
+			const UCoverPoseComponent* GrenPose = Enemy->GetCoverPoseComponent();
+			const bool bGrenTucked = !IsValid(GrenPose) || !GrenPose->bPeeking;
+			const bool bGrenStationary = !Mem->bCoverMoveFacingActive && !Mem->bShufflePending
+				&& !Mem->bDriftCorrecting && !Mem->bBlindFiringNow;
+			if (bGrenTucked && bGrenStationary)
+			{
+				Mem->GrenadeLosBlockedAccum += DeltaSeconds;
+				if (Mem->GrenadeLosBlockedAccum >= DA->GrenadeLobTriggerLOSBlockedTime)
+				{
+					// Full window between attempts whether the throw commits or fails (range/arc/
+					// zero last-known) — no per-tick arc-solve retries.
+					Mem->GrenadeLosBlockedAccum = 0.f;
+
+					const AWeaponBase* GrenWeapon = Enemy->GetCurrentWeapon();
+					const bool bGrenReloading = IsValid(GrenWeapon) && GrenWeapon->IsReloading();
+					const FVector GrenLastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
+					if (!bGrenReloading && GrenComp->CanThrow() && !GrenLastKnown.IsNearlyZero())
+						GrenComp->TryThrowAt(GrenLastKnown);
+				}
+			}
+		}
+	}
+
 	switch (Mem->Phase)
 	{
 	case EFireTaskPhase::Acquire:
@@ -2115,8 +2159,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
 				}
 
-				// Blind-fire path: stay hunkered, aim at last-known, fire with extra spread
-				if (Mem->bBlindFireDecided && Mem->bBlindFireChosen && bHasCoverAcq && !Mem->bBlindFiringNow)
+				// Blind-fire path: stay hunkered, aim at last-known, fire with extra spread.
+				// Never start a blind burst mid grenade wind-up (one-handed spray over a throw).
+				if (Mem->bBlindFireDecided && Mem->bBlindFireChosen && bHasCoverAcq && !Mem->bBlindFiringNow
+					&& !IsGrenadeTelegraphing(Enemy))
 				{
 					// Fix 1: gate on non-zero last-known — a zero last-known must fall back to hide.
 					const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
@@ -2168,6 +2214,13 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					Mem->PhaseTimer = FMath::RandRange(0.15f, 0.25f);
 					break;
 				}
+			}
+
+			// Grenade-throw gate: stay tucked while the wind-up plays — no peek until release.
+			if (IsGrenadeTelegraphing(Enemy))
+			{
+				Mem->PhaseTimer = FMath::RandRange(0.15f, 0.25f);
+				break;
 			}
 
 			// Expose: read current cover from AICS CoverTarget BB key.
@@ -2844,6 +2897,13 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	case EFireTaskPhase::Pause:
 		if (Mem->PhaseTimer <= 0.f && !Mem->bBlindFiringNow)
 		{
+			// Hold the pause while a grenade wind-up plays — no shuffle/relocate/peek mid-throw.
+			if (IsGrenadeTelegraphing(Enemy))
+			{
+				Mem->PhaseTimer = 0.25f;
+				break;
+			}
+
 			// --- Cover shuffle roll (Feature B) ---
 			// Fix 3: skip shuffle when a flank relocate is pending — shuffle moves same-wall
 			// (still flanked) and resets the debounce, delaying the legitimate relocate.
@@ -3035,6 +3095,11 @@ void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerCo
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
 	if (IsValid(Weapon))
 		Weapon->StopFiring();
+
+	// Cancel an in-flight grenade wind-up (parity with the old lob task's AbortTask) —
+	// no-op unless telegraphing. The cancel broadcast stops the throw montage.
+	if (UEnemyGrenadierComponent* GrenComp = Enemy->GetGrenadierComponent())
+		GrenComp->CancelThrow();
 
 	Enemy->SetAimTarget(nullptr);
 	Enemy->SetHasTargetLOS(false);
@@ -3234,6 +3299,10 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 	Mem->bCoverMoveFacingActive = false;
 	ClearPendingShuffle(Enemy, Mem);
 
+	// Cancel an in-flight grenade wind-up before the transit — same reasoning as ExecuteRelocate.
+	if (UEnemyGrenadierComponent* GrenComp = Enemy->GetGrenadierComponent())
+		GrenComp->CancelThrow();
+
 	UCoverPoseComponent* ReseekPose = Enemy->GetCoverPoseComponent();
 	if (IsValid(ReseekPose))
 	{
@@ -3285,6 +3354,11 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 
 	// Defensive: clear blind-fire if active before relocating
 	ClearBlindFireState(Enemy, Mem);
+
+	// Cancel an in-flight grenade wind-up — a relocate mid-telegraph would run off with the
+	// throw montage playing and StartFiring over it (the cancel broadcast stops the montage).
+	if (UEnemyGrenadierComponent* GrenComp = Enemy->GetGrenadierComponent())
+		GrenComp->CancelThrow();
 
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	if (!BB) return;
