@@ -4,8 +4,10 @@
 
 #include "BTService_CoverSwitchMonitor.h"
 #include "AI/BlackboardKeyType_Cover.h"
+#include "AI/CompanionCoverStatics.h"
 #include "CoverSystem.h"
 #include "CoverGeometryStatics.h"
+#include "CoverScoringStatics.h"
 #include "CoverReservationSubsystem.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
@@ -17,77 +19,25 @@
 #include "WeaponBase.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/Character.h"
-#include "Perception/AIPerceptionComponent.h"
-#include "Perception/AISense_Sight.h"
-#include "GameplayTagAssetInterface.h"
-#include "HealthComponent.h"
-#include "ExtractionTypes.h"
+#include "HAL/IConsoleManager.h"
 
 namespace
 {
-	// --- Scoring weights (ported verbatim from CoverRegistrySubsystem::ScoreSlotFor) ---
-	constexpr float Weight_Proximity  = 1.0f;
-	constexpr float Weight_Distance   = 0.7f;
-	constexpr float Weight_CoverBonus = 0.15f;
-	constexpr float IdealDistMin      = 500.f;
-	constexpr float IdealDistRange    = 700.f;
 	constexpr float DefaultCapsuleRadius = 34.f;
 
-	/** Shared scoring helper. Mirrors CoverRegistrySubsystem::ScoreSlotFor / the enemy's ScoreCoverCandidate. */
-	float ScoreCoverCandidate(const FVector& QuerierLoc, const FVector& ThreatLoc, const FVector& CoverLoc, float MaxRadius)
+	/** Per-re-eval decay on the player-advance accumulator (re-evals ~1 s apart) — a player who
+	 *  stops pushing bleeds back below the gate within a few evals. */
+	constexpr float PlayerAdvanceDecayPerReEval = 0.75f;
+
+	/** Shared with the combat task's companion.CoverDebug cvar (defined in BTTask_CompanionCombat.cpp). */
+	bool MonitorCovDbg()
 	{
-		const float DistToQuerier = FVector::Dist(QuerierLoc, CoverLoc);
-		const float ProxScore     = FMath::Clamp(1.f - DistToQuerier / MaxRadius, 0.f, 1.f);
-		const float DistToTarget  = FVector::Dist(CoverLoc, ThreatLoc);
-		const float DistScore     = FMath::Clamp((DistToTarget - IdealDistMin) / IdealDistRange, 0.f, 1.f);
-		return Weight_Proximity * ProxScore + Weight_Distance * DistScore + Weight_CoverBonus;
-	}
-
-	// Collects the companion's known EXTRA threats (sight-perceived, enemy-tagged, alive) as actors
-	// — everything except the focused CombatTarget — sorted nearest-first and capped to MaxExtra.
-	// Returns AActor* so callers can pass each threat into IsThreatCovered's IgnoreThreatActor param
-	// (FVector locations would leave IgnoreThreatActor=nullptr, making the trace hit the threat's own
-	// body and read as "covered" even when exposed).
-	void GatherExtraThreatActors(AAIController* Controller, APawn* Pawn, AActor* FocusTarget,
-		int32 MaxExtra, TArray<AActor*, TInlineAllocator<8>>& OutActors)
-	{
-		OutActors.Reset();
-		if (MaxExtra <= 0 || !IsValid(Pawn)) return;
-
-		UAIPerceptionComponent* Perception = Controller ? Controller->GetPerceptionComponent() : nullptr;
-		if (!Perception) return;
-
-		TArray<AActor*> Perceived;
-		Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), Perceived);
-
-		// Perception can hand back null/pending-kill entries; the Sort lambda derefs by const-ref.
-		Perceived.RemoveAll([](const AActor* A) { return !IsValid(A); });
-
-		const FVector PawnLoc = Pawn->GetActorLocation();
-
-		Perceived.Sort([PawnLoc](const AActor& A, const AActor& B)
-		{
-			return FVector::DistSquared(PawnLoc, A.GetActorLocation()) < FVector::DistSquared(PawnLoc, B.GetActorLocation());
-		});
-
-		for (AActor* Actor : Perceived)
-		{
-			if (!IsValid(Actor) || Actor == FocusTarget) continue;
-
-			const IGameplayTagAssetInterface* TagIface = Cast<IGameplayTagAssetInterface>(Actor);
-			if (!TagIface) continue;
-			FGameplayTagContainer Tags;
-			TagIface->GetOwnedGameplayTags(Tags);
-			if (!Tags.HasTag(TAG_Character_Enemy)) continue;
-
-			const UHealthComponent* Health = Actor->FindComponentByClass<UHealthComponent>();
-			if (Health && Health->IsDead()) continue;
-
-			OutActors.Add(Actor);
-			if (OutActors.Num() >= MaxExtra) break;
-		}
+		static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.CoverDebug"));
+		return CVar && CVar->GetInt() > 0;
 	}
 }
+// Threat gathering lives in CompanionCover:: (AI/CompanionCoverStatics.h) — shared with the
+// first-pick multi-threat re-rank in BTTask_MoveToCoverPoint so both test the same threat set.
 
 UBTService_CoverSwitchMonitor::UBTService_CoverSwitchMonitor()
 {
@@ -103,6 +53,20 @@ UBTService_CoverSwitchMonitor::UBTService_CoverSwitchMonitor()
 	{
 		CoverTargetKey.AllowedTypes.Add(NewObject<UBlackboardKeyType_Cover>(this, TEXT("CoverTargetKey_Cover")));
 	}
+}
+
+void UBTService_CoverSwitchMonitor::InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const
+{
+	Super::InitializeMemory(OwnerComp, NodeMemory, InitType);
+	FCoverSwitchMonitorMemory* Mem = CastInstanceNodeMemory<FCoverSwitchMonitorMemory>(NodeMemory);
+	new (Mem) FCoverSwitchMonitorMemory();
+}
+
+void UBTService_CoverSwitchMonitor::CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const
+{
+	FCoverSwitchMonitorMemory* Mem = CastInstanceNodeMemory<FCoverSwitchMonitorMemory>(NodeMemory);
+	Mem->~FCoverSwitchMonitorMemory();
+	Super::CleanupMemory(OwnerComp, NodeMemory, CleanupType);
 }
 
 void UBTService_CoverSwitchMonitor::InitializeFromAsset(UBehaviorTree& Asset)
@@ -183,15 +147,19 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		const float CapRadius = Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
 		const float Standoff = CapRadius + 10.f;
 		const FVector PawnLoc = Pawn->GetActorLocation();
-		// Enemies arrive edge-aligned (corner-snapped) — the arrival test must use the same position
-		// or dwell never starts at endpoint covers. Companions keep the plain hunker (their combat
-		// task doesn't edge-align).
+		// Both species arrive edge-aligned (corner-snapped) — the arrival test must use the same
+		// position or dwell never starts at endpoint covers.
 		const AEnemyCharacter* MonEnemy = Cast<AEnemyCharacter>(Pawn);
 		const UEnemyArchetypeData* MonDA = MonEnemy ? MonEnemy->GetArchetypeData() : nullptr;
-		const FVector HunkerLoc = MonDA
-			? UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
-				Pawn->GetWorld(), CurrentCover.Data, Standoff, CapRadius, MonDA->CoverCornerGap, Pawn)
-			: UCoverGeometryStatics::GetHunkerPosition(CurrentCover.Data, Standoff);
+		const ACompanionCharacter* MonCompanion = Cast<ACompanionCharacter>(Pawn);
+		FVector HunkerLoc;
+		if (MonDA)
+			HunkerLoc = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+				Pawn->GetWorld(), CurrentCover.Data, Standoff, CapRadius, MonDA->CoverCornerGap, Pawn);
+		else if (MonCompanion)
+			HunkerLoc = CompanionCover::CompanionHunkerPosition(*MonCompanion, CurrentCover.Data, Standoff);
+		else
+			HunkerLoc = UCoverGeometryStatics::GetHunkerPosition(CurrentCover.Data, Standoff);
 		const bool bArrivedNow = FVector::Dist2D(PawnLoc, HunkerLoc) <= ArrivalRadius;
 		if (!bArrivedNow)
 		{
@@ -213,18 +181,83 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 
 	Mem.TimeSinceReEval = 0.f;
 
+	// Exit-on-trigger-clear: the commit gate (BTTask_MoveToCoverPoint) has a release side — once
+	// nothing demands real cover any more (health recovered, mag topped up, threats thinned, fire
+	// lifted) and the exit dwell has passed, vacate and fall back to loose-cover open-engage.
+	// Release thresholds are widened (hysteresis) and the post-vacate cooldown blocks an immediate
+	// re-commit to the same point, so this can't pop-out thrash.
+	if (const ACompanionCharacter* ExitCompanion = Cast<ACompanionCharacter>(Pawn))
+	{
+		if (Mem.TimeSinceArrival >= FMath::Max(Tuning->CoverSwitchMinDwell, Tuning->CoverExitMinDwell))
+		{
+			const AWeaponBase* ExitWeapon = ExitCompanion->GetCurrentWeapon();
+			const bool bFiringNow = IsValid(ExitWeapon) && ExitWeapon->IsFiring();
+			const int32 ExitThreatCount = CompanionCover::CountKnownThreats(Controller, Tuning->CoverTriggerOutnumberedCount);
+			const CompanionCover::FCoverTriggers Release =
+				CompanionCover::EvaluateTriggers(*ExitCompanion, *Tuning, ExitThreatCount, /*bForRelease=*/true);
+			if (!bFiringNow && !Release.Any())
+			{
+				if (UCoverReservationSubsystem* ExitResSub = World->GetSubsystem<UCoverReservationSubsystem>())
+					ExitResSub->MarkVacated(CurrentCover.Handle, Controller);
+				BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
+				if (CoverLocationKey.SelectedKeyName != NAME_None)
+					BB->ClearValue(CoverLocationKey.SelectedKeyName);
+				BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+				Mem = {};
+				UE_LOG(LogCompanionAI, Log, TEXT("CoverExit: %s triggers cleared — vacating to open-engage"), *GetNameSafe(Pawn));
+				return;
+			}
+		}
+	}
+
 	// TODO: lift formation-point computation to a shared utility (spec §5.7 open question).
 	// FollowPlayer uses a velocity-relative offset; the spec wants a fixed actor-facing offset.
 	AActor* Player = Cast<AActor>(BB->GetValueAsObject(PlayerActorKey.SelectedKeyName));
 	if (!IsValid(Player)) return;
 
-	const FVector FormationPoint = Player->GetActorLocation()
-		+ Player->GetActorRightVector()      * Tuning->FormationOffsetRight
-		+ (-Player->GetActorForwardVector()) * Tuning->FormationOffsetBack;
+	// Combat mode anchors the candidate search AHEAD of the player (mirrors the FollowPlayer lead)
+	// so cover-to-cover switches gain ground instead of hanging back at the follow formation.
+	const ACompanionCharacter* CompanionPawn = Cast<ACompanionCharacter>(Pawn);
+	const bool bCombatLead = CompanionPawn && CompanionPawn->GetMode() == ECompanionMode::Combat;
+	const FVector FormationPoint = bCombatLead
+		? Player->GetActorLocation()
+			+ Player->GetActorForwardVector() * Tuning->CombatModeLeadDistance
+			+ Player->GetActorRightVector()   * Tuning->CombatModeLeadOffsetRight
+		: Player->GetActorLocation()
+			+ Player->GetActorRightVector()      * Tuning->FormationOffsetRight
+			+ (-Player->GetActorForwardVector()) * Tuning->FormationOffsetBack;
+
+	// Shared scorer params: neutral defaults reproduce the old local formula exactly for enemies
+	// and for Normal/Stealth companions; a Combat-mode companion gets the advance shift (band floor
+	// pulled toward the threat, band term flipped) from GetParamsForQuerier. MaxSearchRadius must
+	// track this service's own SearchRadius so proximity normalisation is unchanged.
+	FCoverScoreParams ScoreParams;
+	if (CompanionPawn)
+		ScoreParams = UCoverScoringStatics::GetParamsForQuerier(Pawn);
+	ScoreParams.MaxSearchRadius = SearchRadius;
 
 	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
 	const AController* CoverController = Pawn->GetController();
 	const FVector ThreatLoc = CombatTarget->GetActorLocation();
+
+	// Player-advance tracking (Normal/Stealth advance gate): accrue the player's ground gain toward
+	// the focused threat, decaying so it needs sustained pushing. A target switch resets the distance
+	// baseline — the jump between two threats' ranges is not player movement.
+	{
+		const float PlayerThreatDist = FVector::Dist2D(Player->GetActorLocation(), ThreatLoc);
+		if (Mem.LastAdvanceThreat.Get() != CombatTarget)
+		{
+			Mem.LastAdvanceThreat = CombatTarget;
+			Mem.LastPlayerThreatDist = -1.f;
+		}
+		Mem.PlayerAdvanceProgress *= PlayerAdvanceDecayPerReEval;
+		if (Mem.LastPlayerThreatDist >= 0.f)
+		{
+			const float Gain = Mem.LastPlayerThreatDist - PlayerThreatDist;
+			if (Gain > 0.f) Mem.PlayerAdvanceProgress += Gain;
+		}
+		Mem.LastPlayerThreatDist = PlayerThreatDist;
+	}
 
 	const ACharacter* ProtectionChar = Cast<ACharacter>(Pawn);
 	const UCapsuleComponent* PawnCap = ProtectionChar ? ProtectionChar->GetCapsuleComponent() : nullptr;
@@ -242,7 +275,7 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	// Returns AActor* (not FVector) so IsThreatCovered can ignore the threat's own body in the trace.
 	const int32 MaxExtraThreats = FMath::Max(0, Tuning->MaxThreatsForCoverScoring - 1);
 	TArray<AActor*, TInlineAllocator<8>> ExtraThreatActors;
-	GatherExtraThreatActors(Controller, Pawn, CombatTarget, MaxExtraThreats, ExtraThreatActors);
+	CompanionCover::GatherExtraThreatActors(Controller, Pawn, CombatTarget, MaxExtraThreats, ExtraThreatActors);
 	const float MultiThreatPenalty = FMath::Clamp(Tuning->MultiThreatExposurePenalty, 0.f, 1.f);
 	const bool bScoreMultiThreat = ExtraThreatActors.Num() > 0 && MultiThreatPenalty < 1.f && Tuning->bCoverRequiresBodyProtection;
 
@@ -287,7 +320,10 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		}
 
 		const float DistSq = FVector::DistSquared(FormationPoint, Candidate.Data.Location);
-		float Score = ScoreCoverCandidate(FormationPoint, ThreatLoc, Candidate.Data.Location, SearchRadius);
+		// bBodyProtected=false: protection is a hard reject above, not a scored bonus — matches the
+		// old local formula which had no protective term.
+		float Score = UCoverScoringStatics::ScoreCandidate(World, Candidate.Data, FormationPoint, ThreatLoc,
+			/*bBodyProtected=*/ false, ScoreParams);
 
 		// Multi-threat exposure penalty: for each of the closest extra threats this candidate fails to
 		// shield the body from, multiply the score down. Prefers cover that protects against the most
@@ -324,7 +360,8 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		return;
 	}
 
-	float CurrentScore = ScoreCoverCandidate(FormationPoint, ThreatLoc, CurrentCover.Data.Location, SearchRadius);
+	float CurrentScore = UCoverScoringStatics::ScoreCandidate(World, CurrentCover.Data, FormationPoint, ThreatLoc,
+		/*bBodyProtected=*/ false, ScoreParams);
 
 	// Apply the same penalties to CurrentScore that candidates receive — without this the current
 	// cover gets a free pass on arc violations and multi-threat exposure, making the 1.2x beat margin
@@ -354,7 +391,41 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 			CurrentScore *= MultiThreatPenalty;
 	}
 
-	if (BestScore < CurrentScore * Tuning->CoverSwitchScoreMargin) // P6
+	// Blind-current: no peek position at the current point has LoS to the focused target. Such a
+	// point can never earn peek cycles (the G5 gate would deadlock it — same rationale as the combat
+	// task's blind-shuffle exemption) and must not defend its score, or the companion camps a point
+	// it cannot shoot from. Every candidate above already passed the CanPeekShoot filter, so a commit
+	// here always lands on a point with a verified shot.
+	const bool bCurrentBlind = !UCoverGeometryStatics::CanPeekShoot(World, CurrentCover.Data,
+		UCoverGeometryStatics::GetCoverHeight(CurrentCover.Data) == ECoverHeight::Crouch,
+		ThreatLoc, 150.f, CombatTarget, Pawn);
+	if (bCurrentBlind)
+		CurrentScore *= MultiThreatPenalty;
+
+	// Advance ("move up, take space"): a candidate that meaningfully gains ground toward the threat
+	// — and already passed the body-protection gate in the loop above — only needs AdvanceScoreMargin,
+	// so a protected sidegrade can take ground instead of waiting for a 1.2x upgrade that never comes.
+	// Combat mode advances freely; Normal/Stealth advance only while the PLAYER is gaining ground on
+	// the threat (companion takes space with you, not ahead of you). Ordinary switches keep
+	// CoverSwitchScoreMargin.
+	float RequiredMargin = Tuning->CoverSwitchScoreMargin;
+	if (Tuning->bCombatAllowAdvance
+		&& (bCombatLead || Mem.PlayerAdvanceProgress >= Tuning->PlayerAdvanceGateDistance))
+	{
+		constexpr float MinAdvanceGain = 150.f;
+		const float CandDistToThreat = FVector::Dist2D(BestCover.Data.Location, ThreatLoc);
+		const float CurDistToThreat  = FVector::Dist2D(CurrentCover.Data.Location, ThreatLoc);
+		if (CandDistToThreat < CurDistToThreat - MinAdvanceGain)
+			RequiredMargin = Tuning->AdvanceScoreMargin;
+	}
+
+	// Multiplicative margins invert for non-positive scores (cur -0.55 x 1.2 = -0.66 LOWERS the
+	// bar → any candidate wins every re-eval → constant churn). Non-positive current scores use an
+	// absolute improvement bar instead.
+	const bool bBeatsBar = CurrentScore > 0.f
+		? BestScore >= CurrentScore * RequiredMargin
+		: BestScore >= CurrentScore + Tuning->CoverSwitchMinScoreGain;
+	if (!bBeatsBar) // P6
 	{
 		Mem.PendingBestCover = FCoverHandle();
 		Mem.ConsecutiveBetterCount = 0;
@@ -366,6 +437,21 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn);
 	const AWeaponBase* Weapon = Companion ? Companion->GetCurrentWeapon() : nullptr;
 	if (IsValid(Weapon) && Weapon->IsFiring()) return;
+
+	// G5 — commit gate (enemy MinPeekCyclesBeforeRelocate parity): a score-based switch may not
+	// move a companion off a point it never completed a peek cycle at. Trigger-driven exits above
+	// stay ungated, and a blind current point is exempt — it can never earn a cycle, so the gate
+	// would deadlock it. Reset the pending debounce so a stale candidate can't insta-commit later.
+	if (!bCurrentBlind && Companion && Companion->GetPeekCyclesAtCurrentCover() < Tuning->MinPeekCyclesBeforeRelocate)
+	{
+		if (MonitorCovDbg())
+			UE_LOG(LogCompanionAI, Log, TEXT("[COVDBG] %s MONITOR G5-skip cycles=%d < %d (best=%.2f cur=%.2f)"),
+				*GetNameSafe(Pawn), Companion->GetPeekCyclesAtCurrentCover(),
+				Tuning->MinPeekCyclesBeforeRelocate, BestScore, CurrentScore);
+		Mem.PendingBestCover = FCoverHandle();
+		Mem.ConsecutiveBetterCount = 0;
+		return;
+	}
 
 	// G2 — debounce: require two consecutive re-evals agreeing on the same candidate before committing.
 	if (Mem.PendingBestCover == BestCover.Handle)
@@ -395,8 +481,9 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	Mem = {};
 
 	UE_LOG(LogCompanionAI, Log,
-		TEXT("CoverSwitch: %s -> new cover (curScore=%.2f, bestScore=%.2f, margin=%.2fx)"),
-		*GetNameSafe(Pawn), CurrentScore, BestScore, Tuning->CoverSwitchScoreMargin);
+		TEXT("[COVMOVE] CoverSwitch: %s -> new cover (curScore=%.2f, bestScore=%.2f, margin=%.2fx, cyclesAtOld=%d)"),
+		*GetNameSafe(Pawn), CurrentScore, BestScore, Tuning->CoverSwitchScoreMargin,
+		Companion ? Companion->GetPeekCyclesAtCurrentCover() : -1);
 }
 
 void UBTService_CoverSwitchMonitor::OnCeaseRelevant(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)

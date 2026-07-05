@@ -2,6 +2,8 @@
 
 #include "BTTask_MoveToCoverPoint.h"
 #include "AI/BlackboardKeyType_Cover.h"
+#include "AI/CompanionCoverStatics.h"
+#include "CoverScoringStatics.h"
 #include "CoverSystem.h"
 #include "CoverGeometryStatics.h"
 #include "CoverReservationSubsystem.h"
@@ -30,6 +32,8 @@ static constexpr float CoverArrivalTickRadius   = 30.f;
 static constexpr float CoverArrivalIdleRadius   = 45.f;
 static constexpr float DefaultCapsuleRadius     = 34.f;
 static constexpr float FireTickInterval         = 0.1f;
+/** Seconds between mid-move destination-claim rechecks (occupied/intended by someone else). */
+static constexpr float ClaimCheckInterval       = 0.25f;
 
 UBTTask_MoveToCoverPoint::UBTTask_MoveToCoverPoint()
 {
@@ -83,30 +87,92 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	if (HasCoverKey.SelectedKeyName != NAME_None)
 		BB->SetValueAsBool(HasCoverKey.SelectedKeyName, false);
 
-	// Read the cover from the BB via the typed key accessor (avoids GetOuter null for non-instanced nodes)
-	const FCover Cover = BB->GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID());
+	// Read the cover from the BB via the typed key accessor (avoids GetOuter null for non-instanced
+	// nodes). Non-const: the companion's multi-threat re-rank below may override the EQS pick.
+	FCover Cover = BB->GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID());
 	if (!Cover.IsValid()) return EBTNodeResult::Failed;
 
-	// Companion cover-commit gate: cover must be worth the trip (nearby) AND needed (under fire).
-	// Declining fails the task — the BT's ForceSuccess decorator routes on to open-engage stand-fighting.
-	// Enemies are unaffected; their commit policy lives in the fire task's FSM.
+	// Companion: a switch-monitor commit writes CoverTarget + stamps intent, then the combat task
+	// finishes — but the BT loop's EQS task re-picks and overwrites CoverTarget before this task
+	// runs, silently discarding the monitor's (often advancing) choice. Restore our own stamped
+	// intent when it still resolves to live, unoccupied cover.
+	if (Cast<ACompanionCharacter>(Pawn))
+	{
+		UWorld* IntentWorld = OwnerComp.GetWorld();
+		UCoverReservationSubsystem* IntentSub = IntentWorld ? IntentWorld->GetSubsystem<UCoverReservationSubsystem>() : nullptr;
+		ACoverSystem* IntentCoverSys = ACoverSystem::GetCoverSystem(IntentWorld);
+		FCoverHandle IntendedHandle;
+		if (IntentSub && IntentCoverSys
+			&& IntentSub->GetIntendedCover(Controller, IntendedHandle)
+			&& IntendedHandle != Cover.Handle)
+		{
+			FCoverData IntendedData;
+			if (IntentCoverSys->GetCoverData(IntendedHandle, IntendedData))
+			{
+				AController* IntentOccupant = IntentCoverSys->GetOccupyingController(IntendedHandle);
+				if (!IntentOccupant || IntentOccupant == Controller)
+				{
+					Cover.Handle = IntendedHandle;
+					Cover.Data = IntendedData;
+					BB->SetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID(), Cover);
+					UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s restored monitor-intended cover over EQS re-pick loc=%s"),
+						*Pawn->GetName(), *Cover.Data.Location.ToCompactString());
+				}
+			}
+		}
+	}
+
+	// Claim guard at pick time: the EQS result can be stale by the time this task runs, and the
+	// plugin's OccupyCover fails SILENTLY for the loser — never start toward an occupied cover.
+	if (ACoverSystem* ClaimCoverSys = ACoverSystem::GetCoverSystem(OwnerComp.GetWorld()))
+	{
+		AController* Occupant = ClaimCoverSys->GetOccupyingController(Cover.Handle);
+		if (Occupant && Occupant != Controller)
+		{
+			UE_LOG(LogEnemyAI, Log, TEXT("[COVER-AICS] %s picked cover already occupied by %s — failing for re-pick"),
+				*Pawn->GetName(), *GetNameSafe(Occupant->GetPawn()));
+			BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
+			return EBTNodeResult::Failed;
+		}
+	}
+
+	// Companion cover-commit gate: commit only when a situational trigger demands real cover
+	// (under fire / low HP / reloading-low ammo / outnumbered) and the point is within the outer
+	// sanity cap. Declining fails the task — the BT's ForceSuccess decorator routes on to
+	// open-engage stand-fighting (loose cover bias). Enemies are unaffected; their commit policy
+	// lives in the fire task's FSM.
 	if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn))
 	{
 		const ACompanionAIController* CompCtrl = Cast<ACompanionAIController>(Controller);
 		if (const UCompanionTuningDataAsset* Tuning = CompCtrl ? CompCtrl->GetTuning() : nullptr)
 		{
 			const float CommitDist = FVector::Dist(Pawn->GetActorLocation(), Cover.Data.Location);
-			const USuppressionComponent* Supp = Companion->GetSuppressionComponent();
-			const bool bUnderFire = (Supp && Supp->IsSuppressed())
-				|| Companion->IsSuppressed(Tuning->CoverCommitUnderFireWindow);
-			const bool bTooFar = CommitDist > Tuning->CoverCommitMaxDistance;
-			const bool bNotNeeded = Tuning->bCoverCommitRequiresUnderFire && !bUnderFire;
-			if (bTooFar || bNotNeeded)
+			const int32 ThreatCount = CompanionCover::CountKnownThreats(Controller, Tuning->CoverTriggerOutnumberedCount);
+			const CompanionCover::FCoverTriggers Triggers =
+				CompanionCover::EvaluateTriggers(*Companion, *Tuning, ThreatCount, /*bForRelease=*/false);
+
+			// CoverCommitMaxDistance is now an outer sanity cap (never trek across the map for a
+			// duck spot), not the old decline-happy 6.5m radius.
+			const float OuterCap = FMath::Max(Tuning->CoverCommitMaxDistance, Tuning->CoverSearchRadius);
+			if (CommitDist > OuterCap || !Triggers.Any())
 			{
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: cover-commit DECLINED dist=%.0f max=%.0f underFire=%d — stand-fighting"),
-					*Pawn->GetName(), CommitDist, Tuning->CoverCommitMaxDistance, bUnderFire ? 1 : 0);
+				UE_LOG(LogCompanionAI, Log,
+					TEXT("%s: cover-commit DECLINED dist=%.0f cap=%.0f triggers[fire=%d hp=%d ammo=%d out#=%d(n=%d)] — open-engage"),
+					*Pawn->GetName(), CommitDist, OuterCap, Triggers.bUnderFire ? 1 : 0, Triggers.bLowHealth ? 1 : 0,
+					Triggers.bLowAmmoOrReloading ? 1 : 0, Triggers.bOutnumbered ? 1 : 0, ThreatCount);
 				BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
 				return EBTNodeResult::Failed;
+			}
+
+			// Multi-threat first pick: the shared EQS scores exposure against the FOCUSED target only
+			// — when several enemies converge, the EQS winner can be wide open to the others until the
+			// switch monitor's next re-eval. Re-rank locally against all known threats and override the
+			// BB if a better-shielding candidate exists. Companion-only; the shared scorer is untouched.
+			const FCover Reranked = RerankCoverForMultiThreat(OwnerComp, Controller, Pawn, *Tuning, Cover);
+			if (Reranked.IsValid() && Reranked.Handle != Cover.Handle)
+			{
+				Cover = Reranked;
+				BB->SetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID(), Cover);
 			}
 		}
 	}
@@ -151,13 +217,25 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	const float StandoffPadding = IsValid(DA) ? DA->CoverStandoffPadding : DefaultStandoffPadding;
 	const float Standoff = CapsuleRadius + StandoffPadding;
 
-	// Enemies: edge-aligned — endpoint covers snap laterally to a fixed gap from the wall corner
-	// so peeks clear consistently regardless of bake spacing. Companions (no enemy DA) keep the
-	// plain approach position; their combat task doesn't edge-align. Z from the pawn (nav height).
-	FVector ArrivalPos = IsValid(DA)
-		? UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
-			OwnerComp.GetWorld(), Cover.Data, Standoff, CapsuleRadius, DA->CoverCornerGap, Pawn)
-		: UCoverGeometryStatics::GetApproachPosition(Cover.Data, PawnLoc, Standoff);
+	// Edge-aligned arrival for BOTH species — endpoint covers snap laterally to a fixed gap from
+	// the wall corner so peeks clear consistently regardless of bake spacing. Companions used to
+	// keep the plain approach position, which parked them mid-wall: endpoint covers resolved Front
+	// (over-top only — no corner peeks, coin-flip idle side). Z from the pawn (nav height).
+	FVector ArrivalPos;
+	if (IsValid(DA))
+	{
+		ArrivalPos = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+			OwnerComp.GetWorld(), Cover.Data, Standoff, CapsuleRadius, DA->CoverCornerGap, Pawn);
+	}
+	else if (const ACompanionCharacter* ArrCompanion = Cast<ACompanionCharacter>(Pawn))
+	{
+		ArrivalPos = CompanionCover::CompanionHunkerPosition(*ArrCompanion, Cover.Data, Standoff);
+		ArrivalPos.Z = PawnLoc.Z;
+	}
+	else
+	{
+		ArrivalPos = UCoverGeometryStatics::GetApproachPosition(Cover.Data, PawnLoc, Standoff);
+	}
 	ArrivalPos.Z = PawnLoc.Z;
 	Mem->ArrivalPos = ArrivalPos;
 
@@ -249,6 +327,56 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 
 	AEnemyCharacter* Enemy = Mem->CachedEnemy.Get();
 	const UEnemyArchetypeData* DA = Mem->CachedDA.Get();
+
+	// --- Mid-move claim revalidation (throttled) ---
+	// The destination can be taken while en route (the plugin's OccupyCover fails SILENTLY for
+	// the loser) — fail early and let the BT re-pick instead of posing into someone else's cover.
+	Mem->ClaimCheckAccum += DeltaSeconds;
+	if (!bArrived && Mem->ClaimCheckAccum >= ClaimCheckInterval)
+	{
+		Mem->ClaimCheckAccum = 0.f;
+		UWorld* ClaimWorld = OwnerComp.GetWorld();
+		ACoverSystem* ClaimCoverSys = ACoverSystem::GetCoverSystem(ClaimWorld);
+		if (ClaimCoverSys)
+		{
+			AController* Occupant = ClaimCoverSys->GetOccupyingController(Mem->CoverHandle);
+			bool bStolen = Occupant && Occupant != Controller;
+			if (!bStolen)
+			{
+				UCoverReservationSubsystem* ClaimResSub = ClaimWorld ? ClaimWorld->GetSubsystem<UCoverReservationSubsystem>() : nullptr;
+				if (IsValid(ClaimResSub) && ClaimResSub->IsCoverIntendedByOther(Mem->CoverHandle, Controller))
+				{
+					// Tie-break the symmetric intent race: both racers see "intended by other", so
+					// without this BOTH abort and the cover goes unused. Keep moving only when
+					// strictly closer than EVERY rival intender; ties and farther agents yield.
+					bStolen = false;
+					TArray<TPair<APawn*, FCover>> IntentOwners;
+					ClaimResSub->GetIntendedCoverOwners(IntentOwners, Controller);
+					for (const TPair<APawn*, FCover>& Entry : IntentOwners)
+					{
+						if (Entry.Value.Handle != Mem->CoverHandle) continue;
+						const APawn* RivalPawn = Entry.Key;
+						if (!IsValid(RivalPawn)) { bStolen = true; break; } // unknown rival — yield
+						const FVector CoverLoc = Entry.Value.Data.Location;
+						if (FVector::Dist2D(PawnLoc, CoverLoc) >= FVector::Dist2D(RivalPawn->GetActorLocation(), CoverLoc))
+						{
+							bStolen = true;
+							break;
+						}
+					}
+				}
+			}
+			if (bStolen)
+			{
+				UE_LOG(LogEnemyAI, Log, TEXT("[COVER-AICS] %s destination claimed by another agent mid-move — abandoning"),
+					*Pawn->GetName());
+				Controller->StopMovement();
+				StopAdvanceFire(OwnerComp, Mem, false);
+				HandleFailure(OwnerComp, Mem, BB, Controller);
+				return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			}
+		}
+	}
 
 	// --- Stall detection ---
 	bool bStalled = false;
@@ -368,6 +496,21 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 		ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(Pawn->GetWorld());
 		const bool bGotFresh = CoverSys && CoverSys->GetCoverData(Mem->CoverHandle, Data);
 		if (!bGotFresh) Data = Mem->CachedCoverData;
+
+		// Claim guard: if someone else holds this cover, we lost the race (our OccupyCover failed
+		// silently) — fail so the BT re-picks instead of posing into an occupied cover.
+		if (CoverSys)
+		{
+			AController* Occupant = CoverSys->GetOccupyingController(Mem->CoverHandle);
+			if (Occupant && Occupant != Controller)
+			{
+				UE_LOG(LogEnemyAI, Log, TEXT("[COVER-AICS] %s arrived at cover occupied by %s — re-picking"),
+					*Pawn->GetName(), *GetNameSafe(Occupant->GetPawn()));
+				StopAdvanceFire(OwnerComp, Mem, false);
+				HandleFailure(OwnerComp, Mem, BB, Controller);
+				return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			}
+		}
 
 		StopAdvanceFire(OwnerComp, Mem, true);
 		HandleArrival(OwnerComp, Mem, BB, Pawn, Data);
@@ -529,6 +672,103 @@ void UBTTask_MoveToCoverPoint::HandleFailure(UBehaviorTreeComponent& OwnerComp,
 	{
 		BB->ClearValue(CoverTargetKey.SelectedKeyName);
 	}
+}
+
+FCover UBTTask_MoveToCoverPoint::RerankCoverForMultiThreat(UBehaviorTreeComponent& OwnerComp, AAIController* Controller,
+	APawn* Pawn, const UCompanionTuningDataAsset& Tuning, const FCover& ChosenCover) const
+{
+	UWorld* World = OwnerComp.GetWorld();
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	if (!World || !BB || !Tuning.bCoverRequiresBodyProtection) return ChosenCover;
+
+	AActor* FocusTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+	if (!IsValid(FocusTarget)) return ChosenCover;
+
+	const float Penalty = FMath::Clamp(Tuning.MultiThreatExposurePenalty, 0.f, 1.f);
+	const int32 MaxExtra = FMath::Max(0, Tuning.MaxThreatsForCoverScoring - 1);
+	if (MaxExtra <= 0 || Penalty >= 1.f) return ChosenCover;
+
+	TArray<AActor*, TInlineAllocator<8>> ExtraThreats;
+	CompanionCover::GatherExtraThreatActors(Controller, Pawn, FocusTarget, MaxExtra, ExtraThreats);
+	if (ExtraThreats.Num() == 0) return ChosenCover;
+
+	const ACharacter* PawnChar = Cast<ACharacter>(Pawn);
+	const UCapsuleComponent* Cap = PawnChar ? PawnChar->GetCapsuleComponent() : nullptr;
+	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + 10.f;
+
+	const int32 ChosenUncovered = CompanionCover::CountUncoveredThreats(World, ChosenCover.Data, Standoff,
+		Tuning.CoverProtectionChestHeight, Pawn, ExtraThreats);
+	if (ChosenUncovered == 0) return ChosenCover; // already shields every known threat
+
+	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(World);
+	if (!CoverSys) return ChosenCover;
+	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
+	AController* CoverController = Pawn->GetController();
+	const FVector MyLoc = Pawn->GetActorLocation();
+	const FVector ThreatLoc = FocusTarget->GetActorLocation();
+
+	FCoverScoreParams Params = UCoverScoringStatics::GetParamsForQuerier(Pawn);
+	Params.MaxSearchRadius = Tuning.CoverSearchRadius;
+
+	// Penalised score mirrors the switch monitor's multi-threat formula exactly.
+	auto PenalizedScore = [&](const FCoverData& Data, int32 Uncovered)
+	{
+		return UCoverScoringStatics::ScoreCandidate(World, Data, MyLoc, ThreatLoc, /*bBodyProtected=*/false, Params)
+			* FMath::Pow(Penalty, static_cast<float>(Uncovered));
+	};
+
+	TArray<FCover> Candidates;
+	Candidates.Reserve(64);
+	const FBoxSphereBounds Bounds(MyLoc, FVector(Tuning.CoverSearchRadius), Tuning.CoverSearchRadius);
+	CoverSys->GetCoverDataWithinBounds(Bounds, Candidates);
+
+	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(Tuning.CoverFlankArcHalfAngleDeg));
+
+	FCover Best = ChosenCover;
+	float BestScore = PenalizedScore(ChosenCover.Data, ChosenUncovered);
+	int32 BestUncovered = ChosenUncovered;
+
+	// Same outer cap the commit gate enforced on the original pick — the box bounds query can hand
+	// back corner candidates ~1.41x the radius out.
+	const float OuterCapSq = FMath::Square(FMath::Max(Tuning.CoverCommitMaxDistance, Tuning.CoverSearchRadius));
+
+	for (const FCover& Candidate : Candidates)
+	{
+		if (!Candidate.IsValid() || Candidate.Handle == ChosenCover.Handle) continue;
+		if (FVector::DistSquared(MyLoc, Candidate.Data.Location) > OuterCapSq) continue;
+		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
+		if (Occupant && Occupant != CoverController) continue;
+		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, CoverController)) continue;
+		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, CoverController, Tuning.CoverSwitchPostVacateCooldown))
+			continue;
+
+		// Same validity gates the switch monitor applies: fire arc, peekable LoS, focused-threat shield.
+		const FVector ToTarget2D = (ThreatLoc - Candidate.Data.Location).GetSafeNormal2D();
+		if (FVector::DotProduct(UCoverGeometryStatics::GetFireArcForward(Candidate.Data), ToTarget2D) < ArcCos) continue;
+		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
+			UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
+			ThreatLoc, 150.f, FocusTarget, Pawn)) continue;
+		if (!UCoverGeometryStatics::IsThreatCovered(World, Candidate.Data, ThreatLoc, Standoff,
+			Tuning.CoverProtectionChestHeight, FocusTarget, Pawn)) continue;
+
+		const int32 Uncovered = CompanionCover::CountUncoveredThreats(World, Candidate.Data, Standoff,
+			Tuning.CoverProtectionChestHeight, Pawn, ExtraThreats);
+		if (Uncovered >= BestUncovered) continue; // override only for strictly better shielding
+
+		const float Score = PenalizedScore(Candidate.Data, Uncovered);
+		if (Score > BestScore)
+		{
+			Best = Candidate;
+			BestScore = Score;
+			BestUncovered = Uncovered;
+		}
+	}
+
+	if (Best.Handle != ChosenCover.Handle)
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: first-pick re-rank — EQS cover exposed to %d extra threat(s), overriding to one exposed to %d"),
+			*Pawn->GetName(), ChosenUncovered, BestUncovered);
+
+	return Best;
 }
 
 FString UBTTask_MoveToCoverPoint::GetStaticDescription() const

@@ -12,6 +12,7 @@
 class AEnemyCharacter;
 class UEnemyArchetypeData;
 class UEnemyAwarenessComponent;
+struct FEnemyKnownThreat;
 
 /** Tunable term weights for cover-candidate scoring. Defaults reproduce the pre-unification
  *  C++ formula exactly; every post-unification term defaults off (weight 0). */
@@ -57,6 +58,15 @@ struct EXTRACTION_API FCoverScoreParams
 	float MaxSearchRadius = 1200.f;
 };
 
+/** Positions cover candidates must keep distance from: covers hostiles are moving to (declared
+ *  intents) and living hostile pawns themselves. Gathered once per selection round. */
+struct FHostileAnchors
+{
+	TArray<FVector> CoverAnchors;
+	TArray<FVector> PawnAnchors;
+	bool IsEmpty() const { return CoverAnchors.IsEmpty() && PawnAnchors.IsEmpty(); }
+};
+
 UCLASS()
 class EXTRACTION_API UCoverScoringStatics : public UBlueprintFunctionLibrary
 {
@@ -91,6 +101,33 @@ public:
 	 *  LastKnownLocation once LOS is lost. Falls back to the live location when awareness is null. */
 	static FVector GetPerceivedThreatLocation(const AActor* Threat,
 		const UEnemyAwarenessComponent* Awareness, bool& bOutSighted);
+
+	/** Extra known hostiles (beyond FocusTarget) for the multi-threat penalty — from the enemy's
+	 *  awareness tracks: sighted at live position, or perceived within the archetype's
+	 *  ExtraThreatMemorySeconds at the frozen last-stimulus position (aggro-switch case — the
+	 *  hostile this enemy was just fighting must not vanish from its cover math). Capped by
+	 *  MaxExtraThreats; left empty when the penalty is off so callers can skip the traces. */
+	static void GatherEnemyExtraThreats(const AEnemyCharacter* Enemy, const AActor* FocusTarget,
+		TArray<FEnemyKnownThreat>& OutThreats);
+
+	/** Multi-threat exposure penalty on a candidate score: factor = Penalty^N where N = extra threats
+	 *  the candidate fails to shield the body from (at their perceived positions). Sign-aware
+	 *  (negative Press-flipped scores are pushed further down, not up). No-op when ExtraThreats is
+	 *  empty. Soft — never a hard reject. */
+	static float ApplyMultiThreatPenalty(float Score, const UWorld* World, const FCoverData& Data,
+		float Standoff, float ChestHeight, const APawn* IgnorePawn,
+		const TArray<FEnemyKnownThreat>& ExtraThreats, float Penalty);
+
+	/** Hostile anchors for the claim-collision reject, from QuerierPawn's side (enemy vs rest —
+	 *  the split the awareness/tag systems encode). Covers hostiles intend + living hostile pawns.
+	 *  Shared by the EQS CoverIntent filter and the C++ picker loops so both reject identically. */
+	static void GatherHostileAnchors(UWorld* World, const APawn* QuerierPawn,
+		const AController* ExcludeController, FHostileAnchors& Out);
+
+	/** True when Location is within CoverDist (2D) of a hostile-intended cover or PawnDist of a
+	 *  hostile pawn. Either distance <= 0 disables that anchor set. */
+	static bool IsNearHostileAnchor(const FVector& Location, const FHostileAnchors& Anchors,
+		float CoverDist, float PawnDist);
 
 	/** 0-1 fraction of sample points along the pawn->candidate route that are exposed to the
 	 *  threat (clear LOS trace at chest height). Straight-line sampling — cheap by design.

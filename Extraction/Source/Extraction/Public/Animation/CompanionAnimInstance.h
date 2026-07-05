@@ -126,6 +126,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Cover")
 	UAnimMontage* PlayPeekFire(EPeekSide Side, float PlayRate = 1.f);
 
+	/** Play the over-top peek (crouch cover, no usable side gap): stops the idles, picks the
+	 *  side-matched entry variant, returns the montage (nullptr when unset — caller falls back to
+	 *  a plain montage-less stand-up). */
+	UAnimMontage* PlayOverTopPeek(EPeekSide FromSide, float PlayRate = 1.f);
+
 	UFUNCTION(BlueprintPure, Category = "Cover")
 	bool IsInCover() const { return bInCover; }
 
@@ -283,9 +288,30 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	TObjectPtr<UAnimMontage> CoverPeekRightMontage_Stand;
 
+	/** Over-top peek for crouch cover (stand up, fire over the wall) — enemy LoU parity; the task
+	 *  UnCrouches at commit and this montage owns the stand-up-and-aim visual. Entered from the
+	 *  RIGHT-side idle by default. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekOverTopMontage;
+
+	/** Over-top variant entered from the LEFT-side idle. Falls back to CoverPeekOverTopMontage when unset. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekOverTopLeftMontage;
+
 	/** Eased aim gate speed — scales AimPitch/AimYaw to 0 while tucked in cover idle. */
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	float CoverAimGateSpeed = 8.f;
+
+	/** Max spine yaw twist (deg) the aim offset may drive while in cover — the peek montage owns
+	 *  the body rotation; the offset only fine-aims. Mirrors the enemy's CoverAimYawClampDeg. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	float CoverAimYawClampDeg = 75.f;
+
+	/** Pre-clamp |yaw| (deg) beyond which the whole cover aim offset eases to zero — the target is
+	 *  far outside the pose's reach (behind the wall / behind the body), so twisting toward it
+	 *  reads as a broken spine. Mirrors the enemy's CoverAimTrackLimitDeg. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	float CoverAimTrackLimitDeg = 80.f;
 
 	// --- Cover-Reload Spine Tuck (dynamic capture: reproduce cover-idle torso during reload) ---
 
@@ -433,12 +459,21 @@ private:
 	/** Eased gate that scales AimPitch/AimYaw — 0 when in cover idle (not peeking). */
 	float CoverAimGate = 1.f;
 
+	/** Unclamped aim yaw (deg) captured before the cover clamp — feeds the track-limit test. */
+	float RawAimYawDeg = 0.f;
+
+	/** Eased 0..1 — fades the cover aim offset out while the raw bearing exceeds
+	 *  CoverAimTrackLimitDeg, back in otherwise. Reset to 1 outside cover. */
+	float CoverAimTrackAlpha = 1.f;
+
 	/** Cover height latched at EnterCoverPose — PlayPeekFire selects from this rather than the
 	 *  pose-component mirror, which can be stale right after an ExitCoverPose reset. */
 	ECoverHeight LatchedCoverHeight = ECoverHeight::Crouch;
 
-	/** True while any of the four peek montages plays — companion-side peek signal for the aim gate
-	 *  (nothing companion-side sets the pose component's bPeeking). */
+	/** True while any cover peek montage plays (four side peeks + the over-top pair) — companion-side
+	 *  peek signal for the aim gate (nothing companion-side sets the pose component's bPeeking).
+	 *  BlueprintPure so the ABP's grip/aim-gate EventGraph can read ONE call instead of per-asset checks. */
+	UFUNCTION(BlueprintPure, Category = "Cover")
 	bool IsAnyCoverPeekMontagePlaying() const;
 
 	/** Capture spine_01 while tucked-idle, hold it while reloading in cover, and ease

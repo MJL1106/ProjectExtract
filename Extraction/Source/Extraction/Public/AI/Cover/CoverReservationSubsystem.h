@@ -48,11 +48,19 @@ public:
 	void GetIntendedCovers(TArray<FCover>& Out, const AController* ExcludeController = nullptr,
 		const UClass* RequiredControllerClass = nullptr);
 
+	/** Fills Out with (intending controller's pawn, live cover) for every current intent except
+	 *  ExcludeController's. Pawn may be null for a controller mid-repossession — callers filter.
+	 *  Skips stale controllers (pruned in place, same as GetIntendedCovers). */
+	void GetIntendedCoverOwners(TArray<TPair<APawn*, FCover>>& Out, const AController* ExcludeController);
+
 	/** True when any controller OTHER than IgnoreController has declared intent for Handle. O(1) via reverse index. */
 	bool IsCoverIntendedByOther(const FCoverHandle& Handle, const AController* IgnoreController) const;
 
 	/** True when Controller currently has a valid intended cover stamped (heading to cover but not yet arrived). */
 	bool HasIntendedCover(const AController* Controller) const;
+
+	/** True + fills OutHandle when Controller has a valid intended cover stamped. */
+	bool GetIntendedCover(const AController* Controller, FCoverHandle& OutHandle) const;
 
 private:
 

@@ -14,6 +14,7 @@
 #include "Companion/CompanionRoute.h"
 #include "WeaponBase.h"
 #include "Movement/TraversalComponent.h"
+#include "Components/SuppressionComponent.h"
 #include "GameFramework/Pawn.h"
 #include "NavigationSystem.h"
 #include "Engine/World.h"
@@ -112,6 +113,17 @@ void ACompanionAIController::OnPossess(APawn* InPawn)
 
 	// Diagnostic: log possession state so user can confirm config at a glance.
 	const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(InPawn);
+
+	// Suppression resistance from tuning — without this the companion keeps the component default
+	// (1.0, two near-misses = pinned) while every enemy gets its archetype resistance.
+	if (Companion)
+	{
+		if (USuppressionComponent* Supp = Companion->GetSuppressionComponent())
+		{
+			const UCompanionTuningDataAsset* SuppTuning = GetTuning();
+			Supp->ConfigureSuppression(SuppTuning ? SuppTuning->SuppressionResistance : 2.5f);
+		}
+	}
 	const FString WeaponClassName = (Companion && Companion->GetWeaponClass()) ? Companion->GetWeaponClass()->GetName() : TEXT("NONE");
 	const float MaxEngageRange = Companion ? Companion->MaxEngageRange : -1.0f;
 	const float SightRadius = SightConfig ? SightConfig->SightRadius : -1.0f;

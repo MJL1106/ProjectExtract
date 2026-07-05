@@ -3,6 +3,7 @@
 #include "CompanionCharacter.h"
 #include "AI/AITargetingStatics.h"
 #include "AI/CompanionDiag.h"
+#include "AI/CompanionTuningDataAsset.h"
 #include "CompanionAIController.h"
 #include "HealthComponent.h"
 #include "WeaponBase.h"
@@ -14,11 +15,14 @@
 #include "ExtractionTypes.h"
 #include "Character/ExtractionPlayer.h"
 #include "EnemyCharacter.h"
+#include "BehaviorTree/BlackboardComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Components/WidgetComponent.h"
+#include "UI/OverheadWidgetComponent.h"
+#include "UI/CompanionModeIndicatorWidget.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
 
 DEFINE_LOG_CATEGORY(LogCompanion);
 
@@ -36,7 +40,7 @@ ACompanionCharacter::ACompanionCharacter()
 	CoverPoseComponent = CreateDefaultSubobject<UCoverPoseComponent>(TEXT("CoverPoseComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
 
-	HealthWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("HealthWidget"));
+	HealthWidgetComponent = CreateDefaultSubobject<UOverheadWidgetComponent>(TEXT("HealthWidget"));
 	HealthWidgetComponent->SetupAttachment(GetMesh(), TEXT("head"));
 	HealthWidgetComponent->SetRelativeLocation(FVector(0.f, 0.f, 30.f));
 	HealthWidgetComponent->SetWidgetSpace(EWidgetSpace::Screen);
@@ -45,6 +49,17 @@ ACompanionCharacter::ACompanionCharacter()
 	HealthWidgetComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	HealthWidgetComponent->SetTwoSided(false);
 	HealthWidgetComponent->SetVisibility(false);
+
+	// Sits above the health bar so the two never overlap.
+	ModeWidgetComponent = CreateDefaultSubobject<UOverheadWidgetComponent>(TEXT("ModeWidget"));
+	ModeWidgetComponent->SetupAttachment(GetMesh(), TEXT("head"));
+	ModeWidgetComponent->SetRelativeLocation(FVector(0.f, 0.f, 60.f));
+	ModeWidgetComponent->SetWidgetSpace(EWidgetSpace::Screen);
+	ModeWidgetComponent->SetDrawSize(FVector2D(64.f, 64.f));
+	ModeWidgetComponent->SetPivot(FVector2D(0.5f, 0.5f));
+	ModeWidgetComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	ModeWidgetComponent->SetTwoSided(false);
+	ModeWidgetComponent->SetVisibility(false);
 
 	// Configure inherited skeletal mesh — designer assigns mesh + anim class on BP_Companion
 	GetMesh()->SetRelativeLocation(FVector(0.f, 0.f, -88.f));
@@ -76,6 +91,14 @@ ACompanionCharacter::ACompanionCharacter()
 	bUseControllerRotationYaw = false;
 }
 
+void ACompanionCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+
+	// Tuning-driven speeds become reachable only once the companion AI controller is attached.
+	ApplyMovementSpeeds();
+}
+
 void ACompanionCharacter::PostInitializeComponents()
 {
 	Super::PostInitializeComponents();
@@ -98,11 +121,8 @@ void ACompanionCharacter::BeginPlay()
 
 	// The constructor's movement defaults run with C++ default values before BP CDO overrides
 	// apply. Re-apply once BP-overridden values are live so speeds match what designers set.
-	// WalkSpeed/SprintSpeed: re-applied via OnRep_IsSprinting below.
-	// CrouchedWalkSpeed: must be pushed directly since no OnRep covers it.
-	OnRep_IsSprinting();
-	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
-		MoveComp->MaxWalkSpeedCrouched = CrouchedWalkSpeed;
+	// PossessedBy re-applies again once the AI controller (and its tuning asset) is attached.
+	ApplyMovementSpeeds();
 
 	if (HealthComponent && !HealthComponent->OnDeath.IsAlreadyBound(this, &ACompanionCharacter::HandleDeath))
 		HealthComponent->OnDeath.AddDynamic(this, &ACompanionCharacter::HandleDeath);
@@ -137,6 +157,13 @@ void ACompanionCharacter::BeginPlay()
 		HealthWidgetComponent->SetVisibility(true);
 	}
 
+	if (ModeWidgetClass && ModeWidgetComponent)
+	{
+		ModeWidgetComponent->SetWidgetClass(ModeWidgetClass);
+		ModeWidgetComponent->SetVisibility(true);
+		TryLinkModeWidget();
+	}
+
 	UE_LOG(LogCompanion, Log, TEXT("%s spawned with tag Character.Companion"), *GetName());
 }
 
@@ -154,6 +181,7 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		World->GetTimerManager().ClearTimer(DestroyTimerHandle);
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
+		World->GetTimerManager().ClearTimer(ModeWidgetLinkTimerHandle);
 	}
 
 	if (HealthComponent)
@@ -211,6 +239,14 @@ float ACompanionCharacter::GetHealthFraction() const
 	return HealthComponent->GetHealthPercent();
 }
 
+float ACompanionCharacter::GetAmmoFraction() const
+{
+	if (!IsValid(CurrentWeapon)) return 1.f;
+	const UWeaponDataAsset* Data = CurrentWeapon->GetWeaponData();
+	if (!Data || Data->MagazineSize <= 0) return 1.f;
+	return static_cast<float>(CurrentWeapon->GetCurrentAmmo()) / static_cast<float>(Data->MagazineSize);
+}
+
 void ACompanionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
 {
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
@@ -218,6 +254,7 @@ void ACompanionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, bIsSprinting, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, Posture, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, bLowReadyAim, COND_SkipOwner);
+	DOREPLIFETIME_CONDITION(ACompanionCharacter, Mode, COND_SkipOwner);
 }
 
 // --- Crouch diagnostics ---
@@ -269,6 +306,117 @@ void ACompanionCharacter::OnRep_Posture()
 	OnPostureChanged.Broadcast(Posture);
 }
 
+// --- Mode API ---
+
+void ACompanionCharacter::SetMode(ECompanionMode NewMode)
+{
+	if (!HasAuthority()) return;
+	if (NewMode == Mode) return;
+
+	// Same ordering invariant as SetPosture: Mode assigned before broadcast.
+	const bool bWasStealthActive = IsStealthActive();
+	Mode = NewMode;
+
+	// A fresh Stealth order always starts unbroken; leaving Stealth clears the flag so a later
+	// return to Stealth doesn't inherit a stale broken state.
+	bStealthBroken = false;
+
+	// Clamps only on a stealth-active transition — an unconditional call would UnCrouch on every
+	// non-stealth mode cycle, popping the companion out of crouch cover mid-fight. A stale catch-up
+	// stage from the last stealth stint would sprint-pop the clamps; follow re-evaluates next tick.
+	if (IsStealthActive() != bWasStealthActive)
+	{
+		StealthCatchupStage = EStealthCatchup::None;
+		ApplyStealthMovementClamps();
+	}
+
+	UE_LOG(LogCompanion, Log, TEXT("Companion mode -> %s"), *UEnum::GetValueAsString(Mode));
+	OnRep_Mode();
+}
+
+void ACompanionCharacter::OnRep_Mode()
+{
+	// No state mutation — broadcast only. See SetMode for ordering invariant.
+	OnModeChanged.Broadcast(Mode);
+}
+
+void ACompanionCharacter::SetStealthBroken(bool bBroken)
+{
+	if (!HasAuthority()) return;
+	if (bStealthBroken == bBroken) return;
+
+	bStealthBroken = bBroken;
+	// Stale catch-up stage from before the break would make the re-pin clamps sprint-pop.
+	StealthCatchupStage = EStealthCatchup::None;
+	UE_LOG(LogCompanion, Log, TEXT("Companion stealth %s"), bBroken ? TEXT("BROKEN") : TEXT("re-pinned"));
+	ApplyStealthMovementClamps();
+}
+
+void ACompanionCharacter::TryLinkModeWidget()
+{
+	if (!IsValid(ModeWidgetComponent)) return;
+
+	if (UCompanionModeIndicatorWidget* ModeWidget = Cast<UCompanionModeIndicatorWidget>(ModeWidgetComponent->GetUserWidgetObject()))
+	{
+		ModeWidget->SetCompanion(this);
+		return;
+	}
+
+	// Widget not constructed yet (screen-space widgets build on first render) — retry shortly.
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().SetTimer(ModeWidgetLinkTimerHandle, this, &ACompanionCharacter::TryLinkModeWidget, 0.25f, false);
+}
+
+void ACompanionCharacter::ApplyStealthMovementClamps()
+{
+	// Stance enforcement yields to systems that own stance/aim right now (mirrors the BT service's
+	// enforcement-yield set): takedowns own the crouch-approach and the authored knife pose,
+	// traversal resizes the capsule mid-vault, route legs set their own stances. A stealth break /
+	// mode keypress landing mid-vault must not Crouch/UnCrouch under them. Speeds always apply.
+	bool bStanceOwnedElsewhere = bTakedownArmed || bTakedownExecuting || bTakedownMontagePlaying
+		|| (IsValid(TraversalComponent) && TraversalComponent->IsBusy());
+	if (!bStanceOwnedElsewhere)
+		if (const AAIController* AIC = Cast<AAIController>(GetController()))
+			if (const UBlackboardComponent* BB = AIC->GetBlackboardComponent())
+				bStanceOwnedElsewhere = BB->GetValueAsBool(ACompanionAIController::BB_RouteActive);
+
+	if (!bStanceOwnedElsewhere)
+	{
+		if (IsStealthActive())
+		{
+			if (StealthCatchupStage == EStealthCatchup::Sprint)
+			{
+				// Clearly losing the player — break the low profile and sprint to close the gap.
+				// SetSprinting's stealth veto passes only in this stage.
+				UnCrouch();
+				SetSprinting(true);
+			}
+			else
+			{
+				SetSprinting(false);
+				if (CanCrouch()) Crouch();
+			}
+		}
+		else
+		{
+			// Combat tasks own crouch during a fight; releasing here just returns the follow/explore
+			// paths to standing. Cover tasks re-crouch as needed.
+			UnCrouch();
+		}
+	}
+	ApplyMovementSpeeds();
+}
+
+void ACompanionCharacter::SetStealthCatchup(EStealthCatchup NewStage)
+{
+	if (!HasAuthority()) return;
+	if (StealthCatchupStage == NewStage) return;
+
+	StealthCatchupStage = NewStage;
+	if (IsStealthActive()) ApplyStealthMovementClamps();
+	else ApplyMovementSpeeds();
+}
+
 // --- Low Ready Aim ---
 
 void ACompanionCharacter::SetLowReadyAim(bool bNewLowReady)
@@ -276,6 +424,12 @@ void ACompanionCharacter::SetLowReadyAim(bool bNewLowReady)
 	if (!HasAuthority()) return;
 	if (bLowReadyAim == bNewLowReady) return;
 	bLowReadyAim = bNewLowReady;
+
+	// AimLog diagnostics (companion.AimLog 1): change-only, so cost is the edge, not per call.
+	if (const IConsoleVariable* AimLogCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AimLog"));
+		AimLogCVar && AimLogCVar->GetInt() != 0)
+		UE_LOG(LogCompanion, Display, TEXT("[AimLog] SetLowReadyAim -> %d"), (int32)bNewLowReady);
+
 	OnRep_LowReadyAim();
 }
 
@@ -296,6 +450,8 @@ void ACompanionCharacter::SetScriptedAim(bool bNewScriptedAim)
 void ACompanionCharacter::SetSprinting(bool bSprint)
 {
 	if (!HasAuthority()) return;
+	// Stealth rules: no sprinting — except the Sprint catch-up stage (clearly losing the player).
+	if (bSprint && IsStealthActive() && StealthCatchupStage != EStealthCatchup::Sprint) return;
 	if (bIsSprinting == bSprint) return;
 
 	bIsSprinting = bSprint;
@@ -304,8 +460,42 @@ void ACompanionCharacter::SetSprinting(bool bSprint)
 
 void ACompanionCharacter::OnRep_IsSprinting()
 {
-	if (UCharacterMovementComponent* MoveComp = GetCharacterMovement())
-		MoveComp->MaxWalkSpeed = bIsSprinting ? SprintSpeed : WalkSpeed;
+	ApplyMovementSpeeds();
+}
+
+const UCompanionTuningDataAsset* ACompanionCharacter::GetTuning() const
+{
+	const ACompanionAIController* AIC = Cast<ACompanionAIController>(GetController());
+	return AIC ? AIC->GetTuning() : nullptr;
+}
+
+float ACompanionCharacter::TunedWalkSpeed() const
+{
+	const UCompanionTuningDataAsset* T = GetTuning();
+	return T ? T->WalkSpeed : WalkSpeed;
+}
+
+float ACompanionCharacter::TunedSprintSpeed() const
+{
+	const UCompanionTuningDataAsset* T = GetTuning();
+	return T ? T->SprintSpeed : SprintSpeed;
+}
+
+float ACompanionCharacter::TunedCrouchedWalkSpeed() const
+{
+	const UCompanionTuningDataAsset* T = GetTuning();
+	const bool bFastCrouch = IsStealthActive() && StealthCatchupStage == EStealthCatchup::FastCrouch;
+	if (bFastCrouch && T) return T->StealthCrouchCatchupSpeed;
+	return T ? T->CrouchedWalkSpeed : CrouchedWalkSpeed;
+}
+
+void ACompanionCharacter::ApplyMovementSpeeds()
+{
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!MoveComp) return;
+
+	MoveComp->MaxWalkSpeed = bIsSprinting ? TunedSprintSpeed() : TunedWalkSpeed();
+	MoveComp->MaxWalkSpeedCrouched = TunedCrouchedWalkSpeed();
 }
 
 void ACompanionCharacter::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
@@ -387,6 +577,13 @@ int32 ACompanionCharacter::GetCurrentAmmo() const
 	return IsValid(CurrentWeapon) ? CurrentWeapon->GetCurrentAmmo() : 0;
 }
 
+bool ACompanionCharacter::IsCurrentWeaponSuppressed() const
+{
+	if (!IsValid(CurrentWeapon)) return false;
+	const UWeaponDataAsset* Data = CurrentWeapon->GetWeaponData();
+	return Data && Data->bSuppressed;
+}
+
 float ACompanionCharacter::GetWeaponReloadTime() const
 {
 	if (!IsValid(CurrentWeapon)) return 0.f;
@@ -400,6 +597,12 @@ void ACompanionCharacter::SetAimTarget(AActor* NewTarget)
 {
 	if (NewTarget != CurrentAimTarget.Get())
 	{
+		// AimLog diagnostics (companion.AimLog 1): change-only.
+		if (const IConsoleVariable* AimLogCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AimLog"));
+			AimLogCVar && AimLogCVar->GetInt() != 0)
+			UE_LOG(LogCompanion, Display, TEXT("[AimLog] SetAimTarget %s -> %s"),
+				*GetNameSafe(CurrentAimTarget.Get()), *GetNameSafe(NewTarget));
+
 		CurrentAimTarget = NewTarget;
 		TimeAimingAtCurrentTarget = 0.0f;
 	}
@@ -522,6 +725,8 @@ void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod M
 	TakedownActiveMethod = Method;
 	bTakedownArmed = true;
 	bTakedownPlayerCommitted = false;
+	bTakedownCommandedInstant = false;
+	bTakedownKillRegistered = false;
 	bTakedownInPosition = false;
 	bTakedownExecuting = false;
 	bTakedownMontagePlaying = false;
@@ -591,6 +796,8 @@ void ACompanionCharacter::DisarmCommandedTakedown()
 	TakedownPlayerRef.Reset();
 	bTakedownArmed = false;
 	bTakedownPlayerCommitted = false;
+	bTakedownCommandedInstant = false;
+	bTakedownKillRegistered = false;
 	bTakedownInPosition = false;
 	bTakedownExecuting = false;
 	bTakedownCrouchApproach = false;
@@ -621,8 +828,12 @@ void ACompanionCharacter::OnPlayerFiredWeaponHandler()
 {
 	UE_LOG(LogCompanion, Log, TEXT("[Takedown-Companion] player-fired signal received (armed=%d inPosition=%d)"),
 		(int32)bTakedownArmed, (int32)bTakedownInPosition);
-	if (!bTakedownArmed) return;
+	// bTakedownExecuting guard: a follow-up player shot mid-chain (autonomous commit already in
+	// flight) must not convert the remaining timers to the instant cadence.
+	if (!bTakedownArmed || bTakedownExecuting) return;
 
+	// Player pulled the trigger — the synced kill must land this frame, not on the phased cadence.
+	bTakedownCommandedInstant = true;
 	bTakedownPlayerCommitted = true;
 	if (bTakedownInPosition) ExecuteCommandedTakedown();
 }
@@ -641,6 +852,7 @@ void ACompanionCharacter::SetTakedownInPosition(bool bInPos)
 void ACompanionCharacter::CommitTakedownNow()
 {
 	if (!bTakedownArmed || bTakedownExecuting) return;
+	bTakedownCommandedInstant = false; // autonomous solo — keep the phased cadence
 	bTakedownPlayerCommitted = true;
 	if (bTakedownInPosition) ExecuteCommandedTakedown();
 	// If not yet in position, SetTakedownInPosition(true) will fire it (committed already set).
@@ -794,18 +1006,42 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 
 		TakedownShotsRemaining = FMath::Max(ShootShotCount, 0);
 
-		// Skip straight to kill if no shots requested
-		if (TakedownShotsRemaining <= 0)
+		// Player-synced commit: the enemy must die on the player's shot frame. Register the kill
+		// FIRST — the player's own (unsuppressed) shot can alert the victim out of Unaware inside
+		// even the double-tap window, and ExecuteTakedown's reject would turn the synced takedown
+		// into a visible whiff. The double-tap then plays over the first ragdoll frames, which
+		// reads as the killing burst. The autonomous path keeps the phased aim-in cadence below.
+		if (bTakedownCommandedInstant)
 		{
-			World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
-				FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownKill),
-				ShootAimInDuration, false);
+			if (!Enemy->ExecuteTakedown(this, /*bIgnoreRangeAndArc=*/true))
+			{
+				UE_LOG(LogCompanion, Warning, TEXT("Takedown: instant shoot kill rejected (enemy no longer Unaware)"));
+				FinishCommandedTakedown();
+				return;
+			}
+			bTakedownKillRegistered = true;
+
+			if (TakedownShotsRemaining <= 0) HandleTakedownKill();
+			else HandleTakedownAimedIn();
+		}
+		else if (TakedownShotsRemaining <= 0)
+		{
+			// Rate <= 0 silently clears a timer instead of firing — call zero-delay steps directly.
+			if (ShootAimInDuration > 0.f)
+				World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+					FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownKill),
+					ShootAimInDuration, false);
+			else
+				HandleTakedownKill();
 		}
 		else
 		{
-			World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
-				FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownAimedIn),
-				ShootAimInDuration, false);
+			if (ShootAimInDuration > 0.f)
+				World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+					FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownAimedIn),
+					ShootAimInDuration, false);
+			else
+				HandleTakedownAimedIn();
 		}
 	}
 }
@@ -847,19 +1083,27 @@ void ACompanionCharacter::HandleTakedownAimedIn()
 	const UWorld* World = GetWorld();
 	if (!World) { FinishCommandedTakedown(); return; }
 
+	// Commanded (player-synced) chain runs on near-zero intervals; a rate <= 0 would silently
+	// clear the timer instead of firing, so zero-delay steps are called directly.
 	if (TakedownShotsRemaining > 0)
 	{
-		// More shots — re-arm for the next one
-		World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
-			FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownAimedIn),
-			ShootShotInterval, false);
+		const float ShotGap = bTakedownCommandedInstant ? ShootCommandedShotInterval : ShootShotInterval;
+		if (ShotGap > 0.f)
+			World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+				FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownAimedIn),
+				ShotGap, false);
+		else
+			HandleTakedownAimedIn();
 	}
 	else
 	{
-		// All shots fired — proceed to kill
-		World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
-			FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownKill),
-			ShootShotInterval, false);
+		const float KillDelay = bTakedownCommandedInstant ? ShootCommandedKillDelay : ShootShotInterval;
+		if (KillDelay > 0.f)
+			World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+				FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownKill),
+				KillDelay, false);
+		else
+			HandleTakedownKill();
 	}
 }
 
@@ -874,7 +1118,9 @@ void ACompanionCharacter::HandleTakedownKill()
 		return;
 	}
 
-	if (!Enemy->ExecuteTakedown(this, /*bIgnoreRangeAndArc=*/true))
+	// Instant chain already registered the kill before the cosmetic shots — don't re-execute on
+	// the corpse (it would reject and mislabel a successful takedown as whiffed).
+	if (!bTakedownKillRegistered && !Enemy->ExecuteTakedown(this, /*bIgnoreRangeAndArc=*/true))
 	{
 		UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot kill rejected (enemy no longer Unaware)"));
 		FinishCommandedTakedown();
@@ -886,9 +1132,14 @@ void ACompanionCharacter::HandleTakedownKill()
 	const UWorld* World = GetWorld();
 	if (!World) { FinishCommandedTakedown(); return; }
 
-	World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
-		FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownLower),
-		ShootLowerDelay, false);
+	// Rate <= 0 silently clears a timer instead of firing — ShootLowerDelay=0 must still finish
+	// the chain (a hang here leaves bTakedownExecuting stuck and the BT takedown branch waiting).
+	if (ShootLowerDelay > 0.f)
+		World->GetTimerManager().SetTimer(ShootDelayTimerHandle,
+			FTimerDelegate::CreateUObject(this, &ACompanionCharacter::HandleTakedownLower),
+			ShootLowerDelay, false);
+	else
+		HandleTakedownLower();
 }
 
 void ACompanionCharacter::HandleTakedownLower()
@@ -931,6 +1182,8 @@ void ACompanionCharacter::FinishCommandedTakedown()
 	TakedownPlayerRef.Reset();
 	bTakedownArmed = false;
 	bTakedownPlayerCommitted = false;
+	bTakedownCommandedInstant = false;
+	bTakedownKillRegistered = false;
 	bTakedownInPosition = false;
 	bTakedownExecuting = false;
 	bTakedownCrouchApproach = false;

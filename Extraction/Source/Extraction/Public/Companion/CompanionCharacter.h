@@ -22,10 +22,12 @@ class UTraversalComponent;
 class UWidgetComponent;
 class UUserWidget;
 class AExtractionPlayer;
+class UCompanionTuningDataAsset;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionPostureChanged, ECompanionPosture, NewPosture);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionModeChanged, ECompanionMode, NewMode);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLowReadyAimChanged, bool, bIsLowReady);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCommandedTakedownFinished);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCommandedTakedownStarted);
@@ -83,6 +85,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	int32 GetCurrentAmmo() const;
 
+	/** True if the equipped weapon's data marks it suppressed. False with no weapon/data. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	bool IsCurrentWeaponSuppressed() const;
+
 	/** Returns the reload time of the equipped weapon. Returns 0 if no weapon or no data. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	float GetWeaponReloadTime() const;
@@ -115,6 +121,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	AActor* GetAimTarget() const { return CurrentAimTarget.Get(); }
 
+	// --- Target LOS mirror (enemy bHasTargetLOS parity) ---
+	// Written by BTService_UpdateCompanionState's LOS filter; consumed by UCompanionAnimInstance
+	// to fade the cover aim tracking when the target is behind geometry (kills the through-wall
+	// stare — the aim layer itself has no LOS gate by design).
+
+	void SetHasTargetLOS(bool bNewHasLOS) { bHasTargetLOS = bNewHasLOS; }
+	bool HasTargetLOS() const { return bHasTargetLOS; }
+
+	// --- Peek-cycle mirror (combat-task-written; CoverSwitchMonitor reads it as the commit gate
+	// so score-based switches can't move a companion that never got a shot off at this point) ---
+
+	void SetPeekCyclesAtCurrentCover(int32 Cycles) { PeekCyclesAtCurrentCover = Cycles; }
+	int32 GetPeekCyclesAtCurrentCover() const { return PeekCyclesAtCurrentCover; }
+
 	// --- Low Ready Aim ---
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Combat")
@@ -142,6 +162,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
 	bool IsSprinting() const { return bIsSprinting; }
 
+	// --- Stealth catch-up (set by the follow task; shapes ApplyStealthMovementClamps) ---
+
+	void SetStealthCatchup(EStealthCatchup NewStage);
+
+	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
+	EStealthCatchup GetStealthCatchup() const { return StealthCatchupStage; }
+
 	// --- Traversal ---
 
 	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
@@ -157,6 +184,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	float GetHealthFraction() const;
 
+	/** Magazine fraction [0,1] of the equipped weapon. Returns 1 with no weapon/data (never
+	 *  triggers low-ammo behaviour on a companion that can't shoot anyway). */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	float GetAmmoFraction() const;
+
 	// --- Posture ---
 
 	UFUNCTION(BlueprintPure, Category = "Companion")
@@ -167,6 +199,28 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Companion")
 	FOnCompanionPostureChanged OnPostureChanged;
+
+	// --- Mode (player-commanded directive; see ECompanionMode) ---
+
+	UFUNCTION(BlueprintPure, Category = "Companion|Mode")
+	ECompanionMode GetMode() const { return Mode; }
+
+	UFUNCTION(BlueprintCallable, Category = "Companion|Mode")
+	void SetMode(ECompanionMode NewMode);
+
+	/** Stealth-broken = the fight is on (player spotted); stealth rules are suspended until the
+	 *  BT service re-pins. Server-only transient state, set by BTService_UpdateCompanionState. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Mode")
+	bool IsStealthBroken() const { return bStealthBroken; }
+
+	void SetStealthBroken(bool bBroken);
+
+	/** True while stealth rules apply: Mode == Stealth and not broken. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Mode")
+	bool IsStealthActive() const { return Mode == ECompanionMode::Stealth && !bStealthBroken; }
+
+	UPROPERTY(BlueprintAssignable, Category = "Companion|Mode")
+	FOnCompanionModeChanged OnModeChanged;
 
 	// --- Commanded Takedown (synced to player commit) ---
 
@@ -223,10 +277,23 @@ protected:
 	UFUNCTION()
 	void OnRep_Posture();
 
+	UPROPERTY(ReplicatedUsing = OnRep_Mode)
+	ECompanionMode Mode = ECompanionMode::Normal;
+
+	UFUNCTION()
+	void OnRep_Mode();
+
+	/** Not replicated — server-side behaviour gate; clients only need Mode for UI. */
+	bool bStealthBroken = false;
+
+	/** Crouch + sprint-lock while stealth rules apply; releases them when they don't. */
+	void ApplyStealthMovementClamps();
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void PostInitializeComponents() override;
+	virtual void PossessedBy(AController* NewController) override;
 
 	// --- Components ---
 
@@ -247,6 +314,13 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|UI")
 	TSubclassOf<UUserWidget> HealthWidgetClass;
+
+	/** Overhead mode indicator (icon that pops on mode change, then fades). */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|UI")
+	TObjectPtr<UWidgetComponent> ModeWidgetComponent;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|UI")
+	TSubclassOf<UUserWidget> ModeWidgetClass;
 
 	// --- Config ---
 
@@ -283,16 +357,18 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Config", meta = (ClampMin = "0.0"))
 	float DestroyDelay = 3.0f;
 
-	// --- Movement ---
+	// --- Movement (fallbacks — the tuning asset's Companion|Movement block is authoritative
+	// once the AI controller possesses; see TunedWalkSpeed/TunedSprintSpeed/TunedCrouchedWalkSpeed.
+	// Defaults match the tuning defaults so clients without a controller don't diverge) ---
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
-	float WalkSpeed = 400.f;
+	float WalkSpeed = 550.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
-	float SprintSpeed = 650.f;
+	float SprintSpeed = 850.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
-	float CrouchedWalkSpeed = 150.f;
+	float CrouchedWalkSpeed = 250.f;
 
 	// --- Takedown ---
 
@@ -337,12 +413,26 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
 	float ShootLowerDelay = 1.0f;
 
+	/** Player-synced commit: gap between the instant double-tap shots (replaces ShootShotInterval). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float ShootCommandedShotInterval = 0.06f;
+
+	/** Player-synced commit: delay from the last shot to the kill. 0 = kill on the last shot's frame. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float ShootCommandedKillDelay = 0.1f;
+
 private:
 	UPROPERTY(ReplicatedUsing = OnRep_LowReadyAim)
 	bool bLowReadyAim = false;
 
 	/** Scripted weapon-up: aim along control rotation with no actor target (e.g. route Alert/Crouch legs). Not replicated — single-player feature. */
 	bool bScriptedAim = false;
+
+	/** Mirror of the combat service's eye→target LOS trace (enemy bHasTargetLOS parity). Transient, not replicated. */
+	bool bHasTargetLOS = false;
+
+	/** Mirror of the combat task's PeekCyclesAtCover (per-tick copy). Transient, not replicated. */
+	int32 PeekCyclesAtCurrentCover = 0;
 
 	UFUNCTION()
 	void OnRep_LowReadyAim();
@@ -385,7 +475,23 @@ private:
 	float TimeAimingAtCurrentTarget = 0.0f;
 	float LastDamageWorldTime = -1e9f;
 
+	EStealthCatchup StealthCatchupStage = EStealthCatchup::None;
+
+	/** Tuning asset from the possessing companion AI controller; null before possession / on clients. */
+	const UCompanionTuningDataAsset* GetTuning() const;
+	float TunedWalkSpeed() const;
+	float TunedSprintSpeed() const;
+	float TunedCrouchedWalkSpeed() const;
+
+	/** Pushes the current sprint/stealth-catchup state into CMC MaxWalkSpeed / MaxWalkSpeedCrouched. */
+	void ApplyMovementSpeeds();
+
 	FTimerHandle DestroyTimerHandle;
+	FTimerHandle ModeWidgetLinkTimerHandle;
+
+	/** Casts the mode widget component's user widget and hands it this companion.
+	 *  Re-arms ModeWidgetLinkTimerHandle if the widget isn't constructed yet. */
+	void TryLinkModeWidget();
 
 	// --- Commanded takedown state ---
 
@@ -413,6 +519,14 @@ private:
 	TWeakObjectPtr<AExtractionPlayer> TakedownPlayerRef;
 	ETakedownMethod TakedownActiveMethod = ETakedownMethod::Knife;
 	FTimerHandle ShootDelayTimerHandle;
+
+	/** True when the pending shoot execution was triggered by the player's own shot — selects the
+	 *  instant double-tap chain instead of the phased autonomous cadence. */
+	bool bTakedownCommandedInstant = false;
+
+	/** Instant chain registers the kill up front (before the cosmetic shots) — guards
+	 *  HandleTakedownKill against a second ExecuteTakedown on the corpse. */
+	bool bTakedownKillRegistered = false;
 	bool bTakedownArmed = false;
 	bool bTakedownPlayerCommitted = false;
 	bool bTakedownInPosition = false;

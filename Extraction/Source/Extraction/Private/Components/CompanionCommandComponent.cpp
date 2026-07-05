@@ -6,7 +6,11 @@
 #include "Companion/CompanionCharacter.h"
 #include "AI/CompanionAIController.h"
 #include "Camera/CameraComponent.h"
+#include "EnhancedInputSubsystems.h"
+#include "InputMappingContext.h"
 #include "GameFramework/Character.h"
+#include "GameFramework/PlayerController.h"
+#include "Engine/LocalPlayer.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "Engine/EngineTypes.h"
@@ -25,6 +29,11 @@ void UCompanionCommandComponent::BeginPlay()
 
 void UCompanionCommandComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	SetPromptContextRegistered(false);
+
+	if (ACompanionCharacter* Companion = CachedCompanion.Get())
+		Companion->OnModeChanged.RemoveDynamic(this, &UCompanionCommandComponent::HandleCompanionModeChanged);
+
 	CachedCompanion.Reset();
 	CachedCamera.Reset();
 	PendingTarget.Reset();
@@ -39,7 +48,12 @@ ACompanionCharacter* UCompanionCommandComponent::ResolveCompanion()
 
 	AActor* Found = UGameplayStatics::GetActorOfClass(GetWorld(), ACompanionCharacter::StaticClass());
 	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Found);
-	if (IsValid(Companion)) CachedCompanion = Companion;
+	if (IsValid(Companion))
+	{
+		CachedCompanion = Companion;
+		if (!Companion->OnModeChanged.IsAlreadyBound(this, &UCompanionCommandComponent::HandleCompanionModeChanged))
+			Companion->OnModeChanged.AddDynamic(this, &UCompanionCommandComponent::HandleCompanionModeChanged);
+	}
 	return Companion;
 }
 
@@ -94,6 +108,7 @@ void UCompanionCommandComponent::IssuePing()
 	{
 		PendingCommand = ECompanionCommand::Breach;
 		PendingTarget  = HitActor;
+		SetPromptContextRegistered(false); // breach prompt confirms on B — no G/V shield needed
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
 		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> BREACH %s (broadcast)"), *GetNameSafe(HitActor));
 		return;
@@ -109,6 +124,7 @@ void UCompanionCommandComponent::IssuePing()
 		{
 			PendingCommand = ECompanionCommand::Takedown;
 			PendingTarget  = Enemy;
+			SetPromptContextRegistered(true);
 			OnPingChanged.Broadcast(PendingCommand, Enemy);
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> TAKEDOWN %s (broadcast)"), *GetNameSafe(Enemy));
 			return;
@@ -128,7 +144,27 @@ void UCompanionCommandComponent::ClearPending()
 {
 	PendingCommand = ECompanionCommand::None;
 	PendingTarget.Reset();
+	SetPromptContextRegistered(false);
 	OnPingChanged.Broadcast(ECompanionCommand::None, nullptr);
+}
+
+void UCompanionCommandComponent::SetPromptContextRegistered(bool bRegister)
+{
+	if (bRegister == bPromptContextRegistered) return;
+	if (!TakedownPromptContext) return;
+
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	const APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	UEnhancedInputLocalPlayerSubsystem* Subsystem = PC
+		? ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer())
+		: nullptr;
+	if (!Subsystem) return;
+
+	if (bRegister)
+		Subsystem->AddMappingContext(TakedownPromptContext, TakedownPromptContextPriority);
+	else
+		Subsystem->RemoveMappingContext(TakedownPromptContext);
+	bPromptContextRegistered = bRegister;
 }
 
 void UCompanionCommandComponent::ConfirmTakedown(ETakedownMethod Method)
@@ -159,6 +195,40 @@ void UCompanionCommandComponent::ConfirmTakedownKnife()
 void UCompanionCommandComponent::ConfirmTakedownShoot()
 {
 	ConfirmTakedown(ETakedownMethod::Shoot);
+}
+
+// ---- Mode ----
+
+void UCompanionCommandComponent::CycleCompanionMode()
+{
+	ACompanionCharacter* Companion = ResolveCompanion();
+	if (!IsValid(Companion))
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("CycleCompanionMode: no companion in level"));
+		return;
+	}
+
+	ECompanionMode NextMode;
+	switch (Companion->GetMode())
+	{
+	case ECompanionMode::Normal:  NextMode = ECompanionMode::Combat;  break;
+	case ECompanionMode::Combat:  NextMode = ECompanionMode::Stealth; break;
+	default:                      NextMode = ECompanionMode::Normal;  break;
+	}
+
+	UE_LOG(LogCompanionCommand, Log, TEXT("[Mode] cycle -> %s"), *UEnum::GetValueAsString(NextMode));
+	Companion->SetMode(NextMode);
+}
+
+ECompanionMode UCompanionCommandComponent::GetCompanionMode()
+{
+	const ACompanionCharacter* Companion = ResolveCompanion();
+	return IsValid(Companion) ? Companion->GetMode() : ECompanionMode::Normal;
+}
+
+void UCompanionCommandComponent::HandleCompanionModeChanged(ECompanionMode NewMode)
+{
+	OnCompanionModeChanged.Broadcast(NewMode);
 }
 
 void UCompanionCommandComponent::ConfirmBreach()

@@ -55,6 +55,9 @@ protected:
 
 private:
 	float OutOfCombatTimer = 0.f;
+	/** True once the weapon has been lowered since the last target/threat was lost — edge guard for
+	 *  the immediate lower, robust across branch switches (stealth re-pin -> combat decay). */
+	bool bLoweredOnTargetLoss = false;
 	bool bWasLosBlocked = false;
 	/** Accumulated time the no-cover combat target has been LoS-blocked; cleared on LoS-clear or active cover slot. */
 	float OpenLosBlockedTime = 0.f;

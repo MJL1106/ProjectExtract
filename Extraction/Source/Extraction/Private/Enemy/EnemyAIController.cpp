@@ -61,7 +61,9 @@ AEnemyAIController::AEnemyAIController()
 	HearingConfig->SetMaxAge(3.f);
 	HearingConfig->DetectionByAffiliation.bDetectEnemies = true;
 	HearingConfig->DetectionByAffiliation.bDetectNeutrals = true;
-	HearingConfig->DetectionByAffiliation.bDetectFriendlies = false;
+	// Friendlies audible for ally-gunfire coordination (UEnemyAwarenessComponent::HandleAllyGunfireHeard);
+	// sight stays enemies+neutrals only.
+	HearingConfig->DetectionByAffiliation.bDetectFriendlies = true;
 
 	PerceptionComponent->ConfigureSense(*SightConfig);
 	PerceptionComponent->ConfigureSense(*HearingConfig);

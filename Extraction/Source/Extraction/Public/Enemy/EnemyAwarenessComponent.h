@@ -17,6 +17,15 @@ class UEnemySquad;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAwarenessStateChanged, EEnemyAwarenessState, OldState, EEnemyAwarenessState, NewState);
 
+/** A hostile the enemy currently factors into cover decisions: live position when sighted,
+ *  frozen last-stimulus position while memory of it is still fresh (honest knowledge). */
+struct FEnemyKnownThreat
+{
+	AActor* Actor = nullptr;
+	FVector Location = FVector::ZeroVector;
+	bool bSighted = false;
+};
+
 UCLASS(ClassGroup = (Enemy), meta = (BlueprintSpawnableComponent))
 class EXTRACTION_API UEnemyAwarenessComponent : public UActorComponent
 {
@@ -89,6 +98,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	float GetTimeSinceDamagedBy(const AActor* Pawn) const;
 
+	/** Living hostiles beyond ExcludeTarget this enemy either sees now (live location) or has
+	 *  perceived within MemorySeconds (frozen last-stimulus location — honest knowledge), closest
+	 *  first, capped at MaxCount. MemorySeconds <= 0 = currently-sighted only. Cloaked companions
+	 *  are excluded (their track is stale by definition). */
+	void GetExtraKnownThreats(const AActor* ExcludeTarget, int32 MaxCount, float MemorySeconds,
+		TArray<FEnemyKnownThreat>& OutThreats) const;
+
 private:
 
 	/** Per-stimulus-source suspicion bookkeeping. */
@@ -97,9 +113,14 @@ private:
 		float Suspicion = 0.f;
 		bool bSighted = false;
 		FVector LastStimulusLocation = FVector::ZeroVector;
+		/** World time LastStimulusLocation was last written (multi-threat memory window). */
+		float LastStimulusTime = -1e9f;
 		/** World time of last NotifyShotAt processing for this instigator (rate-limit). */
 		float LastShotAtTime = -1e9f;
 	};
+
+	/** Writes Track's stimulus location + timestamp together — keep every write on this path. */
+	void StampTrack(FSuspicionTrack& Track, const FVector& Location) const;
 
 	void SetState(EEnemyAwarenessState NewState);
 	void SetCombatTarget(AActor* NewTarget);
@@ -117,6 +138,8 @@ private:
 
 	void HandleSightStimulus(AActor* Actor, const FAIStimulus& Stimulus);
 	void HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus);
+	/** Ally coordination: a mate's heard gunfire raises suspicion toward what he is shooting at. */
+	void HandleAllyGunfireHeard(class AEnemyCharacter* Shooter, const FAIStimulus& Stimulus);
 	void HandleBodySighted(class AEnemyCharacter* Body);
 	void Bark(EBarkType Type) const;
 
@@ -128,6 +151,22 @@ private:
 	bool ShouldIgnoreCompanionStimulus(const AActor* Actor) const;
 	bool CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, float WorldTime) const;
 
+	/** Mode-dependent companion sight cloak.
+	 *  Combat mode: never cloaked (guns blazing — fully perceivable).
+	 *  Stealth (unbroken): always cloaked, even to in-Combat enemies.
+	 *  Normal (and broken stealth): cloaked until the fight is on — this enemy in Combat, or the
+	 *  global alert has gone Loud (player spotted / firing). Isolated encounters ignore the alert. */
+	bool IsCompanionSightCloaked(const AActor* Actor) const;
+
+	/** Companion gunfire audibility. Stealth: audible unless the weapon is suppressed (the
+	 *  suppressor buys the silence). Normal: silent while sight-cloaked. Combat: always audible. */
+	bool IsCompanionFireInaudible(const AActor* Actor) const;
+
+	/** Seeds/refreshes bSighted tracks for currently-perceived, currently-uncloaked companions.
+	 *  Called on cloak-lift transitions (combat entry, global alert Loud) — sight events swallowed
+	 *  while cloaked left no track, and perception only fires on edges. */
+	void SeedCompanionSightTracks();
+
 	/** Egress: report our current combat target + last-known to the squad (rate-limited by the squad). */
 	void BroadcastSightingToSquad();
 
@@ -136,6 +175,11 @@ private:
 
 	/** True when the controlled pawn has bIsolatedEncounter set (sight-only, no global alert). */
 	bool IsOwnerIsolatedEncounter() const;
+
+	/** True when the controlled pawn is inside a takedown volume — awareness is "muffled": gunfire,
+	 *  walking and reload noise is dropped so taking one enemy down doesn't cascade to its pocket
+	 *  neighbours. A sprint footstep and the global Loud alert still wake it (both bypass the muffle). */
+	bool IsOwnerTakedownMuffled() const;
 
 	bool IsHostile(AActor* Actor) const;
 	static bool IsActorAlive(const AActor* Actor);

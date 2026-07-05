@@ -114,10 +114,26 @@ void UEnemyAwarenessComponent::OnTargetPerceptionUpdated(AActor* Actor, FAIStimu
 	}
 
 	static const FName WeaponFireTag(TEXT("WeaponFire"));
-	const bool bCompanionWeaponFireNoise = IsCompanionActor(Actor)
-		&& Stimulus.Type == UAISense::GetSenseID<UAISense_Hearing>()
-		&& Stimulus.Tag == WeaponFireTag;
-	if (ShouldIgnoreCompanionStimulus(Actor) && !bCompanionWeaponFireNoise) return;
+	if (IsCompanionActor(Actor))
+	{
+		// Gunfire gates on audibility (mode + suppressor); every other stimulus (sight, reload,
+		// footsteps) gates on the sight cloak.
+		const bool bFireNoise = Stimulus.Type == UAISense::GetSenseID<UAISense_Hearing>()
+			&& Stimulus.Tag == WeaponFireTag;
+		if (bFireNoise ? IsCompanionFireInaudible(Actor) : IsCompanionSightCloaked(Actor)) return;
+	}
+
+	// Ally coordination: a mate's gunfire is the only friendly stimulus that matters — every other
+	// friendly noise (reloads, traversal) falls through to the hostility filter and drops.
+	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Hearing>() && Stimulus.Tag == WeaponFireTag)
+	{
+		if (AEnemyCharacter* AllyShooter = Cast<AEnemyCharacter>(Actor); AllyShooter && !IsHostile(Actor))
+		{
+			HandleAllyGunfireHeard(AllyShooter, Stimulus);
+			return;
+		}
+	}
+
 	if (!IsHostile(Actor)) return;
 
 	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>())
@@ -166,7 +182,12 @@ void UEnemyAwarenessComponent::HandleSightStimulus(AActor* Actor, const FAIStimu
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Actor);
 	Track.bSighted = Stimulus.WasSuccessfullySensed();
 	if (Track.bSighted)
-		Track.LastStimulusLocation = Actor->GetActorLocation();
+		StampTrack(Track, Actor->GetActorLocation());
+	else
+		// Lost-sight edge: stamp the last-seen location so the multi-threat memory window counts
+		// from LOS-break, not from the sight-GAIN edge (Combat never tick-refreshes these tracks —
+		// without this a threat visible longer than the window is evicted the tick it ducks).
+		StampTrack(Track, Stimulus.StimulusLocation);
 
 	if (GetDetectionLogLevel() > 0)
 		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] SightStim tgt=%s success=%d state=%s stimLoc=(%.0f,%.0f,%.0f)"),
@@ -207,12 +228,18 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 	if (!Stimulus.WasSuccessfullySensed()) return;
 	if (!IsValid(ArchetypeData)) return;
 
+	// Takedown-volume muffle: a pocket enemy ignores gunfire, walking and reloads so taking one down
+	// doesn't cascade to its neighbours. A sprint is blatant enough to wake it (the player's own fault);
+	// a level-wide Loud alert still wakes it via HandleGlobalAlertChanged.
+	static const FName SprintFootstepTag(TEXT("FootstepSprint"));
+	if (IsOwnerTakedownMuffled() && Stimulus.Tag != SprintFootstepTag) return;
+
 	if (GetDetectionLogLevel() > 0)
 		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] HearStim actor=%s strength=%.2f state=%s"),
 			*Actor->GetName(), Stimulus.Strength, *UEnum::GetValueAsString(CurrentState));
 
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Actor);
-	Track.LastStimulusLocation = Stimulus.StimulusLocation;
+	StampTrack(Track, Stimulus.StimulusLocation);
 
 	// During Combat, only update track bookkeeping (location) — suspicion gain is irrelevant
 	if (CurrentState == EEnemyAwarenessState::Combat) return;
@@ -232,6 +259,40 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 	}
 }
 
+void UEnemyAwarenessComponent::HandleAllyGunfireHeard(AEnemyCharacter* Shooter, const FAIStimulus& Stimulus)
+{
+	if (IsOwnerIsolatedEncounter()) return;
+	if (!Stimulus.WasSuccessfullySensed()) return;
+	if (!IsValid(ArchetypeData)) return;
+	if (IsOwnerTakedownMuffled()) return;
+	if (!IsActorAlive(Shooter)) return;
+	if (CurrentState == EEnemyAwarenessState::Combat) return;
+
+	// Own gunfire echoes back through the friendly-hearing channel — never self-investigate
+	// (the Combat gate above misses the Combat->Searching transition frame).
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	if (MyController && Shooter == MyController->GetPawn()) return;
+
+	// Suspicion points at what the mate is shooting at, not at the mate — the first heard shot turns
+	// us toward his target (Suspicious), sustained fire accumulates into Searching via the normal
+	// suspicion pipeline. If his target is unknown (or cloaked to us, which would purge the track),
+	// face the muzzle instead.
+	AActor* AimTarget = Shooter->GetAIAimTarget();
+	const bool bAimKnown = IsValid(AimTarget) && IsHostile(AimTarget) && !IsCompanionSightCloaked(AimTarget);
+	AActor* TrackKey = bAimKnown ? AimTarget : static_cast<AActor*>(Shooter);
+
+	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(TrackKey);
+	StampTrack(Track, bAimKnown ? AimTarget->GetActorLocation() : Stimulus.StimulusLocation);
+
+	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain;
+	Track.Suspicion = FMath::Min(
+		FMath::Max(Track.Suspicion + Gain, ArchetypeData->SuspiciousThreshold), NoiseSuspicionCap);
+
+	if (GetDetectionLogLevel() > 0)
+		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] AllyFire shooter=%s aim=%s susp=%.0f state=%s"),
+			*GetNameSafe(Shooter), *GetNameSafe(AimTarget), Track.Suspicion, *UEnum::GetValueAsString(CurrentState));
+}
+
 // --- Damage Notification ---
 
 void UEnemyAwarenessComponent::NotifyDamaged(AController* Instigator)
@@ -241,7 +302,10 @@ void UEnemyAwarenessComponent::NotifyDamaged(AController* Instigator)
 
 	APawn* InstigatorPawn = Instigator->GetPawn();
 	if (!IsValid(InstigatorPawn)) return;
-	if (ShouldIgnoreCompanionStimulus(InstigatorPawn)) return;
+	// Real damage is fight-on: only a stealth-active companion stays an invisible attacker (by
+	// design); a cloaked Normal-mode companion that hurts us breaks its own cloak right here.
+	if (const ACompanionCharacter* DmgCompanion = Cast<ACompanionCharacter>(InstigatorPawn))
+		if (DmgCompanion->IsStealthActive()) return;
 	if (!IsHostile(InstigatorPawn)) return;
 
 	RecentDamageInstigatorPawn = InstigatorPawn;
@@ -251,7 +315,7 @@ void UEnemyAwarenessComponent::NotifyDamaged(AController* Instigator)
 	// Ensure the instigator has a suspicion track so threat scoring can find it even when
 	// perception never delivered a stimulus (suppressed weapon, out of hearing range — QA #6).
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(InstigatorPawn);
-	Track.LastStimulusLocation = InstigatorPawn->GetActorLocation();
+	StampTrack(Track, InstigatorPawn->GetActorLocation());
 
 	EnterCombat(InstigatorPawn, false);
 
@@ -275,7 +339,9 @@ void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVecto
 {
 	if (bStopped) return;
 	if (!IsValid(InstigatorPawn)) return;
-	if (ShouldIgnoreCompanionStimulus(InstigatorPawn)) return;
+	// Same fight-on rule as NotifyDamaged: near-misses break a Normal cloak; stealth stays hidden.
+	if (const ACompanionCharacter* ShotCompanion = Cast<ACompanionCharacter>(InstigatorPawn))
+		if (ShotCompanion->IsStealthActive()) return;
 	if (!IsHostile(InstigatorPawn)) return;
 	if (!IsValid(ArchetypeData) || !ArchetypeData->bReactsToBeingShotAt) return;
 
@@ -287,7 +353,7 @@ void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVecto
 	if (CurrentState == EEnemyAwarenessState::Combat)
 	{
 		FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(InstigatorPawn);
-		Track.LastStimulusLocation = ShotOrigin;
+		StampTrack(Track, ShotOrigin);
 		return;
 	}
 
@@ -298,7 +364,7 @@ void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVecto
 	Track.LastShotAtTime = Now;
 
 	// Clamp to at least SearchingThreshold so a mistuned DA can't decay out on the next tick (fix #7).
-	Track.LastStimulusLocation = ShotOrigin;
+	StampTrack(Track, ShotOrigin);
 	const float Floor = FMath::Max(ArchetypeData->ShotAtSuspicionFloor, ArchetypeData->SearchingThreshold);
 	Track.Suspicion = FMath::Max(Track.Suspicion, Floor);
 
@@ -535,6 +601,12 @@ void UEnemyAwarenessComponent::UpdateCombat()
 	if (!bTargetGone)
 		bTargetGone = !IsActorAlive(CombatTarget.Get());
 
+	// Cloak rules: a companion target that re-cloaked (went stealth mid-fight) counts as gone —
+	// without this the ignore-gate swallows its lost-sight event, bHadLOS never drops, and the
+	// enemy tracks and shoots an "invisible" target indefinitely.
+	if (!bTargetGone)
+		bTargetGone = IsCompanionSightCloaked(CombatTarget.Get());
+
 	if (bTargetGone)
 	{
 		// Target died — try to immediately acquire a sighted candidate before dropping to Searching
@@ -665,13 +737,19 @@ void UEnemyAwarenessComponent::UpdateSuspicion()
 	{
 		AActor* Actor = It.Key().Get();
 		if (!Actor) { It.RemoveCurrent(); continue; }
-		if (ShouldIgnoreCompanionStimulus(Actor)) { It.RemoveCurrent(); continue; }
+
+		// Purge only when fully imperceptible. A sight-cloaked companion whose fire is audible
+		// (unsuppressed stealth shots) keeps its track so noise suspicion accumulates across shots;
+		// the cloak still forces the non-sighted branch below, so it can never sight-fill or
+		// trigger the point-blank auto-combat.
+		const bool bSightCloaked = IsCompanionSightCloaked(Actor);
+		if (bSightCloaked && IsCompanionFireInaudible(Actor)) { It.RemoveCurrent(); continue; }
 
 		FSuspicionTrack& Track = It.Value();
-		if (Track.bSighted && IsActorAlive(Actor))
+		if (!bSightCloaked && Track.bSighted && IsActorAlive(Actor))
 		{
 			Track.Suspicion += ComputeSightFillRate(MyPawn, Actor) * UpdateInterval;
-			Track.LastStimulusLocation = Actor->GetActorLocation();
+			StampTrack(Track, Actor->GetActorLocation());
 
 			const bool bPointBlank = FVector::DistSquared(MyPawn->GetActorLocation(), Actor->GetActorLocation()) <= AutoCombatRangeSq;
 			if (Track.Suspicion >= SuspicionMax || bPointBlank)
@@ -773,7 +851,12 @@ float UEnemyAwarenessComponent::ComputeSightFillRate(const APawn* MyPawn, const 
 
 void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual)
 {
-	if (ShouldIgnoreCompanionStimulus(Target)) return;
+	// A stealth-active companion can never become a combat target (invisible by design — its
+	// audible unsuppressed fire routes to Searching, never a lock-on). A cloaked NORMAL companion
+	// reaching here means real damage/near-miss broke its cloak: entering Combat lifts the cloak
+	// for this enemy, so the fight is coherent from this point on.
+	if (const ACompanionCharacter* TargetCompanion = Cast<ACompanionCharacter>(Target))
+		if (TargetCompanion->IsStealthActive()) return;
 
 	if (CurrentState != EEnemyAwarenessState::Combat && GetDetectionLogLevel() > 0)
 	{
@@ -803,6 +886,11 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 			Bark(EBarkType::Contact);
 	}
 	SetState(EEnemyAwarenessState::Combat);
+
+	// Combat entry lifts the Normal-mode companion cloak for this enemy, but sight events swallowed
+	// while cloaked left no track and perception only fires on edges — seed from what's already in
+	// view so the enemy isn't sight-blind to a now-perceivable companion.
+	SeedCompanionSightTracks();
 
 	if (bConfirmedVisual)
 		BroadcastSightingToSquad();
@@ -836,6 +924,12 @@ void UEnemyAwarenessComponent::HandleGlobalAlertChanged(EGlobalAlertLevel OldLev
 	if (bStopped) return;
 	if (IsOwnerIsolatedEncounter()) return;
 	if (NewLevel != EGlobalAlertLevel::Loud) return;
+
+	// Loud lifts the Normal-mode companion cloak for every non-isolated enemy — seed tracks for
+	// companions already in view regardless of our state (the Unaware gate below only guards the
+	// wake-up sweep).
+	SeedCompanionSightTracks();
+
 	if (CurrentState != EEnemyAwarenessState::Unaware) return;
 
 	// Stealth is over — dormant enemies wake up and sweep their post.
@@ -943,6 +1037,59 @@ float UEnemyAwarenessComponent::GetTimeSinceDamagedBy(const AActor* Pawn) const
 	return World->GetTimeSeconds() - *Stamp;
 }
 
+void UEnemyAwarenessComponent::StampTrack(FSuspicionTrack& Track, const FVector& Location) const
+{
+	Track.LastStimulusLocation = Location;
+	const UWorld* World = GetWorld();
+	Track.LastStimulusTime = World ? static_cast<float>(World->GetTimeSeconds()) : Track.LastStimulusTime;
+}
+
+void UEnemyAwarenessComponent::GetExtraKnownThreats(const AActor* ExcludeTarget, int32 MaxCount,
+	float MemorySeconds, TArray<FEnemyKnownThreat>& OutThreats) const
+{
+	OutThreats.Reset();
+	if (MaxCount <= 0) return;
+
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	if (!IsValid(MyPawn)) return;
+
+	const UWorld* World = GetWorld();
+	const float Now = World ? static_cast<float>(World->GetTimeSeconds()) : 0.f;
+
+	OutThreats.Reserve(MaxCount + 2);
+	for (const auto& Pair : SuspicionTracks)
+	{
+		AActor* Candidate = Pair.Key.Get();
+		if (!IsValid(Candidate) || Candidate == ExcludeTarget) continue;
+		if (!IsActorAlive(Candidate)) continue;
+		if (!IsHostile(Candidate)) continue;
+		if (IsCompanionSightCloaked(Candidate)) continue;
+
+		const FSuspicionTrack& Track = Pair.Value;
+		FEnemyKnownThreat Known;
+		Known.Actor = Candidate;
+		Known.bSighted = Track.bSighted;
+		if (Track.bSighted)
+			Known.Location = Candidate->GetActorLocation();
+		else if (MemorySeconds > 0.f && (Now - Track.LastStimulusTime) <= MemorySeconds)
+			Known.Location = Track.LastStimulusLocation; // frozen — honest knowledge
+		else
+			continue;
+
+		OutThreats.Add(Known);
+	}
+
+	const FVector PawnLoc = MyPawn->GetActorLocation();
+	OutThreats.Sort([PawnLoc](const FEnemyKnownThreat& A, const FEnemyKnownThreat& B)
+	{
+		return FVector::DistSquared(PawnLoc, A.Location) < FVector::DistSquared(PawnLoc, B.Location);
+	});
+
+	if (OutThreats.Num() > MaxCount)
+		OutThreats.SetNum(MaxCount, EAllowShrinking::No);
+}
+
 void UEnemyAwarenessComponent::Bark(EBarkType Type) const
 {
 	const AAIController* MyController = Cast<AAIController>(GetOwner());
@@ -967,6 +1114,13 @@ bool UEnemyAwarenessComponent::IsOwnerIsolatedEncounter() const
 	const AAIController* C = Cast<AAIController>(GetOwner());
 	const AEnemyCharacter* E = C ? Cast<AEnemyCharacter>(C->GetPawn()) : nullptr;
 	return E && E->IsIsolatedEncounter();
+}
+
+bool UEnemyAwarenessComponent::IsOwnerTakedownMuffled() const
+{
+	const AAIController* C = Cast<AAIController>(GetOwner());
+	const AEnemyCharacter* E = C ? Cast<AEnemyCharacter>(C->GetPawn()) : nullptr;
+	return E && E->IsInTakedownVolume();
 }
 
 bool UEnemyAwarenessComponent::IsHostile(AActor* Actor) const
@@ -998,14 +1152,73 @@ bool UEnemyAwarenessComponent::IsCompanionActor(const AActor* Actor) const
 	return Cast<const ACompanionCharacter>(Actor) != nullptr;
 }
 
+void UEnemyAwarenessComponent::SeedCompanionSightTracks()
+{
+	AAIController* MyController = Cast<AAIController>(GetOwner());
+	UAIPerceptionComponent* Perception = MyController ? MyController->GetPerceptionComponent() : nullptr;
+	if (!Perception) return;
+
+	TArray<AActor*> Perceived;
+	Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), Perceived);
+	for (AActor* Actor : Perceived)
+	{
+		if (!IsValid(Actor) || !IsCompanionActor(Actor)) continue;
+		if (IsCompanionSightCloaked(Actor)) continue;
+
+		FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Actor);
+		Track.bSighted = true;
+		StampTrack(Track, Actor->GetActorLocation());
+	}
+}
+
 bool UEnemyAwarenessComponent::ShouldIgnoreCompanionStimulus(const AActor* Actor) const
 {
-	return IsCompanionActor(Actor) && CurrentState != EEnemyAwarenessState::Combat;
+	return IsCompanionSightCloaked(Actor);
+}
+
+bool UEnemyAwarenessComponent::IsCompanionSightCloaked(const AActor* Actor) const
+{
+	const ACompanionCharacter* Companion = Cast<const ACompanionCharacter>(Actor);
+	if (!Companion) return false;
+
+	switch (Companion->GetMode())
+	{
+	case ECompanionMode::Combat:
+		return false; // guns blazing — fully perceivable at all times
+	case ECompanionMode::Stealth:
+		if (Companion->IsStealthActive())
+			return true; // invisible even to in-Combat enemies until stealth breaks
+		break; // broken stealth falls through to the Normal fight-on rules
+	default:
+		break;
+	}
+
+	// Normal rules: cloaked until the fight is on — this enemy fighting, or the level gone Loud
+	// (player spotted or firing raises the global alert). Isolated encounters ignore the alert.
+	if (CurrentState == EEnemyAwarenessState::Combat) return false;
+	if (!IsOwnerIsolatedEncounter())
+		if (const UEnemyDirectorSubsystem* Dir = Director.Get())
+			if (Dir->GetAlertLevel() == EGlobalAlertLevel::Loud) return false;
+	return true;
+}
+
+bool UEnemyAwarenessComponent::IsCompanionFireInaudible(const AActor* Actor) const
+{
+	const ACompanionCharacter* Companion = Cast<const ACompanionCharacter>(Actor);
+	if (!Companion) return false;
+
+	// Stealth: gunfire is audible — a suppressor is what buys the silence.
+	if (Companion->GetMode() == ECompanionMode::Stealth && Companion->IsStealthActive())
+		return Companion->IsCurrentWeaponSuppressed();
+
+	// Normal's pre-fight cloak silences fire too; Combat mode is always audible.
+	return IsCompanionSightCloaked(Actor);
 }
 
 bool UEnemyAwarenessComponent::CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, float WorldTime) const
 {
 	if (!IsCompanionActor(Candidate)) return true;
+	if (IsCompanionSightCloaked(Candidate)) return false;
 	if (CurrentState != EEnemyAwarenessState::Combat) return false;
 	if (IsValid(ArchetypeData) && ArchetypeData->CompanionThreatScoreMultiplier <= 0.f) return false;
 
@@ -1130,6 +1343,9 @@ void UEnemyAwarenessComponent::ReportSquadSighting(AActor* Target, const FVector
 	if (bStopped) return;
 	if (!IsValid(Target)) return;
 	if (ShouldIgnoreCompanionStimulus(Target)) return;
+	// A takedown-volume enemy ignores squad chatter too — a squadmate merely Searching must not wake a
+	// pocket target. A real firefight raises the Loud alert, which still wakes it via HandleGlobalAlertChanged.
+	if (IsOwnerTakedownMuffled()) return;
 
 	// Guard: set flag to prevent re-broadcast from any combat-entry path this call triggers
 	TGuardValue<bool> RelayGuard(bInSquadSightingRelay, true);

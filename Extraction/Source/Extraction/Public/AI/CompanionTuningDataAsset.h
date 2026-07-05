@@ -46,6 +46,37 @@ public:
 	UPROPERTY(EditAnywhere, Category="Companion|Posture")
 	TMap<ECompanionPosture, FCompanionPostureProfile> PostureProfiles;
 
+	// --- Movement speeds (applied by ACompanionCharacter; its EditDefaultsOnly members are the
+	// fallback when no tuning asset is assigned) ---
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float WalkSpeed = 550.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float SprintSpeed = 850.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float CrouchedWalkSpeed = 250.f;
+
+	// Fast-crouch catch-up tier while stealth-active and falling behind: keeps the low silhouette
+	// but hustles. Applied to MaxWalkSpeedCrouched while the follow task reports FastCrouch stage.
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float StealthCrouchCatchupSpeed = 400.f;
+
+	// Distance (cm) past which a stealth-active companion breaks crouch entirely and sprints to
+	// catch up (the player is clearly sprinting off). Below it the fast-crouch tier applies.
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float StealthSprintBreakDistance = 1500.f;
+
+	// Master switch for the stealth sprint-break stage. Off = fast-crouch is the only catch-up.
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement")
+	bool bStealthAllowSprintCatchup = true;
+
+	// Player 2D speed (cm/s) above which the follow task treats the player as sprinting and mirrors
+	// sprint. The kit BP owns player sprint state, so it is inferred from velocity (walk 600 / sprint 900).
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float PlayerSprintSpeedThreshold = 700.f;
+
 	// --- Follow / formation (migrated from BTTask_FollowPlayer) ---
 
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation")
@@ -139,6 +170,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "1"))
 	int32 CoverSwitchRequiredAgreeingReEvals = 2;
 
+	// Absolute score improvement required for a switch when the current cover scores <= 0. The
+	// multiplicative margin INVERTS for non-positive scores (cur -0.55 x 1.2 = -0.66 lowers the
+	// bar), which let nearly any candidate win every re-eval — constant cover churn.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.05"))
+	float CoverSwitchMinScoreGain = 0.4f;
+
 	// Radius (cm) for companion cover searches — shared by the MoveToCover picker and the open-engage
 	// re-seek so the two can't desync into a re-seek/can't-reach thrash.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
@@ -151,15 +188,88 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
 	float CoverCommitMaxDistance = 650.f;
 
-	// Cover-commit gate: only commit to cover while under fire (active near-miss suppression, or damage
-	// within CoverCommitUnderFireWindow). False = distance gate only.
+	// DEPRECATED — replaced by the cover-trigger model below (under fire is now ONE of the triggers,
+	// not the sole gate). Field kept so existing assets don't lose data; no longer read.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
 	bool bCoverCommitRequiresUnderFire = true;
 
-	// Window (s) for the damage half of the under-fire check. Near-miss suppression has its own
+	// Window (s) for the damage half of the under-fire trigger. Near-miss suppression has its own
 	// hysteresis and is checked independently.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
 	float CoverCommitUnderFireWindow = 4.f;
+
+	// --- Cover triggers (situational commit — replaces the under-fire-only gate) ---
+	// The companion commits to the real cover system (cover anims) when ANY trigger is active:
+	// under fire, low health, reloading/low ammo, or outnumbered. Otherwise it open-engages with
+	// a loose cover bias (fights NEAR cover without locking into the cover animation loop).
+
+	// Commit when health fraction drops below this.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverTriggerHealthFrac = 0.5f;
+
+	// Release (leave cover) only once health recovers above this — hysteresis against pop-out thrash.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverTriggerHealthReleaseFrac = 0.65f;
+
+	// Commit when magazine fraction drops below this (or while actively reloading).
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverTriggerLowAmmoFrac = 0.3f;
+
+	// Release only once the magazine is back above this.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverTriggerAmmoReleaseFrac = 0.6f;
+
+	// Commit when this many threats are known (sight-perceived, alive). 1-2 remaining enemies never
+	// trigger the hide loop — the companion's accuracy is better used in the open.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "2", ClampMax = "8"))
+	int32 CoverTriggerOutnumberedCount = 3;
+
+	// Minimum time committed to cover before a cleared trigger allows exit.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
+	float CoverExitMinDwell = 2.0f;
+
+	// --- Loose cover bias (default open-engage positioning) ---
+
+	// When picking open-engage micro-positions, prefer points with a cover point within this radius
+	// (so a trigger firing mid-fight has a duck spot nearby). 0 disables the bias.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float LooseCoverBiasRadius = 500.f;
+
+	// Strength of the cover-proximity preference among LoS-valid candidates: higher = strictly
+	// prefers the cover-nearest point, lower = approaches a random LoS pick. 0 disables the bias
+	// entirely (including the pull-back cover snap).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float LooseCoverBiasWeight = 1.0f;
+
+	// --- Combat leash (decoupled from the follow-task SprintDistanceThreshold) ---
+
+	// Max distance from the player the companion positions freely during a fight in COMBAT mode
+	// before being pulled back. Bolder than Normal — it advances and takes space.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "300.0"))
+	float CombatLeashDistance = 2250.f;
+
+	// Same leash for fights while in NORMAL (or Stealth-broken) mode — tighter, stays in your fight.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "300.0"))
+	float NormalCombatLeashDistance = 1500.f;
+
+	// --- Cover-to-cover advance ("move up and take space") ---
+
+	// Allow the switch monitor to advance to a nearer-to-threat cover. Combat mode advances freely;
+	// Normal/Stealth require the player-advance gate below.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch")
+	bool bCombatAllowAdvance = true;
+
+	// Required score margin for an ADVANCE switch (candidate meaningfully nearer the threat and
+	// body-protected). 1.0 = a sidegrade is enough to take ground; CoverSwitchScoreMargin still
+	// applies to ordinary (non-advancing) switches.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.5", ClampMax = "3.0"))
+	float AdvanceScoreMargin = 1.0f;
+
+	// Normal/Stealth advance gate: accumulated player ground-gain toward the threat (uu, decays
+	// between monitor re-evals) required before a non-Combat-mode companion may take an ADVANCE
+	// switch — the companion takes space with the player, not ahead of them.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0"))
+	float PlayerAdvanceGateDistance = 250.f;
 
 	// When true, FindBestCoverFor rejects any slot whose hunkered body position is NOT shielded from
 	// the target by world geometry. Slots that are off to the side or behind the companion relative
@@ -170,6 +280,12 @@ public:
 	// Chest height (cm) used for the body-shield trace from the behind-cover position.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0"))
 	float CoverProtectionChestHeight = 60.f;
+
+	// Lateral corner gap (cm) for edge-aligned cover arrival — the same alignment enemies get from
+	// their archetype DA. Without it companions sit mid-wall, endpoint covers resolve Front
+	// (over-top only: no corner peeks, coin-flip idle side).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float CoverCornerGap = 5.f;
 
 	// Arc slack (degrees) added to CoverFlankArcHalfAngleDeg when testing whether the current cover
 	// point has been flanked. Prevents freshly-entered points from immediately re-triggering.
@@ -193,6 +309,37 @@ public:
 	// 0 disables the backstop entirely.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0", ClampMax = "16"))
 	int32 CoverArcStarvationEvals = 4;
+
+	// Half-angle (degrees) of the peek fire cone about the cover's wall-forward, origin at the pawn.
+	// Gates burst start AND continuing fire — the companion never fires at bearings its cover pose
+	// can't reach (mirrors the enemy's CoverPeekConeHalfAngleDeg; keep the two in step with the
+	// anim-side CoverAimTrackLimitDeg so "torso looks" ⇔ "fire allowed"). 180 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "10", ClampMax = "180"))
+	float CoverPeekConeHalfAngleDeg = 75.f;
+
+	// At crouch cover with a verified side gap AND a clear over-the-top shot, chance per peek
+	// decision to stand up and fire over the wall instead of corner-peeking (enemy parity —
+	// occasional stand-up keeps crouch-cover fights from being 100% corner peeks). 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverEndpointStandPeekChance = 0.3f;
+
+	// Completed peek cycles required at a cover point before the companion may reposition/shuffle
+	// away from it (enemy parity — commit to a point before wandering). The starvation backstop and
+	// genuine invalidates (occupied, blind) ignore this.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0", ClampMax = "8"))
+	int32 MinPeekCyclesBeforeRelocate = 1;
+
+	// Suppression resistance divisor for near-miss buildup (enemy-DA parity: higher = harder to
+	// suppress). The component default (1.0) pins the companion after just two near-misses — under
+	// several shooters it stays suppressed permanently, never fires, and reads as cover churn.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0.1", ClampMax = "10.0"))
+	float SuppressionResistance = 2.5f;
+
+	// While true, suppression NEVER gates the companion's combat task — in cover it just peeks
+	// (peek gate, strike freeze, reposition aborts all read unsuppressed). Near-miss FX and the
+	// suppression component itself are unaffected. User-directed test lever, default ON.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat")
+	bool bIgnoreSuppressionInCover = true;
 
 	// --- Multi-threat cover scoring ---
 
@@ -248,6 +395,37 @@ public:
 	// Cone depth (cm); positions beyond this distance from the player are unconstrained.
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0", EditCondition = "bAvoidPlayerADSCone"))
 	float ADSConeRange = 1500.f;
+
+	// --- Mode (player-commanded Normal / Combat / Stealth) ---
+
+	// Combat mode: how far AHEAD of the player (along their facing / move direction) the companion
+	// holds formation when out of contact. This is also the lead cap — the formation point never
+	// projects farther than this past the player. Must exceed AcceptableRadius or the follow task's
+	// idle gate stops the companion at the player's side before it reaches the lead point.
+	UPROPERTY(EditAnywhere, Category = "Companion|Mode", meta = (ClampMin = "0.0"))
+	float CombatModeLeadDistance = 400.f;
+
+	// Combat mode: lateral offset of the lead formation point.
+	UPROPERTY(EditAnywhere, Category = "Companion|Mode")
+	float CombatModeLeadOffsetRight = 150.f;
+
+	// Combat mode: shift applied to the cover-scoring ideal-distance band floor (cm, negative =
+	// prefer covers nearer the threat). Mirrors the enemy posture Press mechanic: the band term is
+	// also flipped to penalise distance, so the companion gains ground cover-to-cover.
+	UPROPERTY(EditAnywhere, Category = "Companion|Mode", meta = (ClampMax = "0.0"))
+	float CombatModeAdvanceDistMinDelta = -300.f;
+
+	// Stealth mode: formation tucks in tighter behind the player than the normal follow offsets.
+	UPROPERTY(EditAnywhere, Category = "Companion|Mode", meta = (ClampMin = "0.0"))
+	float StealthFormationOffsetBack = 180.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Mode")
+	float StealthFormationOffsetRight = 100.f;
+
+	// Stealth mode: seconds with no combat target and no alerted threats before broken stealth
+	// re-pins (companion returns to crouched, hold-fire stealth rules).
+	UPROPERTY(EditAnywhere, Category = "Companion|Mode", meta = (ClampMin = "0.5"))
+	float StealthRepinDelay = 4.f;
 
 	// --- Follow / formation min-separation ---
 

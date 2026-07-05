@@ -75,15 +75,19 @@ static bool ShouldSkipForForcedHeight(const FCoverData& Data, int32 ForcedHeight
 }
 
 // --- Cover facing / peek-gap selection ---
-/** Eye heights for the peek-gap clearance traces (cover Location sits on the ground plane). */
-static constexpr float StandPeekEyeHeight = 150.f;
-static constexpr float CrouchPeekEyeHeight = 90.f;
+// ChooseGapPeekSide / TryOppositeEndpointSide moved to UCoverGeometryStatics (shared with companion).
 /** Reseek cadence when enemy.ForceCover is on. */
 static constexpr float ForceCoverReseekCooldown = 0.5f;
 // MinPeekCyclesBeforeRelocate promoted to DA field.
 /** 2D drift from the hunker spot that triggers a corrective step-back before the next peek
  *  (mops up root-motion residue from peeks whose Return doesn't land exactly home). */
 static constexpr float CoverDriftCorrectDist = 30.f;
+
+/** 2D distance from the BB cover beyond which BB_HasCover is a lie and gets cleared. Must exceed
+ *  every legitimate in-cover offset: the edge-align corner march (300) + corner gap (≤100) +
+ *  capsule (~34) + peek step-out margin — endpoint covers park the pawn that far from the baked
+ *  point while genuinely in cover. */
+static constexpr float StaleCoverAbandonDist = 500.f;
 
 /** Roll a pause duration with the canonical composition: base RandRange -> Hunker scalar -> feint multiplier. */
 static float RollPauseDuration(const UEnemyArchetypeData* DA, bool bHunkered)
@@ -137,107 +141,6 @@ static void UpdateCombatFocus(AAIController* Controller, const AEnemyCharacter* 
 	}
 	if (IsValid(Target)) Controller->SetFocus(Target);
 	else Controller->ClearFocus(EAIFocusPriority::Gameplay);
-}
-
-/** Feature 2: at a wall-end point (exactly one baked side flag for the current stance), try the
- *  opposite unflagged side by runtime-verifying clearance (peek position not inside geometry)
- *  and LOS to threat. Returns the opposite side on success, ECoverLean::None otherwise. */
-static ECoverLean TryOppositeEndpointSide(UWorld* World, const FCoverData& Data, bool bCrouched,
-	const FVector& ThreatLoc, const AActor* Target, const APawn* Pawn,
-	ECoverLean BakedSide)
-{
-	if (!World) return ECoverLean::None;
-	// Opposite of Left = Right and vice versa; only side peeks have opposites.
-	ECoverLean OppSide = ECoverLean::None;
-	if (BakedSide == ECoverLean::Left)  OppSide = ECoverLean::Right;
-	if (BakedSide == ECoverLean::Right) OppSide = ECoverLean::Left;
-	if (OppSide == ECoverLean::None) return ECoverLean::None;
-
-	const float EyeHeight = bCrouched ? CrouchPeekEyeHeight : StandPeekEyeHeight;
-	const FVector PeekPos = UCoverGeometryStatics::GetLeanPeekPosition(Data, OppSide);
-	const FVector Eye = PeekPos + FVector(0.f, 0.f, EyeHeight);
-
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(CoverEndpointOpposite), false);
-	Params.AddIgnoredActor(Pawn);
-	Params.AddIgnoredActor(Target);
-
-	// Clearance: corner point → peek eye must be unobstructed (blocks = neighbour wall geometry).
-	const FVector Origin = Data.Location + FVector(0.f, 0.f, EyeHeight);
-	if (World->LineTraceTestByChannel(Origin, Eye, ECC_Visibility, Params))
-		return ECoverLean::None;
-
-	// LOS: eye → threat must be clear.
-	if (World->LineTraceTestByChannel(Eye, ThreatLoc, ECC_Visibility, Params))
-		return ECoverLean::None;
-
-	return OppSide;
-}
-
-/** Peek-side pick: baked per-side flags first (the bake already knows which corners have a gap),
- *  ordered preferred-side-first, each LOS-verified from its corner at eye height. Falls back to
- *  the baked preference when no side verifies.
- *  Feature 2: at a wall-end point (exactly ONE baked side flag for the stance), also admits the
- *  opposite unflagged side when runtime traces verify clearance + LOS. The threat-closest dot
- *  then picks naturally as the player flanks around a thin wall end. */
-static ECoverLean ChooseGapPeekSide(UWorld* World, const FCoverData& Data, bool bCrouched,
-	const FVector& ThreatLoc, const AActor* Target, const APawn* Pawn)
-{
-	// enemy.ForceCoverPeekSide bypasses this function entirely (handled by the caller).
-	const bool bLeftBaked  = bCrouched ? Data.bLeftCoverCrouched  : Data.bLeftCoverStanding;
-	const bool bRightBaked = bCrouched ? Data.bRightCoverCrouched : Data.bRightCoverStanding;
-
-	// Feature 2: wall-end point = exactly one baked side flag for the current stance.
-	// Verify the opposite, unflagged side by runtime traces; add it to the candidate pool when valid.
-	bool bLeftValid  = bLeftBaked;
-	bool bRightValid = bRightBaked;
-
-	const bool bExactlyOneSide = (bLeftBaked != bRightBaked); // XOR
-	if (bExactlyOneSide && World)
-	{
-		const ECoverLean BakedSide = bLeftBaked ? ECoverLean::Left : ECoverLean::Right;
-		const ECoverLean OppVerified = TryOppositeEndpointSide(
-			World, Data, bCrouched, ThreatLoc, Target, Pawn, BakedSide);
-		if (OppVerified == ECoverLean::Left)  bLeftValid  = true;
-		if (OppVerified == ECoverLean::Right) bRightValid = true;
-	}
-
-	// Geometry-first: at a wall-end point the single baked flag IS the nearest open corner — the
-	// enemy should idle toward it and try it first, regardless of where it believes the threat is.
-	// The perceived threat position is stale exactly when this runs (tucked behind cover, no LOS),
-	// so a threat-angle preference here degenerates to Front (over-top dominates the dot) and kills
-	// corner peeks entirely.
-	const ECoverLean GeometricSide = bExactlyOneSide
-		? (bLeftBaked ? ECoverLean::Left : ECoverLean::Right) : ECoverLean::None;
-
-	// ResolveLeanSideExplicit uses flag-OR-verified validity for the preference dot.
-	const ECoverLean Preferred = UCoverGeometryStatics::ResolveLeanSideExplicit(
-		Data, bLeftValid, bRightValid, bCrouched && Data.bFrontCoverCrouched, ThreatLoc);
-
-	// Candidate order: geometric corner first, then the threat-preferred side, then the remainder.
-	TArray<ECoverLean, TInlineAllocator<3>> Sides;
-	if (GeometricSide != ECoverLean::None) Sides.Add(GeometricSide);
-	if ((Preferred == ECoverLean::Left || Preferred == ECoverLean::Right) && !Sides.Contains(Preferred))
-		Sides.Add(Preferred);
-	if (bLeftValid  && !Sides.Contains(ECoverLean::Left))  Sides.Add(ECoverLean::Left);
-	if (bRightValid && !Sides.Contains(ECoverLean::Right)) Sides.Add(ECoverLean::Right);
-
-	if (World && !Sides.IsEmpty())
-	{
-		FCollisionQueryParams Params(SCENE_QUERY_STAT(CoverPeekGap), false);
-		Params.AddIgnoredActor(Pawn);
-		Params.AddIgnoredActor(Target);
-		const float EyeHeight = bCrouched ? CrouchPeekEyeHeight : StandPeekEyeHeight;
-		for (const ECoverLean Side : Sides)
-		{
-			const FVector Eye = UCoverGeometryStatics::GetLeanPeekPosition(Data, Side) + FVector(0.f, 0.f, EyeHeight);
-			if (!World->LineTraceTestByChannel(Eye, ThreatLoc, ECC_Visibility, Params))
-				return Side;
-		}
-	}
-
-	// No side verified against the (possibly stale) threat point: the real corner still beats a
-	// threat-dot guess — falling to Front here is what caused permanent over-top stand peeks.
-	return GeometricSide != ECoverLean::None ? GeometricSide : Preferred;
 }
 
 /** Honest knowledge: the threat position this enemy is entitled to act on for cover decisions —
@@ -368,7 +271,17 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 
 	const int32 ForcedHeight = GetForceCoverHeightLocal();
 	const float FlankArcCos = FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg));
-	const FCoverScoreParams ScoreParams = UCoverScoringStatics::MakeParamsForEnemy(Cast<const AEnemyCharacter>(Pawn));
+	const AEnemyCharacter* ScoringEnemy = Cast<const AEnemyCharacter>(Pawn);
+	const FCoverScoreParams ScoreParams = UCoverScoringStatics::MakeParamsForEnemy(ScoringEnemy);
+
+	// Multi-threat: extra sighted hostiles beyond Target (empty when the archetype disables it).
+	TArray<FEnemyKnownThreat> ExtraThreats;
+	UCoverScoringStatics::GatherEnemyExtraThreats(ScoringEnemy, Target, ExtraThreats);
+
+	// Hostile anchors for the claim-collision reject (same rule as the EQS CoverIntent filter).
+	FHostileAnchors HostileAnchors;
+	if (DA->MinHostileCoverDistance > 0.f || DA->MinHostilePawnDistance > 0.f)
+		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, Controller, HostileAnchors);
 
 	TArray<FScoredCover> Scored;
 	Scored.Reserve(Candidates.Num());
@@ -386,6 +299,10 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 			continue;
 		// Skip covers on post-vacate cooldown
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, DA->CoverRelocateCooldown))
+			continue;
+		// Skip covers next to a hostile or a hostile's declared destination (claim collision)
+		if (UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location, HostileAnchors,
+			DA->MinHostileCoverDistance, DA->MinHostilePawnDistance))
 			continue;
 
 		const FCoverData& Data = Candidate.Data;
@@ -413,8 +330,10 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 
 		// Score: shared formula (proximity + target-distance + flat bonus + protective bonus)
 		const float DistSq = FVector::DistSquared(PawnLoc, Data.Location);
-		const float Score = UCoverScoringStatics::ScoreCandidate(
+		float Score = UCoverScoringStatics::ScoreCandidate(
 			World, Data, PawnLoc, ThreatLoc, bBodyProtected, ScoreParams);
+		Score = UCoverScoringStatics::ApplyMultiThreatPenalty(Score, World, Data,
+			Standoff, BodyProtectChestHeight, Pawn, ExtraThreats, DA->MultiThreatExposurePenalty);
 
 		Scored.Add({ Score, DistSq, Candidate });
 	}
@@ -897,6 +816,35 @@ void UBTTask_EnemyCombatFire::CleanupMemory(UBehaviorTreeComponent& OwnerComp, u
 	if (Mem->bShufflePending && IsValid(Enemy))
 		ClearPendingShuffle(Enemy, Mem);
 
+	// Same skip-AbortTask teardown (combat subtree swapped out, e.g. Combat -> Searching): a latched
+	// cover pose + crouch + BB_HasCover otherwise ride into the next state — the enemy then wanders
+	// the searching branch crouched in a cover pose, "taking cover" in the open. Destroy only:
+	// a StoreSubtree pause must keep valid in-cover state for the resume.
+	if (CleanupType == EBTMemoryClear::Destroy)
+	{
+		if (IsValid(Enemy))
+		{
+			if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent())
+			{
+				PoseComp->SetCoverMoving(false, ECoverLean::None);
+				PoseComp->ResetCoverPose();
+			}
+			if (ACharacter* Char = Cast<ACharacter>(Enemy)) Char->UnCrouch();
+		}
+		if (UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent())
+		{
+			ClearCoverBB(BB);
+			BB->SetValueAsBool(AEnemyAIController::BB_HasCover, false);
+		}
+		// An in-flight reseek intent would otherwise block that cover for everyone until this
+		// controller's next SetIntendedCover (the map self-prunes only on controller destruction).
+		if (Mem->ReseekCover.IsValid() && IsValid(Controller))
+		{
+			if (UCoverReservationSubsystem* ResSub = Mem->CachedResSub.Get())
+				ResSub->ClearIntendedCover(Controller);
+		}
+	}
+
 	Mem->~FFireMemory();
 	Super::CleanupMemory(OwnerComp, NodeMemory, CleanupType);
 }
@@ -919,6 +867,38 @@ void UBTTask_EnemyCombatFire::ClearCoverBB(UBlackboardComponent* BB) const
 {
 	if (!BB || CoverTargetKey.SelectedKeyName == NAME_None) return;
 	BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
+}
+
+bool UBTTask_EnemyCombatFire::ValidateCoverStillHeld(UBlackboardComponent* BB, APawn* Pawn, AEnemyCharacter* Enemy) const
+{
+	if (!BB || !IsValid(Pawn)) return false;
+	if (!BB->GetValueAsBool(AEnemyAIController::BB_HasCover)) return false;
+
+	const FCover Cover = ReadCoverFromBB(BB);
+	bool bStale = !Cover.IsValid();
+	if (!bStale)
+		bStale = FVector::Dist2D(Pawn->GetActorLocation(), Cover.Data.Location) > StaleCoverAbandonDist;
+	if (!bStale) return true;
+
+	// The pawn left this cover without anything clearing the flag (pursue / bounding advance /
+	// searching wander / branch switch that skipped cleanup) — stop it acting "in cover" in the open.
+	BB->SetValueAsBool(AEnemyAIController::BB_HasCover, false);
+	ClearCoverBB(BB);
+
+	if (IsValid(Enemy))
+	{
+		if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent())
+		{
+			PoseComp->SetCoverMoving(false, ECoverLean::None);
+			PoseComp->ResetCoverPose();
+		}
+	}
+	if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+
+	if (GetCoverAnimLogLevel() > 0)
+		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s STALE cover cleared (dist=%.0f) — was acting in-cover in the open"),
+			*GetNameSafe(Pawn), Cover.IsValid() ? FVector::Dist2D(Pawn->GetActorLocation(), Cover.Data.Location) : -1.f);
+	return false;
 }
 
 EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
@@ -944,6 +924,11 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 		Mem->CachedCoverSys = ACoverSystem::GetCoverSystem(W);
 		Mem->CachedResSub = W->GetSubsystem<UCoverReservationSubsystem>();
 	}
+
+	// Stale-cover correction on entry: the pawn may arrive here from a searching wander, pursue,
+	// or maneuver task with BB_HasCover still true from a cover it left long ago — every branch
+	// below trusts that flag, so validate before anything reads it.
+	ValidateCoverStillHeld(BB, Pawn, Enemy);
 
 	// Only allow Failed from ExecuteTask when NOT in combat — Bug 2 fix.
 	const EEnemyAwarenessState Awareness = static_cast<EEnemyAwarenessState>(
@@ -1089,6 +1074,11 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			Mem->CachedResSub = TickWorld->GetSubsystem<UCoverReservationSubsystem>();
 	}
 	const float TickNow = TickWorld ? TickWorld->GetTimeSeconds() : 0.f;
+
+	// Stale-cover correction: BB_HasCover must mean "AT my cover" every tick, not "arrived once".
+	// Skipped during SeekingCover — a reseek/ladder transit is legitimately far from the old point.
+	if (Mem->Phase != EFireTaskPhase::SeekingCover)
+		ValidateCoverStillHeld(BB, Pawn, Enemy);
 
 	// Drift-correct facing lock: the corrective MoveToLocation steers the pawn toward the wall
 	// (bUseControllerDesiredRotation follows path-following during the move). Re-assert the
@@ -1731,7 +1721,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				if (IsValid(Target))
 				{
 					const FVector ThreatLoc = GetPerceivedThreatLoc(Controller, Target);
-					ECoverLean IdleSide = ChooseGapPeekSide(TickWorld, ArrivalData,
+					ECoverLean IdleSide = UCoverGeometryStatics::ChooseGapPeekSide(TickWorld, ArrivalData,
 						bArrivalCrouched, ThreatLoc, Target, Pawn);
 					if (IdleSide == ECoverLean::None)
 						IdleSide = UCoverGeometryStatics::ResolveLeanSide(
@@ -1980,7 +1970,29 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						Standoff, Pawn,
 						&bOutsideArc, &bBodyExposed, &AngleDeg);
 
-					if (bCompromised)
+					// Multi-threat enforcement on the HELD cover: exposure to a second KNOWN hostile
+					// (companion/player at its perceived position) also counts as compromised — else an
+					// enemy fighting one target sits wide open to the other indefinitely. Feeds the
+					// debounced SLOW path only (the instant-break fast path stays primary-only), so a
+					// no-better-cover situation churns at worst once per relocate cooldown.
+					bool bExtraExposed = false;
+					if (!bCompromised)
+					{
+						TArray<FEnemyKnownThreat> EvalExtraThreats;
+						UCoverScoringStatics::GatherEnemyExtraThreats(Enemy, Target, EvalExtraThreats);
+						for (const FEnemyKnownThreat& Extra : EvalExtraThreats)
+						{
+							if (!Extra.Actor) continue;
+							if (!UCoverGeometryStatics::IsThreatCovered(TickWorld, CurCoverData, Extra.Location,
+								Standoff, BodyProtectChestHeight, Extra.Actor, Pawn))
+							{
+								bExtraExposed = true;
+								break;
+							}
+						}
+					}
+
+					if (bCompromised || bExtraExposed)
 						Mem->CompromiseConsecutiveCount = FMath::Min(Mem->CompromiseConsecutiveCount + 1, CompromiseDebounceRequired);
 					else
 						Mem->CompromiseConsecutiveCount = FMath::Max(0, Mem->CompromiseConsecutiveCount - 1);
@@ -1989,13 +2001,14 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					{
 						const float CooldownRemaining = DA->CoverRelocateCooldown - (Now - Mem->LastRelocateCompletedTime);
 						UE_LOG(LogEnemyAI, Log,
-							TEXT("[FLANKDBG] %s cover=(%.0f,%.0f,%.0f)(bCrouch=%d) angle=%.1f bOutsideArc=%d bBodyProtected=%d consec=%d cooldownRem=%.2f phase=%d arrived=%d eLOS=%d"),
+							TEXT("[FLANKDBG] %s cover=(%.0f,%.0f,%.0f)(bCrouch=%d) angle=%.1f bOutsideArc=%d bBodyProtected=%d extraExposed=%d consec=%d cooldownRem=%.2f phase=%d arrived=%d eLOS=%d"),
 							*Pawn->GetName(),
 							CurCoverData.Location.X, CurCoverData.Location.Y, CurCoverData.Location.Z,
 							(UCoverGeometryStatics::GetCoverHeight(CurCoverData) == ECoverHeight::Crouch) ? 1 : 0,
 							AngleDeg,
 							bOutsideArc ? 1 : 0,
 							bBodyExposed ? 0 : 1,
+							bExtraExposed ? 1 : 0,
 							Mem->CompromiseConsecutiveCount,
 							CooldownRemaining,
 							static_cast<int32>(Mem->Phase),
@@ -2269,7 +2282,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					}
 					else
 					{
-						PeekSide = ChooseGapPeekSide(TickWorld, ExpCoverData, bExpCrouched,
+						PeekSide = UCoverGeometryStatics::ChooseGapPeekSide(TickWorld, ExpCoverData, bExpCrouched,
 							ThreatLoc, Target, Pawn);
 
 						// Feature 4: crouch cover with a side peek — roll to stand-peek over top.
@@ -2517,7 +2530,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 								if (bExactlyOne)
 								{
 									const ECoverLean BakedSide = bSWLeft ? ECoverLean::Left : ECoverLean::Right;
-									const ECoverLean OppSide = TryOppositeEndpointSide(TickWorld, LadderCoverData,
+									const ECoverLean OppSide = UCoverGeometryStatics::TryOppositeEndpointSide(TickWorld, LadderCoverData,
 										bSwCrouched, GetPerceivedThreatLoc(Controller, Target), Target, Pawn, BakedSide);
 									if (OppSide != ECoverLean::None)
 									{
@@ -2539,7 +2552,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 								else if (bSWLeft && bSWRight)
 								{
 									// Both sides baked — pick the one the pawn is NOT currently on.
-									const ECoverLean CurSide = ChooseGapPeekSide(TickWorld, LadderCoverData,
+									const ECoverLean CurSide = UCoverGeometryStatics::ChooseGapPeekSide(TickWorld, LadderCoverData,
 										bSwCrouched, GetPerceivedThreatLoc(Controller, Target), Target, Pawn);
 									if (CurSide == ECoverLean::Left)  WalkSide = ECoverLean::Right;
 									else if (CurSide == ECoverLean::Right) WalkSide = ECoverLean::Left;
@@ -3221,6 +3234,15 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 	const float FlankArcCos = FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg));
 	const FCoverScoreParams ScoreParams = UCoverScoringStatics::MakeParamsForEnemy(Enemy);
 
+	// Multi-threat: extra sighted hostiles beyond Target (empty when the archetype disables it).
+	TArray<FEnemyKnownThreat> ReseekExtraThreats;
+	UCoverScoringStatics::GatherEnemyExtraThreats(Enemy, Target, ReseekExtraThreats);
+
+	// Hostile anchors for the claim-collision reject (same rule as the EQS CoverIntent filter).
+	FHostileAnchors ReseekHostileAnchors;
+	if (DA->MinHostileCoverDistance > 0.f || DA->MinHostilePawnDistance > 0.f)
+		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, Controller, ReseekHostileAnchors);
+
 	TArray<FScoredCover> Scored;
 	Scored.Reserve(Candidates.Num());
 
@@ -3243,6 +3265,10 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 		// Skip covers on post-vacate cooldown
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, DA->CoverRelocateCooldown))
 			continue;
+		// Skip covers next to a hostile or a hostile's declared destination (claim collision)
+		if (UCoverScoringStatics::IsNearHostileAnchor(Data.Location, ReseekHostileAnchors,
+			DA->MinHostileCoverDistance, DA->MinHostilePawnDistance))
+			continue;
 
 		// CRITICAL #1: fire-arc gate — same as FindProtectiveCover
 		const FVector ToThreat2D = (ThreatLoc - Data.Location).GetSafeNormal2D();
@@ -3264,8 +3290,10 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 
 		// Shared scoring formula — every candidate here passed the body-shield gate above.
 		const float DistSq = FVector::DistSquared(PawnLoc, Data.Location);
-		const float Score = UCoverScoringStatics::ScoreCandidate(
+		float Score = UCoverScoringStatics::ScoreCandidate(
 			World, Data, PawnLoc, ThreatLoc, /*bBodyProtected*/ true, ScoreParams);
+		Score = UCoverScoringStatics::ApplyMultiThreatPenalty(Score, World, Data,
+			Standoff, BodyProtectChestHeight, Pawn, ReseekExtraThreats, DA->MultiThreatExposurePenalty);
 
 		Scored.Add({ Score, DistSq, Candidate });
 	}
@@ -3487,11 +3515,20 @@ bool UBTTask_EnemyCombatFire::TryAdvanceRelocate(UBehaviorTreeComponent& OwnerCo
 	const FCoverScoreParams Params = UCoverScoringStatics::MakeParamsForEnemy(Enemy);
 	if (Params.StickinessMargin > 0.f)
 	{
+		// Penalise BOTH sides for multi-threat exposure — without this the held cover gets a
+		// free pass and an exposure-driven advance can never clear the margin.
+		TArray<FEnemyKnownThreat> ExtraThreats;
+		UCoverScoringStatics::GatherEnemyExtraThreats(Enemy, Target, ExtraThreats);
+
 		const FVector PawnLoc = Pawn->GetActorLocation();
-		const float CurScore = UCoverScoringStatics::ScoreCandidate(
+		float CurScore = UCoverScoringStatics::ScoreCandidate(
 			World, CurCover.Data, PawnLoc, ThreatLoc, /*bBodyProtected*/ true, Params);
-		const float NewScore = UCoverScoringStatics::ScoreCandidate(
+		CurScore = UCoverScoringStatics::ApplyMultiThreatPenalty(CurScore, World, CurCover.Data,
+			Standoff, BodyProtectChestHeight, Pawn, ExtraThreats, DA->MultiThreatExposurePenalty);
+		float NewScore = UCoverScoringStatics::ScoreCandidate(
 			World, NewCover.Data, PawnLoc, ThreatLoc, /*bBodyProtected*/ true, Params);
+		NewScore = UCoverScoringStatics::ApplyMultiThreatPenalty(NewScore, World, NewCover.Data,
+			Standoff, BodyProtectChestHeight, Pawn, ExtraThreats, DA->MultiThreatExposurePenalty);
 		if (NewScore < CurScore + Params.StickinessMargin) return false;
 	}
 
@@ -3610,6 +3647,11 @@ FCover UBTTask_EnemyCombatFire::FindShuffleCover(UWorld* World, const APawn* Paw
 	// PERF: hoist trig out of the per-candidate loop.
 	const float FlankArcCos = FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg));
 
+	// Hostile anchors for the claim-collision reject (same rule as the EQS CoverIntent filter).
+	FHostileAnchors ShuffleHostileAnchors;
+	if (DA->MinHostileCoverDistance > 0.f || DA->MinHostilePawnDistance > 0.f)
+		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, Controller, ShuffleHostileAnchors);
+
 	FCover BestCover;
 	float BestScore = -FLT_MAX;
 
@@ -3641,6 +3683,11 @@ FCover UBTTask_EnemyCombatFire::FindShuffleCover(UWorld* World, const APawn* Paw
 
 		// Post-vacate cooldown gate
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, DA->CoverRelocateCooldown))
+			continue;
+
+		// Claim-collision gate: next to a hostile or a hostile's declared destination
+		if (UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location, ShuffleHostileAnchors,
+			DA->MinHostileCoverDistance, DA->MinHostilePawnDistance))
 			continue;
 
 		// Distance band gate
@@ -3729,6 +3776,11 @@ FCover UBTTask_EnemyCombatFire::FindSidePeekCover(UWorld* World, const APawn* Pa
 
 	const int32 SidePeekForcedHeight = GetForceCoverHeightLocal();
 
+	// Hostile anchors for the claim-collision reject (same rule as the EQS CoverIntent filter).
+	FHostileAnchors SidePeekHostileAnchors;
+	if (DA->MinHostileCoverDistance > 0.f || DA->MinHostilePawnDistance > 0.f)
+		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, Controller, SidePeekHostileAnchors);
+
 	for (const FCover& Candidate : Candidates)
 	{
 		if (!Candidate.IsValid()) continue;
@@ -3755,6 +3807,10 @@ FCover UBTTask_EnemyCombatFire::FindSidePeekCover(UWorld* World, const APawn* Pa
 		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller))
 			continue;
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, DA->CoverRelocateCooldown))
+			continue;
+		// Claim-collision gate: next to a hostile or a hostile's declared destination
+		if (UCoverScoringStatics::IsNearHostileAnchor(Data.Location, SidePeekHostileAnchors,
+			DA->MinHostileCoverDistance, DA->MinHostilePawnDistance))
 			continue;
 
 		const float Proj = FVector::DotProduct(Data.Location - CurrentCover.Data.Location, SideDir);

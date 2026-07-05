@@ -2,11 +2,18 @@
 
 #include "CoverScoringStatics.h"
 #include "CoverGeometryStatics.h"
+#include "CoverReservationSubsystem.h"
 #include "CoverSystem.h"
+#include "HealthComponent.h"
+#include "EngineUtils.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
+#include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
 #include "EnemyPostureComponent.h"
+#include "Companion/CompanionCharacter.h"
+#include "AI/CompanionAIController.h"
+#include "AI/CompanionTuningDataAsset.h"
 #include "GameFramework/Controller.h"
 #include "Engine/World.h"
 
@@ -70,8 +77,28 @@ FCoverScoreParams UCoverScoringStatics::GetParamsForQuerier(const UObject* Queri
 		const AController* Controller = Cast<AController>(Querier);
 		if (Controller) Enemy = Cast<AEnemyCharacter>(Controller->GetPawn());
 	}
-	if (!IsValid(Enemy)) return FCoverScoreParams();
-	return MakeParamsForEnemy(Enemy);
+	if (IsValid(Enemy)) return MakeParamsForEnemy(Enemy);
+
+	// Companion querier: neutral defaults, except Combat mode applies the advance shift (the enemy
+	// Press mechanic) so cover picks gain ground toward the threat instead of holding depth.
+	const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Querier);
+	if (!Companion)
+	{
+		const AController* Controller = Cast<AController>(Querier);
+		if (Controller) Companion = Cast<ACompanionCharacter>(Controller->GetPawn());
+	}
+
+	FCoverScoreParams Params;
+	if (IsValid(Companion) && Companion->GetMode() == ECompanionMode::Combat)
+	{
+		const ACompanionAIController* CompAIC = Cast<ACompanionAIController>(Companion->GetController());
+		if (const UCompanionTuningDataAsset* Tuning = CompAIC ? CompAIC->GetTuning() : nullptr)
+		{
+			Params.IdealDistMin = FMath::Max(0.f, Params.IdealDistMin + Tuning->CombatModeAdvanceDistMinDelta);
+			Params.DistanceBandWeight = -Params.DistanceBandWeight;
+		}
+	}
+	return Params;
 }
 
 float UCoverScoringStatics::ScoreCandidate(const UWorld* World, const FCoverData& Data,
@@ -139,6 +166,98 @@ FVector UCoverScoringStatics::GetPerceivedThreatLocation(const AActor* Threat,
 
 	bOutSighted = Awareness->HasLOSToTarget();
 	return bOutSighted ? Threat->GetActorLocation() : Awareness->GetLastKnownLocation();
+}
+
+void UCoverScoringStatics::GatherEnemyExtraThreats(const AEnemyCharacter* Enemy, const AActor* FocusTarget,
+	TArray<FEnemyKnownThreat>& OutThreats)
+{
+	OutThreats.Reset();
+	if (!IsValid(Enemy)) return;
+
+	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+	if (!IsValid(DA) || DA->MultiThreatExposurePenalty >= 1.f || DA->MaxExtraThreats <= 0) return;
+
+	const AEnemyAIController* Controller = Cast<AEnemyAIController>(Enemy->GetController());
+	const UEnemyAwarenessComponent* Awareness = Controller ? Controller->GetAwarenessComponent() : nullptr;
+	if (!IsValid(Awareness)) return;
+
+	Awareness->GetExtraKnownThreats(FocusTarget, DA->MaxExtraThreats, DA->ExtraThreatMemorySeconds, OutThreats);
+}
+
+float UCoverScoringStatics::ApplyMultiThreatPenalty(float Score, const UWorld* World, const FCoverData& Data,
+	float Standoff, float ChestHeight, const APawn* IgnorePawn,
+	const TArray<FEnemyKnownThreat>& ExtraThreats, float Penalty)
+{
+	if (!World || ExtraThreats.IsEmpty()) return Score;
+
+	// Floor above 0 so a 0 penalty stays a (steep) soft penalty, and the negative branch can divide.
+	const float ClampedPenalty = FMath::Clamp(Penalty, 0.01f, 1.f);
+	if (ClampedPenalty >= 1.f) return Score;
+
+	int32 Uncovered = 0;
+	for (const FEnemyKnownThreat& Threat : ExtraThreats)
+	{
+		if (!Threat.Actor) continue;
+		// Perceived position: live when sighted, frozen last-stimulus otherwise (gather decides).
+		if (!UCoverGeometryStatics::IsThreatCovered(World, Data, Threat.Location,
+			Standoff, ChestHeight, Threat.Actor, IgnorePawn))
+			++Uncovered;
+	}
+	if (Uncovered == 0) return Score;
+
+	const float Factor = FMath::Pow(ClampedPenalty, static_cast<float>(Uncovered));
+	// Press posture flips the band weight, so raw scores can be negative — multiply would then
+	// IMPROVE an exposed candidate. Scale away from zero on the negative side instead.
+	return Score >= 0.f ? Score * Factor : Score / Factor;
+}
+
+void UCoverScoringStatics::GatherHostileAnchors(UWorld* World, const APawn* QuerierPawn,
+	const AController* ExcludeController, FHostileAnchors& Out)
+{
+	Out.CoverAnchors.Reset();
+	Out.PawnAnchors.Reset();
+	if (!World || !IsValid(QuerierPawn)) return;
+
+	const bool bEnemyQuerier = QuerierPawn->IsA<AEnemyCharacter>();
+
+	for (TActorIterator<APawn> It(World); It; ++It)
+	{
+		APawn* Other = *It;
+		if (!IsValid(Other) || Other == QuerierPawn) continue;
+		if (Other->IsA<AEnemyCharacter>() == bEnemyQuerier) continue; // same side
+		const UHealthComponent* HC = Other->FindComponentByClass<UHealthComponent>();
+		if (HC && HC->IsDead()) continue;
+		Out.PawnAnchors.Add(Other->GetActorLocation());
+	}
+
+	if (UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>())
+	{
+		TArray<TPair<APawn*, FCover>> IntentOwners;
+		ResSub->GetIntendedCoverOwners(IntentOwners, ExcludeController);
+		for (const TPair<APawn*, FCover>& Entry : IntentOwners)
+		{
+			const APawn* OwnerPawn = Entry.Key;
+			if (!IsValid(OwnerPawn)) continue;
+			if (OwnerPawn->IsA<AEnemyCharacter>() == bEnemyQuerier) continue; // same side
+			Out.CoverAnchors.Add(Entry.Value.Data.Location);
+		}
+	}
+}
+
+bool UCoverScoringStatics::IsNearHostileAnchor(const FVector& Location, const FHostileAnchors& Anchors,
+	float CoverDist, float PawnDist)
+{
+	if (CoverDist > 0.f)
+	{
+		for (const FVector& Anchor : Anchors.CoverAnchors)
+			if (FVector::Dist2D(Location, Anchor) < CoverDist) return true;
+	}
+	if (PawnDist > 0.f)
+	{
+		for (const FVector& Anchor : Anchors.PawnAnchors)
+			if (FVector::Dist2D(Location, Anchor) < PawnDist) return true;
+	}
+	return false;
 }
 
 float UCoverScoringStatics::ScorePathExposure(const UWorld* World, const FVector& PawnLoc,

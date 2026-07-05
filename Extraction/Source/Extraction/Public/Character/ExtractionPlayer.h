@@ -259,6 +259,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input|Companion")
 	TObjectPtr<UInputAction> IA_CompanionBreach;
 
+	/** Cycle companion mode Normal -> Combat -> Stealth (X key). */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionModeToggle;
+
 	// ---- Takedown Config ----
 
 	/** Player-side finisher montage. Assign in the BP child class.
@@ -408,6 +412,7 @@ private:
 	void CompanionConfirmTakedownKnifeInput(const FInputActionValue& Value);
 	void CompanionConfirmTakedownShootInput(const FInputActionValue& Value);
 	void CompanionConfirmBreachInput(const FInputActionValue& Value);
+	void CompanionModeToggleInput(const FInputActionValue& Value);
 
 	UFUNCTION()
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);

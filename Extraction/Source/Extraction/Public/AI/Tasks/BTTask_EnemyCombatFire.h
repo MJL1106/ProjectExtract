@@ -287,4 +287,10 @@ private:
 
 	/** Clear the CoverTarget BB key. */
 	void ClearCoverBB(UBlackboardComponent* BB) const;
+
+	/** Self-correcting cover truth: BB_HasCover means "AT my cover", not "arrived once". When the
+	 *  pawn has moved beyond the abandon distance from the BB cover (pursue, bounding advance,
+	 *  searching wander, branch switch), clears BB_HasCover + CoverTarget + latched pose/crouch and
+	 *  returns false. Callers skip this during SeekingCover (transit is legitimate). */
+	bool ValidateCoverStillHeld(UBlackboardComponent* BB, APawn* Pawn, AEnemyCharacter* Enemy) const;
 };

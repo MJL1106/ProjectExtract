@@ -168,6 +168,15 @@ bool UCoverReservationSubsystem::HasIntendedCover(const AController* Controller)
 	return Handle && Handle->IsValid();
 }
 
+bool UCoverReservationSubsystem::GetIntendedCover(const AController* Controller, FCoverHandle& OutHandle) const
+{
+	if (!IsValid(Controller)) return false;
+	const FCoverHandle* Handle = IntendedMap.Find(const_cast<AController*>(Controller));
+	if (!Handle || !Handle->IsValid()) return false;
+	OutHandle = *Handle;
+	return true;
+}
+
 void UCoverReservationSubsystem::GetIntendedCovers(TArray<FCover>& Out, const AController* ExcludeController,
 	const UClass* RequiredControllerClass)
 {
@@ -199,6 +208,40 @@ void UCoverReservationSubsystem::GetIntendedCovers(TArray<FCover>& Out, const AC
 		if (CoverSys->GetCoverData(It->Value, Data))
 		{
 			Out.Emplace(It->Value, Data);
+		}
+	}
+}
+
+void UCoverReservationSubsystem::GetIntendedCoverOwners(TArray<TPair<APawn*, FCover>>& Out,
+	const AController* ExcludeController)
+{
+	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(GetWorld());
+	if (!CoverSys) return;
+
+	Out.Reserve(IntendedMap.Num());
+
+	for (auto It = IntendedMap.CreateIterator(); It; ++It)
+	{
+		if (!It->Key.IsValid())
+		{
+			// Mirror GetIntendedCovers: prune stale controller + decrement reverse-index.
+			if (It->Value.IsValid())
+			{
+				int32& Ref = IntendedHandleRefCount.FindOrAdd(It->Value, 0);
+				--Ref;
+				if (Ref <= 0) IntendedHandleRefCount.Remove(It->Value);
+			}
+			It.RemoveCurrent();
+			continue;
+		}
+
+		AController* Ctrl = It->Key.Get();
+		if (Ctrl == ExcludeController) continue;
+
+		FCoverData Data;
+		if (CoverSys->GetCoverData(It->Value, Data))
+		{
+			Out.Emplace(Ctrl->GetPawn(), FCover(It->Value, Data));
 		}
 	}
 }

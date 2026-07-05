@@ -11,6 +11,7 @@
 #include "CrosshairWidget.h"
 #include "AmmoWidget.h"
 #include "BarkFeedWidget.h"
+#include "CompanionModeWidget.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
@@ -98,6 +99,14 @@ void AExtractionPlayerController::BeginPlay()
 		BarkFeedWidget = CreateWidget<UBarkFeedWidget>(this, BarkFeedWidgetClass);
 		if (IsValid(BarkFeedWidget))
 			BarkFeedWidget->AddToPlayerScreen();
+	}
+
+	// Spawn companion mode chip for local player
+	if (IsLocalPlayerController() && CompanionModeWidgetClass)
+	{
+		CompanionModeWidget = CreateWidget<UCompanionModeWidget>(this, CompanionModeWidgetClass);
+		if (IsValid(CompanionModeWidget))
+			CompanionModeWidget->AddToPlayerScreen();
 	}
 }
 

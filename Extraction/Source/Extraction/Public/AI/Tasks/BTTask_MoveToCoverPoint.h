@@ -73,6 +73,9 @@ private:
 		float StallBestDist = TNumericLimits<float>::Max();
 		float StallAccum = 0.f;
 
+		// Mid-move claim revalidation (destination stolen while en route)
+		float ClaimCheckAccum = 0.f;
+
 		void Reset()
 		{
 			ArrivalPos = FVector::ZeroVector;
@@ -87,6 +90,7 @@ private:
 			bFiring = false;
 			StallBestDist = TNumericLimits<float>::Max();
 			StallAccum = 0.f;
+			ClaimCheckAccum = 0.f;
 		}
 	};
 
@@ -95,4 +99,10 @@ private:
 		UBlackboardComponent* BB, APawn* Pawn, const FCoverData& Data) const;
 	void HandleFailure(UBehaviorTreeComponent& OwnerComp, FMoveToCoverPointMemory* Mem,
 		UBlackboardComponent* BB, AAIController* Controller) const;
+
+	/** Companion-only: re-scores the EQS-chosen cover against ALL known threats (not just the
+	 *  focused target) and returns a better-shielding nearby candidate, or ChosenCover unchanged.
+	 *  The shared EQS/scorer is untouched — this is a local post-filter on the result. */
+	FCover RerankCoverForMultiThreat(UBehaviorTreeComponent& OwnerComp, AAIController* Controller,
+		APawn* Pawn, const class UCompanionTuningDataAsset& Tuning, const FCover& ChosenCover) const;
 };

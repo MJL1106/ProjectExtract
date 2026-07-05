@@ -46,9 +46,7 @@ void UEnvQueryTest_CoverAllySpacing::RunTest(FEnvQueryInstance& QueryInstance) c
 
 	if (IsValid(QuerierPawn))
 	{
-		// Determine the querier's controller class family for intent filtering
 		AController* QuerierController = QuerierPawn->GetController();
-		const UClass* QuerierControllerClass = IsValid(QuerierController) ? QuerierController->GetClass() : nullptr;
 
 		AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(QuerierPawn);
 		int32 EstimatedCount = 0;
@@ -92,13 +90,13 @@ void UEnvQueryTest_CoverAllySpacing::RunTest(FEnvQueryInstance& QueryInstance) c
 			}
 		}
 
-		// Also add intended cover positions from the reservation subsystem
-		// Pass the querier controller as exclusion, and filter by controller class family
+		// Also add intended cover positions from the reservation subsystem. No class filter:
+		// a cover ANYONE is moving to is bad spacing regardless of side — the old
+		// AEnemyAIController-only filter let enemy picks stack onto companion destinations.
 		if (IsValid(ResSub))
 		{
 			TArray<FCover> IntendedCovers;
-			ResSub->GetIntendedCovers(IntendedCovers, QuerierController,
-				IsValid(Enemy) ? AEnemyAIController::StaticClass() : QuerierControllerClass);
+			ResSub->GetIntendedCovers(IntendedCovers, QuerierController);
 			for (const FCover& IC : IntendedCovers)
 			{
 				AllyPoints.Add(IC.Data.Location);

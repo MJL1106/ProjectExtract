@@ -21,6 +21,17 @@
 #include "CoverSystem.h"                // FCover / FCoverData for the cover-active LoS-block branch
 #include "CoverReservationSubsystem.h"  // intended-cover check for the approach-window cover-active branch (Fix 4)
 #include "Engine/OverlapResult.h" // FOverlapResult full definition for the proximity overlap scan
+#include "EnemyDirectorSubsystem.h" // global alert level as an out-of-envelope stealth-break signal
+#include "TraversalComponent.h"     // stealth-pin enforcement must not crouch mid-traversal
+#include "Navigation/PathFollowingComponent.h" // ready-only threat stance yields facing to an active move
+#include "HAL/IConsoleManager.h" // companion.AimLog diagnostics CVar
+
+// companion.AimLog 1 — per-service-tick dump of everything that drives the companion's aim/facing
+// (target pick + provenance, ready-only threat, takedown/route yields, focal point, low-ready).
+// Diagnostic for the stuck-ADS / aims-through-walls reports; Display severity so it shows untagged.
+static TAutoConsoleVariable<int32> CVarCompanionAimLog(
+	TEXT("companion.AimLog"), 0,
+	TEXT("1 = log companion aim/stance state each UpdateCompanionState tick."));
 
 UBTService_UpdateCompanionState::UBTService_UpdateCompanionState()
 {
@@ -70,10 +81,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	}
 
 	IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PlayerPawn);
+	const bool bPlayerDBNO = PlayerPawn && PlayerIface && PlayerIface->GetIsDBNO();
 	if (PlayerPawn && PlayerIface)
 	{
 		BB->SetValueAsObject(PlayerActorKey.SelectedKeyName, PlayerPawn);
-		BB->SetValueAsBool(PlayerNeedsReviveKey.SelectedKeyName, PlayerIface->GetIsDBNO());
+		BB->SetValueAsBool(PlayerNeedsReviveKey.SelectedKeyName, bPlayerDBNO);
 	}
 
 	// --- Range thresholds for acquisition/retention ---
@@ -137,7 +149,13 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	const FVector SelectAimOrigin = Companion->GetPawnViewLocation();
 	bool bHasAlertedThreat = false;
 	FVector AlertedThreatLocation = FVector::ZeroVector;
+	const AEnemyCharacter* AlertedThreatEnemy = nullptr; // ready-only LoS gate + AimLog diagnostics
 	float BestAlertDistSq = MAX_FLT;
+
+	// Player-commanded mode gates target acquisition (Normal: alerted-only, Combat: weapons-free,
+	// Stealth: suppressed until broken). bAnyEnemyDetectedPlayer feeds the stealth-break check.
+	const ECompanionMode Mode = Companion->GetMode();
+	bool bAnyEnemyDetectedPlayer = false;
 
 	// Shared ignore list for per-candidate eye-line traces (self + weapon + attached actors) — matches
 	// the final LoS filter and the combat task's trace so acquisition and firing agree on visibility.
@@ -186,6 +204,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 		BestAlertDistSq = DistSq;
 		AlertedThreatLocation = Enemy->GetActorLocation();
+		AlertedThreatEnemy = Enemy;
 		bHasAlertedThreat = true;
 	};
 
@@ -207,12 +226,16 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 		const float DistSq = FVector::DistSquared(MyLocation, Actor->GetActorLocation());
 
-		// Don't engage enemies that haven't detected the player (stealth preservation).
+		// Normal/Stealth: don't engage enemies that haven't detected the player (no first shot).
+		// Combat mode is weapons-free — unaware enemies are valid targets.
 		// Non-AEnemyCharacter actors with the enemy tag keep current behavior (treat as engageable).
 		if (const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Actor))
 		{
 			NoteAlertedThreat(Enemy, DistSq);
-			if (!Enemy->HasDetectedPlayer()) continue;
+			if (Enemy->HasDetectedPlayer())
+				bAnyEnemyDetectedPlayer = true;
+			else if (Mode != ECompanionMode::Combat)
+				continue;
 		}
 
 		ConsiderCandidate(Actor, DistSq);
@@ -260,11 +283,14 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 				const float ProxDistSq = FVector::DistSquared(MyLocation, ProxActor->GetActorLocation());
 
-				// Don't engage enemies that haven't detected the player (stealth preservation).
+				// Same mode-gated no-first-shot rule as the sight pass.
 				if (const AEnemyCharacter* ProxEnemy = Cast<AEnemyCharacter>(ProxActor))
 				{
 					NoteAlertedThreat(ProxEnemy, ProxDistSq);
-					if (!ProxEnemy->HasDetectedPlayer()) continue;
+					if (ProxEnemy->HasDetectedPlayer())
+						bAnyEnemyDetectedPlayer = true;
+					else if (Mode != ECompanionMode::Combat)
+						continue;
 				}
 
 				// bAllowOccludedAny=false: a pure-overlap channel has no perception MaxAge to expire, so an
@@ -304,6 +330,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				const float PlayerDistSq = FVector::DistSquared(PlayerPawn->GetActorLocation(), ThreatActor->GetActorLocation());
 				NoteAlertedThreat(ThreatEnemy, PlayerDistSq);
 				if (!ThreatEnemy->HasDetectedPlayer()) continue;
+				bAnyEnemyDetectedPlayer = true;
 
 				// Selection keyed on companion distance + companion eye-line (ConsiderCandidate) —
 				// bAllowOccludedAny=false so a player-threat candidate can only enter BestVisible
@@ -330,6 +357,33 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	{
 		BestTarget = BestVisible;
 		BestDistSq = BestVisibleDistSq;
+
+		// Target stickiness: with several visible enemies at similar range, nearest-visible flips
+		// every tick as actors move — and each flip re-validates cover/aim/arc against a different
+		// enemy, churning the whole combat loop (cover invalidates, re-picks, no shooting). Keep
+		// the existing live target unless the new pick is meaningfully closer, provided the
+		// existing one is itself still visible (one extra eye-line trace, service cadence only).
+		if (IsValid(ExistingTarget) && BestVisible != ExistingTarget)
+		{
+			const UHealthComponent* StickHealth = ExistingTarget->FindComponentByClass<UHealthComponent>();
+			const bool bExistingAlive = !StickHealth || !StickHealth->IsDead();
+			const float ExistingDistSq = FVector::DistSquared(MyLocation, ExistingTarget->GetActorLocation());
+			constexpr float StickinessRatioSq = 0.56f; // new pick must be ~25% closer to steal focus
+			if (bExistingAlive && BestVisibleDistSq > ExistingDistSq * StickinessRatioSq)
+			{
+				FHitResult StickHit;
+				FCollisionQueryParams StickParams(SCENE_QUERY_STAT(CompanionTargetStick), true);
+				StickParams.AddIgnoredActor(Companion);
+				const bool bStickBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+					StickHit, Companion->GetPawnViewLocation(),
+					AITargeting::GetSightLocation(ExistingTarget), ECC_Visibility, StickParams);
+				if (!bStickBlocked || StickHit.GetActor() == ExistingTarget)
+				{
+					BestTarget = ExistingTarget;
+					BestDistSq = ExistingDistSq;
+				}
+			}
+		}
 	}
 	else if (IsValid(ExistingTarget))
 	{
@@ -341,6 +395,44 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	{
 		BestTarget = BestAny;
 		BestDistSq = BestAnyDistSq;
+	}
+
+	// --- Stealth mode: break detection + auto-target suppression ---
+	// Break = any enemy has detected the player ("player is spotted"). The scan flag only covers
+	// the three scan envelopes, so two out-of-envelope signals widen it: global alert Loud (an
+	// enemy anywhere is in open combat — e.g. a sniper beyond PlayerThreatAwarenessRadius) and
+	// player DBNO (the revive sprint must not crawl at crouch speed). While unbroken, the companion
+	// never auto-acquires a target and never readies up; command-driven fire (takedown/shoot pings)
+	// flows through the BB command keys and is unaffected. SetMode resets the broken flag, so a
+	// fresh Stealth order always starts unbroken.
+	bool bStealthBreakSignal = false;
+	if (Mode == ECompanionMode::Stealth)
+	{
+		bool bGlobalAlertLoud = false;
+		if (const UEnemyDirectorSubsystem* Director = Companion->GetWorld()->GetSubsystem<UEnemyDirectorSubsystem>())
+			bGlobalAlertLoud = Director->GetAlertLevel() == EGlobalAlertLevel::Loud;
+		bStealthBreakSignal = bAnyEnemyDetectedPlayer || bGlobalAlertLoud || bPlayerDBNO;
+	}
+
+	if (Mode == ECompanionMode::Stealth && !Companion->IsStealthBroken())
+	{
+		if (bStealthBreakSignal)
+		{
+			Companion->SetStealthBroken(true);
+		}
+		else
+		{
+			BestTarget = nullptr;
+			bHasAlertedThreat = false;
+			if (ExistingTarget || BB->GetValueAsObject(CombatTargetKey.SelectedKeyName))
+			{
+				// Mid-fight switch into stealth: drop the target so the combat branch aborts and
+				// the cover slot releases through the task's normal teardown.
+				BB->ClearValue(CombatTargetKey.SelectedKeyName);
+				BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+				ExistingTarget = nullptr;
+			}
+		}
 	}
 
 	// Fix 4b: a fresh target identity gets a fresh grace window. Without this reset, an occluded new pick
@@ -364,6 +456,10 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		const FVector AimOrigin = Companion->GetPawnViewLocation();
 		const bool bBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
 			LosHit, AimOrigin, AITargeting::GetSightLocation(BestTarget), ECC_Visibility, LosParams);
+
+		// Mirror for the anim-side aim fade (enemy bHasTargetLOS parity) — true only when the
+		// eye→target trace is genuinely clear, regardless of whether the target is kept below.
+		Companion->SetHasTargetLOS(!bBlocked || LosHit.GetActor() == BestTarget);
 
 		if (bBlocked && LosHit.GetActor() != BestTarget)
 		{
@@ -497,6 +593,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	else
 	{
 		PrevCombatTarget.Reset();
+		Companion->SetHasTargetLOS(false);
 		if (ExistingTarget == nullptr)
 		{
 			BB->ClearValue(CombatTargetKey.SelectedKeyName);
@@ -512,7 +609,25 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	const ECompanionPosture CurrentPosture = Companion->GetPosture();
 	const AActor* TargetAfterUpdate = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName));
 	const bool bHasTarget = IsValid(TargetAfterUpdate);
-	const bool bReadyOnlyThreat = bHasAlertedThreat && !bHasTarget;
+	bool bReadyOnlyThreat = bHasAlertedThreat && !bHasTarget;
+
+	// Honest knowledge: only ready up on an alerted enemy the companion can actually SEE. The
+	// player-threat and proximity passes note threats by radius alone, so without this trace a
+	// searcher behind a wall (e.g. a takedown neighbour scanning for the body) put the companion
+	// in a pinned ADS facing at geometry it has no sight of. One trace, only in the rare
+	// no-target-with-threat state, at service cadence.
+	if (bReadyOnlyThreat && IsValid(AlertedThreatEnemy))
+	{
+		FCollisionQueryParams ReadyLosParams(SCENE_QUERY_STAT(CompanionReadyThreatLoS), true);
+		ReadyLosParams.AddIgnoredActor(Companion);
+		ReadyLosParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+		FHitResult ReadyLosHit;
+		const bool bReadyLosBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+			ReadyLosHit, Companion->GetPawnViewLocation(),
+			AITargeting::GetSightLocation(AlertedThreatEnemy), ECC_Visibility, ReadyLosParams);
+		if (bReadyLosBlocked && ReadyLosHit.GetActor() != AlertedThreatEnemy)
+			bReadyOnlyThreat = false;
+	}
 
 	auto PostureName = [](ECompanionPosture P) -> const TCHAR*
 	{
@@ -525,7 +640,43 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		}
 	};
 
-	if (bHasTarget || bReadyOnlyThreat)
+	if (Companion->IsStealthActive())
+	{
+		// Unbroken stealth: posture pinned, weapon low, crouch enforced (route/follow re-entries
+		// and the un-crouch on leaving combat cover can stand the companion back up).
+		if (CurrentPosture != ECompanionPosture::Stealth)
+		{
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
+					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Stealth));
+			Companion->SetPosture(ECompanionPosture::Stealth);
+		}
+
+		// Enforcement must yield to systems that own aim/facing/stance right now: a commanded
+		// takedown arms with weapon-up + SetFocus (stomping it drops the aim mid-hold and
+		// re-crouches the knife pair out of the authored pose), traversal resizes the capsule
+		// mid-vault, and route legs set their own stances.
+		const UTraversalComponent* Traversal = Companion->GetTraversalComponent();
+		const bool bEnforcementYields =
+			Companion->IsCommandedTakedownArmed()
+			|| Companion->IsCommandedTakedownExecuting()
+			|| Companion->IsTakedownMontagePlaying()
+			|| (IsValid(Traversal) && Traversal->IsBusy())
+			|| BB->GetValueAsBool(ACompanionAIController::BB_RouteActive);
+		if (!bEnforcementYields)
+		{
+			Companion->SetLowReadyAim(true);
+			Controller->ClearFocus(EAIFocusPriority::Gameplay);
+			// The sprint-break catch-up stage owns stance: re-crouching every service tick was
+			// silently capping the stealth "sprint to catch up" at crouched speed — the companion
+			// never visibly sprinted, it got SLOWER (plain crouch speed, not even the fast tier).
+			if (Companion->GetStealthCatchup() != EStealthCatchup::Sprint
+				&& !Companion->bIsCrouched && Companion->CanCrouch())
+				Companion->Crouch();
+		}
+		OutOfCombatTimer = 0.f;
+	}
+	else if (bHasTarget || bReadyOnlyThreat)
 	{
 		if (CurrentPosture != ECompanionPosture::Combat)
 		{
@@ -534,13 +685,102 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Combat));
 			Companion->SetPosture(ECompanionPosture::Combat);
 		}
-		Companion->SetLowReadyAim(false);
+		bLoweredOnTargetLoss = false;
 		if (bReadyOnlyThreat)
-			Controller->SetFocalPoint(AlertedThreatLocation, EAIFocusPriority::Gameplay);
+		{
+			// Ready stance vs a searching-but-not-engaged enemy (e.g. a takedown neighbour
+			// investigating the body): cover it while standing, but never hard-face it while
+			// path-following — the Gameplay focal outranks the move focus and walks the
+			// companion sideways in ADS at a bearing the player has no context for.
+			// Yields to the same aim/focus owners as the sibling branches: an armed/executing
+			// takedown (raises + SetFocus on the victim, possibly while still moving into
+			// position) and route legs (own the Gameplay focal; a one-shot authored-aim focal
+			// would stay cleared for the rest of the leg because the route setter is cached).
+			const bool bAimOwnedElsewhere = Companion->IsCommandedTakedownArmed()
+				|| Companion->IsCommandedTakedownExecuting()
+				|| Companion->IsTakedownMontagePlaying()
+				|| BB->GetValueAsBool(ACompanionAIController::BB_RouteActive);
+			if (!bAimOwnedElsewhere)
+			{
+				const UPathFollowingComponent* PathFollowing = Controller->GetPathFollowingComponent();
+				const bool bPathMoving = IsValid(PathFollowing)
+					&& PathFollowing->GetStatus() == EPathFollowingStatus::Moving;
+				if (bPathMoving)
+				{
+					Companion->SetLowReadyAim(true);
+					Controller->ClearFocus(EAIFocusPriority::Gameplay);
+				}
+				else
+				{
+					Companion->SetLowReadyAim(false);
+					Controller->SetFocalPoint(AlertedThreatLocation, EAIFocusPriority::Gameplay);
+				}
+			}
+		}
+		else
+		{
+			Companion->SetLowReadyAim(false);
+		}
 		OutOfCombatTimer = 0.f;
+	}
+	else if (Mode == ECompanionMode::Stealth && Companion->IsStealthBroken() && !bStealthBreakSignal)
+	{
+		// Broken stealth with the fight over (no target, no alerted threat, no live break signal —
+		// re-pinning under a still-Loud alert or during a DBNO revive would just flap): wait out
+		// the re-pin delay, then return to stealth rules. Runs regardless of current posture — a
+		// break can happen without the companion ever acquiring a target (spotted player, no LoS).
+		// Same immediate weapon-lower as the combat-decay branch below — waiting out the 4s re-pin
+		// aimed at a corpse is the exact stale-ADS stare the edge trigger exists to kill.
+		const bool bTakedownOwnsAim = Companion->IsCommandedTakedownArmed()
+			|| Companion->IsCommandedTakedownExecuting()
+			|| Companion->IsTakedownMontagePlaying();
+		if (!bLoweredOnTargetLoss && !bTakedownOwnsAim)
+		{
+			Companion->SetLowReadyAim(true);
+			// A stale aim target keeps the ADS pose regardless of low-ready (the anim's
+			// actor-target branch bypasses it) — clear it with the same edge/yield guards.
+			Companion->SetAimTarget(nullptr);
+			Controller->ClearFocus(EAIFocusPriority::Gameplay);
+			bLoweredOnTargetLoss = true;
+		}
+		OutOfCombatTimer += DeltaSeconds;
+		const float RepinDelay = RangeTuning ? RangeTuning->StealthRepinDelay : ExploreReturnDelay;
+		if (OutOfCombatTimer >= RepinDelay)
+		{
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: stealth re-pin (posture %s -> %s)"),
+					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Stealth));
+			Companion->SetStealthBroken(false); // re-applies crouch + sprint lock
+			Companion->SetPosture(ECompanionPosture::Stealth);
+			// The timer keeps accruing through an armed takedown — its expiry must not stomp the
+			// takedown's aim/focus either (cosmetic wobble; execute re-raises, but don't fight it).
+			if (!bTakedownOwnsAim)
+			{
+				Companion->SetLowReadyAim(true);
+				Controller->ClearFocus(EAIFocusPriority::Gameplay);
+			}
+			OutOfCombatTimer = 0.f;
+		}
 	}
 	else if (!bHasTarget && CurrentPosture == ECompanionPosture::Combat)
 	{
+		// Lower the weapon the moment the last target is gone — the ExploreReturnDelay below is BT
+		// posture stability, not a reason to hold a stale ADS pose aimed at a dead enemy's bearing.
+		// Edge-guarded by bLoweredOnTargetLoss (reset whenever a target/threat is live) so the lower
+		// still fires after a branch switch mid-accrual (e.g. stealth re-pin -> mode change).
+		// Yields to a commanded takedown, which owns aim/focus while armed.
+		const bool bTakedownOwnsAim = Companion->IsCommandedTakedownArmed()
+			|| Companion->IsCommandedTakedownExecuting()
+			|| Companion->IsTakedownMontagePlaying();
+		if (!bLoweredOnTargetLoss && !bTakedownOwnsAim)
+		{
+			Companion->SetLowReadyAim(true);
+			// Same stale-aim-target backstop as the stealth re-pin branch above.
+			Companion->SetAimTarget(nullptr);
+			Controller->ClearFocus(EAIFocusPriority::Gameplay);
+			bLoweredOnTargetLoss = true;
+		}
+
 		OutOfCombatTimer += DeltaSeconds;
 		if (OutOfCombatTimer >= ExploreReturnDelay)
 		{
@@ -548,10 +788,36 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
 					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Exploration));
 			Companion->SetPosture(ECompanionPosture::Exploration);
-			Companion->SetLowReadyAim(true);
-			Controller->ClearFocus(EAIFocusPriority::Gameplay);
+			// Expiry mirrors the edge-lower's takedown yield — see the re-pin branch.
+			if (!bTakedownOwnsAim)
+			{
+				Companion->SetLowReadyAim(true);
+				Controller->ClearFocus(EAIFocusPriority::Gameplay);
+			}
 			OutOfCombatTimer = 0.f;
 		}
+	}
+
+	// --- AimLog diagnostics (companion.AimLog 1) ---
+	if (CVarCompanionAimLog.GetValueOnGameThread() != 0)
+	{
+		const TCHAR* PickSrc = !TargetAfterUpdate ? TEXT("none")
+			: (TargetAfterUpdate == BestVisible) ? TEXT("visible")
+			: (TargetAfterUpdate == BestAny) ? TEXT("OCCLUDED-ANY")
+			: TEXT("kept");
+		const UPathFollowingComponent* LogPF = Controller->GetPathFollowingComponent();
+		const bool bLogMoving = IsValid(LogPF) && LogPF->GetStatus() == EPathFollowingStatus::Moving;
+		UE_LOG(LogCompanionAI, Display,
+			TEXT("[AimLog] mode=%d posture=%s lowReady=%d aimTarget=%s | bbTarget=%s src=%s losBlocked=%d losBlockT=%.1f | readyOnly=%d alertEnemy=%s alertDist=%.0f | moving=%d route=%d tdArmed=%d tdExec=%d tdMont=%d latch=%d | focusActor=%s focal=%s"),
+			(int32)Mode, PostureName(Companion->GetPosture()), (int32)Companion->IsLowReadyAim(),
+			*GetNameSafe(Companion->GetAimTarget()),
+			*GetNameSafe(TargetAfterUpdate), PickSrc, (int32)bWasLosBlocked, OpenLosBlockedTime,
+			(int32)bReadyOnlyThreat, *GetNameSafe(AlertedThreatEnemy),
+			bHasAlertedThreat ? FMath::Sqrt(BestAlertDistSq) : -1.f,
+			(int32)bLogMoving, (int32)BB->GetValueAsBool(ACompanionAIController::BB_RouteActive),
+			(int32)Companion->IsCommandedTakedownArmed(), (int32)Companion->IsCommandedTakedownExecuting(),
+			(int32)Companion->IsTakedownMontagePlaying(), (int32)bLoweredOnTargetLoss,
+			*GetNameSafe(Controller->GetFocusActor()), *Controller->GetFocalPoint().ToCompactString());
 	}
 
 	// --- Posture-driven scoring weights + posture mirror to BB ---

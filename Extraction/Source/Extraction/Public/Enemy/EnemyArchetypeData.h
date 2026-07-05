@@ -500,9 +500,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "1.0"))
 	float TargetSwitchHysteresis = 1.25f;
 
-	/** Threat-score multiplier for companion candidates once in Combat. 1 = equal priority to the
-	 *  player, 0 = never target the companion. Companions still cannot TRIGGER combat on an unaware
-	 *  enemy regardless of this value (stealth rule). */
+	/** Threat-score multiplier for companion candidates during target SELECTION. 1 = equal priority
+	 *  to the player, 0 = deprioritised out of ScoreAndSelectTarget. Not a hard immunity: a
+	 *  Combat-mode companion can initiate combat, and damage/near-misses from a non-stealth
+	 *  companion still enter combat against it (enemies defend themselves). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CompanionThreatScoreMultiplier = 0.75f;
 
@@ -808,6 +809,36 @@ public:
 	/** Hard cap on route-exposure traces per selection round (spread across the top candidates). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|PathExposure", meta = (ClampMin = "3", ClampMax = "64"))
 	int32 PathExposureMaxTracesPerSelection = 24;
+
+	// --- Cover Multi-Threat (score penalty for exposure to hostiles beyond the combat target) ---
+
+	/** Score multiplier per extra sighted hostile a candidate fails to shield the body from
+	 *  (Score *= penalty^uncovered). Soft penalty only — a partially-exposed cover still beats none.
+	 *  1 = off. Mirrors the companion's MultiThreatExposurePenalty. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MultiThreatExposurePenalty = 0.5f;
+
+	/** Max known hostiles (beyond the combat target) considered for the multi-threat penalty.
+	 *  Bounds the extra body-protection traces per candidate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 MaxExtraThreats = 2;
+
+	/** Seconds a hostile stays a multi-threat factor after sight of it is lost (scored at its
+	 *  frozen last-perceived position — honest knowledge). Covers the aggro-switch case: the
+	 *  hostile this enemy was JUST trading fire with must not vanish from its cover math the
+	 *  moment the combat target changes. 0 = currently-sighted hostiles only. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float ExtraThreatMemorySeconds = 20.f;
+
+	/** Hard reject for cover candidates within this 2D distance (cm) of a cover a hostile is
+	 *  moving to (declared intent). Kills claim collisions with the companion. 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float MinHostileCoverDistance = 250.f;
+
+	/** Hard reject for cover candidates within this 2D distance (cm) of a living hostile pawn —
+	 *  an enemy must never set up on a spot a hostile is holding. 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float MinHostilePawnDistance = 300.f;
 
 	// --- Cover Blind Fire (suppression response) ---
 

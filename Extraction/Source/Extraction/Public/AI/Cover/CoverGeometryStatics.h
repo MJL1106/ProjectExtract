@@ -43,6 +43,16 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
 	static FVector GetLeanPeekPosition(const FCoverData& Data, ECoverLean Lean, float LeanOffset = 65.f);
 
+	/** Corner-peek apex on the hunker line: marches the wall (same trace march as
+	 *  GetEdgeAlignedHunkerPosition) in the lean direction and returns the point past the corner
+	 *  where the whole capsule clears it by ClearanceMargin. The edge-aligned HOME is corner-relative;
+	 *  an apex from the baked point (GetLeanPeekPosition's ±LeanOffset) is in a different reference
+	 *  frame and lands short of the corner when the bake sits back from it. Falls back to
+	 *  GetLeanPeekPosition for Front/None leans, unresolvable corners, or walls longer than the march
+	 *  range. C++ only. */
+	static FVector GetCornerPeekApex(const UWorld* World, const FCoverData& Data, ECoverLean Lean,
+		float Standoff, float CapsuleRadius, float ClearanceMargin, const AActor* IgnoreActor = nullptr);
+
 	/** Pick the best valid lean side for the current stance vs the threat direction. */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
 	static ECoverLean ResolveLeanSide(const FCoverData& Data, bool bCrouched, const FVector& ThreatLoc);
@@ -52,6 +62,20 @@ public:
 	 *  Not a UFUNCTION — C++ only; avoids blueprint overload ambiguity. */
 	static ECoverLean ResolveLeanSideExplicit(const FCoverData& Data,
 		bool bLeftValid, bool bRightValid, bool bFrontValid, const FVector& ThreatLoc);
+
+	/** Peek-side pick: baked per-side flags first (the bake already knows which corners have a gap),
+	 *  ordered geometric-corner-first, each LOS-verified from its corner at eye height. Falls back to
+	 *  the baked preference when no side verifies. At a wall-end point (exactly ONE baked side flag
+	 *  for the stance), also admits the opposite unflagged side when runtime traces verify
+	 *  clearance + LOS. Not a UFUNCTION — takes raw ignore-actor pointers, C++ only. */
+	static ECoverLean ChooseGapPeekSide(UWorld* World, const FCoverData& Data, bool bCrouched,
+		const FVector& ThreatLoc, const AActor* Target, const APawn* Pawn);
+
+	/** At a wall-end point (exactly one baked side flag for the current stance), try the opposite
+	 *  unflagged side by runtime-verifying clearance (peek position not inside geometry) and LOS to
+	 *  threat. Returns the opposite side on success, ECoverLean::None otherwise. C++ only. */
+	static ECoverLean TryOppositeEndpointSide(UWorld* World, const FCoverData& Data, bool bCrouched,
+		const FVector& ThreatLoc, const AActor* Target, const APawn* Pawn, ECoverLean BakedSide);
 
 	/** True when a chest-height trace from the hunker position to ThreatLoc is BLOCKED by geometry
 	 *  (i.e. the cover wall protects the body). Ported from IsSlotBodyProtected. */

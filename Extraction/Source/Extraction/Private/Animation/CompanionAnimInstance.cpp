@@ -14,6 +14,7 @@
 #include "KismetAnimationLibrary.h"
 #include "CompanionAIController.h"
 #include "Enemy/Debug/EnemyDebug.h"
+#include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
 
 void UCompanionAnimInstance::NativeInitializeAnimation()
 {
@@ -112,6 +113,11 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	if (CachedCoverPoseComponent.IsValid())
 	{
+		// bInCover mirrors per-frame like the enemy (EnemyAnimInstance) — Enter/ExitCoverPose still
+		// set it immediately for same-frame reads, but the pose component is the source of truth, so
+		// any path that resets the pose without an ExitCoverPose call self-corrects here instead of
+		// leaving the aim gate latched open/closed (twisted-spine stare during cover transitions).
+		bInCover = CachedCoverPoseComponent->bInCover;
 		CoverHeight = CachedCoverPoseComponent->CoverHeight;
 		CoverLeanDirection = CachedCoverPoseComponent->LeanDirection;
 		bCoverBlindFiring = CachedCoverPoseComponent->bBlindFiring;
@@ -119,6 +125,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	}
 	else
 	{
+		bInCover = false;
 		CoverHeight = ECoverHeight::Stand;
 		CoverLeanDirection = ECoverLean::None;
 		bCoverBlindFiring = false;
@@ -198,6 +205,14 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	// Aim offset
 	AActor* AimTarget = OwningCompanion->GetAimTarget();
+
+	// The no-target fallback must close when the AI has genuinely dropped its focus (target died):
+	// GetBaseAimRotation otherwise keeps serving the dead enemy's bearing for the whole posture-decay
+	// window (stale-ADS stare). Clients have no AIController — focus treated as live there.
+	bool bFocusLive = true;
+	if (const AAIController* AIC = Cast<AAIController>(OwningCompanion->GetController()))
+		bFocusLive = FAISystem::IsValidLocation(AIC->GetFocalPoint());
+
 	if (IsValid(AimTarget))
 	{
 		const FVector ToTarget = AimTarget->GetActorLocation() - OwningCompanion->GetActorLocation();
@@ -209,7 +224,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsAiming = true;
 	}
 	else if (OwningCompanion->IsScriptedAiming() ||
-		(CurrentPosture == ECompanionPosture::Combat && !OwningCompanion->IsLowReadyAim()))
+		(CurrentPosture == ECompanionPosture::Combat && !OwningCompanion->IsLowReadyAim() && bFocusLive))
 	{
 		// Weapon up with no actor target (route Alert/Crouch legs, cover holds, blocked combat):
 		// aim along where the AIController is looking (focal point drives control rotation).
@@ -226,6 +241,30 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsAiming = false;
 	}
 
+	// AimLog diagnostics (companion.AimLog 1): edge-log which branch is driving the ADS pose.
+	// Function-local static is fine — there is a single companion instance.
+	if (const IConsoleVariable* AimLogCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AimLog"));
+		AimLogCVar && AimLogCVar->GetInt() != 0)
+	{
+		const int32 AimBranch = IsValid(AimTarget) ? 1
+			: !bIsAiming ? 0
+			: OwningCompanion->IsScriptedAiming() ? 2
+			: 3;
+		static int32 LastLoggedAimBranch = -1;
+		if (AimBranch != LastLoggedAimBranch)
+		{
+			static const TCHAR* BranchNames[] = { TEXT("None"), TEXT("ActorTarget"), TEXT("Scripted"), TEXT("CombatFocal") };
+			UE_LOG(LogCompanionAI, Display,
+				TEXT("[AimLog][Anim] branch=%s aimTarget=%s posture=%d lowReady=%d focusLive=%d yaw=%.0f pitch=%.0f"),
+				BranchNames[AimBranch], *GetNameSafe(AimTarget), (int32)CurrentPosture,
+				(int32)OwningCompanion->IsLowReadyAim(), (int32)bFocusLive, AimYaw, AimPitch);
+			LastLoggedAimBranch = AimBranch;
+		}
+	}
+
+	// Pre-clamp yaw for the cover track-limit test below.
+	RawAimYawDeg = AimYaw;
+
 	// Cache once per frame — used by both the aim gate and the cover-align block below.
 	const bool bPeekMontagePlaying = IsAnyCoverPeekMontagePlaying();
 
@@ -238,6 +277,27 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		CoverAimGate = FMath::FInterpTo(CoverAimGate, GateTarget, DeltaSeconds, CoverAimGateSpeed);
 		AimPitch *= CoverAimGate;
 		AimYaw *= CoverAimGate;
+
+		if (bInCover)
+		{
+			// The peek montage owns the body rotation in cover — the aim offset only fine-aims.
+			// Clamp the spine yaw, and ease the whole offset out while the raw bearing is far
+			// outside the pose's reach (target behind the wall/body) — ported from the enemy's
+			// CoverAimTrackAlpha fix for the same twisted-spine artefact. Also fade while the
+			// target has no LOS (service-written mirror) — no through-wall stare.
+			const bool bNoLOSInCover = IsValid(OwningCompanion) && !OwningCompanion->HasTargetLOS();
+			const float TrackAlphaTarget = (FMath::Abs(RawAimYawDeg) > CoverAimTrackLimitDeg || bNoLOSInCover) ? 0.f : 1.f;
+			CoverAimTrackAlpha = FMath::FInterpTo(CoverAimTrackAlpha, TrackAlphaTarget, DeltaSeconds, CoverAimGateSpeed);
+
+			AimYaw = FMath::Clamp(AimYaw, -CoverAimYawClampDeg, CoverAimYawClampDeg);
+			AimYaw *= CoverAimTrackAlpha;
+			AimPitch *= CoverAimTrackAlpha;
+		}
+		else
+		{
+			// Outside cover: keep the alpha at 1 so re-entering cover starts clean.
+			CoverAimTrackAlpha = 1.f;
+		}
 	}
 
 	// Traversal
@@ -679,6 +739,10 @@ void UCompanionAnimInstance::EnterCoverPose(EPeekSide DefaultSide, ECoverHeight 
 		Montage_Stop(CoverBlendOutTime, CoverPeekLeftMontage_Stand);
 	if (IsValid(CoverPeekRightMontage_Stand) && Montage_IsPlaying(CoverPeekRightMontage_Stand))
 		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage_Stand);
+	if (IsValid(CoverPeekOverTopMontage) && Montage_IsPlaying(CoverPeekOverTopMontage))
+		Montage_Stop(CoverBlendOutTime, CoverPeekOverTopMontage);
+	if (IsValid(CoverPeekOverTopLeftMontage) && Montage_IsPlaying(CoverPeekOverTopLeftMontage))
+		Montage_Stop(CoverBlendOutTime, CoverPeekOverTopLeftMontage);
 
 	bInCover = true;
 	ActivePeekSide = DefaultSide;
@@ -718,6 +782,10 @@ void UCompanionAnimInstance::ExitCoverPose()
 		Montage_Stop(CoverBlendOutTime, CoverPeekLeftMontage_Stand);
 	if (IsValid(CoverPeekRightMontage_Stand) && Montage_IsPlaying(CoverPeekRightMontage_Stand))
 		Montage_Stop(CoverBlendOutTime, CoverPeekRightMontage_Stand);
+	if (IsValid(CoverPeekOverTopMontage) && Montage_IsPlaying(CoverPeekOverTopMontage))
+		Montage_Stop(CoverBlendOutTime, CoverPeekOverTopMontage);
+	if (IsValid(CoverPeekOverTopLeftMontage) && Montage_IsPlaying(CoverPeekOverTopLeftMontage))
+		Montage_Stop(CoverBlendOutTime, CoverPeekOverTopLeftMontage);
 
 	// CoverAimGate is left to ease back — its target returns to 1 once bInCover clears.
 	bInCover = false;
@@ -777,7 +845,34 @@ bool UCompanionAnimInstance::IsAnyCoverPeekMontagePlaying() const
 	if (IsValid(CoverPeekRightMontage) && Montage_IsPlaying(CoverPeekRightMontage)) return true;
 	if (IsValid(CoverPeekLeftMontage_Stand) && Montage_IsPlaying(CoverPeekLeftMontage_Stand)) return true;
 	if (IsValid(CoverPeekRightMontage_Stand) && Montage_IsPlaying(CoverPeekRightMontage_Stand)) return true;
+	if (IsValid(CoverPeekOverTopMontage) && Montage_IsPlaying(CoverPeekOverTopMontage)) return true;
+	if (IsValid(CoverPeekOverTopLeftMontage) && Montage_IsPlaying(CoverPeekOverTopLeftMontage)) return true;
 	return false;
+}
+
+UAnimMontage* UCompanionAnimInstance::PlayOverTopPeek(EPeekSide FromSide, float PlayRate)
+{
+	// Stop all cover-idle montages so the over-top montage owns the body slot (mirror of PlayPeekFire).
+	if (IsValid(CoverIdleLeftMontage) && Montage_IsPlaying(CoverIdleLeftMontage))
+		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage);
+	if (IsValid(CoverIdleRightMontage) && Montage_IsPlaying(CoverIdleRightMontage))
+		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage);
+	if (IsValid(CoverIdleLeftMontage_Stand) && Montage_IsPlaying(CoverIdleLeftMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverIdleLeftMontage_Stand);
+	if (IsValid(CoverIdleRightMontage_Stand) && Montage_IsPlaying(CoverIdleRightMontage_Stand))
+		Montage_Stop(CoverBlendOutTime, CoverIdleRightMontage_Stand);
+
+	// Side-matched entry variant (enemy PeekOverTop/PeekOverTopLeft parity); right-entry default.
+	UAnimMontage* OverTop = (FromSide == EPeekSide::Left && IsValid(CoverPeekOverTopLeftMontage))
+		? CoverPeekOverTopLeftMontage.Get()
+		: CoverPeekOverTopMontage.Get();
+
+	ActivePeekSide = FromSide;
+
+	if (!IsValid(OverTop)) return nullptr;
+
+	Montage_Play(OverTop, PlayRate);
+	return OverTop;
 }
 
 // --- Cover-Reload Spine Tuck ---

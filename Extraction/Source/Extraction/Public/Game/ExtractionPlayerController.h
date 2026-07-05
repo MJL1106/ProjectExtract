@@ -13,6 +13,7 @@ class UPlayerHealthWidget;
 class UCrosshairWidget;
 class UAmmoWidget;
 class UBarkFeedWidget;
+class UCompanionModeWidget;
 
 /**
  *  Simple first person Player Controller
@@ -81,6 +82,14 @@ protected:
 	/** Active bark feed widget instance */
 	UPROPERTY()
 	TObjectPtr<UBarkFeedWidget> BarkFeedWidget;
+
+	/** Companion mode HUD chip class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UCompanionModeWidget> CompanionModeWidgetClass;
+
+	/** Active companion mode chip instance */
+	UPROPERTY()
+	TObjectPtr<UCompanionModeWidget> CompanionModeWidget;
 
 	/** If true, the player will use UMG touch controls even if not playing on mobile platforms */
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")

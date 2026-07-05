@@ -47,7 +47,7 @@ protected:
 
 private:
 	void TickNoise();
-	void PickNoiseProfile(float& OutLoudness, float& OutRange) const;
+	void PickNoiseProfile(float& OutLoudness, float& OutRange, FName& OutTag) const;
 
 	static constexpr float UpdateInterval = 0.2f;
 

@@ -7,6 +7,8 @@
 #include "EnvQueryContext_CombatTarget.h"
 #include "EnemyCharacter.h"
 #include "EnemyArchetypeData.h"
+#include "EnemyAIController.h"
+#include "EnemyAwarenessComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/Controller.h"
 
@@ -64,6 +66,27 @@ void UEnvQueryTest_CoverScore::RunTest(FEnvQueryInstance& QueryInstance) const
 
 	const FVector PawnLoc = QuerierPawn->GetActorLocation();
 
+	// Multi-threat exposure penalty (enemy queriers): gather extra known hostiles once per run.
+	// Empty when the archetype disables the penalty — the per-candidate traces are then skipped.
+	TArray<FEnemyKnownThreat> ExtraThreats;
+	float MultiThreatPenalty = 1.f;
+	if (Enemy)
+	{
+		// ThreatActor is null when the context resolved to a frozen point (LOS lost) — exclude the
+		// combat target via awareness instead, or the unsighted primary re-enters as an "extra" and
+		// double-penalises its own exposure term.
+		const AActor* ExcludeTarget = ThreatActor;
+		if (!ExcludeTarget)
+		{
+			const AEnemyAIController* EnemyController = Cast<AEnemyAIController>(Enemy->GetController());
+			const UEnemyAwarenessComponent* Awareness = EnemyController ? EnemyController->GetAwarenessComponent() : nullptr;
+			if (IsValid(Awareness)) ExcludeTarget = Awareness->GetCombatTarget();
+		}
+		UCoverScoringStatics::GatherEnemyExtraThreats(Enemy, ExcludeTarget, ExtraThreats);
+		const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+		if (IsValid(DA)) MultiThreatPenalty = DA->MultiThreatExposurePenalty;
+	}
+
 	for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It)
 	{
 		const FCover CoverItem = UEnvQueryItemType_CoverBase::GetValue(
@@ -74,8 +97,11 @@ void UEnvQueryTest_CoverScore::RunTest(FEnvQueryInstance& QueryInstance) const
 			bBodyProtected = UCoverGeometryStatics::IsThreatCovered(World, CoverItem.Data,
 				ThreatLoc, Standoff, CoverScoreChestHeight, ThreatActor, QuerierPawn);
 
-		const float Score = UCoverScoringStatics::ScoreCandidate(
+		float Score = UCoverScoringStatics::ScoreCandidate(
 			World, CoverItem.Data, PawnLoc, ThreatLoc, bBodyProtected, Params);
+
+		Score = UCoverScoringStatics::ApplyMultiThreatPenalty(Score, World, CoverItem.Data,
+			Standoff, CoverScoreChestHeight, QuerierPawn, ExtraThreats, MultiThreatPenalty);
 
 		// Filter bounds are unused for a pure Score test; the engine min-max normalizes raw
 		// scores across the candidate set, so ranking survives negative Press-flipped terms.

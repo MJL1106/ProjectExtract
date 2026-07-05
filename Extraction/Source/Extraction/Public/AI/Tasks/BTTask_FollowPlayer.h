@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "BehaviorTree/BTTaskNode.h"
 #include "BehaviorTree/BehaviorTreeTypes.h"
+#include "Companion/CompanionTypes.h"
 #include "BTTask_FollowPlayer.generated.h"
 
 class UCompanionTuningDataAsset;
@@ -45,6 +46,10 @@ protected:
 private:
 	FVector LastMoveTarget = FVector::ZeroVector;
 	bool bIsIdling = false;
+
+	/** Mode seen last tick — a change drops the idle latch so the new formation applies immediately
+	 *  (e.g. switching to Combat while stationary sends the companion to the lead point). */
+	ECompanionMode LastSeenMode = ECompanionMode::Normal;
 
 	// EQS slot state
 	bool bEqsQueryInProgress = false;

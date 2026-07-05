@@ -319,6 +319,9 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	if (IA_CompanionBreach)
 		EnhancedInput->BindAction(IA_CompanionBreach, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionConfirmBreachInput);
 
+	if (IA_CompanionModeToggle)
+		EnhancedInput->BindAction(IA_CompanionModeToggle, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeToggleInput);
+
 	// Temp debug: H key applies 25 damage
 	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionPlayer::DebugApplyDamage);
 }
@@ -398,8 +401,12 @@ void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 	if (IsInTraversal()) return;
 	if (!IsValid(WeaponComponent)) return;
 
-	WeaponComponent->StartFire();
+	// Broadcast BEFORE the shot: StartFire's hitscan/kill/alert chain runs synchronously, and a
+	// synced companion shoot-takedown listening on this delegate must land its kill while the
+	// victim is still Unaware — after StartFire, the player's own gunshot has already alerted it
+	// and the takedown whiffs.
 	OnPlayerFiredWeapon.Broadcast();
+	WeaponComponent->StartFire();
 }
 
 void AExtractionPlayer::FireStop(const FInputActionValue& Value)
@@ -841,6 +848,12 @@ void AExtractionPlayer::CompanionConfirmBreachInput(const FInputActionValue& /*V
 {
 	if (!IsValid(CompanionCommandComponent)) return;
 	CompanionCommandComponent->ConfirmBreach();
+}
+
+void AExtractionPlayer::CompanionModeToggleInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->CycleCompanionMode();
 }
 
 void AExtractionPlayer::FinishPendingTakedown()

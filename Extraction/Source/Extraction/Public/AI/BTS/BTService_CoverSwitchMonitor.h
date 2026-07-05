@@ -21,6 +21,12 @@ struct FCoverSwitchMonitorMemory
 	// G2 debounce — a candidate must win two consecutive re-evals before the switch commits.
 	FCoverHandle PendingBestCover;
 	int32 ConsecutiveBetterCount = 0;
+
+	// Player-advance tracking for the Normal/Stealth advance gate: accumulated player ground-gain
+	// toward the current threat, decayed per re-eval so stationary play bleeds back to zero.
+	TWeakObjectPtr<AActor> LastAdvanceThreat;
+	float LastPlayerThreatDist = -1.f;
+	float PlayerAdvanceProgress = 0.f;
 };
 
 UCLASS()
@@ -34,6 +40,9 @@ public:
 	virtual uint16 GetInstanceMemorySize() const override { return sizeof(FCoverSwitchMonitorMemory); }
 	virtual FString GetStaticDescription() const override;
 	virtual void InitializeFromAsset(UBehaviorTree& Asset) override;
+	// Node memory holds a TWeakObjectPtr — placement-construct/destruct instead of relying on zero-init.
+	virtual void InitializeMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryInit::Type InitType) const override;
+	virtual void CleanupMemory(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTMemoryClear::Type CleanupType) const override;
 
 protected:
 	virtual void TickNode(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds) override;

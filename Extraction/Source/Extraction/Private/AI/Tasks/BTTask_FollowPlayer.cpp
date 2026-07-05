@@ -41,6 +41,7 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 
 	LastMoveTarget = FVector::ZeroVector;
 	bIsIdling = false;
+	LastSeenMode = Companion->GetMode();
 
 	// Reset EQS slot state — stale slots from a previous run must not bleed into this one.
 	bEqsQueryInProgress = false;
@@ -74,6 +75,42 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	const FVector PlayerLocation = Player->GetActorLocation();
 	const FVector CompanionLocation = Companion->GetActorLocation();
 	const float DistToPlayer = FVector::Dist(CompanionLocation, PlayerLocation);
+
+	// Mode change drops the idle latch and forces a move re-issue so the new formation applies now.
+	if (Companion->GetMode() != LastSeenMode)
+	{
+		LastSeenMode = Companion->GetMode();
+		bIsIdling = false;
+		LastMoveTarget = FVector::ZeroVector;
+	}
+
+	// Stealth catch-up staging — evaluated before the idle/back-out early-returns so the stage
+	// releases as soon as the companion closes the gap. One-way ladder with wide bands: each stage
+	// is entered at its threshold but only dropped one band lower — without the hysteresis a player
+	// walking away parks the companion exactly on the sprint boundary (uncrouched closes at
+	// +sprint-walk, crouched loses at walk-crouch) and it flip-flops crouch/uncrouch every tick.
+	if (Companion->IsStealthActive())
+	{
+		const EStealthCatchup Current = Companion->GetStealthCatchup();
+		// Read-time floor (mirrors EffMinSep/EffStandoff below): a break distance at/below the
+		// fast-crouch threshold would collapse sprint entry and exit onto one boundary and
+		// resurrect the crouch/uncrouch flip-flop the ladder exists to prevent.
+		const float EffSprintBreak = FMath::Max(T->StealthSprintBreakDistance, T->SprintDistanceThreshold + 200.f);
+		EStealthCatchup Stage;
+		if (T->bStealthAllowSprintCatchup && DistToPlayer > EffSprintBreak)
+			Stage = EStealthCatchup::Sprint;
+		else if (Current == EStealthCatchup::Sprint && DistToPlayer > T->SprintDistanceThreshold)
+			Stage = EStealthCatchup::Sprint;   // hold sprint until back inside the fast-crouch band
+		else if (DistToPlayer > T->SprintDistanceThreshold)
+			Stage = EStealthCatchup::FastCrouch;
+		else if (Current != EStealthCatchup::None && DistToPlayer > T->SprintDistanceThreshold * 0.7f)
+			Stage = EStealthCatchup::FastCrouch; // hold the hustle until clearly caught up
+		else
+			Stage = EStealthCatchup::None;
+		Companion->SetStealthCatchup(Stage);
+	}
+	else
+		Companion->SetStealthCatchup(EStealthCatchup::None);
 
 	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] Tick: Dist=%.0f bIsIdling=%d Sprint=%d MaxWalkSpeed=%.0f Vel=%.0f"),
 		DistToPlayer, bIsIdling ? 1 : 0,
@@ -114,8 +151,60 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	const float EffMinSep   = FMath::Min(T->FollowMinSeparation,  T->AcceptableRadius - FollowDistMargin);
 	const float EffStandoff = FMath::Max(T->FollowIdleStandoff,   EffMinSep + FollowDistMargin);
 
+	// Formation point is computed up front — Combat mode keys its idle/hysteresis gates on the
+	// distance to the LEAD point, not to the player (a player squeezing past a leading companion
+	// would otherwise latch it idle at their side until the gap exceeded 1.5x AcceptableRadius).
+	// Mode shapes the formation: Combat leads AHEAD of the player (capped at the lead distance by
+	// construction), Stealth tucks in tight behind, Normal keeps the standard offsets.
+	const ACharacter* PlayerChar = Cast<ACharacter>(Player);
+	const ECompanionMode Mode = Companion->GetMode();
+	const bool bCombatLead = Mode == ECompanionMode::Combat;
+
+	// Floor at read time: a lead inside AcceptableRadius would idle the companion at the player's
+	// side and never take point (mirrors the EffMinSep/EffStandoff read-time clamps above).
+	const float LeadDistance = FMath::Max(T->CombatModeLeadDistance, T->AcceptableRadius + FollowDistMargin);
+
+	float OffsetBack = T->FormationOffsetBack;
+	float OffsetRight = T->FormationOffsetRight;
+	if (bCombatLead)
+	{
+		OffsetBack = -LeadDistance; // negative back = in front
+		OffsetRight = T->CombatModeLeadOffsetRight;
+	}
+	else if (Companion->IsStealthActive())
+	{
+		OffsetBack = T->StealthFormationOffsetBack;
+		OffsetRight = T->StealthFormationOffsetRight;
+	}
+
+	FVector FormationDir;
+	if (PlayerChar && PlayerChar->GetVelocity().SizeSquared() > 100.0f * 100.0f)
+	{
+		// Player is moving — formation relative to their movement direction
+		const FVector MoveDir = PlayerChar->GetVelocity().GetSafeNormal2D();
+		const FVector MoveRight = FVector::CrossProduct(FVector::UpVector, MoveDir);
+		FormationDir = PlayerLocation - MoveDir * OffsetBack + MoveRight * OffsetRight;
+	}
+	else if (bCombatLead)
+	{
+		// Player stationary in Combat mode — take point along their facing.
+		const FVector Facing = Player->GetActorForwardVector().GetSafeNormal2D();
+		const FVector FacingRight = FVector::CrossProduct(FVector::UpVector, Facing);
+		FormationDir = PlayerLocation + Facing * LeadDistance + FacingRight * OffsetRight;
+	}
+	else
+	{
+		// Player stationary — just maintain distance, stay where we are relative to player
+		const FVector ToCompanion = (CompanionLocation - PlayerLocation).GetSafeNormal2D();
+		FormationDir = PlayerLocation + ToCompanion * OffsetBack;
+	}
+
+	// Combat lead idles against the lead point; everything else against the player.
+	const float IdleGateDist = bCombatLead ? FVector::Dist(CompanionLocation, FormationDir) : DistToPlayer;
+
 	// Min-separation back-out: inside the hard floor → walk back to standoff rather than freezing in place.
 	// Deadband on entry prevents the branch from thrashing when the player loiters right at the floor boundary.
+	// Always keyed on player distance — this is the personal-space guard, mode-independent.
 	if (DistToPlayer < EffMinSep - BackoutDeadband)
 	{
 		FVector AwayDir = (CompanionLocation - PlayerLocation).GetSafeNormal2D();
@@ -136,12 +225,12 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		return;
 	}
 
-	// Close enough to player — stop and idle
-	if (DistToPlayer <= T->AcceptableRadius)
+	// Close enough to the formation anchor — stop and idle
+	if (IdleGateDist <= T->AcceptableRadius)
 	{
 		if (!bIsIdling)
 		{
-			UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] >>> ENTER IDLE branch (Dist=%.0f)"), DistToPlayer);
+			UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] >>> ENTER IDLE branch (GateDist=%.0f)"), IdleGateDist);
 			Controller->StopMovement();
 			Companion->SetSprinting(false);
 			bIsIdling = true;
@@ -150,39 +239,23 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	}
 
 	// Hysteresis — don't re-engage movement until outside double the radius
-	if (bIsIdling && DistToPlayer < T->AcceptableRadius * 1.5f)
+	if (bIsIdling && IdleGateDist < T->AcceptableRadius * 1.5f)
 	{
-		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] HYSTERESIS return (Dist=%.0f, idling, no SetSprinting)"), DistToPlayer);
+		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] HYSTERESIS return (GateDist=%.0f, idling, no SetSprinting)"), IdleGateDist);
 		return;
 	}
 
 	if (bIsIdling)
-		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] >>> EXIT IDLE branch (Dist=%.0f, resuming formation)"), DistToPlayer);
+		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] >>> EXIT IDLE branch (GateDist=%.0f, resuming formation)"), IdleGateDist);
 
 	bIsIdling = false;
 
-	// Calculate formation offset (fallback when EQS slot is unavailable).
-	const ACharacter* PlayerChar = Cast<ACharacter>(Player);
-	FVector FormationDir;
-
-	if (PlayerChar && PlayerChar->GetVelocity().SizeSquared() > 100.0f * 100.0f)
-	{
-		// Player is moving — formation behind their movement direction
-		const FVector MoveDir = PlayerChar->GetVelocity().GetSafeNormal2D();
-		const FVector MoveRight = FVector::CrossProduct(FVector::UpVector, MoveDir);
-		FormationDir = PlayerLocation - MoveDir * T->FormationOffsetBack + MoveRight * T->FormationOffsetRight;
-	}
-	else
-	{
-		// Player stationary — just maintain distance, stay where we are relative to player
-		const FVector ToCompanion = (CompanionLocation - PlayerLocation).GetSafeNormal2D();
-		FormationDir = PlayerLocation + ToCompanion * T->FormationOffsetBack;
-	}
-
 	// Kick an async EQS request periodically when a query asset is set. EqsTarget overrides
 	// FormationDir when valid; otherwise we fall through to the formation target unchanged.
+	// Combat mode skips the EQS slot entirely — the query anchors slots around/behind the player,
+	// which would fight the lead point; MoveToLocation's nav projection handles off-mesh leads.
 	TimeSinceLastEqs += DeltaSeconds;
-	if (FollowSlotQuery && !bEqsQueryInProgress && TimeSinceLastEqs >= EqsQueryInterval)
+	if (FollowSlotQuery && !bCombatLead && !bEqsQueryInProgress && TimeSinceLastEqs >= EqsQueryInterval)
 	{
 		bEqsQueryInProgress = true;
 		TimeSinceLastEqs = 0.f;
@@ -191,11 +264,17 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 			FQueryFinishedSignature::CreateUObject(this, &UBTTask_FollowPlayer::OnFollowQueryFinished));
 	}
 
-	const FVector MoveTarget = bHasEqsTarget ? EqsTarget : FormationDir;
+	const FVector MoveTarget = (bHasEqsTarget && !bCombatLead) ? EqsTarget : FormationDir;
 
 	// Sprint catch-up + idle hysteresis still keyed on DistToPlayer (not the slot).
 	// SetSprinting MUST stay before any early-return — preserves the c62bdbf sprint-latch fix.
-	const bool bWantSprint = DistToPlayer > T->SprintDistanceThreshold;
+	// Mirror the player's sprint too: kit BP owns player sprint state, so it's inferred from 2D
+	// speed against the tuning threshold (kit walk 410; threshold sits between walk and sprint).
+	// The mirror needs a distance floor — without it the companion sprints 2m to a formation
+	// point because the player happened to be sprinting somewhere.
+	const bool bPlayerSprinting = Player->GetVelocity().Size2D() > T->PlayerSprintSpeedThreshold;
+	const bool bWantSprint = DistToPlayer > T->SprintDistanceThreshold
+		|| (bPlayerSprinting && DistToPlayer > T->SprintDistanceThreshold * 0.5f);
 	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f Thresh=%.0f EqsSlot=%d -> SetSprinting(%d)"),
 		DistToPlayer, T->SprintDistanceThreshold, bHasEqsTarget ? 1 : 0, bWantSprint ? 1 : 0);
 

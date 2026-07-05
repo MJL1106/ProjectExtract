@@ -68,14 +68,20 @@ void UFootstepNoiseComponent::TickNoise()
 
 	float Loudness = 0.f;
 	float Range = 0.f;
-	PickNoiseProfile(Loudness, Range);
+	FName NoiseTag;
+	PickNoiseProfile(Loudness, Range, NoiseTag);
 	if (Range <= 0.f || Loudness <= 0.f) return;
 
-	UAISense_Hearing::ReportNoiseEvent(GetWorld(), CurrentLocation, Loudness, OwnerChar, Range, TEXT("Footstep"));
+	UAISense_Hearing::ReportNoiseEvent(GetWorld(), CurrentLocation, Loudness, OwnerChar, Range, NoiseTag);
 }
 
-void UFootstepNoiseComponent::PickNoiseProfile(float& OutLoudness, float& OutRange) const
+void UFootstepNoiseComponent::PickNoiseProfile(float& OutLoudness, float& OutRange, FName& OutTag) const
 {
+	// A takedown-volume enemy muffles quiet noise but still reacts to a sprint (see
+	// UEnemyAwarenessComponent::HandleHearingStimulus), so sprint steps carry a distinct tag.
+	static const FName WalkTag(TEXT("Footstep"));
+	static const FName SprintTag(TEXT("FootstepSprint"));
+
 	const ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
 
 	bool bQuiet = OwnerChar && OwnerChar->bIsCrouched;
@@ -86,6 +92,7 @@ void UFootstepNoiseComponent::PickNoiseProfile(float& OutLoudness, float& OutRan
 	{
 		OutLoudness = QuietLoudness;
 		OutRange = QuietRange;
+		OutTag = WalkTag;
 		return;
 	}
 
@@ -93,4 +100,5 @@ void UFootstepNoiseComponent::PickNoiseProfile(float& OutLoudness, float& OutRan
 	const bool bSprinting = Speed >= SprintSpeedThreshold;
 	OutLoudness = bSprinting ? SprintLoudness : WalkLoudness;
 	OutRange = bSprinting ? SprintRange : WalkRange;
+	OutTag = bSprinting ? SprintTag : WalkTag;
 }

@@ -6,14 +6,17 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Companion/CompanionCommandTypes.h"
+#include "Companion/CompanionTypes.h"
 #include "CompanionCommandComponent.generated.h"
 
 class ACompanionCharacter;
 class ACompanionAIController;
 class AEnemyCharacter;
 class UCameraComponent;
+class UInputMappingContext;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPingChanged, ECompanionCommand, PendingCommand, AActor*, PingedTarget);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionModeChangedRelay, ECompanionMode, NewMode);
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanionCommand, Log, All);
 
@@ -34,6 +37,16 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Command")
 	float PingTraceRange = 6000.f;
 
+	/** Registered at TakedownPromptContextPriority ONLY while a takedown ping is pending. Maps the
+	 *  G/V confirm keys so they consume — the kit's grenade (G) and melee (V) can't fire while the
+	 *  takedown prompt is on screen. Assign IMC_CompanionTakedownPrompt in BP. */
+	UPROPERTY(EditAnywhere, Category = "Companion|Command")
+	TObjectPtr<UInputMappingContext> TakedownPromptContext;
+
+	/** Must exceed the gameplay contexts' priority (0) for the consume to block them. */
+	UPROPERTY(EditAnywhere, Category = "Companion|Command")
+	int32 TakedownPromptContextPriority = 10;
+
 	// ---- Actions ----
 
 	/** Camera-trace ping. Call once per press of IA_CompanionPing. */
@@ -51,6 +64,14 @@ public:
 	/** Confirm a queued Breach command. */
 	UFUNCTION(BlueprintCallable, Category = "Companion|Command")
 	void ConfirmBreach();
+
+	/** Cycle the companion's mode Normal -> Combat -> Stealth -> Normal. Call once per press of IA_CompanionModeToggle. */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Mode")
+	void CycleCompanionMode();
+
+	/** Current companion mode. Resolves the companion lazily; Normal if not yet spawned. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Mode")
+	ECompanionMode GetCompanionMode();
 
 	// ---- Getters ----
 
@@ -70,6 +91,11 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Command")
 	FOnPingChanged OnPingChanged;
 
+	/** Relay of the companion's OnModeChanged — HUD widgets subscribe here (player-side, same
+	 *  pattern as OnPingChanged) instead of hunting for the companion actor themselves. */
+	UPROPERTY(BlueprintAssignable, Category = "Companion|Mode")
+	FOnCompanionModeChangedRelay OnCompanionModeChanged;
+
 private:
 	ECompanionCommand PendingCommand = ECompanionCommand::None;
 
@@ -86,4 +112,12 @@ private:
 
 	void ConfirmTakedown(ETakedownMethod Method);
 	void ClearPending();
+
+	UFUNCTION()
+	void HandleCompanionModeChanged(ECompanionMode NewMode);
+
+	/** Adds/removes TakedownPromptContext on the local player. Idempotent. */
+	void SetPromptContextRegistered(bool bRegister);
+
+	bool bPromptContextRegistered = false;
 };

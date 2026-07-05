@@ -358,6 +358,12 @@ public:
 
 	bool IsIsolatedEncounter() const { return bIsolatedEncounter; }
 
+	/** True while standing inside at least one ATakedownVolume. Drives awareness "muffling": a pocket
+	 *  enemy ignores gunfire, walking and reload noise so taking one down doesn't cascade to its
+	 *  neighbours — but a sprint footstep and a level-wide Loud alert still wake it. Distinct from the
+	 *  bIsolatedEncounter test flag, which is fully deaf. */
+	bool IsInTakedownVolume() const { return TakedownVolumeRefCount > 0; }
+
 	/** Designer-assigned squad identifier. Enemies with the same SquadId share sightings and coordinate.
 	 *  NAME_None = squadless (radius-based morale fallback, no coordination). */
 	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Enemy|Squad")

@@ -325,6 +325,11 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
 	float CornerPeekReturnSpeed = 150.f;
 
+	/** How far past the wall corner the CornerPeek apex clears, beyond the capsule radius (cm).
+	 *  Apex = corner + capsule radius + this. */
+	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.0"))
+	float CornerPeekApexClearance = 20.f;
+
 	/** Distance threshold to consider a reposition/corner-peek movement arrived (cm). */
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "1.0"))
 	float RepositionArrivalTolerance = 8.f;
@@ -402,6 +407,42 @@ private:
 	float TimeInCoverIdle = 0.f;
 	float PeekCooldown = 0.f;
 	EPeekSide ResolvedPeekSide = EPeekSide::Right;
+
+	/** Trace-verified side resolve (shared UCoverGeometryStatics::ChooseGapPeekSide) — writes BOTH
+	 *  CurrentLean and ResolvedPeekSide. Crouch cover with no verified side gap maps to Front
+	 *  (over-top analogue, enemy parity); stand cover keeps None so the roll can reject the point. */
+	void ResolvePeekSideForCover(ACompanionCharacter* Companion, AActor* Target,
+		const FCoverData& CoverData, const FVector& ThreatLoc);
+
+	/** Completed peek cycles at the current cover point (incremented per ReturnToCover). Gates
+	 *  reposition/shuffle/compromise-relocate on MinPeekCyclesBeforeRelocate — commit to a point
+	 *  before wandering. */
+	int32 PeekCyclesAtCover = 0;
+
+	/** Cycle carry across task restarts: cycles are per-physical-cover, but target churn (death /
+	 *  switch) exits and re-enters this task several times per fight at the same point. Stamped at
+	 *  exit (OnTaskFinished/AbortTask, before ResetTaskState wipes the live counter); ExecuteTask
+	 *  restores the count when it re-claims the same handle. Deliberately NOT touched by
+	 *  ResetTaskState/ResetPeekCycleCounters. */
+	FCoverHandle PeekCycleCarryHandle;
+	int32 PeekCycleCarryCount = 0;
+
+	/** Consecutive failed no-peek-los validity evals (1 Hz) — invalidate only at the
+	 *  CoverCompromiseDebounce threshold instead of instantly. */
+	int32 NoPeekLosStrikes = 0;
+
+	/** Zero both cycle counters AND the character mirror in the same call — the monitor's G5 gate
+	 *  reads the mirror, and a one-frame stale value at a task-internal swap lets a pre-swap
+	 *  pending candidate commit against the point we just arrived at. */
+	void ResetPeekCycleCounters(ACompanionCharacter* Companion);
+
+	/** One-shot log latch: crouch-cover stand-up committed with no over-top montage wired. */
+	bool bWarnedOverTopUnwired = false;
+
+	/** Shared silent-Reposition commit: stamps intent, low-readies, hands control to
+	 *  TickRepositionAction (walk + stall/timeout snap + arrival CommitCoverSwitch). Used by the
+	 *  action roll and the blocked-LOS shuffle reroute (replaces the old mid-combat TeleportTo). */
+	void CommitSilentReposition(ACompanionCharacter* Companion, const FCover& ShuffleTarget, float Now);
 
 	float CoverValidityCheckTimer = 0.f;
 	float TimeAtCurrentCover = 0.f;
@@ -527,6 +568,11 @@ private:
 	FCoverHandle LastTickCoverHandle;
 	uint8 BlockedRecheckHits = 0;
 
+	/** Per-cover cache for the idle branch's hunker position — the edge-aligned variant runs a
+	 *  lateral trace march that is static per cover point; recompute only when the handle changes. */
+	FCoverHandle CachedIdleHunkerHandle;
+	FVector CachedIdleHunkerLoc = FVector::ZeroVector;
+
 	bool bWaitingForFinalApproach = false;
 	FVector FinalApproachTarget = FVector::ZeroVector;
 	float FinalApproachElapsed = 0.f;
@@ -573,7 +619,7 @@ private:
 	 *  line is blocked (no shots into our own wall), resuming when clear. Throttled to 10 Hz via
 	 *  StandBurstMuzzleCheckTimer; bStandBurstFireHeld latches the withheld state. Used by the plain
 	 *  Stand/Quick burst and by StandUpAndReposition Phase A (stand-fire-in-place). No-op if no weapon. */
-	void TickStandBurstMuzzleWithhold(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+	void TickStandBurstMuzzleWithhold(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds, const FCoverData* PeekConeCover = nullptr);
 
 	virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 
