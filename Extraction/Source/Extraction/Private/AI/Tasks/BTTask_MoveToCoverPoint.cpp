@@ -84,6 +84,13 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
 	if (!BB || !Controller || !Pawn) return EBTNodeResult::Failed;
 
+	// Purposeful commit grant (angle-seek / Combat advance hop): consume UP FRONT — above the
+	// EQS-empty return and the claim-guard decline — so no path through this task can leave a
+	// stale grant. Time-stamped; expired reads false.
+	bool bCommitGrant = false;
+	if (ACompanionCharacter* GrantCompanion = Cast<ACompanionCharacter>(Pawn))
+		bCommitGrant = GrantCompanion->ConsumeCoverCommitGrant();
+
 	// Set HasCover false at start (mirror old task's ReleaseClaim semantics)
 	if (HasCoverKey.SelectedKeyName != NAME_None)
 		BB->SetValueAsBool(HasCoverKey.SelectedKeyName, false);
@@ -152,25 +159,42 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	// sanity cap. Declining fails the task — the BT's ForceSuccess decorator routes on to
 	// open-engage stand-fighting (loose cover bias). Enemies are unaffected; their commit policy
 	// lives in the fire task's FSM.
-	if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn))
+	if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn))
 	{
 		const ACompanionAIController* CompCtrl = Cast<ACompanionAIController>(Controller);
 		if (const UCompanionTuningDataAsset* Tuning = CompCtrl ? CompCtrl->GetTuning() : nullptr)
 		{
 			const float CommitDist = FVector::Dist(Pawn->GetActorLocation(), Cover.Data.Location);
-			const int32 ThreatCount = CompanionCover::CountKnownThreats(Controller, Tuning->CoverTriggerOutnumberedCount);
+			const int32 ThreatCount = CompanionCover::CountKnownThreats(Controller, CompanionCover::OutnumberedCountCap(*Tuning));
 			const CompanionCover::FCoverTriggers Triggers =
 				CompanionCover::EvaluateTriggers(*Companion, *Tuning, ThreatCount, /*bForRelease=*/false);
+
+			// Natural-cycling recommit cooldown: after a committed-time release, don't duck straight
+			// back in unless pressure has genuinely spiked (shared bar with the monitor's release).
+			bool bRecommitBlocked = false;
+			if (!bCommitGrant && Tuning->NaturalReleaseRecommitCooldown > 0.f && OwnerComp.GetWorld())
+			{
+				const float SinceRelease = OwnerComp.GetWorld()->GetTimeSeconds() - Companion->GetLastNaturalReleaseTime();
+				bRecommitBlocked = SinceRelease < Tuning->NaturalReleaseRecommitCooldown
+					&& !CompanionCover::IsStrongPressure(*Companion, *Tuning, ThreatCount);
+			}
+
+			// Low-HP dash gate: wounded-and-alone never sprints open ground for a duck spot. The
+			// pick is known here, so gate on ITS distance (the reseek pre-gate uses nearest-cover).
+			const bool bDashAllowed = bCommitGrant || !Triggers.LowHealthOnly()
+				|| Tuning->LowHealthCoverMaxDash <= 0.f
+				|| CommitDist <= Tuning->LowHealthCoverMaxDash;
 
 			// CoverCommitMaxDistance is now an outer sanity cap (never trek across the map for a
 			// duck spot), not the old decline-happy 6.5m radius.
 			const float OuterCap = FMath::Max(Tuning->CoverCommitMaxDistance, Tuning->CoverSearchRadius);
-			if (CommitDist > OuterCap || !Triggers.Any())
+			if (CommitDist > OuterCap || (!Triggers.Any() && !bCommitGrant) || bRecommitBlocked || !bDashAllowed)
 			{
 				UE_LOG(LogCompanionAI, Log,
-					TEXT("%s: cover-commit DECLINED dist=%.0f cap=%.0f triggers[fire=%d hp=%d ammo=%d out#=%d(n=%d)] — open-engage"),
+					TEXT("%s: cover-commit DECLINED dist=%.0f cap=%.0f triggers[fire=%d hp=%d ammo=%d out#=%d(n=%d)] grant=%d recommitBlock=%d dashOK=%d — open-engage"),
 					*Pawn->GetName(), CommitDist, OuterCap, Triggers.bUnderFire ? 1 : 0, Triggers.bLowHealth ? 1 : 0,
-					Triggers.bLowAmmoOrReloading ? 1 : 0, Triggers.bOutnumbered ? 1 : 0, ThreatCount);
+					Triggers.bLowAmmoOrReloading ? 1 : 0, Triggers.bOutnumbered ? 1 : 0, ThreatCount,
+					bCommitGrant ? 1 : 0, bRecommitBlocked ? 1 : 0, bDashAllowed ? 1 : 0);
 				// Drop any lingering own intent — same stale-restore guard as the claim decline above.
 				if (UCoverReservationSubsystem* DeclineResSub = OwnerComp.GetWorld() ? OwnerComp.GetWorld()->GetSubsystem<UCoverReservationSubsystem>() : nullptr)
 					DeclineResSub->ClearIntendedCover(Controller);

@@ -211,7 +211,26 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 			ActualDamage, HealthComponent->GetCurrentHealth(), HealthComponent->GetCurrentShield());
 	}
 	if (ActualDamage > 0.f && GetWorld())
-		LastDamageWorldTime = GetWorld()->GetTimeSeconds();
+	{
+		const float Now = GetWorld()->GetTimeSeconds();
+		LastDamageWorldTime = Now;
+		// Prune anything older than the widest release window consumers use (2x commit window,
+		// bounded generously) so the ring never grows past a handful of entries.
+		RecentDamageTimes.RemoveAll([Now](float T) { return Now - T > 20.f; });
+		RecentDamageTimes.Add(Now);
+
+		// Attacker stamp for the flanker response (cover break + target steal). Prefer the
+		// instigating pawn — DamageCauser is usually the weapon/projectile, whose location is
+		// useless for the exposed-side geometry test.
+		AActor* Attacker = EventInstigator ? EventInstigator->GetPawn() : nullptr;
+		if (!Attacker && IsValid(DamageCauser)) Attacker = DamageCauser->GetInstigator();
+		if (!Attacker) Attacker = DamageCauser;
+		if (IsValid(Attacker) && Attacker != this)
+		{
+			LastDamageAttacker = Attacker;
+			LastAttackerStampTime = Now;
+		}
+	}
 
 	// Hit react — skip if dying (death path takes over).
 	if (ActualDamage > 0.f && IsValid(HealthComponent) && HealthComponent->IsAlive())
@@ -231,6 +250,55 @@ bool ACompanionCharacter::IsSuppressed(float Window) const
 	if (IsValid(SuppressionComponent) && SuppressionComponent->IsSuppressed()) return true;
 	if (Window <= 0.f || !GetWorld()) return false;
 	return (GetWorld()->GetTimeSeconds() - LastDamageWorldTime) < Window;
+}
+
+int32 ACompanionCharacter::GetRecentDamageCount(float Window) const
+{
+	if (Window <= 0.f || !GetWorld()) return 0;
+	const float Now = GetWorld()->GetTimeSeconds();
+	int32 Count = 0;
+	for (float T : RecentDamageTimes)
+		if (Now - T < Window) ++Count;
+	return Count;
+}
+
+float ACompanionCharacter::GetSuppression01() const
+{
+	return IsValid(SuppressionComponent) ? SuppressionComponent->GetSuppression01() : 0.f;
+}
+
+AActor* ACompanionCharacter::GetRecentAttacker(float Window) const
+{
+	if (Window <= 0.f || !GetWorld()) return nullptr;
+	if (GetWorld()->GetTimeSeconds() - LastAttackerStampTime >= Window) return nullptr;
+	return LastDamageAttacker.Get();
+}
+
+void ACompanionCharacter::StampCompromiseBreak()
+{
+	if (GetWorld())
+		LastCompromiseBreakTime = GetWorld()->GetTimeSeconds();
+}
+
+void ACompanionCharacter::StampNaturalCoverRelease()
+{
+	if (GetWorld())
+		LastNaturalReleaseTime = GetWorld()->GetTimeSeconds();
+}
+
+void ACompanionCharacter::SetCoverCommitGrant(bool bPending)
+{
+	CoverCommitGrantStamp = (bPending && GetWorld()) ? GetWorld()->GetTimeSeconds() : -1e9f;
+}
+
+bool ACompanionCharacter::ConsumeCoverCommitGrant()
+{
+	// One BT loop from the combat task finishing to MoveToCoverPoint running is well under a
+	// second; anything older is a stale grant from a path that never reached the commit gate.
+	constexpr float GrantLifetime = 3.f;
+	const float Stamp = CoverCommitGrantStamp;
+	CoverCommitGrantStamp = -1e9f;
+	return GetWorld() && (GetWorld()->GetTimeSeconds() - Stamp) <= GrantLifetime;
 }
 
 float ACompanionCharacter::GetHealthFraction() const

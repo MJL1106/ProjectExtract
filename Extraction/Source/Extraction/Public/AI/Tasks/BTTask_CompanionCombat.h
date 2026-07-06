@@ -20,6 +20,7 @@ class AAIController;
 class AController;
 class ACoverSystem;
 class UCoverReservationSubsystem;
+class UCompanionTuningDataAsset;
 
 UCLASS()
 class EXTRACTION_API UBTTask_CompanionCombat : public UBTTaskNode
@@ -546,6 +547,51 @@ private:
 
 	/** CMC->MaxAcceleration captured on move-shoot entry so it can be restored on exit. 0 = not captured. */
 	float CachedDefaultAcceleration = 0.f;
+
+	// Angle-seek state (open-engage flank toward enemies hard-focusing the player; per-instance, server-only)
+
+	/** True while the move-shoot drift carries the angle-seek lateral bias. */
+	bool bAngleSeekActive = false;
+	/** Elapsed active time — stands down at AngleSeekMaxTime. */
+	float AngleSeekTimeActive = 0.f;
+	/** Counts down between activations (armed at every deactivation, including aborts). */
+	float AngleSeekCooldownRemaining = 0.f;
+	/** Counts down to the next activation evaluation while inactive. */
+	float AngleSeekEvalTimer = 0.f;
+	/** Flank side: +1/-1 along the perpendicular of the companion->target axis; 0 = unresolved. */
+	float AngleSeekSideSign = 0.f;
+	/** Lateral bias magnitude resolved at activation (DA field x Combat-mode multiplier). */
+	float AngleSeekBiasResolved = 0.f;
+
+	/** Angle-seek driver for the open-engage clear-LoS path: cooldown/abort/exit while active,
+	 *  activation roll while idle (cover-first in Normal, move-shoot flank in Combat). Returns true
+	 *  when it finished the task (cover commit handed to MoveToCoverPoint) — caller returns. */
+	bool TickAngleSeek(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion, AActor* Target,
+		const FVector& MyLocation, bool bPlayerTooFar, float DeltaSeconds);
+
+	/** Deactivates angle-seek and arms the cooldown. Safe when already inactive. */
+	void EndAngleSeek(const ACompanionCharacter* Companion, const TCHAR* Reason);
+
+	/** Cover-first variant: nearest reachable cover with a verified firing line on at least one of
+	 *  the focused attackers (arc/shield tested against their centroid). On success stamps
+	 *  intended-cover + the companion's cover-commit grant and writes the BB CoverTarget;
+	 *  returns true so the caller finishes the task into MoveToCoverPoint. */
+	bool TryAngleSeekCoverCommit(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion,
+		AActor* Target, const FVector& MyLocation, const FVector& AttackerCentroid,
+		TArrayView<AActor* const> Attackers, const UCompanionTuningDataAsset& Tuning);
+
+	// Combat-mode advance hop (cover-to-cover bound toward the threat; per-instance, server-only)
+
+	/** Counts down between hops (and hop retries). Deliberately NOT reset by ResetTaskState — task
+	 *  restarts (target churn, the hop's own Succeeded) must not re-arm an instant hop. */
+	float CombatAdvanceHopTimer = 0.f;
+
+	/** Combat-mode cover-to-cover bound: every CombatAdvanceHopInterval, pick the nearest cover
+	 *  that gains CombatAdvanceHopMinGain toward the threat (within leash + hop max dash, with a
+	 *  verified firing line), commit it via the cover-commit grant and finish the task into
+	 *  MoveToCoverPoint. Returns true when it finished the task — caller returns immediately. */
+	bool TickCombatAdvanceHop(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion,
+		AActor* Target, const FVector& MyLocation, bool bPlayerTooFar, float DeltaSeconds);
 
 	/** Seconds the companion has continuously been inside the player's ADS cone during jiggle steering.
 	 *  When this exceeds the escape threshold, jiggle re-anchors to break the wall-grind stall. */

@@ -38,6 +38,15 @@ struct FCoverSwitchMonitorMemory
 	FVector LastPlayerAdvanceLoc = FVector::ZeroVector;
 	bool bHasPlayerAdvanceSample = false;
 	float PlayerAdvanceProgress = 0.f;
+
+	// Compromise break (enemy flank-break parity): fast-cadence eval timer + consecutive positive
+	// evals. Two agreeing evals confirm a geometric flank; an exposed-side HIT confirms instantly.
+	// Identity guard mirrors the blind-eval one — a task-internal cover shuffle or target switch
+	// must not let a stale count confirm on the first eval at the new point.
+	float CompromiseEvalTimer = 0.f;
+	int32 CompromiseConsecutiveCount = 0;
+	FCoverHandle LastCompromiseEvalCover;
+	TWeakObjectPtr<AActor> LastCompromiseEvalTarget;
 };
 
 UCLASS()

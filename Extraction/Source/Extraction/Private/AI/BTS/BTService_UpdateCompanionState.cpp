@@ -15,6 +15,8 @@
 #include "HealthComponent.h"
 #include "ExtractionTypes.h"
 #include "EnemyCharacter.h"
+#include "EnemyAIController.h"        // angle-seek focus tally: who is this enemy targeting
+#include "EnemyAwarenessComponent.h"  // GetCombatTarget for the focus tally
 #include "GameplayTagAssetInterface.h"
 #include "Kismet/GameplayStatics.h"
 #include "AI/BlackboardKeyType_Cover.h" // new-system Cover-typed BB key read (replaces AAICoverSlot)
@@ -303,6 +305,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 	// Player-centered threat awareness: ready on enemies pressuring the player, but only target them with companion LoS.
 	{
+		int32 PlayerFocusedCount = 0;
 		const float PlayerThreatRadius = RangeTuning ? RangeTuning->PlayerThreatAwarenessRadius : 3500.f;
 		if (IsValid(PlayerPawn) && PlayerThreatRadius > 0.f)
 		{
@@ -332,6 +335,15 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				if (!ThreatEnemy->HasDetectedPlayer()) continue;
 				bAnyEnemyDetectedPlayer = true;
 
+				// Angle-seek focus tally: aggro'd AND actually targeting the PLAYER (not the
+				// companion). Aim target catches the shooter mid-burst; the awareness combat target
+				// catches the aggro'd-but-still-rotating case GetAIAimTarget nulls out.
+				const AEnemyAIController* ThreatAIC = Cast<AEnemyAIController>(ThreatEnemy->GetController());
+				const UEnemyAwarenessComponent* ThreatAwareness = ThreatAIC ? ThreatAIC->GetAwarenessComponent() : nullptr;
+				if (ThreatEnemy->GetAIAimTarget() == PlayerPawn
+					|| (ThreatAwareness && ThreatAwareness->GetCombatTarget() == PlayerPawn))
+					++PlayerFocusedCount;
+
 				// Selection keyed on companion distance + companion eye-line (ConsiderCandidate) —
 				// bAllowOccludedAny=false so a player-threat candidate can only enter BestVisible
 				// (requires passing the eye-line trace), never the untraced BestAny fallback.
@@ -339,6 +351,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				ConsiderCandidate(ThreatActor, CompanionDistSq, /*bAllowOccludedAny=*/ false);
 			}
 		}
+		Companion->SetPlayerFocusedEnemyCount(PlayerFocusedCount);
 	}
 
 	// Resolve the two-tier pick: prefer the nearest VISIBLE candidate. The visible-first swap only ever
@@ -395,6 +408,33 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	{
 		BestTarget = BestAny;
 		BestDistSq = BestAnyDistSq;
+	}
+
+	// Flanker steals focus: an enemy that recently damaged the companion overrides distance
+	// stickiness — being hit outranks "my current pick is closer". Eye-line gated so the
+	// companion never turns to engage a shooter it can't actually see.
+	if (RangeTuning && RangeTuning->FlankerResponseWindow > 0.f)
+	{
+		AEnemyCharacter* AttackerEnemy = Cast<AEnemyCharacter>(Companion->GetRecentAttacker(RangeTuning->FlankerResponseWindow));
+		if (IsValid(AttackerEnemy) && AttackerEnemy != BestTarget)
+		{
+			const UHealthComponent* AttackerHealth = AttackerEnemy->GetHealthComponent();
+			if (!AttackerHealth || !AttackerHealth->IsDead())
+			{
+				FHitResult FlankHit;
+				FCollisionQueryParams FlankParams(SCENE_QUERY_STAT(CompanionFlankerSteal), true);
+				FlankParams.AddIgnoredActor(Companion);
+				FlankParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+				const bool bFlankBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+					FlankHit, Companion->GetPawnViewLocation(),
+					AITargeting::GetSightLocation(AttackerEnemy), ECC_Visibility, FlankParams);
+				if (!bFlankBlocked || FlankHit.GetActor() == AttackerEnemy)
+				{
+					BestTarget = AttackerEnemy;
+					BestDistSq = FVector::DistSquared(MyLocation, AttackerEnemy->GetActorLocation());
+				}
+			}
+		}
 	}
 
 	// --- Stealth mode: break detection + auto-target suppression ---

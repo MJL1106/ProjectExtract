@@ -176,6 +176,36 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.05"))
 	float CoverSwitchMinScoreGain = 0.4f;
 
+	// --- Compromise break (enemy flank-break parity) ---
+	// When the held point no longer protects — threat outside the widened fire arc, body-shield
+	// trace fails, or a known extra threat has the body exposed — the switch monitor bypasses the
+	// dwell/margin/peek-cycle gates and relocates, or vacates to open-engage when no candidate
+	// protects against the new threat picture.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch")
+	bool bCoverCompromiseBreakEnabled = true;
+
+	// Min seconds at the point before compromise evals run — a fresh arrival gets a beat to settle
+	// before the monitor may declare it flanked.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.1"))
+	float CoverCompromiseMinDwell = 0.75f;
+
+	// Seconds between compromise evals — faster than CoverSwitchReEvalInterval so a flank is
+	// noticed mid-dwell. Two consecutive positive evals confirm (anti single-frame flicker).
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.1"))
+	float CoverCompromiseEvalInterval = 0.4f;
+
+	// Seconds after taking a hit during which the shooter counts as an active flanker: a hit from
+	// an enemy the current cover doesn't body-shield against breaks cover instantly (no debounce),
+	// and that shooter steals target focus from a stickier/closer target. 0 disables both.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float FlankerResponseWindow = 2.5f;
+
+	// Min seconds between debounced (geometric) compromise breaks — a no-better-cover crossfire
+	// churns at worst once per cooldown instead of hopping indefinitely. The exposed-side-hit
+	// instant path bypasses this: fresh damage is fresh evidence (enemy fast-path parity).
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0"))
+	float CoverCompromiseBreakCooldown = 4.0f;
+
 	// Radius (cm) for companion cover searches — shared by the MoveToCover picker and the open-engage
 	// re-seek so the two can't desync into a re-seek/can't-reach thrash.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
@@ -194,8 +224,9 @@ public:
 	bool bCoverCommitRequiresUnderFire = true;
 
 	// Window (s) for the damage half of the under-fire trigger. Near-miss suppression has its own
-	// hysteresis and is checked independently.
-	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	// hysteresis and is checked independently. Max 10: the companion's damage-timestamp ring prunes
+	// at 20s and the release check doubles this window — larger values silently undercount.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0", ClampMax = "10.0"))
 	float CoverCommitUnderFireWindow = 4.f;
 
 	// --- Cover triggers (situational commit — replaces the under-fire-only gate) ---
@@ -227,6 +258,108 @@ public:
 	// Minimum time committed to cover before a cleared trigger allows exit.
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
 	float CoverExitMinDwell = 2.0f;
+
+	// --- Real-pressure under-fire (replaces the any-1-damage window check) ---
+
+	// Suppression01 at/above this counts as under fire on its own — sustained near-miss pressure,
+	// not a single graze. The suppression component's binary IsSuppressed latch is no longer consulted
+	// for the commit trigger.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float UnderFireSuppressionFrac = 0.5f;
+
+	// Real damage hits within CoverCommitUnderFireWindow required to count as under fire. The old
+	// check tripped on ANY single hit in the window, which made the commit gate pass near-permanently
+	// in a live firefight. Release side requires one fewer (hysteresis).
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 UnderFireDamageHits = 2;
+
+	// Release-side scale on the suppression fraction (hysteresis): in cover the trigger stays
+	// active down to Frac x this, so a mid-fight decay dip can't pop the companion out and hop it
+	// to a new point on the next burst.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float UnderFireSuppressionReleaseScale = 0.6f;
+
+	// When low health is the ONLY active trigger, only commit if an available cover is within this
+	// distance (cm) — never a long dash across open ground while low. 0 disables the gate.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
+	float LowHealthCoverMaxDash = 500.f;
+
+	// --- Natural cycling (committed-time release back to mobile fighting) ---
+
+	// After this long committed to one stretch of cover fighting, release back to open move-shoot
+	// if pressure is only low-grade (see CoverNaturalReleasePressureFrac). 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
+	float CoverMaxCommitTime = 12.f;
+
+	// Suppression01 at/above this counts as strong pressure and blocks the natural release (as do
+	// low health and outnumbered-at-commit-count).
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverNaturalReleasePressureFrac = 0.75f;
+
+	// After a natural release, block re-commit for this long unless fresh strong pressure arrives —
+	// layered on CoverSwitchPostVacateCooldown so cycling can't degrade into cover-hop churn.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
+	float NaturalReleaseRecommitCooldown = 4.f;
+
+	// --- Combat-mode stricter commit (Combat = mobile/aggressive, cover is the exception) ---
+
+	// Master switch: in COMBAT mode the commit triggers require heavy pressure (below), reload/ammo
+	// never commits, and outnumbered uses CombatOutnumberedCount.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers")
+	bool bCombatModeStricterCommit = true;
+
+	// Combat-mode under-fire needs suppression01 AND damage hits together (not either/or).
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CombatUnderFireSuppressionFrac = 0.7f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 CombatUnderFireDamageHits = 3;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "2", ClampMax = "8"))
+	int32 CombatOutnumberedCount = 4;
+
+	// Combat-mode natural release override: cover touches stay brief (touch, peek, push on) even
+	// when a mid-grade release trigger is still holding. Strong pressure still holds it in place.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
+	float CombatCoverMaxCommitTime = 4.f;
+
+	// --- Combat-mode advance hops (cover-to-cover pushes — mobile but cover-clever) ---
+
+	// Master switch: in COMBAT mode, periodically bound to a cover point that gains ground toward
+	// the threat — brief touch (peek/fire), quick release, back to move-shoot. Cover as movement,
+	// not as a campsite.
+	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops")
+	bool bCombatAdvanceHops = true;
+
+	// Cooldown (s) between hops.
+	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops", meta = (ClampMin = "1.0"))
+	float CombatAdvanceHopInterval = 5.f;
+
+	// A hop candidate must be at least this much closer (cm) to the threat than the companion is.
+	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops", meta = (ClampMin = "50.0"))
+	float CombatAdvanceHopMinGain = 250.f;
+
+	// Max dash length (cm) for one hop — short bounds, never a cross-map sprint.
+	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops", meta = (ClampMin = "100.0"))
+	float CombatAdvanceHopMaxDistance = 800.f;
+
+	// Combat-mode override of LooseCoverBiasWeight: the move-shoot jiggle hugs obstacles harder —
+	// fighting BEHIND things while mobile instead of wandering open ground.
+	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops", meta = (ClampMin = "0.0", ClampMax = "4.0"))
+	float CombatLooseCoverBiasWeight = 2.0f;
+
+	// --- Combat-mode in-cover confidence (peek more often, expose longer) ---
+
+	// Scales the whole between-peek wait (idle dwell + rolled cooldown) while in COMBAT mode.
+	// 0.6 = peeks come ~40% sooner. Applied at the single wait-gate, so every cooldown source
+	// (holds, stay-downs, arrivals) shortens uniformly.
+	UPROPERTY(EditAnywhere, Category = "Companion|CombatConfidence", meta = (ClampMin = "0.2", ClampMax = "1.0"))
+	float CombatPeekCooldownMultiplier = 0.6f;
+
+	// Stretches cover peek burst clocks (stand/quick/corner) while in COMBAT mode — longer
+	// exposure per peek. Applied as a slower countdown at the burst-clock decrements.
+	UPROPERTY(EditAnywhere, Category = "Companion|CombatConfidence", meta = (ClampMin = "1.0", ClampMax = "2.5"))
+	float CombatBurstDurationMultiplier = 1.35f;
 
 	// --- Loose cover bias (default open-engage positioning) ---
 
@@ -264,6 +397,11 @@ public:
 	// applies to ordinary (non-advancing) switches.
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.5", ClampMax = "3.0"))
 	float AdvanceScoreMargin = 1.0f;
+
+	// Combat-mode advance margin override — Combat previously advanced on a sidegrade (1.0), which
+	// with the force-commit bug read as cover-to-cover churn with no firing. Sidegrades no longer hop.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.5", ClampMax = "3.0"))
+	float CombatAdvanceScoreMargin = 1.6f;
 
 	// Normal/Stealth advance gate: accumulated player ground-gain toward the threat (uu, decays
 	// between monitor re-evals) required before a non-Combat-mode companion may take an ADVANCE
@@ -350,6 +488,47 @@ public:
 	// suppression component itself are unaffected. User-directed test lever, default ON.
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat")
 	bool bIgnoreSuppressionInCover = true;
+
+	// --- Angle-seek (get an angle on enemies hard-focusing the player) ---
+
+	// Master switch. When 2+ enemies are focused on the PLAYER and the companion is unpressured,
+	// it actively seeks a firing angle on the attackers instead of holding its current spot.
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek")
+	bool bEnableAngleSeek = true;
+
+	// Enemies simultaneously targeting the player required to arm angle-seek.
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 AngleSeekMinFocusedEnemies = 2;
+
+	// "Not being shot at" window (s): no damage within this AND suppression01 below
+	// AngleSeekPressureFrac = the companion is free to work an angle.
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "0.0"))
+	float AngleSeekSmallWindow = 1.0f;
+
+	// Suppression01 ceiling to arm angle-seek; rising above it mid-seek aborts (the flank drew fire —
+	// pressure is off the player, mission accomplished).
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AngleSeekPressureFrac = 0.3f;
+
+	// Cooldown (s) between angle-seek activations — prevents kill-one-attacker re-arm ping-pong.
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "0.0"))
+	float AngleSeekCooldown = 5.f;
+
+	// Lateral ORBIT RATE: cm added to the move-shoot drift anchor per drift cycle (~1.5s),
+	// perpendicular to the target axis away from the player's firing line — the companion keeps
+	// circling for the crossfire angle for as long as the seek stays active (up to AngleSeekMaxTime).
+	// Combat mode scales this up (see multiplier below).
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "0.0"))
+	float AngleSeekLateralBias = 300.f;
+
+	// Combat-mode multiplier on AngleSeekLateralBias — the aggressive open flank.
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "1.0", ClampMax = "4.0"))
+	float AngleSeekCombatBiasMultiplier = 1.5f;
+
+	// Max duration (s) of one angle-seek before it stands down (also exits when the focus count
+	// drops below AngleSeekMinFocusedEnemies).
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "0.0"))
+	float AngleSeekMaxTime = 6.f;
 
 	// --- Multi-threat cover scoring ---
 

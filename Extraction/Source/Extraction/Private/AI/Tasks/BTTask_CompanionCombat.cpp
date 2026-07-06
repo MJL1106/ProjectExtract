@@ -20,6 +20,9 @@
 #include "CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
 #include "EnemyCharacter.h"
+#include "EnemyAIController.h"        // angle-seek: who is this enemy targeting
+#include "EnemyAwarenessComponent.h"  // angle-seek: GetCombatTarget
+#include "Engine/OverlapResult.h"     // angle-seek: player-centered attacker scan
 #include "Animation/CompanionAnimInstance.h"
 #include "WeaponBase.h"
 #include "HealthComponent.h"
@@ -289,6 +292,56 @@ namespace
 		if (!NavSys->ProjectPointToNavigation(Candidate, NavLoc, FVector(Extent))) return false;
 		OutLoc = NavLoc.Location;
 		return true;
+	}
+
+	/** Angle-seek attacker scan: alive enemies around the player that are aggro'd AND actually
+	 *  targeting the PLAYER (aim target mid-burst, or awareness combat target while still rotating).
+	 *  Mirrors the BT service's focus tally — gathered fresh at point-of-use so no stale pointers. */
+	static void GatherPlayerFocusedAttackers(UWorld* World, const APawn* PlayerPawn,
+		const ACompanionCharacter* Companion, float Radius, TArray<AActor*, TInlineAllocator<8>>& Out)
+	{
+		Out.Reset();
+		if (!World || !IsValid(PlayerPawn) || Radius <= 0.f) return;
+
+		TArray<FOverlapResult> Overlaps;
+		Overlaps.Reserve(16);
+		FCollisionObjectQueryParams ObjParams(ECC_Pawn);
+		FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionAngleSeekFocusScan), false);
+		Params.AddIgnoredActor(Companion);
+		Params.AddIgnoredActor(PlayerPawn);
+		World->OverlapMultiByObjectType(Overlaps, PlayerPawn->GetActorLocation(), FQuat::Identity,
+			ObjParams, FCollisionShape::MakeSphere(Radius), Params);
+
+		for (const FOverlapResult& Overlap : Overlaps)
+		{
+			AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Overlap.GetActor());
+			if (!IsValid(Enemy) || !Enemy->HasDetectedPlayer()) continue;
+			const UHealthComponent* Health = Enemy->GetHealthComponent();
+			if (Health && Health->IsDead()) continue;
+
+			const AEnemyAIController* EnemyAIC = Cast<AEnemyAIController>(Enemy->GetController());
+			const UEnemyAwarenessComponent* Awareness = EnemyAIC ? EnemyAIC->GetAwarenessComponent() : nullptr;
+			if (Enemy->GetAIAimTarget() != PlayerPawn
+				&& !(Awareness && Awareness->GetCombatTarget() == PlayerPawn))
+				continue;
+
+			Out.Add(Enemy);
+			if (Out.Num() >= 8) break;
+		}
+	}
+
+	/** Combat-mode in-cover confidence: scale for the between-peek wait (bBurstClock=false, <1 =
+	 *  peek sooner) or the burst countdown (bBurstClock=true, >1 = expose longer, applied as a
+	 *  slower decrement). 1 outside Combat mode or with no tuning. */
+	static float CombatPeekConfidenceScale(const ACompanionCharacter* Companion, bool bBurstClock)
+	{
+		if (!IsValid(Companion) || Companion->GetMode() != ECompanionMode::Combat) return 1.f;
+		const ACompanionAIController* AIC = Cast<ACompanionAIController>(Companion->GetController());
+		const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
+		if (!Tuning) return 1.f;
+		return bBurstClock
+			? FMath::Max(1.f, Tuning->CombatBurstDurationMultiplier)
+			: FMath::Max(0.01f, Tuning->CombatPeekCooldownMultiplier);
 	}
 
 	// Resolves the player pawn + keep-out radius (AcceptableRadius) from the companion's controller.
@@ -1091,8 +1144,9 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 		const bool bAtApex = FVector::Dist(Next, ApexTarget) <= RepositionArrivalTolerance;
 		if (bAtApex)
 		{
-			// At apex — burst timer now counts down "time firing at the corner".
-			BurstTimer -= DeltaSeconds;
+			// At apex — burst timer now counts down "time firing at the corner". Combat-mode
+			// confidence: slower countdown = longer corner exposure.
+			BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Companion, true);
 			if (BurstTimer <= 0.f)
 				bCornerPeekReturning = true;
 		}
@@ -1457,7 +1511,9 @@ void UBTTask_CompanionCombat::RerollJiggleOffset(ACompanionCharacter* Companion,
 	const ACompanionAIController* BiasAIC = Cast<ACompanionAIController>(Companion->GetController());
 	const UCompanionTuningDataAsset* BiasTuning = BiasAIC ? BiasAIC->GetTuning() : nullptr;
 	const float BiasRadius = BiasTuning ? BiasTuning->LooseCoverBiasRadius : 0.f;
-	const float BiasWeight = BiasTuning ? BiasTuning->LooseCoverBiasWeight : 0.f;
+	// Combat mode hugs obstacles harder — move-shoot BEHIND things, not a walking target in the open.
+	const float BiasWeight = !BiasTuning ? 0.f
+		: (Companion->GetMode() == ECompanionMode::Combat ? BiasTuning->CombatLooseCoverBiasWeight : BiasTuning->LooseCoverBiasWeight);
 	const bool bBias = BiasRadius > 0.f && BiasWeight > 0.f;
 
 	const int32 MaxTries = FMath::Max(1, JiggleLosRetryCount);
@@ -1528,7 +1584,8 @@ void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AA
 	JiggleDriftTimer = JiggleDriftInterval;
 
 	const EJiggleDrift Drift = RollJiggleDrift();
-	if (Drift == EJiggleDrift::Hold) return;
+	const bool bAngleSeekLateral = bAngleSeekActive && AngleSeekSideSign != 0.f;
+	if (Drift == EJiggleDrift::Hold && !bAngleSeekLateral) return;
 
 	// Horizontal home->target axis; nudge JiggleHome toward (Closer) or away (Farther) along it.
 	FVector ToTarget = Target->GetActorLocation() - JiggleHome;
@@ -1537,7 +1594,14 @@ void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AA
 	const FVector ToTargetDir = ToTarget.GetSafeNormal();
 	const float Sign = (Drift == EJiggleDrift::Closer) ? 1.f : -1.f;
 
-	FVector Nudged = JiggleHome + ToTargetDir * (JiggleDriftStep * Sign);
+	FVector Nudged = JiggleHome;
+	if (Drift != EJiggleDrift::Hold)
+		Nudged += ToTargetDir * (JiggleDriftStep * Sign);
+
+	// Angle-seek: lateral flank component perpendicular to the target axis, applied BEFORE the
+	// range clamp / nav projection / player keep-out so every existing guard still wins.
+	if (bAngleSeekLateral)
+		Nudged += FVector::CrossProduct(FVector::UpVector, ToTargetDir) * (AngleSeekSideSign * AngleSeekBiasResolved);
 
 	// Clamp the nudged anchor's horizontal distance to the target into the ideal range band.
 	FVector NudgedToTarget = Target->GetActorLocation() - Nudged;
@@ -1584,6 +1648,274 @@ void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AA
 	}
 
 	JiggleHome = Projected;
+}
+
+// --- Angle-seek (get an angle on enemies hard-focusing the player) ---
+
+bool UBTTask_CompanionCombat::TickAngleSeek(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion,
+	AActor* Target, const FVector& MyLocation, bool bPlayerTooFar, float DeltaSeconds)
+{
+	AngleSeekCooldownRemaining = FMath::Max(0.f, AngleSeekCooldownRemaining - DeltaSeconds);
+
+	const ACompanionAIController* AIC = Cast<ACompanionAIController>(Companion->GetController());
+	const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
+	if (!Tuning || !Tuning->bEnableAngleSeek)
+	{
+		EndAngleSeek(Companion, TEXT("disabled"));
+		return false;
+	}
+
+	const int32 FocusedCount = Companion->GetPlayerFocusedEnemyCount();
+	const float Supp01 = Companion->GetSuppression01();
+
+	if (bAngleSeekActive)
+	{
+		AngleSeekTimeActive += DeltaSeconds;
+		// Rising suppression = the flank drew fire off the player — mission accomplished, stand down.
+		if (Supp01 > Tuning->AngleSeekPressureFrac) EndAngleSeek(Companion, TEXT("drawing-fire"));
+		else if (FocusedCount < Tuning->AngleSeekMinFocusedEnemies) EndAngleSeek(Companion, TEXT("focus-dropped"));
+		else if (Tuning->AngleSeekMaxTime > 0.f && AngleSeekTimeActive >= Tuning->AngleSeekMaxTime) EndAngleSeek(Companion, TEXT("max-time"));
+		else if (bPlayerTooFar) EndAngleSeek(Companion, TEXT("leash"));
+		return false;
+	}
+
+	AngleSeekEvalTimer -= DeltaSeconds;
+	if (AngleSeekEvalTimer > 0.f) return false;
+	AngleSeekEvalTimer = OpenEngageCoverReseekInterval;
+
+	// Activation: player hard-focused, companion unpressured, in leash, not unbroken-Stealth.
+	if (AngleSeekCooldownRemaining > 0.f || bPlayerTooFar) return false;
+	if (Companion->IsStealthActive()) return false;
+	if (FocusedCount < Tuning->AngleSeekMinFocusedEnemies) return false;
+	if (Supp01 >= Tuning->AngleSeekPressureFrac) return false;
+	if (Companion->IsSuppressed(Tuning->AngleSeekSmallWindow)) return false;
+
+	UWorld* World = Companion->GetWorld();
+	APawn* PlayerPawn = AIC->GetPlayerCharacter();
+	if (!World || !IsValid(PlayerPawn)) return false;
+
+	TArray<AActor*, TInlineAllocator<8>> Attackers;
+	GatherPlayerFocusedAttackers(World, PlayerPawn, Companion, Tuning->PlayerThreatAwarenessRadius, Attackers);
+	if (Attackers.Num() < Tuning->AngleSeekMinFocusedEnemies) return false;
+
+	FVector Centroid = FVector::ZeroVector;
+	for (const AActor* Attacker : Attackers) Centroid += Attacker->GetActorLocation();
+	Centroid /= static_cast<float>(Attackers.Num());
+
+	// Normal / broken-Stealth: prefer a logical cover with a firing line on the attackers.
+	const bool bCombatMode = Companion->GetMode() == ECompanionMode::Combat;
+	if (!bCombatMode && TryAngleSeekCoverCommit(OwnerComp, Companion, Target, MyLocation, Centroid, Attackers, *Tuning))
+	{
+		AngleSeekCooldownRemaining = Tuning->AngleSeekCooldown;
+		Companion->StopWeaponFire();
+		EndOpenAreaMoveShoot(Companion);
+		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		return true;
+	}
+
+	// Move-shoot flank (Combat mode primary; Normal fallback when no cover qualifies): drift the
+	// jiggle anchor laterally AWAY from the player->attackers axis so the companion opens a
+	// crossfire angle instead of sharing the player's.
+	FVector ToTarget = Target->GetActorLocation() - MyLocation;
+	ToTarget.Z = 0.f;
+	if (ToTarget.SizeSquared() <= KINDA_SMALL_NUMBER) return false;
+	const FVector Perp = FVector::CrossProduct(FVector::UpVector, ToTarget.GetSafeNormal());
+	FVector AwayFromPlayerLine = MyLocation
+		- FMath::ClosestPointOnInfiniteLine(PlayerPawn->GetActorLocation(), Centroid, MyLocation);
+	AwayFromPlayerLine.Z = 0.f;
+	AngleSeekSideSign = FVector::DotProduct(Perp, AwayFromPlayerLine.GetSafeNormal()) >= 0.f ? 1.f : -1.f;
+	AngleSeekBiasResolved = Tuning->AngleSeekLateralBias
+		* (bCombatMode ? Tuning->AngleSeekCombatBiasMultiplier : 1.f);
+	bAngleSeekActive = true;
+	AngleSeekTimeActive = 0.f;
+	if (bDebugLogging || CovDbg())
+		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK start mode=%s focused=%d supp01=%.2f side=%+.0f bias=%.0f"),
+			*Companion->GetName(), bCombatMode ? TEXT("Combat") : TEXT("Normal"),
+			FocusedCount, Supp01, AngleSeekSideSign, AngleSeekBiasResolved);
+	return false;
+}
+
+void UBTTask_CompanionCombat::EndAngleSeek(const ACompanionCharacter* Companion, const TCHAR* Reason)
+{
+	if (!bAngleSeekActive) return;
+	bAngleSeekActive = false;
+	AngleSeekTimeActive = 0.f;
+	AngleSeekSideSign = 0.f;
+	const ACompanionAIController* AIC = IsValid(Companion) ? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
+	const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
+	AngleSeekCooldownRemaining = Tuning ? Tuning->AngleSeekCooldown : 5.f;
+	if ((bDebugLogging || CovDbg()) && IsValid(Companion))
+		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK end reason=%s"), *Companion->GetName(), Reason);
+}
+
+bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion,
+	AActor* Target, const FVector& MyLocation, const FVector& AttackerCentroid,
+	TArrayView<AActor* const> Attackers, const UCompanionTuningDataAsset& Tuning)
+{
+	UWorld* World = Companion->GetWorld();
+	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(World);
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	AController* Controller = Companion->GetController();
+	if (!World || !CoverSys || !BB || !Controller) return false;
+	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
+
+	const float CommitRadius = FMath::Min(Tuning.CoverSearchRadius, Tuning.CoverCommitMaxDistance);
+	TArray<FCover> Candidates;
+	Candidates.Reserve(32);
+	const FBoxSphereBounds SearchBounds(MyLocation, FVector(CommitRadius), CommitRadius);
+	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
+
+	const UCapsuleComponent* Cap = Companion->GetCapsuleComponent();
+	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : 34.f) + 10.f;
+	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(Tuning.CoverFlankArcHalfAngleDeg));
+	// Line tests run per real attacker (a virtual-centroid trace reads a clustered attacker's own
+	// body as a blocker and rejects exactly the covers this feature wants). Bounded per candidate.
+	const int32 MaxLineTests = FMath::Min(Attackers.Num(), 3);
+
+	FCover Best;
+	float BestDistSq = TNumericLimits<float>::Max();
+	for (const FCover& Candidate : Candidates)
+	{
+		if (!Candidate.IsValid()) continue;
+		const float DistSq = FVector::DistSquared(MyLocation, Candidate.Data.Location);
+		if (DistSq > FMath::Square(CommitRadius) || DistSq >= BestDistSq) continue;
+		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
+		if (Occupant && Occupant != Controller) continue;
+		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, Tuning.CoverSwitchPostVacateCooldown))
+			continue;
+		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller)) continue;
+
+		// The line must be on the ATTACKERS, not the companion's own current target: arc toward
+		// their centroid, then a verified peek-shot on at least one real attacker.
+		const FVector ToCentroid2D = (AttackerCentroid - Candidate.Data.Location).GetSafeNormal2D();
+		if (FVector::DotProduct(UCoverGeometryStatics::GetFireArcForward(Candidate.Data), ToCentroid2D) < ArcCos)
+			continue;
+		const bool bCandidateCrouch = UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch;
+		bool bLineOnAttacker = false;
+		for (int32 i = 0; i < MaxLineTests && !bLineOnAttacker; ++i)
+		{
+			AActor* Attacker = Attackers[i];
+			if (!IsValid(Attacker)) continue;
+			bLineOnAttacker = UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data, bCandidateCrouch,
+				AITargeting::GetSightLocation(Attacker), StandFireEyeHeight, Attacker, Companion);
+		}
+		if (!bLineOnAttacker) continue;
+		if (Tuning.bCoverRequiresBodyProtection
+			&& !UCoverGeometryStatics::IsThreatCovered(World, Candidate.Data, AttackerCentroid,
+				Standoff, Tuning.CoverProtectionChestHeight, Target, Companion))
+			continue;
+
+		Best = Candidate;
+		BestDistSq = DistSq;
+	}
+	if (!Best.IsValid()) return false;
+
+	// Stamp intent so MoveToCoverPoint's intent-restore wins over the BT loop's EQS re-pick (the
+	// monitor-swap-stomp mechanism), and grant the companion so the commit gate skips the trigger
+	// decline for this one commit.
+	if (IsValid(ResSub)) ResSub->SetIntendedCover(Controller, Best.Handle);
+	Companion->SetCoverCommitGrant(true);
+	BB->SetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID(), Best);
+	UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK cover commit loc=%s dist=%.0f"),
+		*Companion->GetName(), *Best.Data.Location.ToCompactString(), FMath::Sqrt(BestDistSq));
+	return true;
+}
+
+bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion,
+	AActor* Target, const FVector& MyLocation, bool bPlayerTooFar, float DeltaSeconds)
+{
+	CombatAdvanceHopTimer = FMath::Max(0.f, CombatAdvanceHopTimer - DeltaSeconds);
+
+	const ACompanionAIController* AIC = Cast<ACompanionAIController>(Companion->GetController());
+	const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
+	if (!Tuning || !Tuning->bCombatAdvanceHops) return false;
+	if (Companion->GetMode() != ECompanionMode::Combat) return false;
+	if (bAngleSeekActive || bPlayerTooFar || CombatAdvanceHopTimer > 0.f) return false;
+
+	// Room to gain: only hop while a bound would still land outside the move-shoot ideal minimum.
+	const float DistToTarget = FVector::Dist2D(MyLocation, Target->GetActorLocation());
+	if (DistToTarget <= MoveShootIdealRangeMin + Tuning->CombatAdvanceHopMinGain) return false;
+
+	UWorld* World = Companion->GetWorld();
+	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(World);
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	AController* Controller = Companion->GetController();
+	APawn* PlayerPawn = AIC->GetPlayerCharacter();
+	if (!World || !CoverSys || !BB || !Controller)
+	{
+		CombatAdvanceHopTimer = OpenEngageCoverReseekInterval;
+		return false;
+	}
+	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
+
+	const float SearchRadius = FMath::Min(Tuning->CoverSearchRadius, Tuning->CombatAdvanceHopMaxDistance);
+	TArray<FCover> Candidates;
+	Candidates.Reserve(32);
+	const FBoxSphereBounds SearchBounds(MyLocation, FVector(SearchRadius), SearchRadius);
+	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
+
+	const UCapsuleComponent* Cap = Companion->GetCapsuleComponent();
+	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : 34.f) + 10.f;
+	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(Tuning->CoverFlankArcHalfAngleDeg));
+	const FVector TargetLoc = Target->GetActorLocation();
+	const FVector TargetSight = AITargeting::GetSightLocation(Target);
+
+	// Nearest qualifying bound — short purposeful dashes, not the biggest land-grab available.
+	FCover Best;
+	float BestDistSq = TNumericLimits<float>::Max();
+	for (const FCover& Candidate : Candidates)
+	{
+		if (!Candidate.IsValid()) continue;
+		const float DistSq = FVector::DistSquared(MyLocation, Candidate.Data.Location);
+		if (DistSq > FMath::Square(SearchRadius) || DistSq >= BestDistSq) continue;
+
+		// Gains ground toward the threat, without hopping inside the ideal-range floor or past the leash.
+		const float CandToThreat = FVector::Dist2D(Candidate.Data.Location, TargetLoc);
+		if (CandToThreat > DistToTarget - Tuning->CombatAdvanceHopMinGain) continue;
+		if (CandToThreat < MoveShootIdealRangeMin) continue;
+		if (IsValid(PlayerPawn)
+			&& FVector::Dist2D(Candidate.Data.Location, PlayerPawn->GetActorLocation()) > Tuning->CombatLeashDistance)
+			continue;
+
+		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
+		if (Occupant && Occupant != Controller) continue;
+		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, Tuning->CoverSwitchPostVacateCooldown))
+			continue;
+		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller)) continue;
+
+		const FVector ToThreat2D = (TargetLoc - Candidate.Data.Location).GetSafeNormal2D();
+		if (FVector::DotProduct(UCoverGeometryStatics::GetFireArcForward(Candidate.Data), ToThreat2D) < ArcCos)
+			continue;
+		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
+			UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
+			TargetSight, StandFireEyeHeight, Target, Companion))
+			continue;
+		if (Tuning->bCoverRequiresBodyProtection
+			&& !UCoverGeometryStatics::IsThreatCovered(World, Candidate.Data, TargetLoc,
+				Standoff, Tuning->CoverProtectionChestHeight, Target, Companion))
+			continue;
+
+		Best = Candidate;
+		BestDistSq = DistSq;
+	}
+	if (!Best.IsValid())
+	{
+		// Nothing hoppable right now — retry at decision cadence, not per tick.
+		CombatAdvanceHopTimer = OpenEngageCoverReseekInterval;
+		return false;
+	}
+
+	if (IsValid(ResSub)) ResSub->SetIntendedCover(Controller, Best.Handle);
+	Companion->SetCoverCommitGrant(true);
+	BB->SetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID(), Best);
+	CombatAdvanceHopTimer = Tuning->CombatAdvanceHopInterval;
+	UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ADVANCE-HOP commit loc=%s dash=%.0f gain=%.0f"),
+		*Companion->GetName(), *Best.Data.Location.ToCompactString(), FMath::Sqrt(BestDistSq),
+		DistToTarget - FVector::Dist2D(Best.Data.Location, TargetLoc));
+	Companion->StopWeaponFire();
+	EndOpenAreaMoveShoot(Companion);
+	FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+	return true;
 }
 
 static FVector SeedMoveDir(const FVector& MicroTarget, const FVector& CompanionLoc, const FVector& CompanionForward)
@@ -2128,6 +2460,14 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	LastDecisionTime = 0.f;
 	bHasLastKnownTargetLocation = false;
 	LastKnownTargetLocation = FVector::ZeroVector;
+	// Angle-seek: deactivate but keep AngleSeekCooldownRemaining — target churn restarts this task
+	// several times per fight, and a reset cooldown would let the flank re-arm instantly after
+	// every kill (the exact ping-pong the cooldown exists to stop).
+	bAngleSeekActive = false;
+	AngleSeekTimeActive = 0.f;
+	AngleSeekSideSign = 0.f;
+	AngleSeekBiasResolved = 0.f;
+	AngleSeekEvalTimer = 0.f;
 }
 
 // --- Smooth-snap helpers ---
@@ -2959,7 +3299,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 
 		TimeInCoverIdle += DeltaSeconds;
-		if (TimeInCoverIdle < MinCoverIdleDwell + PeekCooldown) return;
+		// Combat-mode confidence: the whole wait shrinks — peeks come sooner from every cooldown source.
+		if (TimeInCoverIdle < (MinCoverIdleDwell + PeekCooldown) * CombatPeekConfidenceScale(Ctx.Companion, false)) return;
 
 		UWorld* const TickWorld = Ctx.Companion ? Ctx.Companion->GetWorld() : nullptr;
 		if (!TickWorld) return;
@@ -2991,8 +3332,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (CovDbg())
 		{
 			UE_LOG(LogCompanionAI, Log,
-				TEXT("[COVDBG] %s DECISION suppRaw=%d(gated=%d) cycles=%d strikes=%d holds=%d/%d dwellAtCover=%.1f idle=%.1f justRepo=%d lean=%d ammo=%d hp=%.2f"),
+				TEXT("[COVDBG] %s DECISION suppRaw=%d(gated=%d) supp01=%.2f hits4s=%d focused=%d cycles=%d strikes=%d holds=%d/%d dwellAtCover=%.1f idle=%.1f justRepo=%d lean=%d ammo=%d hp=%.2f"),
 				*Ctx.Companion->GetName(), (int32)bSuppressedRaw, (int32)bSuppressed,
+				Ctx.Companion->GetSuppression01(),
+				Ctx.Companion->GetRecentDamageCount(TickTuning ? TickTuning->CoverCommitUnderFireWindow : 4.f),
+				Ctx.Companion->GetPlayerFocusedEnemyCount(),
 				PeekCyclesAtCover, NoPeekLosStrikes, ConsecutiveHolds, MaxConsecutiveHolds,
 				TimeAtCurrentCover, TimeInCoverIdle, (int32)bJustRepositioned,
 				(int32)CurrentLean, Ctx.Companion->GetCurrentAmmo(), Ctx.Companion->GetHealthFraction());
@@ -3592,7 +3936,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	{
 		LosBlockedAccum = 0.f;
 		TimeInOpenEngageNoCover = 0.f;
-		BurstTimer -= DeltaSeconds;
+		// Combat-mode confidence: slower countdown = longer exposure per peek.
+		BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Ctx.Companion, true);
 		// Peek fire delay: hold the first shot until the peek animation has reached exposure.
 		if (PeekFireDelayRemaining > 0.f)
 			PeekFireDelayRemaining -= DeltaSeconds;
@@ -3888,9 +4233,28 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (CoverTuning)
 		{
 			AAIController* ReseekAIC = Cast<AAIController>(Ctx.Companion->GetController());
-			const int32 ReseekThreats = CompanionCover::CountKnownThreats(ReseekAIC, CoverTuning->CoverTriggerOutnumberedCount);
-			bCommitAllowed = CompanionCover::EvaluateTriggers(
-				*Ctx.Companion, *CoverTuning, ReseekThreats, /*bForRelease=*/false).Any();
+			const int32 ReseekThreats = CompanionCover::CountKnownThreats(ReseekAIC, CompanionCover::OutnumberedCountCap(*CoverTuning));
+			const CompanionCover::FCoverTriggers ReseekTriggers = CompanionCover::EvaluateTriggers(
+				*Ctx.Companion, *CoverTuning, ReseekThreats, /*bForRelease=*/false);
+			bCommitAllowed = ReseekTriggers.Any();
+
+			// Natural-cycling recommit cooldown — same bar as MoveToCoverPoint's commit gate.
+			if (bCommitAllowed && CoverTuning->NaturalReleaseRecommitCooldown > 0.f && CoverWorld)
+			{
+				const float SinceRelease = CoverWorld->GetTimeSeconds() - Ctx.Companion->GetLastNaturalReleaseTime();
+				if (SinceRelease < CoverTuning->NaturalReleaseRecommitCooldown
+					&& !CompanionCover::IsStrongPressure(*Ctx.Companion, *CoverTuning, ReseekThreats))
+					bCommitAllowed = false;
+			}
+
+			// Low-HP dash gate — wounded-and-alone stays mobile unless a duck spot is close.
+			if (bCommitAllowed && !CompanionCover::LowHealthDashAllowed(
+					CoverWorld, MyLocation, Ctx.Companion->GetController(), *CoverTuning, ReseekTriggers))
+				bCommitAllowed = false;
+
+			if (bDebugLogging && !bCommitAllowed && ReseekTriggers.Any())
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: open-engage reseek SUPPRESSED (recommit-cooldown or low-hp dash gate)"),
+					*Ctx.Companion->GetName());
 		}
 
 		if (CoverTuning && CoverWorld && bCommitAllowed)
@@ -3955,6 +4319,17 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 		}
 	}
+
+	// Angle-seek brain: 2+ enemies hard-focusing the player while the companion is unpressured →
+	// actively work an angle on them (Normal: cover with a firing line; Combat: move-shoot flank).
+	// Runs on the suppression "silent acknowledgement" — pressure on the companion disarms it.
+	if (TickAngleSeek(OwnerComp, Ctx.Companion, Ctx.Target, MyLocation, bPlayerTooFar, DeltaSeconds))
+		return;
+
+	// Combat-mode advance hop: cover-to-cover bound that gains ground — cover as movement, not a
+	// campsite (touch, peek, quick release via CombatCoverMaxCommitTime / trigger-clear exit).
+	if (TickCombatAdvanceHop(OwnerComp, Ctx.Companion, Ctx.Target, MyLocation, bPlayerTooFar, DeltaSeconds))
+		return;
 
 	if (!bLineOfSight)
 	{

@@ -135,6 +135,30 @@ public:
 	void SetPeekCyclesAtCurrentCover(int32 Cycles) { PeekCyclesAtCurrentCover = Cycles; }
 	int32 GetPeekCyclesAtCurrentCover() const { return PeekCyclesAtCurrentCover; }
 
+	// --- Player-focus mirror (BTService_UpdateCompanionState-written) ---
+	// Enemies currently in Combat state with their aim/combat target on the PLAYER. Consumed by
+	// the combat task's angle-seek brain — no BB plumbing, same pattern as the LOS mirror above.
+
+	void SetPlayerFocusedEnemyCount(int32 Count) { PlayerFocusedEnemyCount = Count; }
+	int32 GetPlayerFocusedEnemyCount() const { return PlayerFocusedEnemyCount; }
+
+	// --- Natural cover release (committed-time cycling back to mobile fighting) ---
+	// Stamped by CoverSwitchMonitor's natural-release vacate; both cover commit sites read it to
+	// block an immediate re-commit (unless fresh strong pressure) so cycling can't become cover-hop.
+
+	void StampNaturalCoverRelease();
+	float GetLastNaturalReleaseTime() const { return LastNaturalReleaseTime; }
+
+	// --- Purposeful cover-commit grant (combat-task-written, MoveToCoverPoint-consumed one-shot) ---
+	// Set while the pending CoverTarget was deliberately chosen by the combat task (angle-seek pick
+	// or Combat-mode advance hop) — bypasses the EvaluateTriggers decline at commit (reservation /
+	// occupancy checks still apply). Time-stamped: the grant expires after a few seconds and
+	// Consume clears it on EVERY read, so a decline path (claim race, EQS empty, target death) can
+	// never leave a stale trigger-free commit behind.
+
+	void SetCoverCommitGrant(bool bPending);
+	bool ConsumeCoverCommitGrant();
+
 	// --- Low Ready Aim ---
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Combat")
@@ -179,6 +203,28 @@ public:
 	/** True if damage was received within Window seconds. Window <= 0 always returns false. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	bool IsSuppressed(float Window) const;
+
+	/** Number of real damage hits received within Window seconds — graded under-fire signal for the
+	 *  cover triggers (the single-timestamp IsSuppressed check trips on any one graze). */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	int32 GetRecentDamageCount(float Window) const;
+
+	/** Continuous suppression value [0,1] — 0 with no component. The "silent pressure" signal. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	float GetSuppression01() const;
+
+	/** Actor behind the most recent real damage hit, if that hit landed within Window seconds.
+	 *  May be ANY actor (player friendly-fire included) — consumers filter for hostiles. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	AActor* GetRecentAttacker(float Window) const;
+
+	/** World time the most recent attacker stamp landed; -1e9 when never damaged. */
+	float GetLastAttackerStampTime() const { return LastAttackerStampTime; }
+
+	/** World-time stamp of the last compromise break (relocate or vacate). Gates the debounced
+	 *  geometric re-break cooldown and blocks one stale hit from breaking two points in a row. */
+	void StampCompromiseBreak();
+	float GetLastCompromiseBreakTime() const { return LastCompromiseBreakTime; }
 
 	/** Health fraction [0,1]. Returns 1 if HealthComponent missing. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
@@ -474,6 +520,25 @@ private:
 
 	float TimeAimingAtCurrentTarget = 0.0f;
 	float LastDamageWorldTime = -1e9f;
+
+	/** Recent damage-hit timestamps (world seconds) — pruned on stamp, bounded. Backs GetRecentDamageCount. */
+	TArray<float> RecentDamageTimes;
+
+	/** Actor behind the most recent damage hit + its stamp time. Backs GetRecentAttacker. */
+	TWeakObjectPtr<AActor> LastDamageAttacker;
+	float LastAttackerStampTime = -1e9f;
+
+	/** World time of the last compromise break. Backs StampCompromiseBreak. */
+	float LastCompromiseBreakTime = -1e9f;
+
+	/** Mirror of the BT service's "enemies focused on the player" tally. Transient, not replicated. */
+	int32 PlayerFocusedEnemyCount = 0;
+
+	/** World time of the last committed-time natural cover release. */
+	float LastNaturalReleaseTime = -1e9f;
+
+	/** World time the purposeful cover-commit grant was stamped; -1e9 = none. See SetCoverCommitGrant. */
+	float CoverCommitGrantStamp = -1e9f;
 
 	EStealthCatchup StealthCatchupStage = EStealthCatchup::None;
 

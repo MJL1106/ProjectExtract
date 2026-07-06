@@ -27,12 +27,36 @@ namespace CompanionCover
 		bool bOutnumbered = false;
 
 		bool Any() const { return bUnderFire || bLowHealth || bLowAmmoOrReloading || bOutnumbered; }
+
+		/** Low health is the ONLY active trigger — the case the dash gate applies to. */
+		bool LowHealthOnly() const { return bLowHealth && !bUnderFire && !bLowAmmoOrReloading && !bOutnumbered; }
 	};
 
 	/** Evaluates the commit triggers. bForRelease widens each threshold by its release margin so an
-	 *  in-cover companion only exits once the situation has genuinely cleared (anti pop-out). */
+	 *  in-cover companion only exits once the situation has genuinely cleared (anti pop-out).
+	 *  Under fire = graded pressure (suppression01 threshold / multi-hit count), not any-1-damage.
+	 *  Reloading is release-only (stay in cover to reload; never run to cover just to reload).
+	 *  COMBAT mode (bCombatModeStricterCommit) demands heavy pressure and ignores ammo entirely. */
 	FCoverTriggers EvaluateTriggers(const ACompanionCharacter& Companion,
 		const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount, bool bForRelease);
+
+	/** Threat-count cap callers must pass to CountKnownThreats so mode-specific outnumbered
+	 *  thresholds (CombatOutnumberedCount > CoverTriggerOutnumberedCount) stay reachable. */
+	int32 OutnumberedCountCap(const UCompanionTuningDataAsset& Tuning);
+
+	/** Low-HP dash gate: when low health is the ONLY active trigger, commit is allowed only if an
+	 *  available cover sits within LowHealthCoverMaxDash of the pawn — a wounded companion never
+	 *  sprints across open ground to reach a duck spot. Any other active trigger (or a disabled
+	 *  gate) returns true. */
+	bool LowHealthDashAllowed(UWorld* World, const FVector& PawnLoc, const AController* Querier,
+		const UCompanionTuningDataAsset& Tuning, const FCoverTriggers& Triggers);
+
+	/** STRONG pressure — the shared bar for the natural-cycling pair: the switch monitor's
+	 *  committed-time release fires only when this is false, and the commit sites' recommit
+	 *  cooldown blocks only while it stays false. One definition on both sides or a low-grade
+	 *  trigger (suppression 0.5-0.75, lingering low ammo) releases then instantly re-commits. */
+	bool IsStrongPressure(const ACompanionCharacter& Companion,
+		const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount);
 
 	/** Count of sight-perceived, enemy-tagged, alive threats known to the controller, capped.
 	 *  Reads the existing perception component — no new perception cost. */
@@ -47,6 +71,13 @@ namespace CompanionCover
 	/** Number of ExtraThreatActors whose body-shield check fails for this cover point. */
 	int32 CountUncoveredThreats(UWorld* World, const FCoverData& Cover, float Standoff,
 		float ChestHeight, const APawn* Pawn, TArrayView<AActor* const> ExtraThreatActors);
+
+	/** True when Cover no longer protects against a threat at ThreatLoc: the threat sits outside
+	 *  the fire arc widened by ArcSlackDeg, or the chest-height body-shield trace from the hunker
+	 *  position fails. Enemy flank-break parity (BTTask_EnemyCombatFire's IsCoverCompromised). */
+	bool IsCoverCompromised(UWorld* World, const FCoverData& Cover, const AActor* Threat,
+		const FVector& ThreatLoc, float ArcHalfAngleDeg, float ArcSlackDeg, float Standoff,
+		float ChestHeight, const APawn* Pawn);
 
 	/** 2D distance from Point to the nearest AVAILABLE baked cover point within Radius, or -1 if
 	 *  none. Skips points occupied or intended by anyone other than Querier — a duck spot that's

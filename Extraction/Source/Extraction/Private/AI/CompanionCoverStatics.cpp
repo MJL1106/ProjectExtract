@@ -23,34 +23,103 @@ FCoverTriggers EvaluateTriggers(const ACompanionCharacter& Companion,
 	const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount, bool bForRelease)
 {
 	FCoverTriggers Out;
+	const bool bCombatStrict = Tuning.bCombatModeStricterCommit
+		&& Companion.GetMode() == ECompanionMode::Combat;
 
-	// Under fire: near-miss suppression, or damage within the window. Release doubles the window —
-	// without it a lull between bursts pops the companion out, the next burst re-commits it to a
-	// DIFFERENT point (old one on post-vacate cooldown) and it cover-hops every ~8s.
+	// Under fire = graded pressure. The old check tripped on ANY single hit in the window, which
+	// made the commit gate pass near-permanently in a firefight — the 100%-cover bug. Release
+	// doubles the window and needs one fewer hit — without the widening a lull between bursts pops
+	// the companion out, the next burst re-commits it to a DIFFERENT point (old one on post-vacate
+	// cooldown) and it cover-hops every ~8s.
 	const float FireWindow = bForRelease
 		? Tuning.CoverCommitUnderFireWindow * 2.f
 		: Tuning.CoverCommitUnderFireWindow;
-	const USuppressionComponent* Supp = Companion.GetSuppressionComponent();
-	Out.bUnderFire = (Supp && Supp->IsSuppressed()) || Companion.IsSuppressed(FireWindow);
+	const float Supp01 = Companion.GetSuppression01();
+	const int32 RecentHits = Companion.GetRecentDamageCount(FireWindow);
+	// Suppression release margin: in-cover suppression decays whenever the enemy pauses fire, so an
+	// unwidened release bar pops the companion out mid-fight and the next burst re-commits it to a
+	// DIFFERENT point — the same ~8s hop the window doubling exists to stop.
+	const float SuppFracBase = bCombatStrict
+		? Tuning.CombatUnderFireSuppressionFrac
+		: Tuning.UnderFireSuppressionFrac;
+	const float SuppFrac = bForRelease
+		? SuppFracBase * Tuning.UnderFireSuppressionReleaseScale
+		: SuppFracBase;
+	if (bCombatStrict)
+	{
+		// Combat mode = mobile/aggressive: only heavy pressure (sustained suppression AND real
+		// hits together) forces cover. Anything less and it keeps move-shooting.
+		const int32 HitsNeeded = bForRelease
+			? FMath::Max(1, Tuning.CombatUnderFireDamageHits - 1)
+			: Tuning.CombatUnderFireDamageHits;
+		Out.bUnderFire = Supp01 >= SuppFrac && RecentHits >= HitsNeeded;
+	}
+	else
+	{
+		const int32 HitsNeeded = bForRelease
+			? FMath::Max(1, Tuning.UnderFireDamageHits - 1)
+			: Tuning.UnderFireDamageHits;
+		Out.bUnderFire = Supp01 >= SuppFrac || RecentHits >= HitsNeeded;
+	}
 
 	const float HealthThresh = bForRelease
 		? FMath::Max(Tuning.CoverTriggerHealthReleaseFrac, Tuning.CoverTriggerHealthFrac)
 		: Tuning.CoverTriggerHealthFrac;
 	Out.bLowHealth = Companion.GetHealthFraction() < HealthThresh;
 
+	// Reloading is RELEASE-ONLY: already behind cover, stay there through the reload — but never
+	// run to cover from the open just because a reload started (reload on the move instead).
+	// Combat mode never commits on ammo at all.
 	const float AmmoThresh = bForRelease
 		? FMath::Max(Tuning.CoverTriggerAmmoReleaseFrac, Tuning.CoverTriggerLowAmmoFrac)
 		: Tuning.CoverTriggerLowAmmoFrac;
-	Out.bLowAmmoOrReloading = Companion.IsReloading() || Companion.GetAmmoFraction() < AmmoThresh;
+	if (bForRelease)
+		Out.bLowAmmoOrReloading = Companion.IsReloading() || Companion.GetAmmoFraction() < AmmoThresh;
+	else if (!bCombatStrict)
+		Out.bLowAmmoOrReloading = Companion.GetAmmoFraction() < AmmoThresh;
 
 	// Release keeps the trigger "active" one threat below the commit count, so the companion
 	// doesn't pop out the moment a third attacker dies and duck back when it re-perceives one.
-	const int32 CountThresh = bForRelease
-		? FMath::Max(2, Tuning.CoverTriggerOutnumberedCount - 1)
+	const int32 BaseCount = bCombatStrict
+		? Tuning.CombatOutnumberedCount
 		: Tuning.CoverTriggerOutnumberedCount;
+	const int32 CountThresh = bForRelease ? FMath::Max(2, BaseCount - 1) : BaseCount;
 	Out.bOutnumbered = KnownThreatCount >= CountThresh;
 
 	return Out;
+}
+
+int32 OutnumberedCountCap(const UCompanionTuningDataAsset& Tuning)
+{
+	return FMath::Max(Tuning.CoverTriggerOutnumberedCount, Tuning.CombatOutnumberedCount);
+}
+
+bool IsStrongPressure(const ACompanionCharacter& Companion,
+	const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount)
+{
+	// Mode-aware bars: Combat's stricter commit thresholds must apply here too, or a 3-visible-enemy
+	// Combat fight (below its commit bar, so it's open-engaging and hopping) reads as "strong
+	// pressure" the moment a hop lands — blocking the quick release and turning the touch point
+	// into a camp.
+	const bool bCombatStrict = Tuning.bCombatModeStricterCommit
+		&& Companion.GetMode() == ECompanionMode::Combat;
+	const int32 HitsBar = bCombatStrict ? Tuning.CombatUnderFireDamageHits : Tuning.UnderFireDamageHits;
+	const int32 CountBar = bCombatStrict ? Tuning.CombatOutnumberedCount : Tuning.CoverTriggerOutnumberedCount;
+
+	if (Companion.GetSuppression01() >= Tuning.CoverNaturalReleasePressureFrac) return true;
+	if (Companion.GetRecentDamageCount(Tuning.CoverCommitUnderFireWindow) >= HitsBar) return true;
+	if (Companion.GetHealthFraction() < Tuning.CoverTriggerHealthFrac) return true;
+	return KnownThreatCount >= CountBar;
+}
+
+bool LowHealthDashAllowed(UWorld* World, const FVector& PawnLoc, const AController* Querier,
+	const UCompanionTuningDataAsset& Tuning, const FCoverTriggers& Triggers)
+{
+	// Gate only the low-HP-alone case: pinned/outnumbered companions still get the normal commit
+	// range — the danger being avoided is a wounded companion sprinting open ground for a duck spot.
+	if (!Triggers.LowHealthOnly()) return true;
+	if (Tuning.LowHealthCoverMaxDash <= 0.f) return true;
+	return DistToNearestCover(World, PawnLoc, Tuning.LowHealthCoverMaxDash, Querier) >= 0.f;
 }
 
 int32 CountKnownThreats(AAIController* Controller, int32 Cap)
@@ -132,6 +201,24 @@ int32 CountUncoveredThreats(UWorld* World, const FCoverData& Cover, float Stando
 			++Uncovered;
 	}
 	return Uncovered;
+}
+
+bool IsCoverCompromised(UWorld* World, const FCoverData& Cover, const AActor* Threat,
+	const FVector& ThreatLoc, float ArcHalfAngleDeg, float ArcSlackDeg, float Standoff,
+	float ChestHeight, const APawn* Pawn)
+{
+	if (!World || !IsValid(Threat)) return false;
+
+	// Arc test: GetFireArcForward points toward the covered side — dot against to-threat direction.
+	const FVector ToThreat = (ThreatLoc - Cover.Location).GetSafeNormal2D();
+	const FVector FireFwd  = UCoverGeometryStatics::GetFireArcForward(Cover);
+	const float Dot = FVector::DotProduct(FireFwd, ToThreat);
+	if (Dot < FMath::Cos(FMath::DegreesToRadians(ArcHalfAngleDeg + ArcSlackDeg)))
+		return true;
+
+	// Body-shield test from the stable hunker position (not the live pawn chest, which oscillates
+	// through the peek loop and flickers the verdict).
+	return !UCoverGeometryStatics::IsThreatCovered(World, Cover, ThreatLoc, Standoff, ChestHeight, Threat, Pawn);
 }
 
 float DistToNearestCover(UWorld* World, const FVector& Point, float Radius, const AController* Querier)

@@ -18,6 +18,7 @@
 #include "EnemyCharacter.h"
 #include "EnemyArchetypeData.h"
 #include "WeaponBase.h"
+#include "HealthComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/Character.h"
 #include "HAL/IConsoleManager.h"
@@ -29,6 +30,10 @@ namespace
 	/** Per-re-eval decay on the player-advance accumulator (re-evals ~1 s apart) — a player who
 	 *  stops pushing bleeds back below the gate within a few evals. */
 	constexpr float PlayerAdvanceDecayPerReEval = 0.75f;
+
+	/** Consecutive positive compromise evals before a geometric flank confirms (~0.8 s at the
+	 *  default 0.4 s cadence) — same anti-flicker bar as the enemy flank-break. */
+	constexpr int32 CompromiseDebounceRequired = 2;
 
 	/** Shared with the combat task's companion.CoverDebug cvar (defined in BTTask_CompanionCombat.cpp). */
 	bool MonitorCovDbg()
@@ -173,11 +178,109 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	Mem.TimeSinceArrival += DeltaSeconds;
 	Mem.TimeSinceReEval  += DeltaSeconds;
 
-	if (Mem.TimeSinceArrival < Tuning->CoverSwitchMinDwell) return;
-	if (Mem.TimeSinceReEval  < Tuning->CoverSwitchReEvalInterval) return;
+	AActor* CombatTarget = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName));
+
+	// --- Compromise-break detection (enemy flank-break parity) ---
+	// Own fast cadence, evaluated BEFORE the dwell/re-eval gates: a point that has stopped
+	// protecting must not sit out the ~1 s score cadence while an enemy shoots down the side of it.
+	// Geometric flank (arc/body-shield vs the focused target, or body exposed to a known extra
+	// threat) needs two consecutive positive evals; a HIT from an enemy the point doesn't shield
+	// against confirms instantly — being hit is the proof the angle is real (the enemy's
+	// instant-break fast path uses LOS for the same purpose).
+	bool bCompromiseBreak = false;
+	if (Tuning->bCoverCompromiseBreakEnabled && IsValid(CombatTarget))
+	{
+		Mem.CompromiseEvalTimer += DeltaSeconds;
+		if (Mem.TimeSinceArrival >= Tuning->CoverCompromiseMinDwell
+			&& Mem.CompromiseEvalTimer >= Tuning->CoverCompromiseEvalInterval)
+		{
+			Mem.CompromiseEvalTimer = 0.f;
+
+			// Identity guard: a task-internal shuffle swaps the BB cover with no Mem reset, and a
+			// target switch changes what "compromised" means — a stale count must not carry across.
+			if (Mem.LastCompromiseEvalCover != CurrentCover.Handle || Mem.LastCompromiseEvalTarget.Get() != CombatTarget)
+			{
+				Mem.CompromiseConsecutiveCount = 0;
+				Mem.LastCompromiseEvalCover = CurrentCover.Handle;
+				Mem.LastCompromiseEvalTarget = CombatTarget;
+			}
+
+			const ACharacter* CompChar = Cast<ACharacter>(Pawn);
+			const UCapsuleComponent* CompCap = CompChar ? CompChar->GetCapsuleComponent() : nullptr;
+			const float CompStandoff = (CompCap ? CompCap->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + 10.f;
+
+			const bool bCompromised = CompanionCover::IsCoverCompromised(World, CurrentCover.Data,
+				CombatTarget, CombatTarget->GetActorLocation(),
+				Tuning->CoverFlankArcHalfAngleDeg, Tuning->CoverCompromiseArcSlackDeg,
+				CompStandoff, Tuning->CoverProtectionChestHeight, Pawn);
+
+			// Multi-threat enforcement on the HELD point: body exposed to a second known hostile
+			// also counts — else the companion fights one enemy while sitting wide open to another.
+			// Feeds the debounced path only, matching the enemy.
+			bool bExtraExposed = false;
+			if (!bCompromised)
+			{
+				const int32 MaxExtraEval = FMath::Max(0, Tuning->MaxThreatsForCoverScoring - 1);
+				TArray<AActor*, TInlineAllocator<8>> EvalExtraThreats;
+				CompanionCover::GatherExtraThreatActors(Controller, Pawn, CombatTarget, MaxExtraEval, EvalExtraThreats);
+				bExtraExposed = CompanionCover::CountUncoveredThreats(World, CurrentCover.Data,
+					CompStandoff, Tuning->CoverProtectionChestHeight, Pawn, EvalExtraThreats) > 0;
+			}
+
+			// Exposed-side hit: instant confirm, no debounce.
+			bool bFlankerHit = false;
+			const ACompanionCharacter* HitCompanion = Cast<ACompanionCharacter>(Pawn);
+			if (HitCompanion && Tuning->FlankerResponseWindow > 0.f)
+			{
+				const AEnemyCharacter* AttackerEnemy =
+					Cast<AEnemyCharacter>(HitCompanion->GetRecentAttacker(Tuning->FlankerResponseWindow));
+				if (IsValid(AttackerEnemy))
+				{
+					// Freshness gate: the hit must postdate the last break — one stale stamp must
+					// not break two points in a row while the window is still open.
+					const bool bFreshHit = HitCompanion->GetLastAttackerStampTime() > HitCompanion->GetLastCompromiseBreakTime();
+					const UHealthComponent* AttackerHealth = AttackerEnemy->GetHealthComponent();
+					const bool bAttackerAlive = !AttackerHealth || !AttackerHealth->IsDead();
+					if (bFreshHit && bAttackerAlive && !UCoverGeometryStatics::IsThreatCovered(World, CurrentCover.Data,
+						AttackerEnemy->GetActorLocation(), CompStandoff, Tuning->CoverProtectionChestHeight,
+						AttackerEnemy, Pawn))
+						bFlankerHit = true;
+				}
+			}
+
+			if (bCompromised || bExtraExposed)
+				Mem.CompromiseConsecutiveCount = FMath::Min(Mem.CompromiseConsecutiveCount + 1, CompromiseDebounceRequired);
+			else
+				Mem.CompromiseConsecutiveCount = FMath::Max(0, Mem.CompromiseConsecutiveCount - 1);
+
+			// Debounced (geometric) confirms respect the break cooldown — a crossfire with no
+			// protecting point anywhere churns at worst once per cooldown (enemy CoverRelocateCooldown
+			// parity). The hit path bypasses it: fresh damage is fresh evidence.
+			const bool bGeoCooledDown = !HitCompanion
+				|| (World->GetTimeSeconds() - HitCompanion->GetLastCompromiseBreakTime()) >= Tuning->CoverCompromiseBreakCooldown;
+			bCompromiseBreak = bFlankerHit
+				|| (Mem.CompromiseConsecutiveCount >= CompromiseDebounceRequired && bGeoCooledDown);
+
+			if (bCompromiseBreak && MonitorCovDbg())
+				UE_LOG(LogCompanionAI, Log,
+					TEXT("[COVDBG] %s COMPROMISE-BREAK hit=%d geo=%d extra=%d consec=%d"),
+					*GetNameSafe(Pawn), bFlankerHit ? 1 : 0, bCompromised ? 1 : 0, bExtraExposed ? 1 : 0,
+					Mem.CompromiseConsecutiveCount);
+		}
+	}
+	else
+	{
+		Mem.CompromiseEvalTimer = 0.f;
+		Mem.CompromiseConsecutiveCount = 0;
+	}
+
+	if (!bCompromiseBreak)
+	{
+		if (Mem.TimeSinceArrival < Tuning->CoverSwitchMinDwell) return;
+		if (Mem.TimeSinceReEval  < Tuning->CoverSwitchReEvalInterval) return;
+	}
 
 	// Bail early on no combat target before paying for the bounds query.
-	AActor* CombatTarget = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName));
 	if (!IsValid(CombatTarget)) return;
 
 	Mem.TimeSinceReEval = 0.f;
@@ -187,16 +290,30 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	// lifted) and the exit dwell has passed, vacate and fall back to loose-cover open-engage.
 	// Release thresholds are widened (hysteresis) and the post-vacate cooldown blocks an immediate
 	// re-commit to the same point, so this can't pop-out thrash.
-	if (const ACompanionCharacter* ExitCompanion = Cast<ACompanionCharacter>(Pawn))
+	// (Compromise break outranks the trigger-clear exit — the break decides relocate-vs-vacate below.)
+	if (ACompanionCharacter* ExitCompanion = bCompromiseBreak ? nullptr : Cast<ACompanionCharacter>(Pawn))
 	{
 		if (Mem.TimeSinceArrival >= FMath::Max(Tuning->CoverSwitchMinDwell, Tuning->CoverExitMinDwell))
 		{
 			const AWeaponBase* ExitWeapon = ExitCompanion->GetCurrentWeapon();
 			const bool bFiringNow = IsValid(ExitWeapon) && ExitWeapon->IsFiring();
-			const int32 ExitThreatCount = CompanionCover::CountKnownThreats(Controller, Tuning->CoverTriggerOutnumberedCount);
+			const int32 ExitThreatCount = CompanionCover::CountKnownThreats(Controller, CompanionCover::OutnumberedCountCap(*Tuning));
 			const CompanionCover::FCoverTriggers Release =
 				CompanionCover::EvaluateTriggers(*ExitCompanion, *Tuning, ExitThreatCount, /*bForRelease=*/true);
-			if (!bFiringNow && !Release.Any())
+
+			// Natural cycling: after the mode's max commit time at this point with only low-grade
+			// pressure, release back to mobile fighting even though a widened release trigger still
+			// holds. Combat mode uses the short override — cover is a touch point, not a campsite.
+			// The recommit cooldown (both commit sites, gated on the same IsStrongPressure bar)
+			// stops it ducking straight back in.
+			const float MaxCommitTime = ExitCompanion->GetMode() == ECompanionMode::Combat
+				? Tuning->CombatCoverMaxCommitTime
+				: Tuning->CoverMaxCommitTime;
+			const bool bNaturalRelease = MaxCommitTime > 0.f
+				&& Mem.TimeSinceArrival >= MaxCommitTime
+				&& !CompanionCover::IsStrongPressure(*ExitCompanion, *Tuning, ExitThreatCount);
+
+			if (!bFiringNow && (!Release.Any() || bNaturalRelease))
 			{
 				if (UCoverReservationSubsystem* ExitResSub = World->GetSubsystem<UCoverReservationSubsystem>())
 					ExitResSub->MarkVacated(CurrentCover.Handle, Controller);
@@ -204,17 +321,48 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 				if (CoverLocationKey.SelectedKeyName != NAME_None)
 					BB->ClearValue(CoverLocationKey.SelectedKeyName);
 				BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+				const float TimeAtCover = Mem.TimeSinceArrival;
 				Mem = {};
-				UE_LOG(LogCompanionAI, Log, TEXT("CoverExit: %s triggers cleared — vacating to open-engage"), *GetNameSafe(Pawn));
+				if (bNaturalRelease && Release.Any())
+				{
+					ExitCompanion->StampNaturalCoverRelease();
+					UE_LOG(LogCompanionAI, Log, TEXT("CoverExit: %s NATURAL release after %.1fs (low-grade pressure) — vacating to open-engage"),
+						*GetNameSafe(Pawn), TimeAtCover);
+				}
+				else
+				{
+					UE_LOG(LogCompanionAI, Log, TEXT("CoverExit: %s triggers cleared — vacating to open-engage"), *GetNameSafe(Pawn));
+				}
 				return;
 			}
 		}
 	}
 
+	// Compromise break shared vacate: leave the point and fall back to open-engage (the combat
+	// task fights mobile). Used when no candidate protects, or when the loop can't even run.
+	auto VacateCompromised = [&]()
+	{
+		if (ACompanionCharacter* VacCompanion = Cast<ACompanionCharacter>(Pawn))
+			VacCompanion->StampCompromiseBreak();
+		if (UCoverReservationSubsystem* VacResSub = World->GetSubsystem<UCoverReservationSubsystem>())
+			VacResSub->MarkVacated(CurrentCover.Handle, Controller);
+		BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
+		if (CoverLocationKey.SelectedKeyName != NAME_None)
+			BB->ClearValue(CoverLocationKey.SelectedKeyName);
+		BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+		Mem = {};
+		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] CompromiseBreak: %s vacating to open-engage — no protecting candidate"),
+			*GetNameSafe(Pawn));
+	};
+
 	// TODO: lift formation-point computation to a shared utility (spec §5.7 open question).
 	// FollowPlayer uses a velocity-relative offset; the spec wants a fixed actor-facing offset.
 	AActor* Player = Cast<AActor>(BB->GetValueAsObject(PlayerActorKey.SelectedKeyName));
-	if (!IsValid(Player)) return;
+	if (!IsValid(Player))
+	{
+		if (bCompromiseBreak) VacateCompromised();
+		return;
+	}
 
 	// Combat mode anchors the candidate search AHEAD of the player (mirrors the FollowPlayer lead)
 	// so cover-to-cover switches gain ground instead of hanging back at the follow formation.
@@ -368,6 +516,49 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		}
 	}
 
+	// --- Compromise-break commit: relocate to the best qualifying candidate, or vacate to
+	// open-engage when nothing protects. Bypasses margin/G4/G5/debounce — those guard against
+	// churn between two WORKING points; they don't apply to a point that gets the companion shot.
+	if (bCompromiseBreak)
+	{
+		ACompanionCharacter* BreakCompanion = Cast<ACompanionCharacter>(Pawn);
+
+		// Stop any active burst so the transit starts clean (enemy instant-break parity).
+		if (BreakCompanion)
+			if (AWeaponBase* BreakWeapon = BreakCompanion->GetCurrentWeapon())
+				if (BreakWeapon->IsFiring()) BreakWeapon->StopFiring();
+
+		if (BestCover.IsValid())
+		{
+			if (BreakCompanion)
+			{
+				// Purposeful-pick grant: without it MoveToCoverPoint's commit gate re-adjudicates
+				// against the (stricter) commit triggers and declines inside the hysteresis band —
+				// the relocate half of the break would only ever run under heavy pressure.
+				BreakCompanion->SetCoverCommitGrant(true);
+				BreakCompanion->StampCompromiseBreak();
+			}
+			if (IsValid(ResSub))
+			{
+				ResSub->MarkVacated(CurrentCover.Handle, Controller);
+				ResSub->SetIntendedCover(Controller, BestCover.Handle);
+			}
+			BB->SetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID(), BestCover);
+			if (CoverLocationKey.SelectedKeyName != NAME_None)
+				BB->SetValueAsVector(CoverLocationKey.SelectedKeyName, BestCover.Data.Location);
+			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+			Mem = {};
+			UE_LOG(LogCompanionAI, Log,
+				TEXT("[COVMOVE] CompromiseBreak: %s relocating — held point no longer protects (bestScore=%.2f)"),
+				*GetNameSafe(Pawn), BestScore);
+		}
+		else
+		{
+			VacateCompromised();
+		}
+		return;
+	}
+
 	if (!BestCover.IsValid())
 	{
 		// No better candidate this re-eval — reset the debounce so a future winner must agree fresh. (G2)
@@ -444,8 +635,10 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		constexpr float MinAdvanceGain = 150.f;
 		const float CandDistToThreat = FVector::Dist2D(BestCover.Data.Location, ThreatLoc);
 		const float CurDistToThreat  = FVector::Dist2D(CurrentCover.Data.Location, ThreatLoc);
+		// Combat mode uses its own (stiffer) advance margin — the free-advance 1.0 sidegrade bar
+		// read as cover-to-cover churn with no firing once cover was force-taken.
 		if (CandDistToThreat < CurDistToThreat - MinAdvanceGain)
-			RequiredMargin = Tuning->AdvanceScoreMargin;
+			RequiredMargin = bCombatLead ? Tuning->CombatAdvanceScoreMargin : Tuning->AdvanceScoreMargin;
 	}
 
 	// Multiplicative margins invert for non-positive scores (cur -0.55 x 1.2 = -0.66 LOWERS the
