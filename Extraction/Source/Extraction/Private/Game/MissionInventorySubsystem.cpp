@@ -63,6 +63,7 @@ void UMissionInventorySubsystem::RecordKeycard(FName KeycardId)
 
 	OnLootNotify.Broadcast(FText::Format(
 		NSLOCTEXT("Loot", "KeycardAcquired", "Keycard acquired: {0}"), FText::FromName(KeycardId)));
+	OnKeycardRecorded.Broadcast(KeycardId);
 	UE_LOG(LogMissionInventory, Log, TEXT("RecordKeycard: %s"), *KeycardId.ToString());
 }
 

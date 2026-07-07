@@ -10,6 +10,7 @@
 #include "MissionInventorySubsystem.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLootNotify, const FText&, Message);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnKeycardRecorded, FName, KeycardId);
 
 DECLARE_LOG_CATEGORY_EXTERN(LogMissionInventory, Log, All);
 
@@ -37,6 +38,11 @@ public:
 	/** HUD toast subscribes here — one channel for every acquisition message. */
 	UPROPERTY(BlueprintAssignable, Category = "Loot")
 	FOnLootNotify OnLootNotify;
+
+	/** Fired once per NEWLY acquired keycard (not on duplicates). Objective markers with an
+	 *  item criterion listen here. */
+	UPROPERTY(BlueprintAssignable, Category = "Loot|Keycard")
+	FOnKeycardRecorded OnKeycardRecorded;
 
 private:
 	bool GrantAmmo(const FLootGrant& Grant, APawn* Recipient);
