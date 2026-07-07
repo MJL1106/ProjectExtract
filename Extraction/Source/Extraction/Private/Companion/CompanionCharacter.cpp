@@ -782,6 +782,34 @@ void ACompanionCharacter::HandleTraversalEnded()
 	SetSprinting(false);
 }
 
+// --- Commanded Loot ---
+
+void ACompanionCharacter::PlayLootMontage()
+{
+	if (!LootMontage) return;
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst)) return;
+
+	AnimInst->Montage_Play(LootMontage);
+}
+
+// --- Commanded Breach ---
+
+void ACompanionCharacter::PlayBreachMontage(EBreachType Type)
+{
+	const TObjectPtr<UAnimMontage>* Found = BreachMontages.Find(Type);
+	UAnimMontage* Montage = Found ? Found->Get() : nullptr;
+	if (!Montage) return;
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst)) return;
+
+	AnimInst->Montage_Play(Montage);
+}
+
 // --- Commanded Takedown ---
 
 void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod Method)

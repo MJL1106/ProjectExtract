@@ -29,6 +29,19 @@ public:
 	virtual void Breach_Implementation(AActor* Breacher) override;
 	virtual bool CanBreach_Implementation() const override;
 
+	// --- Keycard lock ---
+
+	/** True while the lock is engaged (starts locked and not yet unlocked). Locked doors are
+	 *  not offered for companion breach — the player unlocks them via Interact + keycard. */
+	UFUNCTION(BlueprintPure, Category = "Door|Lock")
+	bool IsLocked() const { return bStartsLocked && !bUnlocked; }
+
+	/** Player Interact on a locked door: consumes nothing — if the mission inventory holds
+	 *  RequiredKeycardId the door unlocks and swings open, otherwise a "requires keycard"
+	 *  toast is raised. No-op when the door isn't locked. */
+	UFUNCTION(BlueprintCallable, Category = "Door|Lock")
+	void TryUnlock(AActor* UnlockInstigator);
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -55,6 +68,17 @@ private:
 	/** Time to swing from closed to open (seconds). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "0.1"))
 	float OpenDuration = 0.8f;
+
+	/** When true the door starts locked and needs RequiredKeycardId to open. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Lock", meta = (AllowPrivateAccess))
+	bool bStartsLocked = false;
+
+	/** Keycard id that opens this door (matches FLootGrant::KeycardId on the card). Kept, not consumed. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Lock", meta = (AllowPrivateAccess, EditCondition = "bStartsLocked"))
+	FName RequiredKeycardId = NAME_None;
+
+	/** Runtime: set once the player unlocks with the keycard. */
+	bool bUnlocked = false;
 
 	EDoorState DoorState = EDoorState::Closed;
 

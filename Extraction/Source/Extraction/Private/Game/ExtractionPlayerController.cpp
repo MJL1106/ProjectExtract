@@ -12,6 +12,8 @@
 #include "AmmoWidget.h"
 #include "BarkFeedWidget.h"
 #include "CompanionModeWidget.h"
+#include "ObjectiveMarkerLayer.h"
+#include "LootNotificationWidget.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
@@ -107,6 +109,22 @@ void AExtractionPlayerController::BeginPlay()
 		CompanionModeWidget = CreateWidget<UCompanionModeWidget>(this, CompanionModeWidgetClass);
 		if (IsValid(CompanionModeWidget))
 			CompanionModeWidget->AddToPlayerScreen();
+	}
+
+	// Spawn objective waypoint layer for local player
+	if (IsLocalPlayerController() && ObjectiveLayerWidgetClass)
+	{
+		ObjectiveLayerWidget = CreateWidget<UObjectiveMarkerLayer>(this, ObjectiveLayerWidgetClass);
+		if (IsValid(ObjectiveLayerWidget))
+			ObjectiveLayerWidget->AddToPlayerScreen();
+	}
+
+	// Spawn loot acquisition toast for local player
+	if (IsLocalPlayerController() && LootToastWidgetClass)
+	{
+		LootToastWidget = CreateWidget<ULootNotificationWidget>(this, LootToastWidgetClass);
+		if (IsValid(LootToastWidget))
+			LootToastWidget->AddToPlayerScreen();
 	}
 }
 

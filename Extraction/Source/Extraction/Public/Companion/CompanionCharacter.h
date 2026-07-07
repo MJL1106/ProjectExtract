@@ -307,6 +307,20 @@ public:
 	void SetTakedownInPosition(bool bInPos);
 
 
+	// --- Commanded Loot ---
+
+	/** Plays the loot/search montage on the body mesh. Early-returns when no montage is assigned
+	 *  (the loot still happens — the anim is cosmetic). Called by BTTask_CompanionLoot on arrival. */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Loot")
+	void PlayLootMontage();
+
+	// --- Commanded Breach ---
+
+	/** Plays the per-type breach montage (kick / tactical open / quiet open). Early-returns when
+	 *  no montage is mapped for Type — the door still opens (current no-montage behaviour). */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Breach")
+	void PlayBreachMontage(EBreachType Type);
+
 	/** Broadcast when a KNIFE commanded takedown begins executing — BP shows the knife mesh here. */
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
 	FOnCommandedTakedownStarted OnCommandedTakedownStarted;
@@ -430,6 +444,15 @@ protected:
 	/** Knife takedown montage — designer assigns in BP. */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown")
 	TObjectPtr<UAnimMontage> KnifeTakedownMontage;
+
+	/** Loot/search montage played at each container during a commanded loot sweep — designer assigns in BP. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Loot")
+	TObjectPtr<UAnimMontage> LootMontage;
+
+	/** Per-type breach montages (Loud kick / Tactical open / Quiet open) — designer assigns in BP.
+	 *  A missing entry means that type breaches without a montage. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Breach")
+	TMap<EBreachType, TObjectPtr<UAnimMontage>> BreachMontages;
 
 	/** Victim-relative-to-attacker placement for the knife takedown, in the shared facing frame:
 	 *  X = forward gap (the companion stands this far BEHIND the victim), Y = lateral, Z = height.

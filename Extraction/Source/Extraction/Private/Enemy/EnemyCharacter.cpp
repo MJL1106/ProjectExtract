@@ -33,6 +33,8 @@
 #include "Engine/DamageEvents.h"
 #include "TimerManager.h"
 #include "EnemyAwarenessWidget.h"
+#include "Data/AmmoDropTableDataAsset.h"
+#include "World/AmmoPickup.h"
 
 static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
 	TEXT("enemy.PersistCorpses"), 1,
@@ -894,6 +896,8 @@ void AEnemyCharacter::HandleDeath()
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 
+	TrySpawnAmmoDrop();
+
 	// Sight perception bakes the listener-target affiliation into its query at registration and never
 	// re-evaluates a runtime team change. This pawn just flipped to NoTeam (dead) — living enemies
 	// ignored it as a friendly while alive, so no sight query pair exists. Evict + re-register it as a
@@ -965,6 +969,35 @@ void AEnemyCharacter::ApplyRagdoll()
 void AEnemyCharacter::DestroyAfterDeath()
 {
 	Destroy();
+}
+
+void AEnemyCharacter::TrySpawnAmmoDrop()
+{
+	if (!HasAuthority() || !AmmoDropTable) return;
+
+	const AWeaponBase* Weapon = CurrentWeapon.Get();
+	const UWeaponDataAsset* Data = Weapon ? Weapon->GetWeaponData() : nullptr;
+	if (!Data) return; // died weaponless — no drop
+
+	const EEnemyWeaponAnimType Category = Data->EnemyWeaponAnimType;
+	const FAmmoDropEntry* Entry = AmmoDropTable->Find(Category);
+	if (!Entry || !Entry->PickupClass) return;
+	if (FMath::FRand() > Entry->DropChance) return;
+
+	const int32 Amount = FMath::RandRange(Entry->MinAmount, Entry->MaxAmount);
+	if (Amount <= 0) return;
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	const FTransform SpawnTransform(FRotator::ZeroRotator, GetActorLocation() + FVector(0.f, 0.f, 30.f));
+	AAmmoPickup* Pickup = World->SpawnActorDeferred<AAmmoPickup>(
+		Entry->PickupClass, SpawnTransform, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!Pickup) return;
+
+	Pickup->InitPickup(Category, Amount);
+	Pickup->FinishSpawning(SpawnTransform);
 }
 
 // --- Silent takedown ---

@@ -3,9 +3,12 @@
 #include "AI/Tasks/BTTask_CompanionBreach.h"
 #include "AIController.h"
 #include "AI/CompanionAIController.h"
+#include "AI/CompanionTuningDataAsset.h"
+#include "Companion/CompanionCharacter.h"
 #include "World/Breachable.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "Perception/AISense_Hearing.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCompanionBreach, Log, All);
 
@@ -17,6 +20,20 @@ static float DistanceFromPawnToDoor(const APawn* Pawn, const AActor* Door)
 	const FBox Bounds = Door->GetComponentsBoundingBox(false);
 	if (!Bounds.IsValid) return FVector::Dist(Pawn->GetActorLocation(), Door->GetActorLocation());
 	return FMath::Sqrt(Bounds.ComputeSquaredDistanceToPoint(Pawn->GetActorLocation()));
+}
+
+// Emits the per-breach-type hearing noise at the door. Missing tuning/profile, or a profile with
+// Loudness/MaxRange <= 0 (Quiet's default), stays silent.
+static void ReportBreachNoise(ACompanionAIController* AIC, const AActor* Door, EBreachType Type)
+{
+	if (!IsValid(AIC) || !IsValid(Door)) return;
+
+	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
+	const FBreachNoiseProfile* Profile = Tuning ? Tuning->BreachNoise.Find(Type) : nullptr;
+	if (!Profile || Profile->Loudness <= 0.f || Profile->MaxRange <= 0.f) return;
+
+	UAISense_Hearing::ReportNoiseEvent(AIC->GetWorld(), Door->GetActorLocation(),
+		Profile->Loudness, AIC->GetPawn(), Profile->MaxRange, TEXT("Breach"));
 }
 
 UBTTask_CompanionBreach::UBTTask_CompanionBreach()
@@ -178,9 +195,21 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// Within range (or arrived as close as possible) — execute breach.
 	AIC->StopMovement();
 	bBreachTriggered = true;
+
+	// Breach type was written by SetBreachType at confirm time (mode-derived).
+	const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	const EBreachType BreachType = BB
+		? static_cast<EBreachType>(BB->GetValueAsEnum(ACompanionAIController::BB_BreachType))
+		: EBreachType::Tactical;
+
+	if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn))
+		Companion->PlayBreachMontage(BreachType);
+
 	IBreachable::Execute_Breach(Door, Pawn);
-	UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: breached %s at dist=%.0f (pathDone=%d), holding %.1fs"),
-		*GetNameSafe(Door), Dist, bPathDone ? 1 : 0, PostBreachWaitTime);
+	ReportBreachNoise(AIC, Door, BreachType);
+
+	UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: breached %s (type=%d) at dist=%.0f (pathDone=%d), holding %.1fs"),
+		*GetNameSafe(Door), static_cast<int32>(BreachType), Dist, bPathDone ? 1 : 0, PostBreachWaitTime);
 	BreachWaitElapsed = 0.f;
 	return;
 }
@@ -198,10 +227,19 @@ FString UBTTask_CompanionBreach::GetStaticDescription() const
 
 void UBTTask_CompanionBreach::FailAndClear(UBehaviorTreeComponent& OwnerComp)
 {
-	if (ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner()))
+	ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
+	if (IsValid(AIC))
 	{
 		AIC->StopMovement();
-		AIC->ClearActiveCommand();
+
+		// Guarded clear: an abort caused by a fresh replacement command (takedown/loot) must not
+		// wipe the command it was replaced by.
+		const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+		const ECompanionCommand Active = IsValid(BB)
+			? static_cast<ECompanionCommand>(BB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand))
+			: ECompanionCommand::None;
+		if (!IsValid(BB) || Active == ECompanionCommand::Breach)
+			AIC->ClearActiveCommand();
 	}
 
 	CachedDoor.Reset();

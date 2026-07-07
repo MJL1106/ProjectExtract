@@ -1,5 +1,5 @@
 // UPingPromptWidget -- contextual key-hint prompt shown when the player pings a target.
-// Shows command-specific hints (Breach / Takedown-Knife / Takedown-Shoot) and hides when cleared.
+// Shows command-specific hints (Breach / Takedown-Knife / Takedown-Shoot / Loot) and hides when cleared.
 //
 // WBP must contain:
 //   UPanelWidget "BreachContainer"      -- visible during Breach pending
@@ -7,6 +7,8 @@
 //   UPanelWidget "TakedownContainer"    -- visible during Takedown pending
 //   UTextBlock   "KnifeHintText"        -- displays KnifeHint text
 //   UTextBlock   "ShootHintText"        -- displays ShootHint text
+//   UPanelWidget "LootContainerPanel"   -- (optional) visible during Loot pending
+//   UTextBlock   "LootHintText"         -- (optional) displays LootHint text
 
 #pragma once
 
@@ -45,6 +47,13 @@ protected:
 	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UTextBlock> ShootHintText;
 
+	/** Optional so existing WBPs keep compiling until the loot panel is added in-editor. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> LootContainerPanel;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> LootHintText;
+
 	// --- Designer-editable hint labels ---
 
 	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
@@ -55,6 +64,9 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
 	FText ShootHint = NSLOCTEXT("PingPrompt", "Shoot", "[U] Shot");
+
+	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
+	FText LootHint = NSLOCTEXT("PingPrompt", "Loot", "[I] Loot");
 
 private:
 	UFUNCTION()

@@ -48,6 +48,7 @@ public:
 	static const FName BB_CommandTargetActor;            // Object
 	static const FName BB_CommandTargetLocation;         // Vector
 	static const FName BB_TakedownMethod;                // enum ETakedownMethod
+	static const FName BB_BreachType;                    // enum EBreachType
 
 	/**
 	 * Write a command into the companion blackboard.
@@ -57,6 +58,9 @@ public:
 
 	/** Reset BB_CompanionCommand to None and clear related keys. */
 	void ClearActiveCommand();
+
+	/** Writes BB_BreachType — call before IssueCommand(Breach). Derived from companion mode at confirm time. */
+	void SetBreachType(EBreachType Type);
 
 	UFUNCTION(BlueprintPure, Category = "Companion|AI")
 	APawn* GetPlayerCharacter() const { return CachedPlayerCharacter.Get(); }

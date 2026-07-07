@@ -40,6 +40,7 @@ class UEnemyPostureComponent;
 // Phase 5 — squad coordination
 class UEnemySquadSubsystem;
 class UEnemySquad;
+class UAmmoDropTableDataAsset;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTakedownExecuted, AActor*, Instigator);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleePerformed);
@@ -327,6 +328,11 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Data")
 	TObjectPtr<UEnemyArchetypeData> ArchetypeData;
 
+	/** Central ammo-drop economy table (chance/amount per weapon category). Assigned once on the
+	 *  base enemy BP — null disables death drops for this enemy. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Data")
+	TObjectPtr<UAmmoDropTableDataAsset> AmmoDropTable;
+
 	// When true, this enemy detects by sight only (ignores hearing) and neither raises nor reacts to
 	// the global alert. For isolating test-gym encounters; leave false in real gameplay.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Testing")
@@ -594,4 +600,8 @@ private:
 
 	void ApplyRagdoll();
 	void DestroyAfterDeath();
+
+	/** Authority-only death-drop roll: chance from AmmoDropTable keyed by the held weapon's
+	 *  category; spawns an AAmmoPickup next to the corpse on success. */
+	void TrySpawnAmmoDrop();
 };

@@ -14,6 +14,8 @@ class UCrosshairWidget;
 class UAmmoWidget;
 class UBarkFeedWidget;
 class UCompanionModeWidget;
+class UObjectiveMarkerLayer;
+class ULootNotificationWidget;
 
 /**
  *  Simple first person Player Controller
@@ -90,6 +92,22 @@ protected:
 	/** Active companion mode chip instance */
 	UPROPERTY()
 	TObjectPtr<UCompanionModeWidget> CompanionModeWidget;
+
+	/** Objective waypoint layer class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UObjectiveMarkerLayer> ObjectiveLayerWidgetClass;
+
+	/** Active objective waypoint layer instance */
+	UPROPERTY()
+	TObjectPtr<UObjectiveMarkerLayer> ObjectiveLayerWidget;
+
+	/** Loot acquisition toast class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<ULootNotificationWidget> LootToastWidgetClass;
+
+	/** Active loot toast instance */
+	UPROPERTY()
+	TObjectPtr<ULootNotificationWidget> LootToastWidget;
 
 	/** If true, the player will use UMG touch controls even if not playing on mobile platforms */
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")

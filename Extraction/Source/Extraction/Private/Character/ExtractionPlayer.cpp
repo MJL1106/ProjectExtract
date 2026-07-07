@@ -37,6 +37,8 @@
 #include "AIController.h"
 #include "BrainComponent.h"
 #include "EnemyDebug.h"
+#include "World/Lootable.h"
+#include "World/BreachableDoor.h"
 
 AExtractionPlayer::AExtractionPlayer()
 	: bIsDBNO(false)
@@ -670,6 +672,9 @@ void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 	if (bIsDBNO) return;
 	if (!IsLocallyControlled()) return;
 
+	// World interactions (loot container / keycard door) win over the revive hold.
+	if (TryWorldInteract()) return;
+
 	AExtractionPlayer* Target = FindReviveTarget();
 	if (!IsValid(Target)) return;
 
@@ -684,6 +689,45 @@ void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 {
 	if (!IsLocallyControlled()) return;
 	if (bIsReviving) CancelRevive();
+}
+
+bool AExtractionPlayer::TryWorldInteract()
+{
+	UWorld* World = GetWorld();
+	if (!World) return false;
+
+	// Controller view point tracks CalcCamera (kit-driven FP camera) — more accurate than eyes.
+	FVector ViewLoc; FRotator ViewRot;
+	GetActorEyesViewPoint(ViewLoc, ViewRot);
+	if (const AController* C = GetController())
+		C->GetPlayerViewPoint(ViewLoc, ViewRot);
+
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(PlayerInteract), false, this);
+	const FVector TraceEnd = ViewLoc + ViewRot.Vector() * InteractTraceRange;
+	if (!World->LineTraceSingleByChannel(Hit, ViewLoc, TraceEnd, ECC_Visibility, Params)) return false;
+
+	AActor* HitActor = Hit.GetActor();
+	if (!IsValid(HitActor)) return false;
+
+	// Lootable container — instant press-to-loot; the container animates itself (no player anim yet).
+	if (HitActor->Implements<ULootable>() && ILootable::Execute_CanLoot(HitActor))
+	{
+		ILootable::Execute_Loot(HitActor, this);
+		return true;
+	}
+
+	// Locked door — keycard unlock (opens on success, "requires keycard" toast otherwise).
+	if (ABreachableDoor* Door = Cast<ABreachableDoor>(HitActor))
+	{
+		if (Door->IsLocked())
+		{
+			Door->TryUnlock(this);
+			return true;
+		}
+	}
+
+	return false;
 }
 
 void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
@@ -847,7 +891,12 @@ void AExtractionPlayer::CompanionConfirmTakedownShootInput(const FInputActionVal
 void AExtractionPlayer::CompanionConfirmBreachInput(const FInputActionValue& /*Value*/)
 {
 	if (!IsValid(CompanionCommandComponent)) return;
-	CompanionCommandComponent->ConfirmBreach();
+
+	// One confirm key — routes to whatever the ping prompt is showing.
+	if (CompanionCommandComponent->GetPendingCommand() == ECompanionCommand::Loot)
+		CompanionCommandComponent->ConfirmLoot();
+	else
+		CompanionCommandComponent->ConfirmBreach();
 }
 
 void AExtractionPlayer::CompanionModeToggleInput(const FInputActionValue& /*Value*/)

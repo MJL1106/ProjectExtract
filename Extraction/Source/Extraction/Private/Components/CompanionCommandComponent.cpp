@@ -2,6 +2,7 @@
 
 #include "CompanionCommandComponent.h"
 #include "World/Breachable.h"
+#include "World/Lootable.h"
 #include "Enemy/EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
 #include "AI/CompanionAIController.h"
@@ -114,7 +115,18 @@ void UCompanionCommandComponent::IssuePing()
 		return;
 	}
 
-	// Priority 2: Takedown-eligible enemy
+	// Priority 2: Lootable container
+	if (HitActor->Implements<ULootable>() && ILootable::Execute_CanLoot(HitActor))
+	{
+		PendingCommand = ECompanionCommand::Loot;
+		PendingTarget  = HitActor;
+		SetPromptContextRegistered(false); // loot confirms on the breach key — no G/V shield needed
+		OnPingChanged.Broadcast(PendingCommand, HitActor);
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> LOOT %s (broadcast)"), *GetNameSafe(HitActor));
+		return;
+	}
+
+	// Priority 3: Takedown-eligible enemy
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(HitActor);
 	if (IsValid(Enemy))
 	{
@@ -244,6 +256,34 @@ void UCompanionCommandComponent::ConfirmBreach()
 		return;
 	}
 
+	// Breach type follows the companion mode, read at confirm time (a mode change between
+	// ping and confirm intentionally wins): Combat -> Loud, Stealth -> Quiet, Normal -> Tactical.
+	EBreachType BreachType = EBreachType::Tactical;
+	switch (GetCompanionMode())
+	{
+	case ECompanionMode::Combat:  BreachType = EBreachType::Loud;  break;
+	case ECompanionMode::Stealth: BreachType = EBreachType::Quiet; break;
+	default:                      BreachType = EBreachType::Tactical; break;
+	}
+	Controller->SetBreachType(BreachType);
+
 	Controller->IssueCommand(ECompanionCommand::Breach, ETakedownMethod::Knife, Target, Target->GetActorLocation());
+	ClearPending();
+}
+
+void UCompanionCommandComponent::ConfirmLoot()
+{
+	if (PendingCommand != ECompanionCommand::Loot) return;
+	AActor* Target = PendingTarget.Get();
+	if (!IsValid(Target)) { ClearPending(); return; }
+
+	ACompanionAIController* Controller = GetCompanionController();
+	if (!IsValid(Controller))
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("ConfirmLoot: companion controller not found"));
+		return;
+	}
+
+	Controller->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife, Target, Target->GetActorLocation());
 	ClearPending();
 }

@@ -55,6 +55,7 @@ const FName ACompanionAIController::BB_CompanionCommand(TEXT("CompanionCommand")
 const FName ACompanionAIController::BB_CommandTargetActor(TEXT("CommandTargetActor"));
 const FName ACompanionAIController::BB_CommandTargetLocation(TEXT("CommandTargetLocation"));
 const FName ACompanionAIController::BB_TakedownMethod(TEXT("TakedownMethod"));
+const FName ACompanionAIController::BB_BreachType(TEXT("BreachType"));
 
 ACompanionAIController::ACompanionAIController()
 {
@@ -426,7 +427,7 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 	UBlackboardComponent* BB = GetBlackboardComponent();
 	if (!BB) return;
 
-	const bool bNeedsTarget = (Command == ECompanionCommand::Breach || Command == ECompanionCommand::Takedown);
+	const bool bNeedsTarget = (Command == ECompanionCommand::Breach || Command == ECompanionCommand::Takedown || Command == ECompanionCommand::Loot);
 	if (bNeedsTarget && !IsValid(TargetActor))
 	{
 		UE_LOG(LogCompanionAI, Warning,
@@ -446,6 +447,14 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 		static_cast<int32>(Method),
 		*GetNameSafe(TargetActor),
 		*TargetLocation.ToString());
+}
+
+void ACompanionAIController::SetBreachType(EBreachType Type)
+{
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	BB->SetValueAsEnum(BB_BreachType, static_cast<uint8>(Type));
 }
 
 void ACompanionAIController::ClearActiveCommand()

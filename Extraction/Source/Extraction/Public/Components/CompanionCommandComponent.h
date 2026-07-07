@@ -65,6 +65,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Companion|Command")
 	void ConfirmBreach();
 
+	/** Confirm a queued Loot command (rides the same confirm key as Breach). */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Command")
+	void ConfirmLoot();
+
 	/** Cycle the companion's mode Normal -> Combat -> Stealth -> Normal. Call once per press of IA_CompanionModeToggle. */
 	UFUNCTION(BlueprintCallable, Category = "Companion|Mode")
 	void CycleCompanionMode();

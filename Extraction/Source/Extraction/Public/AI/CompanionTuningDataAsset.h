@@ -5,7 +5,23 @@
 #include "CoreMinimal.h"
 #include "Engine/DataAsset.h"
 #include "Companion/CompanionTypes.h"
+#include "Companion/CompanionCommandTypes.h"
 #include "CompanionTuningDataAsset.generated.h"
+
+/** Hearing-noise emitted when the companion breaches a door with a given breach type.
+ *  Loudness <= 0 or MaxRange <= 0 (or a missing map entry) = silent — Quiet's default. */
+USTRUCT(BlueprintType)
+struct FBreachNoiseProfile
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, Category = "Noise", meta = (ClampMin = "0.0"))
+	float Loudness = 1.f;
+
+	/** Max range (cm) the noise reaches — passed to ReportNoiseEvent. */
+	UPROPERTY(EditAnywhere, Category = "Noise", meta = (ClampMin = "0.0"))
+	float MaxRange = 3000.f;
+};
 
 USTRUCT(BlueprintType)
 struct FCompanionPostureProfile
@@ -45,6 +61,11 @@ class EXTRACTION_API UCompanionTuningDataAsset : public UDataAsset
 public:
 	UPROPERTY(EditAnywhere, Category="Companion|Posture")
 	TMap<ECompanionPosture, FCompanionPostureProfile> PostureProfiles;
+
+	/** Per-breach-type hearing noise (Loud = big radius, Tactical = small, Quiet = omit for silent).
+	 *  Read by BTTask_CompanionBreach when the door swings. */
+	UPROPERTY(EditAnywhere, Category="Companion|Breach")
+	TMap<EBreachType, FBreachNoiseProfile> BreachNoise;
 
 	// --- Movement speeds (applied by ACompanionCharacter; its EditDefaultsOnly members are the
 	// fallback when no tuning asset is assigned) ---

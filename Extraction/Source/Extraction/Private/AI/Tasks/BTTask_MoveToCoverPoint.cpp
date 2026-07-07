@@ -31,7 +31,9 @@
 static constexpr float CoverArrivalAcceptRadius = 25.f;
 static constexpr float CoverArrivalTickRadius   = 30.f;
 static constexpr float CoverArrivalIdleRadius   = 45.f;
-static constexpr float DefaultCapsuleRadius     = 34.f;
+// Prefixed (vs the plain DefaultCapsuleRadius in BTTask_EnemyCombatFire.cpp) — unity builds can
+// merge the two TUs into one chunk, where file-scope statics with the same name collide.
+static constexpr float MoveToCoverDefaultCapsuleRadius = 34.f;
 static constexpr float FireTickInterval         = 0.1f;
 /** Seconds between mid-move destination-claim rechecks (occupied/intended by someone else). */
 static constexpr float ClaimCheckInterval       = 0.25f;
@@ -246,7 +248,7 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 
 	// Compute arrival position
 	const FVector PawnLoc = Pawn->GetActorLocation();
-	float CapsuleRadius = DefaultCapsuleRadius;
+	float CapsuleRadius = MoveToCoverDefaultCapsuleRadius;
 	if (const ACharacter* Char = Cast<ACharacter>(Pawn))
 	{
 		if (const UCapsuleComponent* Cap = Char->GetCapsuleComponent())
@@ -732,7 +734,7 @@ FCover UBTTask_MoveToCoverPoint::RerankCoverForMultiThreat(UBehaviorTreeComponen
 
 	const ACharacter* PawnChar = Cast<ACharacter>(Pawn);
 	const UCapsuleComponent* Cap = PawnChar ? PawnChar->GetCapsuleComponent() : nullptr;
-	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + 10.f;
+	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : MoveToCoverDefaultCapsuleRadius) + 10.f;
 
 	const int32 ChosenUncovered = CompanionCover::CountUncoveredThreats(World, ChosenCover.Data, Standoff,
 		Tuning.CoverProtectionChestHeight, Pawn, ExtraThreats);

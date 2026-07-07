@@ -1,7 +1,9 @@
 // ABreachableDoor — simple hinged door with IBreachable.
 
 #include "World/BreachableDoor.h"
+#include "Game/MissionInventorySubsystem.h"
 #include "Components/StaticMeshComponent.h"
+#include "Engine/World.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogBreachableDoor, Log, All);
 
@@ -35,6 +37,12 @@ void ABreachableDoor::BeginPlay()
 	}
 
 	ClosedYaw = LeafPivot->GetComponentRotation().Yaw;
+
+	// Fail loud: a locked door with no keycard id can never be opened by anything.
+	if (bStartsLocked && RequiredKeycardId.IsNone())
+		UE_LOG(LogBreachableDoor, Warning,
+			TEXT("%s: bStartsLocked with no RequiredKeycardId — this door is permanently sealed. Set the id or unlock it."),
+			*GetName());
 }
 
 void ABreachableDoor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -65,7 +73,31 @@ void ABreachableDoor::Tick(float DeltaSeconds)
 
 bool ABreachableDoor::CanBreach_Implementation() const
 {
-	return DoorState == EDoorState::Closed;
+	// Locked doors aren't offered for companion breach — unlock with the keycard first.
+	return DoorState == EDoorState::Closed && !IsLocked();
+}
+
+void ABreachableDoor::TryUnlock(AActor* UnlockInstigator)
+{
+	if (!IsLocked() || DoorState != EDoorState::Closed) return;
+
+	UWorld* World = GetWorld();
+	UMissionInventorySubsystem* Subsystem = World ? World->GetSubsystem<UMissionInventorySubsystem>() : nullptr;
+	if (!Subsystem) return;
+
+	if (!Subsystem->HasKeycard(RequiredKeycardId))
+	{
+		Subsystem->OnLootNotify.Broadcast(FText::Format(
+			NSLOCTEXT("Door", "RequiresKeycard", "Locked (requires keycard: {0})"),
+			FText::FromName(RequiredKeycardId)));
+		return;
+	}
+
+	bUnlocked = true;
+	Subsystem->OnLootNotify.Broadcast(NSLOCTEXT("Door", "Unlocked", "Door unlocked"));
+	UE_LOG(LogBreachableDoor, Log, TEXT("%s: unlocked by %s with keycard %s"),
+		*GetName(), *GetNameSafe(UnlockInstigator), *RequiredKeycardId.ToString());
+	BeginSwing();
 }
 
 void ABreachableDoor::Breach_Implementation(AActor* Breacher)

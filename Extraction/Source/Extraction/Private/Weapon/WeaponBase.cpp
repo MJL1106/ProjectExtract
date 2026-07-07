@@ -1656,6 +1656,15 @@ void AWeaponBase::InitializeAmmo()
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
 }
 
+int32 AWeaponBase::AddReserveAmmo(int32 Amount)
+{
+	if (!HasAuthority() || Amount <= 0) return 0;
+
+	ReserveAmmo += Amount;
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	return Amount;
+}
+
 // ---- RepNotify ----
 
 void AWeaponBase::OnRep_CurrentState()

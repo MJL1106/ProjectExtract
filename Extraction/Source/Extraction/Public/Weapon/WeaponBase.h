@@ -154,6 +154,11 @@ public:
 	/** Initialize ammo from data asset (called after spawn/equip) */
 	void InitializeAmmo();
 
+	/** Adds Amount to reserve ammo (pickup/loot grants). Authority-only; broadcasts OnAmmoChanged.
+	 *  Returns the amount actually added (0 when rejected). Reserve is uncapped for now. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
+	int32 AddReserveAmmo(int32 Amount);
+
 	/** Override the auto-reload flag set in the data asset. Enemies force this true so they never
 	 *  go permanently silent — no BT reload task exists for enemies. */
 	void SetAutoReloadOnEmpty(bool bEnable) { bAutoReloadOnEmpty = bEnable; }
