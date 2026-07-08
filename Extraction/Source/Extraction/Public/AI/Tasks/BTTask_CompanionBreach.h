@@ -43,9 +43,17 @@ protected:
 	float DefaultOpenDelay = 0.4f;
 
 	/** Seconds the companion holds at the door after the swing starts (on top of any montage
-	 *  remainder), before the task finishes and it returns to following. */
+	 *  remainder) when the door provides no post-breach point, before the task finishes. */
 	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "0.0"))
 	float PostBreachWaitTime = 1.5f;
+
+	/** Accept radius for the post-breach reposition move (cm). */
+	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "10.0"))
+	float RepositionAcceptRadius = 50.f;
+
+	/** Max seconds the post-breach reposition may take before the task finishes anyway. */
+	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "0.5"))
+	float RepositionTimeout = 3.f;
 
 private:
 	enum class EBreachPhase : uint8
@@ -53,7 +61,8 @@ private:
 		MovingToDoor,
 		Aligning,
 		PlayingMontage, // montage running, door not yet open
-		Holding,        // door open, waiting out montage remainder + PostBreachWaitTime
+		Holding,        // door open, waiting out the montage remainder
+		Repositioning,  // clearing the doorway: Loud walks in past the leaf, others sidestep outside
 	};
 
 	/** Cached door from the blackboard. Weak — the door may be destroyed mid-task. */
@@ -62,6 +71,9 @@ private:
 	/** True when a combat target already existed when the breach started — the ping was a
 	 *  deliberate mid-fight override, so a held-over target must not break the breach off. */
 	bool bHadCombatTargetAtStart = false;
+
+	/** One-shot: the post-breach reposition was attempted and declined (no point / no path). */
+	bool bRepositionDeclined = false;
 
 	EBreachPhase Phase = EBreachPhase::MovingToDoor;
 

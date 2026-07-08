@@ -256,8 +256,9 @@ void UCompanionCommandComponent::ConfirmBreach()
 		return;
 	}
 
-	// Breach type follows the companion mode, read at confirm time (a mode change between
-	// ping and confirm intentionally wins): Combat -> Loud, Stealth -> Quiet, Normal -> Tactical.
+	// Breach type follows the companion mode: Combat -> Loud, Stealth -> Quiet, Normal -> Tactical.
+	// BTTask_CompanionBreach re-derives this from the live mode when the montage starts (a mode
+	// switch while the companion walks over wins); this confirm-time BB write is its fallback.
 	EBreachType BreachType = EBreachType::Tactical;
 	switch (GetCompanionMode())
 	{

@@ -29,6 +29,7 @@ public:
 	virtual void Breach_Implementation(AActor* Breacher) override;
 	virtual bool CanBreach_Implementation() const override;
 	virtual bool GetBreachStandPoint_Implementation(const AActor* Breacher, FVector& OutLocation, FRotator& OutFacing) const override;
+	virtual bool GetPostBreachPoint_Implementation(const AActor* Breacher, bool bEnterRoom, FVector& OutLocation) const override;
 
 	// --- Keycard lock ---
 
@@ -76,6 +77,15 @@ private:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "10.0"))
 	float BreachReachGap = 25.f;
 
+	/** How far past the doorway plane (cm) the post-breach ENTER point sits (Loud breach walks in). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "50.0"))
+	float PostBreachEnterDepth = 250.f;
+
+	/** Lateral offset (cm) from the doorway centre for both post-breach points — inside it clears
+	 *  the swung leaf, outside it clears the opening. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "50.0"))
+	float PostBreachLateralOffset = 170.f;
+
 	/** When true the door starts locked and needs RequiredKeycardId to open. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Lock", meta = (AllowPrivateAccess))
 	bool bStartsLocked = false;
@@ -94,6 +104,13 @@ private:
 
 	/** Yaw at the start of the swing (world yaw of LeafPivot). */
 	float ClosedYaw = 0.f;
+
+	// Doorway frame captured at BeginPlay while the leaf is closed — the panel's live bounds
+	// rotate with the swing, so post-breach geometry must come from this snapshot.
+	FVector PanelClosedCenter = FVector::ZeroVector;
+	FVector PanelOpenCenter = FVector::ZeroVector;
+	float PanelHalfThicknessCached = 5.f;
+	bool bPanelThinAxisX = true;
 
 	/** Begin the opening swing. Enables Tick for the duration. */
 	void BeginSwing();

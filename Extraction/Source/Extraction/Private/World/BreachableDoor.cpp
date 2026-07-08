@@ -40,6 +40,20 @@ void ABreachableDoor::BeginPlay()
 
 	ClosedYaw = LeafPivot->GetComponentRotation().Yaw;
 
+	// Snapshot the doorway frame while the leaf is guaranteed closed (see header note) — the
+	// panel's live bounds rotate with the swing, so post-breach geometry must come from this.
+	if (DoorMesh)
+	{
+		const FBoxSphereBounds LocalBounds = DoorMesh->CalcBounds(DoorMesh->GetComponentTransform() * GetActorTransform().Inverse());
+		PanelClosedCenter = GetActorTransform().TransformPosition(LocalBounds.Origin);
+		PanelHalfThicknessCached = FMath::Min(LocalBounds.BoxExtent.X, LocalBounds.BoxExtent.Y);
+		bPanelThinAxisX = LocalBounds.BoxExtent.X <= LocalBounds.BoxExtent.Y;
+
+		// Where the panel centre ends up at full open: rotated around the hinge by OpenAngle.
+		const FVector Hinge = LeafPivot->GetComponentLocation();
+		PanelOpenCenter = Hinge + (PanelClosedCenter - Hinge).RotateAngleAxis(OpenAngle, FVector::UpVector);
+	}
+
 	// Fail loud: a locked door with no keycard id can never be opened by anything.
 	if (bStartsLocked && RequiredKeycardId.IsNone())
 		UE_LOG(LogBreachableDoor, Warning,
@@ -129,6 +143,40 @@ bool ABreachableDoor::GetBreachStandPoint_Implementation(const AActor* Breacher,
 	OutLocation = Center + Normal * (PanelHalfThickness + CapsuleRadius + BreachReachGap);
 	OutLocation.Z = Breacher->GetActorLocation().Z; // caller keeps its own floor height
 	OutFacing = (-Normal).Rotation();
+	return true;
+}
+
+bool ABreachableDoor::GetPostBreachPoint_Implementation(const AActor* Breacher, bool bEnterRoom, FVector& OutLocation) const
+{
+	if (!IsValid(Breacher) || !DoorMesh) return false;
+
+	// Doorway frame from the BeginPlay snapshot — the live panel bounds have rotated by now.
+	FVector Normal = bPanelThinAxisX ? GetActorForwardVector() : GetActorRightVector();
+	if (FVector::DotProduct(Breacher->GetActorLocation() - PanelClosedCenter, Normal) < 0.f)
+		Normal = -Normal;
+	const FVector Lateral = FVector::CrossProduct(FVector::UpVector, Normal).GetSafeNormal();
+
+	// The open leaf occupies the hinge-side region (inside or outside depending on swing
+	// direction) — both points step laterally AWAY from wherever it ends up.
+	const float LeafSide = FVector::DotProduct(PanelOpenCenter - PanelClosedCenter, Lateral);
+	const float AwaySign = (LeafSide >= 0.f) ? -1.f : 1.f;
+
+	if (bEnterRoom)
+	{
+		OutLocation = PanelClosedCenter - Normal * PostBreachEnterDepth + Lateral * AwaySign * PostBreachLateralOffset;
+	}
+	else
+	{
+		float CapsuleRadius = 35.f;
+		if (const ACharacter* Character = Cast<ACharacter>(Breacher))
+			if (const UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
+				CapsuleRadius = Capsule->GetScaledCapsuleRadius();
+
+		const float Standoff = PanelHalfThicknessCached + CapsuleRadius + BreachReachGap;
+		OutLocation = PanelClosedCenter + Normal * (Standoff + 40.f) + Lateral * AwaySign * PostBreachLateralOffset;
+	}
+
+	OutLocation.Z = Breacher->GetActorLocation().Z;
 	return true;
 }
 

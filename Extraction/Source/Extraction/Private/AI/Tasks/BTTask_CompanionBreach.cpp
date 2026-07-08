@@ -23,6 +23,7 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 {
 	Phase = EBreachPhase::MovingToDoor;
 	bHasStandPoint = false;
+	bRepositionDeclined = false;
 	AlignElapsed = 0.f;
 	PhaseElapsed = 0.f;
 	MontageLength = 0.f;
@@ -115,9 +116,10 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	AActor* Door = CachedDoor.Get();
 	if (!IsValid(Door))
 	{
-		// Destroyed during Holding = the breach already happened; the command still succeeded.
-		if (Phase == EBreachPhase::Holding)
+		// Destroyed after the swing = the breach already happened; the command still succeeded.
+		if (Phase == EBreachPhase::Holding || Phase == EBreachPhase::Repositioning)
 		{
+			if (Phase == EBreachPhase::Repositioning) AIC->StopMovement();
 			AIC->ClearActiveCommand();
 			CachedDoor.Reset();
 			FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
@@ -207,14 +209,29 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (Alpha < 1.f) return;
 
 		// Aligned — start the montage; the door swings at the contact time.
-		const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
-		PendingBreachType = BB
-			? static_cast<EBreachType>(BB->GetValueAsEnum(ACompanionAIController::BB_BreachType))
-			: EBreachType::Tactical;
+		// Breach type follows the companion's mode AT THIS MOMENT (Combat=Loud kick,
+		// Stealth=Quiet, Normal=Tactical) — switching mode while the companion walks over
+		// counts. BB_BreachType (written at confirm, same mapping in ConfirmBreach) is only
+		// the fallback when the pawn isn't a companion.
+		ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn);
+		if (Companion)
+		{
+			switch (Companion->GetMode())
+			{
+			case ECompanionMode::Combat:  PendingBreachType = EBreachType::Loud;  break;
+			case ECompanionMode::Stealth: PendingBreachType = EBreachType::Quiet; break;
+			default:                      PendingBreachType = EBreachType::Tactical; break;
+			}
+		}
+		else
+		{
+			const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+			PendingBreachType = BB
+				? static_cast<EBreachType>(BB->GetValueAsEnum(ACompanionAIController::BB_BreachType))
+				: EBreachType::Tactical;
+		}
 
-		MontageLength = 0.f;
-		if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn))
-			MontageLength = Companion->PlayBreachMontage(PendingBreachType);
+		MontageLength = Companion ? Companion->PlayBreachMontage(PendingBreachType) : 0.f;
 
 		const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
 		const float* TunedDelay = Tuning ? Tuning->BreachOpenDelay.Find(PendingBreachType) : nullptr;
@@ -242,12 +259,59 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	case EBreachPhase::Holding:
 	{
 		PhaseElapsed += DeltaSeconds;
-		// Let the montage remainder play out, then the post-breach hold — but a fresh firefight
-		// cuts the hold short (door's already open; don't stand in the doorway under fire).
 		const float MontageRemainder = FMath::Max(0.f, MontageLength - OpenDelay);
+		if (PhaseElapsed < MontageRemainder) return;
+
+		// Montage done — clear the doorway. Loud walks in past the swung leaf; Tactical/Quiet
+		// sidestep outside beside the frame. Attempted once; a decline falls back to the hold.
+		// A firefight that started during the montage skips the reposition entirely — never walk
+		// deeper into a room that just started shooting.
+		if (!bRepositionDeclined && !(bInCombat && !bHadCombatTargetAtStart))
+		{
+			FVector PostPoint;
+			const bool bEnterRoom = (PendingBreachType == EBreachType::Loud);
+			if (IBreachable::Execute_GetPostBreachPoint(Door, Pawn, bEnterRoom, PostPoint))
+			{
+				// The enter point must be genuinely reachable: a partial path "succeeds" by
+				// stopping in the doorway — exactly where the companion must not stand.
+				FAIMoveRequest MoveReq(PostPoint);
+				MoveReq.SetAcceptanceRadius(RepositionAcceptRadius);
+				MoveReq.SetAllowPartialPath(!bEnterRoom);
+				MoveReq.SetProjectGoalLocation(true);
+				MoveReq.SetUsePathfinding(true);
+
+				if (AIC->MoveTo(MoveReq) != EPathFollowingRequestResult::Failed)
+				{
+					UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: repositioning (%s) after breach of %s"),
+						bEnterRoom ? TEXT("enter") : TEXT("sidestep"), *GetNameSafe(Door));
+					Phase = EBreachPhase::Repositioning;
+					PhaseElapsed = 0.f;
+					return;
+				}
+			}
+			bRepositionDeclined = true;
+		}
+
+		// No point / move failed: hold in place as before — a fresh firefight cuts the hold short.
 		const float HoldTime = (bInCombat && !bHadCombatTargetAtStart) ? 0.f : PostBreachWaitTime;
 		if (PhaseElapsed < MontageRemainder + HoldTime) return;
 
+		AIC->ClearActiveCommand();
+		CachedDoor.Reset();
+		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		return;
+	}
+
+	case EBreachPhase::Repositioning:
+	{
+		PhaseElapsed += DeltaSeconds;
+		// Finish on arrival, on timeout, or immediately when a fresh firefight starts — the
+		// breach itself already succeeded, the combat brain should take over.
+		const bool bFreshCombat = bInCombat && !bHadCombatTargetAtStart;
+		if (!bFreshCombat && AIC->GetMoveStatus() != EPathFollowingStatus::Idle && PhaseElapsed < RepositionTimeout)
+			return;
+
+		if (bFreshCombat) AIC->StopMovement();
 		AIC->ClearActiveCommand();
 		CachedDoor.Reset();
 		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
@@ -335,6 +399,7 @@ void UBTTask_CompanionBreach::FailAndClear(UBehaviorTreeComponent& OwnerComp)
 	CachedDoor.Reset();
 	Phase = EBreachPhase::MovingToDoor;
 	bHasStandPoint = false;
+	bRepositionDeclined = false;
 	AlignElapsed = 0.f;
 	PhaseElapsed = 0.f;
 	MontageLength = 0.f;

@@ -30,4 +30,11 @@ public:
 	 *  implementer has no meaningful stand point (caller falls back to plain proximity). */
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Breach")
 	bool GetBreachStandPoint(const AActor* Breacher, FVector& OutLocation, FRotator& OutFacing) const;
+
+	/** Where the breacher should move AFTER the breach so it doesn't block the opening.
+	 *  bEnterRoom true = a point inside, past the doorway, laterally clear of the swung leaf
+	 *  (Loud entry); false = a point outside beside the frame (Tactical/Quiet sidestep).
+	 *  Returns false when the implementer has no meaningful point (caller just holds). */
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Breach")
+	bool GetPostBreachPoint(const AActor* Breacher, bool bEnterRoom, FVector& OutLocation) const;
 };
