@@ -38,6 +38,7 @@ public:
 	virtual UTraversalComponent* GetTraversalComponent() const = 0;
 	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const = 0;
 	virtual bool GetIsDBNO() const = 0;
+	virtual float GetBleedoutTimeRemaining() const = 0;
 	virtual void ExitDBNO() = 0;
 	virtual ETraversalType GetActiveTraversalType() const = 0;
 	virtual bool IsInTraversal() const = 0;

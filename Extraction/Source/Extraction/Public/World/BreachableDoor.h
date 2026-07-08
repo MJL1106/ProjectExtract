@@ -28,6 +28,7 @@ public:
 	// --- IBreachable ---
 	virtual void Breach_Implementation(AActor* Breacher) override;
 	virtual bool CanBreach_Implementation() const override;
+	virtual bool GetBreachStandPoint_Implementation(const AActor* Breacher, FVector& OutLocation, FRotator& OutFacing) const override;
 
 	// --- Keycard lock ---
 
@@ -68,6 +69,12 @@ private:
 	/** Time to swing from closed to open (seconds). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "0.1"))
 	float OpenDuration = 0.8f;
+
+	/** Clearance (cm) between the breacher's capsule and the door panel's surface at the breach
+	 *  stand point. The full standoff is computed per door and per breacher: panel half-thickness
+	 *  + capsule radius + this gap — so thick doors and big pawns still stand correctly. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "10.0"))
+	float BreachReachGap = 25.f;
 
 	/** When true the door starts locked and needs RequiredKeycardId to open. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Lock", meta = (AllowPrivateAccess))

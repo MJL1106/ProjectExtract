@@ -159,6 +159,11 @@ public:
 	void SetCoverCommitGrant(bool bPending);
 	bool ConsumeCoverCommitGrant();
 
+	// --- Revive Flag (set by BTTask_RevivePlayer while actively reviving) ---
+
+	void SetIsRevivingPlayer(bool bReviving) { bIsRevivingPlayer = bReviving; }
+	bool IsRevivingPlayer() const { return bIsRevivingPlayer; }
+
 	// --- Low Ready Aim ---
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Combat")
@@ -316,10 +321,11 @@ public:
 
 	// --- Commanded Breach ---
 
-	/** Plays the per-type breach montage (kick / tactical open / quiet open). Early-returns when
-	 *  no montage is mapped for Type — the door still opens (current no-montage behaviour). */
+	/** Plays the per-type breach montage (kick / tactical open / quiet open). Returns the montage
+	 *  play length in seconds, or 0 when no montage is mapped for Type — the door still opens
+	 *  (no-montage behaviour). */
 	UFUNCTION(BlueprintCallable, Category = "Companion|Breach")
-	void PlayBreachMontage(EBreachType Type);
+	float PlayBreachMontage(EBreachType Type);
 
 	/** Broadcast when a KNIFE commanded takedown begins executing — BP shows the knife mesh here. */
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
@@ -412,6 +418,22 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "50.0"))
 	float ReviveProximityRadius = 200.0f;
 
+	/** Radius (cm) around the downed player within which an alerted enemy counts as a revive threat. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "100.0"))
+	float ReviveThreatRadius = 1500.f;
+
+	/** Seconds of continuous no-threat before the revive window opens. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveSafeGraceSeconds = 1.0f;
+
+	/** Bleedout seconds remaining at which the companion commits to revive regardless of threats. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "1.0"))
+	float DesperationBleedoutThreshold = 12.f;
+
+	/** Incoming damage multiplier while the companion is actively reviving the player. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float ReviveDamageMultiplier = 0.35f;
+
 protected:
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Config", meta = (ClampMin = "0.0"))
@@ -496,6 +518,10 @@ private:
 
 	/** Scripted weapon-up: aim along control rotation with no actor target (e.g. route Alert/Crouch legs). Not replicated — single-player feature. */
 	bool bScriptedAim = false;
+
+	/** True while the companion is in the BTTask_RevivePlayer hold. Drives tanky damage reduction
+	 *  and the service-side revive-window latch. Transient, not replicated. */
+	bool bIsRevivingPlayer = false;
 
 	/** Mirror of the combat service's eye→target LOS trace (enemy bHasTargetLOS parity). Transient, not replicated. */
 	bool bHasTargetLOS = false;

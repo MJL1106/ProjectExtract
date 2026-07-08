@@ -30,6 +30,8 @@ EBTNodeResult::Type UBTTask_RevivePlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 
 	// Stop any combat activity
 	Companion->StopWeaponFire();
+	Companion->SetIsRevivingPlayer(true);
+	CachedCompanion = Companion;
 
 	ReviveElapsed = 0.0f;
 	bIsHoldingRevive = false;
@@ -47,6 +49,11 @@ void UBTTask_RevivePlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Controller->GetPawn());
 	if (!Companion) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+
+	if (UHealthComponent* CompHealth = Companion->GetHealthComponent())
+	{
+		if (CompHealth->IsDead()) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+	}
 
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	if (!BB) return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
@@ -99,7 +106,23 @@ void UBTTask_RevivePlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	}
 }
 
+void UBTTask_RevivePlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult)
+{
+	if (CachedCompanion.IsValid())
+		CachedCompanion->SetIsRevivingPlayer(false);
+	CachedCompanion.Reset();
+	Super::OnTaskFinished(OwnerComp, NodeMemory, TaskResult);
+}
+
+EBTNodeResult::Type UBTTask_RevivePlayer::AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
+{
+	if (CachedCompanion.IsValid())
+		CachedCompanion->SetIsRevivingPlayer(false);
+	CachedCompanion.Reset();
+	return Super::AbortTask(OwnerComp, NodeMemory);
+}
+
 FString UBTTask_RevivePlayer::GetStaticDescription() const
 {
-	return TEXT("Revive downed player (highest priority)");
+	return TEXT("Revive downed player (threat-gated window)");
 }

@@ -42,6 +42,8 @@ UBTService_UpdateCompanionState::UBTService_UpdateCompanionState()
 	RandomDeviation = 0.05f;
 	bCreateNodeInstance = true;
 
+	ReviveWindowOpenKey.SelectedKeyName = TEXT("ReviveWindowOpen");
+
 	// Default the new-system cover key to the shared "CoverTarget" BB entry so no BT asset edit is
 	// needed; the Cover type filter mirrors BTTask_CompanionCombat so the selector resolves correctly.
 	CoverTargetKey.SelectedKeyName = TEXT("CoverTarget");
@@ -58,6 +60,7 @@ void UBTService_UpdateCompanionState::InitializeFromAsset(UBehaviorTree& Asset)
 	if (UBlackboardData* BBAsset = GetBlackboardAsset())
 	{
 		CoverTargetKey.ResolveSelectedKey(*BBAsset);
+		ReviveWindowOpenKey.ResolveSelectedKey(*BBAsset);
 	}
 }
 
@@ -171,19 +174,35 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	// can enter BestAny as a fallback. When false (player-threat channel), candidates may only be acquired
 	// through the traced BestVisible path — prevents structurally-occluded enemies (e.g. one floor below
 	// within the threat sphere) from entering via the BestAny fallback and being held by pressure-keep.
+	// Defend-the-body bias: when the player is DBNO, enemies closer to the downed player
+	// get a scored distance reduction so the companion prioritizes threats near the body.
+	const float DBNOBiasThreatRadiusSq = bPlayerDBNO && IsValid(PlayerPawn)
+		? FMath::Square(Companion->ReviveThreatRadius) : 0.f;
+	const FVector DBNOPlayerLoc = IsValid(PlayerPawn) ? PlayerPawn->GetActorLocation() : FVector::ZeroVector;
+
 	auto ConsiderCandidate = [&](AActor* Candidate, float DistSq, bool bAllowOccludedAny = true)
 	{
 		if (!IsValid(Candidate)) return;
 		if (DistSq > AcquireRangeSq) return;
 
-		if (bAllowOccludedAny && DistSq < BestAnyDistSq)
+		// Apply defend-the-body scoring bias while DBNO: enemies within the revive threat
+		// radius of the player have their effective distance halved for selection purposes.
+		float ScoredDistSq = DistSq;
+		if (bPlayerDBNO && DBNOBiasThreatRadiusSq > 0.f)
 		{
-			BestAnyDistSq = DistSq;
+			const float EnemyToPlayerDistSq = FVector::DistSquared(Candidate->GetActorLocation(), DBNOPlayerLoc);
+			if (EnemyToPlayerDistSq <= DBNOBiasThreatRadiusSq)
+				ScoredDistSq *= 0.5f;
+		}
+
+		if (bAllowOccludedAny && ScoredDistSq < BestAnyDistSq)
+		{
+			BestAnyDistSq = ScoredDistSq;
 			BestAny = Candidate;
 		}
 
 		// Only trace if this candidate could become the nearest visible one.
-		if (DistSq >= BestVisibleDistSq) return;
+		if (ScoredDistSq >= BestVisibleDistSq) return;
 
 		FHitResult SelHit;
 		FCollisionQueryParams SelParams(SCENE_QUERY_STAT(CompanionSelectLoS), true);
@@ -195,7 +214,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			SelHit, SelectAimOrigin, AITargeting::GetSightLocation(Candidate), ECC_Visibility, SelParams);
 		if (bSelBlocked && SelHit.GetActor() != Candidate) return;
 
-		BestVisibleDistSq = DistSq;
+		BestVisibleDistSq = ScoredDistSq;
 		BestVisible = Candidate;
 	};
 
@@ -858,6 +877,103 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			(int32)Companion->IsCommandedTakedownArmed(), (int32)Companion->IsCommandedTakedownExecuting(),
 			(int32)Companion->IsTakedownMontagePlaying(), (int32)bLoweredOnTargetLoss,
 			*GetNameSafe(Controller->GetFocusActor()), *Controller->GetFocalPoint().ToCompactString());
+	}
+
+	// --- Revive window computation (threat-gated revive) ---
+	if (ReviveWindowOpenKey.SelectedKeyName.IsNone() && !bLoggedReviveKeyResolveFail)
+	{
+		bLoggedReviveKeyResolveFail = true;
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("%s: ReviveWindowOpen BB key failed to resolve — revive window gating is disabled"),
+			*Companion->GetName());
+	}
+	if (bPlayerDBNO && IsValid(PlayerPawn))
+	{
+		bool bReviveWindowOpen = false;
+
+		// Latch: once the companion is mid-revive, hold the key true so the BT hold is uninterruptible.
+		if (Companion->IsRevivingPlayer())
+		{
+			bReviveWindowOpen = true;
+		}
+		else
+		{
+			// Check for nearby threats around the downed player via a dedicated overlap.
+			bool bHot = false;
+			const FVector PlayerLoc = PlayerPawn->GetActorLocation();
+			const float ThreatRadius = Companion->ReviveThreatRadius;
+
+			TArray<FOverlapResult> ReviveOverlaps;
+			ReviveOverlaps.Reserve(8);
+			FCollisionObjectQueryParams RevObjParams(ECC_Pawn);
+			FCollisionQueryParams RevParams(SCENE_QUERY_STAT(ReviveWindowThreat), false);
+			RevParams.AddIgnoredActor(Companion);
+			RevParams.AddIgnoredActor(PlayerPawn);
+
+			Companion->GetWorld()->OverlapMultiByObjectType(
+				ReviveOverlaps, PlayerLoc, FQuat::Identity,
+				RevObjParams, FCollisionShape::MakeSphere(ThreatRadius), RevParams);
+
+			for (const FOverlapResult& Overlap : ReviveOverlaps)
+			{
+				const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Overlap.GetActor());
+				if (!IsValid(Enemy)) continue;
+				if (!Enemy->IsAlertedForCompanionReadiness()) continue;
+				const UHealthComponent* EHP = Enemy->GetHealthComponent();
+				if (EHP && EHP->IsDead()) continue;
+
+				bHot = true;
+				break;
+			}
+
+			// Also check alerted enemies beyond the radius but with LoS to the downed player
+			if (!bHot)
+			{
+				for (AActor* Actor : PerceivedActors)
+				{
+					const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Actor);
+					if (!IsValid(Enemy)) continue;
+					if (!Enemy->IsAlertedForCompanionReadiness()) continue;
+					const UHealthComponent* EHP = Enemy->GetHealthComponent();
+					if (EHP && EHP->IsDead()) continue;
+
+					FHitResult RevLosHit;
+					FCollisionQueryParams RevLosParams(SCENE_QUERY_STAT(ReviveWindowLoS), true);
+					RevLosParams.AddIgnoredActor(Enemy);
+					RevLosParams.AddIgnoredActor(PlayerPawn);
+					const bool bLosBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+						RevLosHit, Enemy->GetPawnViewLocation(), PlayerLoc, ECC_Visibility, RevLosParams);
+					if (!bLosBlocked || RevLosHit.GetActor() == PlayerPawn)
+					{
+						bHot = true;
+						break;
+					}
+				}
+			}
+
+			if (bHot)
+			{
+				ReviveSafeAccumulator = 0.f;
+			}
+			else
+			{
+				ReviveSafeAccumulator += DeltaSeconds;
+			}
+
+			// Desperation override: bleedout nearly out
+			if (PlayerIface->GetBleedoutTimeRemaining() <= Companion->DesperationBleedoutThreshold)
+				bReviveWindowOpen = true;
+			// Grace period elapsed
+			else if (ReviveSafeAccumulator >= Companion->ReviveSafeGraceSeconds)
+				bReviveWindowOpen = true;
+		}
+
+		BB->SetValueAsBool(ReviveWindowOpenKey.SelectedKeyName, bReviveWindowOpen);
+	}
+	else
+	{
+		BB->SetValueAsBool(ReviveWindowOpenKey.SelectedKeyName, false);
+		ReviveSafeAccumulator = 0.f;
 	}
 
 	// --- Posture-driven scoring weights + posture mirror to BB ---

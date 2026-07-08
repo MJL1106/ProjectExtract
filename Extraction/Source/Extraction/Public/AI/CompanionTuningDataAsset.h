@@ -67,6 +67,11 @@ public:
 	UPROPERTY(EditAnywhere, Category="Companion|Breach")
 	TMap<EBreachType, FBreachNoiseProfile> BreachNoise;
 
+	/** Seconds from breach-montage start until the door actually swings (and the noise fires) —
+	 *  tune to the montage's contact frame (kick lands / hand pushes). Missing entry = 0.4s. */
+	UPROPERTY(EditAnywhere, Category="Companion|Breach", meta = (ClampMin = "0.0"))
+	TMap<EBreachType, float> BreachOpenDelay;
+
 	// --- Movement speeds (applied by ACompanionCharacter; its EditDefaultsOnly members are the
 	// fallback when no tuning asset is assigned) ---
 

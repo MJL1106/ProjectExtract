@@ -435,6 +435,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suppression", meta = (ClampMin = "0.0"))
 	float SuppressionSpreadPenaltyDeg = 4.f;
 
+	/** Extra spread (degrees) added when targeting a companion that is actively reviving the player. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
+	float RevivingCompanionExtraSpreadDeg = 6.f;
+
 	// --- Morale (Phase 4) ---
 
 	/** If true, morale events are ignored and the enemy stays Confident permanently (e.g. rusher archetype). */

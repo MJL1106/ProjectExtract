@@ -138,6 +138,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	virtual bool GetIsDBNO() const override { return bIsDBNO; }
 
+	UFUNCTION(BlueprintPure, Category = "Health")
+	virtual float GetBleedoutTimeRemaining() const override { return BleedoutTimeRemaining; }
+
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const override { return CachedAnimInstance; }
 
@@ -285,6 +288,10 @@ protected:
 	float TakedownNearClipPlane = 2.f;
 
 	// ---- DBNO / Revive Config ----
+
+	/** Movement speed while downed (DBNO crawl). */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "10.0"))
+	float DBNOCrawlSpeed = 100.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
 	float BleedoutDuration = 30.f;
@@ -449,6 +456,9 @@ private:
 
 	/** Temp debug: apply 25 damage to self (bound to H key) */
 	void DebugApplyDamage();
+
+	/** Pre-DBNO crouched speed, restored on ExitDBNO. */
+	float SavedMaxWalkSpeedCrouched = 0.f;
 
 	FTimerHandle BleedoutTimerHandle;
 

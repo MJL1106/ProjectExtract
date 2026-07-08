@@ -203,6 +203,7 @@ void ACompanionCharacter::Tick(float DeltaTime)
 
 float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
+	if (bIsRevivingPlayer) DamageAmount *= ReviveDamageMultiplier;
 	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 	if (IsValid(HealthComponent))
 	{
@@ -797,17 +798,17 @@ void ACompanionCharacter::PlayLootMontage()
 
 // --- Commanded Breach ---
 
-void ACompanionCharacter::PlayBreachMontage(EBreachType Type)
+float ACompanionCharacter::PlayBreachMontage(EBreachType Type)
 {
 	const TObjectPtr<UAnimMontage>* Found = BreachMontages.Find(Type);
 	UAnimMontage* Montage = Found ? Found->Get() : nullptr;
-	if (!Montage) return;
+	if (!Montage) return 0.f;
 
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
-	if (!IsValid(AnimInst)) return;
+	if (!IsValid(AnimInst)) return 0.f;
 
-	AnimInst->Montage_Play(Montage);
+	return AnimInst->Montage_Play(Montage);
 }
 
 // --- Commanded Takedown ---

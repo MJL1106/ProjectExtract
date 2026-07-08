@@ -34,6 +34,9 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Blackboard")
 	FBlackboardKeySelector HasCoverPositionKey;
 
+	UPROPERTY(EditAnywhere, Category = "Blackboard")
+	FBlackboardKeySelector ReviveWindowOpenKey;
+
 	/**
 	 * New-system cover point (FCover). Resolved by name "CoverTarget" in InitializeFromAsset so no BT
 	 * asset edit is required. Read (not written) here — used to detect "my own wall is blocking my
@@ -64,4 +67,9 @@ private:
 	TWeakObjectPtr<AActor> PrevCombatTarget;
 	/** One-time guard so the CoverTarget-key-unresolved warning fires at most once per instance. */
 	bool bLoggedCoverKeyResolveFail = false;
+	/** One-time guard so the ReviveWindowOpen-key-unresolved warning fires at most once per instance. */
+	bool bLoggedReviveKeyResolveFail = false;
+
+	/** Accumulated safe-seconds (no nearby threats) while the player is DBNO. Resets on threat detection. */
+	float ReviveSafeAccumulator = 0.f;
 };

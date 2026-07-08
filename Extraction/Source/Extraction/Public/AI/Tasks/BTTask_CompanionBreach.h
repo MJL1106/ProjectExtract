@@ -1,11 +1,12 @@
-// BT task — companion moves to a breachable target and executes Breach().
-// Reads BB_CommandTargetActor (set by IssueCommand), validates IBreachable,
-// drives MoveToActor, then calls Execute_Breach on arrival.
+// BT task — companion moves to a breachable target's stand point, aligns to face it,
+// plays the per-type breach montage, then swings the door at the montage's contact time.
+// Reads BB_CommandTargetActor (set by IssueCommand) and BB_BreachType (set at confirm time).
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "BehaviorTree/BTTaskNode.h"
+#include "Companion/CompanionCommandTypes.h"
 #include "BTTask_CompanionBreach.generated.h"
 
 UCLASS()
@@ -22,37 +23,70 @@ public:
 	virtual FString GetStaticDescription() const override;
 
 protected:
-	/** How close the companion must be to the door before executing Breach (cm). */
+	/** Accept radius for the move to the breach stand point (cm). Small — the align phase
+	 *  closes the last gap so the montage plays from the pose it was authored for. */
 	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "10.0"))
-	float InteractionRange = 150.f;
+	float StandPointAcceptRadius = 30.f;
 
-	/** Accept radius passed to MoveToActor (cm). Slightly less than InteractionRange so the pawn stops inside it. */
+	/** If the move-to path completes farther than this from the stand point (nav gap / blocked
+	 *  approach), the breach fails instead of playing the anim from the wrong spot. (cm) */
 	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "10.0"))
-	float MoveAcceptRadius = 120.f;
+	float MaxAlignSnapDistance = 250.f;
 
-	/** If the move-to path completes (companion got as close as the navmesh allows) within this
-	 *  distance of the door, breach anyway. Covers free-standing doors / nav gaps where the pawn
-	 *  can't reach InteractionRange. Should be >= InteractionRange. (cm) */
-	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "10.0"))
-	float ArrivalBreachRange = 300.f;
+	/** Seconds the companion blends from its arrival pose onto the stand point + facing. */
+	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "0.05"))
+	float AlignDuration = 0.25f;
 
-	/** Seconds the companion holds at the door after breaching, before the task finishes and
-	 *  it returns to following the player. (s) */
+	/** Seconds from montage start until the door swings when the tuning asset has no
+	 *  BreachOpenDelay entry for the type. */
 	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "0.0"))
-	float PostBreachWaitTime = 3.f;
+	float DefaultOpenDelay = 0.4f;
+
+	/** Seconds the companion holds at the door after the swing starts (on top of any montage
+	 *  remainder), before the task finishes and it returns to following. */
+	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "0.0"))
+	float PostBreachWaitTime = 1.5f;
 
 private:
+	enum class EBreachPhase : uint8
+	{
+		MovingToDoor,
+		Aligning,
+		PlayingMontage, // montage running, door not yet open
+		Holding,        // door open, waiting out montage remainder + PostBreachWaitTime
+	};
+
 	/** Cached door from the blackboard. Weak — the door may be destroyed mid-task. */
 	TWeakObjectPtr<AActor> CachedDoor;
 
-	/** True once MoveToActor has been issued. */
-	bool bMoveRequested = false;
+	/** True when a combat target already existed when the breach started — the ping was a
+	 *  deliberate mid-fight override, so a held-over target must not break the breach off. */
+	bool bHadCombatTargetAtStart = false;
 
-	/** True once Breach has been called — waiting for the task to wrap up. */
-	bool bBreachTriggered = false;
+	EBreachPhase Phase = EBreachPhase::MovingToDoor;
 
-	/** Time accumulated since the breach fired, while holding at the door. */
-	float BreachWaitElapsed = 0.f;
+	/** Stand point + facing the montage was authored for (from IBreachable, or a proximity
+	 *  fallback when the door provides none). */
+	FVector StandLocation = FVector::ZeroVector;
+	FRotator StandFacing = FRotator::ZeroRotator;
+	bool bHasStandPoint = false;
+
+	/** Align blend state. */
+	FVector AlignStartLocation = FVector::ZeroVector;
+	float AlignStartYaw = 0.f;
+	float AlignElapsed = 0.f;
+
+	/** Montage/door sequencing. */
+	EBreachType PendingBreachType = EBreachType::Tactical;
+	float OpenDelay = 0.f;
+	float MontageLength = 0.f;
+	float PhaseElapsed = 0.f;
+
+	/** Begin the align phase from the pawn's current pose. */
+	void StartAlign(APawn* Pawn);
+
+	/** Swing the door + emit the per-type noise (montage contact time reached). */
+	void OpenDoorNow(class ACompanionAIController* AIC, AActor* Door);
 
 	/** Clean up and fail. */
 	void FailAndClear(UBehaviorTreeComponent& OwnerComp);

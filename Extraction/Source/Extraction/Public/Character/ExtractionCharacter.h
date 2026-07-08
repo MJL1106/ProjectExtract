@@ -395,6 +395,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	virtual bool GetIsDBNO() const override { return bIsDBNO; }
 
+	UFUNCTION(BlueprintPure, Category = "Health")
+	virtual float GetBleedoutTimeRemaining() const override { return BleedoutTimeRemaining; }
+
 	/** Exit DBNO state and restore health/movement.
 	 *  Called by server authority (revive system, companion AI). */
 	virtual void ExitDBNO() override;

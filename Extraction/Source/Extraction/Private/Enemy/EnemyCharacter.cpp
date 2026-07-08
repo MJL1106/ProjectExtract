@@ -35,6 +35,7 @@
 #include "EnemyAwarenessWidget.h"
 #include "Data/AmmoDropTableDataAsset.h"
 #include "World/AmmoPickup.h"
+#include "Companion/CompanionCharacter.h"
 
 static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
 	TEXT("enemy.PersistCorpses"), 1,
@@ -432,6 +433,13 @@ float AEnemyCharacter::GetAIAimSpreadDegrees() const
 	// Phase 4: suppression widens spread before the command multiplier
 	if (IsValid(SuppressionComponent))
 		Spread += ArchetypeData->SuppressionSpreadPenaltyDeg * SuppressionComponent->GetSuppression01();
+
+	// Mercy spread: widen when targeting a companion that is mid-revive
+	if (const ACompanionCharacter* TargetCompanion = Cast<ACompanionCharacter>(CurrentAimTarget.Get()))
+	{
+		if (TargetCompanion->IsRevivingPlayer())
+			Spread += ArchetypeData->RevivingCompanionExtraSpreadDeg;
+	}
 
 	// Phase 3: squad aura narrows spread; extra spread from BT tasks widens it.
 	Spread *= CommandSpreadMultiplier;

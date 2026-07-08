@@ -205,6 +205,17 @@ void AExtractionPlayer::Tick(float DeltaTime)
 	if (bIsDBNO && BleedoutTimeRemaining > 0.f)
 		BleedoutTimeRemaining = FMath::Max(BleedoutTimeRemaining - DeltaTime, 0.f);
 
+	if (bIsDBNO)
+	{
+		UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+		if (IsValid(MoveComp))
+		{
+			MoveComp->MaxWalkSpeed = DBNOCrawlSpeed;
+			MoveComp->MaxWalkSpeedCrouched = DBNOCrawlSpeed;
+			if (!bIsCrouched && MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
+		}
+	}
+
 	if (IsLocallyControlled() && bIsReviving)
 		UpdateRevive(DeltaTime);
 
@@ -380,7 +391,6 @@ void AExtractionPlayer::DoAim(float Yaw, float Pitch)
 
 void AExtractionPlayer::DoMove(float Right, float Forward)
 {
-	if (bIsDBNO) return;
 	if (IsInTraversal()) return;
 	if (!IsValid(GetController())) return;
 
@@ -1008,7 +1018,11 @@ void AExtractionPlayer::EnterDBNO()
 	if (IsValid(MoveComp))
 	{
 		MoveComp->StopMovementImmediately();
-		MoveComp->DisableMovement();
+		MoveComp->SetMovementMode(MOVE_Walking);
+		SavedMaxWalkSpeedCrouched = MoveComp->MaxWalkSpeedCrouched;
+		MoveComp->MaxWalkSpeed = DBNOCrawlSpeed;
+		MoveComp->MaxWalkSpeedCrouched = DBNOCrawlSpeed;
+		if (MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
 	}
 
 	// Start bleedout timer (server only)
@@ -1045,7 +1059,15 @@ void AExtractionPlayer::ExitDBNO()
 
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
+	{
 		MoveComp->SetMovementMode(MOVE_Walking);
+		MoveComp->MaxWalkSpeedCrouched = SavedMaxWalkSpeedCrouched;
+		if (const UCharacterMovementComponent* Archetype = Cast<UCharacterMovementComponent>(MoveComp->GetArchetype()))
+			MoveComp->MaxWalkSpeed = Archetype->MaxWalkSpeed;
+		else
+			MoveComp->MaxWalkSpeed = GetClass()->GetDefaultObject<AExtractionPlayer>()->GetCharacterMovement()->MaxWalkSpeed;
+	}
+	UnCrouch();
 
 	OnDBNOStateChanged.Broadcast(false, 0.f);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' revived at %.0f%% health"), *GetNameSafe(this), ReviveHealthPercent * 100.f);
@@ -1082,11 +1104,21 @@ void AExtractionPlayer::OnRep_IsDBNO()
 		if (bIsDBNO)
 		{
 			MoveComp->StopMovementImmediately();
-			MoveComp->DisableMovement();
+			MoveComp->SetMovementMode(MOVE_Walking);
+			SavedMaxWalkSpeedCrouched = MoveComp->MaxWalkSpeedCrouched;
+			MoveComp->MaxWalkSpeed = DBNOCrawlSpeed;
+			MoveComp->MaxWalkSpeedCrouched = DBNOCrawlSpeed;
+			if (MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
 		}
 		else
 		{
 			MoveComp->SetMovementMode(MOVE_Walking);
+			MoveComp->MaxWalkSpeedCrouched = SavedMaxWalkSpeedCrouched;
+			if (const UCharacterMovementComponent* Archetype = Cast<UCharacterMovementComponent>(MoveComp->GetArchetype()))
+				MoveComp->MaxWalkSpeed = Archetype->MaxWalkSpeed;
+			else
+				MoveComp->MaxWalkSpeed = GetClass()->GetDefaultObject<AExtractionPlayer>()->GetCharacterMovement()->MaxWalkSpeed;
+			UnCrouch();
 		}
 	}
 

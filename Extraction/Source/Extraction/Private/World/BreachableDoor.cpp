@@ -2,8 +2,10 @@
 
 #include "World/BreachableDoor.h"
 #include "Game/MissionInventorySubsystem.h"
+#include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
+#include "GameFramework/Character.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogBreachableDoor, Log, All);
 
@@ -98,6 +100,36 @@ void ABreachableDoor::TryUnlock(AActor* UnlockInstigator)
 	UE_LOG(LogBreachableDoor, Log, TEXT("%s: unlocked by %s with keycard %s"),
 		*GetName(), *GetNameSafe(UnlockInstigator), *RequiredKeycardId.ToString());
 	BeginSwing();
+}
+
+bool ABreachableDoor::GetBreachStandPoint_Implementation(const AActor* Breacher, FVector& OutLocation, FRotator& OutFacing) const
+{
+	if (!IsValid(Breacher) || !DoorMesh || DoorState != EDoorState::Closed) return false;
+
+	// The door panel is thin: its plane normal is whichever horizontal actor axis spans the
+	// smaller extent of the panel. Measured in actor space so a yawed placement can't inflate
+	// the world AABB and flip the axis pick.
+	const FBoxSphereBounds MeshBounds = DoorMesh->CalcBounds(DoorMesh->GetComponentTransform() * GetActorTransform().Inverse());
+	const FVector Center = GetActorTransform().TransformPosition(MeshBounds.Origin);
+	const FVector LocalExtent = MeshBounds.BoxExtent;
+
+	FVector Normal = (LocalExtent.X <= LocalExtent.Y) ? GetActorForwardVector() : GetActorRightVector();
+	const float PanelHalfThickness = FMath::Min(LocalExtent.X, LocalExtent.Y);
+
+	// Flip the normal onto the breacher's side of the door.
+	if (FVector::DotProduct(Breacher->GetActorLocation() - Center, Normal) < 0.f)
+		Normal = -Normal;
+
+	// Standoff adapts to the door and the breacher: panel surface + capsule + reach gap.
+	float CapsuleRadius = 35.f;
+	if (const ACharacter* Character = Cast<ACharacter>(Breacher))
+		if (const UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
+			CapsuleRadius = Capsule->GetScaledCapsuleRadius();
+
+	OutLocation = Center + Normal * (PanelHalfThickness + CapsuleRadius + BreachReachGap);
+	OutLocation.Z = Breacher->GetActorLocation().Z; // caller keeps its own floor height
+	OutFacing = (-Normal).Rotation();
+	return true;
 }
 
 void ABreachableDoor::Breach_Implementation(AActor* Breacher)

@@ -12,30 +12,6 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogCompanionBreach, Log, All);
 
-// Distance from pawn to the nearest point on the door's collision bounds (not its actor origin).
-// This makes the range check robust to large doors whose pivot sits at the hinge edge.
-static float DistanceFromPawnToDoor(const APawn* Pawn, const AActor* Door)
-{
-	if (!IsValid(Pawn) || !IsValid(Door)) return TNumericLimits<float>::Max();
-	const FBox Bounds = Door->GetComponentsBoundingBox(false);
-	if (!Bounds.IsValid) return FVector::Dist(Pawn->GetActorLocation(), Door->GetActorLocation());
-	return FMath::Sqrt(Bounds.ComputeSquaredDistanceToPoint(Pawn->GetActorLocation()));
-}
-
-// Emits the per-breach-type hearing noise at the door. Missing tuning/profile, or a profile with
-// Loudness/MaxRange <= 0 (Quiet's default), stays silent.
-static void ReportBreachNoise(ACompanionAIController* AIC, const AActor* Door, EBreachType Type)
-{
-	if (!IsValid(AIC) || !IsValid(Door)) return;
-
-	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
-	const FBreachNoiseProfile* Profile = Tuning ? Tuning->BreachNoise.Find(Type) : nullptr;
-	if (!Profile || Profile->Loudness <= 0.f || Profile->MaxRange <= 0.f) return;
-
-	UAISense_Hearing::ReportNoiseEvent(AIC->GetWorld(), Door->GetActorLocation(),
-		Profile->Loudness, AIC->GetPawn(), Profile->MaxRange, TEXT("Breach"));
-}
-
 UBTTask_CompanionBreach::UBTTask_CompanionBreach()
 {
 	NodeName = TEXT("Companion Breach");
@@ -45,9 +21,11 @@ UBTTask_CompanionBreach::UBTTask_CompanionBreach()
 
 EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
-	bMoveRequested = false;
-	bBreachTriggered = false;
-	BreachWaitElapsed = 0.f;
+	Phase = EBreachPhase::MovingToDoor;
+	bHasStandPoint = false;
+	AlignElapsed = 0.f;
+	PhaseElapsed = 0.f;
+	MontageLength = 0.f;
 	CachedDoor.Reset();
 
 	ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
@@ -72,7 +50,6 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 		return EBTNodeResult::Failed;
 	}
 
-	// Validate the door implements IBreachable and is in a breachable state.
 	if (!Door->GetClass()->ImplementsInterface(UBreachable::StaticClass()))
 	{
 		UE_LOG(LogCompanionBreach, Warning, TEXT("ExecuteTask: %s does not implement IBreachable"), *GetNameSafe(Door));
@@ -87,58 +64,48 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 		return EBTNodeResult::Failed;
 	}
 
-	CachedDoor = Door;
-
-	// Check if already within range.
 	APawn* Pawn = AIC->GetPawn();
-	if (IsValid(Pawn))
+	if (!IsValid(Pawn))
 	{
-		const float Dist = DistanceFromPawnToDoor(Pawn, Door);
-		if (Dist <= InteractionRange)
-		{
-			// Already close enough — breach immediately in TickTask.
-			UE_LOG(LogCompanionBreach, Log, TEXT("ExecuteTask: already within range (%.0f <= %.0f) of %s"),
-				Dist, InteractionRange, *GetNameSafe(Door));
-			return EBTNodeResult::InProgress;
-		}
-	}
-
-	// Issue move-to.
-	const EPathFollowingRequestResult::Type MoveResult =
-		AIC->MoveToActor(Door, MoveAcceptRadius, true, true, false, nullptr, true);
-
-	if (MoveResult == EPathFollowingRequestResult::Failed)
-	{
-		UE_LOG(LogCompanionBreach, Warning, TEXT("ExecuteTask: MoveToActor failed for %s"), *GetNameSafe(Door));
 		FailAndClear(OwnerComp);
 		return EBTNodeResult::Failed;
 	}
 
-	bMoveRequested = true;
-	UE_LOG(LogCompanionBreach, Log, TEXT("ExecuteTask: moving to %s (range=%.0f)"), *GetNameSafe(Door), InteractionRange);
+	CachedDoor = Door;
+	bHadCombatTargetAtStart = IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
+
+	// Stand point: where the breach montage was authored to play from. Doors provide one; a
+	// breachable with none falls back to "in front of its origin, facing it".
+	bHasStandPoint = IBreachable::Execute_GetBreachStandPoint(Door, Pawn, StandLocation, StandFacing);
+	if (!bHasStandPoint)
+	{
+		const FVector ToDoor = Door->GetActorLocation() - Pawn->GetActorLocation();
+		StandFacing = FRotator(0.f, ToDoor.Rotation().Yaw, 0.f);
+		StandLocation = Door->GetActorLocation() - ToDoor.GetSafeNormal2D() * 110.f;
+		StandLocation.Z = Pawn->GetActorLocation().Z;
+	}
+
+	const EPathFollowingRequestResult::Type MoveResult =
+		AIC->MoveToLocation(StandLocation, StandPointAcceptRadius, /*bStopOnOverlap*/ true,
+			/*bUsePathfinding*/ true, /*bProjectDestinationToNavigation*/ true);
+
+	if (MoveResult == EPathFollowingRequestResult::Failed)
+	{
+		UE_LOG(LogCompanionBreach, Warning, TEXT("ExecuteTask: move to stand point failed for %s"), *GetNameSafe(Door));
+		FailAndClear(OwnerComp);
+		return EBTNodeResult::Failed;
+	}
+
+	UE_LOG(LogCompanionBreach, Log, TEXT("ExecuteTask: moving to stand point of %s (standPoint=%d)"),
+		*GetNameSafe(Door), bHasStandPoint ? 1 : 0);
 	return EBTNodeResult::InProgress;
 }
 
 void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
-	// Post-breach: hold at the door for PostBreachWaitTime, then finish so Follow resumes.
-	if (bBreachTriggered)
-	{
-		BreachWaitElapsed += DeltaSeconds;
-		if (BreachWaitElapsed >= PostBreachWaitTime)
-		{
-			if (ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner()))
-			{
-				AIC->ClearActiveCommand();
-			}
-			CachedDoor.Reset();
-			FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
-		}
-		return;
-	}
-
 	ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
-	if (!IsValid(AIC))
+	APawn* Pawn = IsValid(AIC) ? AIC->GetPawn() : nullptr;
+	if (!IsValid(Pawn))
 	{
 		FailAndClear(OwnerComp);
 		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
@@ -148,81 +115,204 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	AActor* Door = CachedDoor.Get();
 	if (!IsValid(Door))
 	{
-		UE_LOG(LogCompanionBreach, Warning, TEXT("TickTask: door destroyed mid-task"));
-		FailAndClear(OwnerComp);
-		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-		return;
-	}
-
-	// Re-check breachability — door may have been opened by something else.
-	if (!IBreachable::Execute_CanBreach(Door))
-	{
-		UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: %s no longer breachable"), *GetNameSafe(Door));
-		FailAndClear(OwnerComp);
-		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-		return;
-	}
-
-	APawn* Pawn = AIC->GetPawn();
-	if (!IsValid(Pawn))
-	{
-		FailAndClear(OwnerComp);
-		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-		return;
-	}
-
-	const float Dist = DistanceFromPawnToDoor(Pawn, Door);
-	const bool bPathDone = (AIC->GetMoveStatus() == EPathFollowingStatus::Idle);
-
-	// Breach when genuinely adjacent (nav reached the door), OR when the path has completed and
-	// we're within the generous arrival cap (free-standing door / nav gap — got as close as we can).
-	const bool bShouldBreach = (Dist <= InteractionRange) || (bPathDone && Dist <= ArrivalBreachRange);
-
-	if (!bShouldBreach)
-	{
-		// If the path is done but we're still beyond the arrival cap, the companion genuinely
-		// couldn't reach the door — fail. Otherwise keep moving/waiting.
-		if (bMoveRequested && bPathDone)
+		// Destroyed during Holding = the breach already happened; the command still succeeded.
+		if (Phase == EBreachPhase::Holding)
 		{
-			UE_LOG(LogCompanionBreach, Warning, TEXT("TickTask: path completed but too far to breach (%.0f > %.0f)"),
-				Dist, ArrivalBreachRange);
+			AIC->ClearActiveCommand();
+			CachedDoor.Reset();
+			FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+			return;
+		}
+
+		UE_LOG(LogCompanionBreach, Warning, TEXT("TickTask: door destroyed mid-task"));
+		if (Phase == EBreachPhase::PlayingMontage)
+			if (ACharacter* Character = Cast<ACharacter>(Pawn)) Character->StopAnimMontage();
+		FailAndClear(OwnerComp);
+		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		return;
+	}
+
+	// Combat breaks off an in-flight breach: the fight takes priority, and the player re-pings
+	// the door afterwards. Only a NEWLY acquired target breaks off — a ping issued while already
+	// fighting is a deliberate override and proceeds. Once the montage has started
+	// (PlayingMontage/Holding) it completes — it's under a second and aborting mid-kick looks broken.
+	const UBlackboardComponent* TickBB = OwnerComp.GetBlackboardComponent();
+	const bool bInCombat = IsValid(TickBB)
+		&& IsValid(Cast<AActor>(TickBB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
+
+	if (bInCombat && !bHadCombatTargetAtStart
+		&& (Phase == EBreachPhase::MovingToDoor || Phase == EBreachPhase::Aligning))
+	{
+		UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: combat target acquired — breaking off breach of %s"), *GetNameSafe(Door));
+		FailAndClear(OwnerComp);
+		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		return;
+	}
+
+	switch (Phase)
+	{
+	case EBreachPhase::MovingToDoor:
+	{
+		// Door may have been opened by something else while we were walking over.
+		if (!IBreachable::Execute_CanBreach(Door))
+		{
+			UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: %s no longer breachable"), *GetNameSafe(Door));
 			FailAndClear(OwnerComp);
 			FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			return;
 		}
+
+		if (AIC->GetMoveStatus() != EPathFollowingStatus::Idle) return;
+
+		const float Dist = FVector::Dist2D(Pawn->GetActorLocation(), StandLocation);
+		if (Dist > MaxAlignSnapDistance)
+		{
+			UE_LOG(LogCompanionBreach, Warning, TEXT("TickTask: path completed but too far from stand point (%.0f > %.0f)"),
+				Dist, MaxAlignSnapDistance);
+			FailAndClear(OwnerComp);
+			FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			return;
+		}
+
+		// Re-query the stand point from where the pawn actually ended up: nav projection can land
+		// the move on the far side of the door, and the door flips the stand normal onto the
+		// breacher's CURRENT side — so the align target is never through the closed panel.
+		if (bHasStandPoint)
+			IBreachable::Execute_GetBreachStandPoint(Door, Pawn, StandLocation, StandFacing);
+
+		StartAlign(Pawn);
 		return;
 	}
 
-	// Within range (or arrived as close as possible) — execute breach.
-	AIC->StopMovement();
-	bBreachTriggered = true;
+	case EBreachPhase::Aligning:
+	{
+		// Opened elsewhere during the align beat — don't play a breach anim at an open door.
+		if (!IBreachable::Execute_CanBreach(Door))
+		{
+			FailAndClear(OwnerComp);
+			FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			return;
+		}
 
-	// Breach type was written by SetBreachType at confirm time (mode-derived).
-	const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
-	const EBreachType BreachType = BB
-		? static_cast<EBreachType>(BB->GetValueAsEnum(ACompanionAIController::BB_BreachType))
-		: EBreachType::Tactical;
+		AlignElapsed += DeltaSeconds;
+		const float Alpha = FMath::Clamp(AlignElapsed / AlignDuration, 0.f, 1.f);
+		const float Eased = FMath::InterpEaseInOut(0.f, 1.f, Alpha, 2.f);
 
-	if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn))
-		Companion->PlayBreachMontage(BreachType);
+		FVector NewLoc = FMath::Lerp(AlignStartLocation, StandLocation, Eased);
+		NewLoc.Z = Pawn->GetActorLocation().Z; // keep the capsule's own floor height
+		const float NewYaw = AlignStartYaw + FMath::FindDeltaAngleDegrees(AlignStartYaw, StandFacing.Yaw) * Eased;
+		Pawn->SetActorLocation(NewLoc, /*bSweep*/ true); // don't shove through the player/door
+		Pawn->SetActorRotation(FRotator(0.f, NewYaw, 0.f));
 
-	IBreachable::Execute_Breach(Door, Pawn);
-	ReportBreachNoise(AIC, Door, BreachType);
+		if (Alpha < 1.f) return;
 
-	UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: breached %s (type=%d) at dist=%.0f (pathDone=%d), holding %.1fs"),
-		*GetNameSafe(Door), static_cast<int32>(BreachType), Dist, bPathDone ? 1 : 0, PostBreachWaitTime);
-	BreachWaitElapsed = 0.f;
-	return;
+		// Aligned — start the montage; the door swings at the contact time.
+		const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+		PendingBreachType = BB
+			? static_cast<EBreachType>(BB->GetValueAsEnum(ACompanionAIController::BB_BreachType))
+			: EBreachType::Tactical;
+
+		MontageLength = 0.f;
+		if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn))
+			MontageLength = Companion->PlayBreachMontage(PendingBreachType);
+
+		const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
+		const float* TunedDelay = Tuning ? Tuning->BreachOpenDelay.Find(PendingBreachType) : nullptr;
+		OpenDelay = TunedDelay ? *TunedDelay : DefaultOpenDelay;
+		if (MontageLength > 0.f) OpenDelay = FMath::Min(OpenDelay, MontageLength);
+
+		Phase = EBreachPhase::PlayingMontage;
+		PhaseElapsed = 0.f;
+		UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: aligned at %s — montage len=%.2fs, door opens in %.2fs (type=%d)"),
+			*GetNameSafe(Door), MontageLength, MontageLength > 0.f ? OpenDelay : 0.f, static_cast<int32>(PendingBreachType));
+		return;
+	}
+
+	case EBreachPhase::PlayingMontage:
+	{
+		PhaseElapsed += DeltaSeconds;
+		if (MontageLength > 0.f && PhaseElapsed < OpenDelay) return;
+
+		OpenDoorNow(AIC, Door);
+		Phase = EBreachPhase::Holding;
+		PhaseElapsed = 0.f;
+		return;
+	}
+
+	case EBreachPhase::Holding:
+	{
+		PhaseElapsed += DeltaSeconds;
+		// Let the montage remainder play out, then the post-breach hold — but a fresh firefight
+		// cuts the hold short (door's already open; don't stand in the doorway under fire).
+		const float MontageRemainder = FMath::Max(0.f, MontageLength - OpenDelay);
+		const float HoldTime = (bInCombat && !bHadCombatTargetAtStart) ? 0.f : PostBreachWaitTime;
+		if (PhaseElapsed < MontageRemainder + HoldTime) return;
+
+		AIC->ClearActiveCommand();
+		CachedDoor.Reset();
+		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		return;
+	}
+	}
+}
+
+void UBTTask_CompanionBreach::StartAlign(APawn* Pawn)
+{
+	if (ACompanionAIController* AIC = Cast<ACompanionAIController>(Pawn->GetController()))
+	{
+		AIC->StopMovement();
+		AIC->ClearFocus(EAIFocusPriority::Gameplay); // nothing may fight the breach facing
+	}
+
+	AlignStartLocation = Pawn->GetActorLocation();
+	AlignStartYaw = Pawn->GetActorRotation().Yaw;
+	AlignElapsed = 0.f;
+	Phase = EBreachPhase::Aligning;
+}
+
+void UBTTask_CompanionBreach::OpenDoorNow(ACompanionAIController* AIC, AActor* Door)
+{
+	// The door may have been opened by something else during the wind-up — swing/noise only once.
+	if (!IBreachable::Execute_CanBreach(Door))
+	{
+		UE_LOG(LogCompanionBreach, Log, TEXT("OpenDoorNow: %s opened elsewhere during wind-up — skipping swing"), *GetNameSafe(Door));
+		return;
+	}
+
+	IBreachable::Execute_Breach(Door, AIC->GetPawn());
+
+	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
+	const FBreachNoiseProfile* Profile = Tuning ? Tuning->BreachNoise.Find(PendingBreachType) : nullptr;
+	if (Profile && Profile->Loudness > 0.f && Profile->MaxRange > 0.f)
+	{
+		UAISense_Hearing::ReportNoiseEvent(AIC->GetWorld(), Door->GetActorLocation(),
+			Profile->Loudness, AIC->GetPawn(), Profile->MaxRange, TEXT("Breach"));
+	}
+
+	UE_LOG(LogCompanionBreach, Log, TEXT("OpenDoorNow: breached %s (type=%d)"),
+		*GetNameSafe(Door), static_cast<int32>(PendingBreachType));
 }
 
 EBTNodeResult::Type UBTTask_CompanionBreach::AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
 {
+	// A replacement command should not leave the breach anim playing — the montage remainder
+	// still runs into the Holding phase, so cover both.
+	const float MontageRemainder = FMath::Max(0.f, MontageLength - OpenDelay);
+	const bool bMontageStillPlaying = (Phase == EBreachPhase::PlayingMontage)
+		|| (Phase == EBreachPhase::Holding && PhaseElapsed < MontageRemainder);
+	if (bMontageStillPlaying)
+	{
+		if (AAIController* AIC = OwnerComp.GetAIOwner())
+			if (ACharacter* Character = Cast<ACharacter>(AIC->GetPawn())) Character->StopAnimMontage();
+	}
+
 	FailAndClear(OwnerComp);
 	return EBTNodeResult::Aborted;
 }
 
 FString UBTTask_CompanionBreach::GetStaticDescription() const
 {
-	return FString::Printf(TEXT("Breach door within %.0f cm"), InteractionRange);
+	return FString::Printf(TEXT("Breach: align to stand point (accept %.0f cm), montage, door at contact"), StandPointAcceptRadius);
 }
 
 void UBTTask_CompanionBreach::FailAndClear(UBehaviorTreeComponent& OwnerComp)
@@ -243,7 +333,9 @@ void UBTTask_CompanionBreach::FailAndClear(UBehaviorTreeComponent& OwnerComp)
 	}
 
 	CachedDoor.Reset();
-	bMoveRequested = false;
-	bBreachTriggered = false;
-	BreachWaitElapsed = 0.f;
+	Phase = EBreachPhase::MovingToDoor;
+	bHasStandPoint = false;
+	AlignElapsed = 0.f;
+	PhaseElapsed = 0.f;
+	MontageLength = 0.f;
 }
