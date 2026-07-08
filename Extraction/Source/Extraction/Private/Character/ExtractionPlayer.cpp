@@ -11,6 +11,7 @@
 #include "Animation/AnimMontage.h"
 #include "Components/CapsuleComponent.h"
 #include "Camera/CameraComponent.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -39,6 +40,21 @@
 #include "EnemyDebug.h"
 #include "World/Lootable.h"
 #include "World/BreachableDoor.h"
+#include "HAL/IConsoleManager.h"
+
+// Live revive-arrangement tuning (paired with revive.* CVars in CompanionCharacter.cpp): rotates the
+// downed player's aligned body relative to the reviver. Tweak in PIE, bake the winner, leave at 0.
+static float GRevivePlayerYawOffset = 0.f;
+static FAutoConsoleVariableRef CVarRevivePlayerYawOffset(
+	TEXT("revive.PlayerYawOffset"), GRevivePlayerYawOffset,
+	TEXT("Extra yaw (deg) added to the downed player's revive alignment. 0 = face the reviver."));
+
+// Per-frame camera trace while DBNO/being-revived and for 2s after the revive — for pinning down
+// which rotation source jumps on the snap frame. `revive.CameraDebug 1` to enable.
+static int32 GReviveCameraDebug = 0;
+static FAutoConsoleVariableRef CVarReviveCameraDebug(
+	TEXT("revive.CameraDebug"), GReviveCameraDebug,
+	TEXT("1 = per-frame camera/control/body rotation trace around the revive (very chatty)."));
 
 AExtractionPlayer::AExtractionPlayer()
 	: bIsDBNO(false)
@@ -201,6 +217,51 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void AExtractionPlayer::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
+
+	// Snap-hunt trace: one line per frame while downed/being revived and for 2s after the revive.
+	// Whichever column jumps on the snap frame is the source.
+	if (GReviveCameraDebug && IsLocallyControlled())
+	{
+		const UWorld* World = GetWorld();
+		const float SinceRevive = World ? World->GetTimeSeconds() - LastReviveWorldTime : 1e9f;
+		if (bIsDBNO || bBeingRevivedAnimActive || SinceRevive < 2.f)
+		{
+			const APlayerController* PC = Cast<APlayerController>(GetController());
+			const FRotator CamRot = PC && PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraRotation() : FRotator::ZeroRotator;
+			const FVector CamLoc = PC && PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraLocation() : FVector::ZeroVector;
+			const FRotator CtrlRot = PC ? PC->GetControlRotation() : FRotator::ZeroRotator;
+			const USkeletalMeshComponent* MeshComp = GetMesh();
+			const float HeadYaw = MeshComp ? MeshComp->GetSocketRotation(TEXT("head")).Yaw : 0.f;
+			const USpringArmComponent* Arm = CachedSpringArm.Get();
+			const UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+			const UAnimMontage* ActiveMon = IsValid(AnimInst) ? AnimInst->GetCurrentActiveMontage() : nullptr;
+
+			UE_LOG(LogExtraction, Log,
+				TEXT("CAMTRACE t=%.3f cam=(%.1f,%.1f) camLoc=%s ctrl=(%.1f,%.1f) actorYaw=%.1f headYaw=%.1f armPCR=%d yawFollow=%d DBNO=%d beingRev=%d montage=%s"),
+				World ? World->GetTimeSeconds() : 0.f,
+				CamRot.Yaw, CamRot.Pitch, *CamLoc.ToCompactString(),
+				CtrlRot.Yaw, CtrlRot.Pitch,
+				GetActorRotation().Yaw, HeadYaw,
+				Arm ? (int32)Arm->bUsePawnControlRotation : -1,
+				(int32)bUseControllerRotationYaw, (int32)bIsDBNO, (int32)bBeingRevivedAnimActive,
+				*GetNameSafe(ActiveMon));
+		}
+	}
+
+	// Deferred DBNO free-look restore: hand the camera back to head-bone inheritance only once the
+	// head has converged with the view yaw (get-up montage fully blended out). Restoring the instant
+	// DBNO ends inherited a head still posed ~45° off — a hard snap + quarter-second swing-back.
+	// 1s cap = safety net (also covers FullDeath, which never restored the flag before).
+	if (bDBNOFreeLookActive && !bIsDBNO && !bBeingRevivedAnimActive && IsLocallyControlled())
+	{
+		const UWorld* World = GetWorld();
+		const float SinceRevive = World ? World->GetTimeSeconds() - LastReviveWorldTime : 1e9f;
+		const USkeletalMeshComponent* MeshComp = GetMesh();
+		const float HeadYaw = MeshComp ? MeshComp->GetSocketRotation(TEXT("head")).Yaw : GetActorRotation().Yaw;
+		const float CtrlYaw = IsValid(GetController()) ? GetController()->GetControlRotation().Yaw : HeadYaw;
+		if (FMath::Abs(FMath::FindDeltaAngleDegrees(HeadYaw, CtrlYaw)) < 5.f || SinceRevive > 1.f)
+			SetDBNOCameraFreeLook(false);
+	}
 
 	if (bIsDBNO && BleedoutTimeRemaining > 0.f)
 		BleedoutTimeRemaining = FMath::Max(BleedoutTimeRemaining - DeltaTime, 0.f);
@@ -384,6 +445,8 @@ void AExtractionPlayer::DoAim(float Yaw, float Pitch)
 {
 	if (!IsValid(GetController())) return;
 	if (bTakedownMontageActive) return;
+	// Being-revived does NOT lock look: yaw-follow is suspended (SetBeingRevived), so the camera
+	// spins freely while the animated body stays put. Only movement stays locked (DoMove).
 
 	AddControllerYawInput(Yaw);
 	AddControllerPitchInput(Pitch);
@@ -392,6 +455,7 @@ void AExtractionPlayer::DoAim(float Yaw, float Pitch)
 void AExtractionPlayer::DoMove(float Right, float Forward)
 {
 	if (IsInTraversal()) return;
+	if (bBeingRevivedAnimActive) return;
 	if (!IsValid(GetController())) return;
 
 	AddMovementInput(GetActorRightVector(), Right);
@@ -691,6 +755,8 @@ void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 	ReviveTarget = Target;
 	ReviveElapsed = 0.f;
 	bIsReviving = true;
+	Target->SetBeingRevived(true, ReviveDuration);
+	Target->AlignForRevive(GetActorLocation());
 
 	UE_LOG(LogExtraction, Verbose, TEXT("'%s' began reviving '%s'"), *GetNameSafe(this), *GetNameSafe(Target));
 }
@@ -981,6 +1047,12 @@ float AExtractionPlayer::GetHitboxDamageMultiplier(const FDamageEvent& DamageEve
 
 float AExtractionPlayer::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
+	// Post-revive grace: full immunity for a beat after standing up, or a mid-burst enemy re-downs
+	// the player the frame the revive completes.
+	if (!bIsDBNO && GetWorld()
+		&& (GetWorld()->GetTimeSeconds() - LastReviveWorldTime) < PostReviveDamageGraceSeconds)
+		return 0.f;
+
 	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 	const float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent);
 
@@ -1040,6 +1112,8 @@ void AExtractionPlayer::EnterDBNO()
 		}
 	}
 
+	SetDBNOCameraFreeLook(true);
+
 	OnDBNOStateChanged.Broadcast(true, BleedoutDuration);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' entered DBNO (%.0fs bleedout)"), *GetNameSafe(this), BleedoutDuration);
 }
@@ -1069,6 +1143,14 @@ void AExtractionPlayer::ExitDBNO()
 	}
 	UnCrouch();
 
+	SetBeingRevived(false);
+	// Free-look restore is DEFERRED to Tick: flipping the spring arm back to bone-inheritance here,
+	// while the get-up montage still poses the head ~45° off the view, snapped the camera 47° and
+	// swung it back over the blend-out (CAMTRACE-verified). Tick restores once the head converges.
+
+	if (const UWorld* World = GetWorld())
+		LastReviveWorldTime = World->GetTimeSeconds();
+
 	OnDBNOStateChanged.Broadcast(false, 0.f);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' revived at %.0f%% health"), *GetNameSafe(this), ReviveHealthPercent * 100.f);
 }
@@ -1094,6 +1176,181 @@ void AExtractionPlayer::FullDeath()
 
 	// TODO: Ragdoll, drop loot, spectate camera
 	UE_LOG(LogExtraction, Log, TEXT("'%s' is fully dead"), *GetNameSafe(this));
+}
+
+void AExtractionPlayer::SetDBNOCameraFreeLook(bool bEnable)
+{
+	if (!IsLocallyControlled()) return;
+	if (bEnable == bDBNOFreeLookActive) return;
+
+	USpringArmComponent* Arm = CachedSpringArm.Get();
+	if (!IsValid(Arm))
+	{
+		Arm = FindComponentByClass<USpringArmComponent>();
+		CachedSpringArm = Arm;
+	}
+	if (!IsValid(Arm)) return;
+
+	bDBNOFreeLookActive = bEnable;
+	if (bEnable)
+	{
+		bSavedSpringArmUsePawnControlRotation = Arm->bUsePawnControlRotation;
+		Arm->bUsePawnControlRotation = true;
+	}
+	else
+		Arm->bUsePawnControlRotation = bSavedSpringArmUsePawnControlRotation;
+}
+
+void AExtractionPlayer::SetBeingRevived(bool bBeingRevived, float ExpectedDuration)
+{
+	if (bBeingRevived == bBeingRevivedAnimActive)
+	{
+		// Redundant false→false calls are normal teardown (montage-driven exit already cleared the
+		// state); only a stale TRUE at hold start is a real problem (player would stay flat).
+		if (bBeingRevived)
+			UE_LOG(LogExtraction, Warning, TEXT("SetBeingRevived(true): flag already true — montage NOT retriggered, player will stay flat"));
+		return;
+	}
+	bBeingRevivedAnimActive = bBeingRevived;
+
+	// Yaw-follow suspension: controller yaw re-slaves the actor every frame, which would stomp
+	// AlignForRevive's facing and let look input drag the animated body. Input locks live in
+	// DoAim/DoMove (gated on bBeingRevivedAnimActive).
+	if (bBeingRevived)
+	{
+		bSavedUseControllerRotationYaw = bUseControllerRotationYaw;
+		bUseControllerRotationYaw = false;
+	}
+	else
+	{
+		bUseControllerRotationYaw = bSavedUseControllerRotationYaw;
+
+		// Align the body to the view the player held during the revive in the SAME frame yaw-follow
+		// resumes — otherwise the head-bone-inherited camera shows one frame of the old body yaw and
+		// then swings as the body re-slaves: the end-of-revive camera snap. Skip while still DBNO
+		// (abort path): the downed body must not spin to the free-look camera.
+		if (!bIsDBNO && bUseControllerRotationYaw)
+		{
+			if (AController* PC = GetController())
+				SetActorRotation(FRotator(0.f, PC->GetControlRotation().Yaw, 0.f));
+		}
+	}
+
+	// Hide the held weapon while the paired revive anims play (the clips are authored empty-handed);
+	// restored on every exit path since all of them come back through here with false.
+	// SetWeaponHidden, not SetActorHiddenInGame: the visible gun is a separate visual actor.
+	if (IsValid(WeaponComponent))
+	{
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
+			Weapon->SetWeaponHidden(bBeingRevived);
+	}
+
+	// The kit's VISIBLE third-person gun is a separate BP-spawned actor (BP_Item_Base's Item_Mesh)
+	// attached to a hand socket — C++ has no direct ref (BP-only SpawnedItemRef), so hide any actor
+	// hanging off the weapon-hand sockets. Covers the gun body + its attachment meshes in one call.
+	TArray<AActor*> AttachedActors;
+	GetAttachedActors(AttachedActors);
+	for (AActor* Attached : AttachedActors)
+	{
+		const USceneComponent* AttachedRoot = IsValid(Attached) ? Attached->GetRootComponent() : nullptr;
+		const FName Socket = AttachedRoot ? AttachedRoot->GetAttachSocketName() : NAME_None;
+		if (Socket == TEXT("ik_hand_gun") || Socket == TEXT("ItemHand_R") || Socket == TEXT("ItemHand_L"))
+			Attached->SetActorHiddenInGame(bBeingRevived);
+	}
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst) || !BeingRevivedMontage)
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("SetBeingRevived(%d): no anim instance or no BeingRevivedMontage assigned — player stays flat"),
+			bBeingRevived);
+		return;
+	}
+
+	if (bBeingRevived && bIsDBNO)
+	{
+		if (!AnimInst->Montage_IsPlaying(BeingRevivedMontage))
+		{
+			// Rate-scale so one montage cycle spans the reviver's hold exactly — the get-up motion
+			// lands on the frame the revive completes, whatever the hold duration is tuned to.
+			const float MontageLength = BeingRevivedMontage->GetPlayLength();
+			const float PlayRate = (ExpectedDuration > 0.f && MontageLength > 0.f)
+				? MontageLength / ExpectedDuration : 1.f;
+			const float PlayLength = AnimInst->Montage_Play(BeingRevivedMontage, PlayRate);
+			UE_LOG(LogExtraction, Log, TEXT("SetBeingRevived: playing '%s' rate=%.3f -> playLength=%.2f (bIsDBNO=%d expectDur=%.2f)"),
+				*GetNameSafe(BeingRevivedMontage), PlayRate, PlayLength, bIsDBNO, ExpectedDuration);
+			if (PlayLength <= 0.f)
+			{
+				UE_LOG(LogExtraction, Warning, TEXT("%s: BeingRevivedMontage '%s' failed to play (slot/skeleton mismatch?)"),
+					*GetName(), *GetNameSafe(BeingRevivedMontage));
+			}
+			else
+			{
+				// The get-up montage owns revive completion: its natural blend-out fires ExitDBNO at
+				// the frame the character is upright. The reviver's timer stays as fallback only.
+				FOnMontageBlendingOutStarted BlendOutDelegate;
+				BlendOutDelegate.BindUObject(this, &AExtractionPlayer::OnBeingRevivedMontageBlendOut);
+				AnimInst->Montage_SetBlendingOutDelegate(BlendOutDelegate, BeingRevivedMontage);
+			}
+		}
+	}
+	else if (bBeingRevived && !bIsDBNO)
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("SetBeingRevived(true) but bIsDBNO=false — being-revived montage skipped, player will not pose"));
+	}
+	else if (AnimInst->Montage_IsPlaying(BeingRevivedMontage))
+		AnimInst->Montage_Stop(0.25f, BeingRevivedMontage);
+}
+
+void AExtractionPlayer::AlignForRevive(const FVector& ReviverLocation)
+{
+	if (!bIsDBNO) return;
+
+	// The downed player's body IS the arrangement anchor: keep its current yaw (the reviver snaps
+	// into the player's frame instead), plus the live-tuning offset. ReviverLocation is now only
+	// logged for diagnostics.
+	const float PreYaw = GetActorRotation().Yaw;
+	const float AlignYaw = PreYaw + GRevivePlayerYawOffset;
+	if (!FMath::IsNearlyZero(GRevivePlayerYawOffset))
+		SetActorRotation(FRotator(0.f, AlignYaw, 0.f));
+	UE_LOG(LogExtraction, Log,
+		TEXT("REVIVE ALIGN(player): loc=%s yaw %.1f -> %.1f (yawOffset=%.1f) reviverLoc=%s dist2D=%.1f meshRelYaw=%.1f"),
+		*GetActorLocation().ToCompactString(), PreYaw, AlignYaw, GRevivePlayerYawOffset,
+		*ReviverLocation.ToCompactString(),
+		FVector::Dist2D(GetActorLocation(), ReviverLocation),
+		GetMesh() ? GetMesh()->GetRelativeRotation().Yaw : 0.f);
+
+	// No control-rotation sync: the player looks around freely during the revive (yaw-follow is
+	// suspended, so the view can't drag the body). On get-up the body aligns to wherever they're
+	// looking — normal FPS control resume.
+}
+
+void AExtractionPlayer::OnBeingRevivedMontageBlendOut(UAnimMontage* Montage, bool bInterrupted)
+{
+	// Interrupted = manual stop (task abort/finish) or a same-slot stomp — the active-montage name
+	// identifies a stomper when the get-up visibly cuts out mid-hold.
+	if (bInterrupted)
+	{
+		const USkeletalMeshComponent* MeshComp = GetMesh();
+		const UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+		const UAnimMontage* Active = IsValid(AnimInst) ? AnimInst->GetCurrentActiveMontage() : nullptr;
+		UE_LOG(LogExtraction, Log, TEXT("Being-revived montage INTERRUPTED (bIsDBNO=%d beingRevived=%d activeMontage=%s)"),
+			bIsDBNO, bBeingRevivedAnimActive, *GetNameSafe(Active));
+		return;
+	}
+
+	if (!bIsDBNO || !bBeingRevivedAnimActive || !HasAuthority()) return;
+
+	UE_LOG(LogExtraction, Log, TEXT("Being-revived montage completed get-up — montage-driven ExitDBNO"));
+	ExitDBNO();
+}
+
+bool AExtractionPlayer::IsBeingRevivedMontagePlaying() const
+{
+	if (!BeingRevivedMontage) return false;
+	const USkeletalMeshComponent* MeshComp = GetMesh();
+	const UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+	return IsValid(AnimInst) && AnimInst->Montage_IsPlaying(BeingRevivedMontage);
 }
 
 void AExtractionPlayer::OnRep_IsDBNO()
@@ -1124,6 +1381,11 @@ void AExtractionPlayer::OnRep_IsDBNO()
 
 	if (bIsDBNO)
 		BleedoutTimeRemaining = BleedoutDuration;
+
+	if (!bIsDBNO) SetBeingRevived(false);
+	// Enable-only here: the restore is deferred to Tick until the head bone converges with the view
+	// (same camera-snap avoidance as ExitDBNO).
+	if (bIsDBNO) SetDBNOCameraFreeLook(true);
 
 	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
 }
@@ -1199,6 +1461,8 @@ void AExtractionPlayer::CancelRevive()
 	UE_LOG(LogExtraction, Verbose, TEXT("'%s' cancelled revive on '%s'"),
 		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
 
+	if (IsValid(ReviveTarget)) ReviveTarget->SetBeingRevived(false);
+
 	bIsReviving = false;
 	ReviveElapsed = 0.f;
 	ReviveTarget = nullptr;
@@ -1216,6 +1480,8 @@ void AExtractionPlayer::CompleteRevive()
 		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
 
 	Server_CompleteRevive(ReviveTarget);
+
+	if (IsValid(ReviveTarget)) ReviveTarget->SetBeingRevived(false);
 
 	bIsReviving = false;
 	ReviveElapsed = 0.f;
@@ -1300,4 +1566,17 @@ void AExtractionPlayer::CompDebug(bool bFreeze)
 	else Brain->RestartLogic();
 
 	UE_LOG(LogCompanion, Log, TEXT("CompDebug freeze -> %d"), bFreeze);
+}
+
+void AExtractionPlayer::PlayerDown()
+{
+	if (!HasAuthority()) { UE_LOG(LogExtraction, Warning, TEXT("PlayerDown: no authority")); return; }
+	if (bIsDBNO) { UE_LOG(LogExtraction, Warning, TEXT("PlayerDown: already DBNO")); return; }
+	if (!IsValid(HealthComponent)) { UE_LOG(LogExtraction, Warning, TEXT("PlayerDown: no health component")); return; }
+	// After a full death HealthComponent stays bIsDead; Die() would early-return, so the exec would
+	// silently no-op while logging success. Revive resets bIsDead, so this only blocks post-bleedout.
+	if (HealthComponent->IsDead()) { UE_LOG(LogExtraction, Warning, TEXT("PlayerDown: already fully dead — revive/respawn first")); return; }
+
+	UE_LOG(LogExtraction, Log, TEXT("PlayerDown: forcing DBNO via console"));
+	HealthComponent->Die();
 }

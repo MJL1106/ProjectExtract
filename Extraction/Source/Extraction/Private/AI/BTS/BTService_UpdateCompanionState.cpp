@@ -401,7 +401,23 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			const bool bExistingAlive = !StickHealth || !StickHealth->IsDead();
 			const float ExistingDistSq = FVector::DistSquared(MyLocation, ExistingTarget->GetActorLocation());
 			constexpr float StickinessRatioSq = 0.56f; // new pick must be ~25% closer to steal focus
-			if (bExistingAlive && BestVisibleDistSq > ExistingDistSq * StickinessRatioSq)
+			// Rescue commitment: while the player is DBNO, a live, still-visible target is NEVER
+			// swapped for a nearer one — kill it, then take the next. Every swap re-validates
+			// cover/aim/arc and stalls the clear. Exceptions: flanker-steal below, and a body
+			// charger — a new pick inside the revive threat ring outranks a committed target
+			// that isn't (an enemy walking up to the downed player must not be ignored).
+			bool bBodyChargerSteal = false;
+			if (bPlayerDBNO && DBNOBiasThreatRadiusSq > 0.f)
+			{
+				const bool bNewIsBodyThreat =
+					FVector::DistSquared(BestVisible->GetActorLocation(), DBNOPlayerLoc) <= DBNOBiasThreatRadiusSq;
+				const bool bExistingIsBodyThreat =
+					FVector::DistSquared(ExistingTarget->GetActorLocation(), DBNOPlayerLoc) <= DBNOBiasThreatRadiusSq;
+				bBodyChargerSteal = bNewIsBodyThreat && !bExistingIsBodyThreat;
+			}
+			const bool bDistanceAllowsSteal =
+				(!bPlayerDBNO && BestVisibleDistSq <= ExistingDistSq * StickinessRatioSq) || bBodyChargerSteal;
+			if (bExistingAlive && !bDistanceAllowsSteal)
 			{
 				FHitResult StickHit;
 				FCollisionQueryParams StickParams(SCENE_QUERY_STAT(CompanionTargetStick), true);
@@ -745,7 +761,15 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			Companion->SetPosture(ECompanionPosture::Combat);
 		}
 		bLoweredOnTargetLoss = false;
-		if (bReadyOnlyThreat)
+		// Revive hold owns aim/stance: the kneeling revive must not fight a per-tick ADS re-assert
+		// (the aim layer also overrides the montage slot pose — weapon-up while kneeling).
+		if (Companion->IsRevivingPlayer())
+		{
+			Companion->SetLowReadyAim(true);
+			Companion->SetAimTarget(nullptr);
+			Controller->ClearFocus(EAIFocusPriority::Gameplay);
+		}
+		else if (bReadyOnlyThreat)
 		{
 			// Ready stance vs a searching-but-not-engaged enemy (e.g. a takedown neighbour
 			// investigating the body): cover it while standing, but never hard-face it while
@@ -926,16 +950,24 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				break;
 			}
 
-			// Also check alerted enemies beyond the radius but with LoS to the downed player
+			// Also check enemies beyond the radius with LoS to the downed player — but only ones
+			// actively IN COMBAT within ReviveLoSThreatRadius. Searching enemies parked on the
+			// DBNO standoff ring keep an eye-line to the body indefinitely in open maps; counting
+			// them held the window shut until desperation every single time.
 			if (!bHot)
 			{
+				const float LoSThreatRadiusSq = FMath::Square(Companion->ReviveLoSThreatRadius);
 				for (AActor* Actor : PerceivedActors)
 				{
 					const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Actor);
 					if (!IsValid(Enemy)) continue;
-					if (!Enemy->IsAlertedForCompanionReadiness()) continue;
 					const UHealthComponent* EHP = Enemy->GetHealthComponent();
 					if (EHP && EHP->IsDead()) continue;
+
+					const AEnemyAIController* LosAIC = Cast<AEnemyAIController>(Enemy->GetController());
+					const UEnemyAwarenessComponent* LosAwareness = LosAIC ? LosAIC->GetAwarenessComponent() : nullptr;
+					if (!LosAwareness || LosAwareness->GetAwarenessState() != EEnemyAwarenessState::Combat) continue;
+					if (FVector::DistSquared(Enemy->GetActorLocation(), PlayerLoc) > LoSThreatRadiusSq) continue;
 
 					FHitResult RevLosHit;
 					FCollisionQueryParams RevLosParams(SCENE_QUERY_STAT(ReviveWindowLoS), true);
@@ -960,13 +992,43 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				ReviveSafeAccumulator += DeltaSeconds;
 			}
 
+			const bool bDesperation =
+				PlayerIface->GetBleedoutTimeRemaining() <= Companion->DesperationBleedoutThreshold;
+
+			// Committed rescue: once open, the window stays LATCHED — ring enemies flipping back to
+			// Combat as the companion breaks off must not yank it out mid-approach (the open/shut
+			// flicker aborted every rescue ~4s in). The latch drops only on bail: threats hot AND
+			// companion critically low, and desperation overrides even that (a last-ditch attempt
+			// beats a guaranteed bleedout).
+			const UHealthComponent* CompanionHealth = Companion->GetHealthComponent();
+			const float CompanionHealthFrac = IsValid(CompanionHealth) ? CompanionHealth->GetHealthPercent() : 1.f;
+			const bool bBail = bLastReviveWindowOpen && bHot && !bDesperation
+				&& CompanionHealthFrac < Companion->RescueBailHealthFraction;
+
+			if (bBail)
+			{
+				if (bDebugLogging)
+					UE_LOG(LogCompanionAI, Log, TEXT("%s: RESCUE BAIL hp=%.0f%% — re-fighting until safer"),
+						*Companion->GetName(), CompanionHealthFrac * 100.f);
+			}
+			else if (bLastReviveWindowOpen)
+				bReviveWindowOpen = true;
 			// Desperation override: bleedout nearly out
-			if (PlayerIface->GetBleedoutTimeRemaining() <= Companion->DesperationBleedoutThreshold)
+			else if (bDesperation)
 				bReviveWindowOpen = true;
 			// Grace period elapsed
 			else if (ReviveSafeAccumulator >= Companion->ReviveSafeGraceSeconds)
 				bReviveWindowOpen = true;
 		}
+
+		if (bDebugLogging && bReviveWindowOpen != bLastReviveWindowOpen)
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: REVIVE WINDOW %s (latched=%d bleedout=%.1fs safeAccum=%.2fs)"),
+				*Companion->GetName(), bReviveWindowOpen ? TEXT("OPEN") : TEXT("SHUT"),
+				(int32)Companion->IsRevivingPlayer(), PlayerIface->GetBleedoutTimeRemaining(), ReviveSafeAccumulator);
+		bLastReviveWindowOpen = bReviveWindowOpen;
+
+		// Approach damage resist rides the committed rescue (hold-phase resist is bIsRevivingPlayer).
+		Companion->SetRescueCommitted(bReviveWindowOpen);
 
 		BB->SetValueAsBool(ReviveWindowOpenKey.SelectedKeyName, bReviveWindowOpen);
 	}
@@ -974,6 +1036,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	{
 		BB->SetValueAsBool(ReviveWindowOpenKey.SelectedKeyName, false);
 		ReviveSafeAccumulator = 0.f;
+		bLastReviveWindowOpen = false;
+		Companion->SetRescueCommitted(false);
 	}
 
 	// --- Posture-driven scoring weights + posture mirror to BB ---

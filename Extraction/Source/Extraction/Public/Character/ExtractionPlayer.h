@@ -27,6 +27,7 @@ class UWeaponComponent;
 class UTraversalComponent;
 class UCompanionCommandComponent;
 class UAnimMontage;
+class USpringArmComponent;
 struct FInputActionValue;
 
 // Distinct name from the legacy AExtractionCharacter declaration to avoid linker conflicts during the migration period.
@@ -123,6 +124,25 @@ public:
 
 	/** Exit DBNO state and restore health/movement. Called server-side. */
 	virtual void ExitDBNO() override;
+
+	/** Plays/stops the being-revived montage on the body mesh while a reviver holds the revive.
+	 *  ExpectedDuration > 0 rate-scales the montage to span the hold exactly. Also locks look/move
+	 *  input and suspends controller-yaw follow so AlignForRevive's facing sticks. */
+	virtual void SetBeingRevived(bool bBeingRevived, float ExpectedDuration = 0.f) override;
+
+	/** Rotates the downed body to face the reviver for the paired revive anims. */
+	virtual void AlignForRevive(const FVector& ReviverLocation) override;
+
+	/** Diagnostic: true while BeingRevivedMontage is playing on the body mesh. */
+	virtual bool IsBeingRevivedMontagePlaying() const override;
+
+	virtual const UAnimMontage* GetBeingRevivedMontage() const override { return BeingRevivedMontage; }
+
+	/** Montage-driven revive completion: fires when the being-revived get-up montage starts blending
+	 *  out. A natural end (not interrupted) completes the revive at the exact frame the character is
+	 *  upright — ExitDBNO here instead of on the reviver's timer, killing the "blends back down to
+	 *  crawl, then pops up" seam. Interrupted = stomped/aborted; logged, no exit. */
+	void OnBeingRevivedMontageBlendOut(UAnimMontage* Montage, bool bInterrupted);
 
 	// ---- IExtractionPlayerInterface ----
 
@@ -311,6 +331,18 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "5.0"))
 	float ReviveTraceSphereRadius = 30.f;
 
+	/** Single-shot get-up montage played on the body mesh while someone is actively reviving this
+	 *  player — designer assigns in BP. Missing = no being-revived anim (revive still works via the
+	 *  fallback timer). Must be NON-looping: its natural blend-out is what completes the revive
+	 *  (OnBeingRevivedMontageBlendOut → ExitDBNO); a looping asset would never fire it. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
+	TObjectPtr<UAnimMontage> BeingRevivedMontage;
+
+	/** Seconds of full damage immunity after a revive — without it a mid-burst enemy re-downs the
+	 *  player the frame they stand up. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
+	float PostReviveDamageGraceSeconds = 3.f;
+
 	// ---- Auto-Lean Config ----
 
 	/** Sideways distance (cm) from probe origin to test for a wall. */
@@ -449,6 +481,24 @@ private:
 	void OnBleedoutExpired();
 	void FullDeath();
 
+	/** While downed, the BP spring arm (which inherits head-bone pitch/yaw for the procedural FP
+	 *  camera) switches to pawn control rotation so the crawl/revive anims can't drag the view.
+	 *  Local-only cosmetic; restores the saved flag on revive. */
+	void SetDBNOCameraFreeLook(bool bEnable);
+
+	/** BP-owned spring arm, resolved lazily by class (C++ has no camera components). */
+	TWeakObjectPtr<USpringArmComponent> CachedSpringArm;
+
+	bool bDBNOFreeLookActive = false;
+	bool bSavedSpringArmUsePawnControlRotation = false;
+
+	/** True while a reviver holds the revive on this player; gates the montage against re-triggers,
+	 *  locks look/move input (DoAim/DoMove), and marks controller-yaw follow as suspended. */
+	bool bBeingRevivedAnimActive = false;
+
+	/** bUseControllerRotationYaw as it was before the being-revived lock suspended it. */
+	bool bSavedUseControllerRotationYaw = false;
+
 	float GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const;
 
 	UFUNCTION()
@@ -459,6 +509,9 @@ private:
 
 	/** Pre-DBNO crouched speed, restored on ExitDBNO. */
 	float SavedMaxWalkSpeedCrouched = 0.f;
+
+	/** World time of the last revive — drives the post-revive damage grace. */
+	float LastReviveWorldTime = -1e9f;
 
 	FTimerHandle BleedoutTimerHandle;
 
@@ -492,6 +545,11 @@ private:
 	// console: CompDebug 1 — pause the companion's AI so CompAim/CompFire/CompReload stick; CompDebug 0 — resume.
 	UFUNCTION(Exec)
 	void CompDebug(bool bFreeze);
+
+	/** console: PlayerDown — force this player into DBNO (zeroes health via the normal death path)
+	 *  so the companion revive can be tested on demand. */
+	UFUNCTION(Exec)
+	void PlayerDown();
 
 	// ---- Takedown state ----
 

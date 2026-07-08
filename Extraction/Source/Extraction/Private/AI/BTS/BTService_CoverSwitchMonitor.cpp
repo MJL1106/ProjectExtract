@@ -15,6 +15,7 @@
 #include "CompanionAIController.h"
 #include "CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "EnemyCharacter.h"
 #include "EnemyArchetypeData.h"
 #include "WeaponBase.h"
@@ -362,6 +363,22 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	{
 		if (bCompromiseBreak) VacateCompromised();
 		return;
+	}
+
+	// Rescue doctrine: while the player is DBNO, score-improvement and advance switches are churn —
+	// the companion holds its point and fights. Only the safety paths (compromise break above,
+	// trigger-clear exit earlier) may still move it; skip the candidate search entirely otherwise.
+	if (!bCompromiseBreak)
+	{
+		if (const IExtractionPlayerInterface* DBNOPlayer = Cast<IExtractionPlayerInterface>(Player))
+		{
+			if (DBNOPlayer->GetIsDBNO())
+			{
+				Mem.PendingBestCover = FCoverHandle();
+				Mem.ConsecutiveBetterCount = 0;
+				return;
+			}
+		}
 	}
 
 	// Combat mode anchors the candidate search AHEAD of the player (mirrors the FollowPlayer lead)

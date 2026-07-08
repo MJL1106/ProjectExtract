@@ -42,6 +42,15 @@ public:
 	/** Called by the fire task when an advance relocate actually commits. */
 	void NotifyAdvanceExecuted();
 
+	/** True when a DBNO back-off wants a retreat relocate to deeper cover. Consumers must check
+	 *  this (and validate their cover) BEFORE ConsumeRetreatRequest, so a failed setup doesn't
+	 *  burn the one-shot. */
+	bool HasRetreatRequest() const { return bRetreatRequested; }
+
+	/** One-shot: consuming clears the latch and stamps a repeat cooldown, so a retreat that leaves
+	 *  the enemy inside the standoff ring re-requests after RetreatRepeatCooldown instead of spamming. */
+	bool ConsumeRetreatRequest();
+
 	/** Stops evaluation permanently (pawn died). */
 	void DeactivateForDeath();
 
@@ -50,11 +59,18 @@ private:
 	float ComputeAggression01(const AEnemyCharacter* Enemy, const UEnemyArchetypeData* DA,
 		const AActor* Target) const;
 
+	/** Downed-player standoff: returns true (and requests a one-shot retreat when inside the ring)
+	 *  if a hostile player is DBNO — posture is fully overridden while this holds. */
+	bool ApplyDBNOStandoffOverride(const AEnemyCharacter* Enemy, const UEnemyArchetypeData* DA);
+
 	EEnemyPosture CurrentPosture = EEnemyPosture::Hold;
 	float PressHeldSeconds = 0.f;
 	bool bAdvanceRequested = false;
 	float LastAdvanceWorldTime = -1e9f;
 	bool bStopped = false;
+
+	bool bRetreatRequested = false;
+	float LastRetreatConsumeWorldTime = -1e9f;
 
 	FTimerHandle EvalTimerHandle;
 };

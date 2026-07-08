@@ -105,6 +105,10 @@ public:
 	void GetExtraKnownThreats(const AActor* ExcludeTarget, int32 MaxCount, float MemorySeconds,
 		TArray<FEnemyKnownThreat>& OutThreats) const;
 
+	/** The local player's pawn if it is currently DBNO, else nullptr. Shared by the posture
+	 *  standoff override and the search-converge clamp. */
+	static APawn* FindDownedPlayerPawn(const UObject* WorldContext);
+
 private:
 
 	/** Per-stimulus-source suspicion bookkeeping. */

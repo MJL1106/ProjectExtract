@@ -47,6 +47,9 @@ private:
 	FVector LastMoveTarget = FVector::ZeroVector;
 	bool bIsIdling = false;
 
+	/** ~1Hz throttle for the sprint-mode rescue-approach diagnostic log. */
+	float SprintLogAccumulator = 0.f;
+
 	/** Mode seen last tick — a change drops the idle latch so the new formation applies immediately
 	 *  (e.g. switching to Combat while stationary sends the companion to the lead point). */
 	ECompanionMode LastSeenMode = ECompanionMode::Normal;

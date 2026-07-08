@@ -72,4 +72,7 @@ private:
 
 	/** Accumulated safe-seconds (no nearby threats) while the player is DBNO. Resets on threat detection. */
 	float ReviveSafeAccumulator = 0.f;
+
+	/** Edge-detect for the window open/close diagnostic log. */
+	bool bLastReviveWindowOpen = false;
 };

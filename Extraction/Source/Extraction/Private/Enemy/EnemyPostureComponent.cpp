@@ -17,6 +17,8 @@ static constexpr float PassiveSuppressionThreshold = 0.25f;
 static constexpr float SquadAdvantageSaturation = 3.f;
 /** Fallback eval interval when the archetype DA is not yet available at BeginPlay. */
 static constexpr float DefaultEvalInterval = 0.5f;
+/** Minimum seconds between DBNO-standoff retreat relocates for one enemy. */
+static constexpr float RetreatRepeatCooldown = 8.f;
 
 UEnemyPostureComponent::UEnemyPostureComponent()
 {
@@ -50,6 +52,7 @@ void UEnemyPostureComponent::DeactivateForDeath()
 	bStopped = true;
 	CurrentPosture = EEnemyPosture::Hold;
 	bAdvanceRequested = false;
+	bRetreatRequested = false;
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(EvalTimerHandle);
 }
@@ -68,6 +71,15 @@ void UEnemyPostureComponent::NotifyAdvanceExecuted()
 	PressHeldSeconds = 0.f;
 }
 
+bool UEnemyPostureComponent::ConsumeRetreatRequest()
+{
+	if (!bRetreatRequested) return false;
+	bRetreatRequested = false;
+	const UWorld* World = GetWorld();
+	LastRetreatConsumeWorldTime = World ? World->GetTimeSeconds() : 0.f;
+	return true;
+}
+
 void UEnemyPostureComponent::EvaluatePosture()
 {
 	if (bStopped) return;
@@ -76,11 +88,25 @@ void UEnemyPostureComponent::EvaluatePosture()
 	if (!IsValid(Enemy)) return;
 
 	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
-	if (!IsValid(DA) || !DA->bPostureSystemEnabled)
+	if (!IsValid(DA))
 	{
 		CurrentPosture = EEnemyPosture::Hold;
 		PressHeldSeconds = 0.f;
 		bAdvanceRequested = false;
+		bRetreatRequested = false;
+		return;
+	}
+
+	// Downed hostile player = full posture override (runs even with the posture system disabled,
+	// so rushers and posture-off archetypes still back off from a DBNO player).
+	if (ApplyDBNOStandoffOverride(Enemy, DA)) return;
+
+	if (!DA->bPostureSystemEnabled)
+	{
+		CurrentPosture = EEnemyPosture::Hold;
+		PressHeldSeconds = 0.f;
+		bAdvanceRequested = false;
+		bRetreatRequested = false;
 		return;
 	}
 
@@ -145,6 +171,43 @@ void UEnemyPostureComponent::EvaluatePosture()
 
 	CurrentPosture = EEnemyPosture::Hold;
 	PressHeldSeconds = 0.f;
+}
+
+bool UEnemyPostureComponent::ApplyDBNOStandoffOverride(const AEnemyCharacter* Enemy, const UEnemyArchetypeData* DA)
+{
+	if (DA->DBNOStandoffRadius <= 0.f)
+	{
+		bRetreatRequested = false;
+		return false;
+	}
+
+	const APawn* Downed = UEnemyAwarenessComponent::FindDownedPlayerPawn(this);
+	if (!IsValid(Downed))
+	{
+		// Player revived or bled out — drop any unconsumed retreat latch so a later legitimate
+		// FallBack (morale break) doesn't fire a spurious forced relocate.
+		bRetreatRequested = false;
+		return false;
+	}
+
+	PressHeldSeconds = 0.f;
+	bAdvanceRequested = false;
+
+	const float DistSq = FVector::DistSquared(Enemy->GetActorLocation(), Downed->GetActorLocation());
+	if (DistSq < FMath::Square(DA->DBNOStandoffRadius))
+	{
+		CurrentPosture = EEnemyPosture::FallBack;
+		const UWorld* World = GetWorld();
+		const float Now = World ? World->GetTimeSeconds() : 0.f;
+		if (Now - LastRetreatConsumeWorldTime >= RetreatRepeatCooldown)
+			bRetreatRequested = true;
+	}
+	else
+	{
+		CurrentPosture = EEnemyPosture::Hold;
+		bRetreatRequested = false;
+	}
+	return true;
 }
 
 float UEnemyPostureComponent::ComputeAggression01(const AEnemyCharacter* Enemy,

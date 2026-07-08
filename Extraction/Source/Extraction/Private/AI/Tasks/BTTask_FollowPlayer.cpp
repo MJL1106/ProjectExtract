@@ -41,6 +41,7 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 
 	LastMoveTarget = FVector::ZeroVector;
 	bIsIdling = false;
+	SprintLogAccumulator = 0.f;
 	LastSeenMode = Companion->GetMode();
 
 	// Reset EQS slot state — stale slots from a previous run must not bleed into this one.
@@ -122,9 +123,17 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	// (e.g. revive) can advance to the next task.
 	if (bSprintToTarget)
 	{
-		if (DistToPlayer <= T->AcceptableRadius)
+		// Arrival derives from the REVIVE range only — never the follow AcceptableRadius. That value
+		// is tuned for formation feel (live DA: 30cm — physically unreachable through two colliding
+		// capsules), and any mismatch with RevivePlayer's range silently dead-loops the revive
+		// sequence with the companion standing pressed against the body, which is exactly what
+		// killed the first two rescue playtests. Floored above the two-capsule collision minimum
+		// (~68cm) so no ReviveProximityRadius retune can reintroduce the unreachable-arrival loop.
+		const float ArrivalRadius = FMath::Max(Companion->ReviveProximityRadius * 0.75f, 90.f);
+
+		if (DistToPlayer <= ArrivalRadius)
 		{
-			UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] SPRINT-TO-TARGET arrived (Dist=%.0f) — Succeed"), DistToPlayer);
+			UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] SPRINT-TO-TARGET arrived (Dist=%.0f <= %.0f) — Succeed"), DistToPlayer, ArrivalRadius);
 			Controller->StopMovement();
 			Companion->SetSprinting(false);
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
@@ -132,12 +141,35 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 		Companion->SetSprinting(true);
 
-		// Only re-issue move if player has shifted significantly — avoids restarting the
-		// path every tick which can stutter-step the companion.
-		if (FVector::Dist(PlayerLocation, LastMoveTarget) > 100.0f)
+		// Approach diagnostic at ~1Hz — a rescue that stalls short of the arrival radius must be
+		// visible in the log (dist vs threshold), not inferred.
+		SprintLogAccumulator += DeltaSeconds;
+		if (SprintLogAccumulator >= 1.f)
 		{
-			LastMoveTarget = PlayerLocation;
-			Controller->MoveToLocation(PlayerLocation, T->AcceptableRadius * 0.5f, false, true, false, true);
+			SprintLogAccumulator = 0.f;
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: RESCUE APPROACH dist=%.0f arrival=%.0f vel=%.0f"),
+				*Companion->GetName(), DistToPlayer, ArrivalRadius, Companion->GetVelocity().Size2D());
+		}
+
+		// Rescue destination sits on the COVERED side of the body — offset away from the current
+		// combat threat so the companion slides in behind the downed player instead of kneeling
+		// in the open fire lane. Offset + move acceptance must stay strictly inside the arrival
+		// ring (worst-case stop = offset + acceptance), or a covered-side approach completes its
+		// move outside the raw-player-distance arrival check and stalls.
+		FVector RescueDest = PlayerLocation;
+		if (const AActor* Threat = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)))
+		{
+			FVector Away = (PlayerLocation - Threat->GetActorLocation()).GetSafeNormal2D();
+			if (!Away.IsNearlyZero())
+				RescueDest = PlayerLocation + Away * (ArrivalRadius * 0.4f);
+		}
+
+		// Only re-issue move if the destination has shifted significantly — avoids restarting the
+		// path every tick which can stutter-step the companion.
+		if (FVector::Dist(RescueDest, LastMoveTarget) > 100.0f)
+		{
+			LastMoveTarget = RescueDest;
+			Controller->MoveToLocation(RescueDest, ArrivalRadius * 0.25f, false, true, false, true);
 		}
 		return;
 	}

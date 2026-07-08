@@ -434,10 +434,11 @@ float AEnemyCharacter::GetAIAimSpreadDegrees() const
 	if (IsValid(SuppressionComponent))
 		Spread += ArchetypeData->SuppressionSpreadPenaltyDeg * SuppressionComponent->GetSuppression01();
 
-	// Mercy spread: widen when targeting a companion that is mid-revive
+	// Mercy spread: widen when targeting a companion that is mid-revive or committed to a rescue
+	// (sprinting to the body) — the approach has to be survivable, not just the hold.
 	if (const ACompanionCharacter* TargetCompanion = Cast<ACompanionCharacter>(CurrentAimTarget.Get()))
 	{
-		if (TargetCompanion->IsRevivingPlayer())
+		if (TargetCompanion->IsRevivingPlayer() || TargetCompanion->IsRescueCommitted())
 			Spread += ArchetypeData->RevivingCompanionExtraSpreadDeg;
 	}
 

@@ -60,6 +60,15 @@ public:
 	void NotifyMemberDied(AEnemyCharacter* Dead, bool bWasOfficer);
 	void Rally(AEnemyCharacter* Officer);
 
+	// --- Advance staggering ---
+
+	/** True when no squad member has committed a posture advance within AdvanceWindowSeconds.
+	 *  Caps the squad to one advancing enemy at a time so pushes read as probing, not a rush. */
+	bool CanClaimAdvanceWindow() const;
+
+	/** Records the current world time as the squad's last committed advance. */
+	void RecordAdvance();
+
 	// --- Flank attempt tracking ---
 
 	/** Returns world time of the last flank attempt by this member, or -1e9 if none. */
@@ -134,6 +143,10 @@ private:
 
 	// Bark dedup
 	TMap<EBarkType, float> LastSquadBarkTime;
+
+	// Advance staggering
+	float LastAdvanceWorldTime = -1e9f;
+	static constexpr float AdvanceWindowSeconds = 6.f;
 
 	// --- Bounding overwatch state ---
 

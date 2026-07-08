@@ -47,6 +47,18 @@ FCoverScoreParams UCoverScoringStatics::MakeParamsForEnemy(const AEnemyCharacter
 	if (!IsValid(Enemy)) return FCoverScoreParams();
 	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
 	FCoverScoreParams Params = MakeParams(DA);
+
+	// Downed-player standoff: while a hostile player is DBNO, every enemy cover pick avoids the
+	// ring around the body — set before the posture gate so posture-disabled archetypes get it too.
+	if (IsValid(DA) && DA->DBNOStandoffRadius > 0.f)
+	{
+		if (const APawn* Downed = UEnemyAwarenessComponent::FindDownedPlayerPawn(Enemy))
+		{
+			Params.DBNOAvoidLocation = Downed->GetActorLocation();
+			Params.DBNOAvoidRadius = DA->DBNOStandoffRadius;
+		}
+	}
+
 	if (!IsValid(DA) || !DA->bPostureSystemEnabled) return Params;
 
 	const UEnemyPostureComponent* Posture = Enemy->GetPostureComponent();
@@ -129,6 +141,10 @@ float UCoverScoringStatics::ScoreCandidate(const UWorld* World, const FCoverData
 	if (Params.RetreatViabilityWeight > 0.f && World
 		&& CountNearbyFreeCovers(World, Data, Params.RetreatViabilityRadius) >= 1)
 		Score += Params.RetreatViabilityWeight;
+
+	if (Params.DBNOAvoidRadius > 0.f
+		&& FVector::DistSquared2D(Data.Location, Params.DBNOAvoidLocation) < FMath::Square(Params.DBNOAvoidRadius))
+		Score = ApplyScorePenalty(Score, Params.DBNOAvoidPenalty);
 
 	return Score;
 }

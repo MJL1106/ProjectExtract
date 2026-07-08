@@ -164,6 +164,11 @@ public:
 	void SetIsRevivingPlayer(bool bReviving) { bIsRevivingPlayer = bReviving; }
 	bool IsRevivingPlayer() const { return bIsRevivingPlayer; }
 
+	// --- Rescue Commit (set by the state service while the revive window is latched open) ---
+
+	void SetRescueCommitted(bool bCommitted) { bRescueCommitted = bCommitted; }
+	bool IsRescueCommitted() const { return bRescueCommitted; }
+
 	// --- Low Ready Aim ---
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Combat")
@@ -327,6 +332,41 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Companion|Breach")
 	float PlayBreachMontage(EBreachType Type);
 
+	// --- Revive ---
+
+	/** Plays the kneeling reviver montage while the revive hold runs. Early-returns when no montage
+	 *  is assigned (the revive still happens — the anim is cosmetic). Called by BTTask_RevivePlayer. */
+	void PlayReviveMontage();
+
+	/** Blends the reviver montage out. Safe to call when nothing is playing. */
+	void StopReviveMontage();
+
+	/** True while the reviver montage is actively playing on the body mesh. */
+	bool IsReviveMontagePlaying() const;
+
+	/** ReviveDuration with the `revive.Duration` console override applied (tuning: tweak live in PIE,
+	 *  then bake the winner into the BP). Montage rate-scaling follows this everywhere. */
+	float GetEffectiveReviveDuration() const;
+
+	/** ReviveAlignDistance with the `revive.AlignDistance` console override applied. */
+	float GetEffectiveReviveAlignDistance() const;
+
+	/** Live-tuning yaw (deg) added to the companion's facing at the revive snap — `revive.CompanionYawOffset`. */
+	static float GetReviveCompanionYawOffset();
+
+	/** The reviver montage asset — the revive task reads its clip's authored root start transform. */
+	const UAnimMontage* GetReviveMontage() const { return ReviveMontage; }
+
+	/** True only when the reviver montage is NOT playing AND a *different* montage is active on the
+	 *  body — i.e. a same-group takeover stomped it mid-hold and it needs re-asserting. Returns false
+	 *  when nothing is playing (the montage naturally reached its end), so the per-tick re-assert can't
+	 *  restart it at the tail of the hold — that tail restart was the visible "double play". */
+	bool ShouldReassertReviveMontage() const;
+
+	/** Name of the montage currently active on the body mesh's anim instance ("None" if none) —
+	 *  hold-loop diagnostic for identifying a same-group montage stomping the reviver anim. */
+	FString GetActiveBodyMontageName() const;
+
 	/** Broadcast when a KNIFE commanded takedown begins executing — BP shows the knife mesh here. */
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
 	FOnCommandedTakedownStarted OnCommandedTakedownStarted;
@@ -422,6 +462,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "100.0"))
 	float ReviveThreatRadius = 1500.f;
 
+	/** Cap (cm, from the downed player) for the LoS-based revive-threat check. Beyond ReviveThreatRadius,
+	 *  an enemy only holds the window shut when it is actively IN COMBAT, within this range, AND has an
+	 *  eye-line to the body — a searcher parked on the standoff ring must not block the revive forever. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "100.0"))
+	float ReviveLoSThreatRadius = 2500.f;
+
 	/** Seconds of continuous no-threat before the revive window opens. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
 	float ReviveSafeGraceSeconds = 1.0f;
@@ -433,6 +479,22 @@ public:
 	/** Incoming damage multiplier while the companion is actively reviving the player. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.01", ClampMax = "1.0"))
 	float ReviveDamageMultiplier = 0.35f;
+
+	/** Incoming damage multiplier during the committed rescue approach (window latched, not yet in
+	 *  the hold) — the sprint to the body has to be survivable under ring fire. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float RescueApproachDamageMultiplier = 0.5f;
+
+	/** Health fraction below which a committed rescue bails back to combat while threats are hot.
+	 *  Desperation bleedout overrides the bail (last-ditch attempt beats a guaranteed bleedout). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float RescueBailHealthFraction = 0.25f;
+
+	/** Center-to-center distance (cm) the companion snaps to at revive-hold start so the paired
+	 *  kneel/get-up anims line up face-to-face. Tune to the anim pair's authored gap. Values below
+	 *  the summed capsule radii (~68) are safe: the pair mutually move-ignores during the hold. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "40.0"))
+	float ReviveAlignDistance = 70.f;
 
 protected:
 
@@ -475,6 +537,12 @@ protected:
 	 *  A missing entry means that type breaches without a montage. */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Breach")
 	TMap<EBreachType, TObjectPtr<UAnimMontage>> BreachMontages;
+
+	/** Single-shot reviver montage (rate-scaled to span the hold once) played while reviving the
+	 *  downed player — designer assigns in BP. Must be non-looping: the double-play fix relies on the
+	 *  montage having a natural blend-out tail so the per-tick re-assert stops once it ends. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Revive")
+	TObjectPtr<UAnimMontage> ReviveMontage;
 
 	/** Victim-relative-to-attacker placement for the knife takedown, in the shared facing frame:
 	 *  X = forward gap (the companion stands this far BEHIND the victim), Y = lateral, Z = height.
@@ -522,6 +590,10 @@ private:
 	/** True while the companion is in the BTTask_RevivePlayer hold. Drives tanky damage reduction
 	 *  and the service-side revive-window latch. Transient, not replicated. */
 	bool bIsRevivingPlayer = false;
+
+	/** True while the revive window is latched open (committed rescue: approach + hold). Drives the
+	 *  approach damage reduction. Written by BTService_UpdateCompanionState. Transient. */
+	bool bRescueCommitted = false;
 
 	/** Mirror of the combat service's eye→target LOS trace (enemy bHasTargetLOS parity). Transient, not replicated. */
 	bool bHasTargetLOS = false;

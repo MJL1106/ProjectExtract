@@ -300,6 +300,23 @@ bool UEnemySquad::AnyMemberAwareAtOrAbove(EEnemyAwarenessState MinState, const A
 }
 
 // ---------------------------------------------------------------------------
+// Advance staggering
+// ---------------------------------------------------------------------------
+
+bool UEnemySquad::CanClaimAdvanceWindow() const
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return true;
+	return (World->GetTimeSeconds() - LastAdvanceWorldTime) >= AdvanceWindowSeconds;
+}
+
+void UEnemySquad::RecordAdvance()
+{
+	const UWorld* World = GetWorld();
+	if (IsValid(World)) LastAdvanceWorldTime = World->GetTimeSeconds();
+}
+
+// ---------------------------------------------------------------------------
 // Bark dedup
 // ---------------------------------------------------------------------------
 

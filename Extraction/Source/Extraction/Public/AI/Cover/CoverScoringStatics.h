@@ -56,6 +56,19 @@ struct EXTRACTION_API FCoverScoreParams
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Scoring")
 	float MaxSearchRadius = 1200.f;
+
+	/** Downed-player standoff anchor: candidates within DBNOAvoidRadius (2D) of this location are
+	 *  score-penalised so out-of-ring covers win whenever one exists, while the best in-ring cover
+	 *  still gets picked in enclosed spaces where nothing lies outside. Radius 0 = off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Scoring")
+	FVector DBNOAvoidLocation = FVector::ZeroVector;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Scoring")
+	float DBNOAvoidRadius = 0.f;
+
+	/** Sign-aware multiplicative penalty applied to in-ring candidates (see ApplyScorePenalty). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Scoring")
+	float DBNOAvoidPenalty = 0.25f;
 };
 
 /** Positions cover candidates must keep distance from: covers hostiles are moving to (declared

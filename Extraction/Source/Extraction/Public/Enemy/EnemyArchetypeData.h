@@ -1077,4 +1077,11 @@ public:
 	/** Minimum distance (cm) an advance relocate must close toward the threat vs the current cover. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "50.0"))
 	float PostureAdvanceMinGain = 200.f;
+
+	/** While a hostile player is DBNO: enemies inside this radius (cm) of the downed player are forced
+	 *  to FallBack (with a one-shot retreat relocate), everyone else is capped at Hold — no pressing.
+	 *  Keep above the companion's ReviveThreatRadius so the revive window can actually open. 0 = off.
+	 *  Applies even when bPostureSystemEnabled is false. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float DBNOStandoffRadius = 1800.f;
 };

@@ -28,7 +28,14 @@ protected:
 	FBlackboardKeySelector PlayerActorKey;
 
 private:
+	/** Starts/stops the reviver + being-revived montages when the hold phase begins/ends. */
+	void SetReviveAnimsActive(bool bActive);
+
 	TWeakObjectPtr<ACompanionCharacter> CachedCompanion;
+	TWeakObjectPtr<AActor> CachedPlayerActor;
 	float ReviveElapsed = 0.0f;
 	bool bIsHoldingRevive = false;
+
+	/** ~1Hz throttle for the hold-state diagnostic log. */
+	float HoldLogAccumulator = 0.0f;
 };

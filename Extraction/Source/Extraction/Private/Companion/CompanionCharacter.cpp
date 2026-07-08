@@ -26,6 +26,23 @@
 
 DEFINE_LOG_CATEGORY(LogCompanion);
 
+// Live revive-arrangement tuning: tweak in the PIE console, re-run PlayerDown, repeat; bake the
+// winning values into BP_Companion / the align code, then leave these at their defaults.
+static float GReviveDurationOverride = -1.f;
+static FAutoConsoleVariableRef CVarReviveDuration(
+	TEXT("revive.Duration"), GReviveDurationOverride,
+	TEXT("Override companion revive hold duration in seconds (montages rate-scale to match). <=0 = use BP value."));
+
+static float GReviveAlignDistanceOverride = -1.f;
+static FAutoConsoleVariableRef CVarReviveAlignDistance(
+	TEXT("revive.AlignDistance"), GReviveAlignDistanceOverride,
+	TEXT("Override companion revive snap distance in cm (center-to-center). 0 = on top of the player; negative = use BP value."));
+
+static float GReviveCompanionYawOffset = 0.f;
+static FAutoConsoleVariableRef CVarReviveCompanionYawOffset(
+	TEXT("revive.CompanionYawOffset"), GReviveCompanionYawOffset,
+	TEXT("Extra yaw (deg) added to the companion's facing at the revive snap. 0 = face the player."));
+
 ACompanionCharacter::ACompanionCharacter()
 {
 	PrimaryActorTick.bCanEverTick = true;
@@ -204,6 +221,7 @@ void ACompanionCharacter::Tick(float DeltaTime)
 float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
 	if (bIsRevivingPlayer) DamageAmount *= ReviveDamageMultiplier;
+	else if (bRescueCommitted) DamageAmount *= RescueApproachDamageMultiplier;
 	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 	if (IsValid(HealthComponent))
 	{
@@ -794,6 +812,92 @@ void ACompanionCharacter::PlayLootMontage()
 	if (!IsValid(AnimInst)) return;
 
 	AnimInst->Montage_Play(LootMontage);
+}
+
+// --- Revive ---
+
+void ACompanionCharacter::PlayReviveMontage()
+{
+	if (!ReviveMontage) return;
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst)) return;
+
+	if (!AnimInst->Montage_IsPlaying(ReviveMontage))
+	{
+		// Rate-scale so one kneel cycle spans the hold exactly (mirrors the player's montage sync).
+		const float Duration = GetEffectiveReviveDuration();
+		const float MontageLength = ReviveMontage->GetPlayLength();
+		const float PlayRate = (Duration > 0.f && MontageLength > 0.f)
+			? MontageLength / Duration : 1.f;
+		const float PlayLength = AnimInst->Montage_Play(ReviveMontage, PlayRate);
+		if (PlayLength <= 0.f)
+			UE_LOG(LogCompanion, Warning, TEXT("%s: ReviveMontage '%s' failed to play (slot/skeleton mismatch?)"),
+				*GetName(), *GetNameSafe(ReviveMontage));
+	}
+}
+
+void ACompanionCharacter::StopReviveMontage()
+{
+	if (!ReviveMontage) return;
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst)) return;
+
+	if (AnimInst->Montage_IsPlaying(ReviveMontage))
+		AnimInst->Montage_Stop(0.25f, ReviveMontage);
+}
+
+bool ACompanionCharacter::IsReviveMontagePlaying() const
+{
+	if (!ReviveMontage) return false;
+	const USkeletalMeshComponent* MeshComp = GetMesh();
+	const UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+	return IsValid(AnimInst) && AnimInst->Montage_IsPlaying(ReviveMontage);
+}
+
+float ACompanionCharacter::GetEffectiveReviveDuration() const
+{
+	return GReviveDurationOverride > 0.f ? GReviveDurationOverride : ReviveDuration;
+}
+
+float ACompanionCharacter::GetEffectiveReviveAlignDistance() const
+{
+	// >= 0 so the knob can go all the way to 0 (companion directly on top of the player);
+	// negative = use the BP value.
+	return GReviveAlignDistanceOverride >= 0.f ? GReviveAlignDistanceOverride : ReviveAlignDistance;
+}
+
+float ACompanionCharacter::GetReviveCompanionYawOffset()
+{
+	return GReviveCompanionYawOffset;
+}
+
+bool ACompanionCharacter::ShouldReassertReviveMontage() const
+{
+	if (!ReviveMontage) return false;
+	const USkeletalMeshComponent* MeshComp = GetMesh();
+	const UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst)) return false;
+
+	// Already playing — nothing to re-assert.
+	if (AnimInst->Montage_IsPlaying(ReviveMontage)) return false;
+
+	// Re-assert ONLY when a DIFFERENT montage is currently active (a genuine same-group stomp).
+	// Nothing active = the reviver montage ended naturally; the reviver montage itself lingering in
+	// its blend-out tail is also not a stomp — either way, don't restart the kneel (the double play).
+	const UAnimMontage* Active = AnimInst->GetCurrentActiveMontage();
+	return Active != nullptr && Active != ReviveMontage;
+}
+
+FString ACompanionCharacter::GetActiveBodyMontageName() const
+{
+	const USkeletalMeshComponent* MeshComp = GetMesh();
+	const UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+	const UAnimMontage* Active = IsValid(AnimInst) ? AnimInst->GetCurrentActiveMontage() : nullptr;
+	return GetNameSafe(Active);
 }
 
 // --- Commanded Breach ---

@@ -24,6 +24,7 @@
 #include "GameFramework/Controller.h"
 #include "GameFramework/PlayerController.h"
 #include "Components/CapsuleComponent.h"
+#include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
 #include "EnemyDebug.h"
@@ -989,8 +990,34 @@ void UEnemyAwarenessComponent::SetCombatTarget(AActor* NewTarget)
 void UEnemyAwarenessComponent::SetInvestigateLocation(const FVector& Location)
 {
 	UBlackboardComponent* BB = BlackboardComp.Get();
-	if (IsValid(BB))
-		BB->SetValueAsVector(AEnemyAIController::BB_InvestigateLocation, Location);
+	if (!IsValid(BB)) return;
+
+	// Downed-player standoff: investigate points never lead inside the ring around a DBNO player —
+	// clamp to the ring edge on this enemy's side. Single choke point for every stimulus path
+	// (target-drop search, hearing/perception stimuli, squad sighting relay).
+	FVector ClampedLoc = Location;
+	const float Standoff = IsValid(ArchetypeData) ? ArchetypeData->DBNOStandoffRadius : 0.f;
+	if (Standoff > 0.f)
+	{
+		if (const APawn* Downed = FindDownedPlayerPawn(this))
+		{
+			const FVector DownedLoc = Downed->GetActorLocation();
+			if (FVector::DistSquared2D(ClampedLoc, DownedLoc) < FMath::Square(Standoff))
+			{
+				const AAIController* MyController = Cast<AAIController>(GetOwner());
+				const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+				FVector Away = IsValid(MyPawn)
+					? MyPawn->GetActorLocation() - DownedLoc
+					: -Downed->GetActorForwardVector();
+				Away.Z = 0.f;
+				if (!Away.Normalize()) Away = -Downed->GetActorForwardVector().GetSafeNormal2D();
+				ClampedLoc = DownedLoc + Away * Standoff;
+				if (IsValid(MyPawn)) ClampedLoc.Z = MyPawn->GetActorLocation().Z;
+			}
+		}
+	}
+
+	BB->SetValueAsVector(AEnemyAIController::BB_InvestigateLocation, ClampedLoc);
 }
 
 void UEnemyAwarenessComponent::WriteBBVectors()
@@ -1130,6 +1157,16 @@ bool UEnemyAwarenessComponent::IsHostile(AActor* Actor) const
 
 	const ETeamAttitude::Type Attitude = MyController->GetTeamAttitudeTowards(*Actor);
 	return Attitude == ETeamAttitude::Hostile;
+}
+
+APawn* UEnemyAwarenessComponent::FindDownedPlayerPawn(const UObject* WorldContext)
+{
+	const UWorld* World = IsValid(WorldContext) ? WorldContext->GetWorld() : nullptr;
+	if (!World) return nullptr;
+
+	APawn* Pawn = UGameplayStatics::GetPlayerPawn(World, 0);
+	const IExtractionPlayerInterface* Player = Cast<IExtractionPlayerInterface>(Pawn);
+	return (Player && Player->GetIsDBNO()) ? Pawn : nullptr;
 }
 
 bool UEnemyAwarenessComponent::IsActorAlive(const AActor* Actor)

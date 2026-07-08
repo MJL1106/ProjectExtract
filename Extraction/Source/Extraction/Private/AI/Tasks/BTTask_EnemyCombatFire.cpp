@@ -28,6 +28,7 @@
 #include "Engine/World.h"
 #include "EnemyMoraleComponent.h"
 #include "EnemyPostureComponent.h"
+#include "Squad/EnemySquad.h"
 #include "EnemyDebug.h"
 #include "EnemyAnimInstance.h"
 #include "DrawDebugHelpers.h"
@@ -3040,16 +3041,42 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				}
 			}
 
+			// --- DBNO standoff retreat (player downed, enemy inside the ring -> vacate and re-seek;
+			// the FallBack posture bias + ring avoid-penalty steer the re-seek outside the standoff).
+			// Cover validated BEFORE consuming so a bad BB read doesn't burn the one-shot + cooldown. ---
+			if (DA->DBNOStandoffRadius > 0.f && !Mem->bRelocatePending && !bSuppressed
+				&& GetForceCoverLevel() == 0 && GetForceCoverRepositionLevel() == 0 && IsValid(Target))
+			{
+				UEnemyPostureComponent* RetreatPosture = Enemy->GetPostureComponent();
+				if (IsValid(RetreatPosture) && RetreatPosture->GetPosture() == EEnemyPosture::FallBack
+					&& RetreatPosture->HasRetreatRequest())
+				{
+					const bool bHasCoverRet = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+					const FCover RetCurCover = bHasCoverRet ? ReadCoverFromBB(BB) : FCover();
+					if (RetCurCover.IsValid() && RetreatPosture->ConsumeRetreatRequest())
+					{
+						AWeaponBase* RetWeapon = Enemy->GetCurrentWeapon();
+						if (IsValid(RetWeapon) && RetWeapon->IsFiring()) RetWeapon->StopFiring();
+						ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
+							RetCurCover.Handle, RetCurCover.Data, DA, bHasLOS);
+						break;
+					}
+				}
+			}
+
 			// --- Posture advance (Press held long enough -> proactively take closer cover) ---
 			// Same safety gates as shuffle: clean Pause, not suppressed, no pending flank relocate,
 			// at least one full peek cycle done here. NotifyAdvanceExecuted only on commit, so a
-			// rejected candidate doesn't burn the advance cooldown.
+			// rejected candidate doesn't burn the advance cooldown. Squad window staggers advances
+			// to one member at a time; an unclaimed window leaves the request latched for later.
 			if (DA->bPostureSystemEnabled && !Mem->bRelocatePending && !bSuppressed
 				&& GetForceCoverLevel() == 0 && GetForceCoverRepositionLevel() == 0
 				&& Mem->PeekCyclesAtCover >= DA->MinPeekCyclesBeforeRelocate && IsValid(Target))
 			{
+				UEnemySquad* Squad = Enemy->GetSquad();
 				UEnemyPostureComponent* Posture = Enemy->GetPostureComponent();
 				if (IsValid(Posture) && Posture->GetPosture() == EEnemyPosture::Press
+					&& (!IsValid(Squad) || Squad->CanClaimAdvanceWindow())
 					&& Posture->ConsumeAdvanceRequest())
 				{
 					const bool bHasCoverAdv = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
@@ -3059,6 +3086,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 							AdvCurCover, DA, bHasLOS))
 					{
 						Posture->NotifyAdvanceExecuted();
+						if (IsValid(Squad)) Squad->RecordAdvance();
 						break;
 					}
 				}
