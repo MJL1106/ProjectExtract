@@ -396,6 +396,15 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	if (IA_CompanionModeToggle)
 		EnhancedInput->BindAction(IA_CompanionModeToggle, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeToggleInput);
 
+	if (IA_CompanionModeStealth)
+		EnhancedInput->BindAction(IA_CompanionModeStealth, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeSelectStealthInput);
+
+	if (IA_CompanionModeNormal)
+		EnhancedInput->BindAction(IA_CompanionModeNormal, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeSelectNormalInput);
+
+	if (IA_CompanionModeCombat)
+		EnhancedInput->BindAction(IA_CompanionModeCombat, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeSelectCombatInput);
+
 	// Temp debug: H key applies 25 damage
 	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionPlayer::DebugApplyDamage);
 }
@@ -978,7 +987,25 @@ void AExtractionPlayer::CompanionConfirmBreachInput(const FInputActionValue& /*V
 void AExtractionPlayer::CompanionModeToggleInput(const FInputActionValue& /*Value*/)
 {
 	if (!IsValid(CompanionCommandComponent)) return;
-	CompanionCommandComponent->CycleCompanionMode();
+	CompanionCommandComponent->ToggleModeMenu();
+}
+
+void AExtractionPlayer::CompanionModeSelectStealthInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->SelectCompanionMode(ECompanionMode::Stealth);
+}
+
+void AExtractionPlayer::CompanionModeSelectNormalInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->SelectCompanionMode(ECompanionMode::Normal);
+}
+
+void AExtractionPlayer::CompanionModeSelectCombatInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->SelectCompanionMode(ECompanionMode::Combat);
 }
 
 void AExtractionPlayer::FinishPendingTakedown()

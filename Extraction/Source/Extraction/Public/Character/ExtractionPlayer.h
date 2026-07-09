@@ -282,9 +282,21 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input|Companion")
 	TObjectPtr<UInputAction> IA_CompanionBreach;
 
-	/** Cycle companion mode Normal -> Combat -> Stealth (X key). */
+	/** Open/close the companion mode picker (X key). */
 	UPROPERTY(EditAnywhere, Category = "Input|Companion")
 	TObjectPtr<UInputAction> IA_CompanionModeToggle;
+
+	/** Mode picker — select Stealth (1). Mapped in IMC_CompanionModeSelect, live only while the picker is open. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionModeStealth;
+
+	/** Mode picker — select Normal (2). */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionModeNormal;
+
+	/** Mode picker — select Combat (3). */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionModeCombat;
 
 	// ---- Takedown Config ----
 
@@ -460,6 +472,9 @@ private:
 	void CompanionConfirmTakedownShootInput(const FInputActionValue& Value);
 	void CompanionConfirmBreachInput(const FInputActionValue& Value);
 	void CompanionModeToggleInput(const FInputActionValue& Value);
+	void CompanionModeSelectStealthInput(const FInputActionValue& Value);
+	void CompanionModeSelectNormalInput(const FInputActionValue& Value);
+	void CompanionModeSelectCombatInput(const FInputActionValue& Value);
 
 	UFUNCTION()
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);

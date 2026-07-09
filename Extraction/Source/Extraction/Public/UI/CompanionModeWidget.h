@@ -9,6 +9,7 @@
 
 class UTextBlock;
 class UImage;
+class UPanelWidget;
 class UCompanionCommandComponent;
 
 /**
@@ -35,6 +36,11 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Companion|Mode")
 	void OnModeChangedBP(ECompanionMode NewMode);
 
+	/** Designer hook — expand the chip into the numbered picker list (bOpen=true) or collapse back to
+	 *  the single chip (false). ActiveMode is the currently-commanded mode, for highlighting its row. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Companion|Mode")
+	void OnModeMenuOpenChangedBP(bool bOpen, ECompanionMode ActiveMode);
+
 	// --- Bound widgets ---
 
 	UPROPERTY(meta = (BindWidget))
@@ -45,6 +51,14 @@ protected:
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> KeyHintText;
+
+	/** The numbered picker list (1/2/3 rows). Shown while the picker is open, collapsed otherwise. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> ModeListPanel;
+
+	/** Optional wrapper around the single-mode chip, hidden while the picker list is shown. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> ChipContainer;
 
 	// --- Designer-tunable per-mode display ---
 
@@ -75,6 +89,9 @@ private:
 	UFUNCTION()
 	void HandleModeChanged(ECompanionMode NewMode);
 
+	UFUNCTION()
+	void HandleModeMenuChanged(bool bOpen);
+
 	/** Applies label + tint for the mode. bFromChange also fires the BP flash hook. */
 	void ApplyMode(ECompanionMode NewMode, bool bFromChange);
 
@@ -82,6 +99,9 @@ private:
 	bool TryBindToCommandComponent();
 
 	TWeakObjectPtr<UCompanionCommandComponent> BoundCommandComponent;
+
+	/** Latest commanded mode, cached so the picker-open event can highlight the active row. */
+	ECompanionMode CurrentMode = ECompanionMode::Normal;
 
 	/** Throttle for the lazy bind attempts in NativeTick. */
 	float TimeSinceBindAttempt = 0.f;

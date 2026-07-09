@@ -15,6 +15,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 #include "Engine/EngineTypes.h"
+#include "TimerManager.h"
 
 DEFINE_LOG_CATEGORY(LogCompanionCommand);
 
@@ -30,6 +31,7 @@ void UCompanionCommandComponent::BeginPlay()
 
 void UCompanionCommandComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	CloseModeMenu(); // clears the auto-close timer + unregisters ModeSelectContext
 	SetPromptContextRegistered(false);
 
 	if (ACompanionCharacter* Companion = CachedCompanion.Get())
@@ -230,6 +232,91 @@ void UCompanionCommandComponent::CycleCompanionMode()
 
 	UE_LOG(LogCompanionCommand, Log, TEXT("[Mode] cycle -> %s"), *UEnum::GetValueAsString(NextMode));
 	Companion->SetMode(NextMode);
+}
+
+void UCompanionCommandComponent::ToggleModeMenu()
+{
+	if (bModeMenuOpen)
+		CloseModeMenu();
+	else
+		OpenModeMenu();
+}
+
+void UCompanionCommandComponent::OpenModeMenu()
+{
+	if (bModeMenuOpen) return;
+
+	if (!IsValid(ResolveCompanion()))
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Mode] OpenModeMenu: no companion in level"));
+		return;
+	}
+
+	if (!ModeSelectContext)
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Mode] OpenModeMenu: ModeSelectContext unassigned — picker opens but 1/2/3 won't select (assign IMC_CompanionModeSelect in BP)"));
+
+	bModeMenuOpen = true;
+	SetModeSelectContextRegistered(true);
+
+	if (ModeMenuTimeout > 0.f)
+	{
+		if (UWorld* World = GetWorld())
+			World->GetTimerManager().SetTimer(ModeMenuTimeoutHandle, this,
+				&UCompanionCommandComponent::OnModeMenuTimeout, ModeMenuTimeout, false);
+	}
+
+	OnModeMenuChanged.Broadcast(true);
+	UE_LOG(LogCompanionCommand, Log, TEXT("[Mode] picker open"));
+}
+
+void UCompanionCommandComponent::CloseModeMenu()
+{
+	// Always tear down the timer + context so EndPlay can call this unconditionally.
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(ModeMenuTimeoutHandle);
+	SetModeSelectContextRegistered(false);
+
+	if (!bModeMenuOpen) return;
+	bModeMenuOpen = false;
+	OnModeMenuChanged.Broadcast(false);
+	UE_LOG(LogCompanionCommand, Log, TEXT("[Mode] picker close"));
+}
+
+void UCompanionCommandComponent::OnModeMenuTimeout()
+{
+	CloseModeMenu();
+}
+
+void UCompanionCommandComponent::SelectCompanionMode(ECompanionMode Mode)
+{
+	if (!bModeMenuOpen) return; // number keys only act while the picker is open
+
+	if (ACompanionCharacter* Companion = ResolveCompanion())
+	{
+		UE_LOG(LogCompanionCommand, Log, TEXT("[Mode] select -> %s"), *UEnum::GetValueAsString(Mode));
+		Companion->SetMode(Mode);
+	}
+
+	CloseModeMenu();
+}
+
+void UCompanionCommandComponent::SetModeSelectContextRegistered(bool bRegister)
+{
+	if (bRegister == bModeSelectContextRegistered) return;
+	if (!ModeSelectContext) return;
+
+	const APawn* Pawn = Cast<APawn>(GetOwner());
+	const APlayerController* PC = Pawn ? Cast<APlayerController>(Pawn->GetController()) : nullptr;
+	UEnhancedInputLocalPlayerSubsystem* Subsystem = PC
+		? ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer())
+		: nullptr;
+	if (!Subsystem) return;
+
+	if (bRegister)
+		Subsystem->AddMappingContext(ModeSelectContext, ModeSelectContextPriority);
+	else
+		Subsystem->RemoveMappingContext(ModeSelectContext);
+	bModeSelectContextRegistered = bRegister;
 }
 
 ECompanionMode UCompanionCommandComponent::GetCompanionMode()
