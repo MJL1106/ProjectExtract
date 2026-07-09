@@ -126,6 +126,20 @@ private:
 	/** Writes Track's stimulus location + timestamp together — keep every write on this path. */
 	void StampTrack(FSuspicionTrack& Track, const FVector& Location) const;
 
+	/** Acoustic-occlusion cache entry: one computed multiplier per quantized stimulus cell. */
+	struct FAcousticCacheEntry
+	{
+		FIntVector Cell = FIntVector::ZeroValue;
+		float Multiplier = 1.f;
+		float ExpiryTime = -1.f;
+	};
+
+	/** Occlusion-aware audibility (0..1) of a noise at StimLoc for the owning pawn — 1 through a
+	 *  clear line or open door, muffled through a closed openable door, 0 through walls/floors/
+	 *  locked doors (see AIAcoustics). Cached per AcousticCellSize stimulus cell for
+	 *  AcousticCacheTTL so automatic fire doesn't re-trace every shot. */
+	float GetCachedAcousticMultiplier(const FVector& StimLoc, const AActor* Instigator);
+
 	void SetState(EEnemyAwarenessState NewState);
 	void SetCombatTarget(AActor* NewTarget);
 	void UpdateAwareness();
@@ -215,6 +229,11 @@ private:
 
 	/** Clears the investigate-body reference and the target flag on the corpse. */
 	void ClearInvestigateBody();
+
+	TArray<FAcousticCacheEntry> AcousticCache;
+
+	static constexpr float AcousticCacheTTL = 0.35f;
+	static constexpr float AcousticCellSize = 128.f;
 
 	static constexpr float UpdateInterval = 0.15f;
 	/** Minimum seconds between NotifyShotAt processing for the same instigator (below Combat). */

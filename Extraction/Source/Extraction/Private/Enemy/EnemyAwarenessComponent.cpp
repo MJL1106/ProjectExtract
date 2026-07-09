@@ -1,6 +1,7 @@
 // UEnemyAwarenessComponent — awareness state ladder driven by perception stimuli and damage events.
 
 #include "EnemyAwarenessComponent.h"
+#include "AI/AIAcoustics.h"
 #include "AI/AITargetingStatics.h"
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
@@ -235,9 +236,15 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 	static const FName SprintFootstepTag(TEXT("FootstepSprint"));
 	if (IsOwnerTakedownMuffled() && Stimulus.Tag != SprintFootstepTag) return;
 
+	// Acoustic occlusion: walls/floors/locked doors silence the noise entirely — before the
+	// track stamp, so a blocked shot leaves no memory at all. A closed-but-openable door lets
+	// a muffled fraction through (the enemy can open it and investigate).
+	const float AcousticMult = GetCachedAcousticMultiplier(Stimulus.StimulusLocation, Actor);
+	if (AcousticMult <= KINDA_SMALL_NUMBER) return;
+
 	if (GetDetectionLogLevel() > 0)
-		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] HearStim actor=%s strength=%.2f state=%s"),
-			*Actor->GetName(), Stimulus.Strength, *UEnum::GetValueAsString(CurrentState));
+		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] HearStim actor=%s strength=%.2f acoustic=%.2f state=%s"),
+			*Actor->GetName(), Stimulus.Strength, AcousticMult, *UEnum::GetValueAsString(CurrentState));
 
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Actor);
 	StampTrack(Track, Stimulus.StimulusLocation);
@@ -245,7 +252,7 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 	// During Combat, only update track bookkeeping (location) — suspicion gain is irrelevant
 	if (CurrentState == EEnemyAwarenessState::Combat) return;
 
-	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain;
+	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain * AcousticMult;
 	Track.Suspicion = FMath::Min(Track.Suspicion + Gain, NoiseSuspicionCap);
 
 	static const FName WeaponFireTag(TEXT("WeaponFire"));
@@ -258,6 +265,37 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 			Bark(EBarkType::SearchArea);
 		SetState(EEnemyAwarenessState::Searching);
 	}
+}
+
+float UEnemyAwarenessComponent::GetCachedAcousticMultiplier(const FVector& StimLoc, const AActor* Instigator)
+{
+	const AAIController* Controller = Cast<AAIController>(GetOwner());
+	APawn* MyPawn = Controller ? Controller->GetPawn() : nullptr;
+	UWorld* World = GetWorld();
+	if (!MyPawn || !World) return 1.f;
+
+	const float Now = World->GetTimeSeconds();
+	const FIntVector Cell(
+		FMath::FloorToInt(StimLoc.X / AcousticCellSize),
+		FMath::FloorToInt(StimLoc.Y / AcousticCellSize),
+		FMath::FloorToInt(StimLoc.Z / AcousticCellSize));
+
+	for (int32 i = AcousticCache.Num() - 1; i >= 0; --i)
+	{
+		if (AcousticCache[i].ExpiryTime < Now)
+		{
+			AcousticCache.RemoveAtSwap(i);
+			continue;
+		}
+		if (AcousticCache[i].Cell == Cell) return AcousticCache[i].Multiplier;
+	}
+
+	const float ThroughDoorMult = IsValid(ArchetypeData) ? ArchetypeData->ThroughDoorNoiseMultiplier : 1.f;
+	const float Mult = AIAcoustics::ComputeMultiplier(World, MyPawn->GetPawnViewLocation(), StimLoc,
+		MyPawn, Instigator, ThroughDoorMult);
+
+	AcousticCache.Add({ Cell, Mult, Now + AcousticCacheTTL });
+	return Mult;
 }
 
 void UEnemyAwarenessComponent::HandleAllyGunfireHeard(AEnemyCharacter* Shooter, const FAIStimulus& Stimulus)
@@ -274,6 +312,11 @@ void UEnemyAwarenessComponent::HandleAllyGunfireHeard(AEnemyCharacter* Shooter, 
 	const AAIController* MyController = Cast<AAIController>(GetOwner());
 	if (MyController && Shooter == MyController->GetPawn()) return;
 
+	// Ally gunfire obeys the same acoustics as hostile fire — a mate shooting two rooms away
+	// behind solid walls doesn't coordinate this enemy.
+	const float AcousticMult = GetCachedAcousticMultiplier(Stimulus.StimulusLocation, Shooter);
+	if (AcousticMult <= KINDA_SMALL_NUMBER) return;
+
 	// Suspicion points at what the mate is shooting at, not at the mate — the first heard shot turns
 	// us toward his target (Suspicious), sustained fire accumulates into Searching via the normal
 	// suspicion pipeline. If his target is unknown (or cloaked to us, which would purge the track),
@@ -285,7 +328,7 @@ void UEnemyAwarenessComponent::HandleAllyGunfireHeard(AEnemyCharacter* Shooter, 
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(TrackKey);
 	StampTrack(Track, bAimKnown ? AimTarget->GetActorLocation() : Stimulus.StimulusLocation);
 
-	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain;
+	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain * AcousticMult;
 	Track.Suspicion = FMath::Min(
 		FMath::Max(Track.Suspicion + Gain, ArchetypeData->SuspiciousThreshold), NoiseSuspicionCap);
 

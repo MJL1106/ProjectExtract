@@ -69,6 +69,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception", meta = (ClampMin = "0.1"))
 	float HearingMaxAge = 3.f;
 
+	/** Suspicion multiplier for noise heard through a closed-but-openable door (0..1). 1 = a door
+	 *  doesn't muffle at all; 0 = doors block like walls. Solid geometry and locked doors always
+	 *  block fully regardless of this value. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ThroughDoorNoiseMultiplier = 0.6f;
+
 	// --- Combat ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
