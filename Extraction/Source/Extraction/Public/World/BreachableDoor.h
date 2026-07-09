@@ -5,8 +5,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
-#include "GameFramework/Actor.h"
-#include "World/Breachable.h"
+#include "World/DoorBase.h"
 #include "BreachableDoor.generated.h"
 
 UENUM(BlueprintType)
@@ -18,7 +17,7 @@ enum class EDoorState : uint8
 };
 
 UCLASS(Blueprintable, HideCategories = (Replication, Input, LOD, Cooking))
-class EXTRACTION_API ABreachableDoor : public AActor, public IBreachable
+class EXTRACTION_API ABreachableDoor : public ADoorBase
 {
 	GENERATED_BODY()
 
@@ -30,6 +29,9 @@ public:
 	virtual bool CanBreach_Implementation() const override;
 	virtual bool GetBreachStandPoint_Implementation(const AActor* Breacher, FVector& OutLocation, FRotator& OutFacing) const override;
 	virtual bool GetPostBreachPoint_Implementation(const AActor* Breacher, bool bEnterRoom, FVector& OutLocation) const override;
+
+	/** Mid-swing counts as open: the doorway is already parting and this door never re-closes. */
+	virtual bool IsOpenForAcoustics() const override { return DoorState != EDoorState::Closed; }
 
 	// --- Keycard lock ---
 
@@ -70,21 +72,6 @@ private:
 	/** Time to swing from closed to open (seconds). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "0.1"))
 	float OpenDuration = 0.8f;
-
-	/** Clearance (cm) between the breacher's capsule and the door panel's surface at the breach
-	 *  stand point. The full standoff is computed per door and per breacher: panel half-thickness
-	 *  + capsule radius + this gap — so thick doors and big pawns still stand correctly. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "10.0"))
-	float BreachReachGap = 25.f;
-
-	/** How far past the doorway plane (cm) the post-breach ENTER point sits (Loud breach walks in). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "50.0"))
-	float PostBreachEnterDepth = 250.f;
-
-	/** Lateral offset (cm) from the doorway centre for both post-breach points — inside it clears
-	 *  the swung leaf, outside it clears the opening. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Opening", meta = (AllowPrivateAccess, ClampMin = "50.0"))
-	float PostBreachLateralOffset = 170.f;
 
 	/** When true the door starts locked and needs RequiredKeycardId to open. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Lock", meta = (AllowPrivateAccess))

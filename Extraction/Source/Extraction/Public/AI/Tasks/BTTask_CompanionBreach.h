@@ -55,14 +55,25 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "0.5"))
 	float RepositionTimeout = 3.f;
 
+	/** After a push-through (enter-room) reposition the companion waits inside for the player.
+	 *  The wait ends when the player comes within this distance of the companion (cm). */
+	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "50.0"))
+	float WaitRejoinRadius = 350.f;
+
+	/** The wait also ends when the player moves farther than this from the door (cm) — the player
+	 *  ran off, so the companion returns to normal follow. Roughly double the follow distance. */
+	UPROPERTY(EditAnywhere, Category = "Breach", meta = (ClampMin = "100.0"))
+	float WaitAbandonDistance = 700.f;
+
 private:
 	enum class EBreachPhase : uint8
 	{
 		MovingToDoor,
 		Aligning,
 		PlayingMontage, // montage running, door not yet open
-		Holding,        // door open, waiting out the montage remainder
-		Repositioning,  // clearing the doorway: Loud walks in past the leaf, others sidestep outside
+		Holding,          // door open, waiting out the montage remainder
+		Repositioning,    // clearing the doorway: Loud walks in past the leaf, others sidestep outside
+		WaitingForPlayer, // push-through only: holding inside until the player follows or runs off
 	};
 
 	/** Cached door from the blackboard. Weak — the door may be destroyed mid-task. */
@@ -74,6 +85,10 @@ private:
 
 	/** One-shot: the post-breach reposition was attempted and declined (no point / no path). */
 	bool bRepositionDeclined = false;
+
+	/** True while the active reposition is an enter-room push-through — gates the post-arrival
+	 *  wait-for-player phase (sidesteps finish immediately as before). */
+	bool bEnterRoomReposition = false;
 
 	EBreachPhase Phase = EBreachPhase::MovingToDoor;
 
@@ -99,6 +114,11 @@ private:
 
 	/** Swing the door + emit the per-type noise (montage contact time reached). */
 	void OpenDoorNow(class ACompanionAIController* AIC, AActor* Door);
+
+	/** Suppress/release the door's AI auto-open trigger while this task owns it — the companion
+	 *  walking to its stand point would otherwise trip the trigger and pop the door with no
+	 *  montage, failing the commanded breach. No-op for non-ADoorBase breachables. */
+	void SetDoorAutoOpenSuppressed(bool bSuppressed);
 
 	/** Clean up and fail. */
 	void FailAndClear(UBehaviorTreeComponent& OwnerComp);

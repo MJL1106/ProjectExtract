@@ -37,4 +37,11 @@ public:
 	 *  Returns false when the implementer has no meaningful point (caller just holds). */
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Breach")
 	bool GetPostBreachPoint(const AActor* Breacher, bool bEnterRoom, FVector& OutLocation) const;
+
+	/** True when the breacher should enter the room after breaching regardless of breach type —
+	 *  a per-actor override so designated doors get the Loud-style push-through even on a
+	 *  Tactical/Quiet breach. Montage and noise are unaffected. Defaults to false. */
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Breach")
+	bool ShouldForcePushThrough() const;
+	virtual bool ShouldForcePushThrough_Implementation() const { return false; }
 };

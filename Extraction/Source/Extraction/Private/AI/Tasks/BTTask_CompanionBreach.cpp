@@ -6,6 +6,7 @@
 #include "AI/CompanionTuningDataAsset.h"
 #include "Companion/CompanionCharacter.h"
 #include "World/Breachable.h"
+#include "World/DoorBase.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Perception/AISense_Hearing.h"
@@ -24,6 +25,7 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 	Phase = EBreachPhase::MovingToDoor;
 	bHasStandPoint = false;
 	bRepositionDeclined = false;
+	bEnterRoomReposition = false;
 	AlignElapsed = 0.f;
 	PhaseElapsed = 0.f;
 	MontageLength = 0.f;
@@ -73,6 +75,7 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 	}
 
 	CachedDoor = Door;
+	SetDoorAutoOpenSuppressed(true);
 	bHadCombatTargetAtStart = IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
 
 	// Stand point: where the breach montage was authored to play from. Doors provide one; a
@@ -117,7 +120,8 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	if (!IsValid(Door))
 	{
 		// Destroyed after the swing = the breach already happened; the command still succeeded.
-		if (Phase == EBreachPhase::Holding || Phase == EBreachPhase::Repositioning)
+		if (Phase == EBreachPhase::Holding || Phase == EBreachPhase::Repositioning
+			|| Phase == EBreachPhase::WaitingForPlayer)
 		{
 			if (Phase == EBreachPhase::Repositioning) AIC->StopMovement();
 			AIC->ClearActiveCommand();
@@ -263,13 +267,15 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (PhaseElapsed < MontageRemainder) return;
 
 		// Montage done — clear the doorway. Loud walks in past the swung leaf; Tactical/Quiet
-		// sidestep outside beside the frame. Attempted once; a decline falls back to the hold.
+		// sidestep outside beside the frame, unless the door itself forces the push-through.
+		// Attempted once; a decline falls back to the hold.
 		// A firefight that started during the montage skips the reposition entirely — never walk
 		// deeper into a room that just started shooting.
 		if (!bRepositionDeclined && !(bInCombat && !bHadCombatTargetAtStart))
 		{
 			FVector PostPoint;
-			const bool bEnterRoom = (PendingBreachType == EBreachType::Loud);
+			const bool bEnterRoom = (PendingBreachType == EBreachType::Loud)
+				|| IBreachable::Execute_ShouldForcePushThrough(Door);
 			if (IBreachable::Execute_GetPostBreachPoint(Door, Pawn, bEnterRoom, PostPoint))
 			{
 				// The enter point must be genuinely reachable: a partial path "succeeds" by
@@ -284,10 +290,19 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				{
 					UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: repositioning (%s) after breach of %s"),
 						bEnterRoom ? TEXT("enter") : TEXT("sidestep"), *GetNameSafe(Door));
+					bEnterRoomReposition = bEnterRoom;
 					Phase = EBreachPhase::Repositioning;
 					PhaseElapsed = 0.f;
 					return;
 				}
+
+				UE_LOG(LogCompanionBreach, Warning, TEXT("TickTask: reposition move (%s) rejected for %s — holding in place"),
+					bEnterRoom ? TEXT("enter") : TEXT("sidestep"), *GetNameSafe(Door));
+			}
+			else
+			{
+				UE_LOG(LogCompanionBreach, Warning, TEXT("TickTask: no navigable post-breach point (%s) for %s — holding in place"),
+					bEnterRoom ? TEXT("enter") : TEXT("sidestep"), *GetNameSafe(Door));
 			}
 			bRepositionDeclined = true;
 		}
@@ -296,6 +311,7 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		const float HoldTime = (bInCombat && !bHadCombatTargetAtStart) ? 0.f : PostBreachWaitTime;
 		if (PhaseElapsed < MontageRemainder + HoldTime) return;
 
+		SetDoorAutoOpenSuppressed(false);
 		AIC->ClearActiveCommand();
 		CachedDoor.Reset();
 		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
@@ -312,6 +328,54 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 
 		if (bFreshCombat) AIC->StopMovement();
+
+		// A push-through holds on the inside for the player instead of finishing — finishing
+		// hands control back to follow, which would immediately walk back out the door.
+		if (!bFreshCombat && bEnterRoomReposition)
+		{
+			UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: waiting inside %s for the player"), *GetNameSafe(Door));
+			AIC->StopMovement(); // a timed-out reposition move must not keep pushing through the wait
+			Phase = EBreachPhase::WaitingForPlayer;
+			PhaseElapsed = 0.f;
+			return;
+		}
+
+		SetDoorAutoOpenSuppressed(false);
+		AIC->ClearActiveCommand();
+		CachedDoor.Reset();
+		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		return;
+	}
+
+	case EBreachPhase::WaitingForPlayer:
+	{
+		// Wait ends when the player comes through (near the companion), runs off (far from the
+		// door), goes missing, or there is ANY live combat target — the breach already succeeded,
+		// so even a held-over mid-fight target hands control back to the combat brain here.
+		const AActor* Player = IsValid(TickBB)
+			? Cast<AActor>(TickBB->GetValueAsObject(ACompanionAIController::BB_PlayerActor))
+			: nullptr;
+
+		bool bWaitOver = bInCombat || !IsValid(Player);
+		if (!bWaitOver)
+		{
+			const float PlayerToCompanion = FVector::Dist(Player->GetActorLocation(), Pawn->GetActorLocation());
+			const float PlayerToDoor = FVector::Dist(Player->GetActorLocation(), Door->GetActorLocation());
+			if (PlayerToCompanion <= WaitRejoinRadius)
+			{
+				UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: player rejoined after push-through of %s"), *GetNameSafe(Door));
+				bWaitOver = true;
+			}
+			else if (PlayerToDoor >= WaitAbandonDistance)
+			{
+				UE_LOG(LogCompanionBreach, Log, TEXT("TickTask: player left (%.0f > %.0f from %s) — abandoning push-through wait"),
+					PlayerToDoor, WaitAbandonDistance, *GetNameSafe(Door));
+				bWaitOver = true;
+			}
+		}
+		if (!bWaitOver) return;
+
+		SetDoorAutoOpenSuppressed(false);
 		AIC->ClearActiveCommand();
 		CachedDoor.Reset();
 		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
@@ -349,7 +413,11 @@ void UBTTask_CompanionBreach::OpenDoorNow(ACompanionAIController* AIC, AActor* D
 	const FBreachNoiseProfile* Profile = Tuning ? Tuning->BreachNoise.Find(PendingBreachType) : nullptr;
 	if (Profile && Profile->Loudness > 0.f && Profile->MaxRange > 0.f)
 	{
-		UAISense_Hearing::ReportNoiseEvent(AIC->GetWorld(), Door->GetActorLocation(),
+		// Doorway centre, not actor location — the swing-door root is the hinge, which can sit
+		// inside the frame/wall and wrongly read as occluded to acoustic listener traces.
+		const ADoorBase* DoorBase = Cast<ADoorBase>(Door);
+		const FVector NoiseLocation = DoorBase ? DoorBase->GetAcousticPortalPoint() : Door->GetActorLocation();
+		UAISense_Hearing::ReportNoiseEvent(AIC->GetWorld(), NoiseLocation,
 			Profile->Loudness, AIC->GetPawn(), Profile->MaxRange, TEXT("Breach"));
 	}
 
@@ -374,6 +442,12 @@ EBTNodeResult::Type UBTTask_CompanionBreach::AbortTask(UBehaviorTreeComponent& O
 	return EBTNodeResult::Aborted;
 }
 
+void UBTTask_CompanionBreach::SetDoorAutoOpenSuppressed(bool bSuppressed)
+{
+	if (ADoorBase* Door = Cast<ADoorBase>(CachedDoor.Get()))
+		Door->SetAutoOpenSuppressed(bSuppressed);
+}
+
 FString UBTTask_CompanionBreach::GetStaticDescription() const
 {
 	return FString::Printf(TEXT("Breach: align to stand point (accept %.0f cm), montage, door at contact"), StandPointAcceptRadius);
@@ -396,10 +470,12 @@ void UBTTask_CompanionBreach::FailAndClear(UBehaviorTreeComponent& OwnerComp)
 			AIC->ClearActiveCommand();
 	}
 
+	SetDoorAutoOpenSuppressed(false);
 	CachedDoor.Reset();
 	Phase = EBreachPhase::MovingToDoor;
 	bHasStandPoint = false;
 	bRepositionDeclined = false;
+	bEnterRoomReposition = false;
 	AlignElapsed = 0.f;
 	PhaseElapsed = 0.f;
 	MontageLength = 0.f;

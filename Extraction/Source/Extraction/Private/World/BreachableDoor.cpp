@@ -2,6 +2,7 @@
 
 #include "World/BreachableDoor.h"
 #include "Game/MissionInventorySubsystem.h"
+#include "Components/BoxComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
@@ -16,6 +17,7 @@ ABreachableDoor::ABreachableDoor()
 
 	HingeRoot = CreateDefaultSubobject<USceneComponent>(TEXT("HingeRoot"));
 	SetRootComponent(HingeRoot);
+	DoorwayTrigger->SetupAttachment(HingeRoot);
 
 	LeafPivot = CreateDefaultSubobject<USceneComponent>(TEXT("LeafPivot"));
 	LeafPivot->SetupAttachment(HingeRoot);
@@ -25,6 +27,9 @@ ABreachableDoor::ABreachableDoor()
 	// Ensure the door is visible to Visibility traces (camera ping).
 	DoorMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 	DoorMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+	// The navmesh flows through the doorway — the closed leaf blocks pawns physically, not the
+	// path. Locked doors re-enable this at BeginPlay so enemies route around them instead.
+	DoorMesh->SetCanEverAffectNavigation(false);
 }
 
 void ABreachableDoor::BeginPlay()
@@ -53,6 +58,13 @@ void ABreachableDoor::BeginPlay()
 		const FVector Hinge = LeafPivot->GetComponentLocation();
 		PanelOpenCenter = Hinge + (PanelClosedCenter - Hinge).RotateAngleAxis(OpenAngle, FVector::UpVector);
 	}
+
+	// Locked doors carve the navmesh (dynamic runtime generation) so enemies route around them
+	// rather than pathing into a door they can't open; unlocked doors are nav-transparent.
+	// Set unconditionally on the instance: a serialized BP/instance value of the EditAnywhere
+	// bCanEverAffectNavigation flag would silently mask the constructor default otherwise.
+	if (DoorMesh)
+		DoorMesh->SetCanEverAffectNavigation(IsLocked());
 
 	// Fail loud: a locked door with no keycard id can never be opened by anything.
 	if (bStartsLocked && RequiredKeycardId.IsNone())
@@ -162,20 +174,15 @@ bool ABreachableDoor::GetPostBreachPoint_Implementation(const AActor* Breacher, 
 	const float AwaySign = (LeafSide >= 0.f) ? -1.f : 1.f;
 
 	if (bEnterRoom)
-	{
-		OutLocation = PanelClosedCenter - Normal * PostBreachEnterDepth + Lateral * AwaySign * PostBreachLateralOffset;
-	}
-	else
-	{
-		float CapsuleRadius = 35.f;
-		if (const ACharacter* Character = Cast<ACharacter>(Breacher))
-			if (const UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
-				CapsuleRadius = Capsule->GetScaledCapsuleRadius();
+		return PickNavigableEnterPoint(PanelClosedCenter, Normal, Lateral, AwaySign, Breacher->GetActorLocation().Z, OutLocation);
 
-		const float Standoff = PanelHalfThicknessCached + CapsuleRadius + BreachReachGap;
-		OutLocation = PanelClosedCenter + Normal * (Standoff + 40.f) + Lateral * AwaySign * PostBreachLateralOffset;
-	}
+	float CapsuleRadius = 35.f;
+	if (const ACharacter* Character = Cast<ACharacter>(Breacher))
+		if (const UCapsuleComponent* Capsule = Character->GetCapsuleComponent())
+			CapsuleRadius = Capsule->GetScaledCapsuleRadius();
 
+	const float Standoff = PanelHalfThicknessCached + CapsuleRadius + BreachReachGap;
+	OutLocation = PanelClosedCenter + Normal * (Standoff + 40.f) + Lateral * AwaySign * PostBreachLateralOffset;
 	OutLocation.Z = Breacher->GetActorLocation().Z;
 	return true;
 }
@@ -203,6 +210,16 @@ void ABreachableDoor::BeginSwing()
 	SwingElapsed = 0.f;
 	ClosedYaw = LeafPivot->GetComponentRotation().Yaw;
 	SetActorTickEnabled(true);
+
+	// The leaf stops blocking pawns for good once it starts moving: an arriving pawn walks
+	// through mid-swing without a path stall, and a leaf swinging toward the opener clips
+	// past instead of launching it. Doors never close, so there is nothing to restore. Nav
+	// relevance drops too — a formerly-locked leaf must not keep carving at its open rest.
+	if (DoorMesh)
+	{
+		DoorMesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		DoorMesh->SetCanEverAffectNavigation(false);
+	}
 }
 
 void ABreachableDoor::FinishSwing()
