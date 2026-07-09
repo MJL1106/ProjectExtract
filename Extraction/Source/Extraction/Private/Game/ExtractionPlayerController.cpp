@@ -8,7 +8,6 @@
 #include "ExtractionCameraManager.h"
 #include "Blueprint/UserWidget.h"
 #include "PlayerHealthWidget.h"
-#include "CrosshairWidget.h"
 #include "AmmoWidget.h"
 #include "BarkFeedWidget.h"
 #include "CompanionModeWidget.h"
@@ -27,12 +26,6 @@ AExtractionPlayerController::AExtractionPlayerController()
 		TEXT("/Game/Core/UI/WBP_PlayerHealth"));
 	if (HUDWidgetBP.Succeeded())
 		HUDWidgetClass = HUDWidgetBP.Class;
-
-	// Default crosshair widget class
-	static ConstructorHelpers::FClassFinder<UCrosshairWidget> CrosshairBP(
-		TEXT("/Game/Core/UI/WBP_Crosshair"));
-	if (CrosshairBP.Succeeded())
-		CrosshairWidgetClass = CrosshairBP.Class;
 
 	// Default ammo widget class
 	static ConstructorHelpers::FClassFinder<UAmmoWidget> AmmoBP(
@@ -77,14 +70,6 @@ void AExtractionPlayerController::BeginPlay()
 		HUDWidget = CreateWidget<UPlayerHealthWidget>(this, HUDWidgetClass);
 		if (IsValid(HUDWidget))
 			HUDWidget->AddToPlayerScreen();
-	}
-
-	// Spawn crosshair for local player
-	if (IsLocalPlayerController() && CrosshairWidgetClass)
-	{
-		CrosshairWidget = CreateWidget<UCrosshairWidget>(this, CrosshairWidgetClass);
-		if (IsValid(CrosshairWidget))
-			CrosshairWidget->AddToPlayerScreen();
 	}
 
 	// Spawn ammo display for local player

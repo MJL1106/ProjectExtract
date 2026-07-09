@@ -74,10 +74,10 @@ private:
 	static constexpr float VisibleMeterThreshold = 0.02f;
 
 	/** Widget render opacity ramps from 0→1 as DisplayMeter crosses this range (fade-in). */
-	static constexpr float FadeInThreshold = 0.25f;
+	static constexpr float FadeInThreshold = 0.05f;
 
 	/** Interp speed applied to DisplayMeter each UpdateInterval tick. */
-	static constexpr float MeterInterpSpeed = 6.f;
+	static constexpr float MeterInterpSpeed = 12.f;
 
 	/** Smoothed display value — interps toward the raw awareness meter, drives all visuals. */
 	float DisplayMeter = 0.f;

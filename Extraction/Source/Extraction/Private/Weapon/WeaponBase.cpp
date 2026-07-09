@@ -42,7 +42,7 @@ namespace WeaponConstants
 
 static TAutoConsoleVariable<int32> CVarShowBulletTracers(
 	TEXT("weapon.ShowTracers"),
-	1,
+	0,
 	TEXT("If non-zero, draw a tracer from muzzle to impact and an impact marker for every shot (player + AI)."),
 	ECVF_Cheat);
 

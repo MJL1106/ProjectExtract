@@ -5,6 +5,18 @@
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
 
+static TAutoConsoleVariable<int32> CVarOverheadOcclusion(
+	TEXT("ui.OverheadOcclusion"),
+	1,
+	TEXT("If 0, overhead widgets skip the wall-occlusion hide entirely (diagnostic kill-switch)."),
+	ECVF_Cheat);
+
+static TAutoConsoleVariable<int32> CVarOverheadDebug(
+	TEXT("ui.OverheadWidgetDebug"),
+	0,
+	TEXT("If non-zero, log each overhead widget's occlusion trace result and applied render scale."),
+	ECVF_Cheat);
+
 UOverheadWidgetComponent::UOverheadWidgetComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;
@@ -27,8 +39,10 @@ void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	const FVector CameraLocation = Camera->GetCameraLocation();
 	const FVector WidgetLocation = GetComponentLocation();
 
+	const bool bOcclusionEnabled = bHideWhenOccluded && CVarOverheadOcclusion.GetValueOnGameThread() != 0;
+
 	TimeSinceOcclusionTrace += DeltaTime;
-	if (bHideWhenOccluded && TimeSinceOcclusionTrace >= OcclusionTraceInterval)
+	if (bOcclusionEnabled && TimeSinceOcclusionTrace >= OcclusionTraceInterval)
 	{
 		TimeSinceOcclusionTrace = 0.f;
 
@@ -43,11 +57,40 @@ void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 		ObjectParams.AddObjectTypesToQuery(ECC_WorldStatic);
 		ObjectParams.AddObjectTypesToQuery(ECC_WorldDynamic);
 
-		bOccluded = GetWorld()->LineTraceTestByObjectType(CameraLocation, WidgetLocation, ObjectParams, TraceParams);
+		// Only visible, sight-blocking geometry occludes. Invisible gameplay volumes
+		// (takedown OverlapBoxes) and hidden helper meshes (cover-slot markers) share the
+		// WorldDynamic/WorldStatic object types but must not hide the widget — skip past them.
+		bOccluded = false;
+		FHitResult OcclusionHit;
+		constexpr int32 MaxSkips = 8;
+		for (int32 Skip = 0; Skip < MaxSkips; ++Skip)
+		{
+			if (!GetWorld()->LineTraceSingleByObjectType(OcclusionHit, CameraLocation, WidgetLocation, ObjectParams, TraceParams))
+				break;
+
+			const UPrimitiveComponent* HitComp = OcclusionHit.GetComponent();
+			const AActor* HitActor = OcclusionHit.GetActor();
+			const bool bRealOccluder = IsValid(HitComp)
+				&& HitComp->GetCollisionResponseToChannel(ECC_Visibility) == ECR_Block
+				&& HitComp->IsVisible() && !HitComp->bHiddenInGame
+				&& (!IsValid(HitActor) || !HitActor->IsHidden());
+			if (bRealOccluder)
+			{
+				bOccluded = true;
+				break;
+			}
+			TraceParams.AddIgnoredComponent(HitComp);
+		}
+
+		if (CVarOverheadDebug.GetValueOnGameThread() != 0)
+			UE_LOG(LogTemp, Log, TEXT("[OverheadWidget] %s occluded=%d hitActor=%s hitComp=%s widgetLoc=%s camDist=%.0f"),
+				*GetNameSafe(GetOwner()), (int32)bOccluded,
+				*GetNameSafe(OcclusionHit.GetActor()), *GetNameSafe(OcclusionHit.GetComponent()),
+				*WidgetLocation.ToCompactString(), FVector::Dist(CameraLocation, WidgetLocation));
 	}
 
 	float Scale = 0.f;
-	if (!bOccluded || !bHideWhenOccluded)
+	if (!bOccluded || !bOcclusionEnabled)
 	{
 		const float Distance = FMath::Max(FVector::Dist(CameraLocation, WidgetLocation), 1.f);
 		Scale = FMath::Clamp(ReferenceDistance / Distance, MinScale, MaxScale);

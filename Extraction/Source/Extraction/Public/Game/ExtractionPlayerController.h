@@ -10,7 +10,6 @@
 class UInputMappingContext;
 class UUserWidget;
 class UPlayerHealthWidget;
-class UCrosshairWidget;
 class UAmmoWidget;
 class UBarkFeedWidget;
 class UCompanionModeWidget;
@@ -60,14 +59,6 @@ protected:
 	/** Active HUD widget instance */
 	UPROPERTY()
 	TObjectPtr<UPlayerHealthWidget> HUDWidget;
-
-	/** Crosshair widget class */
-	UPROPERTY(EditDefaultsOnly, Category = "UI")
-	TSubclassOf<UCrosshairWidget> CrosshairWidgetClass;
-
-	/** Active crosshair widget instance */
-	UPROPERTY()
-	TObjectPtr<UCrosshairWidget> CrosshairWidget;
 
 	/** Ammo display widget class */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
