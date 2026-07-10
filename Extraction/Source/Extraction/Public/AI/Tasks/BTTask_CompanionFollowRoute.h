@@ -11,6 +11,7 @@
 class ACompanionRoute;
 class ACompanionCharacter;
 class ACompanionAIController;
+class AExtractionPlayer;
 
 UCLASS()
 class EXTRACTION_API UBTTask_CompanionFollowRoute : public UBTTaskNode
@@ -43,6 +44,9 @@ private:
 		TWeakObjectPtr<ACompanionRoute> CachedRoute;
 		TWeakObjectPtr<ACompanionCharacter> CachedCharacter;
 		TWeakObjectPtr<ACompanionAIController> CachedController;
+
+		/** Player locked via Route->PlayerSpeedLock this run, if any. Released in OnTaskFinished. */
+		TWeakObjectPtr<AExtractionPlayer> CachedSpeedLockedPlayer;
 
 		int32 CurrentIndex = 0;
 		ERoutePhase Phase = ERoutePhase::MovingToStart;

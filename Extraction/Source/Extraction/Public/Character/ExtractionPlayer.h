@@ -54,7 +54,7 @@ class EXTRACTION_API AExtractionPlayer : public ACharacter, public IExtractionPl
 
 public:
 
-	AExtractionPlayer();
+	AExtractionPlayer(const FObjectInitializer& ObjectInitializer);
 
 	virtual void PostInitializeComponents() override;
 
@@ -198,6 +198,21 @@ public:
 
 	/** No WeaponSpawn component on this class — kit BP attaches via socket directly. */
 	virtual USceneComponent* GetWeaponSpawn() const override { return nullptr; }
+
+	/** Locks the player's ground/air speed to Speed for the duration of an active companion route.
+	 *  Enforced by UExtractionPlayerMovement::GetMaxSpeed (consumption-side — kit-BP MaxWalkSpeed
+	 *  writes can't race it): standing speed = Speed exactly, crouch capped but never boosted,
+	 *  DBNO crawl untouched. Called by BTTask_CompanionFollowRoute when Route->PlayerSpeedLock > 0. */
+	UFUNCTION(BlueprintCallable, Category = "Movement")
+	void SetRouteSpeedLock(float Speed) { RouteSpeedLock = Speed; }
+
+	/** Clears the route speed lock. Idempotent — no speed restore needed since the lock never
+	 *  writes movement-component properties. */
+	UFUNCTION(BlueprintCallable, Category = "Movement")
+	void ClearRouteSpeedLock() { RouteSpeedLock = 0.f; }
+
+	/** Read by UExtractionPlayerMovement::GetMaxSpeed. 0 = no lock. */
+	float GetRouteSpeedLock() const { return RouteSpeedLock; }
 
 	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
 	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }
@@ -524,6 +539,10 @@ private:
 
 	/** Pre-DBNO crouched speed, restored on ExitDBNO. */
 	float SavedMaxWalkSpeedCrouched = 0.f;
+
+	/** Active companion-route speed lock (cm/s). 0 = no lock. Consumed by
+	 *  UExtractionPlayerMovement::GetMaxSpeed — never written into the movement component. */
+	float RouteSpeedLock = 0.f;
 
 	/** World time of the last revive — drives the post-revive damage grace. */
 	float LastReviveWorldTime = -1e9f;

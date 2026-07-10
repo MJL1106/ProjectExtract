@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionPlayer.h"
+#include "ExtractionPlayerMovement.h"
 #include "Components/CompanionCommandComponent.h"
 #include "AI/AITargetingStatics.h"
 #include "Perception/AISightTargetInterface.h"
@@ -56,8 +57,10 @@ static FAutoConsoleVariableRef CVarReviveCameraDebug(
 	TEXT("revive.CameraDebug"), GReviveCameraDebug,
 	TEXT("1 = per-frame camera/control/body rotation trace around the revive (very chatty)."));
 
-AExtractionPlayer::AExtractionPlayer()
-	: bIsDBNO(false)
+AExtractionPlayer::AExtractionPlayer(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UExtractionPlayerMovement>(
+		ACharacter::CharacterMovementComponentName))
+	, bIsDBNO(false)
 	, BleedoutTimeRemaining(0.f)
 	, ReviveElapsed(0.f)
 	, bIsReviving(false)
