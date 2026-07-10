@@ -84,7 +84,8 @@ public class Extraction : ModuleRules
 			"Extraction/Private/AI/EQS",
 			"Extraction/Private/AI/Navigation",
 			"Extraction/Private/AI/Cover",
-			"Extraction/Private/World"
+			"Extraction/Private/World",
+			"Extraction/Private/Tests"
 		});
 	}
 }
