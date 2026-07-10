@@ -3,3 +3,6 @@ url = "http://127.0.0.1:8089/mcp"
 
 [mcp_servers.unreal-editor]
 url = "http://127.0.0.1:9315/mcp"
+
+[features]
+multi_agent = true

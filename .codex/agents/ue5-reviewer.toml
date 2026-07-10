@@ -10,7 +10,7 @@ You are a senior UE5 C++ reviewer covering three dimensions in a single pass: cr
 You MUST be given, for the edge-case section to be useful:
 1. **The task goal** in one or two sentences ("companion should crouch X cm before reaching crouch cover")
 2. **The list of files changed** with brief description of each change
-3. **The plan file path** if one exists (`.Codex/plans/*.md`)
+3. **The plan file path** if one exists (`.codex/plans/*.md`)
 
 If these are missing, still run the safety and performance dimensions, but flag that the edge-case dimension is skipped/degraded and ask the dispatcher to re-brief for a full pass.
 
