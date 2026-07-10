@@ -47,10 +47,12 @@ void AExtractionTargetActor::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Placeholder-mesh fallback: no skeletal mesh assigned yet, so the box must catch
-	// the interact trace instead. Trade-off (box eats bullets/sight) only exists until
-	// a mesh asset is assigned in the placed BP.
-	if (IsValid(SkeletalMesh) && !SkeletalMesh->GetSkeletalMeshAsset())
+	// Placeholder-mesh fallback: no skeletal mesh assigned yet — or one without a physics
+	// asset, which has zero collision bodies and lets the interact trace pass through — so
+	// the box must catch the trace instead. Trade-off (box eats bullets/sight) only exists
+	// until a properly set-up mesh asset is assigned in the placed BP.
+	const USkeletalMesh* MeshAsset = IsValid(SkeletalMesh) ? SkeletalMesh->GetSkeletalMeshAsset() : nullptr;
+	if (!MeshAsset || !MeshAsset->GetPhysicsAsset())
 		InteractionBox->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 
 	// Late joiners receive bActivated/bCompleted (and their OnReps) before BeginPlay;
