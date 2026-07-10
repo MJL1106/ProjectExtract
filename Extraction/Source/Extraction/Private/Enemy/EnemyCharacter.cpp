@@ -35,6 +35,7 @@
 #include "EnemyAwarenessWidget.h"
 #include "Data/AmmoDropTableDataAsset.h"
 #include "World/AmmoPickup.h"
+#include "World/LootPickup.h"
 #include "Companion/CompanionCharacter.h"
 
 static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
@@ -906,6 +907,7 @@ void AEnemyCharacter::HandleDeath()
 	if (!IsValid(World)) return;
 
 	TrySpawnAmmoDrop();
+	TrySpawnDeathLoot();
 
 	// Sight perception bakes the listener-target affiliation into its query at registration and never
 	// re-evaluates a runtime team change. This pawn just flipped to NoTeam (dead) — living enemies
@@ -1006,6 +1008,79 @@ void AEnemyCharacter::TrySpawnAmmoDrop()
 	if (!Pickup) return;
 
 	Pickup->InitPickup(Category, Amount);
+	Pickup->FinishSpawning(SpawnTransform);
+}
+
+FVector AEnemyCharacter::FindDeathLootSpawnLocation() const
+{
+	const FVector Origin = GetActorLocation();
+	const FVector Fallback = Origin + FVector(0.f, 0.f, 30.f);
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return Fallback;
+
+	// Candidate lateral directions: behind facing, left, right, forward.
+	const FVector Forward = GetActorForwardVector();
+	const FVector Candidates[4] = {
+		-Forward, FVector::CrossProduct(FVector::UpVector, Forward),
+		FVector::CrossProduct(Forward, FVector::UpVector), Forward
+	};
+
+	constexpr float LateralDist = 80.f;
+	constexpr float SweepRadius = 15.f;
+	constexpr float TraceDown = 500.f;
+	constexpr float GroundOffset = 5.f;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DeathLoot), false, this);
+
+	for (const FVector& Dir : Candidates)
+	{
+		const FVector TestPoint = Origin + Dir * LateralDist + FVector(0.f, 0.f, 30.f);
+
+		// Candidate must be reachable from the corpse — reject spots on the far side of a wall.
+		FHitResult PathHit;
+		if (World->LineTraceSingleByChannel(PathHit, Origin + FVector(0.f, 0.f, 30.f),
+				TestPoint, ECC_WorldStatic, Params))
+			continue;
+
+		// Check the candidate spot isn't inside blocking geometry.
+		if (World->OverlapBlockingTestByChannel(TestPoint, FQuat::Identity,
+				ECC_WorldStatic, FCollisionShape::MakeSphere(SweepRadius), Params))
+			continue;
+
+		// Ground-snap: line trace down to find the floor.
+		FHitResult GroundHit;
+		if (World->LineTraceSingleByChannel(GroundHit, TestPoint,
+				TestPoint - FVector(0.f, 0.f, TraceDown), ECC_WorldStatic, Params))
+			return GroundHit.ImpactPoint + FVector(0.f, 0.f, GroundOffset);
+	}
+
+	return Fallback;
+}
+
+void AEnemyCharacter::TrySpawnDeathLoot()
+{
+	if (!HasAuthority() || DeathLoot.Num() == 0) return;
+
+	if (!LootPickupClass)
+	{
+		UE_LOG(LogEnemyAI, Warning, TEXT("%s: DeathLoot authored but LootPickupClass is unset — loot will not drop"),
+			*GetName());
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	const FVector SpawnLocation = FindDeathLootSpawnLocation();
+	const FTransform SpawnTransform(FRotator::ZeroRotator, SpawnLocation);
+
+	ALootPickup* Pickup = World->SpawnActorDeferred<ALootPickup>(
+		LootPickupClass, SpawnTransform, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn);
+	if (!IsValid(Pickup)) return;
+
+	Pickup->SetContents(DeathLoot);
 	Pickup->FinishSpawning(SpawnTransform);
 }
 

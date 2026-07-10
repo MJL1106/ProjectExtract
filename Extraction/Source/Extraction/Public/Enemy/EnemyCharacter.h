@@ -11,6 +11,7 @@
 #include "AIShooterInterface.h"
 #include "ExtractionTypes.h"
 #include "EnemyTypes.h"
+#include "World/LootTypes.h"
 #include "EnemyCharacter.generated.h"
 
 class UHealthComponent;
@@ -28,6 +29,7 @@ class UEnemyArmourComponent;
 class UEnemyGrenadierComponent;
 class USquadAuraComponent;
 class UEnemySniperTelegraphComponent;
+class ALootPickup;
 
 // Cover pose (AICS migration — default subobject)
 class UCoverPoseComponent;
@@ -333,6 +335,14 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Data")
 	TObjectPtr<UAmmoDropTableDataAsset> AmmoDropTable;
 
+	/** Guaranteed loot dropped as a physical pickup on death (e.g. keycards). Authored per placed instance. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Loot")
+	TArray<FLootGrant> DeathLoot;
+
+	/** Blueprint class to spawn for death loot. Assigned on the base enemy BP. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Loot")
+	TSubclassOf<ALootPickup> LootPickupClass;
+
 	// When true, this enemy detects by sight only (ignores hearing) and neither raises nor reacts to
 	// the global alert. For isolating test-gym encounters; leave false in real gameplay.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Testing")
@@ -604,4 +614,10 @@ private:
 	/** Authority-only death-drop roll: chance from AmmoDropTable keyed by the held weapon's
 	 *  category; spawns an AAmmoPickup next to the corpse on success. */
 	void TrySpawnAmmoDrop();
+
+	/** Authority-only: spawns a loot pickup with DeathLoot contents next to the corpse. */
+	void TrySpawnDeathLoot();
+
+	/** Finds a clear lateral + ground-snapped spawn location for death loot. */
+	FVector FindDeathLootSpawnLocation() const;
 };
