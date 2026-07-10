@@ -470,13 +470,22 @@ private:
 	void InteractStart(const FInputActionValue& Value);
 	void InteractStop(const FInputActionValue& Value);
 
-	/** Camera-forward interact trace: loots ILootable containers, keycard-unlocks locked doors.
+	/** Camera-forward interact trace: IWorldInteractable first, then ILootable containers,
+	 *  then keycard-unlock locked doors.
 	 *  Returns true when the press was consumed by a world interaction (revive check is skipped). */
 	bool TryWorldInteract();
+
+	/** Server RPC for IWorldInteractable interactions initiated by a client. */
+	UFUNCTION(Server, Reliable)
+	void Server_WorldInteract(AActor* Target);
 
 	/** Max distance (cm) for the Interact world trace. */
 	UPROPERTY(EditAnywhere, Category = "Interaction", meta = (ClampMin = "0.0"))
 	float InteractTraceRange = 250.f;
+
+	/** Extra distance (cm) tolerance on the server validation for world interactions,
+	 *  absorbing network latency and minor position desync. */
+	static constexpr float WorldInteractDistanceSlack = 50.f;
 
 	void TakedownInput(const FInputActionValue& Value);
 	void StartMontageDeferred(AEnemyCharacter* Victim);

@@ -41,6 +41,7 @@
 #include "EnemyDebug.h"
 #include "World/Lootable.h"
 #include "World/BreachableDoor.h"
+#include "World/WorldInteractable.h"
 #include "HAL/IConsoleManager.h"
 
 // Live revive-arrangement tuning (paired with revive.* CVars in CompanionCharacter.cpp): rotates the
@@ -808,6 +809,20 @@ bool AExtractionPlayer::TryWorldInteract()
 	AActor* HitActor = Hit.GetActor();
 	if (!IsValid(HitActor)) return false;
 
+	// Generic world interactable — extraction targets, terminals, etc.
+	if (HitActor->Implements<UWorldInteractable>() && IWorldInteractable::Execute_CanWorldInteract(HitActor, this))
+	{
+		if (HasAuthority())
+		{
+			IWorldInteractable::Execute_WorldInteract(HitActor, this);
+		}
+		else
+		{
+			Server_WorldInteract(HitActor);
+		}
+		return true;
+	}
+
 	// Lootable container — instant press-to-loot; the container animates itself (no player anim yet).
 	if (HitActor->Implements<ULootable>() && ILootable::Execute_CanLoot(HitActor))
 	{
@@ -826,6 +841,24 @@ bool AExtractionPlayer::TryWorldInteract()
 	}
 
 	return false;
+}
+
+void AExtractionPlayer::Server_WorldInteract_Implementation(AActor* Target)
+{
+	if (!IsValid(Target)) return;
+	if (!Target->Implements<UWorldInteractable>()) return;
+	if (!IWorldInteractable::Execute_CanWorldInteract(Target, this)) return;
+
+	const float MaxDistSq = FMath::Square(InteractTraceRange + WorldInteractDistanceSlack);
+	const float BoundsDistSq = Target->GetComponentsBoundingBox().ComputeSquaredDistanceToPoint(GetActorLocation());
+	if (BoundsDistSq > MaxDistSq)
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("Server_WorldInteract: '%s' too far from '%s'"),
+			*GetNameSafe(this), *GetNameSafe(Target));
+		return;
+	}
+
+	IWorldInteractable::Execute_WorldInteract(Target, this);
 }
 
 void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
