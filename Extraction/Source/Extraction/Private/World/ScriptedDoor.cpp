@@ -9,6 +9,8 @@ DEFINE_LOG_CATEGORY_STATIC(LogScriptedDoor, Log, All);
 
 AScriptedDoor::AScriptedDoor()
 {
+	bReplicates = true;
+
 	DoorRoot = CreateDefaultSubobject<USceneComponent>(TEXT("DoorRoot"));
 	SetRootComponent(DoorRoot);
 	DoorwayTrigger->SetupAttachment(DoorRoot);
@@ -25,11 +27,17 @@ void AScriptedDoor::BeginPlay()
 	bDoorOpen = bStartsOpen;
 
 	// The navmesh flows through the doorway regardless of door state — the closed leaf blocks
-	// pawns physically until something opens it. Set on every mesh (panel, frame, glass) at
-	// runtime so serialized BP/instance values can't mask it. Pack doors have no lock concept.
+	// pawns physically until something opens it. Only movable meshes are safeguarded and
+	// replicated at runtime; static frame and wall geometry remains navigation-relevant.
 	TInlineComponentArray<UStaticMeshComponent*> Meshes(this);
 	for (UStaticMeshComponent* Mesh : Meshes)
-		if (Mesh) Mesh->SetCanEverAffectNavigation(false);
+	{
+		if (Mesh && Mesh->GetMobility() == EComponentMobility::Movable)
+		{
+			Mesh->SetCanEverAffectNavigation(false);
+			Mesh->SetIsReplicated(true);
+		}
+	}
 }
 
 void AScriptedDoor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -42,12 +50,14 @@ void AScriptedDoor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 bool AScriptedDoor::CanBreach_Implementation() const
 {
+	if (IsExternalGateLocked()) return false;
 	return !bDoorOpen && !bOpenInFlight;
 }
 
 void AScriptedDoor::Breach_Implementation(AActor* Breacher)
 {
-	if (bDoorOpen || bOpenInFlight) return;
+	if (IsExternalGateLocked()) return;
+	if (!HasAuthority() || bDoorOpen || bOpenInFlight) return;
 
 	bOpenInFlight = true;
 	ApplyPawnPassThrough();
@@ -59,6 +69,9 @@ void AScriptedDoor::Breach_Implementation(AActor* Breacher)
 
 void AScriptedDoor::NotifyDoorStateChanged(bool bNowOpen)
 {
+	if (bNowOpen && IsExternalGateLocked())
+		UE_LOG(LogScriptedDoor, Warning, TEXT("%s: opened while externally gate-locked — an ungated BP path bypassed the gate."), *GetName());
+
 	GetWorldTimerManager().ClearTimer(NotifyTimeoutHandle);
 	bDoorOpen = bNowOpen;
 	bOpenInFlight = false;

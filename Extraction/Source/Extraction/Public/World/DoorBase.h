@@ -27,6 +27,17 @@ public:
 	virtual bool GetPostBreachPoint_Implementation(const AActor* Breacher, bool bEnterRoom, FVector& OutLocation) const override;
 	virtual bool ShouldForcePushThrough_Implementation() const override { return bForcePushThrough; }
 
+	// --- External gate (level-script door lock) ---
+
+	/** Lock or unlock from an external gate actor (e.g. ACompanionModeDoorGate). Authority-only. */
+	UFUNCTION(BlueprintCallable, Category = "Door|Gate")
+	void SetExternalGateLocked(bool bLocked);
+
+	UFUNCTION(BlueprintPure, Category = "Door|Gate")
+	bool IsExternalGateLocked() const { return bExternalGateLocked; }
+
+	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+
 	/** While suppressed, the doorway trigger never auto-opens this door. Set by the companion
 	 *  breach task while it owns the door — otherwise the companion walking to its stand point
 	 *  trips the trigger and the door pops open with no montage, failing the commanded breach. */
@@ -44,6 +55,11 @@ protected:
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/** Externally locked by a level-script gate (e.g. companion-mode prerequisite). While set,
+	 *  CanBreach and TryUnlock refuse to open. Replicated so clients see the locked state. */
+	UPROPERTY(Replicated, Transient)
+	bool bExternalGateLocked = false;
 
 	/** Approach volume spanning both sides of the doorway — AI pawns entering it push the door
 	 *  open (see OnDoorwayOverlap). Created here, but every subclass ctor MUST SetupAttachment

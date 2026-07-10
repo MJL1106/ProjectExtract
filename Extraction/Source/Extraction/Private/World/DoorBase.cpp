@@ -9,6 +9,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Character.h"
 #include "NavigationSystem.h"
+#include "Net/UnrealNetwork.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogDoorBase, Log, All);
 
@@ -104,6 +105,20 @@ void ADoorBase::RescanDoorwayForAutoOpen()
 	DoorwayTrigger->GetOverlappingActors(Overlapping, APawn::StaticClass());
 	for (AActor* Actor : Overlapping)
 		TryAutoOpenFor(Actor);
+}
+
+// --- External gate ---
+
+void ADoorBase::SetExternalGateLocked(bool bLocked)
+{
+	if (!HasAuthority()) return;
+	bExternalGateLocked = bLocked;
+}
+
+void ADoorBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+	DOREPLIFETIME(ADoorBase, bExternalGateLocked);
 }
 
 // --- IBreachable defaults ---

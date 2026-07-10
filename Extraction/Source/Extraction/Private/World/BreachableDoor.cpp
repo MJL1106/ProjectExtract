@@ -101,12 +101,14 @@ void ABreachableDoor::Tick(float DeltaSeconds)
 
 bool ABreachableDoor::CanBreach_Implementation() const
 {
+	if (IsExternalGateLocked()) return false;
 	// Locked doors aren't offered for companion breach — unlock with the keycard first.
 	return DoorState == EDoorState::Closed && !IsLocked();
 }
 
 void ABreachableDoor::TryUnlock(AActor* UnlockInstigator)
 {
+	if (IsExternalGateLocked()) return;
 	if (!IsLocked() || DoorState != EDoorState::Closed) return;
 
 	UWorld* World = GetWorld();
@@ -189,6 +191,8 @@ bool ABreachableDoor::GetPostBreachPoint_Implementation(const AActor* Breacher, 
 
 void ABreachableDoor::Breach_Implementation(AActor* Breacher)
 {
+	if (IsExternalGateLocked()) return;
+
 	if (DoorState != EDoorState::Closed)
 	{
 		UE_LOG(LogBreachableDoor, Warning, TEXT("%s: Breach called but door is not Closed (state=%d)"),
