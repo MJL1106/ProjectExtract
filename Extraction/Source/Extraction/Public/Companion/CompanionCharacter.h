@@ -295,6 +295,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
 	bool IsCommandedTakedownArmed() const { return bTakedownArmed; }
 
+	/** True when a shoot-method takedown is armed (stealth discipline exemption snapshot). */
+	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
+	bool IsShootTakedownArmed() const { return bTakedownArmed && TakedownActiveMethod == ETakedownMethod::Shoot; }
+
 	/** True while the companion is in a crouched knife approach. Readable by the AnimInstance. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
 	bool IsInTakedownApproach() const { return bTakedownCrouchApproach; }

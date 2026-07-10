@@ -4,6 +4,8 @@
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
 #include "Character/ExtractionPlayerInterface.h"
+#include "Companion/CompanionCharacter.h"
+#include "Components/CompanionCommandComponent.h"
 #include "GameFramework/Character.h"
 #include "Net/UnrealNetwork.h"
 #include "Engine/World.h"
@@ -47,6 +49,8 @@ void UWeaponComponent::BeginPlay()
 
 void UWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	bNextShotStealthExempt = false;
+
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->OnWeaponFired.RemoveAll(this);
 
@@ -61,6 +65,8 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 {
 	if (!OwnerIface) return;
 	if (!IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return;
+
+	bNextShotStealthExempt = false;
 
 	// Destroy existing weapon
 	if (IsValid(CurrentWeapon))
@@ -112,10 +118,15 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 		OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
 }
 
-void UWeaponComponent::StartFire()
+void UWeaponComponent::StartFire(bool bAuthorityTakedownSnapshot)
 {
-	// Local prediction (skip if we're the server — RPC will execute locally)
 	if (!IsValid(OwnerActor)) return;
+
+	// Authority path: trust the caller's snapshot directly (ExtractionPlayer resolved it).
+	if (OwnerActor->HasAuthority())
+		bNextShotStealthExempt = bAuthorityTakedownSnapshot;
+
+	// Local prediction (skip if we're the server — RPC will execute locally)
 	if (!OwnerActor->HasAuthority() && IsValid(CurrentWeapon))
 		CurrentWeapon->StartFiring();
 
@@ -125,6 +136,9 @@ void UWeaponComponent::StartFire()
 void UWeaponComponent::StopFire()
 {
 	if (!IsValid(OwnerActor)) return;
+
+	bNextShotStealthExempt = false;
+
 	if (!OwnerActor->HasAuthority() && IsValid(CurrentWeapon))
 		CurrentWeapon->StopFiring();
 
@@ -155,11 +169,23 @@ void UWeaponComponent::SetAiming(bool bNewAiming)
 void UWeaponComponent::Server_StartFire_Implementation()
 {
 	if (!IsValid(CurrentWeapon)) return;
+
+	// Remote-client pawn: resolve the companion server-side (never trust a client-sent exemption).
+	// IsLocallyControlled() is false for remote pawns even inside a Server RPC (HasAuthority()
+	// would be true for ALL pawns here). Residual race: the takedown disarm travels via its own
+	// RPC so arrival order vs Server_StartFire isn't guaranteed; resolving at RPC receipt is the
+	// best server-authoritative approximation.
+	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
+	if (OwnerPawn && !OwnerPawn->IsLocallyControlled())
+		bNextShotStealthExempt = ResolveServerTakedownSnapshot();
+
 	CurrentWeapon->StartFiring();
 }
 
 void UWeaponComponent::Server_StopFire_Implementation()
 {
+	bNextShotStealthExempt = false;
+
 	if (!IsValid(CurrentWeapon)) return;
 	CurrentWeapon->StopFiring();
 }
@@ -183,7 +209,14 @@ void UWeaponComponent::OnWeaponFiredCallback()
 {
 	// Only the server should multicast
 	if (IsValid(OwnerActor) && OwnerActor->HasAuthority())
+	{
+		// Copy + clear the exemption: only the FIRST shot of a trigger pull is exempt.
+		const bool bExempt = bNextShotStealthExempt;
+		bNextShotStealthExempt = false;
+
+		OnPlayerWeaponShot.Broadcast(bExempt);
 		Multicast_OnFired();
+	}
 }
 
 // ---- Multicast ----
@@ -281,4 +314,19 @@ void UWeaponComponent::SeatWeaponGripSocket()
 	const FTransform Inv = GripLocal.Inverse();
 	CurrentWeapon->SetActorRelativeLocation(Inv.GetLocation());
 	CurrentWeapon->SetActorRelativeRotation(Inv.GetRotation());
+}
+
+// ---- Stealth Exemption ----
+
+bool UWeaponComponent::ResolveServerTakedownSnapshot()
+{
+	if (!IsValid(OwnerActor)) return false;
+
+	UCompanionCommandComponent* CmdComp = OwnerActor->FindComponentByClass<UCompanionCommandComponent>();
+	if (!IsValid(CmdComp)) return false;
+
+	ACompanionCharacter* Companion = CmdComp->GetCompanion();
+	if (!IsValid(Companion)) return false;
+
+	return Companion->IsShootTakedownArmed();
 }

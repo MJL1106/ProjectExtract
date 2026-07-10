@@ -489,12 +489,22 @@ void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 	if (IsInTraversal()) return;
 	if (!IsValid(WeaponComponent)) return;
 
+	// Snapshot the companion shoot-takedown state BEFORE broadcasting: the synchronous
+	// takedown listener disarms before the actual weapon shot lands.
+	bool bTakedownSnapshot = false;
+	if (HasAuthority() && IsValid(CompanionCommandComponent))
+	{
+		ACompanionCharacter* Companion = CompanionCommandComponent->GetCompanion();
+		if (IsValid(Companion))
+			bTakedownSnapshot = Companion->IsShootTakedownArmed();
+	}
+
 	// Broadcast BEFORE the shot: StartFire's hitscan/kill/alert chain runs synchronously, and a
 	// synced companion shoot-takedown listening on this delegate must land its kill while the
-	// victim is still Unaware — after StartFire, the player's own gunshot has already alerted it
+	// victim is still Unaware -- after StartFire, the player's own gunshot has already alerted it
 	// and the takedown whiffs.
 	OnPlayerFiredWeapon.Broadcast();
-	WeaponComponent->StartFire();
+	WeaponComponent->StartFire(bTakedownSnapshot);
 }
 
 void AExtractionPlayer::FireStop(const FInputActionValue& Value)

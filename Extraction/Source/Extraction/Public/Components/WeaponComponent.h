@@ -9,6 +9,9 @@
 class AWeaponBase;
 class IExtractionPlayerInterface;
 
+/** Broadcast per actual shot with stealth exemption context. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerWeaponShot, bool, bStealthExempt);
+
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class EXTRACTION_API UWeaponComponent : public UActorComponent
 {
@@ -25,10 +28,18 @@ public:
 	/** Spawn and equip a weapon by class */
 	void EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass);
 
-	void StartFire();
+	/** Begin firing. bAuthorityTakedownSnapshot = true when the authority has confirmed a
+	 *  companion shoot-takedown is armed at trigger-pull time (first shot only is exempt). */
+	void StartFire(bool bAuthorityTakedownSnapshot = false);
 	void StopFire();
 	void StartReload();
 	void SetAiming(bool bNewAiming);
+
+	// ---- Events ----
+
+	/** Per-shot relay with stealth discipline exemption flag. Authority-only. */
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FOnPlayerWeaponShot OnPlayerWeaponShot;
 
 	// ---- Getters ----
 
@@ -60,6 +71,10 @@ private:
 
 	UPROPERTY(ReplicatedUsing = OnRep_IsAiming)
 	bool bIsAiming;
+
+	/** True for the FIRST shot of a trigger pull that coincides with a companion shoot-takedown.
+	 *  Consumed (cleared) on the first OnWeaponFiredCallback. */
+	bool bNextShotStealthExempt = false;
 
 	// ---- Server RPCs ----
 
@@ -94,6 +109,9 @@ private:
 
 	/** Re-seats the weapon after SnapToTarget so GripSocket coincides with ik_hand_gun. */
 	void SeatWeaponGripSocket();
+
+	/** Resolves the companion on the server for shoot-takedown snapshot. */
+	bool ResolveServerTakedownSnapshot();
 
 	/** Cached owner actor (GC-safe UPROPERTY anchor) */
 	UPROPERTY()
