@@ -18,7 +18,15 @@ class EXTRACTION_API AExtractionGameMode : public AGameModeBase
 
 public:
 	AExtractionGameMode();
+
+	/** Idempotent level completion: pauses gameplay and shows the completion UI on every player. */
+	UFUNCTION(BlueprintCallable, Category = "Game|Completion")
+	void CompleteLevel();
+
+	/** Unpauses and reloads the current level, resetting all one-shot state. */
+	UFUNCTION(BlueprintCallable, Category = "Game|Completion")
+	void RestartCurrentLevel();
+
+private:
+	bool bLevelCompleted = false;
 };
-
-
-

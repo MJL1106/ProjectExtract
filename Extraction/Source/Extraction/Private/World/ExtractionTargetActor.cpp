@@ -7,6 +7,7 @@
 #include "Net/UnrealNetwork.h"
 
 #include "EnemyDirectorSubsystem.h"
+#include "ExtractionGameMode.h"
 #include "ObjectiveSubsystem.h"
 #include "MissionInventorySubsystem.h"
 #include "LevelCompletionLiftGate.h"
@@ -202,8 +203,10 @@ void AExtractionTargetActor::PerformCompletionAction()
 		break;
 
 	case EWaveCompletionAction::CompleteLevel:
-		// TODO(Task 6): AExtractionGameMode::CompleteLevel() -- wire here once the method exists.
-		UE_LOG(LogExtractionTarget, Log, TEXT("%s: CompletionAction is CompleteLevel (stub -- Task 6 wires GameMode::CompleteLevel)"), *GetName());
+		if (AExtractionGameMode* GameMode = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+			GameMode->CompleteLevel();
+		else
+			UE_LOG(LogExtractionTarget, Warning, TEXT("%s: CompletionAction is CompleteLevel but no AExtractionGameMode found"), *GetName());
 		break;
 
 	case EWaveCompletionAction::BroadcastOnly:

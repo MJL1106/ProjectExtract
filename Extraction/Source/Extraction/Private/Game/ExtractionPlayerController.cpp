@@ -13,8 +13,16 @@
 #include "CompanionModeWidget.h"
 #include "ObjectiveMarkerLayer.h"
 #include "LootNotificationWidget.h"
+#include "LevelCompleteWidget.h"
+#include "ExtractionGameMode.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
+
+namespace
+{
+	// Above every HUD layer so the completion screen popup sits on top.
+	constexpr int32 LevelCompletePopupZOrder = 50;
+}
 
 AExtractionPlayerController::AExtractionPlayerController()
 {
@@ -139,6 +147,42 @@ void AExtractionPlayerController::SetupInputComponent()
 		}
 	}
 	
+}
+
+void AExtractionPlayerController::ClientShowLevelComplete_Implementation()
+{
+	if (!IsLocalPlayerController()) return;
+	// A null class here means the game is paused with no restart path — a soft-lock, not a cosmetic miss.
+	if (!ensureMsgf(LevelCompleteWidgetClass, TEXT("LevelCompleteWidgetClass not assigned on %s — game is paused with no completion screen."), *GetName()))
+		return;
+
+	if (!IsValid(LevelCompleteWidget))
+		LevelCompleteWidget = CreateWidget<ULevelCompleteWidget>(this, LevelCompleteWidgetClass);
+	if (!IsValid(LevelCompleteWidget)) return;
+
+	if (!LevelCompleteWidget->IsInViewport())
+		LevelCompleteWidget->AddToPlayerScreen(LevelCompletePopupZOrder);
+
+	FInputModeUIOnly InputMode;
+	InputMode.SetWidgetToFocus(LevelCompleteWidget->TakeWidget());
+	SetInputMode(InputMode);
+	SetShowMouseCursor(true);
+}
+
+void AExtractionPlayerController::RequestRestartLevel()
+{
+	// FInputModeUIOnly state lives on the GameViewportClient, which survives OpenLevel —
+	// restore game input here or the reloaded level starts with input ignored.
+	SetInputMode(FInputModeGameOnly());
+	SetShowMouseCursor(false);
+
+	ServerRequestRestartLevel();
+}
+
+void AExtractionPlayerController::ServerRequestRestartLevel_Implementation()
+{
+	if (AExtractionGameMode* GameMode = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+		GameMode->RestartCurrentLevel();
 }
 
 bool AExtractionPlayerController::ShouldUseTouchControls() const

@@ -15,6 +15,7 @@ class UBarkFeedWidget;
 class UCompanionModeWidget;
 class UObjectiveMarkerLayer;
 class ULootNotificationWidget;
+class ULevelCompleteWidget;
 
 /**
  *  Simple first person Player Controller
@@ -34,7 +35,26 @@ public:
 	// --- IGenericTeamAgentInterface ---
 	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(0); }
 
+	/** Shows the Level Complete screen on the owning client and switches to UI-only input. */
+	UFUNCTION(Client, Reliable)
+	void ClientShowLevelComplete();
+
+	/** Called by the completion widget: routes the restart to the server's GameMode. */
+	void RequestRestartLevel();
+
 protected:
+
+	/** Server side of the restart request. */
+	UFUNCTION(Server, Reliable)
+	void ServerRequestRestartLevel();
+
+	/** Level Complete screen class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<ULevelCompleteWidget> LevelCompleteWidgetClass;
+
+	/** Active Level Complete screen instance */
+	UPROPERTY()
+	TObjectPtr<ULevelCompleteWidget> LevelCompleteWidget;
 
 	/** Input Mapping Contexts */
 	UPROPERTY(EditAnywhere, Category="Input|Input Mappings")
