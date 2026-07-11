@@ -37,6 +37,7 @@ public:
 	bool TryEnterPress(float Now);
 	bool HasEpisodeExpired(float Now) const;
 	bool IsEpisodeActive() const;
+	bool IsEnabled() const { return bEnabled; }
 
 	/** One committed advance ends the episode and schedules randomized recovery. */
 	void CompleteAdvanceAndScheduleRecovery(float Now, float RecoveryDuration);

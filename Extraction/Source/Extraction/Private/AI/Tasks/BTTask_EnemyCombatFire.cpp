@@ -252,7 +252,7 @@ static FCover PickBestScoredCover(UWorld* World, TArray<FScoredCover>& Scored,
  *  is-better tiebreak. Returns an invalid FCover when none qualify. */
 static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Target,
 	const UEnemyArchetypeData* DA, float Standoff, const FCoverHandle& CurrentHandle,
-	AController* Controller)
+	AController* Controller, float MinAdvanceThreatDistance = 0.f)
 {
 	if (!World || !IsValid(Pawn) || !IsValid(Target) || !IsValid(DA))
 		return FCover();
@@ -307,6 +307,12 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 			continue;
 
 		const FCoverData& Data = Candidate.Data;
+
+		// Press standoff: advance picks reject candidates inside the minimum threat distance
+		// BEFORE scoring, so a valid medium-range candidate can still win.
+		if (MinAdvanceThreatDistance > 0.f
+			&& FVector::Dist2D(Data.Location, ThreatLoc) < MinAdvanceThreatDistance)
+			continue;
 
 		// Debug: forced cover height filter
 		if (ShouldSkipForForcedHeight(Data, ForcedHeight)) continue;
@@ -3645,15 +3651,17 @@ bool UBTTask_EnemyCombatFire::TryAdvanceRelocate(UBehaviorTreeComponent& OwnerCo
 	const float Standoff = (Capsule ? Capsule->GetScaledCapsuleRadius() : DefaultCapsuleRadius) + DA->CoverStandoffPadding;
 
 	// Press-shifted params (MakeParamsForEnemy) make FindProtectiveCover prefer closer covers.
-	FCover NewCover = FindProtectiveCover(World, Pawn, Target, DA, Standoff, CurCover.Handle, Controller);
+	FCover NewCover = FindProtectiveCover(World, Pawn, Target, DA, Standoff, CurCover.Handle,
+		Controller, DA->PressMinThreatDistance);
 	if (!NewCover.IsValid()) return false;
 
 	const FVector ThreatLoc = GetPerceivedThreatLoc(Controller, Target);
 
-	// Gate 1: the pick must genuinely close ground toward the threat.
+	// Gate 1: the pick must genuinely close ground toward the threat without entering the standoff ring.
 	const float CurDist = FVector::Dist2D(CurCover.Data.Location, ThreatLoc);
 	const float NewDist = FVector::Dist2D(NewCover.Data.Location, ThreatLoc);
-	if (NewDist > CurDist - DA->PostureAdvanceMinGain) return false;
+	if (!FEnemyPressCadence::IsAdvanceCandidateDistanceValid(CurDist, NewDist,
+		DA->PostureAdvanceMinGain, DA->PressMinThreatDistance)) return false;
 
 	// Gate 2: stickiness — a voluntary move must beat the held cover by the margin.
 	const FCoverScoreParams Params = UCoverScoringStatics::MakeParamsForEnemy(Enemy);

@@ -52,6 +52,10 @@ EBTNodeResult::Type UBTTask_EnemyFlank::ExecuteTask(UBehaviorTreeComponent& Owne
 	UEnemySquad* Squad = SquadSub ? SquadSub->GetSquadFor(Enemy) : nullptr;
 	if (!Squad) return EBTNodeResult::Failed;
 
+	// Deliberate flanking is an officer-led maneuver — a leaderless squad pressures independently
+	// through the posture Press cadence instead of claiming the Flanker role.
+	if (!Squad->HasLivingOfficer()) return EBTNodeResult::Failed;
+
 	AActor* Target = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
 	if (!IsValid(Target)) return EBTNodeResult::Failed;
 

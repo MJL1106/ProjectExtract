@@ -151,6 +151,13 @@ void UEnemyPostureComponent::NotifyAdvanceExecuted()
 	}
 }
 
+void UEnemyPostureComponent::EndPressEpisodeIfActive(float Now, const UEnemyArchetypeData* DA)
+{
+	if (!PressCadence.IsEpisodeActive()) return;
+	const float Recovery = IsValid(DA) ? FMath::FRandRange(DA->PressRecoveryMin, DA->PressRecoveryMax) : 0.f;
+	PressCadence.EndEpisodeAndScheduleRecovery(Now, Recovery);
+}
+
 bool UEnemyPostureComponent::ConsumeRetreatRequest()
 {
 	if (!bRetreatRequested) return false;
@@ -178,8 +185,14 @@ void UEnemyPostureComponent::EvaluatePosture()
 	}
 
 	// Downed hostile player = full posture override (runs even with the posture system disabled,
-	// so rushers and posture-off archetypes still back off from a DBNO player).
-	if (ApplyDBNOStandoffOverride(Enemy, DA)) return;
+	// so rushers and posture-off archetypes still back off from a DBNO player). Ends any live
+	// Press episode — otherwise a stranded bEpisodeActive blocks Press for the rest of the fight.
+	if (ApplyDBNOStandoffOverride(Enemy, DA))
+	{
+		const UWorld* DBNOWorld = GetWorld();
+		EndPressEpisodeIfActive(DBNOWorld ? DBNOWorld->GetTimeSeconds() : 0.f, DA);
+		return;
+	}
 
 	if (!DA->bPostureSystemEnabled)
 	{
@@ -199,7 +212,21 @@ void UEnemyPostureComponent::EvaluatePosture()
 		CurrentPosture = EEnemyPosture::Hold;
 		PressHeldSeconds = 0.f;
 		bAdvanceRequested = false;
+		bPressCombatActive = false;
 		return;
+	}
+
+	const UWorld* World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.f;
+
+	// New engagement: configure the cadence from the DA and roll the randomized initial Press
+	// opportunity once. Zero-valued tuning configures a disabled cadence — legacy behavior.
+	if (!bPressCombatActive)
+	{
+		PressCadence.Configure(DA->PressMaxEpisodeDuration > 0.f, DA->PressMaxEpisodeDuration);
+		PressCadence.ResetForCombat(Now,
+			FMath::FRandRange(DA->PressInitialDelayMin, DA->PressInitialDelayMax));
+		bPressCombatActive = true;
 	}
 
 	const UEnemyMoraleComponent* Morale = Enemy->GetMoraleComponent();
@@ -211,6 +238,7 @@ void UEnemyPostureComponent::EvaluatePosture()
 
 	if (MoraleState == EMoraleState::Broken || Aggression <= DA->FallBackEnterThreshold)
 	{
+		EndPressEpisodeIfActive(Now, DA);
 		CurrentPosture = EEnemyPosture::FallBack;
 		PressHeldSeconds = 0.f;
 		bAdvanceRequested = false;
@@ -219,13 +247,21 @@ void UEnemyPostureComponent::EvaluatePosture()
 
 	if (CurrentPosture == EEnemyPosture::Press)
 	{
-		const bool bStayPressing = DA->bCanPress && !bSuppressed
+		// Timeout ends the episode with recovery; a committed advance already ended it via
+		// NotifyAdvanceExecuted. Either way an enabled cadence without a live episode exits Press.
+		if (PressCadence.HasEpisodeExpired(Now))
+			EndPressEpisodeIfActive(Now, DA);
+
+		const bool bEpisodeLive = !PressCadence.IsEnabled() || PressCadence.IsEpisodeActive();
+		const bool bStayPressing = bEpisodeLive && DA->bCanPress && !bSuppressed
 			&& MoraleState == EMoraleState::Confident
 			&& Aggression >= DA->PressExitThreshold;
 		if (!bStayPressing)
 		{
+			// Suppression / morale interruption ends the episode and rolls recovery too.
 			// Leaving Press invalidates any pending advance — a re-entered Press must re-earn
 			// the hold time, or a stale latch fires the moment the next Pause arrives.
+			EndPressEpisodeIfActive(Now, DA);
 			CurrentPosture = EEnemyPosture::Hold;
 			PressHeldSeconds = 0.f;
 			bAdvanceRequested = false;
@@ -233,8 +269,6 @@ void UEnemyPostureComponent::EvaluatePosture()
 		}
 
 		PressHeldSeconds += DA->PostureEvalInterval;
-		const UWorld* World = GetWorld();
-		const float Now = World ? World->GetTimeSeconds() : 0.f;
 		if (PressHeldSeconds >= DA->PressAdvanceHoldTime
 			&& (Now - LastAdvanceWorldTime) >= DA->AdvanceRelocateCooldown)
 			bAdvanceRequested = true;
@@ -242,7 +276,8 @@ void UEnemyPostureComponent::EvaluatePosture()
 	}
 
 	if (DA->bCanPress && !bSuppressed && MoraleState == EMoraleState::Confident
-		&& Aggression >= DA->PressEnterThreshold)
+		&& Aggression >= DA->PressEnterThreshold
+		&& PressCadence.TryEnterPress(Now))
 	{
 		CurrentPosture = EEnemyPosture::Press;
 		PressHeldSeconds = 0.f;

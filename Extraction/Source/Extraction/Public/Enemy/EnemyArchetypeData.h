@@ -1091,6 +1091,35 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "50.0"))
 	float PostureAdvanceMinGain = 200.f;
 
+	// --- Posture: Press cadence (bounded Press episodes — officerless grunt pressure) ---
+	// All-zero defaults disable the cadence and preserve legacy always-available Press exactly.
+
+	/** Min seconds after combat begins before the first Press opportunity. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressInitialDelayMin = 0.f;
+
+	/** Max seconds after combat begins before the first Press opportunity. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressInitialDelayMax = 0.f;
+
+	/** Max seconds a Press episode may run before it ends and recovery is rolled.
+	 *  0 = cadence disabled (legacy: Press never expires, no recovery windows). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressMaxEpisodeDuration = 0.f;
+
+	/** Min seconds of recovery after a committed advance or an interrupted episode. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressRecoveryMin = 0.f;
+
+	/** Max seconds of recovery after a committed advance or an interrupted episode. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressRecoveryMax = 0.f;
+
+	/** Advance candidates closer than this (cm) to the threat are rejected before scoring, so a
+	 *  Press stops at medium range instead of walking onto the player. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressMinThreatDistance = 0.f;
+
 	/** While a hostile player is DBNO: enemies inside this radius (cm) of the downed player are forced
 	 *  to FallBack (with a one-shot retreat relocate), everyone else is capped at Hold — no pressing.
 	 *  Keep above the companion's ReviveThreatRadius so the revive window can actually open. 0 = off.
