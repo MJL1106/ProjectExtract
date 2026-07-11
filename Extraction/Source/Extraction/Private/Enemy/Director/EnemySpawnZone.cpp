@@ -85,3 +85,16 @@ FVector AEnemySpawnZone::GetZoneOrigin() const
 {
 	return ZoneBox->GetComponentLocation();
 }
+
+FVector AEnemySpawnZone::GetClosestPointInZone(const FVector& WorldPoint) const
+{
+	const FTransform& BoxTM = ZoneBox->GetComponentTransform();
+	const FVector Extent = ZoneBox->GetUnscaledBoxExtent();
+
+	FVector Local = BoxTM.InverseTransformPosition(WorldPoint);
+	Local.X = FMath::Clamp(Local.X, -Extent.X, Extent.X);
+	Local.Y = FMath::Clamp(Local.Y, -Extent.Y, Extent.Y);
+	Local.Z = FMath::Clamp(Local.Z, -Extent.Z, Extent.Z);
+
+	return BoxTM.TransformPosition(Local);
+}

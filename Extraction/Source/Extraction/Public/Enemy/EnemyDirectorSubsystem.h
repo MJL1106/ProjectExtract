@@ -10,6 +10,7 @@
 #include "DirectorWaveTypes.h"
 #include "EnemyDirectorSubsystem.generated.h"
 
+class ACompanionCharacter;
 class AEnemyCharacter;
 class AEnemyDirectorScopeVolume;
 class AEnemySpawnZone;
@@ -17,6 +18,7 @@ class UDirectorConfigData;
 class UHealthComponent;
 class UEnemySquadSubsystem;
 class UEnemySquad;
+class UNavigationSystemV1;
 struct FMissionPhaseConfig;
 struct FSquadComposition;
 
@@ -163,7 +165,17 @@ private:
 	static constexpr float DefaultSpawnDistMax = 4500.f;
 	static constexpr float NavProjectExtentXY = 200.f;
 	static constexpr float NavProjectExtentZ = 400.f;
-	static constexpr int32 MaxZoneCandidates = 5;
+
+	// Zone selection: sightline samples are raised to head height above the projected
+	// floor, and zones are scored (distance band + companion proximity) instead of
+	// picked randomly from the first few that pass.
+	static constexpr float SpawnEyeHeightOffset = 160.f;
+	static constexpr float SpawnGroundClearance = 2.f;
+	static constexpr int32 MinSightlineSamples = 3;
+	static constexpr float IdealDistanceFrac = 0.35f;
+	static constexpr float DistanceBandBonus = 25.f;
+	static constexpr float CompanionProximityPenalty = 60.f;
+	static constexpr float ZoneScoreJitter = 10.f;
 
 	// ---------- v2: tension ----------
 
@@ -227,8 +239,11 @@ private:
 	const FMissionPhaseConfig& GetCurrentPhaseConfig() const;
 	int32 GetCompositionSize(const FSquadComposition& Comp) const;
 	bool PickComposition(const FMissionPhaseConfig& PhaseConfig, int32 AliveCount, FSquadComposition& OutComposition) const;
-	AEnemySpawnZone* PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot) const;
+	AEnemySpawnZone* PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize) const;
 	bool IsPointInPlayerSightline(const FVector& Point, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams) const;
+	bool IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const;
+	float ScoreZone(const AEnemySpawnZone* Zone, const FVector& PlayerLoc, const FVector& CompanionLoc, bool bHasCompanion, float DistMin, float DistMax) const;
+	const ACompanionCharacter* FindCompanion() const;
 	void SpawnSquadAtZone(const FSquadComposition& Composition, AEnemySpawnZone* Zone, TArray<AEnemyCharacter*>& OutSpawned);
 	AEnemyCharacter* SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index);
 	void SeedSquadWithFight(UEnemySquad* Squad) const;

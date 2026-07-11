@@ -11,6 +11,8 @@
 #include "HealthComponent.h"
 #include "EnemySquadSubsystem.h"
 #include "Squad/EnemySquad.h"
+#include "Companion/CompanionCharacter.h"
+#include "Components/CapsuleComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "NavigationSystem.h"
 #include "Engine/World.h"
@@ -563,7 +565,7 @@ bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*
 	FRotator ViewRot;
 	PC->GetPlayerViewPoint(ViewLoc, ViewRot);
 
-	AEnemySpawnZone* Zone = PickSpawnZone(PlayerPawn->GetActorLocation(), ViewLoc, ViewRot);
+	AEnemySpawnZone* Zone = PickSpawnZone(PlayerPawn->GetActorLocation(), ViewLoc, ViewRot, GetCompositionSize(Composition));
 	if (!IsValid(Zone))
 	{
 		if (!bLoggedNoZone)
@@ -642,7 +644,7 @@ bool UEnemyDirectorSubsystem::PickComposition(const FMissionPhaseConfig& PhaseCo
 	return false;
 }
 
-AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot) const
+AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize) const
 {
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return nullptr;
@@ -656,19 +658,27 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 		DistMax = Effective->SpawnDistanceMax;
 	}
 
-	const float DistMinSq = DistMin * DistMin;
-	const float DistMaxSq = DistMax * DistMax;
 	const FVector ViewDir = ViewRot.Vector();
 
 	FCollisionQueryParams QueryParams;
 	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
 	if (IsValid(PlayerPawn)) QueryParams.AddIgnoredActor(PlayerPawn);
 
+	const ACompanionCharacter* Companion = FindCompanion();
+	const bool bHasCompanion = IsValid(Companion);
+	FVector CompanionLoc = FVector::ZeroVector;
+	if (bHasCompanion)
+	{
+		CompanionLoc = Companion->GetActorLocation();
+		// The companion's body must not count as an occluder for "is this zone hidden".
+		QueryParams.AddIgnoredActor(Companion);
+	}
+
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
 	const bool bUseScopeVolumes = HasActiveScopeVolumes();
 
-	TArray<AEnemySpawnZone*> Candidates;
-	Candidates.Reserve(MaxZoneCandidates);
+	AEnemySpawnZone* BestZone = nullptr;
+	float BestScore = -FLT_MAX;
 
 	for (const TWeakObjectPtr<AEnemySpawnZone>& WeakZone : SpawnZones)
 	{
@@ -679,23 +689,13 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 		const FVector ZoneLoc = Zone->GetZoneOrigin();
 		if (bUseScopeVolumes && !IsPointInsideAnyScope(ZoneLoc)) continue;
 
-		const float DistSq = FVector::DistSquared(PlayerLoc, ZoneLoc);
-		if (DistSq < DistMinSq || DistSq > DistMaxSq) continue;
+		// Min distance against the closest point of the box (a wide zone can put spawn
+		// points far nearer than its origin); max distance against the origin so large
+		// zones don't starve availability.
+		if (FVector::DistSquared(PlayerLoc, Zone->GetClosestPointInZone(PlayerLoc)) < DistMin * DistMin) continue;
+		if (FVector::DistSquared(PlayerLoc, ZoneLoc) > DistMax * DistMax) continue;
 
-		if (IsPointInPlayerSightline(ZoneLoc, ViewLoc, ViewDir, QueryParams)) continue;
-
-		static constexpr int32 SightlineSampleCount = 3;
-		bool bAnySampleVisible = false;
-		for (int32 Si = 0; Si < SightlineSampleCount; ++Si)
-		{
-			const FVector Pt = Zone->GetSpawnTransform(Si).GetLocation();
-			if (IsPointInPlayerSightline(Pt, ViewLoc, ViewDir, QueryParams))
-			{
-				bAnySampleVisible = true;
-				break;
-			}
-		}
-		if (bAnySampleVisible) continue;
+		if (!IsZoneHiddenFromPlayer(Zone, FMath::Max(MinSightlineSamples, SquadSize), ViewLoc, ViewDir, QueryParams, NavSys)) continue;
 
 		if (IsValid(NavSys))
 		{
@@ -704,12 +704,93 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 			if (!NavSys->ProjectPointToNavigation(ZoneLoc, NavLoc, Extent)) continue;
 		}
 
-		Candidates.Add(Zone);
-		if (Candidates.Num() >= MaxZoneCandidates) break;
+		const float Score = ScoreZone(Zone, PlayerLoc, CompanionLoc, bHasCompanion, DistMin, DistMax);
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			BestZone = Zone;
+		}
 	}
 
-	if (Candidates.Num() == 0) return nullptr;
-	return Candidates[FMath::RandRange(0, Candidates.Num() - 1)];
+	return BestZone;
+}
+
+bool UEnemyDirectorSubsystem::IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const
+{
+	// Sample where spawned enemies will actually stand: floor-projected points raised to
+	// head height, one per squad member. Tracing to the raw box base (at/below the floor)
+	// hits the floor and reports "occluded" for zones sitting in plain view.
+	const FVector Extent(NavProjectExtentXY, NavProjectExtentXY, NavProjectExtentZ);
+
+	// SpawnEntryAtZone falls back to the projected zone origin when a point fails to
+	// project — so that's the location the visibility check must cover too.
+	FNavLocation OriginNav;
+	bool bOriginProjected = false;
+	if (IsValid(NavSys))
+		bOriginProjected = NavSys->ProjectPointToNavigation(Zone->GetZoneOrigin(), OriginNav, Extent);
+
+	for (int32 Si = 0; Si < SampleCount; ++Si)
+	{
+		FVector Pt = Zone->GetSpawnTransform(Si).GetLocation();
+
+		if (IsValid(NavSys))
+		{
+			FNavLocation NavLoc;
+			if (NavSys->ProjectPointToNavigation(Pt, NavLoc, Extent))
+				Pt = NavLoc.Location;
+			else if (bOriginProjected)
+				Pt = OriginNav.Location;
+			else
+				return false; // can't establish where this member would stand — fail closed
+		}
+
+		Pt.Z += SpawnEyeHeightOffset;
+		if (IsPointInPlayerSightline(Pt, ViewLoc, ViewDir, QueryParams)) return false;
+	}
+
+	return true;
+}
+
+float UEnemyDirectorSubsystem::ScoreZone(const AEnemySpawnZone* Zone, const FVector& PlayerLoc, const FVector& CompanionLoc, bool bHasCompanion, float DistMin, float DistMax) const
+{
+	// Jitter keeps repeated spawns from always electing the same room when scores tie.
+	float Score = FMath::FRandRange(0.f, ZoneScoreJitter);
+
+	// Prefer zones a little past min distance — keeps pressure on without pop-in range.
+	const float Band = FMath::Max(DistMax - DistMin, 1.f);
+	const float IdealDist = DistMin + Band * IdealDistanceFrac;
+	const float Dist = FVector::Dist(PlayerLoc, Zone->GetZoneOrigin());
+	Score += DistanceBandBonus * (1.f - FMath::Min(FMath::Abs(Dist - IdealDist) / Band, 1.f));
+
+	// Soft penalty near the companion: don't materialise a squad on the second teammate,
+	// but don't hard-starve small interiors either.
+	if (bHasCompanion)
+	{
+		const float CompanionDist = FVector::Dist(CompanionLoc, Zone->GetClosestPointInZone(CompanionLoc));
+		if (CompanionDist < DistMin)
+			Score -= CompanionProximityPenalty * (1.f - CompanionDist / DistMin);
+	}
+
+	return Score;
+}
+
+const ACompanionCharacter* UEnemyDirectorSubsystem::FindCompanion() const
+{
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return nullptr;
+
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
+	{
+		const ACompanionCharacter* Companion = *It;
+		if (!IsValid(Companion)) continue;
+
+		const UHealthComponent* HC = Companion->FindComponentByClass<UHealthComponent>();
+		if (IsValid(HC) && HC->IsDead()) continue;
+
+		return Companion;
+	}
+
+	return nullptr;
 }
 
 bool UEnemyDirectorSubsystem::IsPointInPlayerSightline(const FVector& Point, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams) const
@@ -755,6 +836,16 @@ AEnemyCharacter* UEnemyDirectorSubsystem::SpawnEntryAtZone(UWorld* World, TSubcl
 			}
 		}
 	}
+
+	// Nav-projected locations are on the floor; SpawnActor places the capsule CENTRE
+	// there, embedding the character waist-deep. Raise by the class's capsule half-height.
+	float CapsuleHalfHeight = 88.f;
+	if (const AEnemyCharacter* ClassDefaults = EnemyClass->GetDefaultObject<AEnemyCharacter>())
+	{
+		if (const UCapsuleComponent* Capsule = ClassDefaults->GetCapsuleComponent())
+			CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+	}
+	SpawnLoc.Z += CapsuleHalfHeight + SpawnGroundClearance;
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;

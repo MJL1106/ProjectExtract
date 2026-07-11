@@ -46,6 +46,9 @@ public:
 	/** World-space centre of the box volume. */
 	FVector GetZoneOrigin() const;
 
+	/** Closest point inside the box to a world-space point. Used for min-distance checks so a wide zone can't hide spawn points closer than the zone origin suggests. */
+	FVector GetClosestPointInZone(const FVector& WorldPoint) const;
+
 	/** Optional config pushed to the director on registration (first wins). */
 	UFUNCTION(BlueprintPure, Category = "SpawnZone")
 	UDirectorConfigData* GetDirectorConfig() const { return DirectorConfig; }
