@@ -14,6 +14,7 @@ class UAmmoWidget;
 class UBarkFeedWidget;
 class UCompanionModeWidget;
 class UObjectiveMarkerLayer;
+class AObjectiveMarkerDisplay;
 class ULootNotificationWidget;
 class ULevelCompleteWidget;
 class ULevelFailedWidget;
@@ -124,6 +125,11 @@ protected:
 	/** Active objective waypoint layer instance */
 	UPROPERTY()
 	TObjectPtr<UObjectiveMarkerLayer> ObjectiveLayerWidget;
+
+	/** World-space marker display actor class (assigned in BP defaults — no C++ asset path).
+	 *  Supplied to UObjectiveSubsystem::SetMarkerDisplayClass during local player setup. */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<AObjectiveMarkerDisplay> MarkerDisplayClass;
 
 	/** Loot acquisition toast class (assigned in BP defaults — no C++ asset path). */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")

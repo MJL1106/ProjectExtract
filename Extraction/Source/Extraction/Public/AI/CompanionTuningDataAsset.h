@@ -491,11 +491,84 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "10", ClampMax = "180"))
 	float CoverPeekConeHalfAngleDeg = 75.f;
 
-	// At crouch cover with a verified side gap AND a clear over-the-top shot, chance per peek
-	// decision to stand up and fire over the wall instead of corner-peeking (enemy parity —
-	// occasional stand-up keeps crouch-cover fights from being 100% corner peeks). 0 disables.
+	// DEPRECATED: subsumed by the crouch-peek wallhack scorer (bCrouchPeekWallhackEnabled).
+	// The scorer's per-option weighting replaces this flat chance. Field kept so existing data
+	// assets don't lose the value; no longer read when the wallhack is enabled. Enemy usage untouched.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CoverEndpointStandPeekChance = 0.3f;
+
+	// --- Crouch-peek wallhack scorer (Part A) ---
+
+	// Master toggle: when false the legacy crouch roll runs (flat weighted-random). When true the
+	// scorer evaluates CornerL/R and OverTop by LOS and extra-threat exposure.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
+	bool bCrouchPeekWallhackEnabled = true;
+
+	// Base score for a corner-peek option at normal health.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float CrouchPeekCornerBaseScore = 50.f;
+
+	// Base score for an over-top option at normal health.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float CrouchPeekOverTopBaseScore = 50.f;
+
+	// Bonus added to corner options so corners win ties with over-top.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float CrouchPeekCornerTieBonus = 20.f;
+
+	// Per-extra-threat penalty when that threat has clear LOS to the candidate eye.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float CrouchPeekExtraThreatPenalty = 8.f;
+
+	// Floor so any viable option stays rollable.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1.0"))
+	float CrouchPeekMinViableWeight = 5.f;
+
+	// Max distance (cm) from the hunker position to the corner for it to count as reachable.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "50.0"))
+	float CrouchPeekMaxCornerReachCm = 175.f;
+
+	// Low-health corner base score.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float LowHpCrouchPeekCornerBaseScore = 25.f;
+
+	// Low-health over-top base score.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float LowHpCrouchPeekOverTopBaseScore = 15.f;
+
+	// --- Pressure-responsive cover (Part B) ---
+
+	// Master toggle: when false all Part-B effects are identity (scale 1, no impulse).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
+	bool bPressureResponsiveCover = true;
+
+	// Distance (cm) at which Pressure01 reaches 0 (fully calm).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
+	float PressureFarDistance = 2000.f;
+
+	// Distance (cm) at which Pressure01 reaches 1 (maximum pressure).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "50.0"))
+	float PressureNearDistance = 700.f;
+
+	// Cooldown scale at maximum pressure (composed with Combat's CombatPeekCooldownMultiplier).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float PressureCooldownScaleAtMax = 0.5f;
+
+	// Hold-weight scale at maximum pressure (pushed companion stops choosing to do nothing).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PressureHoldWeightScaleAtMax = 0.25f;
+
+	// Burst-duration multiplier at maximum pressure (composed with Combat's CombatBurstDurationMultiplier).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1.0", ClampMax = "2.0"))
+	float PressureBurstDurationMultiplierAtMax = 1.3f;
+
+	// A closing threat crossing inside this distance fires the peek-now impulse.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "100.0"))
+	float PeekImpulseDistance = 900.f;
+
+	// Seconds before the impulse can fire again after a band crossing.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.5"))
+	float PeekImpulseRearmSeconds = 3.f;
 
 	// Completed peek cycles required at a cover point before the companion may reposition/shuffle
 	// away from it (enemy parity — commit to a point before wandering). The starvation backstop and

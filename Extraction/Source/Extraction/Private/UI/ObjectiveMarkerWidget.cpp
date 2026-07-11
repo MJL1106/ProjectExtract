@@ -1,4 +1,4 @@
-// UObjectiveMarkerWidget implementation.
+// UObjectiveMarkerWidget implementation -- off-screen edge indicator only.
 
 #include "UI/ObjectiveMarkerWidget.h"
 #include "Components/Image.h"
@@ -31,20 +31,18 @@ void UObjectiveMarkerWidget::SetObjective(const FObjectiveMarker& InObjective)
 	Objective = InObjective;
 	bHasSmoothedScreenPosition = false;
 	bLastPositionWasValidProjection = false;
-	LastDisplayedDistanceMetres = INDEX_NONE;
-
-	if (LabelText)
-	{
-		LabelText->SetText(Objective.Label);
-		LabelText->SetVisibility(Objective.Label.IsEmpty()
-			? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible);
-	}
 }
 
 void UObjectiveMarkerWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+
+	// Hide distance and label -- world-space widget handles those now.
+	if (DistanceText)
+		DistanceText->SetVisibility(ESlateVisibility::Collapsed);
+	if (LabelText)
+		LabelText->SetVisibility(ESlateVisibility::Collapsed);
 }
 
 void UObjectiveMarkerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
@@ -67,53 +65,49 @@ void UObjectiveMarkerWidget::NativeTick(const FGeometry& MyGeometry, float InDel
 
 	FVector2D ScreenPosition = FVector2D::ZeroVector;
 	const bool bProjected = PC->ProjectWorldLocationToScreen(WorldLocation, ScreenPosition, true);
-	const bool bValidProjection = bProjected && !bBehind;
-	const FVector2D Center = ViewportSize * 0.5f;
 
-	if (bValidProjection)
+	// Determine if the objective is truly on-screen (within the inset region).
+	bool bOnScreen = false;
+	if (bProjected && !bBehind)
 	{
 		const float ViewportScale = UWidgetLayoutLibrary::GetViewportScale(this);
-		if (ViewportScale <= KINDA_SMALL_NUMBER) return;
-		ScreenPosition /= ViewportScale;
-		ScreenPosition.Y += VerticalScreenOffset;
-		ScreenPosition = ClampToViewport(ScreenPosition, ViewportSize, EdgePadding);
+		if (ViewportScale > KINDA_SMALL_NUMBER)
+		{
+			const FVector2D ScaledPos = ScreenPosition / ViewportScale;
+			const float InsetX = ViewportSize.X * OnScreenInsetFraction;
+			const float InsetY = ViewportSize.Y * OnScreenInsetFraction;
+			bOnScreen = ScaledPos.X >= InsetX && ScaledPos.X <= (ViewportSize.X - InsetX)
+				&& ScaledPos.Y >= InsetY && ScaledPos.Y <= (ViewportSize.Y - InsetY);
+		}
+	}
 
-		// A projection that follows an edge fallback starts a new smoothing track. This prevents
-		// the marker flying through the viewport interior as an objective crosses the camera plane.
-		if (!bHasSmoothedScreenPosition || !bLastPositionWasValidProjection)
-			SmoothedScreenPosition = ScreenPosition;
-		else
-			SmoothedScreenPosition = InterpolateScreenPosition(
-				SmoothedScreenPosition, ScreenPosition, InDeltaTime, InterpolationSpeed);
-		bHasSmoothedScreenPosition = true;
-		bLastPositionWasValidProjection = true;
-	}
-	else
+	// Hide when the world-space billboard is visible (on-screen).
+	if (bOnScreen)
 	{
-		FVector2D Bearing(LocalDirection.Y, -LocalDirection.Z);
-		if (!Bearing.Normalize())
-			Bearing = FVector2D(0.f, 1.f);
-		ScreenPosition = Center + Bearing * (Center.X + Center.Y);
-		SmoothedScreenPosition = ClampToViewport(ScreenPosition, ViewportSize, EdgePadding);
-		bHasSmoothedScreenPosition = true;
-		bLastPositionWasValidProjection = false;
+		SetRenderOpacity(0.f);
+		bHasSmoothedScreenPosition = false;
+		return;
 	}
+
+	SetRenderOpacity(1.f);
+
+	// Off-screen / behind: edge-clamp the indicator.
+	const FVector2D Center = ViewportSize * 0.5f;
+	FVector2D Bearing(LocalDirection.Y, -LocalDirection.Z);
+	if (!Bearing.Normalize())
+		Bearing = FVector2D(0.f, 1.f);
+	ScreenPosition = Center + Bearing * (Center.X + Center.Y);
+	FVector2D ClampedPosition = ClampToViewport(ScreenPosition, ViewportSize, EdgePadding);
+
+	if (!bHasSmoothedScreenPosition || bLastPositionWasValidProjection)
+		SmoothedScreenPosition = ClampedPosition;
+	else
+		SmoothedScreenPosition = InterpolateScreenPosition(
+			SmoothedScreenPosition, ClampedPosition, InDeltaTime, InterpolationSpeed);
+
+	bHasSmoothedScreenPosition = true;
+	bLastPositionWasValidProjection = false;
 
 	SmoothedScreenPosition = ClampToViewport(SmoothedScreenPosition, ViewportSize, EdgePadding);
 	SetRenderTranslation(SmoothedScreenPosition);
-	UpdateDistanceText(WorldLocation);
-}
-
-void UObjectiveMarkerWidget::UpdateDistanceText(const FVector& WorldLocation)
-{
-	if (!DistanceText) return;
-	const APawn* Pawn = GetOwningPlayerPawn();
-	if (!IsValid(Pawn)) return;
-
-	const int32 RoundedMetres = FMath::RoundToInt(
-		FVector::Dist(Pawn->GetActorLocation(), WorldLocation) / 100.f);
-	if (RoundedMetres == LastDisplayedDistanceMetres) return;
-
-	LastDisplayedDistanceMetres = RoundedMetres;
-	DistanceText->SetText(FText::FromString(FString::Printf(TEXT("%d m"), RoundedMetres)));
 }

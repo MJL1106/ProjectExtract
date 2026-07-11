@@ -215,15 +215,25 @@ public:
 	 *  writes can't race it): standing speed = Speed exactly, crouch capped but never boosted,
 	 *  DBNO crawl untouched. Called by BTTask_CompanionFollowRoute when Route->PlayerSpeedLock > 0. */
 	UFUNCTION(BlueprintCallable, Category = "Movement")
-	void SetRouteSpeedLock(float Speed) { RouteSpeedLock = Speed; }
+	void SetRouteSpeedLock(float Speed) { RouteSpeedLock = Speed; OnRouteSpeedLockChanged(Speed > 0.f); }
 
 	/** Clears the route speed lock. Idempotent — no speed restore needed since the lock never
 	 *  writes movement-component properties. */
 	UFUNCTION(BlueprintCallable, Category = "Movement")
-	void ClearRouteSpeedLock() { RouteSpeedLock = 0.f; }
+	void ClearRouteSpeedLock() { RouteSpeedLock = 0.f; OnRouteSpeedLockChanged(false); }
 
 	/** Read by UExtractionPlayerMovement::GetMaxSpeed. 0 = no lock. */
 	float GetRouteSpeedLock() const { return RouteSpeedLock; }
+
+	/** True while the route speed lock is active. The kit BP's sprint input handler checks this
+	 *  so shift can't engage the sprint anim while actual speed is clamped to the lock. */
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool IsSprintBlocked() const { return RouteSpeedLock > 0.f; }
+
+	/** Fired when the route speed lock engages or clears. Kit BP implements this to cancel an
+	 *  already-running sprint on engage (the input-handler gate only covers new presses). */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Movement")
+	void OnRouteSpeedLockChanged(bool bLocked);
 
 	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
 	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }

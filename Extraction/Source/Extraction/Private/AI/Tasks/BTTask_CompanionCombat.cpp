@@ -332,16 +332,36 @@ namespace
 
 	/** Combat-mode in-cover confidence: scale for the between-peek wait (bBurstClock=false, <1 =
 	 *  peek sooner) or the burst countdown (bBurstClock=true, >1 = expose longer, applied as a
-	 *  slower decrement). 1 outside Combat mode or with no tuning. */
-	static float CombatPeekConfidenceScale(const ACompanionCharacter* Companion, bool bBurstClock)
+	 *  slower decrement). 1 outside Combat mode or with no tuning.
+	 *  Pressure01 composes on top when bPressureResponsiveCover is enabled. */
+	static float CombatPeekConfidenceScale(const ACompanionCharacter* Companion, bool bBurstClock, float Pressure01 = 0.f)
 	{
-		if (!IsValid(Companion) || Companion->GetMode() != ECompanionMode::Combat) return 1.f;
-		const ACompanionAIController* AIC = Cast<ACompanionAIController>(Companion->GetController());
+		const ACompanionAIController* AIC = IsValid(Companion)
+			? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
 		const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
-		if (!Tuning) return 1.f;
-		return bBurstClock
-			? FMath::Max(1.f, Tuning->CombatBurstDurationMultiplier)
-			: FMath::Max(0.01f, Tuning->CombatPeekCooldownMultiplier);
+
+		float Scale = 1.f;
+		if (Tuning && IsValid(Companion) && Companion->GetMode() == ECompanionMode::Combat)
+		{
+			Scale = bBurstClock
+				? FMath::Max(1.f, Tuning->CombatBurstDurationMultiplier)
+				: FMath::Max(0.01f, Tuning->CombatPeekCooldownMultiplier);
+		}
+
+		if (Tuning && Tuning->bPressureResponsiveCover && Pressure01 > 0.f)
+		{
+			if (bBurstClock)
+			{
+				Scale *= FMath::Lerp(1.f, Tuning->PressureBurstDurationMultiplierAtMax, Pressure01);
+			}
+			else
+			{
+				const float PressureCooldownScale = FMath::Lerp(1.f, Tuning->PressureCooldownScaleAtMax, Pressure01);
+				Scale *= PressureCooldownScale;
+				Scale = FMath::Max(Scale, 0.35f);
+			}
+		}
+		return Scale;
 	}
 
 	// Resolves the player pawn + keep-out radius (AcceptableRadius) from the companion's controller.
@@ -1145,8 +1165,8 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 		if (bAtApex)
 		{
 			// At apex — burst timer now counts down "time firing at the corner". Combat-mode
-			// confidence: slower countdown = longer corner exposure.
-			BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Companion, true);
+			// confidence + pressure: slower countdown = longer corner exposure.
+			BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Companion, true, Pressure01);
 			if (BurstTimer <= 0.f)
 				bCornerPeekReturning = true;
 		}
@@ -2468,6 +2488,19 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	AngleSeekSideSign = 0.f;
 	AngleSeekBiasResolved = 0.f;
 	AngleSeekEvalTimer = 0.f;
+	// Pressure tracking: reset distance sample so first tick after re-entry doesn't false-detect closing.
+	PreviousNearestThreatDist = -1.f;
+	Pressure01 = 0.f;
+	bPreviousThreatWasClosing = false;
+	PressureSampleTimer = 0.f;
+	// Keep PeekImpulseCooldownRemaining across task restarts (same reason as angle-seek cooldown).
+	// Corner apex cache + scorer viability: clear per task restart (cover handle may differ).
+	CachedCornerApexHandle = FCoverHandle();
+	bCachedCornerLeftFound = false;
+	bCachedCornerRightFound = false;
+	bLastScorerCornerLeftViable = false;
+	bLastScorerCornerRightViable = false;
+	LastScorerBestCornerSide = ECoverLean::None;
 }
 
 // --- Smooth-snap helpers ---
@@ -3299,8 +3332,67 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 
 		TimeInCoverIdle += DeltaSeconds;
-		// Combat-mode confidence: the whole wait shrinks — peeks come sooner from every cooldown source.
-		if (TimeInCoverIdle < (MinCoverIdleDwell + PeekCooldown) * CombatPeekConfidenceScale(Ctx.Companion, false)) return;
+
+		// --- Pressure signal (Part B, throttled ~5 Hz) ---
+		PeekImpulseCooldownRemaining = FMath::Max(0.f, PeekImpulseCooldownRemaining - DeltaSeconds);
+		PressureSampleTimer -= DeltaSeconds;
+		if (TickTuning && TickTuning->bPressureResponsiveCover && PressureSampleTimer <= 0.f)
+		{
+			PressureSampleTimer = 0.2f;
+
+			TArray<AActor*, TInlineAllocator<8>> PressureThreats;
+			GatherKnownThreats(Ctx.Companion, Ctx.Target, TickTuning->MaxThreatsForCoverScoring, PressureThreats);
+			float NearestDist = TNumericLimits<float>::Max();
+			for (const AActor* Threat : PressureThreats)
+			{
+				if (!IsValid(Threat)) continue;
+				const float D = FVector::Dist2D(MyLocation, Threat->GetActorLocation());
+				if (D < NearestDist) NearestDist = D;
+			}
+
+			const float FarDist = TickTuning->PressureFarDistance;
+			const float NearDist = TickTuning->PressureNearDistance;
+			Pressure01 = (NearestDist < TNumericLimits<float>::Max())
+				? FMath::Clamp((FarDist - NearestDist) / FMath::Max(FarDist - NearDist, 1.f), 0.f, 1.f)
+				: 0.f;
+
+			const bool bClosingNow = (PreviousNearestThreatDist >= 0.f && NearestDist < PreviousNearestThreatDist);
+			const bool bClosingConfirmed = bClosingNow && bPreviousThreatWasClosing;
+			bPreviousThreatWasClosing = bClosingNow;
+			PreviousNearestThreatDist = (NearestDist < TNumericLimits<float>::Max()) ? NearestDist : -1.f;
+
+			// Peek-now impulse: 2 consecutive closing samples crossing impulse distance, unsuppressed.
+			bool bImpulseFired = false;
+			if (!bSuppressed && PeekImpulseCooldownRemaining <= 0.f
+				&& bClosingConfirmed && NearestDist < TNumericLimits<float>::Max()
+				&& NearestDist <= TickTuning->PeekImpulseDistance)
+			{
+				const float WaitGateThreshold = (MinCoverIdleDwell + PeekCooldown)
+					* CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01);
+				if (TimeInCoverIdle < WaitGateThreshold)
+				{
+					TimeInCoverIdle = WaitGateThreshold;
+					PeekImpulseCooldownRemaining = TickTuning->PeekImpulseRearmSeconds;
+					bImpulseFired = true;
+				}
+			}
+
+			if (CovDbg())
+			{
+				UE_LOG(LogCompanionAI, Log,
+					TEXT("[COVDBG] %s PRESSURE p01=%.2f nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
+					*Ctx.Companion->GetName(), Pressure01, NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
+					CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01),
+					(int32)bImpulseFired);
+			}
+		}
+		else if (!(TickTuning && TickTuning->bPressureResponsiveCover))
+		{
+			Pressure01 = 0.f;
+		}
+
+		// Combat-mode + pressure confidence: the whole wait shrinks.
+		if (TimeInCoverIdle < (MinCoverIdleDwell + PeekCooldown) * CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01)) return;
 
 		UWorld* const TickWorld = Ctx.Companion ? Ctx.Companion->GetWorld() : nullptr;
 		if (!TickWorld) return;
@@ -3581,20 +3673,17 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-eye BLOCKED by %s — excluding in-place fire from roll"),
 				*Ctx.Companion->GetName(), *GetNameSafe(StandEyeBlocker));
 
-		// Gate 5: roll the peek action around the trace-verified side gap — side peek primary,
-		// matching the enemy model (crouched corner peeks at corners, stand-up only over-top).
+		// Gate 5: roll the peek action.
 		const bool bSideGap = (CurrentLean == ECoverLean::Left || CurrentLean == ECoverLean::Right);
 		const int32 MinPeekCycles = TickTuning ? TickTuning->MinPeekCyclesBeforeRelocate : 1;
-		// Cycle gate waived when NO fire action exists here (no side gap AND blocked stand-eye) —
-		// otherwise crouch-Front behind a blocking wall is a permanent Hold: cycles only accrue by
-		// firing, and nothing can fire (the old Fix-3c CornerPeek escape was removed deliberately —
-		// peeking an unverified side is the wrong-side bug). The waiver also BYPASSES the
-		// bJustRepositioned latch: a repo arrival at a no-fire point must be allowed to walk again
-		// or it dead-ends until the watchdog (the latch's anti-re-starve rationale assumes the
-		// point can fire).
 		const bool bNoFireAction = !bSideGap && !bStandEyeClear;
 		const bool bRepoEligible = bNoFireAction
 			|| (!bJustRepositioned && PeekCyclesAtCover >= MinPeekCycles);
+
+		// Pressure-responsive hold-weight decay (Part B).
+		const float PressureHoldScale = (TickTuning && TickTuning->bPressureResponsiveCover)
+			? FMath::Lerp(1.f, TickTuning->PressureHoldWeightScaleAtMax, Pressure01)
+			: 1.f;
 
 		UE_LOG(LogCompanionAI, Log,
 			TEXT("%s: PEEK-DECISION height=%s lean=%d sideGap=%d standEye=%d cycles=%d"),
@@ -3603,22 +3692,155 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			(int32)CurrentLean, (int32)bSideGap, (int32)bStandEyeClear, PeekCyclesAtCover);
 
 		EPeekAction Action = EPeekAction::Hold;
-		if (bSideGap)
+		const bool bWallhack = bIsCrouchCover && TickTuning && TickTuning->bCrouchPeekWallhackEnabled;
+
+		if (bIsCrouchCover && bWallhack)
 		{
-			// Verified side gap (either height): the montage-driven corner peek is the primary fire
-			// action. CornerPeek stays at cover height — crouched at crouch cover, stand montages at
-			// stand cover via LatchedCoverHeight.
+			// --- Part A: scored crouch-peek selector (wallhack) ---
+			const UCapsuleComponent* ScoreCap = Ctx.Companion->GetCapsuleComponent();
+			const float ScoreCapR = ScoreCap ? ScoreCap->GetScaledCapsuleRadius() : 34.f;
+			const float ScoreStandoff = ScoreCapR + 10.f;
+
+			// Cache corner apexes per cover handle.
+			if (CachedCornerApexHandle != Cover.Handle)
+			{
+				CachedCornerApexHandle = Cover.Handle;
+				const float MaxReach = TickTuning->CrouchPeekMaxCornerReachCm;
+				bCachedCornerLeftFound = UCoverGeometryStatics::TryGetCornerPeekApex(
+					TickWorld, Cover.Data, ECoverLean::Left, ScoreStandoff, ScoreCapR, CornerPeekApexClearance,
+					MaxReach, Ctx.Companion, CachedCornerApexLeft);
+				bCachedCornerRightFound = UCoverGeometryStatics::TryGetCornerPeekApex(
+					TickWorld, Cover.Data, ECoverLean::Right, ScoreStandoff, ScoreCapR, CornerPeekApexClearance,
+					MaxReach, Ctx.Companion, CachedCornerApexRight);
+			}
+
+			// Gather extra threats (skip [0] which is the focus target).
+			TArray<AActor*, TInlineAllocator<8>> ScorerThreats;
+			GatherKnownThreats(Ctx.Companion, Ctx.Target,
+				TickTuning->MaxThreatsForCoverScoring, ScorerThreats);
+			TArray<AActor*, TInlineAllocator<4>> ExtraThreats;
+			for (int32 i = 1; i < ScorerThreats.Num(); ++i)
+				ExtraThreats.Add(ScorerThreats[i]);
+
+			FCrouchPeekScoreParams ScoreParams;
+			ScoreParams.CornerBaseScore = TickTuning->CrouchPeekCornerBaseScore;
+			ScoreParams.OverTopBaseScore = TickTuning->CrouchPeekOverTopBaseScore;
+			ScoreParams.CornerTieBonus = TickTuning->CrouchPeekCornerTieBonus;
+			ScoreParams.ExtraThreatPenalty = TickTuning->CrouchPeekExtraThreatPenalty;
+			ScoreParams.MinViableWeight = TickTuning->CrouchPeekMinViableWeight;
+			ScoreParams.MaxCornerReachCm = TickTuning->CrouchPeekMaxCornerReachCm;
+			ScoreParams.LowHpCornerBaseScore = TickTuning->LowHpCrouchPeekCornerBaseScore;
+			ScoreParams.LowHpOverTopBaseScore = TickTuning->LowHpCrouchPeekOverTopBaseScore;
+			ScoreParams.bLowHp = bLowHp;
+			ScoreParams.bSpeculative = !bLosFromCover;
+			ScoreParams.bStandEyeClear = bStandEyeClear;
+
+			FCrouchPeekScores Scores;
+			UCoverGeometryStatics::ScoreCrouchPeekOptions(TickWorld, Cover.Data,
+				TargetSightLoc, ScoreStandoff,
+				Ctx.Target, Ctx.Companion,
+				bCachedCornerLeftFound, CachedCornerApexLeft,
+				bCachedCornerRightFound, CachedCornerApexRight,
+				MakeArrayView(ExtraThreats), ScoreParams, Scores);
+
+			// Hoist scorer viability for the hold-cap promotion path.
+			bLastScorerCornerLeftViable = Scores.bCornerLeftViable;
+			bLastScorerCornerRightViable = Scores.bCornerRightViable;
+			LastScorerBestCornerSide = Scores.BestCornerSide;
+
+			const float BestCornerScore = FMath::Max(Scores.CornerLeftScore, Scores.CornerRightScore);
+			const bool bAnyCornerViable = Scores.bCornerLeftViable || Scores.bCornerRightViable;
+
+			// Split over-top score between Stand and Quick by existing weight ratio.
+			const float StandBaseW = bLowHp ? LowHpStandWeight : StandWeight;
+			const float QuickBaseW = bLowHp ? LowHpQuickWeight : QuickWeight;
+			const float OverTopTotal = StandBaseW + QuickBaseW;
+			const float StandFrac = (OverTopTotal > 0.f) ? (StandBaseW / OverTopTotal) : 0.5f;
+
+			const float EffHoldWeight = (bLowHp ? LowHpHoldWeight : HoldWeight) * PressureHoldScale;
+			const float RepoW = bRepoEligible ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f;
+			const float StandUpRepoW = (bRepoEligible && bStandEyeClear)
+				? (bLowHp ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
+
+			const TPair<EPeekAction, float> ScoredWeights[] = {
+				{ EPeekAction::CornerPeek,           BestCornerScore },
+				{ EPeekAction::Stand,                Scores.OverTopScore * StandFrac },
+				{ EPeekAction::Quick,                Scores.OverTopScore * (1.f - StandFrac) },
+				{ EPeekAction::Hold,                 EffHoldWeight },
+				{ EPeekAction::Reposition,           RepoW },
+				{ EPeekAction::StandUpAndReposition, StandUpRepoW },
+			};
+			Action = RollPeekActionMulti(MakeArrayView(ScoredWeights));
+
+			// Write CurrentLean/ResolvedPeekSide from the scorer's pick.
+			if (Action == EPeekAction::CornerPeek && bAnyCornerViable)
+			{
+				CurrentLean = Scores.BestCornerSide;
+				ResolvedPeekSide = ResolveSideFromLean(CurrentLean, Cover.Data, TargetLocation);
+			}
+			else if (Action == EPeekAction::Stand || Action == EPeekAction::Quick)
+			{
+				CurrentLean = ECoverLean::Front;
+				ResolvedPeekSide = ResolveSideFromLean(CurrentLean, Cover.Data, TargetLocation);
+			}
+
+#if ENABLE_DRAW_DEBUG
+			if (bDebugLogging)
+			{
+				const FVector BaseHunker = UCoverGeometryStatics::GetHunkerPosition(Cover.Data, ScoreStandoff);
+				const FVector OverTopEye = BaseHunker + FVector(0.f, 0.f, 150.f);
+				auto DrawCandidate = [&](const FVector& Eye, bool bViable, const FColor& Color)
+				{
+					DrawDebugSphere(TickWorld, Eye, 10.f, 8, Color, false, 2.f, 0, 1.5f);
+					const FColor LineColor = bViable ? FColor::Green : FColor::Red;
+					DrawDebugLine(TickWorld, Eye, TargetSightLoc, LineColor, false, 2.f, 0, 1.f);
+				};
+				if (bCachedCornerLeftFound)
+					DrawCandidate(CachedCornerApexLeft + FVector(0.f, 0.f, 90.f), Scores.bCornerLeftViable, FColor::Blue);
+				if (bCachedCornerRightFound)
+					DrawCandidate(CachedCornerApexRight + FVector(0.f, 0.f, 90.f), Scores.bCornerRightViable, FColor::Orange);
+				DrawCandidate(OverTopEye, Scores.bOverTopViable, FColor::Cyan);
+
+				for (AActor* const Extra : ExtraThreats)
+				{
+					if (!IsValid(Extra)) continue;
+					const FVector ExtraLoc = Extra->GetActorLocation() + FVector(0.f, 0.f, 90.f);
+					if (Scores.bCornerLeftViable && bCachedCornerLeftFound)
+						DrawDebugLine(TickWorld, CachedCornerApexLeft + FVector(0.f, 0.f, 90.f), ExtraLoc, FColor(128, 128, 255), false, 2.f, 0, 0.5f);
+					if (Scores.bCornerRightViable && bCachedCornerRightFound)
+						DrawDebugLine(TickWorld, CachedCornerApexRight + FVector(0.f, 0.f, 90.f), ExtraLoc, FColor(255, 178, 102), false, 2.f, 0, 0.5f);
+					if (Scores.bOverTopViable)
+						DrawDebugLine(TickWorld, OverTopEye, ExtraLoc, FColor(128, 255, 255), false, 2.f, 0, 0.5f);
+				}
+			}
+#endif
+
+			if (CovDbg())
+			{
+				UE_LOG(LogCompanionAI, Log,
+					TEXT("[COVDBG] %s WALLHACK cL=%.1f(%d) cR=%.1f(%d) oT=%.1f(%d) bestCorner=%d geo=%d spec=%d extra=%d action=%d side=%d"),
+					*Ctx.Companion->GetName(),
+					Scores.CornerLeftScore, (int32)Scores.bCornerLeftViable,
+					Scores.CornerRightScore, (int32)Scores.bCornerRightViable,
+					Scores.OverTopScore, (int32)Scores.bOverTopViable,
+					(int32)Scores.BestCornerSide, (int32)Scores.GeometricFallbackSide,
+					(int32)ScoreParams.bSpeculative, ExtraThreats.Num(),
+					(int32)Action, (int32)CurrentLean);
+			}
+		}
+		else if (bSideGap)
+		{
+			// Stand cover (or legacy crouch path): verified side gap, corner peek primary.
 			const TPair<EPeekAction, float> SideGapWeights[] = {
 				{ EPeekAction::CornerPeek, bLowHp ? LowHpCornerPeekWeight : CornerPeekWeight },
 				{ EPeekAction::Reposition, bRepoEligible
 					? (bIsCrouchCover ? (bLowHp ? LowHpRepositionWeight : RepositionWeight)
 					                  : (bLowHp ? LowHpRepositionWeightStand : RepositionWeightStand)) : 0.f },
-				{ EPeekAction::Hold,       bLowHp ? LowHpHoldWeight : HoldWeight },
+				{ EPeekAction::Hold,       (bLowHp ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(SideGapWeights));
 
-			// Enemy parity (CoverEndpointStandPeekChance): at crouch cover that also allows
-			// fire-over-the-top, occasionally stand up instead of corner-peeking.
+			// Legacy CoverEndpointStandPeekChance conversion (crouch corners, wallhack disabled).
 			if (Action == EPeekAction::CornerPeek && bIsCrouchCover
 				&& Cover.Data.bFrontCoverCrouched && bStandEyeClear
 				&& FMath::FRand() < (TickTuning ? TickTuning->CoverEndpointStandPeekChance : 0.3f))
@@ -3628,9 +3850,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		else if (bIsCrouchCover)
 		{
-			// Crouch cover, no verified side gap (Front) — over-top analogue: the in-place fire
-			// family, gated on the stand-eye trace (a blocked stand-eye shot would burn the
-			// magazine into our own wall; StandUpAndReposition Phase A fires in place too).
+			// Crouch cover, no side gap, wallhack disabled: legacy Front over-top roll.
 			const float RepoW        = bRepoEligible ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f;
 			const float StandUpRepoW = (bRepoEligible && bStandEyeClear) ? (bLowHp ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
 			const float StandW = bStandEyeClear ? (bLowHp ? LowHpStandWeight : StandWeight) : 0.f;
@@ -3638,13 +3858,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			const TPair<EPeekAction, float> FrontWeights[] = {
 				{ EPeekAction::Stand,                StandW },
 				{ EPeekAction::Quick,                QuickW },
-				{ EPeekAction::Hold,                 bLowHp ? LowHpHoldWeight : HoldWeight },
+				{ EPeekAction::Hold,                 (bLowHp ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
 				{ EPeekAction::Reposition,           RepoW },
 				{ EPeekAction::StandUpAndReposition, StandUpRepoW },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(FrontWeights));
 		}
-		// (Stand cover with no side gap never reaches the roll — rejected at Gate 4.)
 
 		if (Action == EPeekAction::Hold)
 		{
@@ -3657,10 +3876,45 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: HOLD this cycle (%d/%d)"), *Ctx.Companion->GetName(), ConsecutiveHolds, MaxConsecutiveHolds);
 				return;
 			}
-			// Hold cap reached — promote to the model's primary fire action: verified side gap →
-			// corner peek; else over-top when the stand-eye shot is clear; else walk away; else
-			// extend the hold (escape = debounced invalidates).
-			if (bSideGap)
+			// Hold cap promotion: scorer-viable best option at crouch cover (wallhack), else legacy.
+			if (bWallhack)
+			{
+				const bool bCornerViable = bLastScorerCornerLeftViable || bLastScorerCornerRightViable;
+				if (bCornerViable)
+				{
+					Action = EPeekAction::CornerPeek;
+					CurrentLean = LastScorerBestCornerSide;
+					ResolvedPeekSide = ResolveSideFromLean(CurrentLean, Cover.Data, TargetLocation);
+				}
+				else if (bStandEyeClear)
+				{
+					Action = EPeekAction::Stand;
+				}
+				else if (bCachedCornerLeftFound || bCachedCornerRightFound)
+				{
+					// Speculative fallback: corner exists but LOS blocked -- peek to look.
+					Action = EPeekAction::CornerPeek;
+					if (bCachedCornerLeftFound && !bCachedCornerRightFound)
+						CurrentLean = ECoverLean::Left;
+					else if (bCachedCornerRightFound && !bCachedCornerLeftFound)
+						CurrentLean = ECoverLean::Right;
+					else
+						CurrentLean = Cover.Data.bLeftCoverCrouched ? ECoverLean::Left : ECoverLean::Right;
+					ResolvedPeekSide = ResolveSideFromLean(CurrentLean, Cover.Data, TargetLocation);
+				}
+				else if (bRepoEligible)
+				{
+					Action = EPeekAction::Reposition;
+				}
+				else
+				{
+					++ConsecutiveHolds;
+					PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
+					TimeInCoverIdle = 0.f;
+					return;
+				}
+			}
+			else if (bSideGap)
 			{
 				Action = EPeekAction::CornerPeek;
 			}
@@ -3936,11 +4190,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	{
 		LosBlockedAccum = 0.f;
 		TimeInOpenEngageNoCover = 0.f;
-		// Combat-mode confidence: slower countdown = longer exposure per peek.
-		BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Ctx.Companion, true);
 		// Peek fire delay: hold the first shot until the peek animation has reached exposure.
 		if (PeekFireDelayRemaining > 0.f)
 			PeekFireDelayRemaining -= DeltaSeconds;
+		// Part C burst-clock fix: BurstTimer must NOT decrement while the peek-out animation
+		// is still winding up, otherwise quick peeks expire before a single round fires.
+		if (PeekFireDelayRemaining <= 0.f)
+			BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Ctx.Companion, true, Pressure01);
 
 		if (bDebugLogging)
 		{

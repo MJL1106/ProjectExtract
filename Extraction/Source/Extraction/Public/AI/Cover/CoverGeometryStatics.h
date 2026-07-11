@@ -8,6 +8,35 @@
 #include "CoverSystemPublicData.h"
 #include "CoverGeometryStatics.generated.h"
 
+/** Input params for ScoreCrouchPeekOptions (plain C++ struct, not USTRUCT). */
+struct FCrouchPeekScoreParams
+{
+	float CornerBaseScore = 50.f;
+	float OverTopBaseScore = 50.f;
+	float CornerTieBonus = 20.f;
+	float ExtraThreatPenalty = 8.f;
+	float MinViableWeight = 5.f;
+	float MaxCornerReachCm = 175.f;
+	float LowHpCornerBaseScore = 25.f;
+	float LowHpOverTopBaseScore = 15.f;
+	bool bLowHp = false;
+	bool bSpeculative = false;
+	bool bStandEyeClear = false;
+};
+
+/** Output of ScoreCrouchPeekOptions (plain C++ struct). */
+struct FCrouchPeekScores
+{
+	float CornerLeftScore = 0.f;
+	float CornerRightScore = 0.f;
+	float OverTopScore = 0.f;
+	bool bCornerLeftViable = false;
+	bool bCornerRightViable = false;
+	bool bOverTopViable = false;
+	ECoverLean BestCornerSide = ECoverLean::None;
+	ECoverLean GeometricFallbackSide = ECoverLean::None;
+};
+
 UCLASS()
 class EXTRACTION_API UCoverGeometryStatics : public UBlueprintFunctionLibrary
 {
@@ -96,6 +125,25 @@ public:
 	 *  (i.e. the lateral direction toward ThreatLoc has a valid lean flag for the given stance). */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
 	static bool HasThreatFacingSideFlag(const FCoverData& Data, const FVector& ThreatLoc, bool bCrouched);
+
+	/** Checked wrapper over the corner march: returns true when a reachable wall-end corner exists
+	 *  on Side (march succeeded, not exhausted, and within MaxReachCm). On success OutApex is the
+	 *  corner-peek apex position. C++ only. */
+	static bool TryGetCornerPeekApex(const UWorld* World, const FCoverData& Data, ECoverLean Side,
+		float Standoff, float CapsuleRadius, float ClearanceMargin, float MaxReachCm,
+		const AActor* IgnoreActor, FVector& OutApex);
+
+	/** Crouch-peek wallhack scorer: evaluates CornerLeft, CornerRight, and OverTop candidates,
+	 *  traces primary LOS to ThreatLoc and optional extra threats, and returns per-option scores +
+	 *  viability. Corner apex positions are pre-computed by the caller (TryGetCornerPeekApex) and
+	 *  passed in to avoid redundant trace marches. C++ only. */
+	static void ScoreCrouchPeekOptions(const UWorld* World, const FCoverData& Data,
+		const FVector& ThreatLoc, float Standoff,
+		const AActor* IgnoreTarget, const AActor* IgnorePawn,
+		bool bCornerLeftFound, const FVector& ApexLeft,
+		bool bCornerRightFound, const FVector& ApexRight,
+		TArrayView<AActor* const> ExtraThreats,
+		const FCrouchPeekScoreParams& Params, FCrouchPeekScores& OutScores);
 
 	/** True when the pawn can see the threat from its resolved lean-peek position. */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry", meta = (WorldContext = "WorldContextObject"))

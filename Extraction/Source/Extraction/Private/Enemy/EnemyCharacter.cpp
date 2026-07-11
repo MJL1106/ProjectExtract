@@ -72,7 +72,7 @@ AEnemyCharacter::AEnemyCharacter()
 	OwnedTags.AddTag(TAG_Character_Enemy);
 
 	static constexpr float AwarenessWidgetOffsetZ = 30.f;
-	static constexpr float AwarenessWidgetSize     = 64.f;
+	static constexpr float AwarenessWidgetSize     = 76.f;
 
 	AwarenessWidgetComponent = CreateDefaultSubobject<UOverheadWidgetComponent>(TEXT("AwarenessWidget"));
 	AwarenessWidgetComponent->SetupAttachment(GetMesh(), TEXT("head"));

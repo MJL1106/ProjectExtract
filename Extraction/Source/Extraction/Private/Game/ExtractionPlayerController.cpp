@@ -12,6 +12,8 @@
 #include "BarkFeedWidget.h"
 #include "CompanionModeWidget.h"
 #include "ObjectiveMarkerLayer.h"
+#include "Game/ObjectiveSubsystem.h"
+#include "World/ObjectiveMarkerDisplay.h"
 #include "LootNotificationWidget.h"
 #include "LevelCompleteWidget.h"
 #include "LevelFailedWidget.h"
@@ -105,12 +107,26 @@ void AExtractionPlayerController::BeginPlay()
 			CompanionModeWidget->AddToPlayerScreen();
 	}
 
-	// Spawn objective waypoint layer for local player
+	// Spawn objective waypoint layer for local player (edge indicator only)
 	if (IsLocalPlayerController() && ObjectiveLayerWidgetClass)
 	{
 		ObjectiveLayerWidget = CreateWidget<UObjectiveMarkerLayer>(this, ObjectiveLayerWidgetClass);
 		if (IsValid(ObjectiveLayerWidget))
 			ObjectiveLayerWidget->AddToPlayerScreen();
+	}
+
+	// Supply world-space marker display class to the objective subsystem.
+	if (IsLocalPlayerController())
+	{
+		if (!MarkerDisplayClass)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("AExtractionPlayerController: MarkerDisplayClass is null -- "
+				"world-space objective markers will not spawn. Assign it in the BP subclass defaults."));
+		}
+		else if (UObjectiveSubsystem* Objectives = GetWorld()->GetSubsystem<UObjectiveSubsystem>())
+		{
+			Objectives->SetMarkerDisplayClass(MarkerDisplayClass);
+		}
 	}
 
 	// Spawn loot acquisition toast for local player

@@ -33,9 +33,10 @@ public:
 	/** Called by AEnemyCharacter::BeginPlay once the widget is initialised. */
 	void SetEnemy(AEnemyCharacter* InEnemy);
 
-	// Material parameter names — the in-engine material must expose exactly these two params.
+	// Material parameter names — the in-engine material must expose exactly these params.
 	static const FName ParamFill;
 	static const FName ParamFillColor;
+	static const FName ParamPulse;
 
 protected:
 
@@ -53,16 +54,21 @@ protected:
 	// --- Designer-tunable colour stops ---
 
 	UPROPERTY(EditAnywhere, Category = "Awareness")
-	FLinearColor LowColor = FLinearColor(0.4f, 0.4f, 0.4f, 1.f);   // dim grey (near 0)
+	FLinearColor LowColor = FLinearColor(0.8f, 0.85f, 0.95f, 1.f);  // light steel-white (near 0)
 
 	UPROPERTY(EditAnywhere, Category = "Awareness")
 	FLinearColor MidColor = FLinearColor(1.f, 0.85f, 0.f, 1.f);     // yellow (mid suspicion)
 
 	UPROPERTY(EditAnywhere, Category = "Awareness")
-	FLinearColor HighColor = FLinearColor(1.f, 0.4f, 0.f, 1.f);     // orange (high suspicion)
+	FLinearColor HighColor = FLinearColor(1.f, 0.45f, 0.f, 1.f);    // orange (high suspicion)
 
 	UPROPERTY(EditAnywhere, Category = "Awareness")
 	FLinearColor CombatColor = FLinearColor(1.f, 0.05f, 0.f, 1.f);  // red (Combat lock)
+
+	/** Opacity multiplier applied while the enemy holds cover, so the meter reads as
+	 *  "behind cover" instead of vanishing. */
+	UPROPERTY(EditAnywhere, Category = "Awareness", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float InCoverOpacity = 0.45f;
 
 private:
 
@@ -79,12 +85,19 @@ private:
 	/** Interp speed applied to DisplayMeter each UpdateInterval tick. */
 	static constexpr float MeterInterpSpeed = 12.f;
 
+	/** Interp speed applied to CoverDimAlpha each UpdateInterval tick. */
+	static constexpr float CoverDimInterpSpeed = 8.f;
+
 	/** Smoothed display value — interps toward the raw awareness meter, drives all visuals. */
 	float DisplayMeter = 0.f;
+
+	/** Smoothed opacity multiplier — interps toward InCoverOpacity while the enemy holds cover, 1 otherwise. */
+	float CoverDimAlpha = 1.f;
 
 	/** Change-detection caches — MID writes are skipped when nothing has changed. */
 	float LastWrittenMeter = -1.f;
 	FLinearColor LastWrittenColor = FLinearColor::Transparent;
+	float LastWrittenPulse = -1.f;
 
 	TWeakObjectPtr<AEnemyCharacter> Enemy;
 	TWeakObjectPtr<UEnemyAwarenessComponent> CachedAwareness;

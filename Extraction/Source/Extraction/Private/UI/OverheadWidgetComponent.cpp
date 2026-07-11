@@ -4,6 +4,7 @@
 #include "Blueprint/UserWidget.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
+#include "AI/Cover/CoverPoseComponent.h"
 
 static TAutoConsoleVariable<int32> CVarOverheadOcclusion(
 	TEXT("ui.OverheadOcclusion"),
@@ -61,6 +62,8 @@ void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 		// (takedown OverlapBoxes) and hidden helper meshes (cover-slot markers) share the
 		// WorldDynamic/WorldStatic object types but must not hide the widget — skip past them.
 		bOccluded = false;
+		bool bInCover = false;
+		bool bCoverExempt = false;
 		FHitResult OcclusionHit;
 		constexpr int32 MaxSkips = 8;
 		for (int32 Skip = 0; Skip < MaxSkips; ++Skip)
@@ -76,15 +79,30 @@ void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 				&& (!IsValid(HitActor) || !HitActor->IsHidden());
 			if (bRealOccluder)
 			{
-				bOccluded = true;
+				if (!bCoverPoseLookupDone)
+				{
+					bCoverPoseLookupDone = true;
+					if (const AActor* Owner = GetOwner())
+						CachedCoverPose = Owner->FindComponentByClass<UCoverPoseComponent>();
+				}
+
+				const UCoverPoseComponent* CoverPose = CachedCoverPose.Get();
+				bInCover = IsValid(CoverPose) && CoverPose->bInCover;
+				bCoverExempt = bInCover
+					&& CoverPose->CoverHeight == ECoverHeight::Crouch
+					&& FVector::Dist(OcclusionHit.ImpactPoint, WidgetLocation) <= CoverOccluderMaxDistance;
+
+				// Near cover chunk sits between camera and widget — don't skip past it to find a
+				// further real wall, the "show dimmed in cover" behaviour wants this hit ignored entirely.
+				bOccluded = !bCoverExempt;
 				break;
 			}
 			TraceParams.AddIgnoredComponent(HitComp);
 		}
 
 		if (CVarOverheadDebug.GetValueOnGameThread() != 0)
-			UE_LOG(LogTemp, Log, TEXT("[OverheadWidget] %s occluded=%d hitActor=%s hitComp=%s widgetLoc=%s camDist=%.0f"),
-				*GetNameSafe(GetOwner()), (int32)bOccluded,
+			UE_LOG(LogTemp, Log, TEXT("[OverheadWidget] %s occluded=%d inCover=%d coverExempt=%d hitActor=%s hitComp=%s widgetLoc=%s camDist=%.0f"),
+				*GetNameSafe(GetOwner()), (int32)bOccluded, (int32)bInCover, (int32)bCoverExempt,
 				*GetNameSafe(OcclusionHit.GetActor()), *GetNameSafe(OcclusionHit.GetComponent()),
 				*WidgetLocation.ToCompactString(), FVector::Dist(CameraLocation, WidgetLocation));
 	}

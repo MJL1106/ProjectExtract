@@ -338,8 +338,9 @@ void UBTTask_CompanionFollowRoute::OnTaskFinished(
 	// Idempotent locomotion restore — safe to run twice (AbortTask may have run first)
 	RestoreDefaults(*Mem);
 
-	// Release the route-wide player speed lock, if one was applied. ClearRouteSpeedLock no-ops
-	// if already cleared or if the player went DBNO mid-route (crawl speed must not be stomped).
+	// Release the route-wide player speed lock, if one was applied. Safe to run when already
+	// cleared or if the player went DBNO mid-route (crawl speed must not be stomped) — it just
+	// re-fires OnRouteSpeedLockChanged(false), which the kit BP handles idempotently.
 	if (AExtractionPlayer* LockedPlayer = Mem->CachedSpeedLockedPlayer.Get())
 		LockedPlayer->ClearRouteSpeedLock();
 

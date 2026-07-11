@@ -672,6 +672,25 @@ private:
 	FCoverHandle CachedIdleHunkerHandle;
 	FVector CachedIdleHunkerLoc = FVector::ZeroVector;
 
+	// Per-cover cache for corner-peek apexes (static geometry per cover handle).
+	FCoverHandle CachedCornerApexHandle;
+	FVector CachedCornerApexLeft = FVector::ZeroVector;
+	FVector CachedCornerApexRight = FVector::ZeroVector;
+	bool bCachedCornerLeftFound = false;
+	bool bCachedCornerRightFound = false;
+
+	// Last scorer results (hoisted so the hold-cap promotion can read viability).
+	bool bLastScorerCornerLeftViable = false;
+	bool bLastScorerCornerRightViable = false;
+	ECoverLean LastScorerBestCornerSide = ECoverLean::None;
+
+	// Pressure-tracking state (Part B).
+	float PreviousNearestThreatDist = -1.f;
+	float Pressure01 = 0.f;
+	float PeekImpulseCooldownRemaining = 0.f;
+	float PressureSampleTimer = 0.f;
+	bool bPreviousThreatWasClosing = false;
+
 	bool bWaitingForFinalApproach = false;
 	FVector FinalApproachTarget = FVector::ZeroVector;
 	float FinalApproachElapsed = 0.f;

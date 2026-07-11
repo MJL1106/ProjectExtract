@@ -347,7 +347,8 @@ void ALevelObjectiveFlow::UpdatePrimaryObjective()
 			*GetName(), static_cast<uint8>(CurrentStep));
 		return;
 	}
-	Objectives->AddObjective(PrimaryObjectiveId, Label, Target->GetActorLocation(), Target);
+	Objectives->AddObjective(PrimaryObjectiveId, Label, Target->GetActorLocation(), Target,
+		FVector(0.f, 0.f, MarkerHeightOffset));
 }
 
 void ALevelObjectiveFlow::EvaluateCurrentEnemyStep()
@@ -416,7 +417,8 @@ void ALevelObjectiveFlow::UpdateOptionalSupplies()
 		{
 			Objectives->AddObjective(OptionalSuppliesObjectiveId,
 				NSLOCTEXT("LevelFlow", "OptionalSupplies", "Optional: Search side rooms for supplies - Ping with MMB, press I to loot"),
-				CurrentOptionalTarget->GetActorLocation(), CurrentOptionalTarget);
+				CurrentOptionalTarget->GetActorLocation(), CurrentOptionalTarget,
+				FVector(0.f, 0.f, MarkerHeightOffset));
 		}
 		else
 		{

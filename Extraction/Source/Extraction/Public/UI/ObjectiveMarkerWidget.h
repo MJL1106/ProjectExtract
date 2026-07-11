@@ -1,13 +1,12 @@
-// UObjectiveMarkerWidget -- one on-screen objective waypoint: icon with distance-in-metres
-// underneath (and an optional label). Projects the objective's world location to screen each
-// tick (UPingMarkerWidget's pattern) and, unlike the ping marker, EDGE-CLAMPS when the
-// objective is off-screen or behind the camera so the player always knows which way to turn.
-// Spawned and positioned by UObjectiveMarkerLayer — not added to the screen directly.
+// UObjectiveMarkerWidget -- edge-clamped off-screen indicator for objectives. Shows ONLY when
+// the objective is off-screen or behind the camera. While the world-space billboard is visible
+// (projection valid and on-screen) this widget hides itself. Keeps wayfinding without the
+// sprint-bob problem of the old screen-projection approach.
 //
 // WBP must contain:
-//   UImage     "MarkerIcon"   -- waypoint icon
-//   UTextBlock "DistanceText" -- distance line, e.g. "42 m"
-//   UTextBlock "LabelText"    -- (optional) objective label
+//   UImage     "MarkerIcon"   -- directional arrow/icon
+//   UTextBlock "DistanceText" -- hidden in edge mode (kept for layout compat)
+//   UTextBlock "LabelText"    -- (optional) hidden in edge mode
 
 #pragma once
 
@@ -56,21 +55,18 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Objective|Marker", meta = (ClampMin = "0.0"))
 	float EdgePadding = 60.f;
 
-	/** Vertical offset (px) applied while the objective is on screen — floats the icon above the spot. */
-	UPROPERTY(EditAnywhere, Category = "Objective|Marker")
-	float VerticalScreenOffset = -30.f;
-
 	/** Screen-space smoothing speed. Zero snaps directly to the projected target. */
 	UPROPERTY(EditAnywhere, Category = "Objective|Marker", meta = (ClampMin = "0.0"))
 	float InterpolationSpeed = 12.f;
 
+	/** Fraction of screen inset from each edge -- if the projection lands inside this region the
+	 *  marker is considered "on-screen" and this widget hides. Prevents flickering at edges. */
+	UPROPERTY(EditAnywhere, Category = "Objective|Marker", meta = (ClampMin = "0.0", ClampMax = "0.5"))
+	float OnScreenInsetFraction = 0.05f;
+
 private:
-	/** Objective being tracked (copy — resolves a moving TargetActor each tick). */
 	FObjectiveMarker Objective;
 	FVector2D SmoothedScreenPosition = FVector2D::ZeroVector;
 	bool bHasSmoothedScreenPosition = false;
 	bool bLastPositionWasValidProjection = false;
-	int32 LastDisplayedDistanceMetres = INDEX_NONE;
-
-	void UpdateDistanceText(const FVector& WorldLocation);
 };

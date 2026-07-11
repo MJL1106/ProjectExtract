@@ -118,6 +118,11 @@ protected:
 	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Objective Flow|Extraction")
 	TObjectPtr<ALevelCompletionLiftGate> LiftGate;
 
+	/** Vertical offset (cm) applied above the target's bounds-centre for all objective markers
+	 *  registered by this flow. Keeps markers floating above geometry at a readable height. */
+	UPROPERTY(EditAnywhere, Category = "Objective Flow|Marker")
+	float MarkerHeightOffset = 40.f;
+
 private:
 	static const FName PrimaryObjectiveId;
 	static const FName OptionalSuppliesObjectiveId;

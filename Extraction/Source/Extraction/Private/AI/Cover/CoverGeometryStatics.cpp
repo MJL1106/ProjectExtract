@@ -315,6 +315,128 @@ ECoverLean UCoverGeometryStatics::ChooseGapPeekSide(UWorld* World, const FCoverD
 	return GeometricSide != ECoverLean::None ? GeometricSide : Preferred;
 }
 
+bool UCoverGeometryStatics::TryGetCornerPeekApex(const UWorld* World, const FCoverData& Data,
+	ECoverLean Side, float Standoff, float CapsuleRadius, float ClearanceMargin, float MaxReachCm,
+	const AActor* IgnoreActor, FVector& OutApex)
+{
+	if (Side != ECoverLean::Left && Side != ECoverLean::Right) return false;
+	if (!World) return false;
+
+	const FVector Base = GetHunkerPosition(Data, Standoff);
+	const FVector WallDir = Data.DirectionToWall.GetSafeNormal2D();
+	const FVector Lateral = Data.Rotation.RotateVector(FVector::RightVector).GetSafeNormal2D()
+		* (Side == ECoverLean::Right ? 1.f : -1.f);
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(CoverCornerApexCheck), false);
+	if (IgnoreActor) Params.AddIgnoredActor(IgnoreActor);
+
+	float CornerLat;
+	bool bExhausted;
+	if (!CoverCornerMarch::MarchToCornerLat(World, Base, Lateral, WallDir, Standoff + 60.f, Params, CornerLat, bExhausted))
+		return false;
+	if (bExhausted) return false;
+	if (CornerLat > MaxReachCm) return false;
+
+	OutApex = Base + Lateral * (CornerLat + CapsuleRadius + ClearanceMargin);
+	return true;
+}
+
+void UCoverGeometryStatics::ScoreCrouchPeekOptions(const UWorld* World, const FCoverData& Data,
+	const FVector& ThreatLoc, float Standoff,
+	const AActor* IgnoreTarget, const AActor* IgnorePawn,
+	bool bCornerLeftFound, const FVector& ApexLeft,
+	bool bCornerRightFound, const FVector& ApexRight,
+	TArrayView<AActor* const> ExtraThreats,
+	const FCrouchPeekScoreParams& Params, FCrouchPeekScores& OutScores)
+{
+	OutScores = FCrouchPeekScores();
+	if (!World) return;
+
+	FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(CrouchPeekScore), false);
+	TraceParams.AddIgnoredActor(IgnorePawn);
+	TraceParams.AddIgnoredActor(IgnoreTarget);
+
+	const float BaseCorner = Params.bLowHp ? Params.LowHpCornerBaseScore : Params.CornerBaseScore;
+	const float BaseOverTop = Params.bLowHp ? Params.LowHpOverTopBaseScore : Params.OverTopBaseScore;
+
+	// Geometric-corner fallback: the single baked-side flag points at the nearest open corner.
+	const bool bLeftBaked = Data.bLeftCoverCrouched;
+	const bool bRightBaked = Data.bRightCoverCrouched;
+	const bool bExactlyOneSide = (bLeftBaked != bRightBaked);
+	OutScores.GeometricFallbackSide = bExactlyOneSide
+		? (bLeftBaked ? ECoverLean::Left : ECoverLean::Right) : ECoverLean::None;
+
+	auto TraceLOS = [&](const FVector& Eye, const FVector& Target) -> bool
+	{
+		return !World->LineTraceTestByChannel(Eye, Target, ECC_Visibility, TraceParams);
+	};
+
+	if (bCornerLeftFound)
+	{
+		const FVector Eye = ApexLeft + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
+		OutScores.bCornerLeftViable = TraceLOS(Eye, ThreatLoc);
+	}
+	if (bCornerRightFound)
+	{
+		const FVector Eye = ApexRight + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
+		OutScores.bCornerRightViable = TraceLOS(Eye, ThreatLoc);
+	}
+
+	// Over-top: viable iff the caller's stand-eye trace already passed.
+	OutScores.bOverTopViable = Params.bStandEyeClear;
+
+	// Speculative mode: floor viable options so "peek to look" exposes.
+	if (Params.bSpeculative)
+	{
+		if (bCornerLeftFound && !OutScores.bCornerLeftViable && OutScores.GeometricFallbackSide == ECoverLean::Left)
+			OutScores.bCornerLeftViable = true;
+		if (bCornerRightFound && !OutScores.bCornerRightViable && OutScores.GeometricFallbackSide == ECoverLean::Right)
+			OutScores.bCornerRightViable = true;
+		if (Params.bStandEyeClear && !OutScores.bOverTopViable)
+			OutScores.bOverTopViable = true;
+	}
+
+	// Score viable options.
+	auto ScoreOption = [&](bool bViable, float BaseScore, bool bIsCorner, const FVector& Eye) -> float
+	{
+		if (!bViable) return 0.f;
+		float Score = BaseScore + (bIsCorner ? Params.CornerTieBonus : 0.f);
+		for (AActor* const Threat : ExtraThreats)
+		{
+			if (!IsValid(Threat)) continue;
+			const FVector ExtraTarget = Threat->GetActorLocation() + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
+			FCollisionQueryParams ThreatParams(TraceParams);
+			ThreatParams.AddIgnoredActor(Threat);
+			if (!World->LineTraceTestByChannel(Eye, ExtraTarget, ECC_Visibility, ThreatParams))
+				Score -= Params.ExtraThreatPenalty;
+		}
+		return FMath::Max(Score, Params.MinViableWeight);
+	};
+
+	const FVector LeftEye = ApexLeft + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
+	const FVector RightEye = ApexRight + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
+	const FVector OverTopEye = GetHunkerPosition(Data, Standoff) + FVector(0.f, 0.f, CoverPeekStandEyeHeight);
+
+	OutScores.CornerLeftScore = ScoreOption(OutScores.bCornerLeftViable, BaseCorner, true, LeftEye);
+	OutScores.CornerRightScore = ScoreOption(OutScores.bCornerRightViable, BaseCorner, true, RightEye);
+	OutScores.OverTopScore = ScoreOption(OutScores.bOverTopViable, BaseOverTop, false, OverTopEye);
+
+	// Best corner side: highest score, geometric-corner wins ties.
+	if (OutScores.bCornerLeftViable || OutScores.bCornerRightViable)
+	{
+		if (OutScores.CornerLeftScore > OutScores.CornerRightScore)
+			OutScores.BestCornerSide = ECoverLean::Left;
+		else if (OutScores.CornerRightScore > OutScores.CornerLeftScore)
+			OutScores.BestCornerSide = ECoverLean::Right;
+		else if (OutScores.GeometricFallbackSide != ECoverLean::None)
+			OutScores.BestCornerSide = OutScores.GeometricFallbackSide;
+		else if (OutScores.bCornerLeftViable)
+			OutScores.BestCornerSide = ECoverLean::Left;
+		else
+			OutScores.BestCornerSide = ECoverLean::Right;
+	}
+}
+
 bool UCoverGeometryStatics::IsThreatCovered(const UObject* WorldContextObject, const FCoverData& Data,
 	const FVector& ThreatLoc, float Standoff, float ChestHeight,
 	const AActor* IgnoreThreatActor, const AActor* IgnorePawn)

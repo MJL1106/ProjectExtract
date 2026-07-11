@@ -6,6 +6,8 @@
 #include "Components/WidgetComponent.h"
 #include "OverheadWidgetComponent.generated.h"
 
+class UCoverPoseComponent;
+
 /**
  * Screen-space UWidgetComponent for overhead meters/icons (enemy awareness, companion health/mode).
  * Fixes two stock screen-space behaviours:
@@ -31,7 +33,7 @@ protected:
 
 	/** Smallest scale the widget shrinks to at long range. */
 	UPROPERTY(EditAnywhere, Category = "Overhead", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MinScale = 0.35f;
+	float MinScale = 0.5f;
 
 	/** Largest scale when closer than ReferenceDistance. */
 	UPROPERTY(EditAnywhere, Category = "Overhead", meta = (ClampMin = "0.1"))
@@ -45,8 +47,19 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Overhead", meta = (ClampMin = "0.02"))
 	float OcclusionTraceInterval = 0.1f;
 
+	/** While the owner is in crouch-height cover, an occluder hit within this distance (cm) of the
+	 *  widget doesn't hide it — it's the enemy's own cover chunk. Stand/lean cover keeps the full
+	 *  hide (the head-height widget clears the chunk, so an occlusion there means a real wall), and
+	 *  hits further away than this still hide too. */
+	UPROPERTY(EditAnywhere, Category = "Overhead", meta = (ClampMin = "0.0"))
+	float CoverOccluderMaxDistance = 300.f;
+
 private:
 	float TimeSinceOcclusionTrace = 0.f;
 	bool bOccluded = false;
 	FVector2D LastAppliedScale = FVector2D(1.f, 1.f);
+
+	/** One-shot lazy lookup — owner components are fixed after spawn. */
+	TWeakObjectPtr<UCoverPoseComponent> CachedCoverPose;
+	bool bCoverPoseLookupDone = false;
 };

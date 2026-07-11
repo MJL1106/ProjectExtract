@@ -1,12 +1,14 @@
-// UObjectiveSubsystem — world-scope list of active objective markers for the HUD waypoint layer.
-// Level scripting (or the placed AObjectiveMarkerActor) adds/removes objectives by id; the
-// UObjectiveMarkerLayer widget rebuilds its markers on OnObjectivesChanged.
+// UObjectiveSubsystem — world-scope list of active objective markers for the HUD waypoint layer
+// and world-space billboard display actors. Level scripting (or the placed AObjectiveMarkerActor)
+// adds/removes objectives by id; the layer/displays rebuild on OnObjectivesChanged.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "ObjectiveSubsystem.generated.h"
+
+class AObjectiveMarkerDisplay;
 
 USTRUCT(BlueprintType)
 struct FObjectiveMarker
@@ -27,12 +29,13 @@ struct FObjectiveMarker
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	TWeakObjectPtr<AActor> TargetActor;
 
-	/** Resolved marker position this frame. */
-	FVector ResolveLocation() const
-	{
-		const AActor* Target = TargetActor.Get();
-		return Target ? Target->GetActorLocation() : WorldLocation;
-	}
+	/** Additive offset applied after location resolution (e.g. +Z to lift above floor pivot). */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective")
+	FVector Offset = FVector::ZeroVector;
+
+	/** Resolved marker position this frame: bounds-centre of the target actor (or static
+	 *  WorldLocation) plus the per-objective Offset. */
+	FVector ResolveLocation() const;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnObjectivesChanged);
@@ -43,9 +46,13 @@ class EXTRACTION_API UObjectiveSubsystem : public UWorldSubsystem
 	GENERATED_BODY()
 
 public:
-	/** Adds (or replaces, by id) an objective marker. Target optional — set to follow a moving actor. */
+	virtual void Deinitialize() override;
+
+	/** Adds (or replaces, by id) an objective marker. Target optional — set to follow a moving actor.
+	 *  Offset is additive on the resolved bounds-centre location (default zero). */
 	UFUNCTION(BlueprintCallable, Category = "Objective")
-	void AddObjective(FName Id, FText Label, FVector WorldLocation, AActor* TargetActor = nullptr);
+	void AddObjective(FName Id, FText Label, FVector WorldLocation, AActor* TargetActor = nullptr,
+		FVector Offset = FVector::ZeroVector);
 
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void RemoveObjective(FName Id);
@@ -55,10 +62,24 @@ public:
 
 	const TArray<FObjectiveMarker>& GetObjectives() const { return Objectives; }
 
+	/** Set the display actor class to spawn for world-space markers. Call once from the player
+	 *  controller's local setup (the class is a UPROPERTY on the controller BP subclass). */
+	UFUNCTION(BlueprintCallable, Category = "Objective")
+	void SetMarkerDisplayClass(TSubclassOf<AObjectiveMarkerDisplay> InClass);
+
 	/** Broadcast on every add/remove/clear — the HUD layer rebuilds its marker widgets here. */
 	UPROPERTY(BlueprintAssignable, Category = "Objective")
 	FOnObjectivesChanged OnObjectivesChanged;
 
 private:
 	TArray<FObjectiveMarker> Objectives;
+
+	UPROPERTY()
+	TSubclassOf<AObjectiveMarkerDisplay> MarkerDisplayClass;
+
+	UPROPERTY()
+	TArray<TObjectPtr<AObjectiveMarkerDisplay>> ActiveDisplays;
+
+	void RebuildDisplayActors();
+	void DestroyAllDisplays();
 };
