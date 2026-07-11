@@ -3,6 +3,7 @@
 #include "ExtractionPlayer.h"
 #include "ExtractionPlayerMovement.h"
 #include "Components/CompanionCommandComponent.h"
+#include "Components/ConsumableInventoryComponent.h"
 #include "AI/AITargetingStatics.h"
 #include "Perception/AISightTargetInterface.h"
 #include "Perception/AISense_Sight.h"
@@ -42,6 +43,7 @@
 #include "World/Lootable.h"
 #include "World/BreachableDoor.h"
 #include "World/WorldInteractable.h"
+#include "Game/ExtractionGameMode.h"
 #include "HAL/IConsoleManager.h"
 
 // Live revive-arrangement tuning (paired with revive.* CVars in CompanionCharacter.cpp): rotates the
@@ -74,6 +76,7 @@ AExtractionPlayer::AExtractionPlayer(const FObjectInitializer& ObjectInitializer
 	WeaponComponent   = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
 	CompanionCommandComponent = CreateDefaultSubobject<UCompanionCommandComponent>(TEXT("CompanionCommandComponent"));
+	ConsumableInventoryComponent = CreateDefaultSubobject<UConsumableInventoryComponent>(TEXT("ConsumableInventoryComponent"));
 
 	// Bug 6: weapon hitscan traces ECC_Visibility, which the inherited CharacterMesh profile ignores —
 	// block it on the mesh so enemy fire registers on the player.
@@ -182,6 +185,9 @@ void AExtractionPlayer::BeginPlay()
 	if (IsValid(HealthComponent))
 		HealthComponent->OnDeath.AddDynamic(this, &AExtractionPlayer::HandleDeath);
 
+	if (IsValid(ConsumableInventoryComponent))
+		ConsumableInventoryComponent->OnStimUsedNative.AddUObject(this, &AExtractionPlayer::HandleStimUsed);
+
 	// Late-join / standalone catch-up: re-fire OnWeaponEquipped if weapon already equipped
 	if (IsLocallyControlled() && !GetIsDBNO() && IsValid(WeaponComponent))
 	{
@@ -205,6 +211,9 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	if (IsValid(HealthComponent))
 		HealthComponent->OnDeath.RemoveDynamic(this, &AExtractionPlayer::HandleDeath);
+
+	if (IsValid(ConsumableInventoryComponent))
+		ConsumableInventoryComponent->OnStimUsedNative.RemoveAll(this);
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
@@ -384,6 +393,9 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 	if (TakedownAction)
 		EnhancedInput->BindAction(TakedownAction, ETriggerEvent::Started, this, &AExtractionPlayer::TakedownInput);
+
+	if (UseStimAction)
+		EnhancedInput->BindAction(UseStimAction, ETriggerEvent::Started, this, &AExtractionPlayer::UseStimInput);
 
 	if (IA_CompanionPing)
 		EnhancedInput->BindAction(IA_CompanionPing, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionPingInput);
@@ -772,14 +784,18 @@ void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 	// World interactions (loot container / keycard door) win over the revive hold.
 	if (TryWorldInteract()) return;
 
-	AExtractionPlayer* Target = FindReviveTarget();
+	AActor* Target = FindReviveTarget();
 	if (!IsValid(Target)) return;
 
 	ReviveTarget = Target;
 	ReviveElapsed = 0.f;
 	bIsReviving = true;
-	Target->SetBeingRevived(true, ReviveDuration);
-	Target->AlignForRevive(GetActorLocation());
+
+	if (IExtractionPlayerInterface* Iface = Cast<IExtractionPlayerInterface>(Target))
+	{
+		Iface->SetBeingRevived(true, ReviveDuration);
+		Iface->AlignForRevive(GetActorLocation());
+	}
 
 	UE_LOG(LogExtraction, Verbose, TEXT("'%s' began reviving '%s'"), *GetNameSafe(this), *GetNameSafe(Target));
 }
@@ -1054,6 +1070,17 @@ void AExtractionPlayer::CompanionModeSelectCombatInput(const FInputActionValue& 
 	CompanionCommandComponent->SelectCompanionMode(ECompanionMode::Combat);
 }
 
+void AExtractionPlayer::UseStimInput(const FInputActionValue& /*Value*/)
+{
+	if (IsValid(ConsumableInventoryComponent))
+		ConsumableInventoryComponent->TryUseStim();
+}
+
+void AExtractionPlayer::HandleStimUsed()
+{
+	OnStimUsed();
+}
+
 void AExtractionPlayer::FinishPendingTakedown()
 {
 	AEnemyCharacter* Victim = PendingTakedownVictim.Get();
@@ -1183,6 +1210,17 @@ void AExtractionPlayer::EnterDBNO()
 				&AExtractionPlayer::OnBleedoutExpired,
 				BleedoutDuration, false);
 		}
+
+		// Both-DBNO check: if the companion is also downed, immediate mission fail
+		for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It)
+		{
+			if (It->GetIsDBNO())
+			{
+				if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+					GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
+				break;
+			}
+		}
 	}
 
 	SetDBNOCameraFreeLook(true);
@@ -1247,8 +1285,13 @@ void AExtractionPlayer::FullDeath()
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
 
-	// TODO: Ragdoll, drop loot, spectate camera
 	UE_LOG(LogExtraction, Log, TEXT("'%s' is fully dead"), *GetNameSafe(this));
+
+	if (HasAuthority())
+	{
+		if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+			GM->FailLevel(NSLOCTEXT("Extraction", "PlayerDiedReason", "You died."));
+	}
 }
 
 void AExtractionPlayer::SetDBNOCameraFreeLook(bool bEnable)
@@ -1476,12 +1519,11 @@ void AExtractionPlayer::DebugApplyDamage()
 
 // ---- Revive ----
 
-AExtractionPlayer* AExtractionPlayer::FindReviveTarget() const
+AActor* AExtractionPlayer::FindReviveTarget() const
 {
 	const UWorld* World = GetWorld();
 	if (!IsValid(World)) return nullptr;
 
-	// Use the active camera manager for view location/direction — works regardless of BP camera naming
 	const APlayerCameraManager* CamManager = UGameplayStatics::GetPlayerCameraManager(this, 0);
 	if (!IsValid(CamManager)) return nullptr;
 
@@ -1500,17 +1542,19 @@ AExtractionPlayer* AExtractionPlayer::FindReviveTarget() const
 
 	if (!bHit) return nullptr;
 
-	AExtractionPlayer* HitPlayer = Cast<AExtractionPlayer>(HitResult.GetActor());
-	if (!IsValid(HitPlayer)) return nullptr;
-	if (!HitPlayer->GetIsDBNO()) return nullptr;
+	AActor* HitActor = HitResult.GetActor();
+	if (!IsValid(HitActor)) return nullptr;
 
-	// TODO: Validate team membership when team system exists
-	return HitPlayer;
+	IExtractionPlayerInterface* Iface = Cast<IExtractionPlayerInterface>(HitActor);
+	if (!Iface || !Iface->GetIsDBNO()) return nullptr;
+
+	return HitActor;
 }
 
 void AExtractionPlayer::UpdateRevive(float DeltaTime)
 {
-	if (!IsValid(ReviveTarget) || !ReviveTarget->GetIsDBNO())
+	IExtractionPlayerInterface* TargetIface = Cast<IExtractionPlayerInterface>(ReviveTarget);
+	if (!IsValid(ReviveTarget) || !TargetIface || !TargetIface->GetIsDBNO())
 	{
 		CancelRevive();
 		return;
@@ -1534,7 +1578,8 @@ void AExtractionPlayer::CancelRevive()
 	UE_LOG(LogExtraction, Verbose, TEXT("'%s' cancelled revive on '%s'"),
 		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
 
-	if (IsValid(ReviveTarget)) ReviveTarget->SetBeingRevived(false);
+	if (IExtractionPlayerInterface* Iface = Cast<IExtractionPlayerInterface>(ReviveTarget))
+		Iface->SetBeingRevived(false);
 
 	bIsReviving = false;
 	ReviveElapsed = 0.f;
@@ -1554,17 +1599,20 @@ void AExtractionPlayer::CompleteRevive()
 
 	Server_CompleteRevive(ReviveTarget);
 
-	if (IsValid(ReviveTarget)) ReviveTarget->SetBeingRevived(false);
+	if (IExtractionPlayerInterface* Iface = Cast<IExtractionPlayerInterface>(ReviveTarget))
+		Iface->SetBeingRevived(false);
 
 	bIsReviving = false;
 	ReviveElapsed = 0.f;
 	ReviveTarget = nullptr;
 }
 
-void AExtractionPlayer::Server_CompleteRevive_Implementation(AExtractionPlayer* Target)
+void AExtractionPlayer::Server_CompleteRevive_Implementation(AActor* Target)
 {
 	if (!IsValid(Target)) return;
-	if (!Target->GetIsDBNO()) return;
+	IExtractionPlayerInterface* TargetIface = Cast<IExtractionPlayerInterface>(Target);
+	if (!TargetIface) return;
+	if (!TargetIface->GetIsDBNO()) return;
 	if (bIsDBNO) return;
 
 	const float DistSq = FVector::DistSquared(GetActorLocation(), Target->GetActorLocation());
@@ -1575,8 +1623,7 @@ void AExtractionPlayer::Server_CompleteRevive_Implementation(AExtractionPlayer* 
 		return;
 	}
 
-	// TODO: Validate team membership when team system exists
-	Target->ExitDBNO();
+	TargetIface->ExitDBNO();
 }
 
 // ---- Companion Debug Exec Commands ----
@@ -1652,4 +1699,20 @@ void AExtractionPlayer::PlayerDown()
 
 	UE_LOG(LogExtraction, Log, TEXT("PlayerDown: forcing DBNO via console"));
 	HealthComponent->Die();
+}
+
+void AExtractionPlayer::CompDown()
+{
+	if (!HasAuthority()) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: no authority")); return; }
+
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: no companion found")); return; }
+	if (Comp->GetIsDBNO()) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: already DBNO")); return; }
+
+	UHealthComponent* CompHealth = Comp->GetHealthComponent();
+	if (!IsValid(CompHealth)) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: no health component")); return; }
+	if (CompHealth->IsDead()) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: already dead")); return; }
+
+	UE_LOG(LogCompanion, Log, TEXT("CompDown: forcing companion DBNO via console"));
+	CompHealth->Die();
 }

@@ -46,6 +46,7 @@ public:
 
 private:
 	bool GrantAmmo(const FLootGrant& Grant, APawn* Recipient);
+	bool GrantStims(const FLootGrant& Grant, APawn* Recipient);
 
 	/** Falls back to player pawn 0 when no explicit recipient is passed. */
 	APawn* ResolveRecipient(APawn* Recipient) const;

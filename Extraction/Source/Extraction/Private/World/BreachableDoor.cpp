@@ -235,6 +235,7 @@ void ABreachableDoor::FinishSwing()
 	FRotator FinalRot = LeafPivot->GetComponentRotation();
 	FinalRot.Yaw = ClosedYaw + OpenAngle;
 	LeafPivot->SetWorldRotation(FinalRot);
+	BroadcastDoorOpenedOnce();
 
 	UE_LOG(LogBreachableDoor, Log, TEXT("%s: Swing complete — door is now Open"), *GetName());
 }

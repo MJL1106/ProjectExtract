@@ -26,6 +26,7 @@ class UFootstepNoiseComponent;
 class UWeaponComponent;
 class UTraversalComponent;
 class UCompanionCommandComponent;
+class UConsumableInventoryComponent;
 class UAnimMontage;
 class USpringArmComponent;
 struct FInputActionValue;
@@ -112,6 +113,10 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Takedown|Events")
 	void OnTakedownFinished();
 
+	/** Animation hook fired locally only after the server successfully consumes a stim. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory|Consumables")
+	void OnStimUsed();
+
 	// ---- Input handlers (BlueprintCallable so kit BP can delegate if needed) ----
 
 	UFUNCTION(BlueprintCallable, Category = "Input")
@@ -119,6 +124,9 @@ public:
 
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoMove(float Right, float Forward);
+
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void UseStimInput(const FInputActionValue& Value);
 
 	// ---- Revive API ----
 
@@ -154,6 +162,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Components")
 	virtual UTraversalComponent* GetTraversalComponent() const override { return TraversalComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Components")
+	UConsumableInventoryComponent* GetConsumableInventoryComponent() const { return ConsumableInventoryComponent; }
 
 	UFUNCTION(BlueprintPure, Category = "Health")
 	virtual bool GetIsDBNO() const override { return bIsDBNO; }
@@ -245,6 +256,9 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UCompanionCommandComponent> CompanionCommandComponent;
 
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UConsumableInventoryComponent> ConsumableInventoryComponent;
+
 	// ---- Input Mapping Context (assigned in BP child class) ----
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
@@ -278,6 +292,10 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> TakedownAction;
+
+	/** Slot 3 health-stim action. Assigned in the BP child class. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> UseStimAction;
 
 	// ---- Companion Command Input Actions (assigned in BP child class) ----
 
@@ -546,6 +564,8 @@ private:
 	/** Temp debug: apply 25 damage to self (bound to H key) */
 	void DebugApplyDamage();
 
+	void HandleStimUsed();
+
 	/** Pre-DBNO crouched speed, restored on ExitDBNO. */
 	float SavedMaxWalkSpeedCrouched = 0.f;
 
@@ -594,6 +614,11 @@ private:
 	UFUNCTION(Exec)
 	void PlayerDown();
 
+	/** console: CompDown — force the companion into DBNO (zeroes health via its normal death path)
+	 *  so the player-revives-companion path can be tested on demand. */
+	UFUNCTION(Exec)
+	void CompDown();
+
 	// ---- Takedown state ----
 
 	/** Victim held during a montage-deferred takedown. Cleared after kill or montage abort. */
@@ -611,15 +636,15 @@ private:
 	// ---- Revive ----
 
 	void UpdateRevive(float DeltaTime);
-	AExtractionPlayer* FindReviveTarget() const;
+	AActor* FindReviveTarget() const;
 	void CancelRevive();
 	void CompleteRevive();
 
 	UFUNCTION(Server, Reliable)
-	void Server_CompleteRevive(AExtractionPlayer* Target);
+	void Server_CompleteRevive(AActor* Target);
 
 	UPROPERTY()
-	TObjectPtr<AExtractionPlayer> ReviveTarget;
+	TObjectPtr<AActor> ReviveTarget;
 
 	float ReviveElapsed = 0.f;
 	bool bIsReviving = false;

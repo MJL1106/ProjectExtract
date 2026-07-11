@@ -31,6 +31,9 @@
 #include "EngineUtils.h"
 #include "Extraction.h"
 #include "EnemyDebug.h"
+#include "DamageMitigationSettings.h"
+#include "NiagaraComponent.h"
+#include "NiagaraFunctionLibrary.h"
 
 namespace WeaponConstants
 {
@@ -252,6 +255,12 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		WeaponMesh->SetRelativeTransform(RecoilRestRelative);
 		bRecoilRestCaptured = false;
+	}
+
+	if (IsValid(MuzzleFlashComponent))
+	{
+		MuzzleFlashComponent->DestroyComponent();
+		MuzzleFlashComponent = nullptr;
 	}
 
 	if (IsValid(SpawnedVisualActor))
@@ -665,12 +674,13 @@ void AWeaponBase::PerformHitscan()
 	};
 	TArray<FPelletRecord, TInlineAllocator<8>> PelletRecords;
 
-	// Per-victim dedup for morale — populated on first hit per victim, caches the HealthComponent.
+	// Per-victim dedup for morale + mitigation — populated on first hit per victim, caches the HealthComponent.
 	struct FVictimRecord
 	{
 		TWeakObjectPtr<AActor> Victim;
 		UHealthComponent* Health; // cached once, reused in morale pass
 		bool bWasAlive;
+		bool bGateAllowsDamage = true; // set false by the mitigation gate when the shot is suppressed
 	};
 	TArray<FVictimRecord, TInlineAllocator<4>> VictimRecords;
 
@@ -709,11 +719,35 @@ void AWeaponBase::PerformHitscan()
 		if (!bAlreadySeen)
 		{
 			UHealthComponent* VH = HitActor->FindComponentByClass<UHealthComponent>();
-			VictimRecords.Add({ HitActor, VH, VH && VH->IsAlive() });
+			VictimRecords.Add({ HitActor, VH, VH && VH->IsAlive(), true });
 		}
 
 		const float PelletDamage = WeaponData->BaseDamage * ComputeFalloffScale(PelletHit.Distance);
 		PelletRecords.Add({ HitActor, PelletHit, PelletDir, PelletDamage });
+	}
+
+	// === AI DAMAGE MITIGATION GATE (between trace and damage passes) ===
+	const UDamageMitigationSettings* MitS = WeaponData->DamageMitigation;
+	const bool bGateActive = bAIOwned && MitS && MitS->bEnabled;
+	if (bGateActive)
+	{
+		const float Now = World->GetTimeSeconds();
+		const IAIShooterInterface* GateShooter = Cast<IAIShooterInterface>(OwnerChar);
+		AActor* GateTarget = GateShooter ? GateShooter->GetAIAimTarget() : CenterHitActor;
+		const bool bShotDamages = RollShotDamage(*MitS, GateTarget, Now);
+		for (FVictimRecord& VR : VictimRecords)
+		{
+			if (!bShotDamages)
+			{
+				VR.bGateAllowsDamage = false;
+				continue;
+			}
+			// Shot passed the roll; check per-victim cadence cap.
+			if (VR.Health)
+				VR.bGateAllowsDamage = VR.Health->TryConsumeGatedDamage(Now, MitS->PerVictimDamageInterval);
+			else
+				VR.bGateAllowsDamage = bShotDamages; // no HealthComponent (world geometry) = pass through
+		}
 	}
 
 	// === DAMAGE PASS (per-pellet TakeDamage preserves per-bone hitbox multipliers) ===
@@ -724,6 +758,17 @@ void AWeaponBase::PerformHitscan()
 	{
 		AActor* HitActor = PR.Victim.Get();
 		if (!IsValid(HitActor)) continue;
+
+		// Check mitigation gate: find this pellet's victim record and skip TakeDamage if gated.
+		if (bGateActive)
+		{
+			const FVictimRecord* VR = nullptr;
+			for (const FVictimRecord& V : VictimRecords)
+			{
+				if (V.Victim.Get() == HitActor) { VR = &V; break; }
+			}
+			if (VR && !VR->bGateAllowsDamage) continue;
+		}
 
 		FPointDamageEvent DamageEvent;
 		DamageEvent.Damage = PR.Damage;
@@ -811,6 +856,11 @@ FVector AWeaponBase::ApplyConeSpread(const FVector& Dir, float HalfAngleDeg)
 
 void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocation, const FVector& EndPoint, bool bHit)
 {
+	// Muzzle flash: persistent component, re-activated per shot.
+	EnsureMuzzleFlashComponent();
+	if (IsValid(MuzzleFlashComponent))
+		MuzzleFlashComponent->Activate(true);
+
 #if ENABLE_DRAW_DEBUG
 	if (CVarShowBulletTracers.GetValueOnGameThread() == 0) return;
 	UWorld* World = GetWorld();
@@ -1886,4 +1936,52 @@ void AWeaponBase::KitSetAmmo_Implementation(int32 AmmoCount, int32 MaxAmmo)
 
 	bDryFireLogged = false;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+}
+
+// ---- AI Damage Mitigation ----
+
+bool AWeaponBase::RollShotDamage(const UDamageMitigationSettings& S, AActor* Target, float Now)
+{
+	if (!IsValid(WeaponData)) return true;
+
+	const float EffGap = UDamageMitigationSettings::EffectiveResetGap(S, WeaponData->FireRate);
+
+	// Reset ramp when target changes or the gap between shots exceeds the effective threshold.
+	if (Target != GateRampTarget.Get() || (Now - GateLastShotTime) > EffGap)
+		GateRampStartTime = Now;
+
+	GateRampTarget = Target;
+	GateLastShotTime = Now;
+
+	const float TimeOnTarget = Now - GateRampStartTime;
+	const float Chance = UDamageMitigationSettings::RampChance01(S, TimeOnTarget);
+	return FMath::FRand() < Chance;
+}
+
+// ---- Muzzle Flash ----
+
+void AWeaponBase::EnsureMuzzleFlashComponent()
+{
+	if (IsValid(MuzzleFlashComponent)) return;
+	if (!IsValid(WeaponData) || !IsValid(WeaponData->MuzzleFlashFX)) return;
+
+	USkeletalMeshComponent* GripMesh = GetThirdPersonGripMesh();
+	if (!IsValid(GripMesh)) return;
+
+	if (!GripMesh->DoesSocketExist(WeaponConstants::MuzzleSocketName))
+		UE_LOG(LogExtraction, Warning, TEXT("'%s': grip mesh '%s' lacks socket '%s' — muzzle flash will attach at origin"),
+			*GetNameSafe(this), *GetNameSafe(GripMesh->GetSkeletalMeshAsset()), *WeaponConstants::MuzzleSocketName.ToString());
+
+	MuzzleFlashComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+		WeaponData->MuzzleFlashFX,
+		GripMesh,
+		WeaponConstants::MuzzleSocketName,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		EAttachLocation::SnapToTarget,
+		false,  // bAutoDestroy
+		false); // bAutoActivate
+
+	if (IsValid(MuzzleFlashComponent))
+		MuzzleFlashComponent->SetOwnerNoSee(GripMesh->bOwnerNoSee);
 }

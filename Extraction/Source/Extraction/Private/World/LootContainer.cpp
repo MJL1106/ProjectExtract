@@ -25,6 +25,7 @@ bool ALootContainer::CanLoot_Implementation() const
 
 void ALootContainer::Loot_Implementation(AActor* Looter)
 {
+	if (!HasAuthority()) return;
 	// Interface dispatch (not a direct _Implementation call) so BP CanLoot overrides are honoured.
 	if (!ILootable::Execute_CanLoot(this))
 	{
@@ -35,6 +36,10 @@ void ALootContainer::Loot_Implementation(AActor* Looter)
 	bLooted = true;
 	OnOpened(Looter);
 	GrantAllContents();
+#if WITH_DEV_AUTOMATION_TESTS
+	++CompletionBroadcastCount;
+#endif
+	OnLootCompleted.Broadcast(this, Looter);
 
 	UE_LOG(LogLootContainer, Log, TEXT("%s: looted by %s (%d grants)"),
 		*GetName(), *GetNameSafe(Looter), Contents.Num());

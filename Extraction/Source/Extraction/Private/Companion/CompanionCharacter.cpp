@@ -14,13 +14,16 @@
 #include "CoverPoseComponent.h"
 #include "ExtractionTypes.h"
 #include "Character/ExtractionPlayer.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "EnemyCharacter.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "UI/OverheadWidgetComponent.h"
 #include "UI/CompanionModeIndicatorWidget.h"
+#include "Game/ExtractionGameMode.h"
 #include "GameFramework/CharacterMovementComponent.h"
+#include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
 
@@ -42,6 +45,8 @@ static float GReviveCompanionYawOffset = 0.f;
 static FAutoConsoleVariableRef CVarReviveCompanionYawOffset(
 	TEXT("revive.CompanionYawOffset"), GReviveCompanionYawOffset,
 	TEXT("Extra yaw (deg) added to the companion's facing at the revive snap. 0 = face the player."));
+
+static const FName NAME_IsDowned(TEXT("IsDowned"));
 
 ACompanionCharacter::ACompanionCharacter()
 {
@@ -196,7 +201,7 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	if (const UWorld* World = GetWorld())
 	{
-		World->GetTimerManager().ClearTimer(DestroyTimerHandle);
+		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
 		World->GetTimerManager().ClearTimer(ModeWidgetLinkTimerHandle);
 	}
@@ -220,6 +225,7 @@ void ACompanionCharacter::Tick(float DeltaTime)
 
 float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
+	if (bIsDBNO) return 0.f;
 	if (bIsRevivingPlayer) DamageAmount *= ReviveDamageMultiplier;
 	else if (bRescueCommitted) DamageAmount *= RescueApproachDamageMultiplier;
 	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
@@ -342,6 +348,7 @@ void ACompanionCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, Posture, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, bLowReadyAim, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(ACompanionCharacter, Mode, COND_SkipOwner);
+	DOREPLIFETIME(ACompanionCharacter, bIsDBNO);
 }
 
 // --- Crouch diagnostics ---
@@ -710,14 +717,19 @@ FVector ACompanionCharacter::GetAimPointForTarget(const AActor* Target) const
 
 void ACompanionCharacter::HandleDeath()
 {
-	UE_LOG(LogCompanion, Log, TEXT("%s died"), *GetName());
+	UE_LOG(LogCompanion, Log, TEXT("%s died — entering DBNO"), *GetName());
+	EnterDBNO();
+}
 
-	// FIX 1: Tear down any armed takedown immediately on death
+void ACompanionCharacter::EnterDBNO()
+{
+	if (bIsDBNO) return;
+	bIsDBNO = true;
+
+	// Tear down active commands
 	DisarmCommandedTakedown();
 	if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController()))
 		CompAIC->ClearActiveCommand();
-
-	SetActorTickEnabled(false);
 
 	if (IsValid(TraversalComponent))
 		TraversalComponent->CancelTraversal();
@@ -726,28 +738,146 @@ void ACompanionCharacter::HandleDeath()
 	{
 		CurrentWeapon->StopFiring();
 		CurrentWeapon->CancelReload();
+		CurrentWeapon->SetWeaponHidden(true);
 	}
 
-	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
-		Capsule->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	// If mid-reviving the player, clear that state
+	if (bIsRevivingPlayer)
+	{
+		StopReviveMontage();
+		SetIsRevivingPlayer(false);
+	}
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
 		Movement->StopMovementImmediately();
+		Movement->bUseControllerDesiredRotation = false;
+	}
 
-	if (const UWorld* World = GetWorld())
-		World->GetTimerManager().SetTimer(DestroyTimerHandle, this, &ACompanionCharacter::DestroyAfterDeath, DestroyDelay, false);
+	if (AAIController* AIC = Cast<AAIController>(GetController()))
+		AIC->ClearFocus(EAIFocusPriority::Gameplay);
+
+	// QueryOnly: the player's revive sweep is SweepSingleByChannel(ECC_Pawn)
+	// and must still find the downed companion.
+	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
+		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+
+	SetActorTickEnabled(false);
+
+	// Write BB IsDowned for BT gating (key added in-engine later; missing key is tolerable)
+	if (AAIController* AIC = Cast<AAIController>(GetController()))
+		if (UBlackboardComponent* BB = AIC->GetBlackboardComponent())
+			BB->SetValueAsBool(NAME_IsDowned, true);
+
+	// Start bleedout timer (authority only)
+	if (HasAuthority())
+	{
+		GetWorldTimerManager().SetTimer(
+			BleedoutTimerHandle, this,
+			&ACompanionCharacter::OnBleedoutExpired,
+			BleedoutDuration, false);
+
+		// Both-DBNO check: if the player is also downed, immediate mission fail
+		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
+		if (IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PlayerPawn))
+		{
+			if (PlayerIface->GetIsDBNO())
+			{
+				if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+					GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
+			}
+		}
+	}
+
+	OnRep_IsDBNO();
+	UE_LOG(LogCompanion, Log, TEXT("%s entered DBNO (%.0fs bleedout)"), *GetName(), BleedoutDuration);
 }
 
-void ACompanionCharacter::DestroyAfterDeath()
+void ACompanionCharacter::ExitDBNO()
 {
-	Destroy();
+	if (!bIsDBNO) return;
+	bIsDBNO = false;
+
+	GetWorldTimerManager().ClearTimer(BleedoutTimerHandle);
+
+	if (IsValid(CurrentWeapon))
+		CurrentWeapon->SetWeaponHidden(false);
+
+	// Restore capsule to full collision — HandleRevive (bound to OnRevive) restores
+	// QueryAndPhysics, tick, and movement mode, so avoid double-restoring those here.
+
+	// Write BB IsDowned = false
+	if (AAIController* AIC = Cast<AAIController>(GetController()))
+		if (UBlackboardComponent* BB = AIC->GetBlackboardComponent())
+			BB->SetValueAsBool(NAME_IsDowned, false);
+
+	bBeingRevived = false;
+
+	// HealthComponent->Revive triggers OnRevive which fires HandleRevive.
+	// HandleRevive restores tick, collision, and movement mode.
+	if (IsValid(HealthComponent))
+		HealthComponent->Revive(ReviveHealthPercent);
+
+	OnRep_IsDBNO();
+	UE_LOG(LogCompanion, Log, TEXT("%s revived at %.0f%% health"), *GetName(), ReviveHealthPercent * 100.f);
+}
+
+void ACompanionCharacter::OnBleedoutExpired()
+{
+	if (!bIsDBNO) return;
+
+	UE_LOG(LogCompanion, Log, TEXT("%s bleedout expired — mission failed"), *GetName());
+
+	if (HasAuthority())
+	{
+		if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+			GM->FailLevel(NSLOCTEXT("Extraction", "CompanionBledOut", "Your companion bled out."));
+	}
+}
+
+void ACompanionCharacter::OnRep_IsDBNO()
+{
+	OnCompanionDownedStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
+}
+
+float ACompanionCharacter::GetBleedoutTimeRemaining() const
+{
+	if (!bIsDBNO) return 0.f;
+	const UWorld* World = GetWorld();
+	if (!World) return 0.f;
+	return FMath::Max(0.f, World->GetTimerManager().GetTimerRemaining(BleedoutTimerHandle));
+}
+
+ETraversalType ACompanionCharacter::GetActiveTraversalType() const
+{
+	return IsValid(TraversalComponent) ? TraversalComponent->GetActiveType() : ETraversalType::None;
+}
+
+bool ACompanionCharacter::IsInTraversal() const
+{
+	return IsValid(TraversalComponent) && TraversalComponent->IsBusy();
+}
+
+bool ACompanionCharacter::GetIsVaulting() const
+{
+	return IsValid(TraversalComponent) && TraversalComponent->GetActiveType() == ETraversalType::Vault;
+}
+
+void ACompanionCharacter::SetBeingRevived(bool bRevived, float /*ExpectedDuration*/)
+{
+	bBeingRevived = bRevived;
+}
+
+void ACompanionCharacter::AlignForRevive(const FVector& ReviverLocation)
+{
+	const FVector ToReviver = (ReviverLocation - GetActorLocation()).GetSafeNormal2D();
+	if (!ToReviver.IsNearlyZero())
+		SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw, 0.f));
 }
 
 void ACompanionCharacter::HandleRevive()
 {
-	UE_LOG(LogCompanion, Log, TEXT("%s revived"), *GetName());
-
-	GetWorldTimerManager().ClearTimer(DestroyTimerHandle);
+	UE_LOG(LogCompanion, Log, TEXT("%s HandleRevive fired"), *GetName());
 
 	SetActorTickEnabled(true);
 
@@ -755,7 +885,10 @@ void ACompanionCharacter::HandleRevive()
 		Capsule->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
 
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+	{
 		Movement->SetMovementMode(MOVE_Walking);
+		Movement->bUseControllerDesiredRotation = true;
+	}
 }
 
 // --- Traversal ---

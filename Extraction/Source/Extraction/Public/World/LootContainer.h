@@ -13,6 +13,9 @@
 #include "LootContainer.generated.h"
 
 class USkeletalMeshComponent;
+class ALootContainer;
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLootCompleted, ALootContainer*, Container, AActor*, Looter);
 
 UCLASS(Blueprintable, HideCategories = (Replication, Input, LOD, Cooking))
 class EXTRACTION_API ALootContainer : public AActor, public ILootable
@@ -21,6 +24,15 @@ class EXTRACTION_API ALootContainer : public AActor, public ILootable
 
 public:
 	ALootContainer();
+
+	UPROPERTY(BlueprintAssignable, Category = "Loot|Events")
+	FOnLootCompleted OnLootCompleted;
+
+	UFUNCTION(BlueprintPure, Category = "Loot")
+	bool IsLooted() const { return bLooted; }
+#if WITH_DEV_AUTOMATION_TESTS
+	int32 TestGetCompletionBroadcastCount() const { return CompletionBroadcastCount; }
+#endif
 
 	// --- ILootable ---
 	virtual void Loot_Implementation(AActor* Looter) override;
@@ -44,5 +56,8 @@ protected:
 	void OnOpened(AActor* Looter);
 
 private:
+#if WITH_DEV_AUTOMATION_TESTS
+	int32 CompletionBroadcastCount = 0;
+#endif
 	void GrantAllContents();
 };

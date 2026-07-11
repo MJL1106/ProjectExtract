@@ -12,6 +12,9 @@ class USkeletalMeshComponent;
 class UMeshComponent;
 class UWeaponDataAsset;
 class USuppressionComponent;
+class UNiagaraComponent;
+class UNiagaraSystem;
+class UDamageMitigationSettings;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponFired);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnReloadComplete);
@@ -671,4 +674,28 @@ private:
 	TArray<FSuppressionTarget> CachedSuppressionTargets;
 	/** World time when CachedSuppressionTargets was last built. */
 	float SuppressionTargetsBuiltTime = -1e9f;
+
+	// ---- AI damage mitigation ramp state ----
+
+	/** Current ramp target (resets ramp when target changes). */
+	TWeakObjectPtr<AActor> GateRampTarget;
+
+	/** World time when the ramp began for the current target. */
+	float GateRampStartTime = -1e9f;
+
+	/** World time of the last shot evaluated by the gate (for gap-based ramp reset). */
+	float GateLastShotTime = -1e9f;
+
+	/** Rolls the per-shot damage gate. Returns true if the shot should deal damage.
+	 *  Manages ramp state (target tracking, gap-based reset). */
+	bool RollShotDamage(const UDamageMitigationSettings& S, AActor* Target, float Now);
+
+	// ---- Muzzle flash ----
+
+	/** Persistent Niagara component for muzzle flash FX. Re-activated per shot (never spawned per shot). */
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraComponent> MuzzleFlashComponent;
+
+	/** Lazily creates and attaches the muzzle flash component from WeaponData->MuzzleFlashFX. */
+	void EnsureMuzzleFlashComponent();
 };

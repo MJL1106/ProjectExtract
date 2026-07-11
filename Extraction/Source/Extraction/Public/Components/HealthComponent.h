@@ -61,6 +61,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetShieldPercent() const { return MaxShield > 0.f ? CurrentShield / MaxShield : 0.f; }
 
+	/** Attempts to consume a gated damage slot. Returns true if enough time has elapsed since the
+	 *  last damaging hit (any attacker). Returns false if the cadence cap blocks it. Server-only. */
+	bool TryConsumeGatedDamage(float Now, float MinInterval);
+
 	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
 	FOnHealthChanged OnHealthChanged;
 
@@ -110,4 +114,7 @@ private:
 
 	UPROPERTY(Replicated)
 	bool bIsDead = false;
+
+	/** World time of the last gated damaging hit (any attacker). Non-replicated, server-only. */
+	float LastGatedDamageWorldTime = -1e9f;
 };

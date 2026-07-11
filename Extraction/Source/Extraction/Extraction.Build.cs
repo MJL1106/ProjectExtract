@@ -22,7 +22,8 @@ public class Extraction : ModuleRules
 			"AIModule",
 			"GameplayTasks",
 			"NavigationSystem",
-			"AICoverSystem"
+			"AICoverSystem",
+			"Niagara"
 		});
 
 		if (Target.bBuildEditor)

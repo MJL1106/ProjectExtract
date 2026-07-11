@@ -14,14 +14,15 @@
 #include "ObjectiveMarkerLayer.h"
 #include "LootNotificationWidget.h"
 #include "LevelCompleteWidget.h"
+#include "LevelFailedWidget.h"
 #include "ExtractionGameMode.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
 namespace
 {
-	// Above every HUD layer so the completion screen popup sits on top.
-	constexpr int32 LevelCompletePopupZOrder = 50;
+	// Above every HUD layer so the completion/failure screen popup sits on top.
+	constexpr int32 LevelEndPopupZOrder = 50;
 }
 
 AExtractionPlayerController::AExtractionPlayerController()
@@ -161,10 +162,31 @@ void AExtractionPlayerController::ClientShowLevelComplete_Implementation()
 	if (!IsValid(LevelCompleteWidget)) return;
 
 	if (!LevelCompleteWidget->IsInViewport())
-		LevelCompleteWidget->AddToPlayerScreen(LevelCompletePopupZOrder);
+		LevelCompleteWidget->AddToPlayerScreen(LevelEndPopupZOrder);
 
 	FInputModeUIOnly InputMode;
 	InputMode.SetWidgetToFocus(LevelCompleteWidget->TakeWidget());
+	SetInputMode(InputMode);
+	SetShowMouseCursor(true);
+}
+
+void AExtractionPlayerController::ClientShowLevelFailed_Implementation(const FText& Reason)
+{
+	if (!IsLocalPlayerController()) return;
+	if (!ensureMsgf(LevelFailedWidgetClass, TEXT("LevelFailedWidgetClass not assigned on %s — game is paused with no failure screen."), *GetName()))
+		return;
+
+	if (!IsValid(LevelFailedWidget))
+		LevelFailedWidget = CreateWidget<ULevelFailedWidget>(this, LevelFailedWidgetClass);
+	if (!IsValid(LevelFailedWidget)) return;
+
+	LevelFailedWidget->SetFailReason(Reason);
+
+	if (!LevelFailedWidget->IsInViewport())
+		LevelFailedWidget->AddToPlayerScreen(LevelEndPopupZOrder);
+
+	FInputModeUIOnly InputMode;
+	InputMode.SetWidgetToFocus(LevelFailedWidget->TakeWidget());
 	SetInputMode(InputMode);
 	SetShowMouseCursor(true);
 }

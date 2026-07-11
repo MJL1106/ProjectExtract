@@ -16,6 +16,7 @@ class UCompanionModeWidget;
 class UObjectiveMarkerLayer;
 class ULootNotificationWidget;
 class ULevelCompleteWidget;
+class ULevelFailedWidget;
 
 /**
  *  Simple first person Player Controller
@@ -39,7 +40,11 @@ public:
 	UFUNCTION(Client, Reliable)
 	void ClientShowLevelComplete();
 
-	/** Called by the completion widget: routes the restart to the server's GameMode. */
+	/** Shows the Level Failed screen on the owning client and switches to UI-only input. */
+	UFUNCTION(Client, Reliable)
+	void ClientShowLevelFailed(const FText& Reason);
+
+	/** Called by the completion/failure widget: routes the restart to the server's GameMode. */
 	void RequestRestartLevel();
 
 protected:
@@ -55,6 +60,14 @@ protected:
 	/** Active Level Complete screen instance */
 	UPROPERTY()
 	TObjectPtr<ULevelCompleteWidget> LevelCompleteWidget;
+
+	/** Level Failed screen class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<ULevelFailedWidget> LevelFailedWidgetClass;
+
+	/** Active Level Failed screen instance */
+	UPROPERTY()
+	TObjectPtr<ULevelFailedWidget> LevelFailedWidget;
 
 	/** Input Mapping Contexts */
 	UPROPERTY(EditAnywhere, Category="Input|Input Mappings")

@@ -53,6 +53,8 @@ void ADoorBase::BeginPlay()
 
 void ADoorBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (DoorwayTrigger)
+		DoorwayTrigger->OnComponentBeginOverlap.RemoveDynamic(this, &ADoorBase::OnDoorwayOverlap);
 	if (UWorld* World = GetWorld())
 		if (UDoorRegistrySubsystem* Registry = World->GetSubsystem<UDoorRegistrySubsystem>())
 			Registry->Unregister(this);
@@ -105,6 +107,13 @@ void ADoorBase::RescanDoorwayForAutoOpen()
 	DoorwayTrigger->GetOverlappingActors(Overlapping, APawn::StaticClass());
 	for (AActor* Actor : Overlapping)
 		TryAutoOpenFor(Actor);
+}
+
+void ADoorBase::BroadcastDoorOpenedOnce()
+{
+	if (bDoorOpenedBroadcast) return;
+	bDoorOpenedBroadcast = true;
+	OnDoorOpened.Broadcast(this);
 }
 
 // --- External gate ---

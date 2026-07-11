@@ -185,6 +185,13 @@ void UHealthComponent::RegenShield()
 	}
 }
 
+bool UHealthComponent::TryConsumeGatedDamage(float Now, float MinInterval)
+{
+	if ((Now - LastGatedDamageWorldTime) < MinInterval) return false;
+	LastGatedDamageWorldTime = Now;
+	return true;
+}
+
 void UHealthComponent::OnRep_CurrentHealth()
 {
 	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);

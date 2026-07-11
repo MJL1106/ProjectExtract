@@ -199,9 +199,10 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	bIsSprinting = OwningCompanion->IsSprinting();
 	bIsCrouched = OwningCompanion->bIsCrouched;
 
-	// Health
+	// Health / DBNO
 	UHealthComponent* Health = OwningCompanion->GetHealthComponent();
 	bIsAlive = IsValid(Health) ? Health->IsAlive() : true;
+	bIsDBNO = OwningCompanion->GetIsDBNO();
 
 	// Aim offset
 	AActor* AimTarget = OwningCompanion->GetAimTarget();

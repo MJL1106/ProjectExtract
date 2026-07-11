@@ -13,7 +13,7 @@ AExtractionGameMode::AExtractionGameMode()
 
 void AExtractionGameMode::CompleteLevel()
 {
-	if (bLevelCompleted) return;
+	if (bLevelCompleted || bLevelFailed) return;
 	bLevelCompleted = true;
 
 	UGameplayStatics::SetGamePaused(this, true);
@@ -25,9 +25,24 @@ void AExtractionGameMode::CompleteLevel()
 	}
 }
 
+void AExtractionGameMode::FailLevel(const FText& Reason)
+{
+	if (bLevelCompleted || bLevelFailed) return;
+	bLevelFailed = true;
+
+	UGameplayStatics::SetGamePaused(this, true);
+
+	for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+	{
+		if (AExtractionPlayerController* PC = Cast<AExtractionPlayerController>(It->Get()))
+			PC->ClientShowLevelFailed(Reason);
+	}
+}
+
 void AExtractionGameMode::RestartCurrentLevel()
 {
 	bLevelCompleted = false;
+	bLevelFailed = false;
 	UGameplayStatics::SetGamePaused(this, false);
 	UGameplayStatics::OpenLevel(this, FName(*UGameplayStatics::GetCurrentLevelName(this, true)));
 }

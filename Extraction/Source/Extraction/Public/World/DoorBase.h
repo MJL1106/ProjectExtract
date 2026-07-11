@@ -12,6 +12,8 @@
 
 class UBoxComponent;
 
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDoorOpened, AActor*, Door);
+
 UCLASS(Abstract)
 class EXTRACTION_API ADoorBase : public AActor, public IBreachable
 {
@@ -19,6 +21,10 @@ class EXTRACTION_API ADoorBase : public AActor, public IBreachable
 
 public:
 	ADoorBase();
+
+	/** Fired once, when this door first reaches its fully-open state. */
+	UPROPERTY(BlueprintAssignable, Category = "Door|Events")
+	FOnDoorOpened OnDoorOpened;
 
 	// --- IBreachable ---
 	virtual void Breach_Implementation(AActor* Breacher) override;
@@ -37,6 +43,9 @@ public:
 	bool IsExternalGateLocked() const { return bExternalGateLocked; }
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
+#if WITH_DEV_AUTOMATION_TESTS
+	bool TestHasBroadcastDoorOpened() const { return bDoorOpenedBroadcast; }
+#endif
 
 	/** While suppressed, the doorway trigger never auto-opens this door. Set by the companion
 	 *  breach task while it owns the door — otherwise the companion walking to its stand point
@@ -128,6 +137,9 @@ protected:
 	 *  a pawn that never left the volume. */
 	void RescanDoorwayForAutoOpen();
 
+	/** Concrete doors call this from their fully-open completion path. */
+	void BroadcastDoorOpenedOnce();
+
 private:
 	/** AI pawn walked into the doorway approach volume — push the door open if it can open. */
 	UFUNCTION()
@@ -139,4 +151,6 @@ private:
 
 	/** See SetAutoOpenSuppressed. */
 	bool bAutoOpenSuppressed = false;
+
+	bool bDoorOpenedBroadcast = false;
 };

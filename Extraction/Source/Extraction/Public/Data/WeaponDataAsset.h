@@ -10,6 +10,8 @@
 #include "WeaponDataAsset.generated.h"
 
 class UExtractionDamageType;
+class UNiagaraSystem;
+class UDamageMitigationSettings;
 
 /**
  * Per-weapon animation slot set — every montage the enemy anim instance can play for this weapon.
@@ -206,6 +208,20 @@ public:
 	/** Marks this weapon as suppressed (stealth-kill semantics; pair with low NoiseLoudness/NoiseRange). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Noise")
 	bool bSuppressed = false;
+
+	// ---- AI Damage Mitigation ----
+
+	/** Per-weapon AI damage mitigation settings. Null = gate disabled (fail-open).
+	 *  Player weapon DAs leave this null so player bullets always damage. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|AI")
+	TObjectPtr<UDamageMitigationSettings> DamageMitigation;
+
+	// ---- FX ----
+
+	/** Niagara particle system spawned at the muzzle on each shot. Null = no muzzle flash.
+	 *  The system is attached once and re-activated per shot (pooled, never spawned per shot). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<UNiagaraSystem> MuzzleFlashFX;
 
 	// ---- Kit Weapon Bridge ----
 

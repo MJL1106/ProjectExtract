@@ -12,6 +12,7 @@ enum class ELootType : uint8
 {
 	Ammo,
 	Keycard,
+	Stim,
 };
 
 /** One grantable item. Containers hold an array of these; ammo pickups build one on collect. */
@@ -33,4 +34,8 @@ struct EXTRACTION_API FLootGrant
 	/** Keycard identity — doors reference the same id in their RequiredKeycardId. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot", meta = (EditCondition = "Type == ELootType::Keycard", EditConditionHides))
 	FName KeycardId = NAME_None;
+
+	/** Number of player health stims granted, clamped by the player's consumable capacity. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot", meta = (EditCondition = "Type == ELootType::Stim", EditConditionHides, ClampMin = "1"))
+	int32 StimCount = 1;
 };

@@ -11,6 +11,7 @@
 #include "Companion/CompanionTypes.h"
 #include "Companion/CompanionCommandTypes.h"
 #include "AIShooterInterface.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.generated.h"
 
 class UHealthComponent;
@@ -31,9 +32,10 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionModeChanged, ECompanionM
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLowReadyAimChanged, bool, bIsLowReady);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCommandedTakedownFinished);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnCommandedTakedownStarted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCompanionDownedStateChanged, bool, bDowned, float, BleedoutDuration);
 
 UCLASS(Blueprintable)
-class EXTRACTION_API ACompanionCharacter : public ACharacter, public IGameplayTagAssetInterface, public IAIShooterInterface, public IGenericTeamAgentInterface
+class EXTRACTION_API ACompanionCharacter : public ACharacter, public IExtractionPlayerInterface, public IGameplayTagAssetInterface, public IAIShooterInterface, public IGenericTeamAgentInterface
 {
 	GENERATED_BODY()
 
@@ -103,7 +105,7 @@ public:
 	// --- Getters ---
 
 	UFUNCTION(BlueprintPure, Category = "Companion")
-	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
+	virtual UHealthComponent* GetHealthComponent() const override { return HealthComponent; }
 
 	UFUNCTION(BlueprintPure, Category = "Companion")
 	USuppressionComponent* GetSuppressionComponent() const { return SuppressionComponent; }
@@ -206,7 +208,7 @@ public:
 	// --- Traversal ---
 
 	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
-	UTraversalComponent* GetTraversalComponent() const { return TraversalComponent; }
+	virtual UTraversalComponent* GetTraversalComponent() const override { return TraversalComponent; }
 
 	// --- Suppression / Health ---
 
@@ -371,6 +373,31 @@ public:
 	 *  hold-loop diagnostic for identifying a same-group montage stomping the reviver anim. */
 	FString GetActiveBodyMontageName() const;
 
+	// --- DBNO / Downed State ---
+
+	UFUNCTION(BlueprintPure, Category = "Companion|DBNO")
+	bool GetIsCompanionDBNO() const { return bIsDBNO; }
+
+	UPROPERTY(BlueprintAssignable, Category = "Companion|DBNO")
+	FOnCompanionDownedStateChanged OnCompanionDownedStateChanged;
+
+	// --- IExtractionPlayerInterface ---
+
+	virtual UWeaponComponent* GetWeaponComponent() const override { return nullptr; }
+	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const override { return nullptr; }
+	virtual bool GetIsDBNO() const override { return bIsDBNO; }
+	virtual float GetBleedoutTimeRemaining() const override;
+	virtual void ExitDBNO() override;
+	virtual ETraversalType GetActiveTraversalType() const override;
+	virtual bool IsInTraversal() const override;
+	virtual bool GetIsVaulting() const override;
+	virtual FVector GetVaultTargetLocation() const override { return FVector::ZeroVector; }
+	virtual float GetVaultSurfaceHeight() const override { return 0.f; }
+	virtual void DoAim(float Yaw, float Pitch) override {}
+	virtual USceneComponent* GetWeaponSpawn() const override { return nullptr; }
+	virtual void SetBeingRevived(bool bBeingRevived, float ExpectedDuration = 0.f) override;
+	virtual void AlignForRevive(const FVector& ReviverLocation) override;
+
 	/** Broadcast when a KNIFE commanded takedown begins executing — BP shows the knife mesh here. */
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
 	FOnCommandedTakedownStarted OnCommandedTakedownStarted;
@@ -502,8 +529,13 @@ public:
 
 protected:
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Config", meta = (ClampMin = "0.0"))
-	float DestroyDelay = 3.0f;
+	// --- DBNO Config ---
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|DBNO", meta = (ClampMin = "1.0"))
+	float BleedoutDuration = 60.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|DBNO", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float ReviveHealthPercent = 0.3f;
 
 	// --- Movement (fallbacks — the tuning asset's Companion|Movement block is authoritative
 	// once the AI controller possesses; see TunedWalkSpeed/TunedSprintSpeed/TunedCrouchedWalkSpeed.
@@ -632,7 +664,19 @@ private:
 	UFUNCTION()
 	void OnTraversalMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
-	void DestroyAfterDeath();
+	void EnterDBNO();
+	void OnBleedoutExpired();
+
+	UPROPERTY(ReplicatedUsing = OnRep_IsDBNO)
+	bool bIsDBNO = false;
+
+	UFUNCTION()
+	void OnRep_IsDBNO();
+
+	/** True while the player is reviving this companion. Cosmetic/state flag, no montage. */
+	bool bBeingRevived = false;
+
+	FTimerHandle BleedoutTimerHandle;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Companion|Tags")
 	FGameplayTagContainer OwnedTags;
@@ -676,7 +720,6 @@ private:
 	/** Pushes the current sprint/stealth-catchup state into CMC MaxWalkSpeed / MaxWalkSpeedCrouched. */
 	void ApplyMovementSpeeds();
 
-	FTimerHandle DestroyTimerHandle;
 	FTimerHandle ModeWidgetLinkTimerHandle;
 
 	/** Casts the mode widget component's user widget and hands it this companion.

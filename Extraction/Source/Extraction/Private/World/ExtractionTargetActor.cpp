@@ -55,10 +55,6 @@ void AExtractionTargetActor::BeginPlay()
 	if (!MeshAsset || !MeshAsset->GetPhysicsAsset())
 		InteractionBox->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 
-	// Late joiners receive bActivated/bCompleted (and their OnReps) before BeginPlay;
-	// re-registering the reach objective here would leave it dangling.
-	if (!bActivated && !bCompleted)
-		RegisterReachObjective();
 
 #if WITH_EDITOR
 	ValidateConfig();
@@ -87,11 +83,30 @@ void AExtractionTargetActor::GetLifetimeReplicatedProps(TArray<FLifetimeProperty
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 	DOREPLIFETIME(AExtractionTargetActor, bActivated);
 	DOREPLIFETIME(AExtractionTargetActor, bCompleted);
+	DOREPLIFETIME(AExtractionTargetActor, bAvailable);
 }
 
+void AExtractionTargetActor::ActivateTarget()
+{
+	if (!HasAuthority() || bAvailable || bActivated || bCompleted) return;
+
+	bAvailable = true;
+	if (!bObjectiveManagedExternally)
+		RegisterReachObjective();
+}
+
+void AExtractionTargetActor::SetObjectiveManagedExternally(bool bManagedExternally)
+{
+	bObjectiveManagedExternally = bManagedExternally;
+	if (bObjectiveManagedExternally)
+	{
+		RemoveReachObjective();
+		RemoveDefenceObjective();
+	}
+}
 void AExtractionTargetActor::OnRep_bActivated()
 {
-	if (bActivated)
+	if (bActivated && !bObjectiveManagedExternally)
 	{
 		RemoveReachObjective();
 		RegisterDefenceObjective();
@@ -100,10 +115,14 @@ void AExtractionTargetActor::OnRep_bActivated()
 
 void AExtractionTargetActor::OnRep_bCompleted()
 {
-	if (bCompleted)
-	{
+	if (bCompleted && !bObjectiveManagedExternally)
 		RemoveDefenceObjective();
-	}
+}
+
+void AExtractionTargetActor::OnRep_bAvailable()
+{
+	if (bAvailable && !bObjectiveManagedExternally && !bActivated && !bCompleted)
+		RegisterReachObjective();
 }
 
 // ------------------------------------------------------------------
@@ -112,17 +131,20 @@ void AExtractionTargetActor::OnRep_bCompleted()
 
 bool AExtractionTargetActor::CanWorldInteract_Implementation(AActor* /*Interactor*/) const
 {
-	return !bActivated && !bCompleted;
+	return bAvailable && !bActivated && !bCompleted;
 }
 
 void AExtractionTargetActor::WorldInteract_Implementation(AActor* Interactor)
 {
 	if (!HasAuthority()) return;
-	if (bActivated || bCompleted) return;
+	if (!bAvailable || bActivated || bCompleted) return;
 
-	// Swap objectives: remove reach, add defence.
-	RemoveReachObjective();
-	RegisterDefenceObjective();
+	// Swap objectives when this actor owns presentation.
+	if (!bObjectiveManagedExternally)
+	{
+		RemoveReachObjective();
+		RegisterDefenceObjective();
+	}
 
 	// Bind Director delegates before starting the wave so we never miss the completion.
 	BindDirectorDelegates();
@@ -132,8 +154,11 @@ void AExtractionTargetActor::WorldInteract_Implementation(AActor* Interactor)
 	{
 		// Wave failed to start: unbind, restore original state, notify the player.
 		UnbindDirectorDelegates();
-		RemoveDefenceObjective();
-		RegisterReachObjective();
+		if (!bObjectiveManagedExternally)
+		{
+			RemoveDefenceObjective();
+			RegisterReachObjective();
+		}
 
 		FText FailureReason = FText::Format(
 			NSLOCTEXT("ExtractionTarget", "WaveStartFailed", "Cannot begin extraction: wave \"{0}\" failed to start"),
@@ -148,6 +173,7 @@ void AExtractionTargetActor::WorldInteract_Implementation(AActor* Interactor)
 	}
 
 	bActivated = true;
+	OnExtractionTargetWaveStarted.Broadcast();
 	UE_LOG(LogExtractionTarget, Log, TEXT("%s: activated by %s, wave '%s' started"),
 		*GetName(), *GetNameSafe(Interactor), *WaveRequest.WaveId.ToString());
 }
@@ -167,7 +193,8 @@ void AExtractionTargetActor::HandleWaveCompleted(FName WaveId)
 
 	UE_LOG(LogExtractionTarget, Log, TEXT("%s: wave '%s' completed"), *GetName(), *WaveId.ToString());
 
-	RemoveDefenceObjective();
+	if (!bObjectiveManagedExternally)
+		RemoveDefenceObjective();
 	bCompleted = true;
 
 	PerformCompletionAction();

@@ -1,6 +1,7 @@
 // UMissionInventorySubsystem — loot grants and keycard record.
 
 #include "Game/MissionInventorySubsystem.h"
+#include "Components/ConsumableInventoryComponent.h"
 #include "Components/WeaponComponent.h"
 #include "Weapon/WeaponBase.h"
 #include "Data/WeaponDataAsset.h"
@@ -20,9 +21,32 @@ bool UMissionInventorySubsystem::GrantLoot(const FLootGrant& Grant, APawn* Recip
 		RecordKeycard(Grant.KeycardId);
 		return true;
 
+	case ELootType::Stim:
+		return GrantStims(Grant, ResolveRecipient(Recipient));
+
 	default:
 		return false;
 	}
+}
+
+bool UMissionInventorySubsystem::GrantStims(const FLootGrant& Grant, APawn* Recipient)
+{
+	if (!IsValid(Recipient) || Grant.StimCount <= 0) return false;
+
+	UConsumableInventoryComponent* Inventory = Recipient->FindComponentByClass<UConsumableInventoryComponent>();
+	if (!IsValid(Inventory)) return false;
+
+	const int32 Added = Inventory->AddStims(Grant.StimCount);
+	if (Added <= 0)
+	{
+		OnLootNotify.Broadcast(NSLOCTEXT("Loot", "StimsFull", "Stims full"));
+		return false;
+	}
+
+	OnLootNotify.Broadcast(FText::Format(
+		NSLOCTEXT("Loot", "StimsGranted", "+{0} Stim"), FText::AsNumber(Added)));
+	UE_LOG(LogMissionInventory, Log, TEXT("GrantStims: +%d to %s"), Added, *GetNameSafe(Recipient));
+	return true;
 }
 
 bool UMissionInventorySubsystem::GrantAmmo(const FLootGrant& Grant, APawn* Recipient)

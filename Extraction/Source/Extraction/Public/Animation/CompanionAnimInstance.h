@@ -189,6 +189,9 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Locomotion")
 	bool bIsAlive = true;
 
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|DBNO")
+	bool bIsDBNO = false;
+
 	// --- Aim Offset ---
 
 	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|AimOffset")

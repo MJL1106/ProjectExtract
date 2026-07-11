@@ -6,6 +6,7 @@
 #include "Components/ArrowComponent.h"
 #include "GameFramework/Pawn.h"
 #include "GameFramework/Controller.h"
+#include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 
@@ -55,6 +56,7 @@ void ATeleportVolume::OnTriggerBeginOverlap(
 
 	APawn* OverlappingPawn = Cast<APawn>(OtherActor);
 	if (!IsValid(OverlappingPawn)) return;
+	if (!Cast<APlayerController>(OverlappingPawn->GetController())) return;
 	if (!OverlappingPawn->Implements<UExtractionPlayerInterface>()) return;
 
 	const FTransform PlayerSpawn = GetPlayerSpawnTransform();

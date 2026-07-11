@@ -229,8 +229,12 @@ void UBTTask_RevivePlayer::SetReviveAnimsActive(bool bActive)
 
 		// The reviver clips are authored empty-handed — hide the held weapon for the hold.
 		// SetWeaponHidden, not SetActorHiddenInGame: the visible gun is a separate visual actor.
+		// Guard the un-hide: a companion downed mid-revive keeps its weapon hidden via EnterDBNO.
 		if (AWeaponBase* Weapon = Companion->GetCurrentWeapon())
-			Weapon->SetWeaponHidden(bActive);
+		{
+			if (bActive || !Companion->GetIsDBNO())
+				Weapon->SetWeaponHidden(bActive);
+		}
 
 		// Mutual move-ignore for the hold: lets ReviveAlignDistance tuck the pair closer than the
 		// two capsule radii would allow without CMC depenetration jitter. Both are stationary

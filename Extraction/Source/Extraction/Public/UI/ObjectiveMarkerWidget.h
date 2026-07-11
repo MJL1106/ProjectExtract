@@ -28,6 +28,13 @@ public:
 	/** Called by the layer right after spawn. */
 	void SetObjective(const FObjectiveMarker& InObjective);
 
+	/** Exponential interpolation with the same result for equivalent elapsed time. */
+	static FVector2D InterpolateScreenPosition(const FVector2D& Current, const FVector2D& Target,
+		float DeltaTime, float Speed);
+
+	/** Constrains a marker centre to the padded viewport rectangle. */
+	static FVector2D ClampToViewport(const FVector2D& Position, const FVector2D& ViewportSize, float Padding);
+
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
@@ -53,9 +60,17 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Objective|Marker")
 	float VerticalScreenOffset = -30.f;
 
+	/** Screen-space smoothing speed. Zero snaps directly to the projected target. */
+	UPROPERTY(EditAnywhere, Category = "Objective|Marker", meta = (ClampMin = "0.0"))
+	float InterpolationSpeed = 12.f;
+
 private:
 	/** Objective being tracked (copy — resolves a moving TargetActor each tick). */
 	FObjectiveMarker Objective;
+	FVector2D SmoothedScreenPosition = FVector2D::ZeroVector;
+	bool bHasSmoothedScreenPosition = false;
+	bool bLastPositionWasValidProjection = false;
+	int32 LastDisplayedDistanceMetres = INDEX_NONE;
 
 	void UpdateDistanceText(const FVector& WorldLocation);
 };

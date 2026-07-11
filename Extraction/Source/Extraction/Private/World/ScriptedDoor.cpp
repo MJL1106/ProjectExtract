@@ -76,6 +76,8 @@ void AScriptedDoor::NotifyDoorStateChanged(bool bNowOpen)
 	bDoorOpen = bNowOpen;
 	bOpenInFlight = false;
 	RestorePawnCollision();
+	if (bNowOpen)
+		BroadcastDoorOpenedOnce();
 
 	// Re-closed with an AI pawn still standing in the trigger: no new BeginOverlap will fire,
 	// so re-run the auto-open filter for everyone already inside. First close also backfills

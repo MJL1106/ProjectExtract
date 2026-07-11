@@ -21,6 +21,7 @@ DECLARE_LOG_CATEGORY_EXTERN(LogExtractionTarget, Log, All);
 
 /** Broadcast when the extraction wave completes (any CompletionAction). */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnExtractionTargetCompleted);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnExtractionTargetWaveStarted);
 
 UCLASS()
 class EXTRACTION_API AExtractionTargetActor : public AActor, public IWorldInteractable
@@ -44,6 +45,17 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "ExtractionTarget|Events")
 	FOnExtractionTargetCompleted OnExtractionTargetCompleted;
+
+	UPROPERTY(BlueprintAssignable, Category = "ExtractionTarget|Events")
+	FOnExtractionTargetWaveStarted OnExtractionTargetWaveStarted;
+
+	/** Enables interaction and the reach objective. Idempotent and authority-only. */
+	UFUNCTION(BlueprintCallable, Category = "ExtractionTarget|Objectives")
+	void ActivateTarget();
+
+	/** Level-flow mode keeps the singular primary objective under ALevelObjectiveFlow ownership. */
+	UFUNCTION(BlueprintCallable, Category = "ExtractionTarget|Objectives")
+	void SetObjectiveManagedExternally(bool bManagedExternally);
 
 protected:
 	// --- Components ---
@@ -103,11 +115,19 @@ private:
 	UPROPERTY(ReplicatedUsing = OnRep_bCompleted)
 	bool bCompleted = false;
 
+	UPROPERTY(ReplicatedUsing = OnRep_bAvailable)
+	bool bAvailable = false;
+
+	bool bObjectiveManagedExternally = false;
+
 	UFUNCTION()
 	void OnRep_bActivated();
 
 	UFUNCTION()
 	void OnRep_bCompleted();
+
+	UFUNCTION()
+	void OnRep_bAvailable();
 
 	// --- Director event handlers ---
 
