@@ -1,3 +1,5 @@
+ExitPlanMode isn't available here; I'll answer directly instead.
+
 <!-- ROADMAP-CHECKLIST v1 | auto-maintained by .githooks/roadmap-update.sh — keep this line -->
 
 # ProjectExtract — Feature Roadmap & Build Checklist
