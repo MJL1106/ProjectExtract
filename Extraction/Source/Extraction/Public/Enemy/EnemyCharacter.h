@@ -354,6 +354,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Testing")
 	bool bDebugStandAndShoot = false;
 
+	/** Debug: when true, this enemy immediately and persistently treats the player as a detected
+	 *  combat target — no perception required. Engages silently: does not alert the Director or
+	 *  broadcast to the squad, so other enemies stay unaffected. Composes with bDebugStandAndShoot
+	 *  (both ticked = stands planted, firing at the player from spawn). Leave false in real gameplay. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Testing")
+	bool bDebugAutoEngagePlayer = false;
+
 	// --- Perception: head-driven sight cone ---
 
 	/** When true and patrolling, GetActorEyesViewPoint follows the animated head bone so the vision

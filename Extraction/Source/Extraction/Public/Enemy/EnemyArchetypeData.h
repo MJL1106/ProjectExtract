@@ -528,6 +528,13 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float CompanionThreatScoreMultiplier = 0.75f;
 
+	/** Sighted hostiles inside this range (cm) dominate target selection: selection restricts to
+	 *  the point-blank set, preempting squad focus-fire, the recent-damage term held by a distant
+	 *  attacker, and incumbent hysteresis vs targets outside the set. Self-preservation beats
+	 *  orders — an enemy never ignores the player standing in its face. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0"))
+	float PointBlankTargetRange = 600.f;
+
 	// --- Flanking (Phase 5) ---
 
 	/** Minimum seconds between flank attempts (cooldown tracked in BT NodeMemory). */

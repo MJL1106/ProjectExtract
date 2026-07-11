@@ -416,6 +416,48 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 				return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 			}
 		}
+
+		// --- En-route hostile re-validation (same throttle) ---
+		// The pick-time anchor reject sampled hostile positions once; a hostile who moves onto the
+		// destination during a multi-second run must invalidate it. Same radii as pick time, so a
+		// cover legal at pick only fails if a hostile actually closed in.
+		float HostileCoverDist = 0.f;
+		float HostilePawnDist = 0.f;
+		if (IsValid(DA))
+		{
+			HostileCoverDist = DA->MinHostileCoverDistance;
+			HostilePawnDist = DA->MinHostilePawnDistance;
+		}
+		else if (const ACompanionAIController* HostileCheckCompCtrl = Cast<ACompanionAIController>(Controller))
+		{
+			if (const UCompanionTuningDataAsset* HostileCheckTuning = HostileCheckCompCtrl->GetTuning())
+			{
+				HostileCoverDist = HostileCheckTuning->MinHostileCoverDistance;
+				HostilePawnDist = HostileCheckTuning->MinHostilePawnDistance;
+			}
+		}
+
+		if (HostileCoverDist > 0.f || HostilePawnDist > 0.f)
+		{
+			FHostileAnchors HostileAnchors;
+			// Enemy movers: perception-honest anchors — an observable abort must not react to a
+			// hostile the enemy can't know about. Companion movers stay omniscient (AI-vs-AI only;
+			// never keys off an unseen player).
+			if (IsValid(Enemy))
+				UCoverScoringStatics::GatherKnownHostileAnchors(ClaimWorld, Enemy, Controller, HostileAnchors);
+			else
+				UCoverScoringStatics::GatherHostileAnchors(ClaimWorld, Pawn, Controller, HostileAnchors);
+			if (UCoverScoringStatics::IsNearHostileAnchor(Mem->CachedCoverData.Location, HostileAnchors,
+				HostileCoverDist, HostilePawnDist))
+			{
+				UE_LOG(LogEnemyAI, Log, TEXT("[COVER-AICS] %s destination compromised by a hostile mid-move — abandoning"),
+					*Pawn->GetName());
+				Controller->StopMovement();
+				StopAdvanceFire(OwnerComp, Mem, false);
+				HandleFailure(OwnerComp, Mem, BB, Controller);
+				return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			}
+		}
 	}
 
 	// --- Stall detection ---

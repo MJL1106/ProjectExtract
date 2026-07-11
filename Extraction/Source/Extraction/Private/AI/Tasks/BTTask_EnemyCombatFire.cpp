@@ -1993,7 +1993,20 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						}
 					}
 
-					if (bCompromised || bExtraExposed)
+					// Hostile-adjacency enforcement on the HELD cover: a living hostile standing at
+					// the point (player pushing this position) compromises it — the pick-time anchor
+					// reject only sampled positions once. Same radii as pick time; rides the same
+					// debounce so a hostile sprinting past can't trigger a vacate.
+					bool bHostileAdjacent = false;
+					if (!bCompromised && (DA->MinHostileCoverDistance > 0.f || DA->MinHostilePawnDistance > 0.f))
+					{
+						FHostileAnchors HeldAnchors;
+						UCoverScoringStatics::GatherKnownHostileAnchors(TickWorld, Enemy, Controller, HeldAnchors);
+						bHostileAdjacent = UCoverScoringStatics::IsNearHostileAnchor(CurCoverData.Location,
+							HeldAnchors, DA->MinHostileCoverDistance, DA->MinHostilePawnDistance);
+					}
+
+					if (bCompromised || bExtraExposed || bHostileAdjacent)
 						Mem->CompromiseConsecutiveCount = FMath::Min(Mem->CompromiseConsecutiveCount + 1, CompromiseDebounceRequired);
 					else
 						Mem->CompromiseConsecutiveCount = FMath::Max(0, Mem->CompromiseConsecutiveCount - 1);
@@ -2002,7 +2015,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					{
 						const float CooldownRemaining = DA->CoverRelocateCooldown - (Now - Mem->LastRelocateCompletedTime);
 						UE_LOG(LogEnemyAI, Log,
-							TEXT("[FLANKDBG] %s cover=(%.0f,%.0f,%.0f)(bCrouch=%d) angle=%.1f bOutsideArc=%d bBodyProtected=%d extraExposed=%d consec=%d cooldownRem=%.2f phase=%d arrived=%d eLOS=%d"),
+							TEXT("[FLANKDBG] %s cover=(%.0f,%.0f,%.0f)(bCrouch=%d) angle=%.1f bOutsideArc=%d bBodyProtected=%d extraExposed=%d hostileAdj=%d consec=%d cooldownRem=%.2f phase=%d arrived=%d eLOS=%d"),
 							*Pawn->GetName(),
 							CurCoverData.Location.X, CurCoverData.Location.Y, CurCoverData.Location.Z,
 							(UCoverGeometryStatics::GetCoverHeight(CurCoverData) == ECoverHeight::Crouch) ? 1 : 0,
@@ -2010,6 +2023,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 							bOutsideArc ? 1 : 0,
 							bBodyExposed ? 0 : 1,
 							bExtraExposed ? 1 : 0,
+							bHostileAdjacent ? 1 : 0,
 							Mem->CompromiseConsecutiveCount,
 							CooldownRemaining,
 							static_cast<int32>(Mem->Phase),
@@ -2017,12 +2031,13 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 							bEffectiveLOS ? 1 : 0);
 					}
 
-					// Fast path: instant break when compromised + enemy sees the threat.
+					// Fast path: instant break when compromised (flanked, or a hostile standing on
+					// the cover) + enemy sees the threat.
 					// Bypasses safe-phase/not-firing/cooldown/min-peek-cycles gates.
 					// Anti-flicker: requires 2 consecutive positive evals (~0.8s at default cadence)
 					// so a single-frame flicker (e.g. player jump crossing the arc) can't trigger a vacate.
 					// Skipped when ForceCover debug pin is on, or when DA opts out.
-					if (bCompromised && DA->bCoverInstantBreakWithLOS && GetForceCoverLevel() == 0
+					if ((bCompromised || bHostileAdjacent) && DA->bCoverInstantBreakWithLOS && GetForceCoverLevel() == 0
 						&& Mem->CompromiseConsecutiveCount >= 2 && bEffectiveLOS)
 					{
 						if (GetFlankBreakLogLevel() > 0)

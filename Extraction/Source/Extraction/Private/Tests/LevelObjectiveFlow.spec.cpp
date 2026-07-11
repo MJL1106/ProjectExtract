@@ -13,6 +13,8 @@
 #include "Components/HealthComponent.h"
 #include "Character/ExtractionPlayer.h"
 #include "Components/ConsumableInventoryComponent.h"
+#include "GameFramework/PlayerController.h"
+#include "Kismet/GameplayStatics.h"
 
 
 namespace LevelObjectiveWorldTest
@@ -193,11 +195,29 @@ bool FLevelObjectiveActorSeamsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("explicit activation enables extraction"), Target->CanWorldInteract_Implementation(nullptr));
 
 	AExtractionPlayer* Player = World->SpawnActor<AExtractionPlayer>();
+	APlayerController* PlayerController = UGameplayStatics::GetPlayerController(World, 0);
+	if (!PlayerController)
+	{
+		PlayerController = World->SpawnActor<APlayerController>();
+		if (PlayerController && UGameplayStatics::GetPlayerController(World, 0) != PlayerController)
+			World->AddController(PlayerController);
+	}
+	TestNotNull(TEXT("test player controller resolved"), PlayerController);
+	if (!PlayerController) return false;
+	PlayerController->SetRole(ROLE_Authority);
+	PlayerController->Possess(Player);
+	TestEqual(TEXT("loot default recipient resolves test player"),
+		UGameplayStatics::GetPlayerPawn(World, 0), static_cast<APawn*>(Player));
 	Player->GetConsumableInventoryComponent()->AddStims(3);
 	ALootContainer* FullGrantCrate = World->SpawnActor<ALootContainer>();
+	FullGrantCrate->SetRole(ROLE_Authority);
 	LevelObjectiveWorldTest::GiveOneStim(FullGrantCrate);
+	TestTrue(TEXT("full crate fixture is authoritative"), FullGrantCrate->HasAuthority());
+	TestTrue(TEXT("full crate fixture is lootable"), FullGrantCrate->CanLoot_Implementation());
 	FullGrantCrate->Loot_Implementation(Player);
 	TestTrue(TEXT("rejected full-capacity grant still completes crate"), FullGrantCrate->IsLooted());
+	TestEqual(TEXT("rejected full-capacity grant leaves stims unchanged"),
+		Player->GetConsumableInventoryComponent()->GetStimCount(), 3);
 	TestEqual(TEXT("loot completion broadcasts once"), FullGrantCrate->TestGetCompletionBroadcastCount(), 1);
 	FullGrantCrate->Loot_Implementation(Player);
 	TestEqual(TEXT("repeat loot does not rebroadcast"), FullGrantCrate->TestGetCompletionBroadcastCount(), 1);
@@ -211,8 +231,11 @@ bool FLevelObjectiveActorSeamsTest::RunTest(const FString& Parameters)
 
 	AEnemyCharacter* PairA = World->SpawnActor<AEnemyCharacter>();
 	AEnemyCharacter* PairB = World->SpawnActor<AEnemyCharacter>();
+	AEnemyCharacter* PairSecondA = World->SpawnActor<AEnemyCharacter>();
+	AEnemyCharacter* PairSecondB = World->SpawnActor<AEnemyCharacter>();
 	ALevelObjectiveFlow* PairFlow = LevelObjectiveWorldTest::SpawnDormantFlow(World);
 	LevelObjectiveWorldTest::SetObjectArray(PairFlow, TEXT("FirstTakedownPair"), TArray<AEnemyCharacter*>{PairA, PairB});
+	LevelObjectiveWorldTest::SetObjectArray(PairFlow, TEXT("SecondTakedownPair"), TArray<AEnemyCharacter*>{PairSecondA, PairSecondB});
 	PairFlow->TestSetCurrentStep(ELevelObjectiveStep::FirstDoubleTakedown);
 	PairA->GetHealthComponent()->Die();
 	PairFlow->TestEvaluateCurrentEnemyStep();
@@ -225,6 +248,7 @@ bool FLevelObjectiveActorSeamsTest::RunTest(const FString& Parameters)
 	AEnemyCharacter* EarlyB = World->SpawnActor<AEnemyCharacter>();
 	ALevelObjectiveFlow* EarlyFlow = LevelObjectiveWorldTest::SpawnDormantFlow(World);
 	LevelObjectiveWorldTest::SetObjectArray(EarlyFlow, TEXT("FirstTakedownPair"), TArray<AEnemyCharacter*>{EarlyA, EarlyB});
+	LevelObjectiveWorldTest::SetObjectArray(EarlyFlow, TEXT("SecondTakedownPair"), TArray<AEnemyCharacter*>{PairSecondA, PairSecondB});
 	EarlyA->GetHealthComponent()->Die();
 	EarlyB->GetHealthComponent()->Die();
 	EarlyFlow->TestEvaluateCurrentEnemyStep();
@@ -238,6 +262,9 @@ bool FLevelObjectiveActorSeamsTest::RunTest(const FString& Parameters)
 	ALootContainer* NearCrate = World->SpawnActor<ALootContainer>(FVector(100.f, 0.f, 0.f), FRotator::ZeroRotator);
 	ALootContainer* MidCrate = World->SpawnActor<ALootContainer>(FVector(500.f, 0.f, 0.f), FRotator::ZeroRotator);
 	ALootContainer* FarCrate = World->SpawnActor<ALootContainer>(FVector(1000.f, 0.f, 0.f), FRotator::ZeroRotator);
+	NearCrate->SetRole(ROLE_Authority);
+	MidCrate->SetRole(ROLE_Authority);
+	FarCrate->SetRole(ROLE_Authority);
 	LevelObjectiveWorldTest::GiveOneStim(NearCrate);
 	LevelObjectiveWorldTest::GiveOneStim(MidCrate);
 	LevelObjectiveWorldTest::GiveOneStim(FarCrate);

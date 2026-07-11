@@ -142,6 +142,15 @@ public:
 	static void GatherHostileAnchors(UWorld* World, const APawn* QuerierPawn,
 		const AController* ExcludeController, FHostileAnchors& Out);
 
+	/** Perception-honest variant of GatherHostileAnchors for OBSERVABLE enemy reactions (held/en-route
+	 *  cover invalidation): pawn anchors come from the awareness component's known threats (sighted at
+	 *  live position, or frozen last-stimulus within a short freshness window; cloaked companions
+	 *  excluded) — an enemy must never visibly vacate cover because of a hostile it can't know about
+	 *  (unseen player sneaking up for a takedown, stealth-active companion). Cover-intent anchors are
+	 *  unchanged. Pick-time gathering stays omniscient — a pick is not an observable reaction. */
+	static void GatherKnownHostileAnchors(UWorld* World, const AEnemyCharacter* Enemy,
+		const AController* ExcludeController, FHostileAnchors& Out);
+
 	/** True when Location is within CoverDist (2D) of a hostile-intended cover or PawnDist of a
 	 *  hostile pawn. Either distance <= 0 disables that anchor set. */
 	static bool IsNearHostileAnchor(const FVector& Location, const FHostileAnchors& Anchors,

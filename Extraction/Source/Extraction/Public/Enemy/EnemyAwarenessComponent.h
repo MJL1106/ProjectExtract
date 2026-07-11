@@ -46,6 +46,10 @@ public:
 	/** Called by AEnemyCharacter::TakeDamage to force Combat state toward the instigator's pawn. */
 	void NotifyDamaged(AController* Instigator);
 
+	/** Debug: force-set Combat state with the given actor as target, bypassing perception, suspicion,
+	 *  barks, and squad broadcast. Re-assert every awareness tick to prevent decay. */
+	void DebugForceEngage(AActor* Target);
+
 	/** Called by AWeaponBase::ReportNearMisses when a near-miss bullet passes close to this enemy.
 	 *  ShotOrigin is the bullet trace start (eye/muzzle of the shooter) — sent as the investigate
 	 *  point when LOS is blocked so the enemy advances toward the shot corner, not through walls.
@@ -266,6 +270,12 @@ private:
 
 	// Guard against squad sighting relay feedback loops: ReportSquadSighting must NOT re-broadcast
 	bool bInSquadSightingRelay = false;
+
+	// Debug auto-engage: suppresses Director report in SetState while true
+	bool bDebugForcedCombat = false;
+
+	// Edge detection for debug auto-engage flag-off: true while the flag was active last tick
+	bool bWasDebugEngaged = false;
 
 	// Bark hysteresis: suppress re-acquire Contact bark shortly after leaving Combat
 	float LastCombatExitWorldTime = -1e9f;

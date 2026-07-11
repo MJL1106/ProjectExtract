@@ -359,7 +359,7 @@ protected:
 	float DBNOCrawlSpeed = 100.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
-	float BleedoutDuration = 30.f;
+	float BleedoutDuration = 90.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.5"))
 	float ReviveDuration = 4.f;

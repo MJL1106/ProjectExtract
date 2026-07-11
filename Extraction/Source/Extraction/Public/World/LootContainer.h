@@ -59,5 +59,6 @@ private:
 #if WITH_DEV_AUTOMATION_TESTS
 	int32 CompletionBroadcastCount = 0;
 #endif
+	bool CanLootRespectingScriptOverride() const;
 	void GrantAllContents();
 };

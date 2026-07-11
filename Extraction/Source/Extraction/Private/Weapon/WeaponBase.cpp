@@ -33,6 +33,7 @@
 #include "EnemyDebug.h"
 #include "DamageMitigationSettings.h"
 #include "NiagaraComponent.h"
+#include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "NiagaraFunctionLibrary.h"
 
 namespace WeaponConstants
@@ -860,6 +861,9 @@ void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocat
 	EnsureMuzzleFlashComponent();
 	if (IsValid(MuzzleFlashComponent))
 		MuzzleFlashComponent->Activate(true);
+
+	// Bullet tracer: one-shot pooled Niagara streak along the fire line.
+	SpawnTracer(MuzzleLocation, EndPoint);
 
 #if ENABLE_DRAW_DEBUG
 	if (CVarShowBulletTracers.GetValueOnGameThread() == 0) return;
@@ -1984,4 +1988,46 @@ void AWeaponBase::EnsureMuzzleFlashComponent()
 
 	if (IsValid(MuzzleFlashComponent))
 		MuzzleFlashComponent->SetOwnerNoSee(GripMesh->bOwnerNoSee);
+}
+
+void AWeaponBase::SpawnTracer(const FVector& MuzzleLocation, const FVector& EndPoint)
+{
+	if (!IsValid(WeaponData)) return;
+	if (!IsValid(WeaponData->TracerFX)) return;
+
+	// Skip degenerate segments (e.g. point-blank melee range).
+	static constexpr float MinTracerLengthSq = 100.f; // 10 cm squared
+	if (FVector::DistSquared(MuzzleLocation, EndPoint) < MinTracerLengthSq) return;
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	const FRotator TracerRotation = (EndPoint - MuzzleLocation).Rotation();
+
+	UNiagaraComponent* TracerComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		World,
+		WeaponData->TracerFX,
+		MuzzleLocation,
+		TracerRotation,
+		FVector(1.f),
+		true,  // bAutoDestroy
+		true,  // bAutoActivate
+		ENCPoolMethod::AutoRelease);
+
+	if (!IsValid(TracerComp)) return;
+	if (!WeaponData->TracerEndParamName.IsNone())
+		TracerComp->SetVectorParameter(WeaponData->TracerEndParamName, EndPoint);
+
+	// Lyra NS_WeaponFire_Tracer contract: MuzzlePosition (Position) + ImpactPositions
+	// (Vector-array data interface) + Trigger gate. Trigger's authored type isn't
+	// introspectable here, so both bool and int are set — a type-mismatched user-param
+	// set is a silent no-op, which also makes this whole block harmless on systems
+	// that don't expose these names.
+	static const FName TracerMuzzleParam(TEXT("MuzzlePosition"));
+	static const FName TracerImpactsParam(TEXT("ImpactPositions"));
+	static const FName TracerTriggerParam(TEXT("Trigger"));
+	TracerComp->SetVariablePosition(TracerMuzzleParam, MuzzleLocation);
+	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector(TracerComp, TracerImpactsParam, { EndPoint });
+	TracerComp->SetVariableBool(TracerTriggerParam, true);
+	TracerComp->SetVariableInt(TracerTriggerParam, 1);
 }

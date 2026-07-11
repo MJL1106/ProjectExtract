@@ -4,6 +4,7 @@
 #include "Game/MissionInventorySubsystem.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
+#include "UObject/Class.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogLootContainer, Log, All);
 
@@ -23,11 +24,18 @@ bool ALootContainer::CanLoot_Implementation() const
 	return !bLooted && Contents.Num() > 0;
 }
 
+bool ALootContainer::CanLootRespectingScriptOverride() const
+{
+	static const FName CanLootFunctionName = GET_FUNCTION_NAME_CHECKED(ILootable, CanLoot);
+	return GetClass()->IsFunctionImplementedInScript(CanLootFunctionName)
+		? ILootable::Execute_CanLoot(this)
+		: CanLoot_Implementation();
+}
+
 void ALootContainer::Loot_Implementation(AActor* Looter)
 {
 	if (!HasAuthority()) return;
-	// Interface dispatch (not a direct _Implementation call) so BP CanLoot overrides are honoured.
-	if (!ILootable::Execute_CanLoot(this))
+	if (!CanLootRespectingScriptOverride())
 	{
 		UE_LOG(LogLootContainer, Verbose, TEXT("%s: Loot called but nothing to loot"), *GetName());
 		return;

@@ -223,6 +223,17 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
 	TObjectPtr<UNiagaraSystem> MuzzleFlashFX;
 
+	/** Niagara system spawned per shot as a bullet tracer streak along the fire line.
+	 *  Null = no tracer. Spawned at the muzzle, oriented toward the end point, engine-pooled
+	 *  via ENCPoolMethod::AutoRelease (satisfies >1/sec pooling rule without a hand-rolled pool). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<UNiagaraSystem> TracerFX;
+
+	/** Name of the Niagara Vector user parameter that receives the shot end position.
+	 *  Keeps C++ agnostic to whichever tracer system pack is assigned. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	FName TracerEndParamName = TEXT("TracerEnd");
+
 	// ---- Kit Weapon Bridge ----
 
 	/** Kit-side procedural animation values asset (BP-derived DataAsset, e.g. DT_ProceduralAnimValues / DA_Anim_Rifle). Read at runtime via IKitWeaponInterface::GetKitProceduralValues. */

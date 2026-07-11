@@ -37,12 +37,23 @@ void UBTService_EnemyCombat::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* 
 		return;
 	}
 
+	// Debug auto-engage: force LOS true so the fire task shoots without a real trace.
+	const bool bDebugForceEngage = Enemy && Enemy->bDebugAutoEngagePlayer;
+
 	// LOS check — body-point resolver excludes head so head-only peek never opens fire,
 	// except snipers vs a standing target (sniper+standing exception).
-	const FVector EyeLocation = Pawn->GetPawnViewLocation();
-	FVector VisiblePoint;
-	const bool bAllowHead = AITargeting::ShouldIncludeHeadForObserver(Pawn, Target);
-	const bool bHasLOS = AITargeting::GetVisibleBodyPoint(Target, EyeLocation, Pawn, VisiblePoint, bAllowHead);
+	bool bHasLOS = false;
+	if (bDebugForceEngage)
+	{
+		bHasLOS = true;
+	}
+	else
+	{
+		const FVector EyeLocation = Pawn->GetPawnViewLocation();
+		FVector VisiblePoint;
+		const bool bAllowHead = AITargeting::ShouldIncludeHeadForObserver(Pawn, Target);
+		bHasLOS = AITargeting::GetVisibleBodyPoint(Target, EyeLocation, Pawn, VisiblePoint, bAllowHead);
+	}
 	BB->SetValueAsBool(AEnemyAIController::BB_HasLineOfSight, bHasLOS);
 
 	// Mirror LOS to the character for the anim instance's in-cover aim gate.

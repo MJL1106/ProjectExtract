@@ -698,4 +698,8 @@ private:
 
 	/** Lazily creates and attaches the muzzle flash component from WeaponData->MuzzleFlashFX. */
 	void EnsureMuzzleFlashComponent();
+
+	/** Spawns a one-shot Niagara tracer streak from MuzzleLocation toward EndPoint.
+	 *  Engine-pooled (AutoRelease). No-ops when WeaponData->TracerFX is null. */
+	void SpawnTracer(const FVector& MuzzleLocation, const FVector& EndPoint);
 };

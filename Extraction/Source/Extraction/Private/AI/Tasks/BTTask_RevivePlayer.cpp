@@ -32,6 +32,9 @@ UBTTask_RevivePlayer::UBTTask_RevivePlayer()
 {
 	NodeName = TEXT("Revive Player");
 	bNotifyTick = true;
+	// Without this, OnTaskFinished never fires on the Succeeded path (FinishLatentTask) — the weapon
+	// un-hide, move-ignore removal, and SetIsRevivingPlayer(false) cleanup all get skipped.
+	bNotifyTaskFinished = true;
 	bCreateNodeInstance = true;
 }
 

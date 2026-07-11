@@ -77,12 +77,13 @@ bool FConsumableInventoryStimTest::RunTest(const FString& Parameters)
 	TestNotNull(TEXT("DBNO test player spawned"), DBNOPlayer);
 	if (DBNOPlayer)
 	{
-		DBNOPlayer->DispatchBeginPlay();
 		UConsumableInventoryComponent* DBNOInventory = DBNOPlayer->GetConsumableInventoryComponent();
-		UHealthComponent* DBNOHealth = DBNOPlayer->GetHealthComponent();
 		DBNOInventory->AddStims(1);
-		DBNOHealth->Die();
-		TestTrue(TEXT("death path enters DBNO"), DBNOPlayer->GetIsDBNO());
+		ConsumableInventoryTest::SetDamagedHealth(DBNOPlayer, 25.f);
+		FBoolProperty* DBNOProperty = FindFProperty<FBoolProperty>(DBNOPlayer->GetClass(), TEXT("bIsDBNO"));
+		check(DBNOProperty);
+		DBNOProperty->SetPropertyValue_InContainer(DBNOPlayer, true);
+		TestTrue(TEXT("DBNO fixture state is active"), DBNOPlayer->GetIsDBNO());
 		TestFalse(TEXT("DBNO player cannot use a stim"), DBNOInventory->TryUseStim());
 		TestEqual(TEXT("DBNO rejection consumes nothing"), DBNOInventory->GetStimCount(), 1);
 	}

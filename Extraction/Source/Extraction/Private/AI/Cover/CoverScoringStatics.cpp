@@ -266,6 +266,45 @@ void UCoverScoringStatics::GatherHostileAnchors(UWorld* World, const APawn* Quer
 	}
 }
 
+void UCoverScoringStatics::GatherKnownHostileAnchors(UWorld* World, const AEnemyCharacter* Enemy,
+	const AController* ExcludeController, FHostileAnchors& Out)
+{
+	Out.CoverAnchors.Reset();
+	Out.PawnAnchors.Reset();
+	if (!World || !IsValid(Enemy)) return;
+
+	// Pawn anchors from honest knowledge only (see header — observable reactions must not be
+	// omniscient). Frozen anchors use a SHORT freshness window, not ExtraThreatMemorySeconds:
+	// that 20s memory is tuned for exposure scoring, and a positional anchor frozen for 20s is a
+	// ghost — it never moves, trivially satisfies the compromise debounce, and forces
+	// vacate/re-pick churn against a spot nobody is contesting. A hostile actually standing on
+	// the cover is almost always sighted (live position) anyway.
+	const AEnemyAIController* Controller = Cast<AEnemyAIController>(Enemy->GetController());
+	const UEnemyAwarenessComponent* Awareness = Controller ? Controller->GetAwarenessComponent() : nullptr;
+	if (IsValid(Awareness))
+	{
+		constexpr int32 MaxKnownAnchorThreats = 8;
+		constexpr float AnchorFreshnessSeconds = 1.5f;
+		TArray<FEnemyKnownThreat> Known;
+		Awareness->GetExtraKnownThreats(nullptr, MaxKnownAnchorThreats, AnchorFreshnessSeconds, Known);
+		for (const FEnemyKnownThreat& Threat : Known)
+			Out.PawnAnchors.Add(Threat.Location);
+	}
+
+	if (UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>())
+	{
+		TArray<TPair<APawn*, FCover>> IntentOwners;
+		ResSub->GetIntendedCoverOwners(IntentOwners, ExcludeController);
+		for (const TPair<APawn*, FCover>& Entry : IntentOwners)
+		{
+			const APawn* OwnerPawn = Entry.Key;
+			if (!IsValid(OwnerPawn)) continue;
+			if (OwnerPawn->IsA<AEnemyCharacter>()) continue; // same side
+			Out.CoverAnchors.Add(Entry.Value.Data.Location);
+		}
+	}
+}
+
 bool UCoverScoringStatics::IsNearHostileAnchor(const FVector& Location, const FHostileAnchors& Anchors,
 	float CoverDist, float PawnDist)
 {

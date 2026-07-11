@@ -361,7 +361,40 @@ void UEnemyAwarenessComponent::NotifyDamaged(AController* Instigator)
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(InstigatorPawn);
 	StampTrack(Track, InstigatorPawn->GetActorLocation());
 
-	EnterCombat(InstigatorPawn, false);
+	// Point-blank guard: a hit must not rip the target off a sighted hostile standing in our face —
+	// that would flip-flop against ScoreAndSelectTarget's point-blank override every awareness tick.
+	// The damage stamp above still feeds scoring. Holds when the damager is distant, and also when
+	// both are point-blank and the damager is SIGHTED (in-set scoring + hysteresis arbitrate a close
+	// brawl instead of hit-cadence ping-pong); an unsighted point-blank hit is an ambush — force-
+	// switch as before so the enemy turns.
+	bool bKeepPointBlankTarget = false;
+	if (CurrentState == EEnemyAwarenessState::Combat && IsValid(ArchetypeData)
+		&& ArchetypeData->PointBlankTargetRange > 0.f)
+	{
+		AActor* Current = CombatTarget.Get();
+		const AAIController* MyController = Cast<AAIController>(GetOwner());
+		const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+		if (IsValid(Current) && Current != InstigatorPawn && IsValid(MyPawn) && IsActorAlive(Current))
+		{
+			const FSuspicionTrack* CurrentTrack = SuspicionTracks.Find(Current);
+			const float Range = ArchetypeData->PointBlankTargetRange;
+			// Slack on the hold check so a target strafing across the boundary doesn't oscillate
+			// between "guard holds" and "damage rips the target off" at hit cadence.
+			constexpr float PointBlankHoldSlack = 1.15f;
+			const FVector MyLoc = MyPawn->GetActorLocation();
+			const bool bCurrentPointBlank = CurrentTrack && CurrentTrack->bSighted
+				&& FVector::Dist(MyLoc, Current->GetActorLocation()) <= Range * PointBlankHoldSlack;
+			if (bCurrentPointBlank)
+			{
+				const bool bInstigatorPointBlank =
+					FVector::Dist(MyLoc, InstigatorPawn->GetActorLocation()) <= Range;
+				bKeepPointBlankTarget = !bInstigatorPointBlank || Track.bSighted;
+			}
+		}
+	}
+
+	if (!bKeepPointBlankTarget)
+		EnterCombat(InstigatorPawn, false);
 
 	// Fix #4: leaderless focus-fire — if squad has no focus target, claim it on damage
 	if (UEnemySquadSubsystem* SquadSS = SquadSubsystem.Get())
@@ -375,6 +408,24 @@ void UEnemyAwarenessComponent::NotifyDamaged(AController* Instigator)
 				Squad->SetFocusTarget(InstigatorPawn, MyChar);
 		}
 	}
+}
+
+// --- Debug Force-Engage ---
+
+void UEnemyAwarenessComponent::DebugForceEngage(AActor* Target)
+{
+	if (!IsValid(Target)) return;
+
+	// Direct state + target set: no bark, no squad broadcast, no companion-cloak seeding.
+	// bDebugForcedCombat suppresses the Director report inside SetState.
+	LastKnownLocation = Target->GetActorLocation();
+	bHadLOS = true;
+	TimeSinceLOSLost = 0.f;
+
+	bDebugForcedCombat = true;
+	SetCombatTarget(Target);
+	SetState(EEnemyAwarenessState::Combat);
+	bDebugForcedCombat = false;
 }
 
 // --- Shot-At Notification ---
@@ -457,6 +508,34 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 {
 	if (bStopped) return;
 	if (!IsValid(ArchetypeData)) return;
+
+	// Debug auto-engage: force Combat with the player pawn every tick while the flag is set.
+	// Runs before the normal Combat/Suspicion branch so it re-asserts target and state even if
+	// a previous tick decayed to Searching.
+	{
+		const AAIController* MyController = Cast<AAIController>(GetOwner());
+		const AEnemyCharacter* MyChar = MyController ? Cast<AEnemyCharacter>(MyController->GetPawn()) : nullptr;
+		const bool bWantDebugEngage = IsValid(MyChar) && MyChar->bDebugAutoEngagePlayer;
+
+		if (bWantDebugEngage)
+		{
+			APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
+			if (IsValid(PlayerPawn) && IsActorAlive(PlayerPawn))
+			{
+				bWasDebugEngaged = true;
+				DebugForceEngage(PlayerPawn);
+				return;
+			}
+		}
+
+		// Flag-off edge: clear the synthetic bHadLOS so the geometric contact-hold check
+		// re-establishes honestly or decays via LostContactGrace.
+		if (!bWantDebugEngage && bWasDebugEngaged)
+		{
+			bWasDebugEngaged = false;
+			bHadLOS = false;
+		}
+	}
 
 	if (CurrentState == EEnemyAwarenessState::Combat)
 	{
@@ -1005,7 +1084,7 @@ void UEnemyAwarenessComponent::SetState(EEnemyAwarenessState NewState)
 	if (IsValid(BB))
 		BB->SetValueAsEnum(AEnemyAIController::BB_AwarenessState, static_cast<uint8>(CurrentState));
 
-	if (!IsOwnerIsolatedEncounter())
+	if (!IsOwnerIsolatedEncounter() && !bDebugForcedCombat)
 	{
 		if (UEnemyDirectorSubsystem* Dir = Director.Get())
 		{
@@ -1320,6 +1399,34 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 	if (!IsValid(MyPawn)) return nullptr;
 
 	const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+	const FVector MyLoc = MyPawn->GetActorLocation();
+
+	// Point-blank override (self-preservation beats orders): when any sighted, selectable hostile
+	// stands inside PointBlankTargetRange, selection restricts to those candidates. Squad focus and
+	// a distant attacker's recent-damage term can't hold the target on someone far away while a
+	// hostile is in our face. Scoring stays normal INSIDE the set so two close hostiles don't
+	// flicker; an incumbent outside the set never posts an IncumbentScore, so hysteresis can't
+	// protect it either.
+	const float PointBlankRange = ArchetypeData->PointBlankTargetRange;
+	auto IsPointBlank = [&](const AActor* Candidate, const FSuspicionTrack& Track)
+	{
+		return PointBlankRange > 0.f && Track.bSighted
+			&& FVector::Dist(MyLoc, Candidate->GetActorLocation()) <= PointBlankRange;
+	};
+
+	bool bRestrictToPointBlank = false;
+	if (PointBlankRange > 0.f)
+	{
+		for (const auto& Pair : SuspicionTracks)
+		{
+			AActor* Candidate = Pair.Key.Get();
+			if (!IsValid(Candidate)) continue;
+			if (!IsActorAlive(Candidate)) continue;
+			if (!IsHostile(Candidate)) continue;
+			if (!CanSelectCompanionTarget(Candidate, Pair.Value, WorldTime)) continue;
+			if (IsPointBlank(Candidate, Pair.Value)) { bRestrictToPointBlank = true; break; }
+		}
+	}
 
 	// Officer focus-fire override: if squad has a focus target we can perceive, it wins outright
 	if (UEnemySquadSubsystem* SquadSS = SquadSubsystem.Get())
@@ -1335,7 +1442,8 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 				{
 					const FSuspicionTrack* FocusTrack = SuspicionTracks.Find(FocusTarget);
 					if (FocusTrack && FocusTrack->bSighted
-						&& CanSelectCompanionTarget(FocusTarget, *FocusTrack, WorldTime))
+						&& CanSelectCompanionTarget(FocusTarget, *FocusTrack, WorldTime)
+						&& (!bRestrictToPointBlank || IsPointBlank(FocusTarget, *FocusTrack)))
 					{
 						return FocusTarget;
 					}
@@ -1359,8 +1467,9 @@ AActor* UEnemyAwarenessComponent::ScoreAndSelectTarget() const
 
 		const FSuspicionTrack& Track = Pair.Value;
 		if (!CanSelectCompanionTarget(Candidate, Track, WorldTime)) continue;
+		if (bRestrictToPointBlank && !IsPointBlank(Candidate, Track)) continue;
 
-		const float Dist = FVector::Dist(MyPawn->GetActorLocation(), Candidate->GetActorLocation());
+		const float Dist = FVector::Dist(MyLoc, Candidate->GetActorLocation());
 		const float ProximityTerm = ArchetypeData->ThreatWeightProximity * (1.f - FMath::Clamp(Dist * SightRadiusInv, 0.f, 1.f));
 		const float LOSTerm = ArchetypeData->ThreatWeightLOS * (Track.bSighted ? 1.f : 0.f);
 
