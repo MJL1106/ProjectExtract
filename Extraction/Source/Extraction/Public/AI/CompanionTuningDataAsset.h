@@ -570,6 +570,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.5"))
 	float PeekImpulseRearmSeconds = 3.f;
 
+	// A VISIBLE threat inside this range defeats cover logic entirely: in-cover releases to
+	// open-engage (which move-shoots) and new cover commits are declined — no cat-and-mouse
+	// laps around the same rock with a chaser on the companion's tail. 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float PointBlankAbandonDistance = 450.f;
+
+	// Fire at the visible combat target while walking to a committed cover point (muzzle-gated,
+	// 10 Hz). Off = the old silent run-to-cover.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
+	bool bCoverApproachFireWhileMoving = true;
+
 	// Completed peek cycles required at a cover point before the companion may reposition/shuffle
 	// away from it (enemy parity — commit to a point before wandering). The starvation backstop and
 	// genuine invalidates (occupied, blind) ignore this.

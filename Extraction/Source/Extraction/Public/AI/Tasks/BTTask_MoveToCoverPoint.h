@@ -68,6 +68,9 @@ private:
 		float FireTimer = 0.f;
 		float FireTickAccum = 0.f;
 		bool bFiring = false;
+		// Companion approach-fire: the target aim/focus were issued for — a BB retarget mid-move
+		// must re-issue them or fire streams at the old target's position.
+		TWeakObjectPtr<AActor> ApproachFireTarget;
 
 		// Stall detection
 		float StallBestDist = TNumericLimits<float>::Max();
@@ -88,6 +91,7 @@ private:
 			FireTimer = 0.f;
 			FireTickAccum = 0.f;
 			bFiring = false;
+			ApproachFireTarget.Reset();
 			StallBestDist = TNumericLimits<float>::Max();
 			StallAccum = 0.f;
 			ClaimCheckAccum = 0.f;

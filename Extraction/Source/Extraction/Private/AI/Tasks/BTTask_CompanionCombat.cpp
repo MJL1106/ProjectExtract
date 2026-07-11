@@ -3333,63 +3333,93 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		TimeInCoverIdle += DeltaSeconds;
 
-		// --- Pressure signal (Part B, throttled ~5 Hz) ---
+		// --- Pressure signal + point-blank threat check (throttled ~5 Hz, one shared gather) ---
 		PeekImpulseCooldownRemaining = FMath::Max(0.f, PeekImpulseCooldownRemaining - DeltaSeconds);
 		PressureSampleTimer -= DeltaSeconds;
-		if (TickTuning && TickTuning->bPressureResponsiveCover && PressureSampleTimer <= 0.f)
+		const bool bPressureOn = TickTuning && TickTuning->bPressureResponsiveCover;
+		const float PointBlankDist = TickTuning ? TickTuning->PointBlankAbandonDistance : 0.f;
+		if (TickTuning && (bPressureOn || PointBlankDist > 0.f) && PressureSampleTimer <= 0.f)
 		{
 			PressureSampleTimer = 0.2f;
 
 			TArray<AActor*, TInlineAllocator<8>> PressureThreats;
 			GatherKnownThreats(Ctx.Companion, Ctx.Target, TickTuning->MaxThreatsForCoverScoring, PressureThreats);
 			float NearestDist = TNumericLimits<float>::Max();
-			for (const AActor* Threat : PressureThreats)
+			AActor* NearestThreat = nullptr;
+			for (AActor* const Threat : PressureThreats)
 			{
 				if (!IsValid(Threat)) continue;
 				const float D = FVector::Dist2D(MyLocation, Threat->GetActorLocation());
-				if (D < NearestDist) NearestDist = D;
+				if (D < NearestDist) { NearestDist = D; NearestThreat = Threat; }
 			}
 
-			const float FarDist = TickTuning->PressureFarDistance;
-			const float NearDist = TickTuning->PressureNearDistance;
-			Pressure01 = (NearestDist < TNumericLimits<float>::Max())
-				? FMath::Clamp((FarDist - NearestDist) / FMath::Max(FarDist - NearDist, 1.f), 0.f, 1.f)
-				: 0.f;
-
-			const bool bClosingNow = (PreviousNearestThreatDist >= 0.f && NearestDist < PreviousNearestThreatDist);
-			const bool bClosingConfirmed = bClosingNow && bPreviousThreatWasClosing;
-			bPreviousThreatWasClosing = bClosingNow;
-			PreviousNearestThreatDist = (NearestDist < TNumericLimits<float>::Max()) ? NearestDist : -1.f;
-
-			// Peek-now impulse: 2 consecutive closing samples crossing impulse distance, unsuppressed.
-			bool bImpulseFired = false;
-			if (!bSuppressed && PeekImpulseCooldownRemaining <= 0.f
-				&& bClosingConfirmed && NearestDist < TNumericLimits<float>::Max()
-				&& NearestDist <= TickTuning->PeekImpulseDistance)
+			// A point-blank VISIBLE threat defeats cover logic: release to open-engage (turn and
+			// fight, move-shoot) instead of cycling shuffles/covers with a chaser on our tail.
+			if (PointBlankDist > 0.f && IsValid(NearestThreat) && NearestDist <= PointBlankDist)
 			{
-				const float WaitGateThreshold = (MinCoverIdleDwell + PeekCooldown)
-					* CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01);
-				if (TimeInCoverIdle < WaitGateThreshold)
+				const AAIController* LosCtrl = Cast<AAIController>(Ctx.Companion->GetController());
+				if (LosCtrl && LosCtrl->LineOfSightTo(NearestThreat))
 				{
-					TimeInCoverIdle = WaitGateThreshold;
-					PeekImpulseCooldownRemaining = TickTuning->PeekImpulseRearmSeconds;
-					bImpulseFired = true;
+					UE_LOG(LogCompanionAI, Log,
+						TEXT("%s: Cover RELEASE reason=point-blank-threat dist=%.0f threat=%s — open-engage"),
+						*Ctx.Companion->GetName(), NearestDist, *GetNameSafe(NearestThreat));
+					if (UWorld* PbWorld = Ctx.Companion->GetWorld())
+					{
+						if (UCoverReservationSubsystem* PbSub = PbWorld->GetSubsystem<UCoverReservationSubsystem>())
+						{
+							if (AController* PbCtrl = Ctx.Companion->GetController())
+								PbSub->MarkVacated(Cover.Handle, PbCtrl);
+						}
+					}
+					Ctx.Blackboard->ClearValue(CoverTargetKey.GetSelectedKeyID());
+					Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+					BlindHoldTime = 0.f;
+					FruitlessPeeks = 0;
+					return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 				}
 			}
 
-			if (CovDbg())
+			if (bPressureOn)
 			{
-				UE_LOG(LogCompanionAI, Log,
-					TEXT("[COVDBG] %s PRESSURE p01=%.2f nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
-					*Ctx.Companion->GetName(), Pressure01, NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
-					CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01),
-					(int32)bImpulseFired);
+				const float FarDist = TickTuning->PressureFarDistance;
+				const float NearDist = TickTuning->PressureNearDistance;
+				Pressure01 = (NearestDist < TNumericLimits<float>::Max())
+					? FMath::Clamp((FarDist - NearestDist) / FMath::Max(FarDist - NearDist, 1.f), 0.f, 1.f)
+					: 0.f;
+
+				const bool bClosingNow = (PreviousNearestThreatDist >= 0.f && NearestDist < PreviousNearestThreatDist);
+				const bool bClosingConfirmed = bClosingNow && bPreviousThreatWasClosing;
+				bPreviousThreatWasClosing = bClosingNow;
+				PreviousNearestThreatDist = (NearestDist < TNumericLimits<float>::Max()) ? NearestDist : -1.f;
+
+				// Peek-now impulse: 2 consecutive closing samples crossing impulse distance, unsuppressed.
+				bool bImpulseFired = false;
+				if (!bSuppressed && PeekImpulseCooldownRemaining <= 0.f
+					&& bClosingConfirmed && NearestDist < TNumericLimits<float>::Max()
+					&& NearestDist <= TickTuning->PeekImpulseDistance)
+				{
+					const float WaitGateThreshold = (MinCoverIdleDwell + PeekCooldown)
+						* CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01);
+					if (TimeInCoverIdle < WaitGateThreshold)
+					{
+						TimeInCoverIdle = WaitGateThreshold;
+						PeekImpulseCooldownRemaining = TickTuning->PeekImpulseRearmSeconds;
+						bImpulseFired = true;
+					}
+				}
+
+				if (CovDbg())
+				{
+					UE_LOG(LogCompanionAI, Log,
+						TEXT("[COVDBG] %s PRESSURE p01=%.2f nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
+						*Ctx.Companion->GetName(), Pressure01, NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
+						CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01),
+						(int32)bImpulseFired);
+				}
 			}
 		}
-		else if (!(TickTuning && TickTuning->bPressureResponsiveCover))
-		{
+		if (!bPressureOn)
 			Pressure01 = 0.f;
-		}
 
 		// Combat-mode + pressure confidence: the whole wait shrinks.
 		if (TimeInCoverIdle < (MinCoverIdleDwell + PeekCooldown) * CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01)) return;
@@ -3785,7 +3815,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 
 #if ENABLE_DRAW_DEBUG
-			if (bDebugLogging)
+			// CovDbg-only (NOT bDebugLogging — that flag ships enabled on the BT asset, and these
+			// long target lines read as gameplay tracers to a playtester).
+			if (CovDbg())
 			{
 				const FVector BaseHunker = UCoverGeometryStatics::GetHunkerPosition(Cover.Data, ScoreStandoff);
 				const FVector OverTopEye = BaseHunker + FVector(0.f, 0.f, 150.f);
@@ -3795,10 +3827,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					const FColor LineColor = bViable ? FColor::Green : FColor::Red;
 					DrawDebugLine(TickWorld, Eye, TargetSightLoc, LineColor, false, 2.f, 0, 1.f);
 				};
+				const FVector LeftEyeDraw = UCoverGeometryStatics::GetLeanPeekPosition(Cover.Data, ECoverLean::Left) + FVector(0.f, 0.f, 90.f);
+				const FVector RightEyeDraw = UCoverGeometryStatics::GetLeanPeekPosition(Cover.Data, ECoverLean::Right) + FVector(0.f, 0.f, 90.f);
 				if (bCachedCornerLeftFound)
-					DrawCandidate(CachedCornerApexLeft + FVector(0.f, 0.f, 90.f), Scores.bCornerLeftViable, FColor::Blue);
+					DrawCandidate(LeftEyeDraw, Scores.bCornerLeftViable, FColor::Blue);
 				if (bCachedCornerRightFound)
-					DrawCandidate(CachedCornerApexRight + FVector(0.f, 0.f, 90.f), Scores.bCornerRightViable, FColor::Orange);
+					DrawCandidate(RightEyeDraw, Scores.bCornerRightViable, FColor::Orange);
 				DrawCandidate(OverTopEye, Scores.bOverTopViable, FColor::Cyan);
 
 				for (AActor* const Extra : ExtraThreats)
@@ -3806,9 +3840,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if (!IsValid(Extra)) continue;
 					const FVector ExtraLoc = Extra->GetActorLocation() + FVector(0.f, 0.f, 90.f);
 					if (Scores.bCornerLeftViable && bCachedCornerLeftFound)
-						DrawDebugLine(TickWorld, CachedCornerApexLeft + FVector(0.f, 0.f, 90.f), ExtraLoc, FColor(128, 128, 255), false, 2.f, 0, 0.5f);
+						DrawDebugLine(TickWorld, LeftEyeDraw, ExtraLoc, FColor(128, 128, 255), false, 2.f, 0, 0.5f);
 					if (Scores.bCornerRightViable && bCachedCornerRightFound)
-						DrawDebugLine(TickWorld, CachedCornerApexRight + FVector(0.f, 0.f, 90.f), ExtraLoc, FColor(255, 178, 102), false, 2.f, 0, 0.5f);
+						DrawDebugLine(TickWorld, RightEyeDraw, ExtraLoc, FColor(255, 178, 102), false, 2.f, 0, 0.5f);
 					if (Scores.bOverTopViable)
 						DrawDebugLine(TickWorld, OverTopEye, ExtraLoc, FColor(128, 255, 255), false, 2.f, 0, 0.5f);
 				}

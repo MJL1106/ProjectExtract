@@ -187,16 +187,29 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 				|| Tuning->LowHealthCoverMaxDash <= 0.f
 				|| CommitDist <= Tuning->LowHealthCoverMaxDash;
 
+			// Point-blank visible chaser: never run for cover with a threat at knife range — the
+			// decline routes to open-engage, which turns and fights (mirrors the combat task's
+			// point-blank release; overrides grants too, a hop into a chaser's lap is never right).
+			bool bPointBlankThreat = false;
+			if (Tuning->PointBlankAbandonDistance > 0.f)
+			{
+				AActor* PbTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+				bPointBlankThreat = IsValid(PbTarget)
+					&& FVector::Dist2D(Pawn->GetActorLocation(), PbTarget->GetActorLocation()) <= Tuning->PointBlankAbandonDistance
+					&& Controller->LineOfSightTo(PbTarget);
+			}
+
 			// CoverCommitMaxDistance is now an outer sanity cap (never trek across the map for a
 			// duck spot), not the old decline-happy 6.5m radius.
 			const float OuterCap = FMath::Max(Tuning->CoverCommitMaxDistance, Tuning->CoverSearchRadius);
-			if (CommitDist > OuterCap || (!Triggers.Any() && !bCommitGrant) || bRecommitBlocked || !bDashAllowed)
+			if (CommitDist > OuterCap || (!Triggers.Any() && !bCommitGrant) || bRecommitBlocked || !bDashAllowed
+				|| bPointBlankThreat)
 			{
 				UE_LOG(LogCompanionAI, Log,
-					TEXT("%s: cover-commit DECLINED dist=%.0f cap=%.0f triggers[fire=%d hp=%d ammo=%d out#=%d(n=%d)] grant=%d recommitBlock=%d dashOK=%d — open-engage"),
+					TEXT("%s: cover-commit DECLINED dist=%.0f cap=%.0f triggers[fire=%d hp=%d ammo=%d out#=%d(n=%d)] grant=%d recommitBlock=%d dashOK=%d pointBlank=%d — open-engage"),
 					*Pawn->GetName(), CommitDist, OuterCap, Triggers.bUnderFire ? 1 : 0, Triggers.bLowHealth ? 1 : 0,
 					Triggers.bLowAmmoOrReloading ? 1 : 0, Triggers.bOutnumbered ? 1 : 0, ThreatCount,
-					bCommitGrant ? 1 : 0, bRecommitBlocked ? 1 : 0, bDashAllowed ? 1 : 0);
+					bCommitGrant ? 1 : 0, bRecommitBlocked ? 1 : 0, bDashAllowed ? 1 : 0, bPointBlankThreat ? 1 : 0);
 				// Drop any lingering own intent — same stale-restore guard as the claim decline above.
 				if (UCoverReservationSubsystem* DeclineResSub = OwnerComp.GetWorld() ? OwnerComp.GetWorld()->GetSubsystem<UCoverReservationSubsystem>() : nullptr)
 					DeclineResSub->ClearIntendedCover(Controller);
@@ -568,6 +581,62 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 		}
 	}
 
+	// Companion approach-fire: muzzle-gated fire at the visible combat target while walking to
+	// the committed point — the silent run-to-cover reads as broken when enemies have eyes on it.
+	// Focus is set once at first fire and held for the move (facing flicker on momentary LOS loss
+	// reads worse than a held torso); StopAdvanceFire clears it on every exit.
+	if (!IsValid(Enemy) && !bArrived && Mem->FireTickAccum >= FireTickInterval)
+	{
+		if (ACompanionCharacter* FireCompanion = Cast<ACompanionCharacter>(Pawn))
+		{
+			Mem->FireTickAccum = 0.f;
+			const ACompanionAIController* FireCtrl = Cast<ACompanionAIController>(Controller);
+			const UCompanionTuningDataAsset* FireTuning = FireCtrl ? FireCtrl->GetTuning() : nullptr;
+			AActor* Target = (FireTuning && FireTuning->bCoverApproachFireWhileMoving)
+				? Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)) : nullptr;
+
+			bool bCanFire = false;
+			if (IsValid(Target) && !FireCompanion->IsReloading() && Controller->LineOfSightTo(Target))
+			{
+				if (AWeaponBase* W = FireCompanion->GetCurrentWeapon())
+				{
+					FHitResult MuzzleHit;
+					FCollisionQueryParams MuzzleParams;
+					MuzzleParams.AddIgnoredActor(FireCompanion);
+					MuzzleParams.AddIgnoredActor(W);
+					const bool bBlocked = Pawn->GetWorld()->LineTraceSingleByChannel(MuzzleHit,
+						W->GetMuzzleLocation(), Target->GetActorLocation() + FVector(0.f, 0.f, 50.f),
+						ECC_Visibility, MuzzleParams);
+					// A hit on the target or anything attached to it (held weapon) counts as clear.
+					bCanFire = !bBlocked || MuzzleHit.GetActor() == Target
+						|| (MuzzleHit.GetActor() && MuzzleHit.GetActor()->IsAttachedTo(Target));
+				}
+			}
+
+			// BB retarget mid-move: aim/focus are latched per target — re-issue or fire streams
+			// at the old target's position.
+			if (Mem->bFiring && Mem->ApproachFireTarget.Get() != Target)
+			{
+				FireCompanion->StopWeaponFire();
+				Mem->bFiring = false;
+			}
+
+			if (bCanFire && !Mem->bFiring)
+			{
+				FireCompanion->SetAimTarget(Target);
+				Controller->SetFocus(Target);
+				FireCompanion->StartWeaponFire();
+				Mem->bFiring = true;
+				Mem->ApproachFireTarget = Target;
+			}
+			else if (!bCanFire && Mem->bFiring)
+			{
+				FireCompanion->StopWeaponFire();
+				Mem->bFiring = false;
+			}
+		}
+	}
+
 	// Wait while still moving and not stalled
 	if (!bArrived && Status != EPathFollowingStatus::Idle && !bStalled) return;
 
@@ -647,6 +716,21 @@ void UBTTask_MoveToCoverPoint::StopAdvanceFire(UBehaviorTreeComponent& OwnerComp
 {
 	AAIController* Controller = OwnerComp.GetAIOwner();
 	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
+
+	// Companion approach-fire teardown (the enemy path below early-returns on a companion pawn).
+	if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn))
+	{
+		if (Mem->bFiring)
+		{
+			Companion->StopWeaponFire();
+			Mem->bFiring = false;
+		}
+		Companion->SetAimTarget(nullptr);
+		if (!bKeepFocus && Controller)
+			Controller->ClearFocus(EAIFocusPriority::Gameplay);
+		return;
+	}
+
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
 
 	// If pawn is gone, try the cached weak-ptr to reset spread (accept truly-dead case)

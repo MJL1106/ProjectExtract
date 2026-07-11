@@ -20,6 +20,74 @@ static constexpr float DefaultEvalInterval = 0.5f;
 /** Minimum seconds between DBNO-standoff retreat relocates for one enemy. */
 static constexpr float RetreatRepeatCooldown = 8.f;
 
+// --- FEnemyPressCadence ---
+
+void FEnemyPressCadence::Configure(bool bInEnabled, float InMaxEpisodeDuration)
+{
+	bEnabled = bInEnabled;
+	MaxEpisodeDurationSeconds = InMaxEpisodeDuration;
+}
+
+void FEnemyPressCadence::ResetForCombat(float CombatStartTime, float InitialDelay)
+{
+	bEpisodeActive = false;
+	EpisodeStartTime = CombatStartTime;
+	NextOpportunityTime = CombatStartTime + InitialDelay;
+}
+
+bool FEnemyPressCadence::CanEnterPress(float Now) const
+{
+	if (!bEnabled) return true;
+	if (bEpisodeActive) return false;
+	return Now >= NextOpportunityTime;
+}
+
+bool FEnemyPressCadence::TryEnterPress(float Now)
+{
+	if (!CanEnterPress(Now)) return false;
+	bEpisodeActive = true;
+	EpisodeStartTime = Now;
+	return true;
+}
+
+bool FEnemyPressCadence::HasEpisodeExpired(float Now) const
+{
+	if (!bEnabled || !bEpisodeActive) return false;
+	return (Now - EpisodeStartTime) >= MaxEpisodeDurationSeconds;
+}
+
+bool FEnemyPressCadence::IsEpisodeActive() const
+{
+	return bEnabled && bEpisodeActive;
+}
+
+void FEnemyPressCadence::CompleteAdvanceAndScheduleRecovery(float Now, float RecoveryDuration)
+{
+	EndEpisode(Now, RecoveryDuration);
+}
+
+void FEnemyPressCadence::EndEpisodeAndScheduleRecovery(float Now, float RecoveryDuration)
+{
+	EndEpisode(Now, RecoveryDuration);
+}
+
+void FEnemyPressCadence::EndEpisode(float Now, float RecoveryDuration)
+{
+	bEpisodeActive = false;
+	if (!bEnabled) return;
+	NextOpportunityTime = Now + RecoveryDuration;
+}
+
+bool FEnemyPressCadence::IsAdvanceCandidateDistanceValid(float CurrentDistToThreat,
+	float CandidateDistToThreat, float MinGain, float MinThreatDistance)
+{
+	if (CandidateDistToThreat < MinThreatDistance) return false;
+	if ((CurrentDistToThreat - CandidateDistToThreat) < MinGain) return false;
+	return true;
+}
+
+// --- UEnemyPostureComponent ---
+
 UEnemyPostureComponent::UEnemyPostureComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -53,6 +121,7 @@ void UEnemyPostureComponent::DeactivateForDeath()
 	CurrentPosture = EEnemyPosture::Hold;
 	bAdvanceRequested = false;
 	bRetreatRequested = false;
+	bPressCombatActive = false;
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(EvalTimerHandle);
 }
@@ -67,8 +136,19 @@ bool UEnemyPostureComponent::ConsumeAdvanceRequest()
 void UEnemyPostureComponent::NotifyAdvanceExecuted()
 {
 	const UWorld* World = GetWorld();
-	LastAdvanceWorldTime = World ? World->GetTimeSeconds() : 0.f;
+	const float Now = World ? World->GetTimeSeconds() : 0.f;
+	LastAdvanceWorldTime = Now;
 	PressHeldSeconds = 0.f;
+
+	// One committed advance ends the Press episode. No-op when the cadence is disabled — legacy
+	// archetypes keep pressing purely on aggression/suppression/morale as before.
+	const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(GetOwner());
+	const UEnemyArchetypeData* DA = IsValid(Enemy) ? Enemy->GetArchetypeData() : nullptr;
+	if (IsValid(DA) && PressCadence.IsEpisodeActive())
+	{
+		const float Recovery = FMath::FRandRange(DA->PressRecoveryMin, DA->PressRecoveryMax);
+		PressCadence.CompleteAdvanceAndScheduleRecovery(Now, Recovery);
+	}
 }
 
 bool UEnemyPostureComponent::ConsumeRetreatRequest()

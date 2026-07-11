@@ -138,6 +138,10 @@ private:
 	UPROPERTY(ReplicatedUsing = OnRep_PresentationRevision)
 	uint16 PresentationRevision = 0;
 
+	/** Spawn-time centroid of Room1Enemies — the ClearRoom1 marker pins to this fixed area
+	 *  instead of following living enemies around the room. Zero = fall back to enemy-follow. */
+	FVector Room1AreaLocation = FVector::ZeroVector;
+
 	TSet<TWeakObjectPtr<ALootContainer>> CompletedSupplyCrates;
 	TSet<int32> Room1DeadIndices;
 	TSet<int32> FirstPairDeadIndices;

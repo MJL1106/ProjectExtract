@@ -371,16 +371,16 @@ void UCoverGeometryStatics::ScoreCrouchPeekOptions(const UWorld* World, const FC
 		return !World->LineTraceTestByChannel(Eye, Target, ECC_Visibility, TraceParams);
 	};
 
+	// LOS is validated at the LEAN position (the fixed step the peek montage actually takes),
+	// not the marched apex — the apex can sit up to MaxReachCm down the wall, a point the lean
+	// never reaches, which reads as "viable" and then sprays the companion's own cover. The
+	// march result is only the corner-existence gate (mid-wall rejection).
+	const FVector LeftEye = GetLeanPeekPosition(Data, ECoverLean::Left) + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
+	const FVector RightEye = GetLeanPeekPosition(Data, ECoverLean::Right) + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
 	if (bCornerLeftFound)
-	{
-		const FVector Eye = ApexLeft + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
-		OutScores.bCornerLeftViable = TraceLOS(Eye, ThreatLoc);
-	}
+		OutScores.bCornerLeftViable = TraceLOS(LeftEye, ThreatLoc);
 	if (bCornerRightFound)
-	{
-		const FVector Eye = ApexRight + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
-		OutScores.bCornerRightViable = TraceLOS(Eye, ThreatLoc);
-	}
+		OutScores.bCornerRightViable = TraceLOS(RightEye, ThreatLoc);
 
 	// Over-top: viable iff the caller's stand-eye trace already passed.
 	OutScores.bOverTopViable = Params.bStandEyeClear;
@@ -413,8 +413,6 @@ void UCoverGeometryStatics::ScoreCrouchPeekOptions(const UWorld* World, const FC
 		return FMath::Max(Score, Params.MinViableWeight);
 	};
 
-	const FVector LeftEye = ApexLeft + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
-	const FVector RightEye = ApexRight + FVector(0.f, 0.f, CoverPeekCrouchEyeHeight);
 	const FVector OverTopEye = GetHunkerPosition(Data, Standoff) + FVector(0.f, 0.f, CoverPeekStandEyeHeight);
 
 	OutScores.CornerLeftScore = ScoreOption(OutScores.bCornerLeftViable, BaseCorner, true, LeftEye);
