@@ -1198,6 +1198,17 @@ bool AEnemyCharacter::HasDetectedPlayer() const
 	return Awareness->GetAwarenessState() == EEnemyAwarenessState::Combat;
 }
 
+float AEnemyCharacter::GetTimeEnteredCombat() const
+{
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return -1e9f;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return -1e9f;
+
+	return Awareness->GetLastCombatEnterTime();
+}
+
 bool AEnemyCharacter::IsAlertedForCompanionReadiness() const
 {
 	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());

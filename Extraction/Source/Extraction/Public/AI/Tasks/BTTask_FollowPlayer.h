@@ -50,6 +50,15 @@ private:
 	/** ~1Hz throttle for the sprint-mode rescue-approach diagnostic log. */
 	float SprintLogAccumulator = 0.f;
 
+	/** Accumulates DeltaSeconds in the formation branch; gates the blocked-move re-issue below so a
+	 *  normal brief Idle blip (arrival, replan) doesn't spam repath. */
+	float BlockedMoveReissueAccumulator = 0.f;
+
+	/** Minimum seconds between forced LastMoveTarget resets when the path-following component
+	 *  reports Idle while the companion is still outside the formation's acceptance radius (e.g.
+	 *  the player is standing exactly on the anchor point, so MoveToLocation can't path there). */
+	static constexpr float BlockedMoveReissueCooldown = 0.5f;
+
 	/** Mode seen last tick — a change drops the idle latch so the new formation applies immediately
 	 *  (e.g. switching to Combat while stationary sends the companion to the lead point). */
 	ECompanionMode LastSeenMode = ECompanionMode::Normal;

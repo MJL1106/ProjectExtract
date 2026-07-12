@@ -2,10 +2,14 @@
 
 #include "CompanionCommandComponent.h"
 #include "World/Breachable.h"
+#include "World/DoorBase.h"
+#include "World/BreachableDoor.h"
 #include "World/Lootable.h"
+#include "EngineUtils.h"
 #include "Enemy/EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
 #include "AI/CompanionAIController.h"
+#include "BehaviorTree/BlackboardComponent.h"
 #include "Camera/CameraComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputMappingContext.h"
@@ -13,11 +17,28 @@
 #include "GameFramework/PlayerController.h"
 #include "Engine/LocalPlayer.h"
 #include "Kismet/GameplayStatics.h"
+#include "NavigationSystem.h"
 #include "Engine/World.h"
 #include "Engine/EngineTypes.h"
 #include "TimerManager.h"
 
 DEFINE_LOG_CATEGORY(LogCompanionCommand);
+
+// A still-breachable door near the pinged ground point means that spot is breach territory —
+// offering "search" beside the door would let the player bypass the breach interaction.
+static bool AnyBreachableDoorWithin(UWorld* World, const FVector& Center, float Radius)
+{
+	if (!World || Radius <= 0.f) return false;
+	const float RadiusSq = FMath::Square(Radius);
+	for (TActorIterator<ABreachableDoor> It(World); It; ++It)
+	{
+		ABreachableDoor* Door = *It;
+		if (!IsValid(Door) || !IBreachable::Execute_CanBreach(Door)) continue;
+		// Portal point, not actor location — the actor origin sits at the hinge on swing doors.
+		if (FVector::DistSquared(Door->GetAcousticPortalPoint(), Center) <= RadiusSq) return true;
+	}
+	return false;
+}
 
 UCompanionCommandComponent::UCompanionCommandComponent()
 {
@@ -67,6 +88,18 @@ ACompanionAIController* UCompanionCommandComponent::GetCompanionController()
 	return Cast<ACompanionAIController>(Companion->GetController());
 }
 
+bool UCompanionCommandComponent::IsCompanionRouteActive()
+{
+	const ACompanionAIController* Controller = GetCompanionController();
+	const UBlackboardComponent* BB = IsValid(Controller) ? Controller->GetBlackboardComponent() : nullptr;
+	if (!BB || !BB->GetValueAsBool(ACompanionAIController::BB_RouteActive)) return false;
+
+	// A HoldAtFinal park keeps BB_RouteActive true indefinitely — the walk is done, so commands
+	// (breach at the objective door) must work again.
+	const ACompanionCharacter* Companion = ResolveCompanion();
+	return !(IsValid(Companion) && Companion->IsRouteHoldingAtFinal());
+}
+
 // ---- Ping ----
 
 void UCompanionCommandComponent::IssuePing()
@@ -106,12 +139,70 @@ void UCompanionCommandComponent::IssuePing()
 
 	AActor* HitActor = Hit.GetActor();
 
-	// Priority 1: Breachable door
+	// Priority 1: doors. The dedicated breachable door class pings as BREACH; every other door
+	// (the normal scripted/pack doors — their CanBreach is true so the auto-open flows work, but
+	// they are not breach TARGETS) pings as SEARCH-through: the companion walks through the
+	// auto-opening door to the far side and explores there. A door hit never falls through to the
+	// ground-search fallback — a dead door ping (locked/route) stays a dead ping.
+	if (ADoorBase* HitDoor = Cast<ADoorBase>(HitActor))
+	{
+		const bool bBreachDoor = HitActor->IsA<ABreachableDoor>();
+
+		// Route legs are scripted — never offer a command that would yank the companion off one
+		// (and a stairwell ping can grab a neighbouring door's collision mid-descent anyway).
+		if (IsCompanionRouteActive())
+		{
+			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] door %s suppressed — route active"), *GetNameSafe(HitActor));
+			ClearPending();
+			return;
+		}
+
+		if (bBreachDoor && IBreachable::Execute_CanBreach(HitActor))
+		{
+			PendingCommand = ECompanionCommand::Breach;
+			PendingTarget  = HitActor;
+			SetPromptContextRegistered(false); // breach prompt confirms on B — no G/V shield needed
+			OnPingChanged.Broadcast(PendingCommand, HitActor);
+			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> BREACH %s (broadcast)"), *GetNameSafe(HitActor));
+			return;
+		}
+
+		// Search-through needs a door the companion can actually pass: an externally gate-locked
+		// door or one with AI auto-open disabled would leave it shoving the closed leaf to timeout.
+		if (!bBreachDoor && !HitDoor->IsExternalGateLocked() && HitDoor->CanAutoOpenForAI())
+		{
+			FVector ThroughPoint;
+			const ACompanionCharacter* Companion = ResolveCompanion();
+			if (IsValid(Companion)
+				&& IBreachable::Execute_GetPostBreachPoint(HitDoor, Companion, /*bEnterRoom*/ true, ThroughPoint))
+			{
+				PendingCommand  = ECompanionCommand::Explore;
+				PendingTarget   = HitActor; // marker rides the door
+				PendingLocation = ThroughPoint;
+				SetPromptContextRegistered(false); // explore confirms on the breach key — no G/V shield needed
+				OnPingChanged.Broadcast(PendingCommand, HitActor);
+				UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> EXPLORE through door %s at %s (broadcast)"),
+					*GetNameSafe(HitActor), *PendingLocation.ToCompactString());
+				return;
+			}
+		}
+
+		ClearPending();
+		return;
+	}
+
+	// Priority 1b: non-door breachables (BP-only Breachable actors keep the old contract).
 	if (HitActor->Implements<UBreachable>() && IBreachable::Execute_CanBreach(HitActor))
 	{
+		if (IsCompanionRouteActive())
+		{
+			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] breachable %s suppressed — route active"), *GetNameSafe(HitActor));
+			ClearPending();
+			return;
+		}
 		PendingCommand = ECompanionCommand::Breach;
 		PendingTarget  = HitActor;
-		SetPromptContextRegistered(false); // breach prompt confirms on B — no G/V shield needed
+		SetPromptContextRegistered(false);
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
 		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> BREACH %s (broadcast)"), *GetNameSafe(HitActor));
 		return;
@@ -143,12 +234,33 @@ void UCompanionCommandComponent::IssuePing()
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> TAKEDOWN %s (broadcast)"), *GetNameSafe(Enemy));
 			return;
 		}
-	}
-	else
-	{
-		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] hit %s is neither breachable door nor enemy -> clear"), *GetNameSafe(HitActor));
+		// An ineligible enemy stays a dead ping — never downgrade a hostile under the crosshair
+		// to "search this spot".
+		ClearPending();
+		return;
 	}
 
+	// Priority 4: open ground — explore/search the pinged spot. Only offered where the companion
+	// can actually stand (navmesh projection; a wall hit projects to the floor at its base), and
+	// never while a scripted route runs (same contract as breach — commands don't yank route legs).
+	if (!IsCompanionRouteActive())
+	{
+		FNavLocation NavLoc;
+		const UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+		if (NavSys && NavSys->ProjectPointToNavigation(Hit.ImpactPoint, NavLoc, FVector(300.f, 300.f, 500.f))
+			&& !AnyBreachableDoorWithin(World, NavLoc.Location, ExploreSuppressNearBreachRadius))
+		{
+			PendingCommand  = ECompanionCommand::Explore;
+			PendingTarget.Reset();
+			PendingLocation = NavLoc.Location;
+			SetPromptContextRegistered(false); // explore confirms on the breach key — no G/V shield needed
+			OnPingChanged.Broadcast(PendingCommand, nullptr);
+			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> EXPLORE %s (broadcast)"), *PendingLocation.ToCompactString());
+			return;
+		}
+	}
+
+	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] hit %s matched no command -> clear"), *GetNameSafe(HitActor));
 	ClearPending();
 }
 
@@ -336,6 +448,14 @@ void UCompanionCommandComponent::ConfirmBreach()
 	AActor* Target = PendingTarget.Get();
 	if (!IsValid(Target)) { ClearPending(); return; }
 
+	// Backstop for a prompt raised just before a route started — the ping-time gate can't catch it.
+	if (IsCompanionRouteActive())
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] breach on %s rejected — route active"), *GetNameSafe(Target));
+		ClearPending();
+		return;
+	}
+
 	ACompanionAIController* Controller = GetCompanionController();
 	if (!IsValid(Controller))
 	{
@@ -373,5 +493,28 @@ void UCompanionCommandComponent::ConfirmLoot()
 	}
 
 	Controller->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife, Target, Target->GetActorLocation());
+	ClearPending();
+}
+
+void UCompanionCommandComponent::ConfirmExplore()
+{
+	if (PendingCommand != ECompanionCommand::Explore) return;
+
+	// Backstop for a prompt raised just before a route started — the ping-time gate can't catch it.
+	if (IsCompanionRouteActive())
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] explore at %s rejected — route active"), *PendingLocation.ToCompactString());
+		ClearPending();
+		return;
+	}
+
+	ACompanionAIController* Controller = GetCompanionController();
+	if (!IsValid(Controller))
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("ConfirmExplore: companion controller not found"));
+		return;
+	}
+
+	Controller->IssueCommand(ECompanionCommand::Explore, ETakedownMethod::Knife, nullptr, PendingLocation);
 	ClearPending();
 }

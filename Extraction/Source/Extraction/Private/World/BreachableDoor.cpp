@@ -206,6 +206,17 @@ void ABreachableDoor::Breach_Implementation(AActor* Breacher)
 	BeginSwing();
 }
 
+void ABreachableDoor::ForceOpenInstant()
+{
+	if (DoorState == EDoorState::Open) return;
+
+	bUnlocked = true;
+	if (DoorState == EDoorState::Closed)
+		BeginSwing(); // captures ClosedYaw + drops pawn blocking/nav
+	FinishSwing();
+	UE_LOG(LogBreachableDoor, Log, TEXT("%s: ForceOpenInstant (checkpoint fast-forward)"), *GetName());
+}
+
 // --- Internal ---
 
 void ABreachableDoor::BeginSwing()

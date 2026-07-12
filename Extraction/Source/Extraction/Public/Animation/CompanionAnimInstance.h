@@ -57,6 +57,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Animation|Actions")
 	UAnimMontage* GetMontageForType(ETraversalType Type) const;
 
+	/** Diagnostic: the DBNO flag exactly as the AnimGraph reads it this frame (per-tick mirror of
+	 *  the character's bIsDBNO). A true here with no downed pose showing = ABP-side fault. */
+	bool GetIsDBNOMirrored() const { return bIsDBNO; }
+
 	// --- Left-Hand IK ---
 
 	/**
@@ -301,6 +305,16 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	TObjectPtr<UAnimMontage> CoverPeekOverTopLeftMontage;
 
+	/** Global clamp on AimYaw fed to the aim offset — raw deltas reach ±180 while the body lags the
+	 *  focal bearing (route legs down a switchback), extrapolating the spine past the AO's authored
+	 *  range and pulling the gun off the hands. Enemy parity (AimYawClampDeg). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|AimOffset")
+	float AimYawClampDeg = 75.f;
+
+	/** Global clamp on AimPitch fed to the aim offset. Enemy parity (AimPitchClampDeg). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|AimOffset")
+	float AimPitchClampDeg = 55.f;
+
 	/** Eased aim gate speed — scales AimPitch/AimYaw to 0 while tucked in cover idle. */
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	float CoverAimGateSpeed = 8.f;
@@ -397,6 +411,23 @@ protected:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
 	bool bCoverStrafeActive = false;
 
+	/** Eased 0..1 gate — 0 while tucked in cover (not peeking), 1 otherwise. Scales AimPitch/AimYaw
+	 *  in C++ AND is read by the ABP as the aim-offset layer weight, because the AO's centre sample
+	 *  is not identity and at full weight it bends the tucked idle's arms into an ADS hold even with
+	 *  the aim angles at zero. Name must match the ABP's existing Get nodes. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	float CompCoverAimGate = 1.f;
+
+	/**
+	 * Active cover-aim scenario for the ABP's blend-by-int aim-offset selector.
+	 * 0 = None (out-of-cover, tucked, or blind-firing) — standing rifle AO.
+	 * 1 = CrouchPeekLeft, 2 = CrouchPeekRight, 3 = over-top (neutral no-AO passthrough — the
+	 * over-top montage owns the pose). 4 = StandPeekLeft, 5 = StandPeekRight.
+	 * Name must match the ABP's existing Get nodes.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	int32 CompCoverAimScenario = 0;
+
 	FVector CoverStrafeVelocity = FVector::ZeroVector;
 	float CoverStrafeStaleTimer = 0.f;
 
@@ -459,9 +490,6 @@ private:
 	/** Throttle accumulator for the [RELOADTUCK] cover-reload-spine diagnostic line. */
 	float CoverReloadTuckLogAccum = 0.f;
 
-	/** Eased gate that scales AimPitch/AimYaw — 0 when in cover idle (not peeking). */
-	float CoverAimGate = 1.f;
-
 	/** Unclamped aim yaw (deg) captured before the cover clamp — feeds the track-limit test. */
 	float RawAimYawDeg = 0.f;
 
@@ -478,6 +506,9 @@ private:
 	 *  BlueprintPure so the ABP's grip/aim-gate EventGraph can read ONE call instead of per-asset checks. */
 	UFUNCTION(BlueprintPure, Category = "Cover")
 	bool IsAnyCoverPeekMontagePlaying() const;
+
+	/** True while either over-top peek montage plays — selects the neutral aim scenario. */
+	bool IsOverTopPeekMontagePlaying() const;
 
 	/** Capture spine_01 while tucked-idle, hold it while reloading in cover, and ease
 	 *  CoverReloadSpineAlpha 0..1 so the Replace modify bone blends in/out. */

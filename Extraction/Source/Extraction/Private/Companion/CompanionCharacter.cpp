@@ -202,6 +202,7 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (const UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+		World->GetTimerManager().ClearTimer(DBNODiagTimerHandle);
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
 		World->GetTimerManager().ClearTimer(ModeWidgetLinkTimerHandle);
 	}
@@ -221,6 +222,8 @@ void ACompanionCharacter::Tick(float DeltaTime)
 
 	if (CurrentAimTarget.IsValid())
 		TimeAimingAtCurrentTarget += DeltaTime;
+
+	TickPlayerSoftSeparation();
 }
 
 float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -408,17 +411,21 @@ void ACompanionCharacter::SetMode(ECompanionMode NewMode)
 	if (NewMode == Mode) return;
 
 	// Same ordering invariant as SetPosture: Mode assigned before broadcast.
-	const bool bWasStealthActive = IsStealthActive();
+	const ECompanionMode OldMode = Mode;
 	Mode = NewMode;
 
 	// A fresh Stealth order always starts unbroken; leaving Stealth clears the flag so a later
 	// return to Stealth doesn't inherit a stale broken state.
 	bStealthBroken = false;
+	if (NewMode == ECompanionMode::Stealth && GetWorld())
+		StealthPinTime = GetWorld()->GetTimeSeconds();
 
-	// Clamps only on a stealth-active transition — an unconditional call would UnCrouch on every
-	// non-stealth mode cycle, popping the companion out of crouch cover mid-fight. A stale catch-up
-	// stage from the last stealth stint would sprint-pop the clamps; follow re-evaluates next tick.
-	if (IsStealthActive() != bWasStealthActive)
+	// Clamps on the Stealth MODE boundary, not an IsStealthActive edge: broken stealth reads as
+	// inactive on both sides of a Stealth->Combat switch, which left the crouch-mirror's crouch
+	// and the stealth speed clamps latched. Non-stealth cycles still skip — an unconditional call
+	// would UnCrouch out of crouch cover mid-fight. A stale catch-up stage from the last stealth
+	// stint would sprint-pop the clamps; follow re-evaluates next tick.
+	if ((OldMode == ECompanionMode::Stealth) != (NewMode == ECompanionMode::Stealth))
 	{
 		StealthCatchupStage = EStealthCatchup::None;
 		ApplyStealthMovementClamps();
@@ -440,10 +447,39 @@ void ACompanionCharacter::SetStealthBroken(bool bBroken)
 	if (bStealthBroken == bBroken) return;
 
 	bStealthBroken = bBroken;
+	if (!bBroken && GetWorld())
+		StealthPinTime = GetWorld()->GetTimeSeconds();
 	// Stale catch-up stage from before the break would make the re-pin clamps sprint-pop.
 	StealthCatchupStage = EStealthCatchup::None;
 	UE_LOG(LogCompanion, Log, TEXT("Companion stealth %s"), bBroken ? TEXT("BROKEN") : TEXT("re-pinned"));
 	ApplyStealthMovementClamps();
+}
+
+// --- Post-breach engagement grant ---
+
+void ACompanionCharacter::SetPostBreachEngagement(const FVector& Anchor, float Radius, float Duration)
+{
+	if (!HasAuthority() || Radius <= 0.f || Duration <= 0.f) return;
+
+	PostBreachAnchor = Anchor;
+	PostBreachRadiusSq = Radius * Radius;
+	PostBreachExpiryTime = GetWorld() ? GetWorld()->GetTimeSeconds() + Duration : -1.f;
+	UE_LOG(LogCompanion, Log, TEXT("%s: post-breach engagement grant at %s r=%.0f for %.1fs"),
+		*GetName(), *Anchor.ToCompactString(), Radius, Duration);
+}
+
+void ACompanionCharacter::ClearPostBreachEngagement()
+{
+	PostBreachRadiusSq = 0.f;
+	PostBreachExpiryTime = -1.f;
+}
+
+bool ACompanionCharacter::IsWithinPostBreachEngagement(const FVector& Location) const
+{
+	if (PostBreachRadiusSq <= 0.f) return false;
+	const UWorld* World = GetWorld();
+	if (!World || World->GetTimeSeconds() > PostBreachExpiryTime) return false;
+	return FVector::DistSquared(Location, PostBreachAnchor) <= PostBreachRadiusSq;
 }
 
 void ACompanionCharacter::TryLinkModeWidget()
@@ -467,7 +503,7 @@ void ACompanionCharacter::ApplyStealthMovementClamps()
 	// enforcement-yield set): takedowns own the crouch-approach and the authored knife pose,
 	// traversal resizes the capsule mid-vault, route legs set their own stances. A stealth break /
 	// mode keypress landing mid-vault must not Crouch/UnCrouch under them. Speeds always apply.
-	bool bStanceOwnedElsewhere = bTakedownArmed || bTakedownExecuting || bTakedownMontagePlaying
+	bool bStanceOwnedElsewhere = bIsDBNO || bTakedownArmed || bTakedownExecuting || bTakedownMontagePlaying
 		|| (IsValid(TraversalComponent) && TraversalComponent->IsBusy());
 	if (!bStanceOwnedElsewhere)
 		if (const AAIController* AIC = Cast<AAIController>(GetController()))
@@ -483,21 +519,31 @@ void ACompanionCharacter::ApplyStealthMovementClamps()
 				// Clearly losing the player — break the low profile and sprint to close the gap.
 				// SetSprinting's stealth veto passes only in this stage.
 				UnCrouch();
+				bCrouchOwnedByStealth = false;
 				SetSprinting(true);
 			}
 			else
 			{
+				// Stance (crouch/stand) is no longer force-applied here (F4a): Stealth defaults to
+				// a standing slow-walk, and only the service's crouch-mirror (mirroring the
+				// player's own crouch state) pulls the companion down. Speed still applies below.
 				SetSprinting(false);
-				if (CanCrouch()) Crouch();
 			}
 		}
 		else
 		{
-			// Combat tasks own crouch during a fight; releasing here just returns the follow/explore
-			// paths to standing. Cover tasks re-crouch as needed.
-			UnCrouch();
+			// Only release a crouch the stealth mirror applied — a cover task's crouch is not
+			// ours to pop (a stealth break / mode switch can land while crouched at cover).
+			if (bCrouchOwnedByStealth) UnCrouch();
 		}
 	}
+
+	// The ownership claim drops whenever stealth rules stop applying — even when a DBNO/route/
+	// takedown/traversal owns stance and the UnCrouch above was skipped (that owner restores
+	// stance in its own teardown). A claim latched through the yield would pop a later cover crouch.
+	if (!IsStealthActive())
+		bCrouchOwnedByStealth = false;
+
 	ApplyMovementSpeeds();
 }
 
@@ -509,6 +555,22 @@ void ACompanionCharacter::SetStealthCatchup(EStealthCatchup NewStage)
 	StealthCatchupStage = NewStage;
 	if (IsStealthActive()) ApplyStealthMovementClamps();
 	else ApplyMovementSpeeds();
+}
+
+void ACompanionCharacter::MirrorCrouch(bool bCrouch)
+{
+	if (!HasAuthority()) return;
+
+	if (bCrouch)
+	{
+		Crouch();
+		bCrouchOwnedByStealth = true;
+	}
+	else
+	{
+		UnCrouch();
+		bCrouchOwnedByStealth = false;
+	}
 }
 
 // --- Low Ready Aim ---
@@ -566,6 +628,17 @@ const UCompanionTuningDataAsset* ACompanionCharacter::GetTuning() const
 float ACompanionCharacter::TunedWalkSpeed() const
 {
 	const UCompanionTuningDataAsset* T = GetTuning();
+
+	// Stealth no longer force-crouches (F4a) — the standing channel must carry the stealth-tuned
+	// speeds itself. FastCrouch catch-up hustles even while standing; the crouched channel
+	// (TunedCrouchedWalkSpeed) still owns the tier for whenever the crouch-mirror has it hunkered.
+	if (IsStealthActive())
+	{
+		const bool bFastCrouch = StealthCatchupStage == EStealthCatchup::FastCrouch;
+		if (bFastCrouch) return T ? T->StealthCatchupSpeed : StealthCatchupSpeed;
+		return T ? T->StealthWalkSpeed : StealthWalkSpeed;
+	}
+
 	return T ? T->WalkSpeed : WalkSpeed;
 }
 
@@ -578,8 +651,19 @@ float ACompanionCharacter::TunedSprintSpeed() const
 float ACompanionCharacter::TunedCrouchedWalkSpeed() const
 {
 	const UCompanionTuningDataAsset* T = GetTuning();
-	const bool bFastCrouch = IsStealthActive() && StealthCatchupStage == EStealthCatchup::FastCrouch;
-	if (bFastCrouch && T) return T->StealthCrouchCatchupSpeed;
+
+	// Stealth crouch-walk rides the normal walk speed: the standing channel already carries the
+	// stealth slowdown (StealthWalkSpeed), and stacking the crouch penalty on top of it made the
+	// mirror-crouch pace unusably slow. FastCrouch keeps its catch-up tier, floored at the base
+	// so the "hustle" tier can never be slower than ordinary stealth crouch-walk.
+	if (IsStealthActive())
+	{
+		const float Base = T ? T->WalkSpeed : WalkSpeed;
+		if (StealthCatchupStage == EStealthCatchup::FastCrouch && T)
+			return FMath::Max(Base, T->StealthCrouchCatchupSpeed);
+		return Base;
+	}
+
 	return T ? T->CrouchedWalkSpeed : CrouchedWalkSpeed;
 }
 
@@ -590,6 +674,48 @@ void ACompanionCharacter::ApplyMovementSpeeds()
 
 	MoveComp->MaxWalkSpeed = bIsSprinting ? TunedSprintSpeed() : TunedWalkSpeed();
 	MoveComp->MaxWalkSpeedCrouched = TunedCrouchedWalkSpeed();
+}
+
+// --- Soft Collision (F2 asymmetric blocking — companion self-push) ---
+
+void ACompanionCharacter::TickPlayerSoftSeparation()
+{
+	if (!HasAuthority()) return;
+	if (bIsDBNO || bIsRevivingPlayer || bBeingRevived) return;
+	if (bTakedownMontagePlaying) return;
+	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy()) return;
+
+	const ACompanionAIController* AIC = Cast<ACompanionAIController>(GetController());
+	const APawn* PlayerPawn = AIC ? AIC->GetPlayerCharacter() : nullptr;
+	if (!IsValid(PlayerPawn)) return;
+
+	const IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PlayerPawn);
+	if (PlayerIface && PlayerIface->GetIsDBNO()) return;
+
+	// ACharacter::GetCapsuleComponent() is a direct accessor (no per-frame component-class scan the
+	// way FindComponentByClass is) — the player pawn is always an ACharacter, so this is free.
+	const ACharacter* PlayerCharacter = Cast<ACharacter>(PlayerPawn);
+	if (!IsValid(PlayerCharacter)) return;
+
+	const UCapsuleComponent* PlayerCapsule = PlayerCharacter->GetCapsuleComponent();
+	if (!IsValid(PlayerCapsule)) return;
+
+	FVector Delta = GetActorLocation() - PlayerPawn->GetActorLocation();
+	Delta.Z = 0.f;
+
+	const float CombinedRadius = GetCapsuleComponent()->GetScaledCapsuleRadius()
+		+ PlayerCapsule->GetScaledCapsuleRadius()
+		+ CompanionSelfPushPadding;
+
+	const float Dist = Delta.Size();
+	if (Dist >= CombinedRadius) return;
+
+	FVector PushDir = (Dist > KINDA_SMALL_NUMBER) ? (Delta / Dist) : GetActorRightVector();
+	PushDir.Z = 0.f;
+	PushDir = PushDir.GetSafeNormal();
+
+	const float DepthFraction = 1.f - (Dist / CombinedRadius);
+	AddMovementInput(PushDir * (CompanionSelfPushStrength * DepthFraction), 1.f);
 }
 
 void ACompanionCharacter::GetOwnedGameplayTags(FGameplayTagContainer& TagContainer) const
@@ -728,6 +854,7 @@ void ACompanionCharacter::EnterDBNO()
 
 	// Tear down active commands
 	DisarmCommandedTakedown();
+	ClearPostBreachEngagement();
 	if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController()))
 		CompAIC->ClearActiveCommand();
 
@@ -752,6 +879,12 @@ void ACompanionCharacter::EnterDBNO()
 	{
 		Movement->StopMovementImmediately();
 		Movement->bUseControllerDesiredRotation = false;
+		// Crawl channel: the downed-retreat BT task moves this body to cover at crawl pace, body
+		// facing the crawl direction (BS_Downed_Crawl is a Speed x Direction space). HandleRevive
+		// restores both via ApplyMovementSpeeds + the flag flip.
+		Movement->MaxWalkSpeed = DownedCrawlSpeed;
+		Movement->MaxWalkSpeedCrouched = DownedCrawlSpeed;
+		Movement->bOrientRotationToMovement = true;
 	}
 
 	if (AAIController* AIC = Cast<AAIController>(GetController()))
@@ -764,10 +897,22 @@ void ACompanionCharacter::EnterDBNO()
 
 	SetActorTickEnabled(false);
 
-	// Write BB IsDowned for BT gating (key added in-engine later; missing key is tolerable)
+	// Write BB IsDowned for BT gating; drop the combat target so the post-revive tree can't
+	// re-enter Combat against a stale/dead enemy (the state service early-outs while DBNO and
+	// would not clear it for the whole downed stint).
 	if (AAIController* AIC = Cast<AAIController>(GetController()))
 		if (UBlackboardComponent* BB = AIC->GetBlackboardComponent())
+		{
 			BB->SetValueAsBool(NAME_IsDowned, true);
+			BB->ClearValue(ACompanionAIController::BB_CombatTarget);
+		}
+
+	// 1Hz insurance diagnostic: names the seam if the downed pose ever fails to show again
+	// (anim-instance mirror vs character flag vs a stomping montage).
+	GetWorldTimerManager().SetTimer(
+		DBNODiagTimerHandle, this,
+		&ACompanionCharacter::LogDBNODiagnostic,
+		1.f, true);
 
 	// Start bleedout timer (authority only)
 	if (HasAuthority())
@@ -799,6 +944,7 @@ void ACompanionCharacter::ExitDBNO()
 	bIsDBNO = false;
 
 	GetWorldTimerManager().ClearTimer(BleedoutTimerHandle);
+	GetWorldTimerManager().ClearTimer(DBNODiagTimerHandle);
 
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->SetWeaponHidden(false);
@@ -863,16 +1009,118 @@ bool ACompanionCharacter::GetIsVaulting() const
 	return IsValid(TraversalComponent) && TraversalComponent->GetActiveType() == ETraversalType::Vault;
 }
 
-void ACompanionCharacter::SetBeingRevived(bool bRevived, float /*ExpectedDuration*/)
+void ACompanionCharacter::SetBeingRevived(bool bRevived, float ExpectedDuration)
 {
+	if (bBeingRevived == bRevived)
+	{
+		// Redundant false->false calls are normal teardown (montage-driven exit already cleared the
+		// state); only a stale TRUE at hold start is a real problem (companion would stay flat).
+		if (bBeingRevived)
+			UE_LOG(LogCompanion, Warning, TEXT("%s SetBeingRevived(true): flag already true — get-up montage NOT retriggered"), *GetName());
+		return;
+	}
 	bBeingRevived = bRevived;
+
+	// Freeze the crawl under the reviver's hands THIS frame: abort the pathfollowing request
+	// (StopMovementImmediately alone only zeroes velocity — an active move re-accelerates before
+	// the retreat task's next slow tick) and kill residual velocity. The task keeps the hold and
+	// re-issues its move if the hold aborts.
+	if (bRevived)
+	{
+		if (AAIController* AIC = Cast<AAIController>(GetController()))
+			AIC->StopMovement();
+		if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+			Movement->StopMovementImmediately();
+	}
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst) || !BeingRevivedMontage)
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("%s SetBeingRevived(%d): no anim instance or no BeingRevivedMontage assigned — companion stays flat"),
+			*GetName(), bRevived);
+		return;
+	}
+
+	if (bRevived && bIsDBNO)
+	{
+		if (!AnimInst->Montage_IsPlaying(BeingRevivedMontage))
+		{
+			// Rate-scale so one montage cycle spans the reviver's hold exactly — the get-up motion
+			// lands on the frame the revive completes, whatever the hold duration is tuned to.
+			const float MontageLength = BeingRevivedMontage->GetPlayLength();
+			const float PlayRate = (ExpectedDuration > 0.f && MontageLength > 0.f)
+				? MontageLength / ExpectedDuration : 1.f;
+			const float PlayLength = AnimInst->Montage_Play(BeingRevivedMontage, PlayRate);
+			UE_LOG(LogCompanion, Log, TEXT("%s SetBeingRevived: playing '%s' rate=%.3f -> playLength=%.2f (expectDur=%.2f)"),
+				*GetName(), *GetNameSafe(BeingRevivedMontage), PlayRate, PlayLength, ExpectedDuration);
+			if (PlayLength <= 0.f)
+			{
+				UE_LOG(LogCompanion, Warning, TEXT("%s: BeingRevivedMontage '%s' failed to play (slot/skeleton mismatch?)"),
+					*GetName(), *GetNameSafe(BeingRevivedMontage));
+			}
+			else
+			{
+				// The get-up montage owns revive completion: its natural blend-out fires ExitDBNO at
+				// the frame the body is upright. The reviver's hold timer stays as fallback only.
+				FOnMontageBlendingOutStarted BlendOutDelegate;
+				BlendOutDelegate.BindUObject(this, &ACompanionCharacter::OnBeingRevivedMontageBlendOut);
+				AnimInst->Montage_SetBlendingOutDelegate(BlendOutDelegate, BeingRevivedMontage);
+			}
+		}
+	}
+	else if (bRevived && !bIsDBNO)
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("%s SetBeingRevived(true) but bIsDBNO=false — get-up montage skipped"), *GetName());
+	}
+	else if (AnimInst->Montage_IsPlaying(BeingRevivedMontage))
+		AnimInst->Montage_Stop(0.25f, BeingRevivedMontage);
+}
+
+void ACompanionCharacter::OnBeingRevivedMontageBlendOut(UAnimMontage* /*Montage*/, bool bInterrupted)
+{
+	// Interrupted = manual stop (hold abort/finish) or a same-slot stomp — not a completed get-up.
+	if (bInterrupted)
+	{
+		UE_LOG(LogCompanion, Log, TEXT("%s being-revived montage INTERRUPTED (bIsDBNO=%d beingRevived=%d activeMontage=%s)"),
+			*GetName(), bIsDBNO, bBeingRevived, *GetActiveBodyMontageName());
+		return;
+	}
+
+	if (!bIsDBNO || !bBeingRevived || !HasAuthority()) return;
+
+	UE_LOG(LogCompanion, Log, TEXT("%s being-revived montage completed get-up — montage-driven ExitDBNO"), *GetName());
+	ExitDBNO();
+}
+
+bool ACompanionCharacter::IsBeingRevivedMontagePlaying() const
+{
+	if (!BeingRevivedMontage) return false;
+	const USkeletalMeshComponent* MeshComp = GetMesh();
+	const UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+	return IsValid(AnimInst) && AnimInst->Montage_IsPlaying(BeingRevivedMontage);
+}
+
+void ACompanionCharacter::LogDBNODiagnostic() const
+{
+	const USkeletalMeshComponent* MeshComp = GetMesh();
+	const UCompanionAnimInstance* AnimInst = IsValid(MeshComp) ? Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()) : nullptr;
+	UE_LOG(LogCompanion, Log, TEXT("%s DBNO DIAG: charDBNO=%d animDBNO=%d beingRevived=%d speed=%.0f activeMontage=%s"),
+		*GetName(), bIsDBNO,
+		AnimInst ? (int32)AnimInst->GetIsDBNOMirrored() : -1,
+		bBeingRevived,
+		GetVelocity().Size2D(),
+		*GetActiveBodyMontageName());
 }
 
 void ACompanionCharacter::AlignForRevive(const FVector& ReviverLocation)
 {
-	const FVector ToReviver = (ReviverLocation - GetActorLocation()).GetSafeNormal2D();
-	if (!ToReviver.IsNearlyZero())
-		SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw, 0.f));
+	// The downed body is the arrangement ANCHOR (parity with the player's AlignForRevive): keep
+	// the current yaw — the reviving player snaps into THIS frame (SetReviverLock), so rotating
+	// toward the reviver here would fight the authored pair layout.
+	UE_LOG(LogCompanion, Log, TEXT("%s REVIVE ALIGN(companion-downed): anchor yaw=%.1f reviverLoc=%s dist2D=%.1f"),
+		*GetName(), GetActorRotation().Yaw, *ReviverLocation.ToCompactString(),
+		FVector::Dist2D(GetActorLocation(), ReviverLocation));
 }
 
 void ACompanionCharacter::HandleRevive()
@@ -888,7 +1136,11 @@ void ACompanionCharacter::HandleRevive()
 	{
 		Movement->SetMovementMode(MOVE_Walking);
 		Movement->bUseControllerDesiredRotation = true;
+		Movement->bOrientRotationToMovement = false;
 	}
+
+	// Undo the DBNO crawl clamp — re-derive walk/crouch speeds from the tuning asset.
+	ApplyMovementSpeeds();
 }
 
 // --- Traversal ---

@@ -64,6 +64,10 @@ void UEnemyDirectorSubsystem::ReportEnemySearching()
 
 void UEnemyDirectorSubsystem::ReportEnemyCombat()
 {
+	// Stamped before Escalate — Escalate early-outs once already Loud, but the event time must
+	// keep refreshing for every enemy that enters Combat (companion stealth-break reads it).
+	if (const UWorld* World = GetWorld())
+		LastCombatReportTime = World->GetTimeSeconds();
 	Escalate(EGlobalAlertLevel::Loud);
 }
 

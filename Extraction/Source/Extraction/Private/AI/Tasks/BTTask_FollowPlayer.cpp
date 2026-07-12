@@ -42,6 +42,7 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	LastMoveTarget = FVector::ZeroVector;
 	bIsIdling = false;
 	SprintLogAccumulator = 0.f;
+	BlockedMoveReissueAccumulator = 0.f;
 	LastSeenMode = Companion->GetMode();
 
 	// Reset EQS slot state — stale slots from a previous run must not bleed into this one.
@@ -297,6 +298,29 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	}
 
 	const FVector MoveTarget = (bHasEqsTarget && !bCombatLead) ? EqsTarget : FormationDir;
+
+	// Blocked-move re-issue: MoveToLocation can silently fail to path (e.g. the player is standing
+	// exactly on the formation anchor) and the path-following component settles to Idle without
+	// ever crossing the >200cm shift check below — the companion parks short of the target
+	// forever. Reset LastMoveTarget so the shift check passes and the move re-issues. This is a
+	// true Idle-debounce, not a rate-limit: the accumulator only counts while the path is actually
+	// Idle and resets the instant it isn't, so a companion still Moving toward a reachable target
+	// never gets its LastMoveTarget yanked out from under it every 0.5s.
+	const UPathFollowingComponent* PathFollowing = Controller->GetPathFollowingComponent();
+	const bool bPathIdle = IsValid(PathFollowing) && PathFollowing->GetStatus() == EPathFollowingStatus::Idle;
+	if (bPathIdle && !LastMoveTarget.IsNearlyZero())
+	{
+		BlockedMoveReissueAccumulator += DeltaSeconds;
+		if (BlockedMoveReissueAccumulator >= BlockedMoveReissueCooldown)
+		{
+			BlockedMoveReissueAccumulator = 0.f;
+			LastMoveTarget = FVector::ZeroVector;
+		}
+	}
+	else
+	{
+		BlockedMoveReissueAccumulator = 0.f;
+	}
 
 	// Sprint catch-up + idle hysteresis still keyed on DistToPlayer (not the slot).
 	// SetSprinting MUST stay before any early-return — preserves the c62bdbf sprint-latch fix.

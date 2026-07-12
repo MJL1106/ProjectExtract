@@ -72,6 +72,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	EEnemyAwarenessState GetAwarenessState() const { return CurrentState; }
 
+	/** World seconds of the most recent transition INTO Combat. Per-enemy decaying event stamp —
+	 *  covers isolated-encounter enemies that never report to the director. */
+	float GetLastCombatEnterTime() const { return LastCombatEnterTime; }
+
 	/** Highest current per-target suspicion (0-100). Debug/UI use. */
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	float GetHighestSuspicion() const;
@@ -215,6 +219,7 @@ private:
 	TWeakObjectPtr<UEnemyDirectorSubsystem> Director;
 
 	EEnemyAwarenessState CurrentState = EEnemyAwarenessState::Unaware;
+	float LastCombatEnterTime = -1e9f;
 
 	TWeakObjectPtr<AActor> CombatTarget;
 	FVector LastKnownLocation = FVector::ZeroVector;

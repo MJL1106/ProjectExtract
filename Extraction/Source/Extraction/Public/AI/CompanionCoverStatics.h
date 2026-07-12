@@ -51,10 +51,16 @@ namespace CompanionCover
 	bool LowHealthDashAllowed(UWorld* World, const FVector& PawnLoc, const AController* Querier,
 		const UCompanionTuningDataAsset& Tuning, const FCoverTriggers& Triggers);
 
-	/** STRONG pressure — the shared bar for the natural-cycling pair: the switch monitor's
-	 *  committed-time release fires only when this is false, and the commit sites' recommit
-	 *  cooldown blocks only while it stays false. One definition on both sides or a low-grade
-	 *  trigger (suppression 0.5-0.75, lingering low ammo) releases then instantly re-commits. */
+	/** Pressure SPIKE — heavy suppression, recent hits, or outnumbered. Deliberately excludes
+	 *  static low health: a wounded-but-unpressured companion must not bypass the recommit
+	 *  cooldown, or every deliberate cover release instantly re-commits and the companion
+	 *  duck-hops between points. The recommit gates use THIS bar. */
+	bool HasPressureSpiked(const ACompanionCharacter& Companion,
+		const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount);
+
+	/** STRONG pressure — HasPressureSpiked OR low health. The switch monitor's committed-time
+	 *  release fires only when this is false, so a wounded companion holds working cover instead
+	 *  of naturally cycling out of it. Release side only; commit sides use HasPressureSpiked. */
 	bool IsStrongPressure(const ACompanionCharacter& Companion,
 		const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount);
 

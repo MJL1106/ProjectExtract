@@ -232,6 +232,11 @@ public:
 	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it; only the companion BT service calls it. */
 	bool HasDetectedPlayer() const;
 
+	/** World seconds of this enemy's most recent transition into Combat awareness, or a large
+	 *  negative sentinel if never / component missing. Companion stealth-break compares this
+	 *  against the stealth pin time to distinguish a NEW fight from a stale Combat-state tail. */
+	float GetTimeEnteredCombat() const;
+
 	/** True when this enemy is alert enough for the companion to ready its weapon.
 	 *  Searching and Combat count; Suspicious does not. */
 	bool IsAlertedForCompanionReadiness() const;

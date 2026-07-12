@@ -64,7 +64,9 @@ void AObjectiveMarkerActor::Activate()
 		}
 	}
 
-	Objectives->AddObjective(GetEffectiveId(), Label, GetActorLocation(), this);
+	// Static marker (no target actor): the placed location is WYSIWYG. Passing `this` would pull
+	// the resolved height off the actor's bounds, which the completion sphere radius inflates.
+	Objectives->AddObjective(GetEffectiveId(), Label, GetActorLocation());
 	bActive = true;
 
 	// Arm location completion.

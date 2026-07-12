@@ -10,12 +10,21 @@ float UExtractionPlayerMovement::GetMaxSpeed() const
 	const AExtractionPlayer* Player = Cast<AExtractionPlayer>(GetCharacterOwner());
 	if (!Player) return BaseSpeed;
 
+	float Speed = BaseSpeed;
+
+	// Route speed lock — only ground/air locomotion (the walk-speed family); swim/fly/custom alone.
 	const float Lock = Player->GetRouteSpeedLock();
-	if (Lock <= 0.f || Player->GetIsDBNO()) return BaseSpeed;
+	if (Lock > 0.f && !Player->GetIsDBNO() && (IsMovingOnGround() || IsFalling()))
+	{
+		// Crouch is capped, never boosted; standing locks to the exact value.
+		Speed = IsCrouching() ? FMath::Min(Speed, Lock) : Lock;
+	}
 
-	// Only ground/air locomotion (the walk-speed family); leave swim/fly/custom alone.
-	if (!IsMovingOnGround() && !IsFalling()) return BaseSpeed;
+	// Held-Ctrl walk cap — applied last so it combines min-wise with the route lock (whichever is
+	// lower always wins) and always beats a kit-BP sprint write. Crouch excluded: already below
+	// HeldWalkSpeed by design (PIE-verify; see the header comment on HeldWalkSpeed).
+	if (Player->IsWalkHeld() && !Player->GetIsDBNO() && IsMovingOnGround() && !IsCrouching())
+		Speed = FMath::Min(Speed, HeldWalkSpeed);
 
-	// Crouch is capped, never boosted; standing locks to the exact value.
-	return IsCrouching() ? FMath::Min(BaseSpeed, Lock) : Lock;
+	return Speed;
 }

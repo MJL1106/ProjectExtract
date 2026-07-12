@@ -5,13 +5,56 @@
 #include "AI/CompanionAIController.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "Companion/CompanionCharacter.h"
+#include "Components/HealthComponent.h"
+#include "Enemy/EnemyCharacter.h"
 #include "World/Breachable.h"
 #include "World/DoorBase.h"
+#include "World/Lootable.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Perception/AISense_Hearing.h"
+#include "Kismet/GameplayStatics.h"
+#include "EngineUtils.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCompanionBreach, Log, All);
+
+// Any live enemy within the radius = the room is hot; the loot chain must not hold the command
+// slot open (the command selector outranks the combat branch).
+static bool BreachAnyLiveEnemyWithin(UWorld* World, const FVector& Center, float Radius)
+{
+	if (!World) return false;
+	const float RadiusSq = FMath::Square(Radius);
+	for (TActorIterator<AEnemyCharacter> It(World); It; ++It)
+	{
+		const AEnemyCharacter* Enemy = *It;
+		if (!IsValid(Enemy)) continue;
+		const UHealthComponent* Health = Enemy->GetHealthComponent();
+		if (!IsValid(Health) || Health->IsDead()) continue;
+		if (FVector::DistSquared(Enemy->GetActorLocation(), Center) <= RadiusSq) return true;
+	}
+	return false;
+}
+
+// Nearest still-lootable container within the radius (mirrors BTTask_CompanionLoot's sweep filter).
+static AActor* BreachFindNearestLootable(UWorld* World, const FVector& Center, float Radius)
+{
+	if (!World) return nullptr;
+
+	TArray<AActor*> Lootables;
+	UGameplayStatics::GetAllActorsWithInterface(World, ULootable::StaticClass(), Lootables);
+
+	AActor* Best = nullptr;
+	float BestDistSq = FMath::Square(Radius);
+	for (AActor* Candidate : Lootables)
+	{
+		if (!IsValid(Candidate) || !ILootable::Execute_CanLoot(Candidate)) continue;
+		const float DistSq = FVector::DistSquared(Candidate->GetActorLocation(), Center);
+		if (DistSq > BestDistSq) continue;
+		BestDistSq = DistSq;
+		Best = Candidate;
+	}
+	return Best;
+}
 
 UBTTask_CompanionBreach::UBTTask_CompanionBreach()
 {
@@ -311,10 +354,7 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		const float HoldTime = (bInCombat && !bHadCombatTargetAtStart) ? 0.f : PostBreachWaitTime;
 		if (PhaseElapsed < MontageRemainder + HoldTime) return;
 
-		SetDoorAutoOpenSuppressed(false);
-		AIC->ClearActiveCommand();
-		CachedDoor.Reset();
-		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		FinishBreachSuccess(OwnerComp, AIC, Pawn, Door);
 		return;
 	}
 
@@ -340,10 +380,7 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
-		SetDoorAutoOpenSuppressed(false);
-		AIC->ClearActiveCommand();
-		CachedDoor.Reset();
-		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		FinishBreachSuccess(OwnerComp, AIC, Pawn, Door);
 		return;
 	}
 
@@ -375,10 +412,7 @@ void UBTTask_CompanionBreach::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		if (!bWaitOver) return;
 
-		SetDoorAutoOpenSuppressed(false);
-		AIC->ClearActiveCommand();
-		CachedDoor.Reset();
-		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+		FinishBreachSuccess(OwnerComp, AIC, Pawn, Door);
 		return;
 	}
 	}
@@ -451,6 +485,66 @@ void UBTTask_CompanionBreach::SetDoorAutoOpenSuppressed(bool bSuppressed)
 FString UBTTask_CompanionBreach::GetStaticDescription() const
 {
 	return FString::Printf(TEXT("Breach: align to stand point (accept %.0f cm), montage, door at contact"), StandPointAcceptRadius);
+}
+
+void UBTTask_CompanionBreach::FinishBreachSuccess(UBehaviorTreeComponent& OwnerComp,
+	ACompanionAIController* AIC, APawn* Pawn, AActor* Door)
+{
+	SetDoorAutoOpenSuppressed(false);
+
+	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn);
+	const UCompanionTuningDataAsset* Tuning = IsValid(AIC) ? AIC->GetTuning() : nullptr;
+	const float ExploreRadius = Tuning ? Tuning->PostBreachExploreRadius : 900.f;
+	const float GrantDuration = Tuning ? Tuning->PostBreachEngagementDuration : 8.f;
+
+	// Post-breach chain: the companion was ordered through this door, so it clears the room —
+	// unaware enemies nearby become engageable (grant) and a quiet room chains a loot sweep.
+	// Unbroken Stealth keeps the quiet-breach contract: no grant, no auto-loot, hold as before.
+	bool bChainedLoot = false;
+	if (IsValid(Companion) && !Companion->IsStealthActive() && ExploreRadius > 0.f && IsValid(Door))
+	{
+		// Interior anchor: the same enter-room point the reposition uses; doorway portal fallback.
+		FVector Anchor;
+		if (!IBreachable::Execute_GetPostBreachPoint(Door, Pawn, /*bEnterRoom*/ true, Anchor))
+		{
+			const ADoorBase* DoorBase = Cast<ADoorBase>(Door);
+			Anchor = DoorBase ? DoorBase->GetAcousticPortalPoint() : Door->GetActorLocation();
+		}
+
+		Companion->SetPostBreachEngagement(Anchor, ExploreRadius, GrantDuration);
+		bChainedLoot = ChainLootFromAnchor(OwnerComp, AIC, Pawn, Anchor);
+	}
+
+	if (!bChainedLoot)
+		AIC->ClearActiveCommand();
+
+	CachedDoor.Reset();
+	FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
+}
+
+bool UBTTask_CompanionBreach::ChainLootFromAnchor(UBehaviorTreeComponent& OwnerComp,
+	ACompanionAIController* AIC, APawn* Pawn, const FVector& Anchor)
+{
+	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn);
+	const UCompanionTuningDataAsset* Tuning = IsValid(AIC) ? AIC->GetTuning() : nullptr;
+	const float ExploreRadius = Tuning ? Tuning->PostBreachExploreRadius : 900.f;
+	if (!IsValid(Companion) || Companion->IsStealthActive() || ExploreRadius <= 0.f) return false;
+
+	// Loot chains only into a quiet room: while a command is active the combat branch cannot
+	// run, so a hot room clears the command instead and the grant lets the fight start.
+	const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	const bool bInCombat = IsValid(BB)
+		&& IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
+	if (bInCombat || BreachAnyLiveEnemyWithin(Companion->GetWorld(), Anchor, ExploreRadius)) return false;
+
+	AActor* Container = BreachFindNearestLootable(Companion->GetWorld(), Anchor, ExploreRadius);
+	if (!Container) return false;
+
+	UE_LOG(LogCompanionBreach, Log, TEXT("ChainLootFromAnchor: room quiet — chaining loot sweep to %s"),
+		*GetNameSafe(Container));
+	AIC->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife,
+		Container, Container->GetActorLocation());
+	return true;
 }
 
 void UBTTask_CompanionBreach::FailAndClear(UBehaviorTreeComponent& OwnerComp)

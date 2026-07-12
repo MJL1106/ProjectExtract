@@ -69,6 +69,10 @@ public:
 
 	const UCompanionTuningDataAsset* GetTuning() const { return Tuning; }
 
+	/** Hearing stimulus MaxAge (seconds). Stealth-break gates its heard-enemy signal past this so
+	 *  stimuli from before a fresh Stealth order can't break it. */
+	float GetHearingSenseMaxAge() const;
+
 	/** Resets the BB_PlayerTraversal* keys. Public so BT tasks can call on early-finish paths. */
 	void ClearTraversalBlackboard();
 

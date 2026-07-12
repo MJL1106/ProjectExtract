@@ -2,6 +2,7 @@
 
 #include "ExtractionGameMode.h"
 #include "ExtractionCharacter.h"
+#include "ExtractionGameInstance.h"
 #include "ExtractionPlayerController.h"
 #include "Kismet/GameplayStatics.h"
 
@@ -15,6 +16,10 @@ void AExtractionGameMode::CompleteLevel()
 {
 	if (bLevelCompleted || bLevelFailed) return;
 	bLevelCompleted = true;
+
+	// A finished level leaves no resume point behind — the next run starts clean.
+	if (UExtractionGameInstance* GameInstance = GetGameInstance<UExtractionGameInstance>())
+		GameInstance->ClearCheckpoint();
 
 	UGameplayStatics::SetGamePaused(this, true);
 

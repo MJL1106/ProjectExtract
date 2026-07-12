@@ -72,6 +72,26 @@ public:
 	UPROPERTY(EditAnywhere, Category="Companion|Breach", meta = (ClampMin = "0.0"))
 	TMap<EBreachType, float> BreachOpenDelay;
 
+	// --- Post-breach explore/loot/engage chain (skipped entirely in unbroken Stealth) ---
+
+	/** Radius (cm) around the post-breach interior point scanned for lootable containers and, via
+	 *  the engagement grant, within which unaware enemies become engageable. 0 disables the chain. */
+	UPROPERTY(EditAnywhere, Category="Companion|PostBreach", meta = (ClampMin = "0.0"))
+	float PostBreachExploreRadius = 900.f;
+
+	/** Seconds the unaware-enemy engagement grant stays live after a commanded breach completes. */
+	UPROPERTY(EditAnywhere, Category="Companion|PostBreach", meta = (ClampMin = "0.0"))
+	float PostBreachEngagementDuration = 8.f;
+
+	/** Radius (cm) around a commanded explore point scanned for lootable containers and, via the
+	 *  engagement grant, within which unaware enemies become engageable. */
+	UPROPERTY(EditAnywhere, Category="Companion|Explore", meta = (ClampMin = "0.0"))
+	float ExploreLootRadius = 1200.f;
+
+	/** Seconds the unaware-enemy engagement grant stays live around a commanded explore point. */
+	UPROPERTY(EditAnywhere, Category="Companion|Explore", meta = (ClampMin = "0.0"))
+	float ExploreEngagementDuration = 8.f;
+
 	// --- Movement speeds (applied by ACompanionCharacter; its EditDefaultsOnly members are the
 	// fallback when no tuning asset is assigned) ---
 
@@ -89,6 +109,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
 	float StealthCrouchCatchupSpeed = 400.f;
 
+	// Standing-channel stealth speeds (F4a: Stealth no longer force-crouches — this is now the
+	// default stealth stance). Applied to MaxWalkSpeed while stealth-active and standing.
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float StealthWalkSpeed = 300.f;
+
+	// Standing-channel FastCrouch catch-up tier — the crouched-channel equivalent is
+	// StealthCrouchCatchupSpeed above. Applied to MaxWalkSpeed while stealth-active, standing, and
+	// the follow task reports FastCrouch stage.
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float StealthCatchupSpeed = 450.f;
+
 	// Distance (cm) past which a stealth-active companion breaks crouch entirely and sprints to
 	// catch up (the player is clearly sprinting off). Below it the fast-crouch tier applies.
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
@@ -102,6 +133,21 @@ public:
 	// sprint. The kit BP owns player sprint state, so it is inferred from velocity (walk 600 / sprint 900).
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
 	float PlayerSprintSpeedThreshold = 700.f;
+
+	// --- Stealth crouch-mirror (F4a: companion mirrors the player's own crouch/uncrouch, with a
+	// randomized human-reaction delay, instead of Stealth force-crouching) ---
+
+	UPROPERTY(EditAnywhere, Category = "Companion|StealthMirror", meta = (ClampMin = "0.0"))
+	float StealthCrouchMirrorDelayMin = 0.35f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|StealthMirror", meta = (ClampMin = "0.0"))
+	float StealthCrouchMirrorDelayMax = 0.8f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|StealthMirror", meta = (ClampMin = "0.0"))
+	float StealthUncrouchMirrorDelayMin = 0.5f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|StealthMirror", meta = (ClampMin = "0.0"))
+	float StealthUncrouchMirrorDelayMax = 1.2f;
 
 	// --- Follow / formation (migrated from BTTask_FollowPlayer) ---
 
@@ -739,4 +785,55 @@ public:
 	// Acceptance radius for the back-out move (cm). Kept small so the companion actually reaches the standoff.
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "10"))
 	float FollowBackoutAcceptRadius = 50.f;
+
+	// --- Non-combat facing (F3 watch-threats + F1 ambient facing) ---
+	// Out-of-combat presentation only — never flips posture to Combat, never fires, never touches
+	// the actual combat-target key. See UBTService_UpdateCompanionState::UpdateNonCombatFacing.
+
+	// Range (cm) within which the nearest perceived, alive, LoS-visible enemy — including one that
+	// hasn't detected the player — becomes a "watch threat" (Normal: weapon raised; Stealth: rotate
+	// only, stays low).
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0"))
+	float WatchThreatRange = 3500.f;
+
+	// Seconds the watch facing/stance holds after the watched enemy drops out of LoS/range before
+	// releasing. Doubles as last-known-position memory: long enough that a player backing off from
+	// an unaware enemy keeps the companion covering the retreat instead of shrugging it off, while
+	// still absorbing doorway flicker.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0"))
+	float WatchThreatLingerSeconds = 6.f;
+
+	// Master kill-switch for ambient facing (path look-ahead while moving, attention-yaw while idle,
+	// idle scan glances). Off = the companion holds whatever yaw it last had out of combat, and
+	// watch-threat facing is the only out-of-combat facing source. Defaults off: the 2026-07-11
+	// playtest read ambient facing as erratic (fought commanded moves); watch facing alone landed.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing")
+	bool bAmbientFacingEnabled = false;
+
+	// Distance (cm) ahead along the current path the companion's ambient facing looks while moving.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0"))
+	float AmbientLookAheadDistance = 300.f;
+
+	// Yaw error (degrees) the idle companion must exceed before it turns to face the player's
+	// attention yaw — a dead zone so it doesn't hunt every tiny direction change.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float AmbientYawDeadzoneDeg = 35.f;
+
+	// Half-angle (degrees) of the cone, centered on the player→companion direction, within which
+	// the player's own view counts as "looking at the companion" — while true, idle facing does not
+	// adopt a new attention yaw (don't turn away while being looked at).
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float AttentionDontTurnAwayConeDeg = 35.f;
+
+	// Idle scan-glance re-roll interval bounds (seconds) — a small random offset added to the
+	// idle attention yaw, re-rolled on this cadence for a subtle "looking around" tell.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.5"))
+	float AmbientScanIntervalMin = 4.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.5"))
+	float AmbientScanIntervalMax = 8.f;
+
+	// Max magnitude (degrees) of the idle scan-glance yaw offset.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0", ClampMax = "90.0"))
+	float AmbientScanOffsetMaxDeg = 20.f;
 };

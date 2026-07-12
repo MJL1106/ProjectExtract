@@ -29,6 +29,7 @@ class UCompanionCommandComponent;
 class UConsumableInventoryComponent;
 class UAnimMontage;
 class USpringArmComponent;
+class USceneComponent;
 struct FInputActionValue;
 
 // Distinct name from the legacy AExtractionCharacter declaration to avoid linker conflicts during the migration period.
@@ -172,6 +173,20 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	virtual float GetBleedoutTimeRemaining() const override { return BleedoutTimeRemaining; }
 
+	// ---- Revive prompt (local-only; URevivePromptWidget polls these) ----
+
+	/** Downed teammate under the crosshair (low-rate local scan), or nullptr. */
+	UFUNCTION(BlueprintPure, Category = "Revive")
+	AActor* GetReviveCandidate() const { return ReviveCandidate.Get(); }
+
+	/** True while the local hold-E revive is running. */
+	UFUNCTION(BlueprintPure, Category = "Revive")
+	bool IsRevivingTarget() const { return bIsReviving; }
+
+	/** Normalized 0-1 progress of the local revive hold. */
+	UFUNCTION(BlueprintPure, Category = "Revive")
+	float GetReviveProgress() const { return ReviveDuration > 0.f ? FMath::Clamp(ReviveElapsed / ReviveDuration, 0.f, 1.f) : 0.f; }
+
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const override { return CachedAnimInstance; }
 
@@ -225,15 +240,26 @@ public:
 	/** Read by UExtractionPlayerMovement::GetMaxSpeed. 0 = no lock. */
 	float GetRouteSpeedLock() const { return RouteSpeedLock; }
 
-	/** True while the route speed lock is active. The kit BP's sprint input handler checks this
-	 *  so shift can't engage the sprint anim while actual speed is clamped to the lock. */
+	/** True while the route speed lock is active OR the player is holding the walk key. The kit
+	 *  BP's sprint input handler checks this so shift can't engage the sprint anim in either case. */
 	UFUNCTION(BlueprintPure, Category = "Movement")
-	bool IsSprintBlocked() const { return RouteSpeedLock > 0.f; }
+	bool IsSprintBlocked() const { return RouteSpeedLock > 0.f || bWalkHeld; }
 
 	/** Fired when the route speed lock engages or clears. Kit BP implements this to cancel an
 	 *  already-running sprint on engage (the input-handler gate only covers new presses). */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Movement")
 	void OnRouteSpeedLockChanged(bool bLocked);
+
+	/** True while the hold-to-walk key (Left Ctrl) is held. Consumed by
+	 *  UExtractionPlayerMovement::GetMaxSpeed to cap ground speed; footsteps key off velocity, not
+	 *  this flag, so no replication is needed (single-player feature). */
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool IsWalkHeld() const { return bWalkHeld; }
+
+	/** Fired on the true/false edge of the walk-hold key. Kit BP implements this to cancel an
+	 *  already-running sprint on engage, mirroring OnRouteSpeedLockChanged. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Movement")
+	void OnWalkHeldChanged(bool bHeld);
 
 	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
 	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }
@@ -296,6 +322,10 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> VaultAction;
+
+	/** Hold-to-walk (Left Ctrl). Started sets bWalkHeld true, Completed/Canceled clear it. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> WalkAction;
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> InteractAction;
@@ -371,8 +401,10 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
 	float BleedoutDuration = 90.f;
 
+	/** 2.0 matches the companion's revive hold (BP_Companion.ReviveDuration) — both directions
+	 *  of the pair play the same clips at the same pace. */
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.5"))
-	float ReviveDuration = 4.f;
+	float ReviveDuration = 2.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.01", ClampMax = "1.0"))
 	float ReviveHealthPercent = 0.3f;
@@ -392,6 +424,12 @@ protected:
 	 *  (OnBeingRevivedMontageBlendOut → ExitDBNO); a looping asset would never fire it. */
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
 	TObjectPtr<UAnimMontage> BeingRevivedMontage;
+
+	/** Kneel montage played on this player's OWN body while they hold E reviving a downed
+	 *  teammate — rate-scaled so one cycle spans ReviveDuration. The FP camera rides the head
+	 *  bone through it (takedown-style), so this is what "locks" the reviver's view. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
+	TObjectPtr<UAnimMontage> ReviverMontage;
 
 	/** Seconds of full damage immunity after a revive — without it a mid-burst enemy re-downs the
 	 *  player the frame they stand up. */
@@ -492,6 +530,12 @@ private:
 	void ReloadStart(const FInputActionValue& Value);
 	void ADSStart(const FInputActionValue& Value);
 	void ADSStop(const FInputActionValue& Value);
+
+	void WalkStart(const FInputActionValue& Value);
+	void WalkStop(const FInputActionValue& Value);
+
+	/** True while the hold-to-walk key is down. See IsWalkHeld/OnWalkHeldChanged. */
+	bool bWalkHeld = false;
 
 	void VaultStart(const FInputActionValue& Value);
 
@@ -653,9 +697,66 @@ private:
 	UFUNCTION(Server, Reliable)
 	void Server_CompleteRevive(AActor* Target);
 
+	/** Ordered owner-pawn requests for the authoritative revive session lifecycle. */
+	UFUNCTION(Server, Reliable)
+	void Server_BeginReviveSession(AActor* Target);
+
+	UFUNCTION(Server, Reliable)
+	void Server_EndReviveSession();
+
+	bool CanBeginReviveSessionAuthority(AActor* Target) const;
+	void BeginReviveSessionAuthority(AActor* Target);
+	void EndReviveSessionAuthority();
+	void ApplyReviveTargetAlignmentAuthority(ACharacter& Target);
+
+	/** Server-only, non-owning session state used to reject repeated/conflicting starts and
+	 *  guarantee authority-side movement-ignore teardown on cancel, finish, or EndPlay. */
+	TWeakObjectPtr<ACharacter> AuthorityReviveSessionTarget;
+	TOptional<double> AuthorityReviveSessionStartTime;
+
 	UPROPERTY()
 	TObjectPtr<AActor> ReviveTarget;
 
 	float ReviveElapsed = 0.f;
 	bool bIsReviving = false;
+
+	/** Low-rate crosshair scan feeding the revive prompt (local player only). */
+	void UpdateReviveCandidateScan(float DeltaTime);
+
+	TWeakObjectPtr<AActor> ReviveCandidate;
+	float ReviveCandidateScanAccumulator = 0.f;
+
+	/** Takedown-style hold lock while reviving: aligns the target around this stable actor frame,
+	 *  plays ReviverMontage, attaches the local camera to the head, and gates move/fire.
+	 *  Symmetric teardown on cancel/complete. */
+	bool SetReviverLock(bool bActive);
+	bool AttachReviveCameraToHead();
+	void RestoreReviveCameraAttachment();
+	void TryRestoreReviverYawFollow(float YawInput);
+
+	/** Hide/show the held weapon visuals (weapon actor + the kit's hand-socket visual actors). */
+	void SetHeldWeaponHidden(bool bHideWeapon);
+
+	bool bReviverLockActive = false;
+	TWeakObjectPtr<ACharacter> ReviverLockIgnoredTarget;
+
+	/** Saved once while the local revive camera is attached to the animated head. Non-reflected,
+	 *  non-owning state restores the Blueprint-owned spring arm exactly when its original hierarchy
+	 *  remains valid; failed reattachment safely falls back to a world-preserving detach. */
+	TWeakObjectPtr<USceneComponent> ReviveCameraOriginalParent;
+	FName ReviveCameraOriginalSocket = NAME_None;
+	FTransform ReviveCameraOriginalRelativeTransform = FTransform::Identity;
+	bool bReviveCameraOriginalUsePawnControlRotation = false;
+	bool bReviveCameraAttachmentActive = false;
+
+	/** View yaw captured before controller-yaw follow is suspended. */
+	float ReviverLookAnchorYaw = 0.f;
+
+	/** Reviver-lock yaw ownership is restored only by fresh horizontal look input. Dedicated
+	 *  state avoids clobbering the being-revived role's separate yaw-follow save. */
+	bool bReviverSavedUseControllerRotationYaw = false;
+	bool bReviverYawFollowRestorePending = false;
+
+	/** World time the reviver lock released, retained for the camera debug trace. */
+	float ReviverLockEndTime = -1e9f;
 };

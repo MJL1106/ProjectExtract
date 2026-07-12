@@ -139,6 +139,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "0"))
 	int32 DefaultReserveAmmo = 120;
 
+	/** When true, reloads never consume reserve and CanReload ignores the reserve>0 requirement —
+	 *  the magazine and reload cadence stay finite, only the pool is bottomless. Set on the
+	 *  companion's weapon (design: companion never permanently runs dry). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo")
+	bool bInfiniteReserve = false;
+
 	/** Time in seconds for a full reload */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Ammo", meta = (ClampMin = "0.1"))
 	float ReloadTime = 2.2f;

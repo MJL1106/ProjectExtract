@@ -14,6 +14,7 @@ void UPingPromptWidget::NativeConstruct()
 	if (IsValid(KnifeHintText))   KnifeHintText->SetText(KnifeHint);
 	if (IsValid(ShootHintText))   ShootHintText->SetText(ShootHint);
 	if (IsValid(LootHintText))    LootHintText->SetText(LootHint);
+	if (IsValid(ExploreHintText)) ExploreHintText->SetText(ExploreHint);
 
 	// Resolve the command component on the owning player pawn.
 	APawn* Pawn = GetOwningPlayerPawn();
@@ -48,9 +49,10 @@ void UPingPromptWidget::HandlePingChanged(ECompanionCommand PendingCommand, AAct
 	const bool bBreach    = (PendingCommand == ECompanionCommand::Breach);
 	const bool bTakedown  = (PendingCommand == ECompanionCommand::Takedown);
 	const bool bLoot      = (PendingCommand == ECompanionCommand::Loot);
+	const bool bExplore   = (PendingCommand == ECompanionCommand::Explore);
 
 	UE_LOG(LogTemp, Warning, TEXT("[PingPrompt] HandlePingChanged: cmd=%d target=%s -> show=%d"),
-		(int32)PendingCommand, *GetNameSafe(PingedTarget), (bBreach || bTakedown || bLoot));
+		(int32)PendingCommand, *GetNameSafe(PingedTarget), (bBreach || bTakedown || bLoot || bExplore));
 
 	if (IsValid(BreachContainer))
 	{
@@ -67,6 +69,11 @@ void UPingPromptWidget::HandlePingChanged(ECompanionCommand PendingCommand, AAct
 		LootContainerPanel->SetVisibility(bLoot ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
 	}
 
+	if (IsValid(ExploreContainerPanel))
+	{
+		ExploreContainerPanel->SetVisibility(bExplore ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	}
+
 	// Hide the whole widget when no command is pending.
-	SetVisibility((bBreach || bTakedown || bLoot) ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
+	SetVisibility((bBreach || bTakedown || bLoot || bExplore) ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed);
 }

@@ -52,6 +52,15 @@ namespace
 		TEXT("1 = verbose companion cover decision/movement logging ([COVDBG] decisions, [COVMOVE] position changes)."));
 
 	bool CovDbg() { return CVarCompanionCoverDebug.GetValueOnGameThread() > 0; }
+
+	// companion.FireDebug is registered once in WeaponBase.cpp — re-query by name to avoid a
+	// duplicate CVar registration across translation units.
+	bool FireDbg()
+	{
+		static const IConsoleVariable* CVar =
+			IConsoleManager::Get().FindConsoleVariable(TEXT("companion.FireDebug"));
+		return CVar && CVar->GetInt() != 0;
+	}
 }
 
 namespace
@@ -1428,7 +1437,7 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 	{
 		Companion->StopWeaponFire();
 		bStandBurstFireHeld = true;
-		if (bDebugLogging)
+		if (bDebugLogging || FireDbg())
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst FIRE HELD — muzzle blocked by %s"),
 				*Companion->GetName(), *GetNameSafe(MuzzleHit.GetActor()));
 		return;
@@ -1456,7 +1465,7 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 		Companion->StartWeaponFire();
 		bStandBurstFireHeld = false;
 		LastStandBurstResumeFireTime = Now;
-		if (bDebugLogging)
+		if (bDebugLogging || FireDbg())
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst FIRE RESUMED — muzzle clear"),
 				*Companion->GetName());
 	}
@@ -3578,6 +3587,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					Ctx.Blackboard->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 					BlindHoldTime = 0.f;
 					FruitlessPeeks = 0;
+					// A deliberate release must start the recommit cooldown, or MoveToCoverPoint
+					// re-commits on the very next BT loop (low-HP trigger stays true) and the
+					// companion duck-hops point to point instead of open-engaging.
+					Ctx.Companion->StampNaturalCoverRelease();
 					return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 				}
 			}
@@ -4533,7 +4546,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				const float SinceRelease = CoverWorld->GetTimeSeconds() - Ctx.Companion->GetLastNaturalReleaseTime();
 				if (SinceRelease < CoverTuning->NaturalReleaseRecommitCooldown
-					&& !CompanionCover::IsStrongPressure(*Ctx.Companion, *CoverTuning, ReseekThreats))
+					&& !CompanionCover::HasPressureSpiked(*Ctx.Companion, *CoverTuning, ReseekThreats))
 					bCommitAllowed = false;
 			}
 

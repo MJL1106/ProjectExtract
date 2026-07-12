@@ -94,7 +94,7 @@ int32 OutnumberedCountCap(const UCompanionTuningDataAsset& Tuning)
 	return FMath::Max(Tuning.CoverTriggerOutnumberedCount, Tuning.CombatOutnumberedCount);
 }
 
-bool IsStrongPressure(const ACompanionCharacter& Companion,
+bool HasPressureSpiked(const ACompanionCharacter& Companion,
 	const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount)
 {
 	// Mode-aware bars: Combat's stricter commit thresholds must apply here too, or a 3-visible-enemy
@@ -108,8 +108,16 @@ bool IsStrongPressure(const ACompanionCharacter& Companion,
 
 	if (Companion.GetSuppression01() >= Tuning.CoverNaturalReleasePressureFrac) return true;
 	if (Companion.GetRecentDamageCount(Tuning.CoverCommitUnderFireWindow) >= HitsBar) return true;
-	if (Companion.GetHealthFraction() < Tuning.CoverTriggerHealthFrac) return true;
 	return KnownThreatCount >= CountBar;
+}
+
+bool IsStrongPressure(const ACompanionCharacter& Companion,
+	const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount)
+{
+	// Low health is a static condition, not a spike — it belongs only on the release-blocking
+	// side (hold working cover while wounded), never on the recommit-bypass side.
+	if (Companion.GetHealthFraction() < Tuning.CoverTriggerHealthFrac) return true;
+	return HasPressureSpiked(Companion, Tuning, KnownThreatCount);
 }
 
 bool LowHealthDashAllowed(UWorld* World, const FVector& PawnLoc, const AController* Querier,

@@ -3,6 +3,7 @@
 #include "BTTask_CompanionFollowRoute.h"
 #include "CompanionAIController.h"
 #include "CompanionCharacter.h"
+#include "Animation/CompanionAnimInstance.h"
 #include "Companion/CompanionRoute.h"
 #include "Character/ExtractionPlayer.h"
 #include "HealthComponent.h"
@@ -92,6 +93,21 @@ EBTNodeResult::Type UBTTask_CompanionFollowRoute::ExecuteTask(
 	Mem->CachedRoute = Route;
 	Mem->CachedCharacter = Companion;
 	Mem->CachedController = Controller;
+
+	// Fresh route — the walk is starting, so the hold flag must be down.
+	Companion->SetRouteHoldingAtFinal(false);
+
+	// Stale-cover teardown: a cover task aborted around route start (e.g. the post-breach combat
+	// window) can leave the pose component latched bInCover with no owner. The anim rig correctly
+	// zeroes the aim gate AND the grip layer for a tucked companion, so a stale latch walks the
+	// whole route with the gun off the hands and no aim offset. The route owns the body now.
+	if (const USkeletalMeshComponent* Mesh = Companion->GetMesh())
+		if (UCompanionAnimInstance* Anim = Cast<UCompanionAnimInstance>(Mesh->GetAnimInstance()))
+			if (Anim->IsInCover())
+			{
+				UE_LOG(LogCompanionRoute, Warning, TEXT("%s: route start with stale cover pose — tearing down"), *Companion->GetName());
+				Anim->ExitCoverPose();
+			}
 
 	const int32 StartIndex = ComputeRouteStartIndex(*Route, Companion->GetActorLocation());
 	Mem->CurrentIndex = StartIndex;
@@ -476,7 +492,11 @@ void UBTTask_CompanionFollowRoute::UpdateAimFocus(
 
 		if (!ToTarget.IsNearlyZero())
 		{
-			const FVector LookAhead = PawnLoc + ToTarget * AimLookAheadDistance;
+			// Look-ahead at VIEW height, not actor-centre height: the controller now preserves
+			// focal-point pitch (UpdateControlRotation override), so a centre-height point 300cm
+			// out would aim the weapon ~13 degrees down for the whole leg.
+			FVector LookAhead = PawnLoc + ToTarget * AimLookAheadDistance;
+			LookAhead.Z = Companion->GetPawnViewLocation().Z;
 			SetFocalPointCached(Mem, *Controller, LookAhead);
 			return;
 		}
@@ -588,6 +608,11 @@ EBTNodeResult::Type UBTTask_CompanionFollowRoute::HandleReachFinal(
 		Mem.Phase = ERoutePhase::Holding;
 		SetFocalPointCached(Mem, *Controller, Route->GetWaypointAimWorld(LastIndex));
 
+		// The walk is done — flag the hold so player commands (breach) re-enable even though
+		// this task stays latent and BB_RouteActive stays true.
+		if (ACompanionCharacter* Character = Mem.CachedCharacter.Get())
+			Character->SetRouteHoldingAtFinal(true);
+
 		UE_LOG(LogCompanionRoute, Log, TEXT("Route complete — holding at final WP %d"), LastIndex);
 		return EBTNodeResult::InProgress;
 	}
@@ -611,8 +636,9 @@ void UBTTask_CompanionFollowRoute::RestoreDefaults(FRouteMemory& Mem) const
 		if (Companion->bIsCrouched)
 			Companion->UnCrouch();
 
-		// Always clear scripted aim on route exit
+		// Always clear scripted aim + the hold flag on route exit
 		Companion->SetScriptedAim(false);
+		Companion->SetRouteHoldingAtFinal(false);
 
 		// Restore both walk speeds
 		if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())

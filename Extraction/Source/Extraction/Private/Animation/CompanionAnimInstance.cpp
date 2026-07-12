@@ -32,7 +32,8 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 	bCoverStrafeActive = false;
 	CoverStrafeVelocity = FVector::ZeroVector;
 	CoverStrafeStaleTimer = 0.f;
-	CoverAimGate = 1.f;
+	CompCoverAimGate = 1.f;
+	CompCoverAimScenario = 0;
 
 	APawn* PawnOwner = TryGetPawnOwner();
 	if (!IsValid(PawnOwner)) return;
@@ -167,7 +168,12 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	bHasVelocity = Speed > 1.f;
 	Direction = UKismetAnimationLibrary::CalculateDirection(EffectiveVelocity, OwningCompanion->GetActorRotation());
 
-	const float MaxSpeed = MovementComponent->MaxWalkSpeed;
+	// Crouched movement is capped by MaxWalkSpeedCrouched — normalizing against the standing cap
+	// starves the locomotion blend while crouched and reads as foot-slide. (Component query, not
+	// the bIsCrouched member: that mirror is assigned later in this update.)
+	const float MaxSpeed = MovementComponent->IsCrouching()
+		? MovementComponent->MaxWalkSpeedCrouched
+		: MovementComponent->MaxWalkSpeed;
 	NormalizedSpeed = MaxSpeed > 0.f ? Speed / MaxSpeed : 0.f;
 
 	// Throttled speed diag — only logs while actually moving (>20) so it's not idle spam.
@@ -263,8 +269,12 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		}
 	}
 
-	// Pre-clamp yaw for the cover track-limit test below.
+	// Pre-clamp yaw for the cover track-limit test below, then clamp both axes to the AO's sane
+	// range — raw deltas reach ±180 while the body lags the focal bearing (route legs down a
+	// switchback), extrapolating the spine past the AO's authored samples. Enemy parity.
 	RawAimYawDeg = AimYaw;
+	AimPitch = FMath::Clamp(AimPitch, -AimPitchClampDeg, AimPitchClampDeg);
+	AimYaw = FMath::Clamp(AimYaw, -AimYawClampDeg, AimYawClampDeg);
 
 	// Cache once per frame — used by both the aim gate and the cover-align block below.
 	const bool bPeekMontagePlaying = IsAnyCoverPeekMontagePlaying();
@@ -275,9 +285,9 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	{
 		const bool bGateOff = bInCover && !bCoverPeeking && !bPeekMontagePlaying;
 		const float GateTarget = bGateOff ? 0.f : 1.f;
-		CoverAimGate = FMath::FInterpTo(CoverAimGate, GateTarget, DeltaSeconds, CoverAimGateSpeed);
-		AimPitch *= CoverAimGate;
-		AimYaw *= CoverAimGate;
+		CompCoverAimGate = FMath::FInterpTo(CompCoverAimGate, GateTarget, DeltaSeconds, CoverAimGateSpeed);
+		AimPitch *= CompCoverAimGate;
+		AimYaw *= CompCoverAimGate;
 
 		if (bInCover)
 		{
@@ -298,6 +308,22 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		{
 			// Outside cover: keep the alpha at 1 so re-entering cover starts clean.
 			CoverAimTrackAlpha = 1.f;
+		}
+	}
+
+	// --- Cover aim scenario export ---
+	// Feeds the ABP's blend-by-int aim-offset selector. Peek signal mirrors the gate above:
+	// bCoverPeeking is never set companion-side, so the playing peek montage is the signal.
+	{
+		CompCoverAimScenario = 0;
+		if (bInCover && !bCoverBlindFiring && (bCoverPeeking || bPeekMontagePlaying))
+		{
+			if (IsOverTopPeekMontagePlaying())
+				CompCoverAimScenario = 3;
+			else if (LatchedCoverHeight == ECoverHeight::Stand)
+				CompCoverAimScenario = (ActivePeekSide == EPeekSide::Left) ? 4 : 5;
+			else
+				CompCoverAimScenario = (ActivePeekSide == EPeekSide::Left) ? 1 : 2;
 		}
 	}
 
@@ -349,7 +375,8 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		// Cover cleanup — symmetric with the enemy dead branch; don't rely on BT teardown alone.
 		if (bInCover)
 			ExitCoverPose();
-		CoverAimGate = 1.f;
+		CompCoverAimGate = 1.f;
+		CompCoverAimScenario = 0;
 	}
 	bWasAlive = bIsAlive;
 
@@ -788,7 +815,7 @@ void UCompanionAnimInstance::ExitCoverPose()
 	if (IsValid(CoverPeekOverTopLeftMontage) && Montage_IsPlaying(CoverPeekOverTopLeftMontage))
 		Montage_Stop(CoverBlendOutTime, CoverPeekOverTopLeftMontage);
 
-	// CoverAimGate is left to ease back — its target returns to 1 once bInCover clears.
+	// CompCoverAimGate is left to ease back — its target returns to 1 once bInCover clears.
 	bInCover = false;
 
 	if (UCoverPoseComponent* Pose = IsValid(OwningCompanion) ? OwningCompanion->GetCoverPoseComponent() : nullptr)
@@ -846,6 +873,13 @@ bool UCompanionAnimInstance::IsAnyCoverPeekMontagePlaying() const
 	if (IsValid(CoverPeekRightMontage) && Montage_IsPlaying(CoverPeekRightMontage)) return true;
 	if (IsValid(CoverPeekLeftMontage_Stand) && Montage_IsPlaying(CoverPeekLeftMontage_Stand)) return true;
 	if (IsValid(CoverPeekRightMontage_Stand) && Montage_IsPlaying(CoverPeekRightMontage_Stand)) return true;
+	if (IsValid(CoverPeekOverTopMontage) && Montage_IsPlaying(CoverPeekOverTopMontage)) return true;
+	if (IsValid(CoverPeekOverTopLeftMontage) && Montage_IsPlaying(CoverPeekOverTopLeftMontage)) return true;
+	return false;
+}
+
+bool UCompanionAnimInstance::IsOverTopPeekMontagePlaying() const
+{
 	if (IsValid(CoverPeekOverTopMontage) && Montage_IsPlaying(CoverPeekOverTopMontage)) return true;
 	if (IsValid(CoverPeekOverTopLeftMontage) && Montage_IsPlaying(CoverPeekOverTopLeftMontage)) return true;
 	return false;

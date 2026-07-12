@@ -77,6 +77,20 @@ void UBTTask_CompanionLoot::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		return;
 	}
 
+	// Combat breaks off the sweep: while a command is active the combat branch cannot run (the
+	// command selector outranks it), so a live target must fail the loot command out — same
+	// contract as the breach task's mid-approach break-off. The player re-pings afterwards.
+	if (const UBlackboardComponent* CombatBB = OwnerComp.GetBlackboardComponent())
+	{
+		if (IsValid(Cast<AActor>(CombatBB->GetValueAsObject(ACompanionAIController::BB_CombatTarget))))
+		{
+			UE_LOG(LogCompanionLoot, Log, TEXT("TickTask: combat target acquired — breaking off loot sweep"));
+			FailAndClear(OwnerComp);
+			FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			return;
+		}
+	}
+
 	// Latest loot ping wins mid-sweep: a fresh confirmed target re-anchors the sweep (the command
 	// enum stays Loot, so no observer-abort fires — we watch the target key ourselves).
 	if (const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent())

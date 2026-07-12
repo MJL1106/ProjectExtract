@@ -57,6 +57,11 @@ public:
 	void ReportEnemyCombat();
 	void ReportBodyDiscovered();
 
+	/** World seconds of the most recent enemy Combat-state entry reported to the director.
+	 *  Unlike the alert ladder (a ratchet that never de-escalates), this is a decaying event
+	 *  stamp — compare against a reference time to ask "has a fight started since X?". */
+	float GetLastCombatReportTime() const { return LastCombatReportTime; }
+
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Director")
 	void TripAlarm();
 
@@ -148,6 +153,7 @@ private:
 
 	EGlobalAlertLevel AlertLevel = EGlobalAlertLevel::Calm;
 	int32 BodiesDiscovered = 0;
+	float LastCombatReportTime = -1e9f;
 
 	TArray<TWeakObjectPtr<AEnemyCharacter>> Corpses;
 

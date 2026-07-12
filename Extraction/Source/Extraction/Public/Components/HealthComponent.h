@@ -65,6 +65,11 @@ public:
 	 *  last damaging hit (any attacker). Returns false if the cadence cap blocks it. Server-only. */
 	bool TryConsumeGatedDamage(float Now, float MinInterval);
 
+	/** World seconds of the last damaging TakeDamage call (any source), or a large negative
+	 *  sentinel if never damaged. Server-side event stamp — companion stealth-break reads the
+	 *  player's to detect an out-of-envelope shooter. */
+	float GetLastDamageWorldTime() const { return LastDamageWorldTime; }
+
 	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
 	FOnHealthChanged OnHealthChanged;
 
@@ -117,4 +122,7 @@ private:
 
 	/** World time of the last gated damaging hit (any attacker). Non-replicated, server-only. */
 	float LastGatedDamageWorldTime = -1e9f;
+
+	/** World time of the last damaging TakeDamage call. Non-replicated, server-only. */
+	float LastDamageWorldTime = -1e9f;
 };

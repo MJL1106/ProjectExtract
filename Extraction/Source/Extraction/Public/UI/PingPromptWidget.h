@@ -9,6 +9,8 @@
 //   UTextBlock   "ShootHintText"        -- displays ShootHint text
 //   UPanelWidget "LootContainerPanel"   -- (optional) visible during Loot pending
 //   UTextBlock   "LootHintText"         -- (optional) displays LootHint text
+//   UPanelWidget "ExploreContainerPanel" -- (optional) visible during Explore pending
+//   UTextBlock   "ExploreHintText"       -- (optional) displays ExploreHint text
 
 #pragma once
 
@@ -54,6 +56,13 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> LootHintText;
 
+	/** Optional so existing WBPs keep compiling until the explore panel is added in-editor. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> ExploreContainerPanel;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> ExploreHintText;
+
 	// --- Designer-editable hint labels ---
 
 	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
@@ -67,6 +76,9 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
 	FText LootHint = NSLOCTEXT("PingPrompt", "Loot", "[I] Loot");
+
+	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
+	FText ExploreHint = NSLOCTEXT("PingPrompt", "Explore", "[I] Search area");
 
 private:
 	UFUNCTION()

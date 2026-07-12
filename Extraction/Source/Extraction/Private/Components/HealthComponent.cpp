@@ -65,6 +65,8 @@ void UHealthComponent::TakeDamage(float Damage)
 	World->GetTimerManager().ClearTimer(ShieldRegenDelayHandle);
 	World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
 
+	LastDamageWorldTime = World->GetTimeSeconds();
+
 	// Deplete shield first, overflow into health
 	if (CurrentShield > 0.f)
 	{

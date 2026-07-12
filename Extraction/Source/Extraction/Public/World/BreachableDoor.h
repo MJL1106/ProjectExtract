@@ -33,6 +33,13 @@ public:
 	/** Mid-swing counts as open: the doorway is already parting and this door never re-closes. */
 	virtual bool IsOpenForAcoustics() const override { return DoorState != EDoorState::Closed; }
 
+	/** Instantly poses the leaf fully open (no swing), unlocking first. Fires the one-shot
+	 *  OnDoorOpened broadcast — callers fast-forwarding a flow must set their step BEFORE this. */
+	virtual void ForceOpenInstant() override;
+
+	/** Keycard id this door's lock wants — the checkpoint fast-forward re-grants it on resume. */
+	FName GetRequiredKeycardId() const { return RequiredKeycardId; }
+
 	// --- Keycard lock ---
 
 	/** True while the lock is engaged (starts locked and not yet unlocked). Locked doors are

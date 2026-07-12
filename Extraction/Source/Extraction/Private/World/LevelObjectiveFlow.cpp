@@ -1,11 +1,21 @@
 #include "World/LevelObjectiveFlow.h"
 
+#include "AI/CompanionAIController.h"
+#include "BehaviorTree/BlackboardComponent.h"
+#include "Companion/CompanionCharacter.h"
 #include "Companion/CompanionRoute.h"
 #include "Components/HealthComponent.h"
 #include "Enemy/EnemyCharacter.h"
+#include "EngineUtils.h"
+#include "Game/ExtractionGameInstance.h"
+#include "Game/MissionInventorySubsystem.h"
 #include "Game/ObjectiveSubsystem.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/Pawn.h"
+#include "Kismet/GameplayStatics.h"
+#include "TimerManager.h"
+#include "World/BreachableDoor.h"
+#include "World/CompanionModeDoorGate.h"
 #include "World/DoorBase.h"
 #include "World/ExtractionTargetActor.h"
 #include "World/LevelCompletionLiftGate.h"
@@ -93,6 +103,7 @@ void ALevelObjectiveFlow::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 	DOREPLIFETIME(ALevelObjectiveFlow, CurrentPrimaryTarget);
 	DOREPLIFETIME(ALevelObjectiveFlow, CurrentOptionalTarget);
 	DOREPLIFETIME(ALevelObjectiveFlow, PresentationRevision);
+	DOREPLIFETIME(ALevelObjectiveFlow, Room1AreaLocation);
 }
 
 void ALevelObjectiveFlow::BeginPlay()
@@ -118,6 +129,11 @@ void ALevelObjectiveFlow::BeginPlay()
 
 void ALevelObjectiveFlow::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	if (const UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(CheckpointHealPollHandle);
+		World->GetTimerManager().ClearTimer(CheckpointSpawnRetryHandle);
+	}
 	if (HasAuthority()) UnbindDelegates();
 	if (UObjectiveSubsystem* Objectives = GetWorld() ? GetWorld()->GetSubsystem<UObjectiveSubsystem>() : nullptr)
 	{
@@ -130,9 +146,27 @@ void ALevelObjectiveFlow::EndPlay(const EEndPlayReason::Type EndPlayReason)
 bool ALevelObjectiveFlow::ActivateFlow()
 {
 	if (!HasAuthority() || CurrentStep != ELevelObjectiveStep::Inactive || !ValidateReferences()) return false;
+
+	// Pin the ClearRoom1 marker to the room area: centroid of the placed Room 1 enemies,
+	// unless a hand-placed anchor was set in the level.
+	if (Room1AreaLocation.IsZero() && Room1Enemies.Num() > 0)
+	{
+		FVector Sum = FVector::ZeroVector;
+		int32 ValidCount = 0;
+		for (const AEnemyCharacter* Enemy : Room1Enemies)
+		{
+			if (!IsValid(Enemy)) continue;
+			Sum += Enemy->GetActorLocation();
+			++ValidCount;
+		}
+		if (ValidCount > 0)
+			Room1AreaLocation = Sum / ValidCount;
+	}
+
 	CurrentStep = ELevelObjectiveStep::BreachRoofDoor;
 	ForceNetUpdate();
 	UpdatePrimaryObjective();
+	TryResumeFromCheckpoint();
 	return true;
 }
 
@@ -282,11 +316,211 @@ void ALevelObjectiveFlow::Advance(ELevelObjectiveEvent Event)
 		ActivateOptionalSupplies();
 	if (CurrentStep == ELevelObjectiveStep::ReachExtractionTarget && IsValid(ExtractionTarget))
 		ExtractionTarget->ActivateTarget();
+	if (CheckpointSteps.Contains(CurrentStep))
+	{
+		TryApplyCompanionCheckpointHeal();
+		// Record the checkpoint so a level restart (fail flow) resumes here.
+		if (UExtractionGameInstance* GameInstance = Cast<UExtractionGameInstance>(GetGameInstance()))
+			GameInstance->SetCheckpoint(FName(*UGameplayStatics::GetCurrentLevelName(this, true)), CurrentStep);
+	}
 
 	ForceNetUpdate();
 	UpdatePrimaryObjective();
 	RefreshRecordedEnemyDeaths();
 	EvaluateCurrentEnemyStep();
+}
+
+void ALevelObjectiveFlow::TryApplyCompanionCheckpointHeal()
+{
+	UWorld* World = GetWorld();
+	if (!World || !HasAuthority()) return;
+
+	ACompanionCharacter* Companion = CachedCompanion.Get();
+	if (!IsValid(Companion))
+	{
+		for (TActorIterator<ACompanionCharacter> It(World); It; ++It) { Companion = *It; break; }
+		CachedCompanion = Companion;
+	}
+	if (!IsValid(Companion))
+	{
+		UE_LOG(LogLevelObjectiveFlow, Warning, TEXT("Checkpoint heal dropped — no companion found in level (step %d)"),
+			static_cast<int32>(CurrentStep));
+		World->GetTimerManager().ClearTimer(CheckpointHealPollHandle);
+		return;
+	}
+
+	// DBNO holds the heal — the revive flow owns recovery; the full heal lands after revive.
+	bool bInCombat = Companion->GetIsCompanionDBNO();
+	if (!bInCombat)
+	{
+		if (const AAIController* AICtl = Cast<AAIController>(Companion->GetController()))
+			if (const UBlackboardComponent* BB = AICtl->GetBlackboardComponent())
+				bInCombat = IsValid(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+	}
+
+	if (bInCombat)
+	{
+		if (!World->GetTimerManager().IsTimerActive(CheckpointHealPollHandle))
+			World->GetTimerManager().SetTimer(CheckpointHealPollHandle, this,
+				&ALevelObjectiveFlow::TryApplyCompanionCheckpointHeal, 1.f, true);
+		return;
+	}
+
+	World->GetTimerManager().ClearTimer(CheckpointHealPollHandle);
+	if (UHealthComponent* Health = Companion->GetHealthComponent())
+	{
+		if (Health->IsAlive() && Health->GetCurrentHealth() < Health->GetMaxHealth())
+		{
+			Health->Heal(Health->GetMaxHealth());
+			UE_LOG(LogLevelObjectiveFlow, Log, TEXT("Checkpoint step %d reached — companion healed to full"),
+				static_cast<int32>(CurrentStep));
+		}
+	}
+}
+
+void ALevelObjectiveFlow::TryResumeFromCheckpoint()
+{
+	if (!HasAuthority()) return;
+	const UExtractionGameInstance* GameInstance = Cast<UExtractionGameInstance>(GetGameInstance());
+	if (!GameInstance) return;
+
+	const FName LevelName(*UGameplayStatics::GetCurrentLevelName(this, true));
+	const ELevelObjectiveStep Checkpoint = GameInstance->GetCheckpointForLevel(LevelName);
+	if (Checkpoint == ELevelObjectiveStep::Inactive || Checkpoint <= CurrentStep) return;
+
+	UE_LOG(LogLevelObjectiveFlow, Log, TEXT("%s: resuming at checkpoint step %d"),
+		*GetName(), static_cast<int32>(Checkpoint));
+	FastForwardToStep(Checkpoint);
+
+	CheckpointSpawnRetries = 0;
+	TryApplyCheckpointSpawn();
+}
+
+void ALevelObjectiveFlow::FastForwardToStep(ELevelObjectiveStep TargetStep)
+{
+	auto StepDone = [TargetStep](ELevelObjectiveStep Step) { return Step < TargetStep; };
+	auto DestroyGroup = [](const TArray<TObjectPtr<AEnemyCharacter>>& Enemies)
+	{
+		for (AEnemyCharacter* Enemy : Enemies)
+			if (IsValid(Enemy)) Enemy->Destroy();
+	};
+	TArray<const ADoorBase*, TInlineAllocator<4>> OpenedDoors;
+	auto OpenDoor = [&OpenedDoors](ADoorBase* Door)
+	{
+		if (!IsValid(Door)) return;
+		Door->ForceOpenInstant();
+		OpenedDoors.Add(Door);
+	};
+
+	// Step FIRST: door force-opens fire OnDoorOpened, which re-enters Advance — with the step
+	// already at the target those events no-op instead of walking the state machine again.
+	CurrentStep = TargetStep;
+
+	if (StepDone(ELevelObjectiveStep::BreachRoofDoor))
+		OpenDoor(RoofDoor);
+	// FollowCompanionDownstairs: nothing to restore — the route command simply never runs.
+	if (StepDone(ELevelObjectiveStep::BreachStairwellDoor))
+		OpenDoor(StairwellBreachDoor);
+	if (StepDone(ELevelObjectiveStep::ClearRoom1))
+		DestroyGroup(Room1Enemies);
+	if (StepDone(ELevelObjectiveStep::FindOfficeKeycard))
+	{
+		// Keycards are kept, not consumed — re-granting is correct at every later step, and the
+		// UnlockStairwellDoor step needs it back in the mission inventory.
+		if (const ABreachableDoor* LockedDoor = Cast<ABreachableDoor>(Room1ExitDoor.Get()))
+			if (UMissionInventorySubsystem* Inventory = GetWorld()->GetSubsystem<UMissionInventorySubsystem>())
+				if (LockedDoor->GetRequiredKeycardId() != NAME_None)
+					Inventory->RecordKeycard(LockedDoor->GetRequiredKeycardId());
+	}
+	if (StepDone(ELevelObjectiveStep::UnlockStairwellDoor))
+		OpenDoor(Room1ExitDoor);
+	if (StepDone(ELevelObjectiveStep::SwitchCompanionToStealth))
+		OpenDoor(Room2EntryDoor);
+	if (StepDone(ELevelObjectiveStep::FirstDoubleTakedown))
+		DestroyGroup(FirstTakedownPair);
+	if (StepDone(ELevelObjectiveStep::SecondDoubleTakedown))
+		DestroyGroup(SecondTakedownPair);
+
+	// Retire any mode gate whose door this fast-forward opened. BeginPlay order between gate and
+	// flow is undefined: telling the gate directly covers gate-first (its lock is cleared), and
+	// the gate's own BeginPlay skips locking once bUnlocked is set (flow-first).
+	if (OpenedDoors.Num() > 0)
+		for (TActorIterator<ACompanionModeDoorGate> It(GetWorld()); It; ++It)
+			if (OpenedDoors.Contains(It->GetTargetDoor()))
+				It->ForceUnlockForCheckpoint();
+
+	// Entry side effects Advance() would have fired on the way to the target step.
+	if (TargetStep >= ELevelObjectiveStep::FirstDoubleTakedown)
+		ActivateOptionalSupplies();
+	if (TargetStep >= ELevelObjectiveStep::ReachExtractionTarget && IsValid(ExtractionTarget))
+		ExtractionTarget->ActivateTarget();
+
+	ForceNetUpdate();
+	RefreshRecordedEnemyDeaths();
+	UpdatePrimaryObjective();
+	EvaluateCurrentEnemyStep();
+}
+
+void ALevelObjectiveFlow::TryApplyCheckpointSpawn()
+{
+	UWorld* World = GetWorld();
+	if (!World || !HasAuthority()) return;
+
+	AActor* SpawnPoint = CheckpointSpawns.FindRef(CurrentStep);
+	if (!IsValid(SpawnPoint))
+	{
+		UE_LOG(LogLevelObjectiveFlow, Warning,
+			TEXT("%s: no CheckpointSpawns entry for step %d — resuming at the level-start position"),
+			*GetName(), static_cast<int32>(CurrentStep));
+		return;
+	}
+
+	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
+	if (!IsValid(PlayerPawn))
+	{
+		// Player spawn order vs level-actor BeginPlay isn't guaranteed — poll briefly.
+		if (++CheckpointSpawnRetries <= 40)
+		{
+			if (!World->GetTimerManager().IsTimerActive(CheckpointSpawnRetryHandle))
+				World->GetTimerManager().SetTimer(CheckpointSpawnRetryHandle, this,
+					&ALevelObjectiveFlow::TryApplyCheckpointSpawn, 0.25f, true);
+			return;
+		}
+		World->GetTimerManager().ClearTimer(CheckpointSpawnRetryHandle);
+		UE_LOG(LogLevelObjectiveFlow, Warning, TEXT("%s: no player pawn after %d spawn polls — checkpoint teleport skipped"),
+			*GetName(), CheckpointSpawnRetries);
+		return;
+	}
+	World->GetTimerManager().ClearTimer(CheckpointSpawnRetryHandle);
+
+	const FVector SpawnLoc = SpawnPoint->GetActorLocation();
+	const FRotator SpawnRot(0.f, SpawnPoint->GetActorRotation().Yaw, 0.f);
+	// TeleportTo fails on encroachment (misplaced TargetPoint) — force the drop rather than
+	// silently leaving the pawn at level start with the world already fast-forwarded.
+	if (!PlayerPawn->TeleportTo(SpawnLoc, SpawnRot))
+	{
+		UE_LOG(LogLevelObjectiveFlow, Warning, TEXT("%s: checkpoint spawn encroached at %s — forcing player teleport"),
+			*GetName(), *SpawnLoc.ToCompactString());
+		PlayerPawn->TeleportTo(SpawnLoc, SpawnRot, /*bIsATest*/ false, /*bNoCheck*/ true);
+	}
+	if (AController* PlayerController = PlayerPawn->GetController())
+		PlayerController->SetControlRotation(SpawnRot);
+
+	ACompanionCharacter* Companion = CachedCompanion.Get();
+	if (!IsValid(Companion))
+	{
+		for (TActorIterator<ACompanionCharacter> It(World); It; ++It) { Companion = *It; break; }
+		CachedCompanion = Companion;
+	}
+	if (IsValid(Companion))
+	{
+		const FVector CompanionLoc = SpawnLoc + SpawnPoint->GetActorRightVector() * 150.f;
+		if (!Companion->TeleportTo(CompanionLoc, SpawnRot))
+			Companion->TeleportTo(SpawnLoc, SpawnRot, /*bIsATest*/ false, /*bNoCheck*/ true);
+	}
+
+	UE_LOG(LogLevelObjectiveFlow, Log, TEXT("%s: checkpoint resume — player%s teleported to step-%d spawn"),
+		*GetName(), IsValid(Companion) ? TEXT(" + companion") : TEXT(""), static_cast<int32>(CurrentStep));
 }
 
 void ALevelObjectiveFlow::UpdatePrimaryObjective()
@@ -328,6 +562,24 @@ void ALevelObjectiveFlow::UpdatePrimaryObjective()
 		Objectives->RemoveObjective(PrimaryObjectiveId); return;
 	}
 
+	// ClearRoom1 pins to the fixed room area instead of following living enemies around
+	// (Zero anchor = fall back to the enemy-follow Target resolved in the switch above).
+	if (CurrentStep == ELevelObjectiveStep::ClearRoom1 && !Room1AreaLocation.IsZero())
+	{
+		if (HasAuthority() && CurrentPrimaryTarget != nullptr)
+		{
+			CurrentPrimaryTarget = nullptr;
+			++PresentationRevision;
+			ForceNetUpdate();
+		}
+		// Enemy centroid sits at capsule centre; lift so the marker reads at the same height
+		// as target-based markers (FObjectiveMarker::HeightAboveBase above the floor).
+		constexpr float Room1AreaMarkerLift = 80.f;
+		Objectives->AddObjective(PrimaryObjectiveId, Label,
+			Room1AreaLocation + FVector(0.f, 0.f, Room1AreaMarkerLift));
+		return;
+	}
+
 	if (HasAuthority())
 	{
 		if (CurrentPrimaryTarget != Target)
@@ -347,8 +599,7 @@ void ALevelObjectiveFlow::UpdatePrimaryObjective()
 			*GetName(), static_cast<uint8>(CurrentStep));
 		return;
 	}
-	Objectives->AddObjective(PrimaryObjectiveId, Label, Target->GetActorLocation(), Target,
-		FVector(0.f, 0.f, MarkerHeightOffset));
+	Objectives->AddObjective(PrimaryObjectiveId, Label, Target->GetActorLocation(), Target);
 }
 
 void ALevelObjectiveFlow::EvaluateCurrentEnemyStep()
@@ -415,10 +666,11 @@ void ALevelObjectiveFlow::UpdateOptionalSupplies()
 	{
 		if (IsValid(CurrentOptionalTarget))
 		{
+			// Optional objectives are text-only on the HUD objective panel — no world marker.
 			Objectives->AddObjective(OptionalSuppliesObjectiveId,
 				NSLOCTEXT("LevelFlow", "OptionalSupplies", "Optional: Search side rooms for supplies - Ping with MMB, press I to loot"),
 				CurrentOptionalTarget->GetActorLocation(), CurrentOptionalTarget,
-				FVector(0.f, 0.f, MarkerHeightOffset));
+				FVector::ZeroVector, /*bShowWorldMarker*/ false);
 		}
 		else
 		{
@@ -461,9 +713,11 @@ void ALevelObjectiveFlow::UpdateOptionalSupplies()
 		return;
 	}
 
+	// Optional objectives are text-only on the HUD objective panel — no world marker.
 	Objectives->AddObjective(OptionalSuppliesObjectiveId,
 		NSLOCTEXT("LevelFlow", "OptionalSupplies", "Optional: Search side rooms for supplies - Ping with MMB, press I to loot"),
-		CurrentOptionalTarget->GetActorLocation(), CurrentOptionalTarget);
+		CurrentOptionalTarget->GetActorLocation(), CurrentOptionalTarget,
+		FVector::ZeroVector, /*bShowWorldMarker*/ false);
 }
 ALootContainer* ALevelObjectiveFlow::FindNearestUnlootedSupply(const FVector& Origin) const
 {

@@ -31,8 +31,10 @@ enum class EPeekSide : uint8
 };
 
 /** Stealth catch-up stage, set by the follow task from distance-to-player. Shapes
- *  ACompanionCharacter::ApplyStealthMovementClamps: FastCrouch hustles while crouched,
- *  Sprint is the only state allowed to break the stealth sprint veto. */
+ *  ACompanionCharacter::TunedWalkSpeed/TunedCrouchedWalkSpeed: FastCrouch hustles at whatever
+ *  stance the companion currently holds (standing or crouched — stance is the crouch-mirror's
+ *  call, not the catch-up ladder's), Sprint is the only state allowed to break the stealth
+ *  sprint veto. */
 UENUM(BlueprintType)
 enum class EStealthCatchup : uint8
 {

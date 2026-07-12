@@ -122,4 +122,17 @@ private:
 
 	/** Clean up and fail. */
 	void FailAndClear(UBehaviorTreeComponent& OwnerComp);
+
+	/** Shared success finish for the post-swing phases: releases the door, stamps the post-breach
+	 *  engagement grant, and either chains a loot sweep into a quiet room (IssueCommand(Loot) — no
+	 *  ClearActiveCommand on this path so the follow-up command survives) or clears the command so
+	 *  the combat brain takes over. Unbroken Stealth skips the chain entirely. */
+	void FinishBreachSuccess(UBehaviorTreeComponent& OwnerComp, class ACompanionAIController* AIC,
+		APawn* Pawn, AActor* Door);
+
+	/** Chain IssueCommand(Loot) into a quiet room: nearest still-lootable container within the explore
+	 *  radius of Anchor, only when no combat target and no live enemy in range. Returns true when the
+	 *  command was chained (caller must then NOT ClearActiveCommand). Does not stamp the grant. */
+	bool ChainLootFromAnchor(UBehaviorTreeComponent& OwnerComp, class ACompanionAIController* AIC,
+		APawn* Pawn, const FVector& Anchor);
 };

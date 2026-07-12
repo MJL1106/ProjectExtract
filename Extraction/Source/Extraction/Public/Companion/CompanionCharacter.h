@@ -190,6 +190,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	bool IsScriptedAiming() const { return bScriptedAim; }
 
+	// --- Route hold (BB_RouteActive stays true through a HoldAtFinal park; this distinguishes it) ---
+
+	void SetRouteHoldingAtFinal(bool bHolding) { bRouteHoldingAtFinal = bHolding; }
+
+	/** True while the route task is parked at the final waypoint (HoldAtFinal). The walk is done —
+	 *  player commands (breach) are allowed again even though the route branch is still latent. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Route")
+	bool IsRouteHoldingAtFinal() const { return bRouteHoldingAtFinal; }
+
 	// --- Sprint API ---
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Movement")
@@ -201,6 +210,11 @@ public:
 	// --- Stealth catch-up (set by the follow task; shapes ApplyStealthMovementClamps) ---
 
 	void SetStealthCatchup(EStealthCatchup NewStage);
+
+	/** Crouch/UnCrouch on behalf of the stealth crouch-mirror. Tracks ownership so the stealth
+	 *  teardown (ApplyStealthMovementClamps) only releases a crouch this system applied — never
+	 *  a combat cover crouch. */
+	void MirrorCrouch(bool bCrouch);
 
 	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
 	EStealthCatchup GetStealthCatchup() const { return StealthCatchupStage; }
@@ -277,8 +291,23 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Mode")
 	bool IsStealthActive() const { return Mode == ECompanionMode::Stealth && !bStealthBroken; }
 
+	/** World seconds of the moment unbroken stealth last became active (fresh Stealth order or
+	 *  re-pin). The BT service breaks stealth on any combat EVENT stamped after this — a stale
+	 *  Combat-awareness/alert tail from before the order can never re-break it. */
+	float GetStealthPinTime() const { return StealthPinTime; }
+
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Mode")
 	FOnCompanionModeChanged OnModeChanged;
+
+	// --- Post-breach engagement grant (server-only, transient) ---
+	// Widens Normal-mode target acquisition to UNAWARE enemies near a spot the player ordered the
+	// companion into, for a bounded window. Stamped by BTTask_CompanionBreach on completion and by
+	// BTTask_CompanionExplore on arrival; consumed by BTService_UpdateCompanionState's
+	// acquisition gates; cleared on DBNO/death.
+
+	void SetPostBreachEngagement(const FVector& Anchor, float Radius, float Duration);
+	void ClearPostBreachEngagement();
+	bool IsWithinPostBreachEngagement(const FVector& Location) const;
 
 	// --- Commanded Takedown (synced to player commit) ---
 
@@ -378,6 +407,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|DBNO")
 	bool GetIsCompanionDBNO() const { return bIsDBNO; }
 
+	/** True while the player's revive hold is active on this companion. The downed-retreat BT task
+	 *  freezes in place while this holds so the body doesn't crawl out from under the reviver. */
+	bool IsBeingRevived() const { return bBeingRevived; }
+
+	/** Crawl-pace MaxWalkSpeed applied while DBNO — the downed-retreat task re-asserts this clamp. */
+	float GetDownedCrawlSpeed() const { return DownedCrawlSpeed; }
+
 	UPROPERTY(BlueprintAssignable, Category = "Companion|DBNO")
 	FOnCompanionDownedStateChanged OnCompanionDownedStateChanged;
 
@@ -397,6 +433,8 @@ public:
 	virtual USceneComponent* GetWeaponSpawn() const override { return nullptr; }
 	virtual void SetBeingRevived(bool bBeingRevived, float ExpectedDuration = 0.f) override;
 	virtual void AlignForRevive(const FVector& ReviverLocation) override;
+	virtual bool IsBeingRevivedMontagePlaying() const override;
+	virtual const UAnimMontage* GetBeingRevivedMontage() const override { return BeingRevivedMontage; }
 
 	/** Broadcast when a KNIFE commanded takedown begins executing — BP shows the knife mesh here. */
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
@@ -423,7 +461,21 @@ protected:
 	/** Not replicated — server-side behaviour gate; clients only need Mode for UI. */
 	bool bStealthBroken = false;
 
-	/** Crouch + sprint-lock while stealth rules apply; releases them when they don't. */
+	/** World seconds when unbroken stealth last became active. See GetStealthPinTime. */
+	float StealthPinTime = -1e9f;
+
+	/** True while the current crouch was applied by the stealth crouch-mirror (MirrorCrouch).
+	 *  Gates the teardown UnCrouch in ApplyStealthMovementClamps so a combat cover crouch —
+	 *  which this system does not own — is never popped. */
+	bool bCrouchOwnedByStealth = false;
+
+	// Post-breach engagement grant backing state (server-only, transient).
+	FVector PostBreachAnchor = FVector::ZeroVector;
+	float PostBreachRadiusSq = 0.f;
+	float PostBreachExpiryTime = -1.f;
+
+	/** Sprint-lock + stealth speed tiers while stealth rules apply; releases them when they don't.
+	 *  Stance (crouch/stand) is owned by the BT service's player-crouch mirror (F4a), not this. */
 	void ApplyStealthMovementClamps();
 
 protected:
@@ -532,10 +584,15 @@ protected:
 	// --- DBNO Config ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|DBNO", meta = (ClampMin = "1.0"))
-	float BleedoutDuration = 60.f;
+	float BleedoutDuration = 105.f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|DBNO", meta = (ClampMin = "0.01", ClampMax = "1.0"))
 	float ReviveHealthPercent = 0.3f;
+
+	/** MaxWalkSpeed while DBNO — the downed-retreat crawl toward cover. Mirrors the player's
+	 *  DBNOCrawlSpeed so the shared BS_Downed_Crawl blendspace reads the same motion range. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|DBNO", meta = (ClampMin = "0.0"))
+	float DownedCrawlSpeed = 100.f;
 
 	// --- Movement (fallbacks — the tuning asset's Companion|Movement block is authoritative
 	// once the AI controller possesses; see TunedWalkSpeed/TunedSprintSpeed/TunedCrouchedWalkSpeed.
@@ -549,6 +606,28 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
 	float CrouchedWalkSpeed = 250.f;
+
+	// Standing-channel stealth fallbacks (used when no tuning asset is assigned) — mirror of the
+	// tuning asset's UCompanionTuningDataAsset::StealthWalkSpeed / StealthCatchupSpeed. Stealth no
+	// longer force-crouches (F4a), so TunedWalkSpeed must return a stealth-tuned value while
+	// standing, same convention as WalkSpeed/CrouchedWalkSpeed above.
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
+	float StealthWalkSpeed = 300.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
+	float StealthCatchupSpeed = 450.f;
+
+	// --- Soft Collision (companion-side self-push — F2 asymmetric blocking) ---
+
+	/** AddMovementInput scale applied when the companion overlaps the player capsule. The player's
+	 *  own push (which lets it pass through) lives on AExtractionPlayer::CompanionPushStrength. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|SoftCollision", meta = (ClampMin = "0.0"))
+	float CompanionSelfPushStrength = 1.0f;
+
+	/** Extra personal-space padding (cm) added on top of the combined capsule radii before the
+	 *  self-push kicks in. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|SoftCollision", meta = (ClampMin = "0.0"))
+	float CompanionSelfPushPadding = 0.f;
 
 	// --- Takedown ---
 
@@ -579,6 +658,12 @@ protected:
 	 *  montage having a natural blend-out tail so the per-tick re-assert stops once it ends. */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Revive")
 	TObjectPtr<UAnimMontage> ReviveMontage;
+
+	/** Get-up montage played on this companion while the PLAYER revives it (mirror of the player's
+	 *  BeingRevivedMontage) — rate-scaled so one cycle spans the hold; its natural blend-out drives
+	 *  ExitDBNO at the upright frame. ReviveSlot, non-looping. Designer assigns in BP. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Revive")
+	TObjectPtr<UAnimMontage> BeingRevivedMontage;
 
 	/** Victim-relative-to-attacker placement for the knife takedown, in the shared facing frame:
 	 *  X = forward gap (the companion stands this far BEHIND the victim), Y = lateral, Z = height.
@@ -622,6 +707,9 @@ private:
 
 	/** Scripted weapon-up: aim along control rotation with no actor target (e.g. route Alert/Crouch legs). Not replicated — single-player feature. */
 	bool bScriptedAim = false;
+
+	/** True while the route task is parked at the final waypoint (HoldAtFinal). Transient, not replicated. */
+	bool bRouteHoldingAtFinal = false;
 
 	/** True while the companion is in the BTTask_RevivePlayer hold. Drives tanky damage reduction
 	 *  and the service-side revive-window latch. Transient, not replicated. */
@@ -673,10 +761,18 @@ private:
 	UFUNCTION()
 	void OnRep_IsDBNO();
 
-	/** True while the player is reviving this companion. Cosmetic/state flag, no montage. */
+	/** True while the player is reviving this companion. */
 	bool bBeingRevived = false;
 
+	/** Natural montage end = the companion is upright — montage-driven ExitDBNO (mirror of
+	 *  AExtractionPlayer::OnBeingRevivedMontageBlendOut). Interrupted = abort/stop, no exit. */
+	void OnBeingRevivedMontageBlendOut(UAnimMontage* Montage, bool bInterrupted);
+
+	/** 1Hz while-DBNO diagnostic: anim-instance bIsDBNO mirror + active body montage. */
+	void LogDBNODiagnostic() const;
+
 	FTimerHandle BleedoutTimerHandle;
+	FTimerHandle DBNODiagTimerHandle;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Companion|Tags")
 	FGameplayTagContainer OwnedTags;
@@ -719,6 +815,11 @@ private:
 
 	/** Pushes the current sprint/stealth-catchup state into CMC MaxWalkSpeed / MaxWalkSpeedCrouched. */
 	void ApplyMovementSpeeds();
+
+	/** Server-authority: gently pushes the companion out of an overlap with the player instead of
+	 *  popping — the companion side of the F2 asymmetric blocking (the player's own push is
+	 *  AExtractionPlayer::UpdateCompanionSoftCollision). Mirrors that push math with roles swapped. */
+	void TickPlayerSoftSeparation();
 
 	FTimerHandle ModeWidgetLinkTimerHandle;
 

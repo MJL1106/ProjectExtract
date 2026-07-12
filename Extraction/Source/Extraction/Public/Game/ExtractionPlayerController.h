@@ -14,10 +14,12 @@ class UAmmoWidget;
 class UBarkFeedWidget;
 class UCompanionModeWidget;
 class UObjectiveMarkerLayer;
+class UObjectiveTextPanelWidget;
 class AObjectiveMarkerDisplay;
 class ULootNotificationWidget;
 class ULevelCompleteWidget;
 class ULevelFailedWidget;
+class URevivePromptWidget;
 
 /**
  *  Simple first person Player Controller
@@ -126,6 +128,14 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UObjectiveMarkerLayer> ObjectiveLayerWidget;
 
+	/** Screen-space objective text panel class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UObjectiveTextPanelWidget> ObjectiveTextPanelWidgetClass;
+
+	/** Active objective text panel instance */
+	UPROPERTY()
+	TObjectPtr<UObjectiveTextPanelWidget> ObjectiveTextPanelWidget;
+
 	/** World-space marker display actor class (assigned in BP defaults — no C++ asset path).
 	 *  Supplied to UObjectiveSubsystem::SetMarkerDisplayClass during local player setup. */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
@@ -138,6 +148,14 @@ protected:
 	/** Active loot toast instance */
 	UPROPERTY()
 	TObjectPtr<ULootNotificationWidget> LootToastWidget;
+
+	/** "[E] Revive" prompt class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<URevivePromptWidget> RevivePromptWidgetClass;
+
+	/** Active revive prompt instance */
+	UPROPERTY()
+	TObjectPtr<URevivePromptWidget> RevivePromptWidget;
 
 	/** If true, the player will use UMG touch controls even if not playing on mobile platforms */
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")

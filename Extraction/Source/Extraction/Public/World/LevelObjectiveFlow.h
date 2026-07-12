@@ -4,6 +4,7 @@
 #include "GameFramework/Actor.h"
 #include "LevelObjectiveFlow.generated.h"
 
+class ACompanionCharacter;
 class ACompanionRoute;
 class ADoorBase;
 class AEnemyCharacter;
@@ -118,10 +119,16 @@ protected:
 	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Objective Flow|Extraction")
 	TObjectPtr<ALevelCompletionLiftGate> LiftGate;
 
-	/** Vertical offset (cm) applied above the target's bounds-centre for all objective markers
-	 *  registered by this flow. Keeps markers floating above geometry at a readable height. */
-	UPROPERTY(EditAnywhere, Category = "Objective Flow|Marker")
-	float MarkerHeightOffset = 40.f;
+	/** Steps that count as checkpoints — advancing INTO one grants the companion a full heal,
+	 *  applied once it is out of combat (immediately if already calm), and records the step to
+	 *  the GameInstance so a level restart resumes here instead of at the start. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Flow|Checkpoints")
+	TArray<ELevelObjectiveStep> CheckpointSteps;
+
+	/** Resume point per checkpoint step — player teleports here on a checkpoint restart (the
+	 *  companion lands beside it). Wire a TargetPoint for every CheckpointSteps entry. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Objective Flow|Checkpoints")
+	TMap<ELevelObjectiveStep, TObjectPtr<AActor>> CheckpointSpawns;
 
 private:
 	static const FName PrimaryObjectiveId;
@@ -139,13 +146,39 @@ private:
 	uint16 PresentationRevision = 0;
 
 	/** Spawn-time centroid of Room1Enemies — the ClearRoom1 marker pins to this fixed area
-	 *  instead of following living enemies around the room. Zero = fall back to enemy-follow. */
+	 *  instead of following living enemies around the room. Zero = fall back to enemy-follow.
+	 *  Auto-computed at flow activation when left Zero; set by hand to override the anchor. */
+	UPROPERTY(EditAnywhere, Replicated, Category = "Objective Flow|Room 1")
 	FVector Room1AreaLocation = FVector::ZeroVector;
 
 	TSet<TWeakObjectPtr<ALootContainer>> CompletedSupplyCrates;
 	TSet<int32> Room1DeadIndices;
 	TSet<int32> FirstPairDeadIndices;
 	TSet<int32> SecondPairDeadIndices;
+
+	/** Lazily-resolved level companion for checkpoint heals. */
+	TWeakObjectPtr<ACompanionCharacter> CachedCompanion;
+	/** Poll while the companion is in combat/DBNO — the heal applies once it calms. */
+	FTimerHandle CheckpointHealPollHandle;
+
+	void TryApplyCompanionCheckpointHeal();
+
+	// --- Checkpoint restart (GameInstance-recorded; resume applied at flow activation) ---
+
+	/** If the GameInstance holds a checkpoint for this level, fast-forward the flow + world to it
+	 *  and start the spawn-teleport attempt. Called once from ActivateFlow. */
+	void TryResumeFromCheckpoint();
+
+	/** Applies every completed step's end-state (doors opened, cleared enemy groups removed,
+	 *  keycard re-granted, entry side effects) and sets CurrentStep to TargetStep. */
+	void FastForwardToStep(ELevelObjectiveStep TargetStep);
+
+	/** Teleports player + companion to the checkpoint spawn once both exist (short poll — player
+	 *  spawn order vs level BeginPlay isn't guaranteed). */
+	void TryApplyCheckpointSpawn();
+
+	FTimerHandle CheckpointSpawnRetryHandle;
+	int32 CheckpointSpawnRetries = 0;
 
 	bool ValidateReferences() const;
 	void BindDelegates();

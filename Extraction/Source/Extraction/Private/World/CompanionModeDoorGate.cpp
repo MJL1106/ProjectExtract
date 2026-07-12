@@ -40,7 +40,11 @@ void ACompanionModeDoorGate::BeginPlay()
 
 	if (HasAuthority())
 	{
-		if (IsValid(TargetDoor))
+		if (bUnlocked)
+		{
+			// Checkpoint fast-forward retired this gate before BeginPlay — do not re-lock the door.
+		}
+		else if (IsValid(TargetDoor))
 		{
 			TargetDoor->SetExternalGateLocked(true);
 			UE_LOG(LogModeDoorGate, Log, TEXT("%s: locked target door %s (requires %s)"),
@@ -118,6 +122,13 @@ void ACompanionModeDoorGate::OnCompanionModeChanged(ECompanionMode NewMode)
 }
 
 // --- Unlock ---
+
+void ACompanionModeDoorGate::ForceUnlockForCheckpoint()
+{
+	if (bUnlocked) return;
+	PerformUnlock();
+	ForceNetUpdate();
+}
 
 void ACompanionModeDoorGate::PerformUnlock()
 {

@@ -13,12 +13,12 @@ FVector FObjectiveMarker::ResolveLocation() const
 	if (!Target)
 		return WorldLocation + Offset;
 
-	// Use bounds-centre rather than actor origin so markers sit at visual midpoint
-	// (e.g. mid-door rather than floor hinge pivot).
+	// Resolve from the bounds BASE plus a standard height so markers read at one consistent
+	// height regardless of target shape (floor crate vs door vs enemy).
 	FVector Origin;
 	FVector Extents;
 	Target->GetActorBounds(false, Origin, Extents);
-	return Origin + Offset;
+	return FVector(Origin.X, Origin.Y, Origin.Z - Extents.Z + HeightAboveBase) + Offset;
 }
 
 // --- UObjectiveSubsystem ---
@@ -30,7 +30,7 @@ void UObjectiveSubsystem::Deinitialize()
 }
 
 void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocation,
-	AActor* TargetActor, FVector Offset)
+	AActor* TargetActor, FVector Offset, bool bShowWorldMarker)
 {
 	if (Id == NAME_None) return;
 
@@ -43,15 +43,29 @@ void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocat
 		Existing->WorldLocation = WorldLocation;
 		Existing->TargetActor = TargetActor;
 		Existing->Offset = Offset;
+		Existing->bShowWorldMarker = bShowWorldMarker;
 
-		// Re-init the existing display actor rather than rebuilding all displays.
-		for (AObjectiveMarkerDisplay* Display : ActiveDisplays)
+		if (bShowWorldMarker)
 		{
-			if (IsValid(Display) && Display->GetObjectiveId() == Id)
+			// Re-init the existing display actor rather than rebuilding all displays.
+			bool bFoundDisplay = false;
+			for (AObjectiveMarkerDisplay* Display : ActiveDisplays)
 			{
-				Display->InitObjective(*Existing);
-				break;
+				if (IsValid(Display) && Display->GetObjectiveId() == Id)
+				{
+					Display->InitObjective(*Existing);
+					bFoundDisplay = true;
+					break;
+				}
 			}
+			// Flag may have flipped false->true on this id — spawn the missing display.
+			if (!bFoundDisplay)
+				RebuildDisplayActors();
+		}
+		else
+		{
+			// Flag flipped true->false — the stale pass culls the now-unwanted display.
+			RebuildDisplayActors();
 		}
 
 		OnObjectivesChanged.Broadcast();
@@ -64,6 +78,7 @@ void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocat
 	Marker.WorldLocation = WorldLocation;
 	Marker.TargetActor = TargetActor;
 	Marker.Offset = Offset;
+	Marker.bShowWorldMarker = bShowWorldMarker;
 
 	OnObjectivesChanged.Broadcast();
 	RebuildDisplayActors();
@@ -114,7 +129,8 @@ void UObjectiveSubsystem::RebuildDisplayActors()
 			continue;
 		}
 		const bool bStillActive = Objectives.ContainsByPredicate(
-			[Display](const FObjectiveMarker& M) { return M.Id == Display->GetObjectiveId(); });
+			[Display](const FObjectiveMarker& M)
+			{ return M.Id == Display->GetObjectiveId() && M.bShowWorldMarker; });
 		if (!bStillActive)
 		{
 			Display->Destroy();
@@ -125,6 +141,8 @@ void UObjectiveSubsystem::RebuildDisplayActors()
 	// Spawn displays for objectives that don't yet have one.
 	for (const FObjectiveMarker& Objective : Objectives)
 	{
+		if (!Objective.bShowWorldMarker) continue;
+
 		const bool bAlreadyDisplayed = ActiveDisplays.ContainsByPredicate(
 			[&Objective](const AObjectiveMarkerDisplay* D) {
 				return IsValid(D) && D->GetObjectiveId() == Objective.Id;

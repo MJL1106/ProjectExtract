@@ -29,11 +29,23 @@ struct FObjectiveMarker
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	TWeakObjectPtr<AActor> TargetActor;
 
-	/** Additive offset applied after location resolution (e.g. +Z to lift above floor pivot). */
+	/** Additive offset applied after location resolution (e.g. XY nudge or extra Z on top of
+	 *  HeightAboveBase for target-based markers). */
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	FVector Offset = FVector::ZeroVector;
 
-	/** Resolved marker position this frame: bounds-centre of the target actor (or static
+	/** Target-based markers resolve at the target's bounds BASE plus this height, so a floor
+	 *  crate, a door and an enemy all read at the same marker height. Ignored for static
+	 *  (no-target) markers. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective")
+	float HeightAboveBase = 170.f;
+
+	/** When false the objective is text-only (HUD objective panel): no world-space billboard
+	 *  and no off-screen edge indicator. Used for optional objectives. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective")
+	bool bShowWorldMarker = true;
+
+	/** Resolved marker position this frame: target bounds-base + HeightAboveBase (or static
 	 *  WorldLocation) plus the per-objective Offset. */
 	FVector ResolveLocation() const;
 };
@@ -49,10 +61,11 @@ public:
 	virtual void Deinitialize() override;
 
 	/** Adds (or replaces, by id) an objective marker. Target optional — set to follow a moving actor.
-	 *  Offset is additive on the resolved bounds-centre location (default zero). */
+	 *  Offset is additive on the resolved location (default zero). bShowWorldMarker=false makes the
+	 *  objective text-only (no billboard, no edge indicator) — used for optional objectives. */
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void AddObjective(FName Id, FText Label, FVector WorldLocation, AActor* TargetActor = nullptr,
-		FVector Offset = FVector::ZeroVector);
+		FVector Offset = FVector::ZeroVector, bool bShowWorldMarker = true);
 
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void RemoveObjective(FName Id);

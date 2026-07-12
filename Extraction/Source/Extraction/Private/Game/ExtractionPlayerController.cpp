@@ -12,11 +12,13 @@
 #include "BarkFeedWidget.h"
 #include "CompanionModeWidget.h"
 #include "ObjectiveMarkerLayer.h"
+#include "ObjectiveTextPanelWidget.h"
 #include "Game/ObjectiveSubsystem.h"
 #include "World/ObjectiveMarkerDisplay.h"
 #include "LootNotificationWidget.h"
 #include "LevelCompleteWidget.h"
 #include "LevelFailedWidget.h"
+#include "RevivePromptWidget.h"
 #include "ExtractionGameMode.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
@@ -115,6 +117,14 @@ void AExtractionPlayerController::BeginPlay()
 			ObjectiveLayerWidget->AddToPlayerScreen();
 	}
 
+	// Spawn screen-space objective text panel for local player
+	if (IsLocalPlayerController() && ObjectiveTextPanelWidgetClass)
+	{
+		ObjectiveTextPanelWidget = CreateWidget<UObjectiveTextPanelWidget>(this, ObjectiveTextPanelWidgetClass);
+		if (IsValid(ObjectiveTextPanelWidget))
+			ObjectiveTextPanelWidget->AddToPlayerScreen();
+	}
+
 	// Supply world-space marker display class to the objective subsystem.
 	if (IsLocalPlayerController())
 	{
@@ -135,6 +145,14 @@ void AExtractionPlayerController::BeginPlay()
 		LootToastWidget = CreateWidget<ULootNotificationWidget>(this, LootToastWidgetClass);
 		if (IsValid(LootToastWidget))
 			LootToastWidget->AddToPlayerScreen();
+	}
+
+	// Spawn revive prompt for local player
+	if (IsLocalPlayerController() && RevivePromptWidgetClass)
+	{
+		RevivePromptWidget = CreateWidget<URevivePromptWidget>(this, RevivePromptWidgetClass);
+		if (IsValid(RevivePromptWidget))
+			RevivePromptWidget->AddToPlayerScreen();
 	}
 }
 

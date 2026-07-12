@@ -178,7 +178,7 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 			{
 				const float SinceRelease = OwnerComp.GetWorld()->GetTimeSeconds() - Companion->GetLastNaturalReleaseTime();
 				bRecommitBlocked = SinceRelease < Tuning->NaturalReleaseRecommitCooldown
-					&& !CompanionCover::IsStrongPressure(*Companion, *Tuning, ThreatCount);
+					&& !CompanionCover::HasPressureSpiked(*Companion, *Tuning, ThreatCount);
 			}
 
 			// Low-HP dash gate: wounded-and-alone never sprints open ground for a duck spot. The

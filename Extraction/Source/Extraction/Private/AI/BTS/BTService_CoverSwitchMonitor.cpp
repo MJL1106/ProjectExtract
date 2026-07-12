@@ -305,8 +305,8 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 			// Natural cycling: after the mode's max commit time at this point with only low-grade
 			// pressure, release back to mobile fighting even though a widened release trigger still
 			// holds. Combat mode uses the short override — cover is a touch point, not a campsite.
-			// The recommit cooldown (both commit sites, gated on the same IsStrongPressure bar)
-			// stops it ducking straight back in.
+			// The recommit cooldown (both commit sites, bypassed only by HasPressureSpiked — no
+			// static low-health bypass) stops it ducking straight back in.
 			const float MaxCommitTime = ExitCompanion->GetMode() == ECompanionMode::Combat
 				? Tuning->CombatCoverMaxCommitTime
 				: Tuning->CoverMaxCommitTime;

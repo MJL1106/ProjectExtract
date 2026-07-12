@@ -32,9 +32,20 @@ public:
 	/** Open, or an AI-initiated open is in flight (the BP timeline is already swinging). */
 	virtual bool IsOpenForAcoustics() const override { return bDoorOpen || bOpenInFlight; }
 
+	/** Checkpoint fast-forward: drives the BP's breach/open path (the leaf swings once at level
+	 *  start — C++ can't pose a BP-owned timeline leaf instantly). */
+	virtual void ForceOpenInstant() override;
+
 	/** Blueprint reports its door state here (see class comment for the wiring contract). */
 	UFUNCTION(BlueprintCallable, Category = "Door|State")
 	void NotifyDoorStateChanged(bool bNowOpen);
+
+	/** A player-driven swing (open or close) is starting. Call from the door BP at the start of
+	 *  every E-press path, before the timeline plays — makes the leaf pawn-passable for the swing
+	 *  exactly like an AI breach, so it can't launch the opener. Collision restores when the BP
+	 *  reports the swing's end via NotifyDoorStateChanged (or the timeout fires). */
+	UFUNCTION(BlueprintCallable, Category = "Door|State")
+	void NotifySwingStarting();
 
 protected:
 	virtual void BeginPlay() override;
@@ -79,9 +90,15 @@ private:
 
 	FTimerHandle NotifyTimeoutHandle;
 
+	/** Re-arms RestorePawnCollision while a pawn is still inside a leaf's sweep volume. */
+	FTimerHandle RestoreRetryHandle;
+
 	/** Meshes stop blocking pawns while the BP timeline swings, so path-following AI never
 	 *  stalls against a half-open leaf. Restored by RestorePawnCollision. */
 	void ApplyPawnPassThrough();
 	void RestorePawnCollision();
 	void HandleNotifyTimeout();
+
+	/** True if any pawn overlaps a movable leaf's bounds — re-blocking would launch it. */
+	bool IsAnyPawnOverlappingLeaf() const;
 };

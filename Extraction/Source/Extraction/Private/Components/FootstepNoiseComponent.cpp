@@ -97,8 +97,26 @@ void UFootstepNoiseComponent::PickNoiseProfile(float& OutLoudness, float& OutRan
 	}
 
 	const float Speed = OwnerChar ? OwnerChar->GetVelocity().Size2D() : 0.f;
-	const bool bSprinting = Speed >= SprintSpeedThreshold;
-	OutLoudness = bSprinting ? SprintLoudness : WalkLoudness;
-	OutRange = bSprinting ? SprintRange : WalkRange;
-	OutTag = bSprinting ? SprintTag : WalkTag;
+
+	if (Speed >= SprintSpeedThreshold)
+	{
+		OutLoudness = SprintLoudness;
+		OutRange = SprintRange;
+		OutTag = SprintTag;
+		return;
+	}
+
+	// Slow-walk (held-Ctrl) tier: quieter than an ordinary jog, tag stays "Footstep" (not exempt
+	// from the takedown-volume muffle the way a sprint step is).
+	if (Speed < WalkSpeedThreshold)
+	{
+		OutLoudness = SlowWalkLoudness;
+		OutRange = SlowWalkRange;
+		OutTag = WalkTag;
+		return;
+	}
+
+	OutLoudness = WalkLoudness;
+	OutRange = WalkRange;
+	OutTag = WalkTag;
 }

@@ -1075,6 +1075,12 @@ void UEnemyAwarenessComponent::SetState(EEnemyAwarenessState NewState)
 	const EEnemyAwarenessState OldState = CurrentState;
 	CurrentState = NewState;
 
+	if (NewState == EEnemyAwarenessState::Combat)
+	{
+		if (const UWorld* World = GetWorld())
+			LastCombatEnterTime = World->GetTimeSeconds();
+	}
+
 	if (const AAIController* C = Cast<AAIController>(GetOwner()))
 		UE_LOG(LogEnemyAI, Verbose, TEXT("[AWARE] %s: %s -> %s"),
 			C->GetPawn() ? *C->GetPawn()->GetName() : TEXT("<no pawn>"),

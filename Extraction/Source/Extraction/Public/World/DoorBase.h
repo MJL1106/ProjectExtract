@@ -56,9 +56,17 @@ public:
 	 *  override; base doors report closed. Used by AIAcoustics door classification. */
 	virtual bool IsOpenForAcoustics() const { return false; }
 
+	/** Checkpoint fast-forward: put the door into its opened end-state (unlocking if needed).
+	 *  Safe to call on an already-open door. Children override; base is a no-op. */
+	virtual void ForceOpenInstant() {}
+
 	/** World-space doorway centre for acoustic portal traces — the closed-bounds centre, NOT the
 	 *  actor location (which sits at the hinge on swing doors). */
 	FVector GetAcousticPortalPoint() const;
+
+	/** True when AI pawns can push this door open via the doorway trigger. A search-through ping
+	 *  on a door the companion cannot open would shove it against the closed leaf until timeout. */
+	bool CanAutoOpenForAI() const { return bAutoOpenForAI; }
 
 protected:
 	virtual void PostInitializeComponents() override;

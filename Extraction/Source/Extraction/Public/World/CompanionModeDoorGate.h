@@ -23,6 +23,13 @@ public:
 
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
+	/** The door this gate locks. Checkpoint fast-forward matches gates to force-opened doors. */
+	ADoorBase* GetTargetDoor() const { return TargetDoor; }
+
+	/** Checkpoint fast-forward: retire the gate (clear the door lock, kill trigger + objective).
+	 *  Safe pre-BeginPlay — BeginPlay skips its lock when the gate is already unlocked. */
+	void ForceUnlockForCheckpoint();
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;

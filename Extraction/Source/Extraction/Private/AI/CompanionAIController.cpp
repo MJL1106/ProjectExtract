@@ -92,6 +92,18 @@ ACompanionAIController::ACompanionAIController()
 	PerceptionComponent->SetDominantSense(UAISense_Sight::StaticClass());
 }
 
+float ACompanionAIController::GetHearingSenseMaxAge() const
+{
+	return HearingConfig ? HearingConfig->GetMaxAge() : 3.f;
+}
+
+// NB deliberately NO UpdateControlRotation override (2nd attempt REVERTED 2026-07-12, director
+// call): restoring pitch for location focals makes route/watch aims pitch the AO, and even with
+// the aim gate + global clamps live and combat AO playtest-validated, the route look degraded
+// (grip layer drops on cover-state flicker; gun off the hands on the stairs). Location focals
+// stay pitch-flat (engine zeroes pitch for non-pawn focus); combat is unaffected (SetFocus on a
+// pawn keeps pitch). Don't re-add without fixing the ABP grip cluster's bInCover zeroing first.
+
 void ACompanionAIController::OnPossess(APawn* InPawn)
 {
 	Super::OnPossess(InPawn);

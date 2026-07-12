@@ -185,6 +185,8 @@ bool FLevelObjectiveActorSeamsTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("breach request does not complete objective early"), Door->TestHasBroadcastDoorOpened());
 	Door->NotifyDoorStateChanged(true);
 	TestTrue(TEXT("fully-open notification completes door"), Door->TestHasBroadcastDoorOpened());
+	// Direct notify calls with no swing-start are exactly what the unwired-door tripwire warns on.
+	AddExpectedMessage(TEXT("no swing-start recorded"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
 	Door->NotifyDoorStateChanged(false);
 	Door->NotifyDoorStateChanged(true);
 	TestTrue(TEXT("door completion remains one-shot latched"), Door->TestHasBroadcastDoorOpened());

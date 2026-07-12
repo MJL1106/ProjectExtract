@@ -41,6 +41,8 @@ void UObjectiveMarkerLayer::RebuildMarkers()
 
 	for (const FObjectiveMarker& Objective : Subsystem->GetObjectives())
 	{
+		if (!Objective.bShowWorldMarker) continue;
+
 		UObjectiveMarkerWidget* Marker = CreateWidget<UObjectiveMarkerWidget>(this, MarkerWidgetClass);
 		if (!Marker) continue;
 
