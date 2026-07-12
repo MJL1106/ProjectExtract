@@ -166,6 +166,12 @@ public:
 	 *  go permanently silent — no BT reload task exists for enemies. */
 	void SetAutoReloadOnEmpty(bool bEnable) { bAutoReloadOnEmpty = bEnable; }
 
+	/** Registers the kit FP weapon's muzzle anchor so the owning player's flash renders on the
+	 *  visible first-person gun (the TP WeaponMesh is OwnerNoSee). Called by the character BP on
+	 *  equip; pass null on unequip to drop the flash component. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|FX")
+	void SetFirstPersonMuzzle(USceneComponent* InMuzzle);
+
 	// ---- Magazine swap (enemy reload visual) ----
 
 	/**
@@ -698,6 +704,19 @@ private:
 
 	/** Lazily creates and attaches the muzzle flash component from WeaponData->MuzzleFlashFX. */
 	void EnsureMuzzleFlashComponent();
+
+	/** First-person muzzle anchor on the kit's FP weapon item (BP_Item_Base "Muzzle" component).
+	 *  Set by the character BP on equip; the TP WeaponMesh is OwnerNoSee so the owning player's
+	 *  flash must attach here instead. */
+	UPROPERTY(Transient)
+	TObjectPtr<USceneComponent> FirstPersonMuzzle;
+
+	/** Owner-only-see Niagara flash attached to FirstPersonMuzzle. Re-activated per shot. */
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraComponent> FirstPersonMuzzleFlashComponent;
+
+	/** Lazily creates the first-person flash on FirstPersonMuzzle. No-ops until the anchor is set. */
+	void EnsureFirstPersonMuzzleFlashComponent();
 
 	/** Spawns a one-shot Niagara tracer streak from MuzzleLocation toward EndPoint.
 	 *  Engine-pooled (AutoRelease). No-ops when WeaponData->TracerFX is null. */

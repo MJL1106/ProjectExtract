@@ -68,6 +68,14 @@ static TAutoConsoleVariable<int32> CVarFireAlignDebug(
 	TEXT("If non-zero, log enemy weapon fire-align: SetupFireAlign captures (rest/fire relative, sockets, fire offset) and SetFireAlignAlpha (alpha + resulting WeaponMesh relative/world transform). Diagnoses misalignment from the WeaponSocket_Fire blend. Default 0 = no logging, no behavior change."),
 	ECVF_Cheat);
 
+// Single definition — other translation units (companion BT service/task) re-query this by name
+// via IConsoleManager::Get().FindConsoleVariable to avoid duplicate CVar registration.
+static TAutoConsoleVariable<int32> CVarCompanionFireDebug(
+	TEXT("companion.FireDebug"),
+	0,
+	TEXT("If non-zero, log companion fire-decision denials (state/ammo), stealth-break signal state, and burst fire-withhold transitions."),
+	ECVF_Cheat);
+
 AWeaponBase::AWeaponBase()
 	: CurrentState(EWeaponState::Idle)
 	, CurrentAmmo(0)
@@ -264,6 +272,12 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		MuzzleFlashComponent = nullptr;
 	}
 
+	if (IsValid(FirstPersonMuzzleFlashComponent))
+	{
+		FirstPersonMuzzleFlashComponent->DestroyComponent();
+		FirstPersonMuzzleFlashComponent = nullptr;
+	}
+
 	if (IsValid(SpawnedVisualActor))
 	{
 		SpawnedVisualActor->Destroy();
@@ -346,7 +360,23 @@ void AWeaponBase::StartFiring()
 	if (IsValid(OwnerChar))
 		RebuildSuppressionTargets();
 
-	if (!CanFire()) return;
+	if (!CanFire())
+	{
+		if (CVarCompanionFireDebug.GetValueOnGameThread() != 0
+			&& IsValid(GetOwner()) && GetOwner()->IsA<ACompanionCharacter>())
+		{
+			const float FireReadyIn = (FireReadyTimeSeconds > 0.f && GetWorld())
+				? FireReadyTimeSeconds - GetWorld()->GetTimeSeconds() : 0.f;
+			UE_LOG(LogCompanionDiag, Warning,
+				TEXT("%s: [FireDebug] StartFiring DENIED state=%d ammo=%d reserve=%d fireReadyIn=%.2f dataValid=%d"),
+				*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, ReserveAmmo,
+				FireReadyIn, IsValid(WeaponData) ? 1 : 0);
+		}
+		// Dry trigger press on an empty mag — kick the reload instead of silently no-oping.
+		if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
+			Reload();
+		return;
+	}
 
 	if (HasAuthority())
 		CurrentState = EWeaponState::Firing;
@@ -408,6 +438,15 @@ void AWeaponBase::OnAutoFireTimer()
 {
 	if (!bWantsToFire || !CanFire())
 	{
+		if (bWantsToFire && CVarCompanionFireDebug.GetValueOnGameThread() != 0
+			&& IsValid(GetOwner()) && GetOwner()->IsA<ACompanionCharacter>())
+		{
+			UE_LOG(LogCompanionDiag, Warning,
+				TEXT("%s: [FireDebug] AutoFire DENIED state=%d ammo=%d reserve=%d dataValid=%d"),
+				*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, ReserveAmmo,
+				IsValid(WeaponData) ? 1 : 0);
+		}
+
 		if (const UWorld* World = GetWorld())
 			World->GetTimerManager().ClearTimer(AutoFireTimerHandle);
 
@@ -862,6 +901,11 @@ void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocat
 	if (IsValid(MuzzleFlashComponent))
 		MuzzleFlashComponent->Activate(true);
 
+	// First-person flash on the kit FP gun — the TP flash above is OwnerNoSee.
+	EnsureFirstPersonMuzzleFlashComponent();
+	if (IsValid(FirstPersonMuzzleFlashComponent))
+		FirstPersonMuzzleFlashComponent->Activate(true);
+
 	// Bullet tracer: one-shot pooled Niagara streak along the fire line.
 	SpawnTracer(MuzzleLocation, EndPoint);
 
@@ -1301,7 +1345,7 @@ bool AWeaponBase::CanReload() const
 	return CurrentState == EWeaponState::Idle
 		&& IsValid(WeaponData)
 		&& CurrentAmmo < WeaponData->MagazineSize
-		&& ReserveAmmo > 0;
+		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
 }
 
 void AWeaponBase::Reload()
@@ -1374,10 +1418,12 @@ void AWeaponBase::OnReloadFinished()
 	if (HasAuthority())
 	{
 		const int32 AmmoNeeded = WeaponData->MagazineSize - CurrentAmmo;
-		const int32 AmmoToLoad = FMath::Min(AmmoNeeded, ReserveAmmo);
+		const int32 AmmoToLoad = WeaponData->bInfiniteReserve
+			? AmmoNeeded : FMath::Min(AmmoNeeded, ReserveAmmo);
 
 		CurrentAmmo += AmmoToLoad;
-		ReserveAmmo -= AmmoToLoad;
+		if (!WeaponData->bInfiniteReserve)
+			ReserveAmmo -= AmmoToLoad;
 		CurrentState = EWeaponState::Idle;
 
 		// Post-reload settle: hold fire briefly so the reload anim finishes seating the gun.
@@ -1412,8 +1458,12 @@ void AWeaponBase::OnReloadFinished()
 
 	OnReloadComplete.Broadcast();
 
-	// Resume firing if input is still held
-	if (bWantsToFire)
+	// Resume firing if input is still held. Player-controlled weapons skip this: the kit BP owns
+	// fire cadence there (KitBeginFire never arms AutoFireTimer), and a post-reload StartFiring
+	// would run the C++ auto-fire loop against the kit's own dispatch.
+	const ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
+	const bool bPlayerOwned = IsValid(OwnerChar) && IsValid(Cast<APlayerController>(OwnerChar->GetController()));
+	if (bWantsToFire && !bPlayerOwned)
 		StartFiring();
 }
 
@@ -1424,7 +1474,8 @@ void AWeaponBase::HandleShellInserted()
 	if (!IsValid(WeaponData) || !WeaponData->bShellByShellReload) return;
 
 	// If the mag is already full or reserve is exhausted, end the reload now.
-	if (CurrentAmmo >= WeaponData->MagazineSize || ReserveAmmo <= 0)
+	if (CurrentAmmo >= WeaponData->MagazineSize
+		|| (!WeaponData->bInfiniteReserve && ReserveAmmo <= 0))
 	{
 		AdvanceShellReloadSection(false);
 		FinishShellReload();
@@ -1433,10 +1484,12 @@ void AWeaponBase::HandleShellInserted()
 
 	// Seat one shell.
 	CurrentAmmo = FMath::Min(CurrentAmmo + 1, WeaponData->MagazineSize);
-	ReserveAmmo = FMath::Max(ReserveAmmo - 1, 0);
+	if (!WeaponData->bInfiniteReserve)
+		ReserveAmmo = FMath::Max(ReserveAmmo - 1, 0);
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
 
-	const bool bMore = (CurrentAmmo < WeaponData->MagazineSize && ReserveAmmo > 0);
+	const bool bMore = CurrentAmmo < WeaponData->MagazineSize
+		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
 
 	if (IsReloadDebugEnabled())
 	{
@@ -1763,6 +1816,12 @@ void AWeaponBase::KitBeginFire_Implementation()
 		RebuildFFIgnoreList();
 		RebuildSuppressionTargets();
 	}
+
+	// Dry trigger press on an empty mag — kick the reload instead of silently no-oping.
+	// Lives here as well as the per-shot dispatch: the kit BP may gate its own HitScan
+	// dispatches on its mirrored ammo count, but it always signals the trigger press.
+	if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
+		Reload();
 }
 
 void AWeaponBase::KitStopFire_Implementation()
@@ -1793,6 +1852,9 @@ void AWeaponBase::KitFire_HitScan_Implementation()
 					*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, *GetNameSafe(WeaponData));
 			}
 		}
+		// Dry dispatch on an empty mag — kick the reload instead of silently no-oping.
+		if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
+			Reload();
 		return;
 	}
 
@@ -1988,6 +2050,47 @@ void AWeaponBase::EnsureMuzzleFlashComponent()
 
 	if (IsValid(MuzzleFlashComponent))
 		MuzzleFlashComponent->SetOwnerNoSee(GripMesh->bOwnerNoSee);
+}
+
+void AWeaponBase::SetFirstPersonMuzzle(USceneComponent* InMuzzle)
+{
+	if (FirstPersonMuzzle == InMuzzle) return;
+
+	FirstPersonMuzzle = InMuzzle;
+
+	// Anchor changed (weapon swap) or cleared (unequip) — drop the old component; it will be
+	// lazily rebuilt on the new anchor by the next shot.
+	if (IsValid(FirstPersonMuzzleFlashComponent))
+	{
+		FirstPersonMuzzleFlashComponent->DestroyComponent();
+		FirstPersonMuzzleFlashComponent = nullptr;
+	}
+}
+
+void AWeaponBase::EnsureFirstPersonMuzzleFlashComponent()
+{
+	if (IsValid(FirstPersonMuzzleFlashComponent)) return;
+	if (!IsValid(FirstPersonMuzzle)) return;
+	if (!IsValid(WeaponData) || !IsValid(WeaponData->MuzzleFlashFX)) return;
+	if (GetNetMode() == NM_DedicatedServer) return;
+
+	// Only the owning player's screen shows the FP gun — gate on local control rather than
+	// SetOnlyOwnerSee, which silently hides the flash if the kit item's Owner chain doesn't
+	// reach the pawn. Remote clients never receive the anchor, so this only filters the server
+	// copy on a listen host.
+	const APawn* OwnerPawn = Cast<APawn>(GetOwner());
+	if (!IsValid(OwnerPawn) || !OwnerPawn->IsLocallyControlled()) return;
+
+	FirstPersonMuzzleFlashComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+		WeaponData->MuzzleFlashFX,
+		FirstPersonMuzzle,
+		NAME_None,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		EAttachLocation::SnapToTarget,
+		false,  // bAutoDestroy
+		false); // bAutoActivate
+
 }
 
 void AWeaponBase::SpawnTracer(const FVector& MuzzleLocation, const FVector& EndPoint)
