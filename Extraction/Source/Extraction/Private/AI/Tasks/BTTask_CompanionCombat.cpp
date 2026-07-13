@@ -261,6 +261,37 @@ namespace
 		return FMath::Clamp(Data->BurstCount, 1, FMath::Max(1, Data->MagazineSize));
 	}
 
+	// Combat-move diagnostic: one line per issued combat move with its origin site and direction
+	// semantics. towardTargetDot < 0 = moving AWAY from the combat target (backpedal); distPlayer
+	// tracks leash drift. Pins which mover walks the companion out of a fight.
+	static void LogCombatMoveDiag(const ACompanionCharacter* Companion, const AActor* Target, const TCHAR* Site, const FVector& Dest)
+	{
+		if (!UE_LOG_ACTIVE(LogCompanionDiag, Log) || !IsValid(Companion)) return;
+		const FVector MyLoc = Companion->GetActorLocation();
+		FVector MoveDir = Dest - MyLoc;
+		MoveDir.Z = 0.f;
+		const float Disp = MoveDir.Size();
+		if (Disp > KINDA_SMALL_NUMBER) MoveDir /= Disp;
+		float TowardTargetDot = 0.f;
+		float DistTarget = -1.f;
+		if (IsValid(Target))
+		{
+			FVector ToTarget = Target->GetActorLocation() - MyLoc;
+			ToTarget.Z = 0.f;
+			DistTarget = ToTarget.Size();
+			if (DistTarget > KINDA_SMALL_NUMBER && Disp > KINDA_SMALL_NUMBER)
+				TowardTargetDot = FVector::DotProduct(MoveDir, ToTarget / DistTarget);
+		}
+		float DistPlayer = -1.f;
+		if (const ACompanionAIController* AIC = Cast<ACompanionAIController>(Companion->GetController()))
+		{
+			if (const APawn* Player = AIC->GetPlayerCharacter())
+				DistPlayer = FVector::Dist2D(MyLoc, Player->GetActorLocation());
+		}
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CombatMove] site=%s dest=%s disp=%.0f towardTargetDot=%+.2f distTarget=%.0f distPlayer=%.0f"),
+			*Companion->GetName(), Site, *Dest.ToCompactString(), Disp, TowardTargetDot, DistTarget, DistPlayer);
+	}
+
 	static void DeferCoverPosture(ACompanionCharacter* Companion, bool bShouldCrouch)
 	{
 		if (!IsValid(Companion)) return;
@@ -1676,6 +1707,8 @@ void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AA
 		}
 	}
 
+	LogCombatMoveDiag(Companion, Target,
+		bAngleSeekLateral ? TEXT("jiggle-drift(angle-seek)") : TEXT("jiggle-drift"), Projected);
 	JiggleHome = Projected;
 }
 
@@ -2124,9 +2157,14 @@ void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Compa
 	// angle past it, so the fan includes the back directions. Try base distance, then 2x, else hold.
 	constexpr float WideStepFactor = 2.0f;
 	FVector Dest;
-	const bool bHaveDest =
-		PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance, Dest)
-		|| PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance * WideStepFactor, Dest);
+	const TCHAR* FanDirName = TEXT("?");
+	bool bWideStep = false;
+	bool bHaveDest = PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance, Dest, &FanDirName);
+	if (!bHaveDest)
+	{
+		bWideStep = true;
+		bHaveDest = PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance * WideStepFactor, Dest, &FanDirName);
+	}
 
 	// No LoS-clear fan point at either distance — hold (respect the reposition timer, don't thrash the nav query).
 	if (!bHaveDest)
@@ -2138,10 +2176,12 @@ void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Compa
 
 	bMoveShootHolding = false;
 	MoveShootDestination = Dest;
+	LogCombatMoveDiag(Companion, Target,
+		*FString::Printf(TEXT("regain-los:%s%s"), FanDirName, bWideStep ? TEXT("(x2)") : TEXT("")), MoveShootDestination);
 	AIC->MoveToLocation(MoveShootDestination, MoveShootAcceptRadius, false, true, false, true);
 }
 
-bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest) const
+bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest, const TCHAR** OutDirName) const
 {
 	if (!IsValid(Companion) || !IsValid(Target)) return false;
 
@@ -2154,19 +2194,21 @@ bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Compani
 	const FVector RightOfTarget = FVector::CrossProduct(FVector::UpVector, ToTargetDir).GetSafeNormal();
 	const FVector Back = -ToTargetDir; // horizontal target->companion: lowers the look-up angle past a ramp lip
 	const FVector Offsets[] = { RightOfTarget, -RightOfTarget, Back, Back + RightOfTarget, Back - RightOfTarget };
+	static const TCHAR* OffsetNames[] = { TEXT("right"), TEXT("left"), TEXT("back"), TEXT("back-right"), TEXT("back-left") };
 
 	// Nearest valid candidate (smallest displacement from current location that regains LoS) — biases a
 	// small back-step over a big lateral swing. Project + LoS-verify each, track the closest hit.
 	bool bFound = false;
 	float BestDistSq = TNumericLimits<float>::Max();
-	for (const FVector& Dir : Offsets)
+	for (int32 i = 0; i < UE_ARRAY_COUNT(Offsets); ++i)
 	{
 		FVector Candidate;
-		if (!TryLateralLosDestination(Companion, Target, IgnoredAttached, Dir.GetSafeNormal() * StepDistance, Candidate)) continue;
+		if (!TryLateralLosDestination(Companion, Target, IgnoredAttached, Offsets[i].GetSafeNormal() * StepDistance, Candidate)) continue;
 		const float DistSq = FVector::DistSquared(Candidate, MyLoc);
 		if (DistSq >= BestDistSq) continue;
 		BestDistSq = DistSq;
 		OutDest = Candidate;
+		if (OutDirName) *OutDirName = OffsetNames[i];
 		bFound = true;
 	}
 	return bFound;
@@ -2318,6 +2360,7 @@ void UBTTask_CompanionCombat::TickMoveShootTowardPlayer(ACompanionCharacter* Com
 	}
 	bMoveShootHolding = false;
 	MoveShootDestination = Projected;
+	LogCombatMoveDiag(Companion, Target, TEXT("player-pull"), MoveShootDestination);
 	AIC->MoveToLocation(MoveShootDestination, MoveShootAcceptRadius, false, true, false, true);
 }
 
@@ -2749,6 +2792,27 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 		const FVector HunkerLoc = CompanionCover::CompanionHunkerPosition(*Companion, Cover.Data, Standoff);
 		const float DistToHunker = FVector::Dist(ArrivalLoc, HunkerLoc);
 
+		// Entry sanity guard: MoveToCoverPoint delivers within ~45cm, so a hunker beyond the
+		// edge-align divergence budget means the BB claim is stale/bogus — release for a re-pick
+		// instead of physically trekking there in cover posture (the "crouch-walk across the room"
+		// failure). MarkVacated so the EQS PostVacate filter blocks an instant re-pick of the point.
+		// 2D: the hunker keeps the baked cover Z while the pawn sits at nav-biased Z — a 3D compare
+		// would eat the divergence headroom in vertical offset and reject legitimate far-corner claims.
+		if (FVector::Dist2D(ArrivalLoc, HunkerLoc) > FinalApproachMaxStartDist)
+		{
+			UE_LOG(LogCompanionAI, Warning,
+				TEXT("%s: FINALAPPROACH-REJECT distToHunker2D=%.0f max=%.0f coverLoc=%s pawnLoc=%s — releasing stale claim for re-pick"),
+				*Companion->GetName(), FVector::Dist2D(ArrivalLoc, HunkerLoc), FinalApproachMaxStartDist,
+				*Cover.Data.Location.ToCompactString(), *ArrivalLoc.ToCompactString());
+			if (UCoverReservationSubsystem* VacSub = Companion->GetWorld()->GetSubsystem<UCoverReservationSubsystem>())
+			{
+				if (AController* VacCtrl = Companion->GetController())
+					VacSub->MarkVacated(Cover.Handle, VacCtrl);
+			}
+			ResetTaskState(Companion, BB, Cover.Handle, true);
+			return EBTNodeResult::Failed;
+		}
+
 		if (DistToHunker <= FinalApproachAcceptRadius)
 		{
 			// Already at the cover point — snap and enter cover immediately.
@@ -2809,10 +2873,11 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 		}
 
 		UE_LOG(LogCompanionAI, Log,
-			TEXT("%s: COVER-CLAIMED height=%s lean=%d canPeek=%d"),
+			TEXT("%s: COVER-CLAIMED height=%s lean=%d canPeek=%d distToHunker=%.0f coverLoc=%s"),
 			*Companion->GetName(),
 			(UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch) ? TEXT("Crouch") : TEXT("Stand"),
-			(int32)CurrentLean, (int32)(CurrentLean != ECoverLean::None));
+			(int32)CurrentLean, (int32)(CurrentLean != ECoverLean::None),
+			DistToHunker, *Cover.Data.Location.ToCompactString());
 		if (CurrentLean == ECoverLean::None)
 		{
 			UE_LOG(LogCompanionAI, Warning,

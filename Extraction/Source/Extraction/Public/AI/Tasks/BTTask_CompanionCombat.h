@@ -306,6 +306,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "30.0"))
 	float FinalApproachSnapMaxDist = 120.f;
 
+	/** Max hunker distance (cm) at which the task will start a final approach at all. MoveToCoverPoint
+	 *  delivers within ~45cm; the legitimate residual is edge-align divergence between the two hunker
+	 *  computations (corner-march clamp + standoff delta, ~400 worst case). Beyond this the claim is
+	 *  bogus/stale — release for a re-pick instead of trekking across the room in cover posture. */
+	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "100.0"))
+	float FinalApproachMaxStartDist = 450.f;
+
 	/** Duration of the smooth-snap tween that replaces cover entry / return teleport pops (seconds). */
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float SmoothSnapDuration = 0.2f;
@@ -439,7 +446,7 @@ private:
 	bool TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, const FVector& LateralOffset, FVector& OutDest) const;
 
 	/** Regain-LoS fan: tests right/left/back/back-right/back-left offsets at StepDistance, nav-projects + LoS-verifies each, returns the NEAREST valid point (smallest displacement). Biases toward a small back-step over a big swing. Returns false if none clear. */
-	bool PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest) const;
+	bool PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest, const TCHAR** OutDirName = nullptr) const;
 
 	/** Symmetric teardown for move-and-shoot: stop movement, clear focus, restore walk speed, reset state. */
 	void EndOpenAreaMoveShoot(ACompanionCharacter* Companion);

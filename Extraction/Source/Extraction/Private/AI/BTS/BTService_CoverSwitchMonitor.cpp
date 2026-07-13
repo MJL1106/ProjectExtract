@@ -27,6 +27,9 @@
 namespace
 {
 	constexpr float DefaultCapsuleRadius = 34.f;
+	// Multiplier on ArrivalRadius for the per-tick decision gate — looser than the arrival latch so
+	// peek-step offsets (lean-fire positions reach ~125cm from the hunker) don't suppress decisions.
+	constexpr float AtCoverDecisionSlack = 2.f;
 
 	/** Per-re-eval decay on the player-advance accumulator (re-evals ~1 s apart) — a player who
 	 *  stops pushing bleeds back below the gate within a few evals. */
@@ -143,41 +146,56 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		return;
 	}
 
-	// Dwell-from-arrival: only treat the cover point as occupied (start accruing dwell) once the pawn
-	// is physically at its hunker position. BTTask_MoveToCoverPoint moves the pawn to
-	// GetApproachPosition, so test against the equivalent hunker point — not the raw cover Location,
-	// which would deadlock dwell for standoff-offset points.
+	// Identity guard on the arrival latch: a task-internal shuffle or a monitor commit swaps the BB
+	// cover without a HasCover false/true edge — the latch (and dwell) must re-earn at the new point,
+	// or the monitor keeps "re-scoring from cover" while the pawn is still walking to it.
+	if (Mem.bHasArrived && Mem.LastArrivalCover != CurrentCover.Handle)
+	{
+		Mem.bHasArrived = false;
+		Mem.TimeSinceArrival = 0.f;
+	}
+
+	// Physical at-cover distance: starts dwell (arrival latch) and gates every switch/compromise
+	// decision below. BTTask_MoveToCoverPoint moves the pawn to the edge-aligned hunker, so test
+	// against the equivalent hunker point — not the raw cover Location, which would deadlock dwell
+	// for standoff-offset points.
+	const ACharacter* PawnChar = Cast<ACharacter>(Pawn);
+	const UCapsuleComponent* Cap = PawnChar ? PawnChar->GetCapsuleComponent() : nullptr;
+	const float CapRadius = Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+	const float Standoff = CapRadius + 10.f;
+	const AEnemyCharacter* MonEnemy = Cast<AEnemyCharacter>(Pawn);
+	const UEnemyArchetypeData* MonDA = MonEnemy ? MonEnemy->GetArchetypeData() : nullptr;
+	const ACompanionCharacter* MonCompanion = Cast<ACompanionCharacter>(Pawn);
+	FVector HunkerLoc;
+	if (MonDA)
+		HunkerLoc = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+			Pawn->GetWorld(), CurrentCover.Data, Standoff, CapRadius, MonDA->CoverCornerGap, Pawn);
+	else if (MonCompanion)
+		HunkerLoc = CompanionCover::CompanionHunkerPosition(*MonCompanion, CurrentCover.Data, Standoff);
+	else
+		HunkerLoc = UCoverGeometryStatics::GetHunkerPosition(CurrentCover.Data, Standoff);
+	const float DistToHunker2D = FVector::Dist2D(Pawn->GetActorLocation(), HunkerLoc);
+
 	if (!Mem.bHasArrived)
 	{
-		const ACharacter* PawnChar = Cast<ACharacter>(Pawn);
-		const UCapsuleComponent* Cap = PawnChar ? PawnChar->GetCapsuleComponent() : nullptr;
-		const float CapRadius = Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
-		const float Standoff = CapRadius + 10.f;
-		const FVector PawnLoc = Pawn->GetActorLocation();
-		// Both species arrive edge-aligned (corner-snapped) — the arrival test must use the same
-		// position or dwell never starts at endpoint covers.
-		const AEnemyCharacter* MonEnemy = Cast<AEnemyCharacter>(Pawn);
-		const UEnemyArchetypeData* MonDA = MonEnemy ? MonEnemy->GetArchetypeData() : nullptr;
-		const ACompanionCharacter* MonCompanion = Cast<ACompanionCharacter>(Pawn);
-		FVector HunkerLoc;
-		if (MonDA)
-			HunkerLoc = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
-				Pawn->GetWorld(), CurrentCover.Data, Standoff, CapRadius, MonDA->CoverCornerGap, Pawn);
-		else if (MonCompanion)
-			HunkerLoc = CompanionCover::CompanionHunkerPosition(*MonCompanion, CurrentCover.Data, Standoff);
-		else
-			HunkerLoc = UCoverGeometryStatics::GetHunkerPosition(CurrentCover.Data, Standoff);
-		const bool bArrivedNow = FVector::Dist2D(PawnLoc, HunkerLoc) <= ArrivalRadius;
-		if (!bArrivedNow)
+		if (DistToHunker2D > ArrivalRadius)
 		{
 			Mem.TimeSinceArrival = 0.f;
 			return;
 		}
 		Mem.bHasArrived = true;
+		Mem.LastArrivalCover = CurrentCover.Handle;
 	}
 
 	Mem.TimeSinceArrival += DeltaSeconds;
 	Mem.TimeSinceReEval  += DeltaSeconds;
+
+	// Decision gate: while the pawn isn't physically at the current point (final-approach walk,
+	// snap-glide, wandered peek), hold ALL switch/compromise decisions — judging or vacating a point
+	// the pawn isn't at is what produced mid-trek CoverSwitch/CompromiseBreak churn. Slack over
+	// ArrivalRadius tolerates peek-step offsets. Dwell keeps accruing; the latch stays intact.
+	if (DistToHunker2D > ArrivalRadius * AtCoverDecisionSlack)
+		return;
 
 	AActor* CombatTarget = Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName));
 

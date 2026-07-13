@@ -2,6 +2,7 @@
 
 #include "BTTask_MoveToCoverPoint.h"
 #include "AI/AITargetingStatics.h"
+#include "AI/CompanionDiag.h"
 #include "AI/BlackboardKeyType_Cover.h"
 #include "AI/CompanionCoverStatics.h"
 #include "CoverScoringStatics.h"
@@ -317,6 +318,27 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(
 		ArrivalPos, CoverArrivalAcceptRadius, false, true, true, true);
 	Mem->bMoveIssued = true;
+
+	// Combat-move diagnostic (companion only) — mirrors BTTask_CompanionCombat's [CombatMove] lines
+	// so every mover that can walk the companion out of a fight is tagged in one log stream.
+	if (Cast<ACompanionCharacter>(Pawn) && UE_LOG_ACTIVE(LogCompanionDiag, Log))
+	{
+		AActor* DiagTarget = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
+		float TowardTargetDot = 0.f;
+		FVector MoveDir = ArrivalPos - PawnLoc;
+		MoveDir.Z = 0.f;
+		const float Disp = MoveDir.Size();
+		if (Disp > KINDA_SMALL_NUMBER) MoveDir /= Disp;
+		if (IsValid(DiagTarget) && Disp > KINDA_SMALL_NUMBER)
+		{
+			FVector ToTarget = DiagTarget->GetActorLocation() - PawnLoc;
+			ToTarget.Z = 0.f;
+			if (ToTarget.SizeSquared() > KINDA_SMALL_NUMBER)
+				TowardTargetDot = FVector::DotProduct(MoveDir, ToTarget.GetSafeNormal());
+		}
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: [CombatMove] site=cover-move dest=%s disp=%.0f towardTargetDot=%+.2f coverLoc=%s"),
+			*Pawn->GetName(), *ArrivalPos.ToCompactString(), Disp, TowardTargetDot, *Cover.Data.Location.ToCompactString());
+	}
 
 	UE_LOG(LogEnemyAI, Verbose, TEXT("[COVER-AICS] %s MoveTo (%.0f,%.0f,%.0f) dist=%.0f result=%d"),
 		*Pawn->GetName(), ArrivalPos.X, ArrivalPos.Y, ArrivalPos.Z,

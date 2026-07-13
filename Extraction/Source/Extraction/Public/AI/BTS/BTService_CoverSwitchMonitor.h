@@ -16,7 +16,10 @@ struct FCoverSwitchMonitorMemory
 	bool  bWasInCoverLastTick = false;
 
 	// Dwell-from-arrival: only accrue TimeSinceArrival once physically at the cover point (fixes claim-time start).
+	// LastArrivalCover is the point the latch was earned at — a task-internal shuffle or monitor commit
+	// swaps the BB cover without a HasCover edge, and the latch must re-earn at the new point.
 	bool  bHasArrived = false;
+	FCoverHandle LastArrivalCover;
 
 	// G2 debounce — a candidate must win two consecutive re-evals before the switch commits.
 	FCoverHandle PendingBestCover;
