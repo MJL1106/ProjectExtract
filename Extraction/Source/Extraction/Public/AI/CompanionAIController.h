@@ -54,7 +54,8 @@ public:
 	 * Write a command into the companion blackboard.
 	 * Breach and Takedown both require a valid TargetActor — logs and early-returns if missing.
 	 */
-	void IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor, const FVector& TargetLocation);
+	void IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor,
+		const FVector& TargetLocation, bool bPreserveSearchRoomExposure = false);
 
 	/** Reset BB_CompanionCommand to None and clear related keys. */
 	void ClearActiveCommand();

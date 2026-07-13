@@ -7,6 +7,7 @@
 #include "GameplayTagAssetInterface.h"
 #include "GameplayTagContainer.h"
 #include "GenericTeamAgentInterface.h"
+#include "AI/SearchRoomExposure.h"
 #include "Movement/TraversalTypes.h"
 #include "Companion/CompanionTypes.h"
 #include "Companion/CompanionCommandTypes.h"
@@ -309,6 +310,21 @@ public:
 	void ClearPostBreachEngagement();
 	bool IsWithinPostBreachEngagement(const FVector& Location) const;
 
+	// --- Search/Breach room exposure (server-only, command-scoped) ---
+
+	void BeginSearchRoomExposure(const FVector& RoomAnchor, float Radius, bool bSilentStartle);
+	void EndSearchRoomExposure();
+	bool IsSearchRoomExposureActive() const { return SearchRoomExposure.IsActive(); }
+	uint32 GetActiveSearchRoomExposureGeneration() const { return SearchRoomExposure.GetActiveGeneration(); }
+	bool IsSearchRoomExposureObserverInScope(const FVector& ObserverLocation) const
+	{
+		return SearchRoomExposure.IsObserverInScope(ObserverLocation);
+	}
+	bool HasSearchRoomExposureSilentStartle(uint32 ExposureGeneration) const
+	{
+		return SearchRoomExposure.HasSilentStartle(ExposureGeneration);
+	}
+
 	// --- Commanded Takedown (synced to player commit) ---
 
 	/** Arms the companion for a coordinated takedown. Binds to the player's OnPlayerTakedownCommitted.
@@ -447,6 +463,8 @@ protected:
 	FVector PostBreachAnchor = FVector::ZeroVector;
 	float PostBreachRadiusSq = 0.f;
 	float PostBreachExpiryTime = -1.f;
+
+	FSearchRoomExposureState SearchRoomExposure;
 
 	/** Sprint-lock + stealth speed tiers while stealth rules apply; releases them when they don't.
 	 *  Stance (crouch/stand) is owned by the BT service's player-crouch mirror (F4a), not this. */

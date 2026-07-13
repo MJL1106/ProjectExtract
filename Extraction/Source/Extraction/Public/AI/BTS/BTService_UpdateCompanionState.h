@@ -130,7 +130,7 @@ private:
 	/**
 	 * Arbitrates non-combat facing/stance every tick, after the posture chain settles. Priority
 	 * ladder: Tier 0 yields to any system that already owns aim/focus/stance this tick (combat
-	 * target, ready-threat, revive, takedown, traversal, route, companion command, DBNO); Tier 1
+	 * target, ready-threat, revive, takedown, traversal, route, moving/non-Loot command, DBNO); Tier 1
 	 * (F3) watches the nearest visible/lingering threat; Tier 2 (F1) is ambient path-look-ahead or
 	 * idle attention-yaw facing. Never writes the combat-target key, never fires, never flips
 	 * posture to Combat.

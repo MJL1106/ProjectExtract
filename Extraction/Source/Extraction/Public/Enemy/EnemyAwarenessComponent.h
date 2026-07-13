@@ -9,6 +9,7 @@
 #include "EnemyAwarenessComponent.generated.h"
 
 class AEnemyCharacter;
+class ACompanionCharacter;
 class UBlackboardComponent;
 class UEnemyArchetypeData;
 class UEnemyDirectorSubsystem;
@@ -164,6 +165,8 @@ private:
 
 	void HandleSightStimulus(AActor* Actor, const FAIStimulus& Stimulus);
 	void HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus);
+	bool TryApplyBreachSearchRoomStartle(AActor* Actor, const FAIStimulus& Stimulus,
+		float NormalGain, FSuspicionTrack& Track);
 	/** Ally coordination: a mate's heard gunfire raises suspicion toward what he is shooting at. */
 	void HandleAllyGunfireHeard(class AEnemyCharacter* Shooter, const FAIStimulus& Stimulus);
 	void HandleBodySighted(class AEnemyCharacter* Body);
@@ -192,6 +195,8 @@ private:
 	 *  Called on cloak-lift transitions (combat entry, global alert Loud) — sight events swallowed
 	 *  while cloaked left no track, and perception only fires on edges. */
 	void SeedCompanionSightTracks();
+	void RefreshSearchRoomExposure();
+	void ApplySilentSearchRoomStartle(ACompanionCharacter* Companion, FSuspicionTrack& Track);
 
 	/** Egress: report our current combat target + last-known to the squad (rate-limited by the squad). */
 	void BroadcastSightingToSquad();
@@ -225,6 +230,10 @@ private:
 	FVector LastKnownLocation = FVector::ZeroVector;
 
 	TMap<TWeakObjectPtr<AActor>, FSuspicionTrack> SuspicionTracks;
+
+	TWeakObjectPtr<ACompanionCharacter> CachedPerceivedCompanion;
+	uint32 LastSeededSearchRoomExposureGeneration = 0;
+	uint32 LastStartledSearchRoomExposureGeneration = 0;
 
 	/** Bodies this enemy has already reacted to (one search trigger per body per enemy). */
 	TSet<TWeakObjectPtr<const AActor>> DiscoveredBodies;

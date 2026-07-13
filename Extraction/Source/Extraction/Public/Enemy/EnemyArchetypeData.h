@@ -176,6 +176,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
 	float NoiseSuspicionGain = 30.f;
 
+	/** Minimum suspicion after an in-scope Search/Breach door startle. Hearing still cannot confirm Combat. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0", ClampMax = "99.0"))
+	float BreachStartleSuspicionFloor = 75.f;
+
 	/** Fill multiplier at the edge of the view cone (1 at centre). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float AngleEdgeFillFactor = 0.35f;

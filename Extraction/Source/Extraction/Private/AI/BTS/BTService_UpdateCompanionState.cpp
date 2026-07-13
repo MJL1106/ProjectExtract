@@ -3,6 +3,7 @@
 #include "BTService_UpdateCompanionState.h"
 #include "AI/AITargetingStatics.h"
 #include "AI/CompanionDiag.h"
+#include "AI/CompanionSearchRoomPolicy.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
@@ -306,10 +307,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				bAnyEnemyDetectedPlayer = true;
 				bFreshEnvelopeCombatEntry |= Enemy->GetTimeEnteredCombat() > StealthPinTime;
 			}
-			// Post-breach grant: unaware enemies inside the just-breached room are engageable
-			// even outside Combat mode — the companion was ordered through that door.
-			else if (Mode != ECompanionMode::Combat
-				&& !Companion->IsWithinPostBreachEngagement(Enemy->GetActorLocation()))
+			// Exposure changes enemy sight, not permission to acquire an unaware target.
+			else if (!CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Mode))
 				continue;
 		}
 
@@ -368,9 +367,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 						bAnyEnemyDetectedPlayer = true;
 						bFreshEnvelopeCombatEntry |= ProxEnemy->GetTimeEnteredCombat() > StealthPinTime;
 					}
-					// Post-breach grant: see the sight-pass twin above.
-					else if (Mode != ECompanionMode::Combat
-						&& !Companion->IsWithinPostBreachEngagement(ProxEnemy->GetActorLocation()))
+					// Same no-first-shot policy as the sight pass.
+					else if (!CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Mode))
 						continue;
 				}
 
@@ -925,14 +923,21 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			// takedown (raises + SetFocus on the victim, possibly while still moving into
 			// position), route legs (own the Gameplay focal; a one-shot authored-aim focal
 			// would stay cleared for the rest of the leg because the route setter is cached),
-			// and an active player command — hard-facing a threat while walking to a commanded
-			// breach/loot point back-walks the whole approach.
+			// and commands that own facing. Stationary Loot is the exception: it may cover the
+			// threat between movement legs without back-walking the approach.
+			const UPathFollowingComponent* PathFollowing = Controller->GetPathFollowingComponent();
+			const bool bPathMoving = IsValid(PathFollowing)
+				&& PathFollowing->GetStatus() == EPathFollowingStatus::Moving;
+			const ECompanionCommand ActiveCommand = static_cast<ECompanionCommand>(
+				BB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand));
+			const bool bPostureOwnsFacing = CompanionSearchRoomPolicy::PostureOwnsReadyThreatFacing(
+				Companion->IsStealthActive(), ActiveCommand, bPathMoving,
+				Companion->IsSearchRoomExposureActive());
 			const bool bAimOwnedElsewhere = Companion->IsCommandedTakedownArmed()
 				|| Companion->IsCommandedTakedownExecuting()
 				|| Companion->IsTakedownMontagePlaying()
 				|| BB->GetValueAsBool(ACompanionAIController::BB_RouteActive)
-				|| static_cast<ECompanionCommand>(BB->GetValueAsEnum(
-					ACompanionAIController::BB_CompanionCommand)) != ECompanionCommand::None;
+				|| !bPostureOwnsFacing;
 			if (!bAimOwnedElsewhere)
 			{
 				Companion->SetLowReadyAim(false);
@@ -1276,14 +1281,23 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 	// Mirrors bEnforcementYields plus the combat/ready-threat/revive/DBNO/command states those
 	// branches cover themselves.
 	const UTraversalComponent* Traversal = Companion.GetTraversalComponent();
-	const bool bCommandActive = static_cast<ECompanionCommand>(
-		BB.GetValueAsEnum(ACompanionAIController::BB_CompanionCommand)) != ECompanionCommand::None;
-	const bool bTierZeroYield = bHasTarget || bReadyOnlyThreat || Companion.IsRevivingPlayer()
+	const ECompanionCommand ActiveCommand = static_cast<ECompanionCommand>(
+		BB.GetValueAsEnum(ACompanionAIController::BB_CompanionCommand));
+	const UPathFollowingComponent* PathFollowing = Controller.GetPathFollowingComponent();
+	const bool bPathMoving = IsValid(PathFollowing)
+		&& PathFollowing->GetStatus() == EPathFollowingStatus::Moving;
+	const bool bCommandYieldsFacing = CompanionSearchRoomPolicy::CommandYieldsThreatFacing(
+		ActiveCommand, bPathMoving, Companion.IsSearchRoomExposureActive());
+	const bool bReadyThreatOwnsFacing = CompanionSearchRoomPolicy::PostureOwnsReadyThreatFacing(
+		Companion.IsStealthActive(), ActiveCommand, bPathMoving,
+		Companion.IsSearchRoomExposureActive());
+	const bool bTierZeroYield = bHasTarget || (bReadyOnlyThreat && bReadyThreatOwnsFacing)
+		|| Companion.IsRevivingPlayer()
 		|| Companion.IsCommandedTakedownArmed() || Companion.IsCommandedTakedownExecuting()
 		|| Companion.IsTakedownMontagePlaying()
 		|| (IsValid(Traversal) && Traversal->IsBusy())
 		|| BB.GetValueAsBool(ACompanionAIController::BB_RouteActive)
-		|| bCommandActive
+		|| bCommandYieldsFacing
 		|| Companion.GetIsCompanionDBNO();
 
 	if (bTierZeroYield)

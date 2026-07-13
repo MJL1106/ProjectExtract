@@ -429,7 +429,8 @@ void ACompanionAIController::ReleaseNextCoverSlotIfClaimed()
 	BB->SetValueAsObject(BB_NextCoverSlot, nullptr);
 }
 
-void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor, const FVector& TargetLocation)
+void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor,
+	const FVector& TargetLocation, bool bPreserveSearchRoomExposure)
 {
 	// Tear down any armed takedown from a prior command before overwriting BB keys.
 	// Guarantees "latest ping replaces previous" even if the BT branch lacks an observer-abort.
@@ -448,10 +449,16 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 		return;
 	}
 
-	BB->SetValueAsEnum(BB_CompanionCommand,       static_cast<uint8>(Command));
+	if (!bPreserveSearchRoomExposure)
+		if (ACompanionCharacter* Comp = Cast<ACompanionCharacter>(GetPawn()))
+			Comp->EndSearchRoomExposure();
+
 	BB->SetValueAsObject(BB_CommandTargetActor,   TargetActor);
 	BB->SetValueAsVector(BB_CommandTargetLocation, TargetLocation);
 	BB->SetValueAsEnum(BB_TakedownMethod,         static_cast<uint8>(Method));
+	// CompanionCommand is the BT transition edge. Commit it last so a newly selected
+	// branch always observes the complete payload for this command.
+	BB->SetValueAsEnum(BB_CompanionCommand,       static_cast<uint8>(Command));
 
 	UE_LOG(LogCompanionAI, Warning,
 		TEXT("[IssueCommand] BB written: Command=%d Method=%d Target=%s Loc=%s"),
@@ -471,6 +478,9 @@ void ACompanionAIController::SetBreachType(EBreachType Type)
 
 void ACompanionAIController::ClearActiveCommand()
 {
+	if (ACompanionCharacter* Comp = Cast<ACompanionCharacter>(GetPawn()))
+		Comp->EndSearchRoomExposure();
+
 	UBlackboardComponent* BB = GetBlackboardComponent();
 	if (!BB) return;
 

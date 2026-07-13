@@ -3,6 +3,7 @@
 #include "EnemyAwarenessComponent.h"
 #include "AI/AIAcoustics.h"
 #include "AI/AITargetingStatics.h"
+#include "AI/SearchRoomExposure.h"
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
@@ -99,6 +100,9 @@ void UEnemyAwarenessComponent::OnTargetPerceptionUpdated(AActor* Actor, FAIStimu
 	if (bStopped) return;
 	if (!IsValid(Actor)) return;
 
+	if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Actor))
+		CachedPerceivedCompanion = Companion;
+
 	if (GetDetectionLogLevel() > 0 && Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>())
 		if (const AEnemyCharacter* EC = Cast<AEnemyCharacter>(Actor))
 			UE_LOG(LogTemp, Warning, TEXT("[BODYDBG] %s sight-stim from enemy %s sensed=%d alive=%d state=%s"),
@@ -118,11 +122,17 @@ void UEnemyAwarenessComponent::OnTargetPerceptionUpdated(AActor* Actor, FAIStimu
 	static const FName WeaponFireTag(TEXT("WeaponFire"));
 	if (IsCompanionActor(Actor))
 	{
-		// Gunfire gates on audibility (mode + suppressor); every other stimulus (sight, reload,
-		// footsteps) gates on the sight cloak.
-		const bool bFireNoise = Stimulus.Type == UAISense::GetSenseID<UAISense_Hearing>()
-			&& Stimulus.Tag == WeaponFireTag;
-		if (bFireNoise ? IsCompanionFireInaudible(Actor) : IsCompanionSightCloaked(Actor)) return;
+		const bool bHearing = Stimulus.Type == UAISense::GetSenseID<UAISense_Hearing>();
+		const bool bFireNoise = bHearing && Stimulus.Tag == WeaponFireTag;
+		if (bFireNoise && IsCompanionFireInaudible(Actor)) return;
+
+		// Quiet entry stays acoustically silent. Exposure lifts sight only; it must not make a
+		// non-watcher react to footsteps/reloads emitted during an unbroken Stealth command.
+		if (bHearing && !bFireNoise)
+			if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Actor))
+				if (Companion->IsStealthActive()) return;
+
+		if (!bFireNoise && IsCompanionSightCloaked(Actor)) return;
 	}
 
 	// Ally coordination: a mate's gunfire is the only friendly stimulus that matters — every other
@@ -191,6 +201,10 @@ void UEnemyAwarenessComponent::HandleSightStimulus(AActor* Actor, const FAIStimu
 		// without this a threat visible longer than the window is evicted the tick it ducks).
 		StampTrack(Track, Stimulus.StimulusLocation);
 
+	if (Track.bSighted)
+		if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Actor))
+			ApplySilentSearchRoomStartle(Companion, Track);
+
 	if (GetDetectionLogLevel() > 0)
 		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] SightStim tgt=%s success=%d state=%s stimLoc=(%.0f,%.0f,%.0f)"),
 			*GetNameSafe(Actor), Stimulus.WasSuccessfullySensed() ? 1 : 0, *UEnum::GetValueAsString(CurrentState),
@@ -224,6 +238,33 @@ void UEnemyAwarenessComponent::HandleSightStimulus(AActor* Actor, const FAIStimu
 	}
 }
 
+bool UEnemyAwarenessComponent::TryApplyBreachSearchRoomStartle(AActor* Actor,
+	const FAIStimulus& Stimulus, float NormalGain, FSuspicionTrack& Track)
+{
+	static const FName BreachTag(TEXT("Breach"));
+	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Actor);
+	if (!IsValid(Companion) || Stimulus.Tag != BreachTag) return false;
+
+	const uint32 ExposureGeneration = Companion->GetActiveSearchRoomExposureGeneration();
+	if (ExposureGeneration == 0 || LastStartledSearchRoomExposureGeneration == ExposureGeneration)
+		return false;
+
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	if (!IsValid(MyPawn)
+		|| !Companion->IsSearchRoomExposureObserverInScope(MyPawn->GetActorLocation()))
+	{
+		return false;
+	}
+
+	Track.Suspicion = SearchRoomExposure::ApplyStartleSuspicion(Track.Suspicion, NormalGain,
+		ArchetypeData->BreachStartleSuspicionFloor, NoiseSuspicionCap);
+	LastStartledSearchRoomExposureGeneration = ExposureGeneration;
+	UE_LOG(LogEnemyAI, Log, TEXT("[SEARCH EXPOSURE] %s breach startle gen=%u suspicion=%.0f"),
+		*GetNameSafe(GetOwner()), ExposureGeneration, Track.Suspicion);
+	return true;
+}
+
 void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus)
 {
 	if (IsOwnerIsolatedEncounter()) return;
@@ -253,7 +294,8 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 	if (CurrentState == EEnemyAwarenessState::Combat) return;
 
 	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain * AcousticMult;
-	Track.Suspicion = FMath::Min(Track.Suspicion + Gain, NoiseSuspicionCap);
+	if (!TryApplyBreachSearchRoomStartle(Actor, Stimulus, Gain, Track))
+		Track.Suspicion = FMath::Min(Track.Suspicion + Gain, NoiseSuspicionCap);
 
 	static const FName WeaponFireTag(TEXT("WeaponFire"));
 	if (Stimulus.Tag == WeaponFireTag && Track.Suspicion >= ArchetypeData->SuspiciousThreshold)
@@ -508,6 +550,8 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 {
 	if (bStopped) return;
 	if (!IsValid(ArchetypeData)) return;
+
+	RefreshSearchRoomExposure();
 
 	// Debug auto-engage: force Combat with the player pawn every tick while the flag is set.
 	// Runs before the normal Combat/Suspicion branch so it re-asserts target and state even if
@@ -978,8 +1022,21 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 	// audible unsuppressed fire routes to Searching, never a lock-on). A cloaked NORMAL companion
 	// reaching here means real damage/near-miss broke its cloak: entering Combat lifts the cloak
 	// for this enemy, so the fight is coherent from this point on.
-	if (const ACompanionCharacter* TargetCompanion = Cast<ACompanionCharacter>(Target))
-		if (TargetCompanion->IsStealthActive()) return;
+	if (ACompanionCharacter* TargetCompanion = Cast<ACompanionCharacter>(Target))
+	{
+		if (TargetCompanion->IsStealthActive())
+		{
+			const AAIController* MyController = Cast<AAIController>(GetOwner());
+			const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+			if (!IsValid(MyPawn)
+				|| !TargetCompanion->IsSearchRoomExposureObserverInScope(MyPawn->GetActorLocation()))
+			{
+				return;
+			}
+
+			TargetCompanion->SetStealthBroken(true);
+		}
+	}
 
 	if (CurrentState != EEnemyAwarenessState::Combat && GetDetectionLogLevel() > 0)
 	{
@@ -1317,6 +1374,53 @@ bool UEnemyAwarenessComponent::IsCompanionActor(const AActor* Actor) const
 	return Cast<const ACompanionCharacter>(Actor) != nullptr;
 }
 
+void UEnemyAwarenessComponent::RefreshSearchRoomExposure()
+{
+	ACompanionCharacter* Companion = CachedPerceivedCompanion.Get();
+	if (!IsValid(Companion)) return;
+
+	const uint32 ExposureGeneration = Companion->GetActiveSearchRoomExposureGeneration();
+	if (ExposureGeneration == 0 || ExposureGeneration == LastSeededSearchRoomExposureGeneration) return;
+
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	if (!IsValid(MyPawn)
+		|| !Companion->IsSearchRoomExposureObserverInScope(MyPawn->GetActorLocation()))
+	{
+		return;
+	}
+
+	LastSeededSearchRoomExposureGeneration = ExposureGeneration;
+	SeedCompanionSightTracks();
+}
+
+void UEnemyAwarenessComponent::ApplySilentSearchRoomStartle(ACompanionCharacter* Companion,
+	FSuspicionTrack& Track)
+{
+	if (!IsValid(Companion) || !IsValid(ArchetypeData)) return;
+
+	const uint32 ExposureGeneration = Companion->GetActiveSearchRoomExposureGeneration();
+	if (!Companion->HasSearchRoomExposureSilentStartle(ExposureGeneration)
+		|| LastStartledSearchRoomExposureGeneration == ExposureGeneration)
+	{
+		return;
+	}
+
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	if (!IsValid(MyPawn)
+		|| !Companion->IsSearchRoomExposureObserverInScope(MyPawn->GetActorLocation()))
+	{
+		return;
+	}
+
+	Track.Suspicion = SearchRoomExposure::ApplyStartleSuspicion(Track.Suspicion, 0.f,
+		ArchetypeData->BreachStartleSuspicionFloor, NoiseSuspicionCap);
+	LastStartledSearchRoomExposureGeneration = ExposureGeneration;
+	UE_LOG(LogEnemyAI, Log, TEXT("[SEARCH EXPOSURE] %s quiet visual startle gen=%u suspicion=%.0f"),
+		*GetNameSafe(GetOwner()), ExposureGeneration, Track.Suspicion);
+}
+
 void UEnemyAwarenessComponent::SeedCompanionSightTracks()
 {
 	AAIController* MyController = Cast<AAIController>(GetOwner());
@@ -1333,6 +1437,7 @@ void UEnemyAwarenessComponent::SeedCompanionSightTracks()
 		FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Actor);
 		Track.bSighted = true;
 		StampTrack(Track, Actor->GetActorLocation());
+		ApplySilentSearchRoomStartle(Cast<ACompanionCharacter>(Actor), Track);
 	}
 }
 
@@ -1345,6 +1450,14 @@ bool UEnemyAwarenessComponent::IsCompanionSightCloaked(const AActor* Actor) cons
 {
 	const ACompanionCharacter* Companion = Cast<const ACompanionCharacter>(Actor);
 	if (!Companion) return false;
+
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	if (IsValid(MyPawn)
+		&& Companion->IsSearchRoomExposureObserverInScope(MyPawn->GetActorLocation()))
+	{
+		return false;
+	}
 
 	switch (Companion->GetMode())
 	{

@@ -78,6 +78,7 @@ private:
 
 	/** Cached door from the blackboard. Weak — the door may be destroyed mid-task. */
 	TWeakObjectPtr<AActor> CachedDoor;
+	FVector RoomAnchor = FVector::ZeroVector;
 
 	/** True when a combat target already existed when the breach started — the ping was a
 	 *  deliberate mid-fight override, so a held-over target must not break the breach off. */

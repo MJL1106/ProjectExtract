@@ -83,14 +83,23 @@ public:
 	UPROPERTY(EditAnywhere, Category="Companion|PostBreach", meta = (ClampMin = "0.0"))
 	float PostBreachEngagementDuration = 8.f;
 
-	/** Radius (cm) around a commanded explore point scanned for lootable containers and, via the
-	 *  engagement grant, within which unaware enemies become engageable. */
+	/** Radius (cm) around the searched room's interior point scanned for lootable containers and,
+	 *  via the engagement grant, within which unaware enemies become engageable. */
 	UPROPERTY(EditAnywhere, Category="Companion|Explore", meta = (ClampMin = "0.0"))
 	float ExploreLootRadius = 1200.f;
 
-	/** Seconds the unaware-enemy engagement grant stays live around a commanded explore point. */
+	/** Seconds the unaware-enemy engagement grant stays live around a searched room. */
 	UPROPERTY(EditAnywhere, Category="Companion|Explore", meta = (ClampMin = "0.0"))
 	float ExploreEngagementDuration = 8.f;
+
+	/** Seconds (min) the companion stands in a searched room that turned up nothing before
+	 *  returning to follow. The actual dwell is rolled per search between min and max. */
+	UPROPERTY(EditAnywhere, Category="Companion|Explore", meta = (ClampMin = "0.0"))
+	float SearchDwellMin = 2.f;
+
+	/** Seconds (max) the companion stands in an empty searched room before returning to follow. */
+	UPROPERTY(EditAnywhere, Category="Companion|Explore", meta = (ClampMin = "0.0"))
+	float SearchDwellMax = 4.f;
 
 	// --- Movement speeds (applied by ACompanionCharacter; its EditDefaultsOnly members are the
 	// fallback when no tuning asset is assigned) ---

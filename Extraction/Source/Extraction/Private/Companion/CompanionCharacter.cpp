@@ -261,6 +261,7 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 
 	DisarmCommandedTakedown();
+	EndSearchRoomExposure();
 
 	if (const UWorld* World = GetWorld())
 	{
@@ -542,6 +543,25 @@ bool ACompanionCharacter::IsWithinPostBreachEngagement(const FVector& Location) 
 	const UWorld* World = GetWorld();
 	if (!World || World->GetTimeSeconds() > PostBreachExpiryTime) return false;
 	return FVector::DistSquared(Location, PostBreachAnchor) <= PostBreachRadiusSq;
+}
+
+void ACompanionCharacter::BeginSearchRoomExposure(const FVector& RoomAnchor, float Radius, bool bSilentStartle)
+{
+	if (!HasAuthority() || Radius <= 0.f) return;
+
+	SearchRoomExposure.Begin(RoomAnchor, Radius, bSilentStartle);
+	UE_LOG(LogCompanion, Log, TEXT("%s: search-room exposure begin gen=%u anchor=%s r=%.0f silentStartle=%d"),
+		*GetName(), SearchRoomExposure.GetActiveGeneration(), *RoomAnchor.ToCompactString(), Radius,
+		bSilentStartle ? 1 : 0);
+}
+
+void ACompanionCharacter::EndSearchRoomExposure()
+{
+	if (!SearchRoomExposure.IsActive()) return;
+
+	const uint32 EndingGeneration = SearchRoomExposure.GetActiveGeneration();
+	SearchRoomExposure.End();
+	UE_LOG(LogCompanion, Log, TEXT("%s: search-room exposure end gen=%u"), *GetName(), EndingGeneration);
 }
 
 void ACompanionCharacter::TryLinkModeWidget()
@@ -917,6 +937,7 @@ void ACompanionCharacter::EnterDBNO()
 	// Tear down active commands
 	DisarmCommandedTakedown();
 	ClearPostBreachEngagement();
+	EndSearchRoomExposure();
 	if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController()))
 		CompAIC->ClearActiveCommand();
 

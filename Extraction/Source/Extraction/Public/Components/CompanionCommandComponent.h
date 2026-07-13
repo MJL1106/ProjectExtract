@@ -39,11 +39,6 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Command")
 	float PingTraceRange = 6000.f;
 
-	/** Open-ground "search" pings are suppressed when a still-breachable door sits within this
-	 *  radius (cm) of the pinged spot — that area is breach territory. 0 disables the check. */
-	UPROPERTY(EditAnywhere, Category = "Companion|Command", meta = (ClampMin = "0.0"))
-	float ExploreSuppressNearBreachRadius = 400.f;
-
 	/** Registered at TakedownPromptContextPriority ONLY while a takedown ping is pending. Maps the
 	 *  G/V confirm keys so they consume — the kit's grenade (G) and melee (V) can't fire while the
 	 *  takedown prompt is on screen. Assign IMC_CompanionTakedownPrompt in BP. */
@@ -156,9 +151,6 @@ private:
 	ECompanionCommand PendingCommand = ECompanionCommand::None;
 
 	TWeakObjectPtr<AActor> PendingTarget;
-
-	/** Navmesh-projected point of a pending Explore ping (Explore has no target actor). */
-	FVector PendingLocation = FVector::ZeroVector;
 
 	/** Lazily resolved on first use; valid for the lifetime of the level. */
 	TWeakObjectPtr<ACompanionCharacter> CachedCompanion;

@@ -3,7 +3,9 @@
 #include "AI/Tasks/BTTask_CompanionBreach.h"
 #include "AIController.h"
 #include "AI/CompanionAIController.h"
+#include "AI/CompanionSearchRoomPolicy.h"
 #include "AI/CompanionTuningDataAsset.h"
+#include "CompanionBreachStatics.h"
 #include "Companion/CompanionCharacter.h"
 #include "Components/HealthComponent.h"
 #include "Enemy/EnemyCharacter.h"
@@ -12,7 +14,6 @@
 #include "World/Lootable.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Navigation/PathFollowingComponent.h"
-#include "Perception/AISense_Hearing.h"
 #include "Kismet/GameplayStatics.h"
 #include "EngineUtils.h"
 
@@ -72,6 +73,7 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 	AlignElapsed = 0.f;
 	PhaseElapsed = 0.f;
 	MontageLength = 0.f;
+	RoomAnchor = FVector::ZeroVector;
 	CachedDoor.Reset();
 
 	ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
@@ -118,6 +120,7 @@ EBTNodeResult::Type UBTTask_CompanionBreach::ExecuteTask(UBehaviorTreeComponent&
 	}
 
 	CachedDoor = Door;
+	RoomAnchor = CompanionBreachStatics::ResolveInteriorAnchor(Door, Pawn);
 	SetDoorAutoOpenSuppressed(true);
 	bHadCombatTargetAtStart = IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
 
@@ -434,25 +437,19 @@ void UBTTask_CompanionBreach::StartAlign(APawn* Pawn)
 
 void UBTTask_CompanionBreach::OpenDoorNow(ACompanionAIController* AIC, AActor* Door)
 {
-	// The door may have been opened by something else during the wind-up — swing/noise only once.
-	if (!IBreachable::Execute_CanBreach(Door))
+	const UCompanionTuningDataAsset* Tuning = IsValid(AIC) ? AIC->GetTuning() : nullptr;
+	const UBlackboardComponent* ActiveBB = IsValid(AIC) ? AIC->GetBlackboardComponent() : nullptr;
+	const bool bStillBreachingThisDoor = IsValid(ActiveBB)
+		&& static_cast<ECompanionCommand>(ActiveBB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand)) == ECompanionCommand::Breach
+		&& ActiveBB->GetValueAsObject(ACompanionAIController::BB_CommandTargetActor) == Door;
+	const float ExposureRadius = bStillBreachingThisDoor
+		? (Tuning ? Tuning->PostBreachExploreRadius : 900.f)
+		: 0.f;
+	if (!CompanionBreachStatics::OpenBreachDoor(AIC, Door, PendingBreachType,
+		RoomAnchor, ExposureRadius))
 	{
 		UE_LOG(LogCompanionBreach, Log, TEXT("OpenDoorNow: %s opened elsewhere during wind-up — skipping swing"), *GetNameSafe(Door));
 		return;
-	}
-
-	IBreachable::Execute_Breach(Door, AIC->GetPawn());
-
-	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
-	const FBreachNoiseProfile* Profile = Tuning ? Tuning->BreachNoise.Find(PendingBreachType) : nullptr;
-	if (Profile && Profile->Loudness > 0.f && Profile->MaxRange > 0.f)
-	{
-		// Doorway centre, not actor location — the swing-door root is the hinge, which can sit
-		// inside the frame/wall and wrongly read as occluded to acoustic listener traces.
-		const ADoorBase* DoorBase = Cast<ADoorBase>(Door);
-		const FVector NoiseLocation = DoorBase ? DoorBase->GetAcousticPortalPoint() : Door->GetActorLocation();
-		UAISense_Hearing::ReportNoiseEvent(AIC->GetWorld(), NoiseLocation,
-			Profile->Loudness, AIC->GetPawn(), Profile->MaxRange, TEXT("Breach"));
 	}
 
 	UE_LOG(LogCompanionBreach, Log, TEXT("OpenDoorNow: breached %s (type=%d)"),
@@ -497,26 +494,24 @@ void UBTTask_CompanionBreach::FinishBreachSuccess(UBehaviorTreeComponent& OwnerC
 	const float ExploreRadius = Tuning ? Tuning->PostBreachExploreRadius : 900.f;
 	const float GrantDuration = Tuning ? Tuning->PostBreachEngagementDuration : 8.f;
 
-	// Post-breach chain: the companion was ordered through this door, so it clears the room —
-	// unaware enemies nearby become engageable (grant) and a quiet room chains a loot sweep.
-	// Unbroken Stealth keeps the quiet-breach contract: no grant, no auto-loot, hold as before.
+	// Combat is weapons-free. Normal and Stealth preserve no-first-shot behavior and may chain
+	// same-room loot while an unaware/searching enemy is only being watched.
 	bool bChainedLoot = false;
-	if (IsValid(Companion) && !Companion->IsStealthActive() && ExploreRadius > 0.f && IsValid(Door))
+	if (IsValid(Companion) && ExploreRadius > 0.f && IsValid(Door))
 	{
 		// Interior anchor: the same enter-room point the reposition uses; doorway portal fallback.
-		FVector Anchor;
-		if (!IBreachable::Execute_GetPostBreachPoint(Door, Pawn, /*bEnterRoom*/ true, Anchor))
-		{
-			const ADoorBase* DoorBase = Cast<ADoorBase>(Door);
-			Anchor = DoorBase ? DoorBase->GetAcousticPortalPoint() : Door->GetActorLocation();
-		}
+		const FVector& Anchor = RoomAnchor;
 
-		Companion->SetPostBreachEngagement(Anchor, ExploreRadius, GrantDuration);
+		if (CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Companion->GetMode()))
+			Companion->SetPostBreachEngagement(Anchor, ExploreRadius, GrantDuration);
 		bChainedLoot = ChainLootFromAnchor(OwnerComp, AIC, Pawn, Anchor);
 	}
 
-	if (!bChainedLoot)
-		AIC->ClearActiveCommand();
+	// The Breach decorator observes CompanionCommand and self-aborts this task.
+	// That abort owns the handoff; finishing this task again would cancel Loot.
+	if (bChainedLoot) return;
+
+	AIC->ClearActiveCommand();
 
 	CachedDoor.Reset();
 	FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
@@ -528,14 +523,18 @@ bool UBTTask_CompanionBreach::ChainLootFromAnchor(UBehaviorTreeComponent& OwnerC
 	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn);
 	const UCompanionTuningDataAsset* Tuning = IsValid(AIC) ? AIC->GetTuning() : nullptr;
 	const float ExploreRadius = Tuning ? Tuning->PostBreachExploreRadius : 900.f;
-	if (!IsValid(Companion) || Companion->IsStealthActive() || ExploreRadius <= 0.f) return false;
+	if (!IsValid(Companion) || ExploreRadius <= 0.f) return false;
 
-	// Loot chains only into a quiet room: while a command is active the combat branch cannot
-	// run, so a hot room clears the command instead and the grant lets the fight start.
+	// A real combat target always hands off. Only Combat treats a merely visible live enemy as
+	// immediately hot; Normal and Stealth continue until the enemy actually enters Combat.
 	const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	const bool bInCombat = IsValid(BB)
 		&& IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
-	if (bInCombat || BreachAnyLiveEnemyWithin(Companion->GetWorld(), Anchor, ExploreRadius)) return false;
+	const ECompanionMode Mode = Companion->GetMode();
+	const bool bVisibleLiveEnemy = Mode == ECompanionMode::Combat
+		&& BreachAnyLiveEnemyWithin(Companion->GetWorld(), Anchor, ExploreRadius);
+	if (CompanionSearchRoomPolicy::ShouldTreatRoomAsHot(Mode, bInCombat, bVisibleLiveEnemy))
+		return false;
 
 	AActor* Container = BreachFindNearestLootable(Companion->GetWorld(), Anchor, ExploreRadius);
 	if (!Container) return false;
@@ -543,7 +542,7 @@ bool UBTTask_CompanionBreach::ChainLootFromAnchor(UBehaviorTreeComponent& OwnerC
 	UE_LOG(LogCompanionBreach, Log, TEXT("ChainLootFromAnchor: room quiet — chaining loot sweep to %s"),
 		*GetNameSafe(Container));
 	AIC->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife,
-		Container, Container->GetActorLocation());
+		Container, Container->GetActorLocation(), true);
 	return true;
 }
 
