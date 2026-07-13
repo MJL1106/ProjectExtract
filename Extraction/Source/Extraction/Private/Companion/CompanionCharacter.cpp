@@ -734,13 +734,18 @@ float ACompanionCharacter::TunedCrouchedWalkSpeed() const
 {
 	const UCompanionTuningDataAsset* T = GetTuning();
 
-	// Stealth crouch-walk rides the normal walk speed: the standing channel already carries the
-	// stealth slowdown (StealthWalkSpeed), and stacking the crouch penalty on top of it made the
-	// mirror-crouch pace unusably slow. FastCrouch keeps its catch-up tier, floored at the base
-	// so the "hustle" tier can never be slower than ordinary stealth crouch-walk.
+	// Stealth crouch-walk mirrors the PLAYER's crouched cap: riding the standing WalkSpeed (the
+	// old fix for the mirror-crouch being unusably slow) made the companion skate — crouch anim at
+	// walk velocity. Matching the player keeps the mirror in step: slower skates behind the anim,
+	// faster outruns the player it's mirroring. FastCrouch keeps its catch-up tier, floored at the
+	// base so the "hustle" tier can never be slower than ordinary stealth crouch-walk.
 	if (IsStealthActive())
 	{
-		const float Base = T ? T->WalkSpeed : WalkSpeed;
+		float Base = T ? T->WalkSpeed : WalkSpeed;
+		const ACompanionAIController* AIC = Cast<ACompanionAIController>(GetController());
+		const ACharacter* Player = AIC ? Cast<ACharacter>(AIC->GetPlayerCharacter()) : nullptr;
+		const UCharacterMovementComponent* PlayerMove = Player ? Player->GetCharacterMovement() : nullptr;
+		if (PlayerMove) Base = PlayerMove->MaxWalkSpeedCrouched;
 		if (StealthCatchupStage == EStealthCatchup::FastCrouch && T)
 			return FMath::Max(Base, T->StealthCrouchCatchupSpeed);
 		return Base;

@@ -62,96 +62,40 @@ The user is the director, not the engineer. Cut everything that isn't load-beari
 ## Workflow (this is the workflow — follow it, do not freelance)
 
 - **In-engine work = invoke `inengine-checklist` skill EVERY TIME — no exceptions.** Whenever the response would tell the user to do something in the Unreal editor (open a BP, set a property, place an actor, add a component, edit a DataAsset, create a child class), invoke `inengine-checklist` first. The skill enforces a tight numbered-list format with exact menu paths and verbatim values, and strips all code/architecture commentary. Even a single editor step goes through it. If the work is large (BP graph edits, repetitive bulk, many reference wires), use `ue5-inengine-agent` instead — do not freehand prose for editor instructions.
+- **Codex MUST NOT start PIE, Simulate, inject gameplay input, or autonomously playtest.** The user owns all gameplay playtesting. Codex may build, boot the editor, inspect/edit assets at edit time, and provide concise test scenarios, but must stop before pressing Play.
 
-**The loop:** Plan → Implement → Review → Fix-review-findings → Review → ... → Done.
+**The loop:** Plan → Execute → Review → Fix-findings → Review → ... → Done.
 Continue the implement/review loop until no `CRITICAL` or `WARNING` findings remain.
 
 ### Role of the main chat
 The main Codex chat is the **senior-dev watchdog running on the model the user chose for the chat**.
 
 - Plans the work and waits for approval on anything non-trivial
-- Breaks tasks into file-ownership slices
-- Coordinates subagents by direct dispatch, or a team workflow when `ue5-team` recommends one
-- Reviews implementer output before declaring "done"
-- **Never downshifts planning, architecture, or final judgement to a weaker model**
-- **Never writes substantive code itself** — that's the implementer's job. Trivial typos / renames / single-line tweaks are the only main-chat code exception.
-
-### Codex model policy by dispatch
-
-Codex agent TOML files define roles only; **model choice happens when the main chat dispatches the agent**.
-
-For every role below assigned to Luna, dispatch with `model: "gpt-5.6-luna"` and `reasoning_effort: "max"`.
-
-| Role | Dispatch model | Notes |
-|---|---|---|
-| Plan / architecture | Current chat model | Always keep the user's chosen strong model in the main chat |
-| Review / final judgement | Inherit current chat model | Use `ue5-reviewer` without a model downgrade |
-| C++ implementation | `gpt-5.6-luna` + max effort | Default for `ue5-cpp-implementer` after plan approval |
-| Test writing | `gpt-5.6-luna` + max effort | `ue5-qa-tester` |
-| Research / docs | `gpt-5.6-luna` + max effort | Escalate to inherited model only when reasoning, not lookup, is the bottleneck |
-| In-engine read-only scout | `gpt-5.6-luna` + max effort | Cheap, parallel, read-only editor reconnaissance |
-| Normal in-engine editing / build fixes | `gpt-5.6-luna` + max effort | Use `ue5-inengine-agent` or `ue5-build-specialist` for bounded implementation-style work |
-| Hard debugging / escalation | Inherit current chat model | Use inherited model when the prior Luna pass is stuck or the issue is architecture-heavy |
-
-### Subagent preference
-
-Prefer custom subagents wherever the task matches an agent description. Main chat should rarely be the one writing code — its role is orchestration and review.
-
-- Solo C++ work → dispatch `ue5-cpp-implementer` on `gpt-5.6-luna` with `reasoning_effort: "max"` after plan approval. Never freelance edits from main chat for anything beyond trivial typos / renames / single-line tweaks.
-- For parallelisable dispatches (reviewer + multiple plan agents, or several scouts), issue them in a single message, not sequentially.
-- Pure research / "where does X live" → use `rg` / graph tools directly. Don't spawn an agent for a one-line answer.
+- Reviews the work against the stated goal before declaring it done
+- Chooses directly between local work, available tools, and optional custom agents based on the task
 
 ### Engine state is a source of truth — check it, don't guess
 
-When planning, investigating a bug, or forming a picture of "what does this actually do right now" for anything in-engine (current BP graph wiring, DataAsset/DataTable values, live AnimBP state, level actor placement, EQS/BT authoring, widget layout) — this applies beyond explicit "wire this up" requests, including planning and bug investigation:
-- If the answer would be more reliable read from the running editor than inferred from `.uasset` diffs or memory, **check the engine** — dispatch `ue5-inengine-scout` (read-only, `gpt-5.6-luna` with `reasoning_effort: "max"`) rather than guessing from C++ or asking the user to go look. If the inspection turns into a bounded editor edit, dispatch `ue5-inengine-agent` on `gpt-5.6-luna` with `reasoning_effort: "max"`; inherit the current chat model only when that pass is stuck or the issue is architecture-heavy.
-- **Scale scouts to the question, favoring speed over conservatism.** If the recon splits into independent inspection threads (e.g. "check the BT, the Blackboard, and the EQS query" or "inspect 3 unrelated widgets"), dispatch one scout per thread **in a single message** so they run concurrently — up to 5 at once. Don't default to 1 scout doing everything sequentially when 3-5 parallel scouts would answer it faster; don't over-split a single-thread question either. Judge the split by independence of the sub-questions, not by a fixed count.
-- If the editor isn't running, **boot it first** — route through `ue5-inengine-agent` (it self-boots via the `boot-engine` skill) since scouts can't boot the editor themselves. Don't skip the check just because the editor is currently down, and don't ask the user to open it.
-- This is read-only reconnaissance for planning purposes — it does not replace the implement/review/build loop, and it does not authorize edits during an investigation.
+When planning, investigating a bug, or forming a picture of current in-engine state (Blueprint wiring, DataAsset/DataTable values, AnimBP state, level actors, EQS/BT authoring, or widget layout), check the running editor when it is more reliable than source or asset diffs. Use the appropriate available tooling for inspection or editing, and keep the implementation/review loop intact.
 
 ### The loop in detail
 
-0. **`ue5-team` skill** — decide solo vs team (mandatory Step 0 for every non-trivial task)
-1. **Implement:**
-   - Solo → `ue5-cpp-implementer` on `gpt-5.6-luna` with `reasoning_effort: "max"`
-   - Team → compose agents from `ue5-team`'s recommendation with explicit file ownership and dispatch-time models
-2. **Review (single consolidated reviewer, covers safety + performance + edge-case in one pass):**
-   - `ue5-reviewer` — always, every C++ change, inheriting the current chat model. MUST be briefed with: (a) the task goal in one or two sentences, (b) the list of changed files with brief description, (c) the plan file path if one exists. Without the goal the edge-case dimension is degraded (safety/performance still run).
-   - `ue5-ui-specialist` — if UMG / Slate / widget code touched
-   - `ue5-build-specialist` — if `Build.cs` / `Target.cs` / `.uproject` / plugin config / include paths touched
-3. **Fix review findings:** any `CRITICAL` or `WARNING` → re-dispatch `ue5-cpp-implementer` with the consolidated findings. **Do NOT fix in main chat.** Loop back to step 2 if the fix is non-trivial.
-4. **Own the close→build→reboot loop yourself — never make the user the build/editor operator.** **Build only AFTER the review round is clean — never start (or run in parallel with) the reviewer.** The reviewer reads source, not binaries; a finding means edits and a second build, so a pre-review build is wasted compile time and a wasted editor close. Sequence is strictly: review → fix findings → re-review if non-trivial → THEN close/build/reboot once. For any C++ change that needs testing:
+1. **Plan:** define the goal, scope, approach, and verification.
+2. **Execute:** make the focused change using the approach that best fits the task.
+3. **Review:** check safety, performance, architecture, edge cases, and goal coverage.
+4. **Fix findings:** address every `CRITICAL` or `WARNING`, then return to the review step.
+5. **Build and verify when the change requires it.** Build only after the review round is clean. For any C++ change that needs testing:
    - **(a) ALWAYS confirm before closing — no exceptions, every time.** Before touching the process, ask the user: "Close the Unreal Editor to build?" with choices **"Yes, close now"** / **"No, hold off — another chat is still working"**. Never force-close autonomously on the assumption a prior approval still applies — ask fresh each time a close is about to happen. If the user picks hold off, wait and re-ask later instead of proceeding. Only on an explicit "yes, close now" do you proceed. Then close ONLY this project's editor, scoped by the `.uproject` in the process command line. **NEVER `Stop-Process -Name UnrealEditor`** — the user keeps other projects' editors open at the same time, and blanket-kill terminates all of them. Use:
      ```
      Get-CimInstance Win32_Process -Filter "Name='UnrealEditor.exe'" | Where-Object { $_.CommandLine -like '*Extraction.uproject*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
      ```
-   - **(b) Build with the editor closed and confirm `Result: Succeeded` in the log** — exit 0 from the `Build.bat` wrapper is NOT proof (a Live Coding lock exits fast without compiling). If it fails, dispatch `ue5-build-specialist` (linker/IWYU/Build.cs) or `ue5-cpp-implementer` (semantic/template/API), then re-build. Standard command:
+   - **(b) Build with the editor closed and confirm `Result: Succeeded` in the log** — exit 0 from the `Build.bat` wrapper is NOT proof (a Live Coding lock exits fast without compiling). If it fails, diagnose and fix the build issue, then re-build. Standard command:
      ```
      "/c/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat" ExtractionEditor Win64 Development -Project="C:/Users/matth/Documents/Github/ProjectExtract/Extraction/Extraction.uproject" -WaitMutex
      ```
      Run in the background when available (UE builds take 30-300s), redirect to a temp file, grep for `Result:` / `error`.
    - **(c) On green, re-boot this project's editor** via the `boot-engine` skill (+ VibeUE proxy); wait for `vibeue_status` and a trivial `mcp__unreal-editor__execute_script` NeoStack check. Reviewers read; they don't compile.
-5. **"Ready" / "done" = the user can literally press Play.** Build-green is a mid-step, not a stopping point — never report ready while the editor is closed. Only surface the result + reviewer summaries once ALL hold: no outstanding `CRITICAL`/`WARNING` findings, the build hit `Result: Succeeded`, AND this project's editor is re-booted and sitting where pressing Play works.
-
-### Other agents (dispatch on match)
-
-| Task | Agent |
-|---|---|
-| In-engine asset/BP/material/UMG/Niagara/DataAsset/level wiring, asset import, Behavior Trees/Blackboards/EQS — via MCP, no C++ | `ue5-inengine-agent` |
-| Read-only in-engine recon — "what's wired", "what does X currently look like", pre-flight brief before an edit, planning/bug-investigation lookups. Cheap, parallelizable (up to 5 at once) | `ue5-inengine-scout` |
-| Unresolved externals, IWYU warnings, missing API macros, Build.cs edits, linker errors | `ue5-build-specialist` |
-| Writing automation tests, scaffolding a test module | `ue5-qa-tester` |
-| UE5 API behaviour unclear / new engine feature / want to confirm best practice | `ue5-doc-researcher` |
-
-### Team-spawning shortcuts (when `ue5-team` returns TEAM)
-
-- Feature work → compose a custom team from `ue5-team`'s recommendation
-- Branch/PR review → dispatch `ue5-reviewer` plus any specialists that match changed files
-- Multi-hypothesis bug → run competing investigations in parallel, then arbitrate evidence in the main chat
-- API research / feasibility study → parallel `ue5-doc-researcher` or `ue5-inengine-scout` agents if the questions are independent
-- Always shut down any explicit team workflow when the task completes
-
----
+6. **"Ready" / "done" = the user can literally press Play.** Build-green is a mid-step, not a stopping point — never report ready while the editor is closed. Only report ready once there are no outstanding `CRITICAL`/`WARNING` findings, the build hit `Result: Succeeded`, AND this project's editor is re-booted and sitting where pressing Play works.
 
 ## Skill Invocation (be aggressive — invoke whenever the topic is mentioned)
 
@@ -178,22 +122,10 @@ Local skills under `.agents/skills/` are loaded on demand and cheap. **Invoke a 
 | Any UE5 C++ review request | `ue5-code-review` |
 | Crash, freeze, compile error | `ue5-crash-debug` |
 | Boot / reopen the ProjectExtract editor and bring VibeUE + NeoStack online | `boot-engine` |
-| In-engine editor work via MCP (BP/material/UMG/Niagara/DataAsset/level/asset import) and in-engine AI systems (Behavior Trees / Blackboards / EQS → NeoStack) — done autonomously | **dispatch `ue5-inengine-agent`** |
+| In-engine editor work via MCP (BP/material/UMG/Niagara/DataAsset/level/asset import) and in-engine AI systems (Behavior Trees / Blackboards / EQS → NeoStack) | Use the appropriate in-engine tooling and matching skill; an agent is optional |
 | Drive the editor from the CLI yourself — tooling map, screenshots, the code→build→boot→wire→close loop, gotchas | **read `agent_docs/UnrealWorkflow.md`** (VibeUE editor :8088 / Codex proxy :8089 + NeoStack :9315) |
 | End of session — summarising for handoff | `session-handoff` |
-| **Start of any non-trivial task — decide solo vs team** | **`ue5-team` (mandatory Step 0)** |
-
-If unsure whether to invoke, **bias toward invoking the skill** (cheap — just loads reference) and **against dispatching a subagent** (costly — spawns a full session).
-
----
-
-## Model rule — custom agents plus explicit dispatch model
-
-The custom subagents in `.codex/agents/` are the right tool for any UE5 work. These TOML files do not pin a model; the main chat chooses the model at dispatch time.
-
-- **For UE5 codebase exploration / research / implementation / review** → use the custom agents above. Never use a generic explore/general agent for substantive work.
-- **For trivial file-path lookups** ("what file lives at X", "find all callers of Y") → `rg` directly in the main session, no agent needed.
-- **If a custom agent doesn't fit and you must spawn a generic one**, set an explicit model and effort. Use `gpt-5.6-luna` with `reasoning_effort: "max"` for ordinary implementation, research, and debugging work. Keep architecture in the main chat. Inherit the current chat model only for review, final judgement, or hard escalation after a Luna pass is stuck.
+If unsure whether to invoke a skill or agent, choose based on the task's actual needs and keep the workflow proportionate.
 
 ---
 
@@ -210,7 +142,7 @@ If richer graph tools are exposed in a future session, use them. Otherwise fall 
 
 ## Project-Specific Notes
 
-- **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, editor MCP :8088; Codex proxy :8089 — `execute_python_code`, `manage_skills`, `manage_asset`). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). To get it done autonomously, **dispatch `ue5-inengine-agent`**. Alternatively hand off to a human via `inengine-checklist` in plain English. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. **NeoStack (:9315) is the fallback when VibeUE lacks the capability — especially in-engine AI systems: Behavior Trees, Blackboards, EQS, and AI Blueprint wiring (VibeUE has no BT/Blackboard skill).** Drive it via the `neostack-loop` / `neostack-blueprint` skills.
+- **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, editor MCP :8088; Codex proxy :8089 — `execute_python_code`, `manage_skills`, `manage_asset`). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). Use the appropriate in-engine tooling for the task; use `inengine-checklist` when giving manual editor steps. C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. **NeoStack (:9315) is the fallback when VibeUE lacks the capability — especially in-engine AI systems: Behavior Trees, Blackboards, EQS, and AI Blueprint wiring (VibeUE has no BT/Blackboard skill).** Drive it via the `neostack-loop` / `neostack-blueprint` skills.
 - **Companion manual QA scenarios** live in `agent_docs/companion_testing.md` — refer there before claiming an AI feature works. When automation tests land, mirror the scenarios.
 - **Roadmap / feature checklist:** `agent_docs/project_roadmap.md` is the live build checklist — every remaining feature broken down by system with status (`[ ]` to-do / `[~]` in progress / `[x]` done) and soft week tags. Consult it for current state, and **tick items off as you complete them**. It also auto-reconciles from each commit via a git `post-commit` hook (`.githooks/roadmap-update.sh`); if hooks ever get reset, re-run `sh .githooks/install.sh`.
 - **Branching:** feature-by-feature on user-managed branches. User handles PRs to `main`. No CI/CD assumptions. Don't auto-merge or push without explicit instruction.
@@ -218,7 +150,7 @@ If richer graph tools are exposed in a future session, use them. Otherwise fall 
 
 ## Shortcuts (project-specific — `QPLAN`/`QCHECK`/`QPERF` in global)
 
-- **QSAFETY / QEDGE / QFULL**: Run `ue5-reviewer` over the current change (single consolidated pass covers safety + performance + edge-case). Brief it with the task goal for a full edge-case pass.
+- **QSAFETY / QEDGE / QFULL**: Apply a consolidated safety + performance + edge-case review to the current change, using the task goal to check feature coverage.
 
 ## Session Start
 
@@ -226,15 +158,3 @@ At session start, on a fresh task, do this in order before responding:
 1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + NeoStack tooling map + gotchas); `companion_testing.md` for companion QA; **`project_roadmap.md` for the live feature checklist**
 2. Confirm the active branch matches the feature being worked on (`git status`)
 3. If the task touches AI / movement / animation / UI, **invoke the matching skill from the table above before any tool calls**
-4. **Invoke `ue5-team`** to decide solo vs team for the task — this is Step 0 of the workflow
-
-## Required environment
-
-For Codex multi-agent workflows, `.codex/config.toml` must contain:
-
-```
-[features]
-multi_agent = true
-```
-
-If multi-agent tools are unavailable in a session, fall back to solo flow and tell the user the Codex multi-agent feature is not enabled.
