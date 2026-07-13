@@ -3,6 +3,7 @@
 #include "BarkSubsystem.h"
 #include "BarkSetData.h"
 #include "EnemyDebug.h"
+#include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
 #include "Engine/World.h"
@@ -33,6 +34,38 @@ void UBarkSubsystem::RequestBark(const AActor* Speaker, const UBarkSetData* Bark
 	const UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 	const float Now = World->GetTimeSeconds();
+
+	// Earshot gate — out-of-range barks are skipped BEFORE any cooldown stamp, so the same enemy
+	// can still bark the moment the player closes in. Null pawn (dead/travelling) = no gate.
+	if (const APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0))
+	{
+		const float DistSq = FVector::DistSquared(PlayerPawn->GetActorLocation(), Speaker->GetActorLocation());
+		if (DistSq > FMath::Square(MaxSubtitleRange))
+		{
+			if (bDebug)
+			{
+				const FString TypeStr = UEnum::GetValueAsString(Type);
+				UE_LOG(LogEnemyBark, Log, TEXT("DROP OutOfRange type=%s (dist=%.0f > %.0f)"), *TypeStr, FMath::Sqrt(DistSq), MaxSubtitleRange);
+				ShowBarkScreenMessage(Speaker, Type, FString::Printf(TEXT("DROP Range %s (%.0f>%.0f)"), *TypeStr, FMath::Sqrt(DistSq), MaxSubtitleRange), FColor::Silver);
+			}
+			return;
+		}
+	}
+
+	// One voice at a time: any bark inside the global gap is dropped; high-priority telegraphs
+	// (grenade out, man down) only wait out the short gap.
+	const float RequiredGap = Def->Priority >= 2 ? PriorityBarkGap : GlobalAnyBarkGap;
+	const float SinceAny = Now - LastAnyBarkTime;
+	if (SinceAny < RequiredGap)
+	{
+		if (bDebug)
+		{
+			const FString TypeStr = UEnum::GetValueAsString(Type);
+			UE_LOG(LogEnemyBark, Log, TEXT("DROP GlobalGap type=%s (since=%.2fs < gap=%.2fs, prio=%d)"), *TypeStr, SinceAny, RequiredGap, Def->Priority);
+			ShowBarkScreenMessage(Speaker, Type, FString::Printf(TEXT("DROP Gap %s (%.1fs<%.1fs)"), *TypeStr, SinceAny, RequiredGap), FColor::Silver);
+		}
+		return;
+	}
 
 	if (const float* GlobalLast = LastBarkTimePerType.Find(Type))
 	{
@@ -68,6 +101,7 @@ void UBarkSubsystem::RequestBark(const AActor* Speaker, const UBarkSetData* Bark
 
 	LastBarkTimePerType.Add(Type, Now);
 	LastBarkTimePerSpeaker.Add(SpeakerKey, Now);
+	LastAnyBarkTime = Now;
 
 	const FText& Line = Def->Lines[FMath::RandRange(0, Def->Lines.Num() - 1)];
 	OnBarkRequested.Broadcast(SpeakerName, Line);

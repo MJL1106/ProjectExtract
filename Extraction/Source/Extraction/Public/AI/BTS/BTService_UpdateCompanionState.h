@@ -83,6 +83,9 @@ private:
 	/** Edge-detect for the window open/close diagnostic log. */
 	bool bLastReviveWindowOpen = false;
 
+	/** World time of the last body-charger target steal — gates the steal to BodyChargerStealCooldown. */
+	float LastBodyChargerStealTime = -1.f;
+
 	// --- F4a stealth crouch-mirror state (mirrors the player's own crouch/uncrouch with a
 	// randomized human-reaction delay; see UpdateStealthCrouchMirror) ---
 

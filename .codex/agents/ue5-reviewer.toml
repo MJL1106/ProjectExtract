@@ -48,22 +48,16 @@ If these are missing, still run the safety and performance dimensions, but flag 
 | SetActorLocation on Character | Bypasses MovementComponent, collision, nav | Use AddMovementInput for gameplay |
 | Tags variable shadow | Local `Tags` shadows AActor::Tags | Use ActorTags or specific name |
 
-### ProjectExtract-Specific Safety Checks (multiplayer FPS / AI)
+### ProjectExtract-Specific Safety Checks (single-player FPS / AI)
 
 | Pattern | What to look for | Fix |
 |---------|------------------|-----|
-| Replicated UPROPERTY without `DOREPLIFETIME` | `Replicated` specifier present but property missing from `GetLifetimeReplicatedProps` | Add `DOREPLIFETIME[_CONDITION]` line; without it the var never replicates |
-| Missing `Super::GetLifetimeReplicatedProps` | Override exists but doesn't call `Super::` | Parent's replicated vars stop replicating |
-| RPC called on wrong net role | Server RPC called from server, or Multicast called from client | `if (HasAuthority())` gate; Multicast must originate on server |
-| `OnRep_` not idempotent | OnRep callback assumes "this is the first time" | OnRep can fire multiple times on a single change burst — make handlers safe to re-run |
 | `AAIController::OnPossess` missing `Super::` | Override skips Super → BT/Blackboard/Perception not initialised | Always call `Super::OnPossess(InPawn)` first |
 | Behavior tree task missing `FinishLatentTask` | `ExecuteTask` returns `InProgress` but no path calls `FinishLatentTask` | Every code path must finish or task hangs forever |
-| Spawn weapon outside `HasAuthority()` | Server-only spawn called on client → ghost weapon | Wrap weapon spawn in `if (HasAuthority())` |
 | Asset reference in C++ via `ConstructorHelpers` | Hardcoded `/Game/...` path in constructor | Move to UPROPERTY assignable in Blueprint subclass |
-| `SetActorLocation` on Character during gameplay | Bypasses CMC, collision, NavMesh, replication | Use `LaunchCharacter`, `AddMovementInput`, or proper movement mode |
+| `SetActorLocation` on Character during gameplay | Bypasses CMC, collision, and NavMesh | Use `LaunchCharacter`, `AddMovementInput`, or proper movement mode |
 | AI `MaxWalkSpeed` written by multiple BT tasks | Race between FollowPlayer and Combat tasks setting speed | Centralize via a single sprint-state API on the character (e.g. `SetSprinting`) |
 | Companion / Enemy weapon-class never assigned | `WeaponClass` UPROPERTY left null in BP | `PostInitializeComponents` warning log, fail-loud in dev |
-| Damage applied outside server | `TakeDamage` called from client | Damage events must originate on server, replicate via OnRep / multicast |
 
 ---
 
@@ -91,14 +85,6 @@ If these are missing, still run the safety and performance dimensions, but flag 
 - `SynchronizeProperties()` called more than necessary
 - Binding expensive computations to widget Tick
 
-### Network (ProjectExtract is multiplayer — always relevant)
-- Default `NetUpdateFrequency = 100Hz` on AI actors (should be ~10Hz for AI background, ~30Hz for active combat)
-- Replicating data that doesn't need replication (UI-only state, cached values)
-- RPC spam in Tick — batch via timer or change-driven events
-- `NetMulticast` RPCs sent on every frame instead of state-change boundaries
-- Replicated TArray with frequent rewrites — consider `FFastArraySerializer`
-- `bAlwaysRelevant = true` on AI/props — should be relevancy-culled by default
-
 ### Memory
 - Large DataAssets loaded synchronously (should use async via StreamableManager)
 - Hard references to assets that should be soft references (`TSoftObjectPtr`)
@@ -119,23 +105,22 @@ You do **not** re-review for crashes or performance here (those are dimensions 1
 
 Walk every change through this checklist. Skip categories that don't apply.
 
-1. **Init-order / BP CDO override timing** — the single most common ProjectExtract gotcha (see `CompanionCharacter.cpp:78-80` comment). A C++ constructor reading a UPROPERTY default and applying it to another field (e.g. `MoveComp->MaxWalkSpeed = WalkSpeed;`) means BP CDO overrides on that UPROPERTY don't apply until *after* the constructor runs. Fix: re-apply in `BeginPlay` (or `PostInitProperties`, `OnConstruction`) — see the existing `OnRep_IsSprinting()` re-apply pattern in `CompanionCharacter::BeginPlay`.
+1. **Init-order / BP CDO override timing** — the single most common ProjectExtract gotcha (see `CompanionCharacter.cpp:78-80` comment). A C++ constructor reading a UPROPERTY default and applying it to another field (e.g. `MoveComp->MaxWalkSpeed = WalkSpeed;`) means BP CDO overrides on that UPROPERTY don't apply until *after* the constructor runs. Fix: re-apply in `BeginPlay` (or `PostInitProperties`, `OnConstruction`) — see the existing re-apply pattern in `CompanionCharacter::BeginPlay`.
 
 2. **State transitions — what if A → C skips B?** BT task aborts mid-action — does cleanup run? Posture change mid-traversal (vault/climb/mantle) — what state is left behind? Compare every place a flag is **set** with every place it's **cleared**. Asymmetry is the bug.
 
-3. **Re-entrance and idempotency.** BeginPlay can fire twice (seamless travel, level reload) — does the code re-bind delegates or stack timers? `OnRep_` handlers fire multiple times on a single change burst — safe to re-run? BT task `ExecuteTask` re-enters after a brief abort — does state from the previous run leak in?
+3. **Re-entrance and idempotency.** BeginPlay can fire twice (level reload) — does the code re-bind delegates or stack timers? Callbacks can fire multiple times on a single change burst — safe to re-run? BT task `ExecuteTask` re-enters after a brief abort — does state from the previous run leak in?
 
 4. **Boundary values and degenerate inputs.** New UPROPERTY tunables at 0, negative, or larger than the world. `EarlyCrouchDistance < AcceptableRadius` → never triggers. `EarlyCrouchDistance > SearchRadius` → triggers every move. Float `==` comparisons against 0 or default. `TArray::Num() == 0` paths.
 
-5. **Multiplayer corner cases** (when networked state changes). Server-only mutation read on client without replication carrying it. Late joiner: does OnRep catch them up? Server-spawned actor (companion) — does the client view stay consistent? `HasAuthority()` gating present where mutation happens?
 
-6. **Abort / interrupt / cleanup flows.** BT task `AbortTask` / `OnTaskFinished` — every state the task set should be reset. `EndPlay` — every flag, timer, delegate from BeginPlay/PostInit should be torn down. Mid-action interruption (companion killed while crouching toward cover) — does death reset the crouch?
+5. **Abort / interrupt / cleanup flows.** BT task `AbortTask` / `OnTaskFinished` — every state the task set should be reset. `EndPlay` — every flag, timer, delegate from BeginPlay/PostInit should be torn down. Mid-action interruption (companion killed while crouching toward cover) — does death reset the crouch?
 
-7. **Designer / asset null cases.** New `TObjectPtr<UAnimMontage>` UPROPERTY left unassigned — does the fallback path exercise, or silently fall through to the wrong asset? Missing data asset — fail loud (`UE_LOG Warning` in PostInitializeComponents) or silent?
+6. **Designer / asset null cases.** New `TObjectPtr<UAnimMontage>` UPROPERTY left unassigned — does the fallback path exercise, or silently fall through to the wrong asset? Missing data asset — fail loud (`UE_LOG Warning` in PostInitializeComponents) or silent?
 
-8. **Concurrent / interacting systems.** Two systems writing the same state (e.g. CMC `MaxWalkSpeed` set by both SprintAPI and CrouchAPI — who wins?). Does new code respect the existing single-writer convention (see `CompanionCharacter::OnRep_IsSprinting`)? Animation states: anticipatory crouch firing mid-traversal — does CMC accept `Crouch()` mid-vault?
+7. **Concurrent / interacting systems.** Two systems writing the same state (e.g. CMC `MaxWalkSpeed` set by both SprintAPI and CrouchAPI — who wins?). Does new code respect the existing single-writer convention? Animation states: anticipatory crouch firing mid-traversal — does CMC accept `Crouch()` mid-vault?
 
-9. **Goal-coverage gaps** — the most important category. Re-read the task goal. List every behaviour it implies. For each, find the code that delivers it. If you can't find code that delivers behaviour X, flag it as MISSING — this is how you catch "the implementer did 4 of 5 things on the plan".
+8. **Goal-coverage gaps** — the most important category. Re-read the task goal. List every behaviour it implies. For each, find the code that delivers it. If you can't find code that delivers behaviour X, flag it as MISSING — this is how you catch "the implementer did 4 of 5 things on the plan".
 
 ### What to skip in this dimension
 - Style nits, naming, comments — not a concern unless they hide a real bug.

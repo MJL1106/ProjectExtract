@@ -33,10 +33,10 @@ Run through these checks in order — first match wins:
    - Examples: "audit performance before milestone", "find all Tick bottlenecks", "QPERF the whole project"
 
 4. **Bug Investigation Team** — Bug report mentions symptoms spanning 2+ systems (e.g., "companion stops firing after revive", "client desync on weapon reload mid-vault").
-   - Examples: "weapon damage not registering on dedicated server", "companion AI freezes when player dies during traversal"
+   - Examples: "weapon damage not registering against an enemy", "companion AI freezes when player dies during traversal"
 
 5. **Architecture Planning Team** — Task is designing a new system that needs UE5 API research.
-   - Examples: "design the squad command system", "architect the extraction-zone capture mechanic", "design replicated persistent loadouts"
+   - Examples: "design the squad command system", "architect the extraction-zone capture mechanic", "design persistent loadouts"
 
 ### Do NOT spawn a team when:
 - Task touches fewer than 3 files
@@ -118,7 +118,7 @@ When creating a team, the lead should:
    ```
    Task 1 (Implementer A): "Implement FooComponent in Public/Components/Foo* and Private/Components/Foo*"
    Task 2 (Implementer B): "Implement Foo HUD widget in Public/UI/Foo* and Private/UI/Foo*"
-   Task 3 (Reviewer): "Review all changes for safety + replication correctness, plan-mode only"
+   Task 3 (Reviewer): "Review all changes for safety + gameplay correctness, plan-mode only"
    ```
 4. The lead handles `AExtractionPlayerController` / `AExtractionGameMode` integration, `Build.cs` updates, and cross-system wiring
 

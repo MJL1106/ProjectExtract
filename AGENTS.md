@@ -1,6 +1,6 @@
 # AGENTS.md — ProjectExtract
 
-Multiplayer first-person shooter on Unreal Engine 5.7 with an AI companion system. Single C++ module: `Extraction`.
+Single-player first-person shooter on Unreal Engine 5.7 with an AI companion system. Single C++ module: `Extraction`.
 
 ## Stack
 - **Engine:** Unreal Engine 5.7
@@ -22,7 +22,6 @@ If you are Codex CLI (terminal / Desktop / VS Code), ignore this section and con
 
 ## Hard Rules (project-specific)
 - MUST never hardcode `/Game/...` asset paths via `ConstructorHelpers::FObjectFinder` — designer assigns assets in Blueprint subclasses (this project uses an in-editor MCP agent for asset wiring; C++ stays asset-agnostic)
-- MUST mark replicated UPROPERTY `Replicated` or `ReplicatedUsing=OnRep_*` AND add `DOREPLIFETIME[_CONDITION]` in `GetLifetimeReplicatedProps`
 - MUST register new `Public/<Subfolder>/` and `Private/<Subfolder>/` paths in `Extraction.Build.cs`'s include arrays — the project uses explicit subfolder paths
 
 ## Architectural Taste (project-specific overrides)
@@ -81,29 +80,31 @@ The main Codex chat is the **senior-dev watchdog running on the model the user c
 
 Codex agent TOML files define roles only; **model choice happens when the main chat dispatches the agent**.
 
+For every role below assigned to Luna, dispatch with `model: "gpt-5.6-luna"` and `reasoning_effort: "max"`.
+
 | Role | Dispatch model | Notes |
 |---|---|---|
 | Plan / architecture | Current chat model | Always keep the user's chosen strong model in the main chat |
 | Review / final judgement | Inherit current chat model | Use `ue5-reviewer` without a model downgrade |
-| C++ implementation | `gpt-5.6-terra` | Default for `ue5-cpp-implementer` after plan approval |
-| Test writing | `gpt-5.6-terra` | `ue5-qa-tester` |
-| Research / docs | `gpt-5.6-terra` | Escalate to inherited model only when reasoning, not lookup, is the bottleneck |
-| In-engine read-only scout | `gpt-5.6-terra` | Cheap, parallel, read-only editor reconnaissance |
-| Normal in-engine editing / build fixes | `gpt-5.6-terra` | Use `ue5-inengine-agent` or `ue5-build-specialist` for bounded implementation-style work |
-| Hard debugging / escalation | Inherit current chat model | Use inherited model when the prior Terra pass is stuck or the issue is architecture-heavy |
+| C++ implementation | `gpt-5.6-luna` + max effort | Default for `ue5-cpp-implementer` after plan approval |
+| Test writing | `gpt-5.6-luna` + max effort | `ue5-qa-tester` |
+| Research / docs | `gpt-5.6-luna` + max effort | Escalate to inherited model only when reasoning, not lookup, is the bottleneck |
+| In-engine read-only scout | `gpt-5.6-luna` + max effort | Cheap, parallel, read-only editor reconnaissance |
+| Normal in-engine editing / build fixes | `gpt-5.6-luna` + max effort | Use `ue5-inengine-agent` or `ue5-build-specialist` for bounded implementation-style work |
+| Hard debugging / escalation | Inherit current chat model | Use inherited model when the prior Luna pass is stuck or the issue is architecture-heavy |
 
 ### Subagent preference
 
 Prefer custom subagents wherever the task matches an agent description. Main chat should rarely be the one writing code — its role is orchestration and review.
 
-- Solo C++ work → dispatch `ue5-cpp-implementer` on `gpt-5.6-terra` after plan approval. Never freelance edits from main chat for anything beyond trivial typos / renames / single-line tweaks.
+- Solo C++ work → dispatch `ue5-cpp-implementer` on `gpt-5.6-luna` with `reasoning_effort: "max"` after plan approval. Never freelance edits from main chat for anything beyond trivial typos / renames / single-line tweaks.
 - For parallelisable dispatches (reviewer + multiple plan agents, or several scouts), issue them in a single message, not sequentially.
 - Pure research / "where does X live" → use `rg` / graph tools directly. Don't spawn an agent for a one-line answer.
 
 ### Engine state is a source of truth — check it, don't guess
 
 When planning, investigating a bug, or forming a picture of "what does this actually do right now" for anything in-engine (current BP graph wiring, DataAsset/DataTable values, live AnimBP state, level actor placement, EQS/BT authoring, widget layout) — this applies beyond explicit "wire this up" requests, including planning and bug investigation:
-- If the answer would be more reliable read from the running editor than inferred from `.uasset` diffs or memory, **check the engine** — dispatch `ue5-inengine-scout` (read-only, usually `gpt-5.6-terra`) rather than guessing from C++ or asking the user to go look. If the inspection turns into a bounded editor edit, dispatch `ue5-inengine-agent` on `gpt-5.6-terra`; inherit the current chat model only when that pass is stuck or the issue is architecture-heavy.
+- If the answer would be more reliable read from the running editor than inferred from `.uasset` diffs or memory, **check the engine** — dispatch `ue5-inengine-scout` (read-only, `gpt-5.6-luna` with `reasoning_effort: "max"`) rather than guessing from C++ or asking the user to go look. If the inspection turns into a bounded editor edit, dispatch `ue5-inengine-agent` on `gpt-5.6-luna` with `reasoning_effort: "max"`; inherit the current chat model only when that pass is stuck or the issue is architecture-heavy.
 - **Scale scouts to the question, favoring speed over conservatism.** If the recon splits into independent inspection threads (e.g. "check the BT, the Blackboard, and the EQS query" or "inspect 3 unrelated widgets"), dispatch one scout per thread **in a single message** so they run concurrently — up to 5 at once. Don't default to 1 scout doing everything sequentially when 3-5 parallel scouts would answer it faster; don't over-split a single-thread question either. Judge the split by independence of the sub-questions, not by a fixed count.
 - If the editor isn't running, **boot it first** — route through `ue5-inengine-agent` (it self-boots via the `boot-engine` skill) since scouts can't boot the editor themselves. Don't skip the check just because the editor is currently down, and don't ask the user to open it.
 - This is read-only reconnaissance for planning purposes — it does not replace the implement/review/build loop, and it does not authorize edits during an investigation.
@@ -112,7 +113,7 @@ When planning, investigating a bug, or forming a picture of "what does this actu
 
 0. **`ue5-team` skill** — decide solo vs team (mandatory Step 0 for every non-trivial task)
 1. **Implement:**
-   - Solo → `ue5-cpp-implementer` on `gpt-5.6-terra`
+   - Solo → `ue5-cpp-implementer` on `gpt-5.6-luna` with `reasoning_effort: "max"`
    - Team → compose agents from `ue5-team`'s recommendation with explicit file ownership and dispatch-time models
 2. **Review (single consolidated reviewer, covers safety + performance + edge-case in one pass):**
    - `ue5-reviewer` — always, every C++ change, inheriting the current chat model. MUST be briefed with: (a) the task goal in one or two sentences, (b) the list of changed files with brief description, (c) the plan file path if one exists. Without the goal the edge-case dimension is degraded (safety/performance still run).
@@ -158,7 +159,6 @@ Local skills under `.agents/skills/` are loaded on demand and cheap. **Invoke a 
 
 | Topic | Skill |
 |---|---|
-| Replication / RPC / net roles / authority | `ue-networking-replication`, `ue5-multiplayer-helper` |
 | GameplayAbilities / GAS / AttributeSet / GameplayEffect | `ue-gameplay-abilities` |
 | CharacterMovementComponent / custom movement / vault / climb | `ue-character-movement` |
 | DataAsset / DataTable / async loading / soft refs | `ue-data-assets-tables` |
@@ -193,7 +193,7 @@ The custom subagents in `.codex/agents/` are the right tool for any UE5 work. Th
 
 - **For UE5 codebase exploration / research / implementation / review** → use the custom agents above. Never use a generic explore/general agent for substantive work.
 - **For trivial file-path lookups** ("what file lives at X", "find all callers of Y") → `rg` directly in the main session, no agent needed.
-- **If a custom agent doesn't fit and you must spawn a generic one**, set an explicit model. Use `gpt-5.6-terra` for ordinary implementation, research, and debugging work. Keep architecture in the main chat. Inherit the current chat model only for review, final judgement, or hard escalation after a Terra pass is stuck.
+- **If a custom agent doesn't fit and you must spawn a generic one**, set an explicit model and effort. Use `gpt-5.6-luna` with `reasoning_effort: "max"` for ordinary implementation, research, and debugging work. Keep architecture in the main chat. Inherit the current chat model only for review, final judgement, or hard escalation after a Luna pass is stuck.
 
 ---
 
@@ -225,7 +225,7 @@ If richer graph tools are exposed in a future session, use them. Otherwise fall 
 At session start, on a fresh task, do this in order before responding:
 1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + NeoStack tooling map + gotchas); `companion_testing.md` for companion QA; **`project_roadmap.md` for the live feature checklist**
 2. Confirm the active branch matches the feature being worked on (`git status`)
-3. If the task touches AI / movement / animation / replication / UI, **invoke the matching skill from the table above before any tool calls**
+3. If the task touches AI / movement / animation / UI, **invoke the matching skill from the table above before any tool calls**
 4. **Invoke `ue5-team`** to decide solo vs team for the task — this is Step 0 of the workflow
 
 ## Required environment

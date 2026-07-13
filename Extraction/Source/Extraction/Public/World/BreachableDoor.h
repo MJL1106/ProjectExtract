@@ -58,6 +58,11 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void Tick(float DeltaSeconds) override;
 
+	/** Exact leaf identity — only DoorMesh is the barrier; the BP-added frame (whatever its
+	 *  mobility) is trim and must not block pawns. The leaf must stay a single mesh: extra
+	 *  BP-added leaf geometry would be treated as trim, so bake it into the DoorMesh asset. */
+	virtual bool IsDoorLeafMesh(const UStaticMeshComponent& Mesh) const override { return &Mesh == DoorMesh; }
+
 private:
 	/** Scene component at the hinge edge — actor root. Stays rigid so the whole actor can be rotated in the level. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Door", meta = (AllowPrivateAccess))

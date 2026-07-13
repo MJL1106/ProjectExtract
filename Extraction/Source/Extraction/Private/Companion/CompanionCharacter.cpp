@@ -29,23 +29,6 @@
 
 DEFINE_LOG_CATEGORY(LogCompanion);
 
-// Live revive-arrangement tuning: tweak in the PIE console, re-run PlayerDown, repeat; bake the
-// winning values into BP_Companion / the align code, then leave these at their defaults.
-static float GReviveDurationOverride = -1.f;
-static FAutoConsoleVariableRef CVarReviveDuration(
-	TEXT("revive.Duration"), GReviveDurationOverride,
-	TEXT("Override companion revive hold duration in seconds (montages rate-scale to match). <=0 = use BP value."));
-
-static float GReviveAlignDistanceOverride = -1.f;
-static FAutoConsoleVariableRef CVarReviveAlignDistance(
-	TEXT("revive.AlignDistance"), GReviveAlignDistanceOverride,
-	TEXT("Override companion revive snap distance in cm (center-to-center). 0 = on top of the player; negative = use BP value."));
-
-static float GReviveCompanionYawOffset = 0.f;
-static FAutoConsoleVariableRef CVarReviveCompanionYawOffset(
-	TEXT("revive.CompanionYawOffset"), GReviveCompanionYawOffset,
-	TEXT("Extra yaw (deg) added to the companion's facing at the revive snap. 0 = face the player."));
-
 static const FName NAME_IsDowned(TEXT("IsDowned"));
 
 ACompanionCharacter::ACompanionCharacter()
@@ -202,7 +185,6 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (const UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
-		World->GetTimerManager().ClearTimer(DBNODiagTimerHandle);
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
 		World->GetTimerManager().ClearTimer(ModeWidgetLinkTimerHandle);
 	}
@@ -907,13 +889,6 @@ void ACompanionCharacter::EnterDBNO()
 			BB->ClearValue(ACompanionAIController::BB_CombatTarget);
 		}
 
-	// 1Hz insurance diagnostic: names the seam if the downed pose ever fails to show again
-	// (anim-instance mirror vs character flag vs a stomping montage).
-	GetWorldTimerManager().SetTimer(
-		DBNODiagTimerHandle, this,
-		&ACompanionCharacter::LogDBNODiagnostic,
-		1.f, true);
-
 	// Start bleedout timer (authority only)
 	if (HasAuthority())
 	{
@@ -944,7 +919,6 @@ void ACompanionCharacter::ExitDBNO()
 	bIsDBNO = false;
 
 	GetWorldTimerManager().ClearTimer(BleedoutTimerHandle);
-	GetWorldTimerManager().ClearTimer(DBNODiagTimerHandle);
 
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->SetWeaponHidden(false);
@@ -957,7 +931,7 @@ void ACompanionCharacter::ExitDBNO()
 		if (UBlackboardComponent* BB = AIC->GetBlackboardComponent())
 			BB->SetValueAsBool(NAME_IsDowned, false);
 
-	bBeingRevived = false;
+	SetBeingRevived(false);
 
 	// HealthComponent->Revive triggers OnRevive which fires HandleRevive.
 	// HandleRevive restores tick, collision, and movement mode.
@@ -983,6 +957,7 @@ void ACompanionCharacter::OnBleedoutExpired()
 
 void ACompanionCharacter::OnRep_IsDBNO()
 {
+	if (!bIsDBNO) SetBeingRevived(false);
 	OnCompanionDownedStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
 }
 
@@ -1011,20 +986,9 @@ bool ACompanionCharacter::GetIsVaulting() const
 
 void ACompanionCharacter::SetBeingRevived(bool bRevived, float ExpectedDuration)
 {
-	if (bBeingRevived == bRevived)
-	{
-		// Redundant false->false calls are normal teardown (montage-driven exit already cleared the
-		// state); only a stale TRUE at hold start is a real problem (companion would stay flat).
-		if (bBeingRevived)
-			UE_LOG(LogCompanion, Warning, TEXT("%s SetBeingRevived(true): flag already true — get-up montage NOT retriggered"), *GetName());
-		return;
-	}
+	if (bBeingRevived == bRevived) return;
 	bBeingRevived = bRevived;
 
-	// Freeze the crawl under the reviver's hands THIS frame: abort the pathfollowing request
-	// (StopMovementImmediately alone only zeroes velocity — an active move re-accelerates before
-	// the retreat task's next slow tick) and kill residual velocity. The task keeps the hold and
-	// re-issues its move if the hold aborts.
 	if (bRevived)
 	{
 		if (AAIController* AIC = Cast<AAIController>(GetController()))
@@ -1037,60 +1001,20 @@ void ACompanionCharacter::SetBeingRevived(bool bRevived, float ExpectedDuration)
 	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
 	if (!IsValid(AnimInst) || !BeingRevivedMontage)
 	{
-		UE_LOG(LogCompanion, Warning, TEXT("%s SetBeingRevived(%d): no anim instance or no BeingRevivedMontage assigned — companion stays flat"),
-			*GetName(), bRevived);
 		return;
 	}
 
 	if (bRevived && bIsDBNO)
 	{
-		if (!AnimInst->Montage_IsPlaying(BeingRevivedMontage))
-		{
-			// Rate-scale so one montage cycle spans the reviver's hold exactly — the get-up motion
-			// lands on the frame the revive completes, whatever the hold duration is tuned to.
-			const float MontageLength = BeingRevivedMontage->GetPlayLength();
-			const float PlayRate = (ExpectedDuration > 0.f && MontageLength > 0.f)
-				? MontageLength / ExpectedDuration : 1.f;
-			const float PlayLength = AnimInst->Montage_Play(BeingRevivedMontage, PlayRate);
-			UE_LOG(LogCompanion, Log, TEXT("%s SetBeingRevived: playing '%s' rate=%.3f -> playLength=%.2f (expectDur=%.2f)"),
-				*GetName(), *GetNameSafe(BeingRevivedMontage), PlayRate, PlayLength, ExpectedDuration);
-			if (PlayLength <= 0.f)
-			{
-				UE_LOG(LogCompanion, Warning, TEXT("%s: BeingRevivedMontage '%s' failed to play (slot/skeleton mismatch?)"),
-					*GetName(), *GetNameSafe(BeingRevivedMontage));
-			}
-			else
-			{
-				// The get-up montage owns revive completion: its natural blend-out fires ExitDBNO at
-				// the frame the body is upright. The reviver's hold timer stays as fallback only.
-				FOnMontageBlendingOutStarted BlendOutDelegate;
-				BlendOutDelegate.BindUObject(this, &ACompanionCharacter::OnBeingRevivedMontageBlendOut);
-				AnimInst->Montage_SetBlendingOutDelegate(BlendOutDelegate, BeingRevivedMontage);
-			}
-		}
-	}
-	else if (bRevived && !bIsDBNO)
-	{
-		UE_LOG(LogCompanion, Warning, TEXT("%s SetBeingRevived(true) but bIsDBNO=false — get-up montage skipped"), *GetName());
+		const float MontageLength = BeingRevivedMontage->GetPlayLength();
+		const float PlayRate = ExpectedDuration > 0.f && MontageLength > 0.f
+			? MontageLength / ExpectedDuration : 1.f;
+		if (AnimInst->Montage_Play(BeingRevivedMontage, PlayRate) <= 0.f)
+			UE_LOG(LogCompanion, Warning, TEXT("%s: BeingRevivedMontage '%s' failed to play"),
+				*GetName(), *GetNameSafe(BeingRevivedMontage));
 	}
 	else if (AnimInst->Montage_IsPlaying(BeingRevivedMontage))
 		AnimInst->Montage_Stop(0.25f, BeingRevivedMontage);
-}
-
-void ACompanionCharacter::OnBeingRevivedMontageBlendOut(UAnimMontage* /*Montage*/, bool bInterrupted)
-{
-	// Interrupted = manual stop (hold abort/finish) or a same-slot stomp — not a completed get-up.
-	if (bInterrupted)
-	{
-		UE_LOG(LogCompanion, Log, TEXT("%s being-revived montage INTERRUPTED (bIsDBNO=%d beingRevived=%d activeMontage=%s)"),
-			*GetName(), bIsDBNO, bBeingRevived, *GetActiveBodyMontageName());
-		return;
-	}
-
-	if (!bIsDBNO || !bBeingRevived || !HasAuthority()) return;
-
-	UE_LOG(LogCompanion, Log, TEXT("%s being-revived montage completed get-up — montage-driven ExitDBNO"), *GetName());
-	ExitDBNO();
 }
 
 bool ACompanionCharacter::IsBeingRevivedMontagePlaying() const
@@ -1101,26 +1025,12 @@ bool ACompanionCharacter::IsBeingRevivedMontagePlaying() const
 	return IsValid(AnimInst) && AnimInst->Montage_IsPlaying(BeingRevivedMontage);
 }
 
-void ACompanionCharacter::LogDBNODiagnostic() const
-{
-	const USkeletalMeshComponent* MeshComp = GetMesh();
-	const UCompanionAnimInstance* AnimInst = IsValid(MeshComp) ? Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()) : nullptr;
-	UE_LOG(LogCompanion, Log, TEXT("%s DBNO DIAG: charDBNO=%d animDBNO=%d beingRevived=%d speed=%.0f activeMontage=%s"),
-		*GetName(), bIsDBNO,
-		AnimInst ? (int32)AnimInst->GetIsDBNOMirrored() : -1,
-		bBeingRevived,
-		GetVelocity().Size2D(),
-		*GetActiveBodyMontageName());
-}
-
 void ACompanionCharacter::AlignForRevive(const FVector& ReviverLocation)
 {
-	// The downed body is the arrangement ANCHOR (parity with the player's AlignForRevive): keep
-	// the current yaw — the reviving player snaps into THIS frame (SetReviverLock), so rotating
-	// toward the reviver here would fight the authored pair layout.
-	UE_LOG(LogCompanion, Log, TEXT("%s REVIVE ALIGN(companion-downed): anchor yaw=%.1f reviverLoc=%s dist2D=%.1f"),
-		*GetName(), GetActorRotation().Yaw, *ReviverLocation.ToCompactString(),
-		FVector::Dist2D(GetActorLocation(), ReviverLocation));
+	if (!bIsDBNO) return;
+	const FVector ToReviver = (ReviverLocation - GetActorLocation()).GetSafeNormal2D();
+	if (!ToReviver.IsNearlyZero())
+		SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw, 0.f));
 }
 
 void ACompanionCharacter::HandleRevive()
@@ -1204,85 +1114,26 @@ void ACompanionCharacter::PlayLootMontage()
 void ACompanionCharacter::PlayReviveMontage()
 {
 	if (!ReviveMontage) return;
-
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
 	if (!IsValid(AnimInst)) return;
+	if (AnimInst->Montage_IsPlaying(ReviveMontage)) return;
 
-	if (!AnimInst->Montage_IsPlaying(ReviveMontage))
-	{
-		// Rate-scale so one kneel cycle spans the hold exactly (mirrors the player's montage sync).
-		const float Duration = GetEffectiveReviveDuration();
-		const float MontageLength = ReviveMontage->GetPlayLength();
-		const float PlayRate = (Duration > 0.f && MontageLength > 0.f)
-			? MontageLength / Duration : 1.f;
-		const float PlayLength = AnimInst->Montage_Play(ReviveMontage, PlayRate);
-		if (PlayLength <= 0.f)
-			UE_LOG(LogCompanion, Warning, TEXT("%s: ReviveMontage '%s' failed to play (slot/skeleton mismatch?)"),
-				*GetName(), *GetNameSafe(ReviveMontage));
-	}
+	const float MontageLength = ReviveMontage->GetPlayLength();
+	const float PlayRate = ReviveDuration > 0.f && MontageLength > 0.f
+		? MontageLength / ReviveDuration : 1.f;
+	if (AnimInst->Montage_Play(ReviveMontage, PlayRate) <= 0.f)
+		UE_LOG(LogCompanion, Warning, TEXT("%s: ReviveMontage '%s' failed to play (slot/skeleton mismatch?)"),
+			*GetName(), *GetNameSafe(ReviveMontage));
 }
 
 void ACompanionCharacter::StopReviveMontage()
 {
 	if (!ReviveMontage) return;
-
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
-	if (!IsValid(AnimInst)) return;
-
-	if (AnimInst->Montage_IsPlaying(ReviveMontage))
+	if (IsValid(AnimInst) && AnimInst->Montage_IsPlaying(ReviveMontage))
 		AnimInst->Montage_Stop(0.25f, ReviveMontage);
-}
-
-bool ACompanionCharacter::IsReviveMontagePlaying() const
-{
-	if (!ReviveMontage) return false;
-	const USkeletalMeshComponent* MeshComp = GetMesh();
-	const UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
-	return IsValid(AnimInst) && AnimInst->Montage_IsPlaying(ReviveMontage);
-}
-
-float ACompanionCharacter::GetEffectiveReviveDuration() const
-{
-	return GReviveDurationOverride > 0.f ? GReviveDurationOverride : ReviveDuration;
-}
-
-float ACompanionCharacter::GetEffectiveReviveAlignDistance() const
-{
-	// >= 0 so the knob can go all the way to 0 (companion directly on top of the player);
-	// negative = use the BP value.
-	return GReviveAlignDistanceOverride >= 0.f ? GReviveAlignDistanceOverride : ReviveAlignDistance;
-}
-
-float ACompanionCharacter::GetReviveCompanionYawOffset()
-{
-	return GReviveCompanionYawOffset;
-}
-
-bool ACompanionCharacter::ShouldReassertReviveMontage() const
-{
-	if (!ReviveMontage) return false;
-	const USkeletalMeshComponent* MeshComp = GetMesh();
-	const UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
-	if (!IsValid(AnimInst)) return false;
-
-	// Already playing — nothing to re-assert.
-	if (AnimInst->Montage_IsPlaying(ReviveMontage)) return false;
-
-	// Re-assert ONLY when a DIFFERENT montage is currently active (a genuine same-group stomp).
-	// Nothing active = the reviver montage ended naturally; the reviver montage itself lingering in
-	// its blend-out tail is also not a stomp — either way, don't restart the kneel (the double play).
-	const UAnimMontage* Active = AnimInst->GetCurrentActiveMontage();
-	return Active != nullptr && Active != ReviveMontage;
-}
-
-FString ACompanionCharacter::GetActiveBodyMontageName() const
-{
-	const USkeletalMeshComponent* MeshComp = GetMesh();
-	const UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
-	const UAnimMontage* Active = IsValid(AnimInst) ? AnimInst->GetCurrentActiveMontage() : nullptr;
-	return GetNameSafe(Active);
 }
 
 // --- Commanded Breach ---

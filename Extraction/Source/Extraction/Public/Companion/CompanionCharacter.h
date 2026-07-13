@@ -376,32 +376,6 @@ public:
 	/** Blends the reviver montage out. Safe to call when nothing is playing. */
 	void StopReviveMontage();
 
-	/** True while the reviver montage is actively playing on the body mesh. */
-	bool IsReviveMontagePlaying() const;
-
-	/** ReviveDuration with the `revive.Duration` console override applied (tuning: tweak live in PIE,
-	 *  then bake the winner into the BP). Montage rate-scaling follows this everywhere. */
-	float GetEffectiveReviveDuration() const;
-
-	/** ReviveAlignDistance with the `revive.AlignDistance` console override applied. */
-	float GetEffectiveReviveAlignDistance() const;
-
-	/** Live-tuning yaw (deg) added to the companion's facing at the revive snap — `revive.CompanionYawOffset`. */
-	static float GetReviveCompanionYawOffset();
-
-	/** The reviver montage asset — the revive task reads its clip's authored root start transform. */
-	const UAnimMontage* GetReviveMontage() const { return ReviveMontage; }
-
-	/** True only when the reviver montage is NOT playing AND a *different* montage is active on the
-	 *  body — i.e. a same-group takeover stomped it mid-hold and it needs re-asserting. Returns false
-	 *  when nothing is playing (the montage naturally reached its end), so the per-tick re-assert can't
-	 *  restart it at the tail of the hold — that tail restart was the visible "double play". */
-	bool ShouldReassertReviveMontage() const;
-
-	/** Name of the montage currently active on the body mesh's anim instance ("None" if none) —
-	 *  hold-loop diagnostic for identifying a same-group montage stomping the reviver anim. */
-	FString GetActiveBodyMontageName() const;
-
 	// --- DBNO / Downed State ---
 
 	UFUNCTION(BlueprintPure, Category = "Companion|DBNO")
@@ -573,11 +547,15 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float RescueBailHealthFraction = 0.25f;
 
-	/** Center-to-center distance (cm) the companion snaps to at revive-hold start so the paired
-	 *  kneel/get-up anims line up face-to-face. Tune to the anim pair's authored gap. Values below
-	 *  the summed capsule radii (~68) are safe: the pair mutually move-ignores during the hold. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "40.0"))
-	float ReviveAlignDistance = 70.f;
+	/** Reviver actor offset in the patient actor frame: X is forward and Y is right, in centimetres. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive",
+		meta = (ToolTip = "Authored reviver offset from the patient actor. X is forward and Y is right, in centimetres."))
+	FVector2D RevivePairOffset = FVector2D(60.f, -64.5f);
+
+	/** Reviver actor yaw relative to the patient actor yaw, in degrees. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive",
+		meta = (ToolTip = "Authored reviver yaw relative to the patient actor yaw, in degrees."))
+	float RevivePairYawOffset = -46.f;
 
 protected:
 
@@ -653,15 +631,11 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Breach")
 	TMap<EBreachType, TObjectPtr<UAnimMontage>> BreachMontages;
 
-	/** Single-shot reviver montage (rate-scaled to span the hold once) played while reviving the
-	 *  downed player — designer assigns in BP. Must be non-looping: the double-play fix relies on the
-	 *  montage having a natural blend-out tail so the per-tick re-assert stops once it ends. */
+	/** Single-shot reviver montage, rate-scaled to span the hold once. Designer assigns in BP. */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Revive")
 	TObjectPtr<UAnimMontage> ReviveMontage;
 
-	/** Get-up montage played on this companion while the PLAYER revives it (mirror of the player's
-	 *  BeingRevivedMontage) — rate-scaled so one cycle spans the hold; its natural blend-out drives
-	 *  ExitDBNO at the upright frame. ReviveSlot, non-looping. Designer assigns in BP. */
+	/** Montage played on this companion while the player revives it, rate-scaled to the hold. */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Revive")
 	TObjectPtr<UAnimMontage> BeingRevivedMontage;
 
@@ -764,15 +738,7 @@ private:
 	/** True while the player is reviving this companion. */
 	bool bBeingRevived = false;
 
-	/** Natural montage end = the companion is upright — montage-driven ExitDBNO (mirror of
-	 *  AExtractionPlayer::OnBeingRevivedMontageBlendOut). Interrupted = abort/stop, no exit. */
-	void OnBeingRevivedMontageBlendOut(UAnimMontage* Montage, bool bInterrupted);
-
-	/** 1Hz while-DBNO diagnostic: anim-instance bIsDBNO mirror + active body montage. */
-	void LogDBNODiagnostic() const;
-
 	FTimerHandle BleedoutTimerHandle;
-	FTimerHandle DBNODiagTimerHandle;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Companion|Tags")
 	FGameplayTagContainer OwnedTags;

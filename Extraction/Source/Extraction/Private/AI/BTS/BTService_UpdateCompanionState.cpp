@@ -446,6 +446,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	// Only fall back to BestAny when there is no valid existing target to preserve.
 	AActor* BestTarget;
 	float BestDistSq;
+	bool bBodyChargerStealGranted = false;
 	if (BestVisible)
 	{
 		BestTarget = BestVisible;
@@ -475,6 +476,20 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				const bool bExistingIsBodyThreat =
 					FVector::DistSquared(ExistingTarget->GetActorLocation(), DBNOPlayerLoc) <= DBNOBiasThreatRadiusSq;
 				bBodyChargerSteal = bNewIsBodyThreat && !bExistingIsBodyThreat;
+				// Hysteresis: several enemies converging on the body flap in/out of the threat ring,
+				// firing this steal several times a second — each swap re-validates cover/aim/arc
+				// and the target thrashes. At most one steal per cooldown. The stamp itself is
+				// deferred until after the flanker override below — a stamped-but-overridden steal
+				// would suppress a genuine charger for the residual window.
+				if (bBodyChargerSteal)
+				{
+					const float StealCooldown = RangeTuning ? RangeTuning->BodyChargerStealCooldown : 2.f;
+					if (StealCooldown > 0.f && LastBodyChargerStealTime >= 0.f
+						&& (Companion->GetWorld()->GetTimeSeconds() - LastBodyChargerStealTime) < StealCooldown)
+						bBodyChargerSteal = false;
+					else
+						bBodyChargerStealGranted = true;
+				}
 			}
 			const bool bDistanceAllowsSteal =
 				(!bPlayerDBNO && BestVisibleDistSq <= ExistingDistSq * StickinessRatioSq) || bBodyChargerSteal;
@@ -532,6 +547,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			}
 		}
 	}
+
+	// Body-charger cooldown stamp — only when the steal actually took effect (survived the
+	// flanker override above), so an overridden steal can't burn the window.
+	if (bBodyChargerStealGranted && BestTarget == BestVisible)
+		LastBodyChargerStealTime = Companion->GetWorld()->GetTimeSeconds();
 
 	// --- Stealth mode: event-driven break + auto-target suppression ---
 	// Break = a combat EVENT stamped after the stealth pin time (the moment this stealth stint

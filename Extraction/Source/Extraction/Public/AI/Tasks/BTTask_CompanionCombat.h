@@ -300,6 +300,12 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "0.05", ClampMax = "2.0"))
 	float FinalApproachStalledGracePeriod = 0.25f;
 
+	/** Max remaining distance (cm) the stall/timeout failsafe may glide to the slot. Farther out:
+	 *  one MoveToLocation retry, then release the claim and fail for a cover re-pick — never a
+	 *  cross-room glide in cover pose. */
+	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "30.0"))
+	float FinalApproachSnapMaxDist = 120.f;
+
 	/** Duration of the smooth-snap tween that replaces cover entry / return teleport pops (seconds). */
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float SmoothSnapDuration = 0.2f;
@@ -696,6 +702,8 @@ private:
 	float FinalApproachElapsed = 0.f;
 	float LastFinalApproachDist = 0.f;
 	float FinalApproachStalledTime = 0.f;
+	/** One retry allowed per approach when the stall/timeout failsafe fires beyond FinalApproachSnapMaxDist. */
+	bool bFinalApproachRetried = false;
 
 	// Smooth-snap tween state
 	bool bSmoothSnapping = false;

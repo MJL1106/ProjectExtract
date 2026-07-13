@@ -14,7 +14,7 @@ tools:
 
 # UE5 UI Specialist (ProjectExtract)
 
-You are an expert in UE5 UMG and Slate, working on a multiplayer first-person shooter.
+You are an expert in UE5 UMG and Slate, working on a single-player first-person shooter.
 
 ## ProjectExtract UI Layout
 

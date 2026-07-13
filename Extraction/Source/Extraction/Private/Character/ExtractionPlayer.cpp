@@ -44,74 +44,16 @@
 #include "World/BreachableDoor.h"
 #include "World/WorldInteractable.h"
 #include "Game/ExtractionGameMode.h"
-#include "HAL/IConsoleManager.h"
 
-// Live revive-arrangement tuning (paired with revive.* CVars in CompanionCharacter.cpp): rotates the
-// downed player's aligned body relative to the reviver. Tweak in PIE, bake the winner, leave at 0.
-static float GRevivePlayerYawOffset = 0.f;
-static FAutoConsoleVariableRef CVarRevivePlayerYawOffset(
-	TEXT("revive.PlayerYawOffset"), GRevivePlayerYawOffset,
-	TEXT("Extra yaw (deg) added to the downed player's revive alignment. 0 = face the reviver."));
-
-// Per-frame camera trace while DBNO/being-revived and for 2s after the revive — for pinning down
-// which rotation source jumps on the snap frame. `revive.CameraDebug 1` to enable.
-static int32 GReviveCameraDebug = 0;
-static FAutoConsoleVariableRef CVarReviveCameraDebug(
-	TEXT("revive.CameraDebug"), GReviveCameraDebug,
-	TEXT("1 = per-frame camera/control/body rotation trace around the revive (very chatty)."));
-
-// Revive-hold look cones (deg): free look, bounded so the head-socket camera can't swing across
-// the player's own mesh. Reviver kneels upright (anchor = bearing to the companion, pitch biased
-// down toward the body); the being-revived patient lies on their back (anchor = the downed
-// capsule's yaw — the reviver kneels ahead-left of it — pitch biased up toward the reviver).
-static constexpr float GReviverConeHalfYaw = 63.0f;
-static constexpr float GReviverPitchMin = -63.0f;
-static constexpr float GReviverPitchMax = 32.0f;
-static constexpr float GBeingRevivedConeHalfYaw = 63.0f;
-// Floor sits at -45 not -15: a crawling player commonly enters the revive gazing steeply down at
-// the floor, and a tighter floor snaps the view up 30°+ on the first clamp frame.
-static constexpr float GBeingRevivedPitchMin = -45.0f;
-static constexpr float GBeingRevivedPitchMax = 60.0f;
-
-// Fat near clip while kneeling: the camera rides the head socket within centimetres of the
-// player's own shoulder/chest — cull those polys instead of rendering meat across the lens.
-// (TakedownNearClipPlane is tuned tiny (2.0) for the opposite problem — don't reuse it.)
-static constexpr float GReviverNearClip = 30.0f;
-
-// The kneel clip's first stretch is the authored stand-to-kneel intro, which swings the head
-// socket (the camera's location anchor) in an arc through the player's own body. Start past it
-// and rate-scale the remainder across the hold — the camera cuts once to the kneel vantage
-// instead of sweeping through the mesh.
-static constexpr float GReviverKneelStartOffset = 0.4f;
-
-// Reliable owner RPCs preserve order but not identical transit time. Permit only this small
-// scheduling/network variance while keeping the configured hold duration server-authoritative.
-static constexpr double GReviveCompletionLatencyToleranceSeconds = 0.1;
-
-// Plays the kneel from GReviverKneelStartOffset and rate-scales the remainder across the hold.
-static bool PlayReviverKneel(UAnimInstance& AnimInst, UAnimMontage& Montage, float HoldDuration, float HoldElapsed)
+// Rate-scales the full kneel montage across the revive hold.
+static bool PlayReviverKneel(UAnimInstance& AnimInst, UAnimMontage& Montage, float HoldDuration)
 {
 	const float Length = Montage.GetPlayLength();
-	const float StartOffset = (Length > GReviverKneelStartOffset + KINDA_SMALL_NUMBER)
-		? GReviverKneelStartOffset : 0.f;
-	const float PlayRate = (HoldDuration > 0.f && Length > StartOffset)
-		? (Length - StartOffset) / HoldDuration : 1.f;
-	if (AnimInst.Montage_Play(&Montage, PlayRate) <= 0.f) return false;
-	AnimInst.Montage_SetPosition(&Montage,
-		FMath::Min(StartOffset + HoldElapsed * PlayRate, Length - KINDA_SMALL_NUMBER));
-	return true;
+	const float PlayRate = HoldDuration > 0.f && Length > 0.f ? Length / HoldDuration : 1.f;
+	return AnimInst.Montage_Play(&Montage, PlayRate) > 0.f;
 }
 
-// Called from DoAim (bounds recovery-style feeds immediately) AND Tick (input deltas accumulate
-// into RotationInput and land in the controller's UpdateRotation AFTER DoAim ran — the pawn tick
-// is the first spot that sees the post-input rotation, catching flick overshoot the same frame).
-static void ClampLookCone(AController* Controller, float AnchorYaw, float ConeHalfYaw, float PitchMin, float PitchMax)
-{
-	FRotator Ctrl = Controller->GetControlRotation();
-	Ctrl.Yaw = AnchorYaw + FMath::Clamp(FMath::FindDeltaAngleDegrees(AnchorYaw, Ctrl.Yaw), -ConeHalfYaw, ConeHalfYaw);
-	Ctrl.Pitch = FMath::Clamp(FRotator::NormalizeAxis(Ctrl.Pitch), PitchMin, PitchMax);
-	Controller->SetControlRotation(Ctrl);
-}
+static const FName ReviverCameraSocketName(TEXT("Camera"));
 
 AExtractionPlayer::AExtractionPlayer(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UExtractionPlayerMovement>(
@@ -277,18 +219,17 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	PendingTakedownVictim.Reset();
 	bTakedownMontageActive = false;
 
-	EndReviveSessionAuthority();
-	RestoreReviveCameraAttachment();
+	SetReviverLock(false);
+	SetReviverCameraSocket(false);
+	SetBeingRevived(false);
 	if (ACharacter* IgnoredTarget = ReviverLockIgnoredTarget.Get())
 	{
 		MoveIgnoreActorRemove(IgnoredTarget);
 		IgnoredTarget->MoveIgnoreActorRemove(this);
 	}
 	ReviverLockIgnoredTarget.Reset();
-	CachedSpringArm.Reset();
 	bReviverLockActive = false;
 	bReviverSavedUseControllerRotationYaw = false;
-	bReviverYawFollowRestorePending = false;
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -296,54 +237,6 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 void AExtractionPlayer::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
-
-	// Snap-hunt trace: one line per frame while downed/being revived and for 2s after the revive.
-	// Whichever column jumps on the snap frame is the source.
-	if (GReviveCameraDebug && IsLocallyControlled())
-	{
-		const UWorld* World = GetWorld();
-		const float SinceRevive = World
-			? World->GetTimeSeconds() - FMath::Max(LastReviveWorldTime, ReviverLockEndTime) : 1e9f;
-		if (bIsDBNO || bBeingRevivedAnimActive || bReviverLockActive || SinceRevive < 2.f)
-		{
-			const APlayerController* PC = Cast<APlayerController>(GetController());
-			const FRotator CamRot = PC && PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraRotation() : FRotator::ZeroRotator;
-			const FVector CamLoc = PC && PC->PlayerCameraManager ? PC->PlayerCameraManager->GetCameraLocation() : FVector::ZeroVector;
-			const FRotator CtrlRot = PC ? PC->GetControlRotation() : FRotator::ZeroRotator;
-			const USkeletalMeshComponent* MeshComp = GetMesh();
-			const float HeadYaw = MeshComp ? MeshComp->GetSocketRotation(TEXT("head")).Yaw : 0.f;
-			const USpringArmComponent* Arm = CachedSpringArm.Get();
-			const UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
-			const UAnimMontage* ActiveMon = IsValid(AnimInst) ? AnimInst->GetCurrentActiveMontage() : nullptr;
-
-			UE_LOG(LogExtraction, Log,
-				TEXT("CAMTRACE t=%.3f cam=(%.1f,%.1f) camLoc=%s ctrl=(%.1f,%.1f) actorYaw=%.1f headYaw=%.1f armPCR=%d yawFollow=%d DBNO=%d beingRev=%d revLock=%d montage=%s"),
-				World ? World->GetTimeSeconds() : 0.f,
-				CamRot.Yaw, CamRot.Pitch, *CamLoc.ToCompactString(),
-				CtrlRot.Yaw, CtrlRot.Pitch,
-				GetActorRotation().Yaw, HeadYaw,
-				Arm ? (int32)Arm->bUsePawnControlRotation : -1,
-				(int32)bUseControllerRotationYaw, (int32)bIsDBNO, (int32)bBeingRevivedAnimActive,
-				(int32)bReviverLockActive, *GetNameSafe(ActiveMon));
-		}
-	}
-
-	// Deferred DBNO free-look restore: hand the camera back to head-bone inheritance only once the
-	// head has converged with the view yaw (get-up montage fully blended out). Restoring the instant
-	// DBNO ends inherited a head still posed ~45° off — a hard snap + quarter-second swing-back.
-	// 1s cap = safety net (also covers FullDeath, which never restored the flag before).
-	if (bDBNOFreeLookActive && !bIsDBNO && !bBeingRevivedAnimActive && !bReviverLockActive && IsLocallyControlled())
-	{
-		const UWorld* World = GetWorld();
-		// Whichever free-look owner released last (own revive OR reviver-lock) opens the window.
-		const float HandbackStamp = FMath::Max(LastReviveWorldTime, ReviverLockEndTime);
-		const float SinceRevive = World ? World->GetTimeSeconds() - HandbackStamp : 1e9f;
-		const USkeletalMeshComponent* MeshComp = GetMesh();
-		const float HeadYaw = MeshComp ? MeshComp->GetSocketRotation(TEXT("head")).Yaw : GetActorRotation().Yaw;
-		const float CtrlYaw = IsValid(GetController()) ? GetController()->GetControlRotation().Yaw : HeadYaw;
-		if (FMath::Abs(FMath::FindDeltaAngleDegrees(HeadYaw, CtrlYaw)) < 5.f || SinceRevive > 1.f)
-			SetDBNOCameraFreeLook(false);
-	}
 
 	if (bIsDBNO && BleedoutTimeRemaining > 0.f)
 		BleedoutTimeRemaining = FMath::Max(BleedoutTimeRemaining - DeltaTime, 0.f);
@@ -361,18 +254,6 @@ void AExtractionPlayer::Tick(float DeltaTime)
 
 	if (IsLocallyControlled() && bIsReviving)
 		UpdateRevive(DeltaTime);
-
-	// Re-assert the hold look cones AFTER the controller applied this frame's accumulated input
-	// (DoAim's clamp only sees the pre-input rotation — a hard flick would rest past the cone).
-	if (IsLocallyControlled() && IsValid(GetController()))
-	{
-		if (bReviverLockActive)
-			ClampLookCone(GetController(), ReviverLookAnchorYaw,
-				GReviverConeHalfYaw, GReviverPitchMin, GReviverPitchMax);
-		else if (bBeingRevivedAnimActive)
-			ClampLookCone(GetController(), GetActorRotation().Yaw,
-				GBeingRevivedConeHalfYaw, GBeingRevivedPitchMin, GBeingRevivedPitchMax);
-	}
 
 	if (IsLocallyControlled())
 		UpdateReviveCandidateScan(DeltaTime);
@@ -546,8 +427,9 @@ void AExtractionPlayer::MoveInput(const FInputActionValue& Value)
 
 void AExtractionPlayer::LookInput(const FInputActionValue& Value)
 {
+	if (bReviverLockActive || bBeingRevivedAnimActive) return;
+
 	const FVector2D LookAxisVector = Value.Get<FVector2D>();
-	TryRestoreReviverYawFollow(LookAxisVector.X);
 
 	// Cancel recoil recovery when player moves mouse
 	if (IsValid(WeaponComponent))
@@ -560,41 +442,12 @@ void AExtractionPlayer::LookInput(const FInputActionValue& Value)
 	DoAim(LookAxisVector.X, LookAxisVector.Y);
 }
 
-void AExtractionPlayer::TryRestoreReviverYawFollow(float YawInput)
-{
-	if (!bReviverYawFollowRestorePending) return;
-	if (bIsDBNO)
-	{
-		bReviverSavedUseControllerRotationYaw = false;
-		bReviverYawFollowRestorePending = false;
-		return;
-	}
-	if (!IsValid(GetController())) return;
-	if (bReviverLockActive || bBeingRevivedAnimActive || bTakedownMontageActive) return;
-	if (FMath::IsNearlyZero(YawInput)) return;
-
-	bUseControllerRotationYaw = bReviverSavedUseControllerRotationYaw;
-	bReviverSavedUseControllerRotationYaw = false;
-	bReviverYawFollowRestorePending = false;
-}
-
 void AExtractionPlayer::DoAim(float Yaw, float Pitch)
 {
 	if (!IsValid(GetController())) return;
-	if (bTakedownMontageActive) return;
-	// Neither revive role locks look: yaw-follow is suspended on both sides (SetBeingRevived /
-	// SetReviverLock), so the camera spins freely while the animated body stays put. Only
-	// movement (and fire/reload/ADS for the reviver) stays locked.
-
+	if (bTakedownMontageActive || bReviverLockActive || bBeingRevivedAnimActive) return;
 	AddControllerYawInput(Yaw);
 	AddControllerPitchInput(Pitch);
-
-	if (bReviverLockActive)
-		ClampLookCone(GetController(), ReviverLookAnchorYaw,
-			GReviverConeHalfYaw, GReviverPitchMin, GReviverPitchMax);
-	else if (bBeingRevivedAnimActive)
-		ClampLookCone(GetController(), GetActorRotation().Yaw,
-			GBeingRevivedConeHalfYaw, GBeingRevivedPitchMin, GBeingRevivedPitchMax);
 }
 
 void AExtractionPlayer::DoMove(float Right, float Forward)
@@ -613,8 +466,6 @@ void AExtractionPlayer::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	Super::CalcCamera(DeltaTime, OutResult);
 	if (bTakedownMontageActive && TakedownNearClipPlane > 0.f)
 		OutResult.PerspectiveNearClipPlane = TakedownNearClipPlane;
-	else if (bReviverLockActive)
-		OutResult.PerspectiveNearClipPlane = GReviverNearClip;
 }
 
 // ---- Weapon Input ----
@@ -622,7 +473,7 @@ void AExtractionPlayer::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 {
 	if (bIsDBNO) return;
-	if (bReviverLockActive) return; // kneeling with the weapon hidden — no firing mid-revive
+	if (bReviverLockActive || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
 	if (!IsValid(WeaponComponent)) return;
 
@@ -653,7 +504,7 @@ void AExtractionPlayer::FireStop(const FInputActionValue& Value)
 void AExtractionPlayer::ReloadStart(const FInputActionValue& Value)
 {
 	if (bIsDBNO) return;
-	if (bReviverLockActive) return;
+	if (bReviverLockActive || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
 	if (!IsValid(WeaponComponent)) return;
 
@@ -663,7 +514,7 @@ void AExtractionPlayer::ReloadStart(const FInputActionValue& Value)
 void AExtractionPlayer::ADSStart(const FInputActionValue& Value)
 {
 	if (bIsDBNO) return;
-	if (bReviverLockActive) return;
+	if (bReviverLockActive || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
 	if (!IsValid(WeaponComponent)) return;
 
@@ -949,10 +800,7 @@ void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 	ReviveElapsed = 0.f;
 	bIsReviving = true;
 
-	if (IExtractionPlayerInterface* Iface = Cast<IExtractionPlayerInterface>(Target))
-		Iface->SetBeingRevived(true, ReviveDuration);
-
-	// Start the local camera/animation lock; its authority path aligns the target exactly once.
+	// The lock starts the ordered alignment session, then plays both montages once.
 	if (!SetReviverLock(true))
 	{
 		CancelRevive();
@@ -1342,12 +1190,6 @@ void AExtractionPlayer::EnterDBNO()
 {
 	if (bIsDBNO) return;
 	bIsDBNO = true;
-	if (bReviverYawFollowRestorePending)
-	{
-		bReviverSavedUseControllerRotationYaw = false;
-		bReviverYawFollowRestorePending = false;
-	}
-
 	// Stop auto-lean: ADSStop may never fire if the player is downed mid-ADS, which would leave the probe
 	// driving lean on a downed pawn. The per-frame FInterpTo eases AutoLeanAlpha back to 0.
 	bAutoLeanActive = false;
@@ -1429,9 +1271,7 @@ void AExtractionPlayer::ExitDBNO()
 	UnCrouch();
 
 	SetBeingRevived(false);
-	// Free-look restore is DEFERRED to Tick: flipping the spring arm back to bone-inheritance here,
-	// while the get-up montage still poses the head ~45° off the view, snapped the camera 47° and
-	// swung it back over the blend-out (CAMTRACE-verified). Tick restores once the head converges.
+	SetDBNOCameraFreeLook(false);
 
 	if (const UWorld* World = GetWorld())
 		LastReviveWorldTime = World->GetTimeSeconds();
@@ -1455,6 +1295,8 @@ void AExtractionPlayer::FullDeath()
 
 	bAutoLeanActive = false;
 	AutoLeanTargetAlpha = 0.f;
+	SetBeingRevived(false);
+	SetDBNOCameraFreeLook(false);
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
@@ -1493,85 +1335,67 @@ void AExtractionPlayer::SetDBNOCameraFreeLook(bool bEnable)
 
 void AExtractionPlayer::SetBeingRevived(bool bBeingRevived, float ExpectedDuration)
 {
-	if (bBeingRevived == bBeingRevivedAnimActive)
-	{
-		// Redundant false→false calls are normal teardown (montage-driven exit already cleared the
-		// state); only a stale TRUE at hold start is a real problem (player would stay flat).
-		if (bBeingRevived)
-			UE_LOG(LogExtraction, Warning, TEXT("SetBeingRevived(true): flag already true — montage NOT retriggered, player will stay flat"));
-		return;
-	}
+	if (bBeingRevivedAnimActive == bBeingRevived) return;
 	bBeingRevivedAnimActive = bBeingRevived;
-
-	// Yaw-follow suspension: controller yaw re-slaves the actor every frame, which would stomp
-	// AlignForRevive's facing and let look input drag the animated body. Input locks live in
-	// DoAim/DoMove (gated on bBeingRevivedAnimActive).
 	if (bBeingRevived)
 	{
 		bSavedUseControllerRotationYaw = bUseControllerRotationYaw;
 		bUseControllerRotationYaw = false;
+		SetBeingRevivedCameraAnimationControl(true);
 	}
 	else
 	{
 		bUseControllerRotationYaw = bSavedUseControllerRotationYaw;
-
-		// Align the body to the view the player held during the revive in the SAME frame yaw-follow
-		// resumes — otherwise the head-bone-inherited camera shows one frame of the old body yaw and
-		// then swings as the body re-slaves: the end-of-revive camera snap. Skip while still DBNO
-		// (abort path): the downed body must not spin to the free-look camera.
-		if (!bIsDBNO && bUseControllerRotationYaw)
-		{
-			if (AController* PC = GetController())
-				SetActorRotation(FRotator(0.f, PC->GetControlRotation().Yaw, 0.f));
-		}
+		SetBeingRevivedCameraAnimationControl(false);
 	}
 
-	// Hide the held weapon while the paired revive anims play (the clips are authored empty-handed);
-	// restored on every exit path since all of them come back through here with false.
 	SetHeldWeaponHidden(bBeingRevived);
+	if (bBeingRevived && IsValid(WeaponComponent))
+	{
+		WeaponComponent->StopFire();
+		WeaponComponent->SetAiming(false);
+		OnADSChanged(false);
+		bAutoLeanActive = false;
+		AutoLeanTargetAlpha = 0.f;
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon()) Weapon->CancelReload();
+	}
 
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
-	if (!IsValid(AnimInst) || !BeingRevivedMontage)
-	{
-		UE_LOG(LogExtraction, Warning, TEXT("SetBeingRevived(%d): no anim instance or no BeingRevivedMontage assigned — player stays flat"),
-			bBeingRevived);
-		return;
-	}
-
+	if (!IsValid(AnimInst) || !BeingRevivedMontage) return;
 	if (bBeingRevived && bIsDBNO)
 	{
-		if (!AnimInst->Montage_IsPlaying(BeingRevivedMontage))
-		{
-			// Rate-scale so one montage cycle spans the reviver's hold exactly — the get-up motion
-			// lands on the frame the revive completes, whatever the hold duration is tuned to.
-			const float MontageLength = BeingRevivedMontage->GetPlayLength();
-			const float PlayRate = (ExpectedDuration > 0.f && MontageLength > 0.f)
-				? MontageLength / ExpectedDuration : 1.f;
-			const float PlayLength = AnimInst->Montage_Play(BeingRevivedMontage, PlayRate);
-			UE_LOG(LogExtraction, Log, TEXT("SetBeingRevived: playing '%s' rate=%.3f -> playLength=%.2f (bIsDBNO=%d expectDur=%.2f)"),
-				*GetNameSafe(BeingRevivedMontage), PlayRate, PlayLength, bIsDBNO, ExpectedDuration);
-			if (PlayLength <= 0.f)
-			{
-				UE_LOG(LogExtraction, Warning, TEXT("%s: BeingRevivedMontage '%s' failed to play (slot/skeleton mismatch?)"),
-					*GetName(), *GetNameSafe(BeingRevivedMontage));
-			}
-			else
-			{
-				// The get-up montage owns revive completion: its natural blend-out fires ExitDBNO at
-				// the frame the character is upright. The reviver's timer stays as fallback only.
-				FOnMontageBlendingOutStarted BlendOutDelegate;
-				BlendOutDelegate.BindUObject(this, &AExtractionPlayer::OnBeingRevivedMontageBlendOut);
-				AnimInst->Montage_SetBlendingOutDelegate(BlendOutDelegate, BeingRevivedMontage);
-			}
-		}
-	}
-	else if (bBeingRevived && !bIsDBNO)
-	{
-		UE_LOG(LogExtraction, Warning, TEXT("SetBeingRevived(true) but bIsDBNO=false — being-revived montage skipped, player will not pose"));
+		const float Length = BeingRevivedMontage->GetPlayLength();
+		const float Rate = ExpectedDuration > 0.f && Length > 0.f ? Length / ExpectedDuration : 1.f;
+		AnimInst->Montage_Play(BeingRevivedMontage, Rate);
 	}
 	else if (AnimInst->Montage_IsPlaying(BeingRevivedMontage))
+	{
 		AnimInst->Montage_Stop(0.25f, BeingRevivedMontage);
+	}
+}
+
+void AExtractionPlayer::SetBeingRevivedCameraAnimationControl(bool bActive)
+{
+	if (!IsLocallyControlled() || bBeingRevivedCameraOverrideActive == bActive) return;
+	USpringArmComponent* Arm = CachedSpringArm.Get();
+	if (!IsValid(Arm))
+	{
+		Arm = FindComponentByClass<USpringArmComponent>();
+		CachedSpringArm = Arm;
+	}
+	if (!IsValid(Arm)) return;
+
+	bBeingRevivedCameraOverrideActive = bActive;
+	if (bActive)
+	{
+		bBeingRevivedSavedSpringArmUsePawnControlRotation = Arm->bUsePawnControlRotation;
+		Arm->bUsePawnControlRotation = false;
+	}
+	else
+	{
+		Arm->bUsePawnControlRotation = bBeingRevivedSavedSpringArmUsePawnControlRotation;
+	}
 }
 
 void AExtractionPlayer::SetHeldWeaponHidden(bool bHideWeapon)
@@ -1597,320 +1421,134 @@ void AExtractionPlayer::SetHeldWeaponHidden(bool bHideWeapon)
 	}
 }
 
-bool AExtractionPlayer::AttachReviveCameraToHead()
-{
-	if (bReviveCameraAttachmentActive) return true;
-
-	USpringArmComponent* Arm = FindComponentByClass<USpringArmComponent>();
-	USkeletalMeshComponent* MeshComp = GetMesh();
-	if (!IsValid(Arm) || !IsValid(MeshComp) || MeshComp->GetBoneIndex(TEXT("head")) == INDEX_NONE)
-	{
-		return false;
-	}
-
-	ReviveCameraOriginalParent = Arm->GetAttachParent();
-	ReviveCameraOriginalSocket = Arm->GetAttachSocketName();
-	ReviveCameraOriginalRelativeTransform = Arm->GetRelativeTransform();
-	bReviveCameraOriginalUsePawnControlRotation = Arm->bUsePawnControlRotation;
-
-	if (!Arm->AttachToComponent(MeshComp, FAttachmentTransformRules::KeepWorldTransform, TEXT("head")))
-	{
-		ReviveCameraOriginalParent.Reset();
-		ReviveCameraOriginalSocket = NAME_None;
-		ReviveCameraOriginalRelativeTransform = FTransform::Identity;
-		return false;
-	}
-
-	// KeepWorldTransform produces the face-relative offset from the validated pre-revive view.
-	// Retaining that runtime offset avoids both a hardcoded rig value and an entry snap.
-	Arm->bUsePawnControlRotation = true;
-	CachedSpringArm = Arm;
-	bReviveCameraAttachmentActive = true;
-	return true;
-}
-
-void AExtractionPlayer::RestoreReviveCameraAttachment()
-{
-	if (!bReviveCameraAttachmentActive) return;
-	bReviveCameraAttachmentActive = false;
-
-	USpringArmComponent* Arm = CachedSpringArm.Get();
-	USceneComponent* OriginalParent = ReviveCameraOriginalParent.Get();
-	if (IsValid(Arm))
-	{
-		if (IsValid(OriginalParent))
-		{
-			if (Arm->AttachToComponent(OriginalParent, FAttachmentTransformRules::KeepWorldTransform, ReviveCameraOriginalSocket))
-				Arm->SetRelativeTransform(ReviveCameraOriginalRelativeTransform);
-			else
-			{
-				Arm->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
-				UE_LOG(LogExtraction, Warning, TEXT("%s: failed to restore revive camera parent; camera detached with world transform preserved"), *GetName());
-			}
-		}
-		else
-		{
-			Arm->DetachFromComponent(FDetachmentTransformRules::KeepWorldTransform);
-			UE_LOG(LogExtraction, Warning, TEXT("%s: revive camera parent became invalid; camera detached with world transform preserved"), *GetName());
-		}
-
-		Arm->bUsePawnControlRotation = bReviveCameraOriginalUsePawnControlRotation;
-	}
-
-	ReviveCameraOriginalParent.Reset();
-	ReviveCameraOriginalSocket = NAME_None;
-	ReviveCameraOriginalRelativeTransform = FTransform::Identity;
-	bReviveCameraOriginalUsePawnControlRotation = false;
-}
-
 bool AExtractionPlayer::SetReviverLock(bool bActive)
 {
-	if (bReviverLockActive == bActive) return true;
-	// Locking without a target would anchor the look cone on stale state and skip the yaw-follow
-	// save the unlock path restores.
-	if (bActive && !IsValid(ReviveTarget)) return false;
+	if (bReviverLockActive == bActive)
+	{
+		if (!bActive) SetReviverCameraSocket(false);
+		return true;
+	}
+
+	ACharacter* Target = bActive
+		? Cast<ACharacter>(ReviveTarget)
+		: ReviverLockIgnoredTarget.Get(true);
+	IExtractionPlayerInterface* TargetIface = Cast<IExtractionPlayerInterface>(Target);
+	if (bActive && (!IsValid(Target) || !TargetIface || !TargetIface->GetIsDBNO())) return false;
 
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
-
 	if (bActive)
 	{
-		// Montage playback is the entry transaction's only fallible required dependency. Start it
-		// before committing camera/yaw/session/weapon state so the caller can use normal cancellation
-		// without nested lock teardown or a duplicate end-session RPC.
-		if (!IsValid(AnimInst) || !ReviverMontage)
-		{
-			UE_LOG(LogExtraction, Warning, TEXT("%s: revive cancelled because the reviver AnimInstance or ReviverMontage is missing"),
-				*GetName());
-			return false;
-		}
-		if (!PlayReviverKneel(*AnimInst, *ReviverMontage, ReviveDuration, 0.f))
-		{
-			UE_LOG(LogExtraction, Warning, TEXT("%s: ReviverMontage '%s' failed to play (slot/skeleton mismatch?); cancelling revive"),
-				*GetName(), *GetNameSafe(ReviverMontage));
-			return false;
-		}
-
 		bReviverLockActive = true;
+		ReviverLockIgnoredTarget = Target;
+		MoveIgnoreActorAdd(Target);
+		Target->MoveIgnoreActorAdd(this);
+		ApplyReviveTargetAlignment(*Target);
+		TargetIface->SetBeingRevived(true, ReviveDuration);
 
-		// A back-to-back revive inherits the pre-first-revive intent while yaw follow remains
-		// deferred, so no unlock/relock frame can rotate the actor between holds.
-		if (!bReviverYawFollowRestorePending)
-			bReviverSavedUseControllerRotationYaw = bUseControllerRotationYaw;
-		bReviverYawFollowRestorePending = false;
+		bReviverSavedUseControllerRotationYaw = bUseControllerRotationYaw;
 		bUseControllerRotationYaw = false;
-		const AController* OwnController = GetController();
-		ReviverLookAnchorYaw = OwnController ? OwnController->GetControlRotation().Yaw : GetActorRotation().Yaw;
-
-		if (!AttachReviveCameraToHead())
-			UE_LOG(LogExtraction, Warning, TEXT("%s: revive camera could not attach to the head; preserving the normal camera"), *GetName());
-
-		AActor* Target = ReviveTarget;
-		if (IsValid(Target))
+		const bool bMontageStarted = IsValid(AnimInst) && ReviverMontage
+			&& SetReviverCameraSocket(true)
+			&& PlayReviverKneel(*AnimInst, *ReviverMontage, ReviveDuration);
+		if (!bMontageStarted)
 		{
-			// Camera/animation stay local; the ordered server session owns alignment and ignores.
-			if (HasAuthority())
-				BeginReviveSessionAuthority(Target);
-			else
-				Server_BeginReviveSession(Target);
-
-			// Autonomous clients retain prediction-side ignores; authority already added its copy.
-			if (!HasAuthority())
-			{
-				if (ACharacter* TargetChar = Cast<ACharacter>(Target))
-				{
-					MoveIgnoreActorAdd(TargetChar);
-					TargetChar->MoveIgnoreActorAdd(this);
-					ReviverLockIgnoredTarget = TargetChar;
-				}
-			}
+			SetReviverLock(false);
+			return false;
 		}
+		if (UCharacterMovementComponent* Move = GetCharacterMovement()) Move->StopMovementImmediately();
 
-		if (UCharacterMovementComponent* Move = GetCharacterMovement())
-			Move->StopMovementImmediately();
-
-		// A held trigger otherwise keeps the auto-fire loop shooting the hidden weapon through the
-		// whole hold (and recoil pumps the control rotation past the DoAim lock). Recoil RECOVERY
-		// must die too: it feeds DoAim every tick until look input cancels it, so with the hold's
-		// free look active it visibly self-rotates the camera whenever the mouse sits still.
+		SetHeldWeaponHidden(true);
 		if (IsValid(WeaponComponent))
 		{
 			WeaponComponent->StopFire();
-			AWeaponBase* HeldWeapon = WeaponComponent->GetCurrentWeapon();
-			if (IsValid(HeldWeapon))
-				HeldWeapon->CancelRecoilRecovery();
+			WeaponComponent->SetAiming(false);
+			OnADSChanged(false);
+			bAutoLeanActive = false;
+			AutoLeanTargetAlpha = 0.f;
+			if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
+			{
+				Weapon->CancelRecoilRecovery();
+				Weapon->CancelReload();
+			}
 		}
-
-		SetHeldWeaponHidden(true);
 	}
 	else
 	{
-		bReviverLockActive = false;
-
+		if (IsValid(Target) && TargetIface)
+			TargetIface->SetBeingRevived(false);
 		if (IsValid(AnimInst) && ReviverMontage && AnimInst->Montage_IsPlaying(ReviverMontage))
 			AnimInst->Montage_Stop(0.f, ReviverMontage);
-
-		// End is ordered after begin on the same reliable owner channel. Call it before local
-		// teardown and before CancelRevive/CompleteRevive clear ReviveTarget.
-		if (HasAuthority())
-			EndReviveSessionAuthority();
-		else
-			Server_EndReviveSession();
-
-		RestoreReviveCameraAttachment();
+		SetReviverCameraSocket(false);
+		bUseControllerRotationYaw = bReviverSavedUseControllerRotationYaw;
+		bReviverSavedUseControllerRotationYaw = false;
 		SetHeldWeaponHidden(false);
 
-		// Keep yaw follow disabled across unlock. Saved-true resumes only on fresh horizontal look;
-		// saved-false remains false. DBNO discards the pending handoff so downed free look cannot
-		// rotate the body.
-		bUseControllerRotationYaw = false;
-		bReviverYawFollowRestorePending = !bIsDBNO && bReviverSavedUseControllerRotationYaw;
-		if (bIsDBNO)
-			bReviverSavedUseControllerRotationYaw = false;
-
-		if (const UWorld* World = GetWorld())
-			ReviverLockEndTime = World->GetTimeSeconds();
-
-		if (ACharacter* IgnoredTarget = ReviverLockIgnoredTarget.Get())
-		{
-			MoveIgnoreActorRemove(IgnoredTarget);
-			IgnoredTarget->MoveIgnoreActorRemove(this);
-		}
+		if (Target)
+			MoveIgnoreActorRemove(Target);
+		if (IsValid(Target))
+			Target->MoveIgnoreActorRemove(this);
 		ReviverLockIgnoredTarget.Reset();
+		bReviverLockActive = false;
 	}
 
 	return true;
 }
 
-bool AExtractionPlayer::CanBeginReviveSessionAuthority(AActor* Target) const
+bool AExtractionPlayer::SetReviverCameraSocket(bool bActive)
 {
-	if (!HasAuthority() || bIsDBNO || !IsValid(Target)) return false;
+	if (bActive && !IsLocallyControlled()) return true;
+	if (bReviverCameraSocketActive == bActive) return true;
 
-	IExtractionPlayerInterface* TargetIface = Cast<IExtractionPlayerInterface>(Target);
-	if (!TargetIface || !TargetIface->GetIsDBNO()) return false;
-	if (!IsValid(Cast<ACharacter>(Target))) return false;
-
-	const float DistSq = FVector::DistSquared(GetActorLocation(), Target->GetActorLocation());
-	return DistSq <= FMath::Square(ReviveProximityRadius);
-}
-
-void AExtractionPlayer::BeginReviveSessionAuthority(AActor* Target)
-{
-	if (!HasAuthority()) return;
-
-	if (ACharacter* ExistingTarget = AuthorityReviveSessionTarget.Get())
+	USpringArmComponent* Arm = CachedSpringArm.Get();
+	if (!IsValid(Arm))
 	{
-		if (ExistingTarget == Target) return;
-		UE_LOG(LogExtraction, Warning, TEXT("Server rejected conflicting revive start '%s' while '%s' is active"),
-			*GetNameSafe(Target), *GetNameSafe(ExistingTarget));
-		return;
+		Arm = FindComponentByClass<USpringArmComponent>();
+		CachedSpringArm = Arm;
 	}
-	AuthorityReviveSessionTarget.Reset();
-	AuthorityReviveSessionStartTime.Reset();
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!IsValid(Arm) || !IsValid(MeshComp)) return false;
 
-	if (!CanBeginReviveSessionAuthority(Target))
+	if (bActive)
 	{
-		UE_LOG(LogExtraction, Warning, TEXT("Server rejected stale or invalid revive start for '%s'"), *GetNameSafe(Target));
-		return;
+		if (Arm->GetAttachParent() != MeshComp || !MeshComp->DoesSocketExist(ReviverCameraSocketName)) return false;
+		ReviverCameraSavedSocket = Arm->GetAttachSocketName();
+		ReviverCameraSavedRelativeTransform = Arm->GetRelativeTransform();
+		if (!Arm->AttachToComponent(MeshComp, FAttachmentTransformRules::SnapToTargetNotIncludingScale, ReviverCameraSocketName))
+			return false;
+		Arm->SetRelativeTransform(FTransform::Identity);
+		bReviverCameraSocketActive = true;
+		return true;
 	}
 
-	const UWorld* World = GetWorld();
-	if (!IsValid(World))
-	{
-		UE_LOG(LogExtraction, Warning, TEXT("Server rejected revive start for '%s' because world time is unavailable"),
-			*GetNameSafe(Target));
-		return;
-	}
-
-	ACharacter* TargetCharacter = CastChecked<ACharacter>(Target);
-	AuthorityReviveSessionTarget = TargetCharacter;
-	AuthorityReviveSessionStartTime.Emplace(World->GetTimeSeconds());
-	MoveIgnoreActorAdd(TargetCharacter);
-	TargetCharacter->MoveIgnoreActorAdd(this);
-	ApplyReviveTargetAlignmentAuthority(*TargetCharacter);
+	if (!Arm->AttachToComponent(MeshComp, FAttachmentTransformRules::KeepRelativeTransform, ReviverCameraSavedSocket))
+		return false;
+	Arm->SetRelativeTransform(ReviverCameraSavedRelativeTransform);
+	bReviverCameraSocketActive = false;
+	return true;
 }
 
-void AExtractionPlayer::EndReviveSessionAuthority()
+void AExtractionPlayer::ApplyReviveTargetAlignment(ACharacter& Target)
 {
-	AuthorityReviveSessionStartTime.Reset();
-	if (!HasAuthority()) return;
+	const ACompanionCharacter* CompanionTarget = Cast<ACompanionCharacter>(&Target);
+	if (!CompanionTarget) return;
 
-	// Teardown never revalidates DBNO/range. Pending-kill access lets this pawn remove its own
-	// targeted ignore without invoking gameplay code on an invalid target.
-	ACharacter* TargetCharacter = AuthorityReviveSessionTarget.Get(true);
-	AuthorityReviveSessionTarget.Reset();
-	if (TargetCharacter)
-		MoveIgnoreActorRemove(TargetCharacter);
-	if (IsValid(TargetCharacter))
-		TargetCharacter->MoveIgnoreActorRemove(this);
-}
-
-void AExtractionPlayer::ApplyReviveTargetAlignmentAuthority(ACharacter& Target)
-{
-	constexpr float AuthoredFwd = 60.0f;
-	constexpr float AuthoredRight = -64.5f;
-	constexpr float AuthoredYaw = -46.0f;
 	const float PlayerYaw = GetActorRotation().Yaw;
-	const float TargetYaw = PlayerYaw - AuthoredYaw;
-	const FRotator TargetFrame(0.f, TargetYaw, 0.f);
-	FVector TargetLoc = GetActorLocation() - TargetFrame.RotateVector(FVector(AuthoredFwd, AuthoredRight, 0.f));
-	TargetLoc.Z = Target.GetActorLocation().Z;
-	Target.SetActorLocation(TargetLoc, false, nullptr, ETeleportType::TeleportPhysics);
+	const float TargetYaw = PlayerYaw - CompanionTarget->RevivePairYawOffset;
+	const FRotator TargetYawRotation(0.f, TargetYaw, 0.f);
+	const FVector AuthoredOffset(CompanionTarget->RevivePairOffset.X, CompanionTarget->RevivePairOffset.Y, 0.f);
+	FVector TargetLocation = GetActorLocation() - TargetYawRotation.RotateVector(AuthoredOffset);
+	TargetLocation.Z = Target.GetActorLocation().Z;
+	Target.SetActorLocation(TargetLocation, false, nullptr, ETeleportType::TeleportPhysics);
 	Target.SetActorRotation(FRotator(0.f, TargetYaw, 0.f));
-	Target.ForceNetUpdate();
-}
-
-void AExtractionPlayer::Server_BeginReviveSession_Implementation(AActor* Target)
-{
-	BeginReviveSessionAuthority(Target);
-}
-
-void AExtractionPlayer::Server_EndReviveSession_Implementation()
-{
-	EndReviveSessionAuthority();
 }
 
 void AExtractionPlayer::AlignForRevive(const FVector& ReviverLocation)
 {
 	if (!bIsDBNO) return;
-
-	// The downed player's body IS the arrangement anchor: keep its current yaw (the reviver snaps
-	// into the player's frame instead), plus the live-tuning offset. ReviverLocation is now only
-	// logged for diagnostics.
-	const float PreYaw = GetActorRotation().Yaw;
-	const float AlignYaw = PreYaw + GRevivePlayerYawOffset;
-	if (!FMath::IsNearlyZero(GRevivePlayerYawOffset))
-		SetActorRotation(FRotator(0.f, AlignYaw, 0.f));
-	UE_LOG(LogExtraction, Log,
-		TEXT("REVIVE ALIGN(player): loc=%s yaw %.1f -> %.1f (yawOffset=%.1f) reviverLoc=%s dist2D=%.1f meshRelYaw=%.1f"),
-		*GetActorLocation().ToCompactString(), PreYaw, AlignYaw, GRevivePlayerYawOffset,
-		*ReviverLocation.ToCompactString(),
-		FVector::Dist2D(GetActorLocation(), ReviverLocation),
-		GetMesh() ? GetMesh()->GetRelativeRotation().Yaw : 0.f);
-
-	// No control-rotation sync: the player looks around freely during the revive (yaw-follow is
-	// suspended, so the view can't drag the body). On get-up the body aligns to wherever they're
-	// looking — normal FPS control resume.
-}
-
-void AExtractionPlayer::OnBeingRevivedMontageBlendOut(UAnimMontage* Montage, bool bInterrupted)
-{
-	// Interrupted = manual stop (task abort/finish) or a same-slot stomp — the active-montage name
-	// identifies a stomper when the get-up visibly cuts out mid-hold.
-	if (bInterrupted)
-	{
-		const USkeletalMeshComponent* MeshComp = GetMesh();
-		const UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
-		const UAnimMontage* Active = IsValid(AnimInst) ? AnimInst->GetCurrentActiveMontage() : nullptr;
-		UE_LOG(LogExtraction, Log, TEXT("Being-revived montage INTERRUPTED (bIsDBNO=%d beingRevived=%d activeMontage=%s)"),
-			bIsDBNO, bBeingRevivedAnimActive, *GetNameSafe(Active));
-		return;
-	}
-
-	if (!bIsDBNO || !bBeingRevivedAnimActive || !HasAuthority()) return;
-
-	UE_LOG(LogExtraction, Log, TEXT("Being-revived montage completed get-up — montage-driven ExitDBNO"));
-	ExitDBNO();
+	const FVector ToReviver = (ReviverLocation - GetActorLocation()).GetSafeNormal2D();
+	if (!ToReviver.IsNearlyZero())
+		SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw, 0.f));
 }
 
 bool AExtractionPlayer::IsBeingRevivedMontagePlaying() const
@@ -1950,10 +1588,15 @@ void AExtractionPlayer::OnRep_IsDBNO()
 	if (bIsDBNO)
 		BleedoutTimeRemaining = BleedoutDuration;
 
-	if (!bIsDBNO) SetBeingRevived(false);
-	// Enable-only here: the restore is deferred to Tick until the head bone converges with the view
-	// (same camera-snap avoidance as ExitDBNO).
-	if (bIsDBNO) SetDBNOCameraFreeLook(true);
+	if (!bIsDBNO)
+	{
+		SetBeingRevived(false);
+		SetDBNOCameraFreeLook(false);
+	}
+	else if (!bBeingRevivedAnimActive)
+	{
+		SetDBNOCameraFreeLook(true);
+	}
 
 	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
 }
@@ -2045,25 +1688,10 @@ void AExtractionPlayer::UpdateRevive(float DeltaTime)
 	}
 
 	ReviveElapsed += DeltaTime;
+	if (ReviveElapsed < ReviveDuration) return;
 
-	// Arbitration should keep the revive montage authoritative. If it is still interrupted, log
-	// the competing montage once and cancel cleanly instead of replaying a full-body montage here.
-	if (bReviverLockActive && ReviverMontage)
-	{
-		USkeletalMeshComponent* MeshComp = GetMesh();
-		UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
-		if (!IsValid(AnimInst) || (!AnimInst->Montage_IsPlaying(ReviverMontage)
-			&& ReviveElapsed < ReviveDuration - ReviverMontage->BlendOut.GetBlendTime()))
-		{
-			const UAnimMontage* Stomper = IsValid(AnimInst) ? AnimInst->GetCurrentActiveMontage() : nullptr;
-			UE_LOG(LogExtraction, Warning, TEXT("Reviver kneel interrupted at %.2fs (stomper: %s); cancelling revive"),
-				ReviveElapsed, *GetNameSafe(Stomper));
-			CancelRevive();
-			return;
-		}
-	}
-
-	if (ReviveElapsed >= ReviveDuration) CompleteRevive();
+	TargetIface->ExitDBNO();
+	CancelRevive();
 }
 
 void AExtractionPlayer::CancelRevive()
@@ -2073,85 +1701,11 @@ void AExtractionPlayer::CancelRevive()
 	UE_LOG(LogExtraction, Verbose, TEXT("'%s' cancelled revive on '%s'"),
 		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
 
-	if (IsValid(ReviveTarget))
-	{
-		if (IExtractionPlayerInterface* Iface = Cast<IExtractionPlayerInterface>(ReviveTarget))
-			Iface->SetBeingRevived(false);
-	}
-
 	SetReviverLock(false);
 
 	bIsReviving = false;
 	ReviveElapsed = 0.f;
 	ReviveTarget = nullptr;
-}
-
-void AExtractionPlayer::CompleteRevive()
-{
-	if (!IsValid(ReviveTarget))
-	{
-		CancelRevive();
-		return;
-	}
-
-	UE_LOG(LogExtraction, Log, TEXT("'%s' completed revive on '%s'"),
-		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
-
-	Server_CompleteRevive(ReviveTarget);
-
-	if (IExtractionPlayerInterface* Iface = Cast<IExtractionPlayerInterface>(ReviveTarget))
-		Iface->SetBeingRevived(false);
-
-	SetReviverLock(false);
-
-	bIsReviving = false;
-	ReviveElapsed = 0.f;
-	ReviveTarget = nullptr;
-}
-
-void AExtractionPlayer::Server_CompleteRevive_Implementation(AActor* Target)
-{
-	if (!IsValid(Target)) return;
-	if (AuthorityReviveSessionTarget.Get() != Target)
-	{
-		UE_LOG(LogExtraction, Warning, TEXT("Server_CompleteRevive rejected target '%s' outside the active session"),
-			*GetNameSafe(Target));
-		return;
-	}
-
-	const UWorld* World = GetWorld();
-	if (!IsValid(World) || !AuthorityReviveSessionStartTime.IsSet())
-	{
-		UE_LOG(LogExtraction, Warning, TEXT("Server_CompleteRevive rejected target '%s' because authoritative session timing is unavailable"),
-			*GetNameSafe(Target));
-		return;
-	}
-
-	const double AuthoritativeElapsedSeconds = World->GetTimeSeconds() - AuthorityReviveSessionStartTime.GetValue();
-	const double MinimumCompletionSeconds = FMath::Max(
-		static_cast<double>(ReviveDuration) - GReviveCompletionLatencyToleranceSeconds, 0.0);
-	if (!FMath::IsFinite(AuthoritativeElapsedSeconds) || AuthoritativeElapsedSeconds < MinimumCompletionSeconds)
-	{
-		UE_LOG(LogExtraction, Warning,
-			TEXT("Server_CompleteRevive rejected early completion for '%s': %.3fs elapsed, %.3fs required"),
-			*GetNameSafe(Target), AuthoritativeElapsedSeconds, MinimumCompletionSeconds);
-		return;
-	}
-
-	IExtractionPlayerInterface* TargetIface = Cast<IExtractionPlayerInterface>(Target);
-	if (!TargetIface) return;
-	if (!TargetIface->GetIsDBNO()) return;
-	if (bIsDBNO) return;
-
-	const float DistSq = FVector::DistSquared(GetActorLocation(), Target->GetActorLocation());
-	if (DistSq > FMath::Square(ReviveProximityRadius))
-	{
-		UE_LOG(LogExtraction, Warning, TEXT("Server_CompleteRevive: '%s' too far from '%s'"),
-			*GetNameSafe(this), *GetNameSafe(Target));
-		return;
-	}
-
-	TargetIface->ExitDBNO();
 }
 
 // ---- Companion Debug Exec Commands ----

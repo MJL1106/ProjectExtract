@@ -38,6 +38,26 @@ void ADoorBase::PostInitializeComponents()
 	// flag flip works both ways.
 	if (DoorwayTrigger)
 		DoorwayTrigger->OnComponentBeginOverlap.AddDynamic(this, &ADoorBase::OnDoorwayOverlap);
+
+	// No door surface is ever a floor: frame sills and paneled-leaf collision read as walkable
+	// steps/ramps to the CMC, so pawns walking into a door step onto it and ride upward (the
+	// "float at doors" bug — FloatDiag showed pawns based on a door's Frame component). And
+	// non-leaf trim never blocks pawns at all: frame sill bars span the walkway, so once
+	// unwalkable they'd wall the doorway off instead of being stepped over. Runs post-init so
+	// BP-added meshes (e.g. BreachableDoor's Frame) are covered.
+	TInlineComponentArray<UStaticMeshComponent*> Meshes(this);
+	for (UStaticMeshComponent* Mesh : Meshes)
+	{
+		if (!Mesh) continue;
+		Mesh->SetWalkableSlopeOverride(FWalkableSlopeOverride(WalkableSlope_Unwalkable, 0.f));
+		if (!IsDoorLeafMesh(*Mesh))
+			Mesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+	}
+}
+
+bool ADoorBase::IsDoorLeafMesh(const UStaticMeshComponent& Mesh) const
+{
+	return Mesh.GetMobility() == EComponentMobility::Movable;
 }
 
 void ADoorBase::BeginPlay()

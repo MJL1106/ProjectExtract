@@ -272,6 +272,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0", ClampMax = "10.0"))
 	float FlankerResponseWindow = 2.5f;
 
+	// Min seconds between body-charger target steals while the player is DBNO. Converging enemies
+	// flap in/out of the revive threat ring — without hysteresis the steal fires several times a
+	// second and the target thrashes (cover/aim/arc re-validate on every swap). 0 disables the cooldown.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float BodyChargerStealCooldown = 2.0f;
+
 	// Min seconds between debounced (geometric) compromise breaks — a no-better-cover crossfire
 	// churns at worst once per cooldown instead of hopping indefinitely. The exposed-side-hit
 	// instant path bypasses this: fresh damage is fresh evidence (enemy fast-path parity).
@@ -785,6 +791,14 @@ public:
 	// Acceptance radius for the back-out move (cm). Kept small so the companion actually reaches the standoff.
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "10"))
 	float FollowBackoutAcceptRadius = 50.f;
+
+	// Max vertical gap (cm) at which the companion counts as level with the player. Straight-line
+	// distance lies through floors — a stairwell player one floor down reads as ~400cm "close" in 3D.
+	// Off-level: idle/hysteresis never latch, wrong-floor EQS follow slots are discarded, and
+	// non-stealth follow sprints to close the gap. Must clear steps/ramps but stay under a floor
+	// height (~400). 0 disables all three gates.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0"))
+	float FollowMaxZDelta = 150.f;
 
 	// --- Non-combat facing (F3 watch-threats + F1 ambient facing) ---
 	// Out-of-combat presentation only — never flips posture to Combat, never fires, never touches

@@ -15,6 +15,7 @@
 #include "Net/UnrealNetwork.h"
 #include "Perception/AISense_Hearing.h"
 #include "TimerManager.h"
+#include "World/DoorBase.h"
 
 DEFINE_LOG_CATEGORY(LogTraversal);
 
@@ -556,9 +557,19 @@ bool UTraversalComponent::TraceForwardForWall(FHitResult& OutHit, const FCollisi
 
 	const FCollisionShape SweepShape = FCollisionShape::MakeSphere(VaultForwardTraceRadius);
 
-	const bool bHit = GetWorld()->SweepSingleByChannel(
+	bool bHit = GetWorld()->SweepSingleByChannel(
 		OutHit, Start, End, FQuat::Identity,
 		ECC_Visibility, SweepShape, IgnoreParams);
+
+	// Doors are never traversal targets: a half-open or swinging leaf reads as a thin vaultable
+	// wall (pawn pass-through doesn't hide it from this Visibility sweep), and climbing one
+	// leaves the character hanging in the doorway when the "obstacle" rotates away.
+	if (bHit && OutHit.GetActor() && OutHit.GetActor()->IsA<ADoorBase>())
+	{
+		UE_LOG(LogTraversal, Verbose, TEXT("[ForwardTrace] %s - hit door %s, rejecting as traversal target"),
+			*OwnerTag(OwningCharacter), *GetNameSafe(OutHit.GetActor()));
+		bHit = false;
+	}
 
 	UE_LOG(LogTraversal, Verbose, TEXT("[ForwardTrace] %s - Start=%s, End=%s, Radius=%.1f, ResultHit=%d"),
 		*OwnerTag(OwningCharacter), *Start.ToCompactString(), *End.ToCompactString(), VaultForwardTraceRadius, bHit ? 1 : 0);
@@ -594,8 +605,12 @@ bool UTraversalComponent::TraceDownForSurface(const FHitResult& WallHit, FHitRes
 		FeetZ + MaxTraversalHeight + TraversalConstants::TraversalHeightTraceBuffer);
 	const FVector TraceEnd(LedgeOrigin.X, LedgeOrigin.Y, FeetZ);
 
-	const bool bHit = GetWorld()->LineTraceSingleByChannel(
+	bool bHit = GetWorld()->LineTraceSingleByChannel(
 		OutSurfaceHit, TraceStart, TraceEnd, ECC_Visibility, IgnoreParams);
+
+	// Same rule as the forward sweep: a door top is never a landing surface.
+	if (bHit && OutSurfaceHit.GetActor() && OutSurfaceHit.GetActor()->IsA<ADoorBase>())
+		bHit = false;
 
 	UE_LOG(LogTraversal, Verbose, TEXT("[DownTrace] %s - TraceStart=%s, TraceEnd=%s, ResultHit=%d, ImpactZ=%.1f"),
 		*OwnerTag(OwningCharacter), *TraceStart.ToCompactString(), *TraceEnd.ToCompactString(),

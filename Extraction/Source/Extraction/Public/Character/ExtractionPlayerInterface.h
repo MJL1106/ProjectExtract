@@ -83,16 +83,12 @@ public:
 	 *  have independent durations). Default no-op. */
 	virtual void SetBeingRevived(bool /*bBeingRevived*/, float /*ExpectedDuration*/ = 0.f) {}
 
-	/** Rotate this downed character's body to face the reviver so the paired revive anims line up.
-	 *  Call AFTER SetBeingRevived(true) (which suspends controller-yaw follow). Default no-op. */
+	/** Rotate this downed character's body to face the reviver before paired montage playback. */
 	virtual void AlignForRevive(const FVector& /*ReviverLocation*/) {}
 
-	/** Diagnostic: true while this character's being-revived montage is actively playing on its body
-	 *  mesh. Lets the reviver task log whether the downed half of the pair actually took over the pose
-	 *  (a flat downed body under a kneeling reviver = this returning false). Default false. */
+	/** True while this character's being-revived montage is active. */
 	virtual bool IsBeingRevivedMontagePlaying() const { return false; }
 
-	/** The montage this character plays while being revived, or nullptr. The reviver task reads its
-	 *  clip's authored root start transform to derive the paired-arrangement offset. */
+	/** The montage this character plays while being revived, or nullptr. */
 	virtual const UAnimMontage* GetBeingRevivedMontage() const { return nullptr; }
 };

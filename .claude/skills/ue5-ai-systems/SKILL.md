@@ -1,12 +1,12 @@
 ---
 name: ue5-ai-systems
-description: UE5 AI architecture guide for companion and enemy systems in a multiplayer FPS. Use when the user works on AI behavior, enemies, companions, behavior trees, EQS, perception, cover, squad coordination, DBNO/revive, or any AI decision-making. Also use when the user describes wanting enemies or NPCs that do something specific.
+description: UE5 AI architecture guide for companion and enemy systems in a single-player FPS. Use when the user works on AI behavior, enemies, companions, behavior trees, EQS, perception, cover, squad coordination, DBNO/revive, or any AI decision-making. Also use when the user describes wanting enemies or NPCs that do something specific.
 ---
 
 # UE5 AI Systems — Companion & Enemy
 
 ## Purpose
-Architecture guide for the AI systems in a multiplayer FPS dissertation project. Covers companion AI (follow, fight, revive), enemy archetypes (grunt, rusher, heavy, sniper, officer), and shared systems (weapons, health, faction tags, EQS, nav mesh).
+Architecture guide for the AI systems in a single-player FPS project. Covers companion AI (follow, fight, revive), enemy archetypes (grunt, rusher, heavy, sniper, officer), and shared systems (weapons, health, faction tags, EQS, nav mesh).
 
 ## Architecture Overview
 
@@ -152,12 +152,6 @@ Perception's `DetectionByAffiliation` uses this automatically — no manual fact
 - Settles over time while holding aim on target
 - Resets on target switch or movement
 - Configurable per difficulty: `FCompanionAccuracyConfig` in DataAsset
-
-### Co-op Specifics (Multiplayer)
-- Companion follows the **host player** — use `GetWorld()->GetFirstPlayerController()` on the server, which returns the listen server host's controller. Avoid `PlayerState->GetOwner()` which may not return what you expect
-- Revive priority: closest DBNO player regardless of who they are
-- All AI runs on server — companion pawn replicates state to clients
-- Companion state (follow/combat/revive) replicated for client UI
 
 See `references/companion-bt.md` for full BT task and service implementations.
 

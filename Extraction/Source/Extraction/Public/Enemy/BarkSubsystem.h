@@ -30,9 +30,21 @@ private:
 	/** Same bark type from any speaker within this window is dropped (no five-voice "Contact!" stacks). */
 	static constexpr float GlobalTypeDedupWindow = 1.5f;
 
+	/** Minimum gap between ANY two barks world-wide — one voice at a time. */
+	static constexpr float GlobalAnyBarkGap = 2.0f;
+
+	/** Reduced gap for high-priority barks (FBarkDefinition::Priority >= 2) so critical telegraphs
+	 *  (grenade out, man down) aren't eaten by ambient chatter. */
+	static constexpr float PriorityBarkGap = 0.5f;
+
+	/** Speakers farther than this from the local player are skipped entirely — no subtitle and no
+	 *  cooldown stamp, so the same enemy can still bark once the player closes in. */
+	static constexpr float MaxSubtitleRange = 4000.f;
+
 	/** Shows a coalescing on-screen debug message for a bark event (gated by caller). */
 	void ShowBarkScreenMessage(const AActor* Speaker, EBarkType Type, const FString& Message, const FColor& Color);
 
 	TMap<TPair<FObjectKey, uint8>, float> LastBarkTimePerSpeaker;
 	TMap<EBarkType, float> LastBarkTimePerType;
+	float LastAnyBarkTime = -1000.f;
 };

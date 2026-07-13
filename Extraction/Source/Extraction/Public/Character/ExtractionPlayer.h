@@ -142,16 +142,10 @@ public:
 	/** Rotates the downed body to face the reviver for the paired revive anims. */
 	virtual void AlignForRevive(const FVector& ReviverLocation) override;
 
-	/** Diagnostic: true while BeingRevivedMontage is playing on the body mesh. */
+	/** True while BeingRevivedMontage is playing on the body mesh. */
 	virtual bool IsBeingRevivedMontagePlaying() const override;
 
 	virtual const UAnimMontage* GetBeingRevivedMontage() const override { return BeingRevivedMontage; }
-
-	/** Montage-driven revive completion: fires when the being-revived get-up montage starts blending
-	 *  out. A natural end (not interrupted) completes the revive at the exact frame the character is
-	 *  upright — ExitDBNO here instead of on the reviver's timer, killing the "blends back down to
-	 *  crawl, then pops up" seam. Interrupted = stomped/aborted; logged, no exit. */
-	void OnBeingRevivedMontageBlendOut(UAnimMontage* Montage, bool bInterrupted);
 
 	// ---- IExtractionPlayerInterface ----
 
@@ -418,10 +412,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "5.0"))
 	float ReviveTraceSphereRadius = 30.f;
 
-	/** Single-shot get-up montage played on the body mesh while someone is actively reviving this
-	 *  player — designer assigns in BP. Missing = no being-revived anim (revive still works via the
-	 *  fallback timer). Must be NON-looping: its natural blend-out is what completes the revive
-	 *  (OnBeingRevivedMontageBlendOut → ExitDBNO); a looping asset would never fire it. */
+	/** Montage played once while someone revives this player, rate-scaled to the hold. */
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
 	TObjectPtr<UAnimMontage> BeingRevivedMontage;
 
@@ -592,9 +583,7 @@ private:
 	void OnBleedoutExpired();
 	void FullDeath();
 
-	/** While downed, the BP spring arm (which inherits head-bone pitch/yaw for the procedural FP
-	 *  camera) switches to pawn control rotation so the crawl/revive anims can't drag the view.
-	 *  Local-only cosmetic; restores the saved flag on revive. */
+	/** While downed outside a revive, switch the BP spring arm to pawn-control free look. */
 	void SetDBNOCameraFreeLook(bool bEnable);
 
 	/** BP-owned spring arm, resolved lazily by class (C++ has no camera components). */
@@ -603,9 +592,12 @@ private:
 	bool bDBNOFreeLookActive = false;
 	bool bSavedSpringArmUsePawnControlRotation = false;
 
-	/** True while a reviver holds the revive on this player; gates the montage against re-triggers,
-	 *  locks look/move input (DoAim/DoMove), and marks controller-yaw follow as suspended. */
+	/** Local patient-role state; gates input and prevents montage re-triggering. */
 	bool bBeingRevivedAnimActive = false;
+
+	void SetBeingRevivedCameraAnimationControl(bool bActive);
+	bool bBeingRevivedCameraOverrideActive = false;
+	bool bBeingRevivedSavedSpringArmUsePawnControlRotation = false;
 
 	/** bUseControllerRotationYaw as it was before the being-revived lock suspended it. */
 	bool bSavedUseControllerRotationYaw = false;
@@ -692,27 +684,7 @@ private:
 	void UpdateRevive(float DeltaTime);
 	AActor* FindReviveTarget() const;
 	void CancelRevive();
-	void CompleteRevive();
-
-	UFUNCTION(Server, Reliable)
-	void Server_CompleteRevive(AActor* Target);
-
-	/** Ordered owner-pawn requests for the authoritative revive session lifecycle. */
-	UFUNCTION(Server, Reliable)
-	void Server_BeginReviveSession(AActor* Target);
-
-	UFUNCTION(Server, Reliable)
-	void Server_EndReviveSession();
-
-	bool CanBeginReviveSessionAuthority(AActor* Target) const;
-	void BeginReviveSessionAuthority(AActor* Target);
-	void EndReviveSessionAuthority();
-	void ApplyReviveTargetAlignmentAuthority(ACharacter& Target);
-
-	/** Server-only, non-owning session state used to reject repeated/conflicting starts and
-	 *  guarantee authority-side movement-ignore teardown on cancel, finish, or EndPlay. */
-	TWeakObjectPtr<ACharacter> AuthorityReviveSessionTarget;
-	TOptional<double> AuthorityReviveSessionStartTime;
+	void ApplyReviveTargetAlignment(ACharacter& Target);
 
 	UPROPERTY()
 	TObjectPtr<AActor> ReviveTarget;
@@ -726,13 +698,9 @@ private:
 	TWeakObjectPtr<AActor> ReviveCandidate;
 	float ReviveCandidateScanAccumulator = 0.f;
 
-	/** Takedown-style hold lock while reviving: aligns the target around this stable actor frame,
-	 *  plays ReviverMontage, attaches the local camera to the head, and gates move/fire.
-	 *  Symmetric teardown on cancel/complete. */
+	/** Aligns the target once, plays the paired montages once, and gates player input. */
 	bool SetReviverLock(bool bActive);
-	bool AttachReviveCameraToHead();
-	void RestoreReviveCameraAttachment();
-	void TryRestoreReviverYawFollow(float YawInput);
+	bool SetReviverCameraSocket(bool bActive);
 
 	/** Hide/show the held weapon visuals (weapon actor + the kit's hand-socket visual actors). */
 	void SetHeldWeaponHidden(bool bHideWeapon);
@@ -740,23 +708,11 @@ private:
 	bool bReviverLockActive = false;
 	TWeakObjectPtr<ACharacter> ReviverLockIgnoredTarget;
 
-	/** Saved once while the local revive camera is attached to the animated head. Non-reflected,
-	 *  non-owning state restores the Blueprint-owned spring arm exactly when its original hierarchy
-	 *  remains valid; failed reattachment safely falls back to a world-preserving detach. */
-	TWeakObjectPtr<USceneComponent> ReviveCameraOriginalParent;
-	FName ReviveCameraOriginalSocket = NAME_None;
-	FTransform ReviveCameraOriginalRelativeTransform = FTransform::Identity;
-	bool bReviveCameraOriginalUsePawnControlRotation = false;
-	bool bReviveCameraAttachmentActive = false;
-
-	/** View yaw captured before controller-yaw follow is suspended. */
-	float ReviverLookAnchorYaw = 0.f;
-
-	/** Reviver-lock yaw ownership is restored only by fresh horizontal look input. Dedicated
-	 *  state avoids clobbering the being-revived role's separate yaw-follow save. */
+	/** bUseControllerRotationYaw as it was before the reviver lock. */
 	bool bReviverSavedUseControllerRotationYaw = false;
-	bool bReviverYawFollowRestorePending = false;
 
-	/** World time the reviver lock released, retained for the camera debug trace. */
-	float ReviverLockEndTime = -1e9f;
+	/** Local reviver camera attachment state; restores the exact pre-role mesh socket transform. */
+	bool bReviverCameraSocketActive = false;
+	FName ReviverCameraSavedSocket = NAME_None;
+	FTransform ReviverCameraSavedRelativeTransform = FTransform::Identity;
 };

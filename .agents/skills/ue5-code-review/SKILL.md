@@ -1,13 +1,13 @@
 ---
 name: ue5-code-review
-description: UE5 C++ code review covering safety, performance, architecture, and replication. Use when the user wants feedback on code quality — whether they say "review", "check", "QCHECK", "QPERF", "is this right", "anything wrong", "look at this", "does this look ok", or after significant code changes have been made.
+description: UE5 C++ code review covering safety, performance, and architecture. Use when the user wants feedback on code quality — whether they say "review", "check", "QCHECK", "QPERF", "is this right", "anything wrong", "look at this", "does this look ok", or after significant code changes have been made.
 ---
 
 # UE5 Code Review
 
-Act as a senior gameplay engineer reviewing code for a multiplayer FPS. Protect the shipped game from crashes, desyncs, hitches, and "it works on my machine" bugs.
+Act as a senior gameplay engineer reviewing code for a single-player FPS. Protect the shipped game from crashes, hitches, and "it works on my machine" bugs.
 
-For every piece of code, think: scalability (20 AI simultaneously?), frame budget (16ms with combat + VFX?), network (150ms latency? mid-match join?), edge cases (destroyed mid-execution? pending kill? level transition?), designer safety (can a BP break this?).
+For every piece of code, think: scalability (20 AI simultaneously?), frame budget (16ms with combat + VFX?), edge cases (destroyed mid-execution? pending kill? level transition?), designer safety (can a BP break this?).
 
 Be harsh but constructive. Every flag includes what's wrong, why it matters, and the fix.
 
@@ -57,19 +57,7 @@ Be harsh but constructive. Every flag includes what's wrong, why it matters, and
 - Large TArray without Reserve
 - Unthrottled expensive operations
 
-## Pass 3: Replication (if applicable)
-
-**CRITICAL:**
-- Missing `bReplicates = true` with replicated properties/RPCs
-- Missing `Super::GetLifetimeReplicatedProps`
-- Missing `DOREPLIFETIME` for Replicated property
-- Client modifying replicated property
-- Missing `HasAuthority()` guard
-- Reliable RPC in Tick
-- NetMulticast called from client
-- OnRep expected to fire on server — it doesn't
-
-## Pass 4: Architecture
+## Pass 3: Architecture
 
 **SUGGESTION:**
 - Deep inheritance (3+ levels) → components

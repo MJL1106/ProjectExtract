@@ -184,6 +184,15 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	const float EffMinSep   = FMath::Min(T->FollowMinSeparation,  T->AcceptableRadius - FollowDistMargin);
 	const float EffStandoff = FMath::Max(T->FollowIdleStandoff,   EffMinSep + FollowDistMargin);
 
+	// Level-alignment gate: DistToPlayer is straight-line and lies through floors — a stairwell
+	// player one floor down reads as ~400cm "close". Off-level the companion must never settle.
+	// Read-time floor (mirrors EffMinSep/EffStandoff): a max-Z inside the idle radius would make
+	// idle unreachable on any slope and sprint the companion in place at the player's side.
+	const float ZDelta = FMath::Abs(CompanionLocation.Z - PlayerLocation.Z);
+	const float EffMaxZDelta = T->FollowMaxZDelta <= 0.f
+		? 0.f : FMath::Max(T->FollowMaxZDelta, T->AcceptableRadius + FollowDistMargin);
+	const bool bZAligned = EffMaxZDelta <= 0.f || ZDelta <= EffMaxZDelta;
+
 	// Formation point is computed up front — Combat mode keys its idle/hysteresis gates on the
 	// distance to the LEAD point, not to the player (a player squeezing past a leading companion
 	// would otherwise latch it idle at their side until the gap exceeded 1.5x AcceptableRadius).
@@ -258,8 +267,9 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		return;
 	}
 
-	// Close enough to the formation anchor — stop and idle
-	if (IdleGateDist <= T->AcceptableRadius)
+	// Close enough to the formation anchor — stop and idle. Never while off-level: "close"
+	// through a floor slab isn't close.
+	if (bZAligned && IdleGateDist <= T->AcceptableRadius)
 	{
 		if (!bIsIdling)
 		{
@@ -271,8 +281,9 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		return;
 	}
 
-	// Hysteresis — don't re-engage movement until outside double the radius
-	if (bIsIdling && IdleGateDist < T->AcceptableRadius * 1.5f)
+	// Hysteresis — don't re-engage movement until outside double the radius. A player dropping
+	// a floor breaks the latch immediately (bZAligned) even inside the band.
+	if (bZAligned && bIsIdling && IdleGateDist < T->AcceptableRadius * 1.5f)
 	{
 		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] HYSTERESIS return (GateDist=%.0f, idling, no SetSprinting)"), IdleGateDist);
 		return;
@@ -297,7 +308,13 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 			FQueryFinishedSignature::CreateUObject(this, &UBTTask_FollowPlayer::OnFollowQueryFinished));
 	}
 
-	const FVector MoveTarget = (bHasEqsTarget && !bCombatLead) ? EqsTarget : FormationDir;
+	// Wrong-floor EQS slots are discarded, not just down-scored: the query's donut projects onto
+	// whatever navmesh is in vertical range, and its Distance3D scoring can rank a slot directly
+	// above/below the player as near-perfect. FormationDir sits at the player's Z, so the
+	// fallback paths to their floor.
+	const bool bEqsSlotLevel = bHasEqsTarget
+		&& (EffMaxZDelta <= 0.f || FMath::Abs(EqsTarget.Z - PlayerLocation.Z) <= EffMaxZDelta);
+	const FVector MoveTarget = (bEqsSlotLevel && !bCombatLead) ? EqsTarget : FormationDir;
 
 	// Blocked-move re-issue: MoveToLocation can silently fail to path (e.g. the player is standing
 	// exactly on the formation anchor) and the path-following component settles to Idle without
@@ -329,10 +346,13 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	// The mirror needs a distance floor — without it the companion sprints 2m to a formation
 	// point because the player happened to be sprinting somewhere.
 	const bool bPlayerSprinting = Player->GetVelocity().Size2D() > T->PlayerSprintSpeedThreshold;
+	// Off-level counts as far regardless of 3D distance — the real path runs the stairwell.
+	// Stealth is exempt: its catch-up ladder owns pace there (sprint break deliberately unreachable).
 	const bool bWantSprint = DistToPlayer > T->SprintDistanceThreshold
-		|| (bPlayerSprinting && DistToPlayer > T->SprintDistanceThreshold * 0.5f);
+		|| (bPlayerSprinting && DistToPlayer > T->SprintDistanceThreshold * 0.5f)
+		|| (!bZAligned && !Companion->IsStealthActive());
 	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f Thresh=%.0f EqsSlot=%d -> SetSprinting(%d)"),
-		DistToPlayer, T->SprintDistanceThreshold, bHasEqsTarget ? 1 : 0, bWantSprint ? 1 : 0);
+		DistToPlayer, T->SprintDistanceThreshold, bEqsSlotLevel ? 1 : 0, bWantSprint ? 1 : 0);
 
 	Companion->SetSprinting(bWantSprint);
 

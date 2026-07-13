@@ -77,7 +77,7 @@ Target: whole list done by end of W7 (Sun 9/8). `[Core]` ships in every scenario
 ### Week 3/08 (W7) — UI/UX, polish, integrate (full-time in NY) — target everything done Sun 9/8
 - [ ] [Core] **In-game HUD: HP + ammo** (required). Player health and a weapon/ammo readout.
 - [ ] [Stretch] **UI/UX.** Main menu (marketplace-bought, shooter-themed), class-creation / loadout editor (COD/BF style — set weapons + attachments pre-mission), and a minimap.
-- [ ] [Stretch] **Full polish.** Enemy + companion voice shouts (companion with a bit of personality/depth), weapon FX + reload sounds, music (menu + in-game for combat / extraction).
+- [~] [Stretch] **Full polish.** Enemy + companion voice shouts (companion with a bit of personality/depth), weapon FX + reload sounds, music (menu + in-game for combat / extraction). — Enemy bark SUBTITLE feed landed (UBarkSubsystem + WBP_BarkFeed, C++-owned lifetime, DA_Barks_Grunt); audio/voice + rest of polish pending.
 - [ ] [Core] **Integrate the full level.** Both halves end-to-end, full objective flow, a difficulty-consistency pass (no scaling across the level).
 - [ ] [Core] **Final verify.** Confirm the whole list is present and working; capture final demo footage.
 

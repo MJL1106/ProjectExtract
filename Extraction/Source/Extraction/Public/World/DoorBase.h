@@ -11,6 +11,7 @@
 #include "DoorBase.generated.h"
 
 class UBoxComponent;
+class UStaticMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDoorOpened, AActor*, Door);
 
@@ -72,6 +73,12 @@ protected:
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
+	/** True for meshes that are the door's swinging barrier — they keep blocking pawns. Non-leaf
+	 *  trim (frames) drops pawn collision entirely: frame sill bars span the walkway, so once
+	 *  door surfaces are unwalkable a blocking sill walls the doorway off instead of being
+	 *  stepped over. Default heuristic: movable meshes are leaves, static meshes are trim. */
+	virtual bool IsDoorLeafMesh(const UStaticMeshComponent& Mesh) const;
 
 	/** Externally locked by a level-script gate (e.g. companion-mode prerequisite). While set,
 	 *  CanBreach and TryUnlock refuse to open. Replicated so clients see the locked state. */

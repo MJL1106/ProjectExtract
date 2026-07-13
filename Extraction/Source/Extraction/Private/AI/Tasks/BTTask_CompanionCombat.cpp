@@ -2478,6 +2478,7 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	FinalApproachTarget = FVector::ZeroVector;
 	FinalApproachElapsed = 0.f;
 	FinalApproachStalledTime = 0.f;
+	bFinalApproachRetried = false;
 	bSmoothSnapping = false;
 	SmoothSnapElapsed = 0.f;
 	bPendingCrouchAfterSnap = false;
@@ -2594,6 +2595,20 @@ bool UBTTask_CompanionCombat::TickSmoothSnap(ACompanionCharacter* Companion, flo
 	const float InterpAlpha = (SmoothSnapInitialDist > 30.f) ? Alpha : FMath::SmoothStep(0.f, 1.f, Alpha);
 	const FVector NextLoc = FMath::Lerp(SmoothSnapStartLoc, SmoothSnapTargetLoc, InterpAlpha);
 	const FRotator NextRot = FMath::Lerp(SmoothSnapStartRot, SmoothSnapTargetRot, InterpAlpha);
+	// Long glides feed the cover strafe blend (silent-reposition parity) — without it the ABP
+	// sits in cover idle while the actor translates, which reads as a slide. Short pop-fix
+	// snaps (<=30cm) keep the idle montage running instead of re-bobbing it for a blink.
+	const bool bAnimatedGlide = SmoothSnapInitialDist > 30.f;
+	if (bAnimatedGlide)
+	{
+		if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
+		{
+			const FVector MoveDelta = NextLoc - Companion->GetActorLocation();
+			CAI->SetCoverStrafeVelocity((DeltaSeconds > KINDA_SMALL_NUMBER)
+				? (MoveDelta / DeltaSeconds)
+				: FVector::ZeroVector);
+		}
+	}
 	Companion->SetActorLocationAndRotation(NextLoc, NextRot, false, nullptr, ETeleportType::TeleportPhysics);
 	if (Alpha >= 1.f)
 	{
@@ -2628,6 +2643,17 @@ bool UBTTask_CompanionCombat::TickSmoothSnap(ACompanionCharacter* Companion, flo
 				*GetNameSafe(Companion),
 				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 			Companion->UnCrouch();
+		}
+		if (bAnimatedGlide)
+		{
+			// The strafe feed stopped the idle montage at glide start — the anim contract is that
+			// the BT re-enters the pose on arrival (bPlayEnterMontage=false: no re-bob).
+			if (UCompanionAnimInstance* CAI = GetCompanionAnim(Companion))
+			{
+				CAI->ClearCoverStrafeVelocity();
+				CAI->EnterCoverPose(ResolvedPeekSide,
+					bPendingCrouchAfterSnap ? ECoverHeight::Crouch : ECoverHeight::Stand, false);
+			}
 		}
 		bPendingCrouchAfterSnap = false;
 		if (bPendingReloadAfterSnap && IsValid(Companion))
@@ -2888,6 +2914,45 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		if (!bArrived && !bTimedOut && !bStalled)
 			return;
+
+		// Far-out failsafe: never glide across the room in cover pose. Re-issue the move once
+		// (a crossing enemy can stall path-following well short of the slot), then release the
+		// claim and fail so the BT re-picks reachable cover.
+		if (!bArrived && Dist > FinalApproachSnapMaxDist)
+		{
+			if (!bFinalApproachRetried)
+			{
+				bFinalApproachRetried = true;
+				FinalApproachElapsed = 0.f;
+				FinalApproachStalledTime = 0.f;
+				if (AAIController* RetryAIC = Cast<AAIController>(Ctx.Companion->GetController()))
+					RetryAIC->MoveToLocation(FinalApproachTarget, FinalApproachAcceptRadius, false, true, true, true);
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: FINALAPPROACH-RETRY dist=%.0f timedOut=%d stalled=%d"),
+					*Ctx.Companion->GetName(), Dist, (int32)bTimedOut, (int32)bStalled);
+				return;
+			}
+			UE_LOG(LogCompanionAI, Warning, TEXT("%s: FINALAPPROACH-UNREACHABLE dist=%.0f — releasing claim for re-pick"),
+				*Ctx.Companion->GetName(), Dist);
+			if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
+				AIC->StopMovement();
+			if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
+				CMC->StopMovementImmediately();
+			// Stamp MarkVacated so the EQS PostVacate filter blocks an immediate re-pick of the
+			// unreachable point — without it the scorer re-picks the slot it just failed to reach
+			// (it scored best moments ago and is now free) and the approach/fail loop paces.
+			// Local copy: ResetTaskState wipes the member it would otherwise alias (AbortTask parity).
+			const FCoverHandle UnreachableHandle = LastTickCoverHandle;
+			if (UnreachableHandle.IsValid())
+			{
+				if (UCoverReservationSubsystem* VacSub = Ctx.Companion->GetWorld()->GetSubsystem<UCoverReservationSubsystem>())
+				{
+					if (AController* VacCtrl = Ctx.Companion->GetController())
+						VacSub->MarkVacated(UnreachableHandle, VacCtrl);
+				}
+			}
+			ResetTaskState(Ctx.Companion, Ctx.Blackboard, UnreachableHandle, true);
+			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		}
 
 		if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
 			AIC->StopMovement();
@@ -4645,6 +4710,16 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			bIsFiringBurst = false;
 		}
 		LosBlockedAccum += DeltaSeconds;
+
+		// An active angle-seek can't work a blocked line — its Combat-mode motor is the
+		// jiggle-drift lateral bias, and jiggle is latched off below while LoS is blocked. All it
+		// does here is hard-gate TickCombatAdvanceHop, the one system that CAN route around the
+		// blocker; and because ResetTaskState clears the flag without stamping the cooldown, the
+		// seek re-armed on every abandon/restart and the companion stood in a permanent
+		// hold/abandon loop. End it (stamps AngleSeekCooldown) once the block outlives a
+		// transient corner-clip.
+		if (bAngleSeekActive && LosBlockedAccum >= AimDropOnLosBlockedSeconds)
+			EndAngleSeek(Ctx.Companion, TEXT("los-blocked"));
 
 		if (bEnableOpenAreaMoveAndShoot)
 		{

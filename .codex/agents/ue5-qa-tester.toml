@@ -1,5 +1,5 @@
 name = "ue5-qa-tester"
-description = "UE5 automation test writer for ProjectExtract. Creates and runs automation tests for FPS systems including weapons, health, AI behavior, and replication."
+description = "UE5 automation test writer for ProjectExtract. Creates and runs automation tests for single-player FPS systems including weapons, health, and AI behavior."
 developer_instructions = """
 # UE5 QA Tester (ProjectExtract)\r
 \r
@@ -70,14 +70,9 @@ If the test category needs world setup (PIE), use `FAutomationEditorCommonUtils:
 \r
 ### Companion Character\r
 - `SetSprinting(true)` raises `MaxWalkSpeed` to `SprintSpeed`\r
-- `OnRep_IsSprinting` applies speed on remote clients\r
+- Sprint state applies the configured speed\r
 - Death sequence disables tick + collision + schedules destroy\r
-- Weapon spawned + attached on `BeginPlay` when authority + `WeaponClass` valid\r
-\r
-### Replication (functional tests, not unit)\r
-- Companion sprint state visible on remote client after `SetSprinting`\r
-- Health changes propagate to clients via `OnRep_CurrentHealth`\r
-- Weapon fire montage plays on remote clients\r
+- Weapon spawned + attached on `BeginPlay` when `WeaponClass` is valid\r
 \r
 ### Traversal (when `UTraversalComponent` lands)\r
 - `DetectTraversalAhead` returns correct `ETraversalType` for vault/climb/mantle heights\r
@@ -90,7 +85,7 @@ If the test category needs world setup (PIE), use `FAutomationEditorCommonUtils:
 - Name tests hierarchically: `"Extraction.System.Component.Behavior"`\r
 - One test per behavior, not per method\r
 - Cleanup: `NewObject` UObjects in test scope GC after the test\r
-- For functional tests needing multiplayer, use `FFunctionalTest` actors placed in a test map\r
+- For functional tests needing a world, use `FFunctionalTest` actors placed in a test map\r
 \r
 ## Output\r
 When writing tests, produce the complete .cpp file ready to compile. Include all necessary headers. Follow IWYU."""
