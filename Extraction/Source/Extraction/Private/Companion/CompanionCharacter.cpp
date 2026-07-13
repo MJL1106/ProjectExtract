@@ -1,7 +1,9 @@
 // AI companion character — follows player, engages enemies, revives downed teammates.
 
 #include "CompanionCharacter.h"
+
 #include "AI/AITargetingStatics.h"
+#include "Animation/AnimMontage.h"
 #include "AI/CompanionDiag.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "CompanionAIController.h"
@@ -26,6 +28,84 @@
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "Misc/AutomationTest.h"
+#include "Misc/FileHelper.h"
+#include "Misc/Paths.h"
+#include "UObject/UnrealType.h"
+#endif
+
+namespace
+{
+	float CalculateReviveMontagePlayRate(float MontageLength, float BlendOutTime, float ExpectedDuration)
+	{
+		const float PlayableLength = MontageLength - BlendOutTime;
+		return ExpectedDuration > 0.f && PlayableLength > 0.f
+			? PlayableLength / ExpectedDuration : 1.f;
+	}
+}
+
+#if WITH_DEV_AUTOMATION_TESTS
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCompanionReviveMontageTimingTest,
+	"Extraction.Companion.Revive.MontageTiming",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FCompanionReviveMontageTimingTest::RunTest(const FString& Parameters)
+{
+	constexpr float MontageLength = 1.9333167f;
+	constexpr float BlendOutTime = 0.25f;
+	constexpr float ReviveDuration = 5.f;
+	const float PlayRate = CalculateReviveMontagePlayRate(MontageLength, BlendOutTime, ReviveDuration);
+
+	TestEqual(TEXT("Montage reaches blend-out boundary when revive completes"),
+		PlayRate * ReviveDuration, MontageLength - BlendOutTime, KINDA_SMALL_NUMBER);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRevivePatientYawTrimRangeTest,
+	"Extraction.Companion.Revive.PatientYawTrimRange",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FRevivePatientYawTrimRangeTest::RunTest(const FString& Parameters)
+{
+	const FProperty* Property = FindFProperty<FProperty>(ACompanionCharacter::StaticClass(),
+		GET_MEMBER_NAME_CHECKED(ACompanionCharacter, PlayerRevivePatientYawTrimDeg));
+	if (!TestNotNull(TEXT("Patient yaw trim property exists"), Property)) return false;
+
+	TestEqual(TEXT("Patient yaw trim permits negative values"), Property->GetMetaData(TEXT("ClampMin")), TEXT("-180.0"));
+	TestEqual(TEXT("Patient yaw trim has a symmetric maximum"), Property->GetMetaData(TEXT("ClampMax")), TEXT("180.0"));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FReviveMeshPoseRefreshContractTest,
+	"Extraction.Companion.Revive.MeshPoseRefreshContract",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FReviveMeshPoseRefreshContractTest::RunTest(const FString& Parameters)
+{
+	const FString SourcePath = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectDir(),
+		TEXT("Source/Extraction/Private/Character/ExtractionPlayer.cpp")));
+	FString Source;
+	if (!TestTrue(TEXT("Player source is readable"), FFileHelper::LoadFileToString(Source, *SourcePath))) return false;
+
+	const int32 RestoreIndex = Source.Find(TEXT("MeshComp->SetRelativeRotation(ReviverSavedMeshRelativeRotation);"));
+	const int32 TickPoseIndex = Source.Find(TEXT("MeshComp->TickPose(0.f, false);"), ESearchCase::CaseSensitive,
+		ESearchDir::FromStart, RestoreIndex);
+	const int32 RefreshIndex = Source.Find(TEXT("MeshComp->RefreshBoneTransforms();"), ESearchCase::CaseSensitive,
+		ESearchDir::FromStart, RestoreIndex);
+	const int32 SeatClearIndex = Source.Find(TEXT("bReviverSeated = false;"), ESearchCase::CaseSensitive,
+		ESearchDir::FromStart, RestoreIndex);
+
+	TestTrue(TEXT("Mesh rotation restore exists"), RestoreIndex != INDEX_NONE);
+	TestTrue(TEXT("Pose ticks after the mesh rotation restore"),
+		RestoreIndex != INDEX_NONE && TickPoseIndex > RestoreIndex);
+	TestTrue(TEXT("Bones refresh after the pose tick"), TickPoseIndex != INDEX_NONE && RefreshIndex > TickPoseIndex);
+	TestTrue(TEXT("Pose refresh completes before clearing the seated state"),
+		RefreshIndex != INDEX_NONE && SeatClearIndex > RefreshIndex);
+	return true;
+}
+#endif
 
 DEFINE_LOG_CATEGORY(LogCompanion);
 
@@ -989,10 +1069,9 @@ void ACompanionCharacter::SetBeingRevived(bool bRevived, float ExpectedDuration)
 	if (bBeingRevived == bRevived) return;
 	bBeingRevived = bRevived;
 
-	// MOVE_None for the hold: the being-revived clip carries ~50cm of back-loaded root motion
-	// that CMC would apply to the capsule, sliding the patient out from under the reviver's
-	// hands. Frozen, the pose stays root-locked at the aligned spot; walking resumes on release
-	// (the downed-retreat task re-asserts crawl speed on its own tick).
+	// Stop the downed retreat, but keep a grounded movement mode so CMC consumes the
+	// being-revived montage's authored root motion. The retreat task remains suppressed by
+	// bBeingRevived and re-asserts its crawl speed after an interrupted hold.
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
 		if (bRevived)
@@ -1000,7 +1079,7 @@ void ACompanionCharacter::SetBeingRevived(bool bRevived, float ExpectedDuration)
 			if (AAIController* AIC = Cast<AAIController>(GetController()))
 				AIC->StopMovement();
 			Movement->StopMovementImmediately();
-			Movement->SetMovementMode(MOVE_None);
+			Movement->SetMovementMode(MOVE_Walking);
 		}
 		else
 			Movement->SetMovementMode(MOVE_Walking);
@@ -1015,9 +1094,10 @@ void ACompanionCharacter::SetBeingRevived(bool bRevived, float ExpectedDuration)
 
 	if (bRevived && bIsDBNO)
 	{
+		AnimInst->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
 		const float MontageLength = BeingRevivedMontage->GetPlayLength();
-		const float PlayRate = ExpectedDuration > 0.f && MontageLength > 0.f
-			? MontageLength / ExpectedDuration : 1.f;
+		const float PlayRate = CalculateReviveMontagePlayRate(
+			MontageLength, BeingRevivedMontage->BlendOut.GetBlendTime(), ExpectedDuration);
 		if (AnimInst->Montage_Play(BeingRevivedMontage, PlayRate) <= 0.f)
 			UE_LOG(LogCompanion, Warning, TEXT("%s: BeingRevivedMontage '%s' failed to play"),
 				*GetName(), *GetNameSafe(BeingRevivedMontage));
@@ -1043,10 +1123,13 @@ void ACompanionCharacter::AlignForRevive(const FVector& ReviverLocation)
 
 	// Rotation-only mirror of BTTask_RevivePlayer's position snap: instead of moving the reviver
 	// to the authored offset, face so the reviver's actual position sits at the authored local
-	// angle (atan2 of RevivePairOffset ≈ -47°). Works from any approach direction; the radial
-	// distance is whatever the reviver chose within revive range.
-	const float AuthoredLocalAngle = FMath::RadiansToDegrees(FMath::Atan2(RevivePairOffset.Y, RevivePairOffset.X));
-	SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw - AuthoredLocalAngle, 0.f));
+	// angle (atan2 of the PLAYER-direction pair offset, ≈ -47°). Works from any approach
+	// direction; the radial distance is whatever the reviver chose within revive range. Must use
+	// the same offset as SeatReviverForHold or the seat step stops being purely radial.
+	const float AuthoredLocalAngle = FMath::RadiansToDegrees(FMath::Atan2(PlayerRevivePairOffset.Y, PlayerRevivePairOffset.X));
+	// The trim rotates only this body; SeatReviverForHold subtracts it back out of its anchor,
+	// so the reviver's seat and facing stay put in world.
+	SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw - AuthoredLocalAngle + PlayerRevivePatientYawTrimDeg, 0.f));
 }
 
 void ACompanionCharacter::HandleRevive()
@@ -1134,6 +1217,7 @@ void ACompanionCharacter::PlayReviveMontage()
 	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
 	if (!IsValid(AnimInst)) return;
 	if (AnimInst->Montage_IsPlaying(ReviveMontage)) return;
+	AnimInst->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
 
 	const float MontageLength = ReviveMontage->GetPlayLength();
 	const float PlayRate = ReviveDuration > 0.f && MontageLength > 0.f

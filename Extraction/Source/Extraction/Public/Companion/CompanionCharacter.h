@@ -382,7 +382,7 @@ public:
 	bool GetIsCompanionDBNO() const { return bIsDBNO; }
 
 	/** True while the player's revive hold is active on this companion. The downed-retreat BT task
-	 *  freezes in place while this holds so the body doesn't crawl out from under the reviver. */
+	 *  stops issuing crawl movement so only the paired montage's root motion moves the body. */
 	bool IsBeingRevived() const { return bBeingRevived; }
 
 	/** Crawl-pace MaxWalkSpeed applied while DBNO — the downed-retreat task re-asserts this clamp. */
@@ -556,6 +556,25 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive",
 		meta = (ToolTip = "Authored reviver yaw relative to the patient actor yaw, in degrees."))
 	float RevivePairYawOffset = -46.f;
+
+	/** PLAYER-reviver seat position in the patient actor frame (X fwd, Y right, cm). Defaults
+	 *  to the working direction's tuned constants (both directions play the same authored
+	 *  clip pair). Kept separate from RevivePairOffset so the player side can be trimmed live
+	 *  without touching the working direction. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Revive")
+	FVector2D PlayerRevivePairOffset = FVector2D(60.f, -64.5f);
+
+	/** PLAYER-reviver visual yaw relative to the patient actor yaw (matches RevivePairYawOffset;
+	 *  ABP_Manny's rotate-root-bone is compensated separately on the player). */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Revive")
+	float PlayerRevivePairYawOffset = -46.f;
+
+	/** Extra yaw on the PATIENT body at align, WITHOUT moving the reviver's seat (the seat
+	 *  anchors to the untrimmed frame). Positive = the companion turns to its right, which
+	 *  reads as rotating left from the kneeling player's view. Live-tunable. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Revive",
+		meta = (ClampMin = "-180.0", ClampMax = "180.0", UIMin = "-180.0", UIMax = "180.0"))
+	float PlayerRevivePatientYawTrimDeg = 0.f;
 
 protected:
 

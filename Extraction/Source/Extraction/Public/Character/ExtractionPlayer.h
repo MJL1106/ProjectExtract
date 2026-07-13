@@ -446,12 +446,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
 	float ReviverKneelStartOffsetSeconds = 0.4f;
 
-	/** Interp speed for the hold camera's ease onto the patient. The camera rotation is
-	 *  decoupled from the head bone for the hold (the kneel blend-in slerps the head the long
-	 *  way round and the socket-riding camera sweeps with it) and eased to a look-at instead. */
-	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.1"))
-	float ReviverCamLookInterpSpeed = 6.f;
-
 	// ---- Auto-Lean Config ----
 
 	/** Sideways distance (cm) from probe origin to test for a wall. */
@@ -756,14 +750,4 @@ private:
 	/** Controller whose look input the hold suppressed (SetIgnoreLookInput is a refcount —
 	 *  the release must land on the same controller even after an unpossess mid-hold). */
 	TWeakObjectPtr<APlayerController> ReviverLookIgnoredPC;
-
-	/** Hold camera rotation, eased toward the look-at each CalcCamera. Seeded with the live
-	 *  camera rotation at hold start so frame one has no cut. */
-	FRotator ReviverCamCurrentRotation = FRotator::ZeroRotator;
-
-	/** Pair positions captured at hold start. Both revive clips carry back-loaded authored
-	 *  root motion (reviver ~119cm, patient ~50cm) that drags the actors apart mid-hold; the
-	 *  hold freezes both to MOVE_None and re-pins XY every tick as a backstop. */
-	FVector ReviveHoldSeatLocation = FVector::ZeroVector;
-	FVector ReviveHoldPatientLocation = FVector::ZeroVector;
 };

@@ -471,19 +471,10 @@ void AExtractionPlayer::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	if ((bTakedownMontageActive || bIsReviving) && TakedownNearClipPlane > 0.f)
 		OutResult.PerspectiveNearClipPlane = TakedownNearClipPlane;
 
-	// Hold camera: location keeps riding the head socket (the kneel bob), rotation does NOT —
-	// the montage blend-in slerps the head bone the long way round (~215° in the diagnostic
-	// logs) and a socket-riding rotation sweeps with it. Ease onto the patient instead.
-	if (bIsReviving && IsValid(ReviveTarget))
-	{
-		FVector LookTarget = ReviveTarget->GetActorLocation();
-		if (const ACharacter* Patient = Cast<ACharacter>(ReviveTarget))
-			if (const USkeletalMeshComponent* PatientMesh = Patient->GetMesh())
-				LookTarget = PatientMesh->GetSocketLocation(TEXT("pelvis")) + FVector(0.f, 0.f, 15.f);
-		const FRotator Desired = (LookTarget - OutResult.Location).Rotation();
-		ReviverCamCurrentRotation = FMath::RInterpTo(ReviverCamCurrentRotation, Desired, DeltaTime, ReviverCamLookInterpSpeed);
-		OutResult.Rotation = ReviverCamCurrentRotation;
-	}
+	// No hold-camera manipulation: like traversal, the camera rides the head bone exactly as
+	// the kneel montage animates it (look input is ignored for the hold). The historical spin
+	// sources are fixed at THEIR sinks — intro skipped, zero blend-in, aim layers zeroed,
+	// turn-in-place synced — so the head-following camera is clean.
 }
 
 // ---- Weapon Input ----
@@ -1384,6 +1375,7 @@ void AExtractionPlayer::SetBeingRevived(bool bBeingRevived, float ExpectedDurati
 	if (!IsValid(AnimInst) || !BeingRevivedMontage) return;
 	if (bBeingRevived && bIsDBNO)
 	{
+		AnimInst->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
 		const float Length = BeingRevivedMontage->GetPlayLength();
 		const float Rate = ExpectedDuration > 0.f && Length > 0.f ? Length / ExpectedDuration : 1.f;
 		AnimInst->Montage_Play(BeingRevivedMontage, Rate);
@@ -1503,27 +1495,20 @@ void AExtractionPlayer::BeginReviveHold(AActor* Target)
 	IExtractionPlayerInterface* TargetIface = Cast<IExtractionPlayerInterface>(Target);
 	if (!IsValid(Target) || !TargetIface || !TargetIface->GetIsDBNO()) return;
 	if (FVector::DistSquared(GetActorLocation(), Target->GetActorLocation()) > FMath::Square(ReviveProximityRadius)) return;
-	// The hold freezes to MOVE_None at the current Z — an airborne E would kneel in mid-air.
+	// Root motion needs a grounded CMC mode; an airborne E would kneel in mid-air.
 	if (GetCharacterMovement() && GetCharacterMovement()->IsFalling()) return;
 
 	ReviveTarget = Target;
 	ReviveElapsed = 0.f;
 	bIsReviving = true;
 
-	// MOVE_None for the hold: both revive clips carry back-loaded root motion (this one ~119cm)
-	// and CMC applies montage root motion to the capsule in any moving mode — the diagnostic
-	// runs measured the pair dragged 88→160cm apart mid-hold. In MOVE_None the pose stays
-	// root-locked at the seat and nothing (root motion, pushes) can move the capsule.
+	// Clear approach velocity, but keep a grounded movement mode so CMC consumes the revive
+	// montage's authored root motion. Input remains locked for the full hold.
 	if (UCharacterMovementComponent* Move = GetCharacterMovement())
 	{
 		Move->StopMovementImmediately();
-		Move->SetMovementMode(MOVE_None);
+		Move->SetMovementMode(MOVE_Walking);
 	}
-
-	// Seed the hold camera with the live view so frame one has no cut; CalcCamera eases it
-	// onto the patient from here.
-	if (const APlayerCameraManager* Cam = UGameplayStatics::GetPlayerCameraManager(this, 0))
-		ReviverCamCurrentRotation = Cam->GetCameraRotation();
 
 	// Patient first: SetBeingRevived stops its AI movement, so the rotation-only align below
 	// can't be fought by the downed crawl's orient-to-movement.
@@ -1546,10 +1531,6 @@ void AExtractionPlayer::BeginReviveHold(AActor* Target)
 	if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Target))
 		SeatReviverForHold(*Companion);
 
-	// Pin capture after align + seat — these are the authored pair positions the hold defends.
-	ReviveHoldSeatLocation = GetActorLocation();
-	ReviveHoldPatientLocation = Target->GetActorLocation();
-
 	SetReviveAnimsActive(true);
 
 	LogReviveDebugState(TEXT("START"), *this, Target);
@@ -1561,15 +1542,19 @@ void AExtractionPlayer::SeatReviverForHold(const ACompanionCharacter& Companion)
 	// authored offset anchored on the patient's (post-align) yaw. The offset lies along the
 	// original approach bearing by construction, so this is a purely radial correction to the
 	// authored 88cm — direction is untouched.
-	const float CompanionYaw = Companion.GetActorRotation().Yaw;
-	const FVector AuthoredOffset(Companion.RevivePairOffset.X, Companion.RevivePairOffset.Y, 0.f);
+	// Anchor on the UNTRIMMED patient frame: the patient-yaw trim rotates only the companion's
+	// body; the seat and the kneel facing must not swing with it.
+	const float CompanionYaw = Companion.GetActorRotation().Yaw - Companion.PlayerRevivePatientYawTrimDeg;
+	// PLAYER-direction pair constants — same values as the companion reviver's tuned constants
+	// (both directions play the one authored clip pair), kept separate so this side trims live
+	// without touching the working direction.
+	const FVector AuthoredOffset(Companion.PlayerRevivePairOffset.X, Companion.PlayerRevivePairOffset.Y, 0.f);
 	FVector SeatLocation = Companion.GetActorLocation()
 		+ FRotator(0.f, CompanionYaw, 0.f).RotateVector(AuthoredOffset);
 	SeatLocation.Z = GetActorLocation().Z;
 
-	// Sweep the radial correction: under the hold's MOVE_None freeze no depenetration solver
-	// runs, so an unswept snap into a wall (tight cover the downed crawl retreats to) would pin
-	// the camera inside geometry for the whole hold. Stop the seat at the first blocker.
+	// Sweep the initial radial correction so a downed companion beside tight cover cannot snap
+	// the player capsule or camera into geometry before root motion takes ownership.
 	if (const UCapsuleComponent* Capsule = GetCapsuleComponent())
 	{
 		FCollisionQueryParams SeatParams;
@@ -1589,7 +1574,8 @@ void AExtractionPlayer::SeatReviverForHold(const ACompanionCharacter& Companion)
 	// static Rotate Root Bone 45 — the correction) at the patient.
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	if (!IsValid(MeshComp)) return;
-	const float SeatYaw = CompanionYaw + Companion.RevivePairYawOffset + ReviverSeatYawCorrectionDeg;
+	// Authored pair yaw plus the side-agnostic ABP Rotate-Root-Bone correction.
+	const float SeatYaw = CompanionYaw + Companion.PlayerRevivePairYawOffset + ReviverSeatYawCorrectionDeg;
 	const float MeshYawDelta = FRotator::NormalizeAxis(SeatYaw - GetActorRotation().Yaw);
 	ReviverSavedMeshRelativeRotation = MeshComp->GetRelativeRotation();
 	MeshComp->SetRelativeRotation(ReviverSavedMeshRelativeRotation + FRotator(0.f, MeshYawDelta, 0.f));
@@ -1651,14 +1637,18 @@ void AExtractionPlayer::SetReviveAnimsActive(bool bActive)
 
 	if (bActive)
 	{
+		AnimInst->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
 		// Skip the authored stand-turn-kneel intro AND keep the auto blend-out region off the
 		// timeline: playable = [offset, length - blendout], rate-scaled to span the full hold
 		// so the clip never starts blending back to standing while the player is still holding.
+		// Zero blend-in: the standing and kneel poses differ ~145° in facing, so any blend slerps
+		// the whole body (and its visible FP arms/shadow) the long way round.
 		const float Length = ReviverMontage->GetPlayLength();
 		const float StartAt = FMath::Min(ReviverKneelStartOffsetSeconds, Length);
 		const float Playable = Length - StartAt - ReviverMontage->BlendOut.GetBlendTime();
 		const float Rate = (ReviveDuration > 0.f && Playable > 0.f) ? Playable / ReviveDuration : 1.f;
-		if (AnimInst->Montage_Play(ReviverMontage, Rate, EMontagePlayReturnType::MontageLength, StartAt) <= 0.f)
+		const FMontageBlendSettings BlendIn(0.f);
+		if (AnimInst->Montage_PlayWithBlendSettings(ReviverMontage, BlendIn, Rate, EMontagePlayReturnType::MontageLength, StartAt) <= 0.f)
 			UE_LOG(LogExtraction, Warning, TEXT("SetReviveAnimsActive: Montage_Play failed for '%s' — hold continues without the kneel."),
 				*GetNameSafe(ReviverMontage));
 	}
@@ -1822,20 +1812,6 @@ void AExtractionPlayer::UpdateRevive(float DeltaTime)
 		return;
 	}
 
-	// XY pin backstop under the MOVE_None freeze: if any path still shifts a body (root motion
-	// through an unfrozen mode transition, external push), re-assert the captured pair. Live Z
-	// is kept — the pin must not fight the floor.
-	const auto ReassertXY = [](AActor& Actor, const FVector& Pin)
-	{
-		FVector Loc = Actor.GetActorLocation();
-		if (FVector::DistSquared2D(Loc, Pin) <= 1.f) return;
-		Loc.X = Pin.X;
-		Loc.Y = Pin.Y;
-		Actor.SetActorLocation(Loc, false, nullptr, ETeleportType::TeleportPhysics);
-	};
-	ReassertXY(*this, ReviveHoldSeatLocation);
-	ReassertXY(*ReviveTarget, ReviveHoldPatientLocation);
-
 	ReviveElapsed += DeltaTime;
 
 	// Per-frame dump through the spin window (montage blend-in + pose-branch blend), 4Hz after.
@@ -1868,7 +1844,11 @@ void AExtractionPlayer::CancelRevive()
 	if (bReviverSeated)
 	{
 		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
 			MeshComp->SetRelativeRotation(ReviverSavedMeshRelativeRotation);
+			MeshComp->TickPose(0.f, false);
+			MeshComp->RefreshBoneTransforms();
+		}
 		bReviverSeated = false;
 	}
 	if (APlayerController* IgnoredPC = ReviverLookIgnoredPC.Get())
@@ -1879,8 +1859,8 @@ void AExtractionPlayer::CancelRevive()
 	bUseControllerRotationYaw = bReviverSavedUseControllerRotationYaw;
 	bReviverSavedUseControllerRotationYaw = false;
 
-	// Undo the hold freeze. Walking is the only mode a standing reviver can be in here — the
-	// hold rejects starts from traversal/DBNO and blocks all movement input while active.
+	// Reassert normal grounded movement after completion or interruption. The hold rejects
+	// starts from falling and blocks all movement input while active.
 	if (UCharacterMovementComponent* Move = GetCharacterMovement())
 		Move->SetMovementMode(MOVE_Walking);
 
