@@ -137,7 +137,21 @@ void UExtractionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 	const FRotator ActorRotation = OwningPawn->GetActorRotation();
 	const FRotator AimDelta = UKismetMathLibrary::NormalizedDeltaRotator(AimRotation, ActorRotation);
 	AimPitch = FMath::ClampAngle(AimDelta.Pitch, -90.f, 90.f);
-	AimYaw = FMath::ClampAngle(AimDelta.Yaw, -180.f, 180.f);
+	// NormalizedDeltaRotator already returns [-180, 180]. ClampAngle(x, -180, 180) is degenerate
+	// (its half-range ClampAxis(360) wraps to 0, centred at 180) and returns 180 for EVERY input —
+	// it fed the aim offset "camera directly behind" every frame since Feb, contorting the body
+	// whenever an aim layer engaged (the "float at doors" pose).
+	AimYaw = AimDelta.Yaw;
+
+	// Full-body montage owns the body (takedown finisher / revive kneel): zero the aim deltas so
+	// ABP_Manny's bIsRevivingTarget ModifyBone chain (spine_03→neck_01→head, Alpha=1) can't bake
+	// the control-vs-seat mismatch into the head bone the camera rides. The kit BP pumps look
+	// input straight into the controller, bypassing the C++ gates, so the delta is garbage mid-hold.
+	if (OwningPlayerIface->IsInTakedown())
+	{
+		AimPitch = 0.f;
+		AimYaw = 0.f;
+	}
 
 	// Sprint, slide, prone via interface. AExtractionCharacter returns replicated state;
 	// AExtractionPlayer returns default false (kit BP owns these on the new player).

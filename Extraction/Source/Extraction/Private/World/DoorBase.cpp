@@ -8,10 +8,16 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Character.h"
+#include "HAL/IConsoleManager.h"
 #include "NavigationSystem.h"
 #include "Net/UnrealNetwork.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogDoorBase, Log, All);
+
+static TAutoConsoleVariable<int32> CVarDoorUnwalkable(
+	TEXT("debug.DoorUnwalkable"), 1,
+	TEXT("1 = door meshes unwalkable + non-leaf trim ignores pawns (shipped behavior). 0 = skip both overrides — diagnostic A/B for the door-proximity bounce float. Takes effect on PIE restart."),
+	ECVF_Default);
 
 ADoorBase::ADoorBase()
 {
@@ -45,13 +51,16 @@ void ADoorBase::PostInitializeComponents()
 	// non-leaf trim never blocks pawns at all: frame sill bars span the walkway, so once
 	// unwalkable they'd wall the doorway off instead of being stepped over. Runs post-init so
 	// BP-added meshes (e.g. BreachableDoor's Frame) are covered.
-	TInlineComponentArray<UStaticMeshComponent*> Meshes(this);
-	for (UStaticMeshComponent* Mesh : Meshes)
+	if (CVarDoorUnwalkable.GetValueOnGameThread() != 0)
 	{
-		if (!Mesh) continue;
-		Mesh->SetWalkableSlopeOverride(FWalkableSlopeOverride(WalkableSlope_Unwalkable, 0.f));
-		if (!IsDoorLeafMesh(*Mesh))
-			Mesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		TInlineComponentArray<UStaticMeshComponent*> Meshes(this);
+		for (UStaticMeshComponent* Mesh : Meshes)
+		{
+			if (!Mesh) continue;
+			Mesh->SetWalkableSlopeOverride(FWalkableSlopeOverride(WalkableSlope_Unwalkable, 0.f));
+			if (!IsDoorLeafMesh(*Mesh))
+				Mesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
+		}
 	}
 }
 

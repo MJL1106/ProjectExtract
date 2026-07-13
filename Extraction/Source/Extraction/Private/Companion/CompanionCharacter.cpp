@@ -989,12 +989,21 @@ void ACompanionCharacter::SetBeingRevived(bool bRevived, float ExpectedDuration)
 	if (bBeingRevived == bRevived) return;
 	bBeingRevived = bRevived;
 
-	if (bRevived)
+	// MOVE_None for the hold: the being-revived clip carries ~50cm of back-loaded root motion
+	// that CMC would apply to the capsule, sliding the patient out from under the reviver's
+	// hands. Frozen, the pose stays root-locked at the aligned spot; walking resumes on release
+	// (the downed-retreat task re-asserts crawl speed on its own tick).
+	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
-		if (AAIController* AIC = Cast<AAIController>(GetController()))
-			AIC->StopMovement();
-		if (UCharacterMovementComponent* Movement = GetCharacterMovement())
+		if (bRevived)
+		{
+			if (AAIController* AIC = Cast<AAIController>(GetController()))
+				AIC->StopMovement();
 			Movement->StopMovementImmediately();
+			Movement->SetMovementMode(MOVE_None);
+		}
+		else
+			Movement->SetMovementMode(MOVE_Walking);
 	}
 
 	USkeletalMeshComponent* MeshComp = GetMesh();
@@ -1028,9 +1037,16 @@ bool ACompanionCharacter::IsBeingRevivedMontagePlaying() const
 void ACompanionCharacter::AlignForRevive(const FVector& ReviverLocation)
 {
 	if (!bIsDBNO) return;
+
 	const FVector ToReviver = (ReviverLocation - GetActorLocation()).GetSafeNormal2D();
-	if (!ToReviver.IsNearlyZero())
-		SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw, 0.f));
+	if (ToReviver.IsNearlyZero()) return;
+
+	// Rotation-only mirror of BTTask_RevivePlayer's position snap: instead of moving the reviver
+	// to the authored offset, face so the reviver's actual position sits at the authored local
+	// angle (atan2 of RevivePairOffset ≈ -47°). Works from any approach direction; the radial
+	// distance is whatever the reviver chose within revive range.
+	const float AuthoredLocalAngle = FMath::RadiansToDegrees(FMath::Atan2(RevivePairOffset.Y, RevivePairOffset.X));
+	SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw - AuthoredLocalAngle, 0.f));
 }
 
 void ACompanionCharacter::HandleRevive()

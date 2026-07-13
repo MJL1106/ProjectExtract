@@ -126,6 +126,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoMove(float Right, float Forward);
 
+	/** Gate at the pawn function, not the input handler: the kit BP feeds move input straight
+	 *  into AddMovementInput (same bypass as its IA_Look wiring), which dragged the revive pair
+	 *  from 88cm to 165cm mid-hold. Every input path funnels through this override. */
+	virtual void AddMovementInput(FVector WorldDirection, float ScaleValue = 1.0f, bool bForce = false) override;
+
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	void UseStimInput(const FInputActionValue& Value);
 
@@ -262,10 +267,11 @@ public:
 	 *  Also serves as the fallback when the montage ends/interrupts before the notify fires. */
 	void FinishPendingTakedown();
 
-	/** True while the takedown finisher montage is playing.
-	 *  AnimBP reads this to gate the procedural FP-arm layer off during the finisher. */
+	/** True while a full-body montage owns this body: the takedown finisher OR the revive kneel.
+	 *  AnimBP reads this to gate the procedural FP-arm layer off (the kit's transient dynamic
+	 *  montages stomp DefaultSlot otherwise); WeaponBase gates recoil recovery on it. */
 	UFUNCTION(BlueprintPure, Category = "Takedown")
-	virtual bool IsInTakedown() const override { return bTakedownMontageActive; }
+	virtual bool IsInTakedown() const override { return bTakedownMontageActive || bIsReviving; }
 
 protected:
 
@@ -426,6 +432,25 @@ protected:
 	 *  player the frame they stand up. */
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
 	float PostReviveDamageGraceSeconds = 3.f;
+
+	/** Extra yaw applied to the revive-kneel mesh seat. Compensates ABP_Manny's static
+	 *  Rotate Root Bone (Yaw=45) that shifts the player's whole pose off capsule forward —
+	 *  the companion (no such node) doesn't need it. Tune live on the BP CDO if the kneel
+	 *  lands off-angle from the downed body. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
+	float ReviverSeatYawCorrectionDeg = -45.f;
+
+	/** Clip time skipped at the start of the kneel montage. The clip's first ~0.4s is an
+	 *  authored stand-turn-kneel intro whose head arc drags the head-mounted FP camera a full
+	 *  lap — starting past it opens the hold directly on the kneel facing the patient. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
+	float ReviverKneelStartOffsetSeconds = 0.4f;
+
+	/** Interp speed for the hold camera's ease onto the patient. The camera rotation is
+	 *  decoupled from the head bone for the hold (the kneel blend-in slerps the head the long
+	 *  way round and the socket-riding camera sweeps with it) and eased to a look-at instead. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.1"))
+	float ReviverCamLookInterpSpeed = 6.f;
 
 	// ---- Auto-Lean Config ----
 
@@ -684,7 +709,6 @@ private:
 	void UpdateRevive(float DeltaTime);
 	AActor* FindReviveTarget() const;
 	void CancelRevive();
-	void ApplyReviveTargetAlignment(ACharacter& Target);
 
 	UPROPERTY()
 	TObjectPtr<AActor> ReviveTarget;
@@ -698,21 +722,48 @@ private:
 	TWeakObjectPtr<AActor> ReviveCandidate;
 	float ReviveCandidateScanAccumulator = 0.f;
 
-	/** Aligns the target once, plays the paired montages once, and gates player input. */
-	bool SetReviverLock(bool bActive);
-	bool SetReviverCameraSocket(bool bActive);
+	/** Mirror of BTTask_RevivePlayer's first-tick gate: guards, patient montage + AI-stop via
+	 *  SetBeingRevived, rotation-only AlignForRevive on the target, reviver MESH seat at the
+	 *  authored pair yaw (capsule never rotates), then the reviver-side anims bundle. */
+	void BeginReviveHold(AActor* Target);
+
+	/** Reviver-side bundle, mirror of BTTask_RevivePlayer::SetReviveAnimsActive: weapon
+	 *  hide/suppress, mutual move-ignore with ReviveTarget, kneel montage rate-scaled to
+	 *  ReviveDuration (zero-blend stop on teardown). */
+	void SetReviveAnimsActive(bool bActive);
 
 	/** Hide/show the held weapon visuals (weapon actor + the kit's hand-socket visual actors). */
 	void SetHeldWeaponHidden(bool bHideWeapon);
 
-	bool bReviverLockActive = false;
-	TWeakObjectPtr<ACharacter> ReviverLockIgnoredTarget;
+	/** Snaps this reviver into the authored pair frame anchored on the (already rotated) downed
+	 *  companion — radial step to the authored 88cm along the approach line, capsule at the
+	 *  authored yaw, control rotation synced to the seat (zero aim-offset delta = no head twist). */
+	void SeatReviverForHold(const ACompanionCharacter& Companion);
 
-	/** bUseControllerRotationYaw as it was before the reviver lock. */
+	/** bUseControllerRotationYaw as it was before the revive-hold capsule seat suspended it. */
 	bool bReviverSavedUseControllerRotationYaw = false;
 
-	/** Local reviver camera attachment state; restores the exact pre-role mesh socket transform. */
-	bool bReviverCameraSocketActive = false;
-	FName ReviverCameraSavedSocket = NAME_None;
-	FTransform ReviverCameraSavedRelativeTransform = FTransform::Identity;
+	/** Control rotation as it was at hold start; restored on teardown so the view lands back
+	 *  exactly where the player was aiming. */
+	FRotator ReviverSavedControlRotation = FRotator::ZeroRotator;
+
+	/** Mesh relative rotation as it was before the seat rotated the body for the kneel. The seat
+	 *  rotates the MESH, never the capsule — a capsule snap feeds the kit ABP's turn-in-place
+	 *  chain (TurnDir/UpperYaw) and spins the head at hold start and end. */
+	FRotator ReviverSavedMeshRelativeRotation = FRotator::ZeroRotator;
+	bool bReviverSeated = false;
+
+	/** Controller whose look input the hold suppressed (SetIgnoreLookInput is a refcount —
+	 *  the release must land on the same controller even after an unpossess mid-hold). */
+	TWeakObjectPtr<APlayerController> ReviverLookIgnoredPC;
+
+	/** Hold camera rotation, eased toward the look-at each CalcCamera. Seeded with the live
+	 *  camera rotation at hold start so frame one has no cut. */
+	FRotator ReviverCamCurrentRotation = FRotator::ZeroRotator;
+
+	/** Pair positions captured at hold start. Both revive clips carry back-loaded authored
+	 *  root motion (reviver ~119cm, patient ~50cm) that drags the actors apart mid-hold; the
+	 *  hold freezes both to MOVE_None and re-pins XY every tick as a backstop. */
+	FVector ReviveHoldSeatLocation = FVector::ZeroVector;
+	FVector ReviveHoldPatientLocation = FVector::ZeroVector;
 };
