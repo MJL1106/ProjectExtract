@@ -172,6 +172,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
 	float AutoCombatRange = 350.f;
 
+	/** Range (cm) of the close-proximity fill boost: a sighted target closer than this fills the
+	 *  meter faster the closer it is, scaling from NearFillBoostMax at 0 down to x1 at this range.
+	 *  Naturally makes tight interiors detect faster than open maps. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
+	float NearFillBoostRange = 1200.f;
+
+	/** Fill multiplier at point-blank (0 cm), tapering linearly to 1 at NearFillBoostRange. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "1.0"))
+	float NearFillBoostMax = 3.f;
+
 	/** Suspicion added per unit of noise-event loudness. Noise alone never confirms Combat. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
 	float NoiseSuspicionGain = 30.f;
@@ -1130,4 +1140,85 @@ public:
 	 *  Applies even when bPostureSystemEnabled is false. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
 	float DBNOStandoffRadius = 1800.f;
+
+	// --- Rusher (three-phase: cover approach → circle-strafe standoff → triggered charge) ---
+
+	/** Ring radius (cm) the rusher orbits the target at while circle-strafing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "100.0",
+		ToolTip = "Orbit ring radius (cm) for the circle-strafe standoff phase."))
+	float RushStandoffRadius = 700.f;
+
+	/** Distance (cm) to the target at which the rusher leaves the cover-advance approach and starts circling. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "100.0",
+		ToolTip = "Enter the circle-strafe phase when the target is inside this range (cm)."))
+	float RushStandoffEnterRange = 1100.f;
+
+	/** Hysteresis band (cm) — the target must open distance past EnterRange + this before the rusher
+	 *  drops back to the cover-advance approach (prevents flip-flopping at the boundary). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0",
+		ToolTip = "Extra distance (cm) beyond EnterRange before circling is abandoned for the cover approach."))
+	float RushStandoffHysteresis = 300.f;
+
+	/** Degrees stepped around the orbit ring per circle-strafe repick. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "10.0", ClampMax = "120.0",
+		ToolTip = "Angular step (degrees) along the standoff ring per strafe repick."))
+	float RushCircleStepDeg = 40.f;
+
+	/** Max distance (cm) from the target a charge may launch. Beyond it the commit decorator stays closed
+	 *  and the rusher keeps circling / advancing instead. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "100.0",
+		ToolTip = "Charges may only start when the target is inside this range (cm)."))
+	float RushChargeMaxRange = 1300.f;
+
+	/** Hysteresis band (cm) — a committed charge holds until the target opens distance past
+	 *  ChargeMaxRange + this, then the charger drops back to circling. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0",
+		ToolTip = "Extra distance (cm) beyond ChargeMaxRange before a committed charge is abandoned."))
+	float RushChargeHysteresis = 300.f;
+
+	/** Max squad members allowed to charge simultaneously (rush tokens). Squadless rushers are uncapped. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "1",
+		ToolTip = "Rush-token cap per squad: how many rushers may be in the charge phase at once."))
+	int32 MaxSimultaneousRushers = 2;
+
+	/** Seconds between push-trigger evaluations (reload/low-health/LoS-lost reads and the base-chance roll). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.1",
+		ToolTip = "Interval (seconds) between charge-trigger evaluations while not charging."))
+	float RushEvalInterval = 0.5f;
+
+	/** Chance (0-1) per evaluation to charge with no vulnerability trigger — keeps pressure organic. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0", ClampMax = "1.0",
+		ToolTip = "Per-evaluation probability of an untriggered charge. 0 = only triggered charges."))
+	float RushBaseChance = 0.03f;
+
+	/** When true, seeing the target reload triggers a charge (requires current LoS — no wallhack reads). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher",
+		meta = (ToolTip = "Charge when the target is seen reloading."))
+	bool bRushOnTargetReload = true;
+
+	/** Target health fraction at or below which a charge triggers. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0", ClampMax = "1.0",
+		ToolTip = "Charge when the target's health fraction is at or below this. 0 disables."))
+	float RushTargetLowHealthFraction = 0.35f;
+
+	/** Continuous seconds without LoS to the target (it ducked behind cover) before a charge triggers. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0",
+		ToolTip = "Charge when LoS to the target has been lost for this many seconds. 0 disables."))
+	float RushLosLostTriggerTime = 1.5f;
+
+	/** Inside this range (cm) the rusher always charges — self-defence beats the token cap and triggers. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0",
+		ToolTip = "Point-blank override (cm): a target this close always provokes the charge branch."))
+	float RushPointBlankRange = 350.f;
+
+	/** Bearing offset (degrees) applied per charger slot so simultaneous chargers approach from
+	 *  different sides, converging only at melee range. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0", ClampMax = "80.0",
+		ToolTip = "Per-slot approach bearing spread (degrees) so two chargers come in from different sides."))
+	float RushApproachSpreadDeg = 35.f;
+
+	/** Health fraction below which a charge aborts. 0 = never abort (fearless default). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0", ClampMax = "0.95",
+		ToolTip = "Health fraction below which a committed charge is abandoned. 0 = fearless."))
+	float RushAbortHealthFraction = 0.f;
 };
