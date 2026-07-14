@@ -113,6 +113,25 @@ Tuning (no rebuild): `BP_Companion` → `ShootAimInDuration` / `ShootShotInterva
 
 ---
 
+## Test 8 — Search-Room Enemy Detection
+
+| Scenario | Expected |
+|----------|----------|
+| Normal Search; enemy faces the closed door | One breach startle, Combat in under one second, then normal combat behavior |
+| Normal Search; enemy faces away with same-room loot | Detection rises to the breach-startle floor and the enemy turns/searches; the companion loots and watches but never fires before the enemy reaches Combat |
+| Stealth/Quiet Search; enemy faces the closed door | No hearing event, one visual startle, stealth breaks at Combat, companion never fires first |
+| Stealth/Quiet Search; visible unaware enemy plus same-room loot | Companion continues to Loot, watches at low-ready while stationary, never fires first, and aborts Loot when the enemy reaches Combat |
+| Quiet Search; enemy is blocked from seeing the entry | No startle or visual detection until normal gunfire/alert propagation reaches it |
+| Clear-sight corridor enemy inside the room radius; equally visible enemy outside it | Inside enemy detects the companion; outside enemy remains cloaked |
+| Search through an already-open door | Exposure begins with the enter move; detection works with no door-startle bump |
+| Empty Search dwell; ordered-Breach WaitingForPlayer | Exposure remains active until the command returns to Follow |
+| Same-room Search/Breach → Loot chain | Exposure remains active through Loot; a newly visible enemy reacts mid-loot |
+| Replacement ping; failed/aborted task; DBNO; death | Exposure clears without damaging the replacement command or later-room behavior |
+| Change companion mode during an active Search/Breach chain | Exposure remains active until command completion |
+| Outside Search/Breach | Combat remains weapons-free; Normal/Stealth retain no-first-shot, cloak, loot, and gunfire-alert behavior |
+
+---
+
 ## Known Limitations (prototype scope)
 - Cylinder mesh only — no animations
 - No squad coordination (single companion)

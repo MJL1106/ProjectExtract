@@ -1,0 +1,154 @@
+// Stateless geometry helpers for AICS FCoverData — all cover-position math in one place.
+
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Kismet/BlueprintFunctionLibrary.h"
+#include "AI/Cover/CoverPoseTypes.h"
+#include "CoverSystemPublicData.h"
+#include "CoverGeometryStatics.generated.h"
+
+/** Input params for ScoreCrouchPeekOptions (plain C++ struct, not USTRUCT). */
+struct FCrouchPeekScoreParams
+{
+	float CornerBaseScore = 50.f;
+	float OverTopBaseScore = 50.f;
+	float CornerTieBonus = 20.f;
+	float ExtraThreatPenalty = 8.f;
+	float MinViableWeight = 5.f;
+	float MaxCornerReachCm = 175.f;
+	float LowHpCornerBaseScore = 25.f;
+	float LowHpOverTopBaseScore = 15.f;
+	bool bLowHp = false;
+	bool bSpeculative = false;
+	bool bStandEyeClear = false;
+};
+
+/** Output of ScoreCrouchPeekOptions (plain C++ struct). */
+struct FCrouchPeekScores
+{
+	float CornerLeftScore = 0.f;
+	float CornerRightScore = 0.f;
+	float OverTopScore = 0.f;
+	bool bCornerLeftViable = false;
+	bool bCornerRightViable = false;
+	bool bOverTopViable = false;
+	ECoverLean BestCornerSide = ECoverLean::None;
+	ECoverLean GeometricFallbackSide = ECoverLean::None;
+};
+
+UCLASS()
+class EXTRACTION_API UCoverGeometryStatics : public UBlueprintFunctionLibrary
+{
+	GENERATED_BODY()
+
+public:
+
+	/** Derive the effective cover height from baked FCoverData flags.
+	 *  Stand when a standing side-peek exists AND no front-crouch (tall wall, side-peek only).
+	 *  Crouch otherwise. This replaces all raw bCrouchedCover height checks. */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static ECoverHeight GetCoverHeight(const FCoverData& Data);
+
+	/** Position behind cover wall at standoff distance, on the cover's Z plane. */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static FVector GetHunkerPosition(const FCoverData& Data, float Standoff);
+
+	/** Approach waypoint: hunker XY with caller's Z (preserves nav height). */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static FVector GetApproachPosition(const FCoverData& Data, const FVector& PawnLoc, float Standoff);
+
+	/** Hunker position laterally normalised to the wall's actual end. AICS bake spacing leaves
+	 *  endpoint points at inconsistent distances from the corner (too deep on some walls, past the
+	 *  edge on others); for exactly-one-side-flag points this marches chest-height traces along the
+	 *  wall to find the corner and places the capsule so its edge sits CornerGap inside it.
+	 *  Mid-wall / double-flag points and trace failures return the plain hunker. All systems that
+	 *  define "standing at this cover" (arrival targets, drift-correct, arrival detection) must use
+	 *  THIS, not GetHunkerPosition, or they will disagree about the slot by up to the snap distance. */
+	static FVector GetEdgeAlignedHunkerPosition(const UWorld* World, const FCoverData& Data,
+		float Standoff, float CapsuleRadius, float CornerGap, const AActor* IgnoreActor = nullptr);
+
+	/** Lateral peek position for a given lean side. */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static FVector GetLeanPeekPosition(const FCoverData& Data, ECoverLean Lean, float LeanOffset = 65.f);
+
+	/** Corner-peek apex on the hunker line: marches the wall (same trace march as
+	 *  GetEdgeAlignedHunkerPosition) in the lean direction and returns the point past the corner
+	 *  where the whole capsule clears it by ClearanceMargin. The edge-aligned HOME is corner-relative;
+	 *  an apex from the baked point (GetLeanPeekPosition's ±LeanOffset) is in a different reference
+	 *  frame and lands short of the corner when the bake sits back from it. Falls back to
+	 *  GetLeanPeekPosition for Front/None leans, unresolvable corners, or walls longer than the march
+	 *  range. C++ only. */
+	static FVector GetCornerPeekApex(const UWorld* World, const FCoverData& Data, ECoverLean Lean,
+		float Standoff, float CapsuleRadius, float ClearanceMargin, const AActor* IgnoreActor = nullptr);
+
+	/** Pick the best valid lean side for the current stance vs the threat direction. */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static ECoverLean ResolveLeanSide(const FCoverData& Data, bool bCrouched, const FVector& ThreatLoc);
+
+	/** Overload that accepts explicit per-side validity bools, allowing callers to pass
+	 *  flag-OR-runtime-verified validity (e.g. ChooseGapPeekSide with endpoint fallback).
+	 *  Not a UFUNCTION — C++ only; avoids blueprint overload ambiguity. */
+	static ECoverLean ResolveLeanSideExplicit(const FCoverData& Data,
+		bool bLeftValid, bool bRightValid, bool bFrontValid, const FVector& ThreatLoc);
+
+	/** Peek-side pick: baked per-side flags first (the bake already knows which corners have a gap),
+	 *  ordered geometric-corner-first, each LOS-verified from its corner at eye height. Falls back to
+	 *  the baked preference when no side verifies. At a wall-end point (exactly ONE baked side flag
+	 *  for the stance), also admits the opposite unflagged side when runtime traces verify
+	 *  clearance + LOS. Not a UFUNCTION — takes raw ignore-actor pointers, C++ only. */
+	static ECoverLean ChooseGapPeekSide(UWorld* World, const FCoverData& Data, bool bCrouched,
+		const FVector& ThreatLoc, const AActor* Target, const APawn* Pawn);
+
+	/** At a wall-end point (exactly one baked side flag for the current stance), try the opposite
+	 *  unflagged side by runtime-verifying clearance (peek position not inside geometry) and LOS to
+	 *  threat. Returns the opposite side on success, ECoverLean::None otherwise. C++ only. */
+	static ECoverLean TryOppositeEndpointSide(UWorld* World, const FCoverData& Data, bool bCrouched,
+		const FVector& ThreatLoc, const AActor* Target, const APawn* Pawn, ECoverLean BakedSide);
+
+	/** True when a chest-height trace from the hunker position to ThreatLoc is BLOCKED by geometry
+	 *  (i.e. the cover wall protects the body). Ported from IsSlotBodyProtected. */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry", meta = (WorldContext = "WorldContextObject"))
+	static bool IsThreatCovered(const UObject* WorldContextObject, const FCoverData& Data,
+		const FVector& ThreatLoc, float Standoff, float ChestHeight,
+		const AActor* IgnoreThreatActor, const AActor* IgnorePawn);
+
+	/** Outward fire direction (away from the wall). */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static FVector GetFireArcForward(const FCoverData& Data);
+
+	/** True when two cover points share the same wall (within angular tolerance). */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static bool IsSameWall(const FCoverData& A, const FCoverData& B, float CosThreshold = 0.9397f);
+
+	/** True when the cover point carries a stance-matched side flag on the threat-facing side
+	 *  (i.e. the lateral direction toward ThreatLoc has a valid lean flag for the given stance). */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
+	static bool HasThreatFacingSideFlag(const FCoverData& Data, const FVector& ThreatLoc, bool bCrouched);
+
+	/** Checked wrapper over the corner march: returns true when a reachable wall-end corner exists
+	 *  on Side (march succeeded, not exhausted, and within MaxReachCm). On success OutApex is the
+	 *  corner-peek apex position. C++ only. */
+	static bool TryGetCornerPeekApex(const UWorld* World, const FCoverData& Data, ECoverLean Side,
+		float Standoff, float CapsuleRadius, float ClearanceMargin, float MaxReachCm,
+		const AActor* IgnoreActor, FVector& OutApex);
+
+	/** Crouch-peek wallhack scorer: evaluates CornerLeft, CornerRight, and OverTop candidates,
+	 *  traces primary LOS to ThreatLoc and optional extra threats, and returns per-option scores +
+	 *  viability. Corner apex positions are pre-computed by the caller (TryGetCornerPeekApex) and
+	 *  passed in to avoid redundant trace marches. C++ only. */
+	static void ScoreCrouchPeekOptions(const UWorld* World, const FCoverData& Data,
+		const FVector& ThreatLoc, float Standoff,
+		const AActor* IgnoreTarget, const AActor* IgnorePawn,
+		bool bCornerLeftFound, const FVector& ApexLeft,
+		bool bCornerRightFound, const FVector& ApexRight,
+		TArrayView<AActor* const> ExtraThreats,
+		const FCrouchPeekScoreParams& Params, FCrouchPeekScores& OutScores);
+
+	/** True when the pawn can see the threat from its resolved lean-peek position. */
+	UFUNCTION(BlueprintPure, Category = "Cover|Geometry", meta = (WorldContext = "WorldContextObject"))
+	static bool CanPeekShoot(const UObject* WorldContextObject, const FCoverData& Data,
+		bool bCrouched, const FVector& ThreatLoc, float EyeHeight,
+		const AActor* IgnoreThreatActor, const AActor* IgnorePawn,
+		float LeanOffset = 65.f);
+};

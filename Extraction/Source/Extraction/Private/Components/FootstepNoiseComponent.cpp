@@ -68,14 +68,20 @@ void UFootstepNoiseComponent::TickNoise()
 
 	float Loudness = 0.f;
 	float Range = 0.f;
-	PickNoiseProfile(Loudness, Range);
+	FName NoiseTag;
+	PickNoiseProfile(Loudness, Range, NoiseTag);
 	if (Range <= 0.f || Loudness <= 0.f) return;
 
-	UAISense_Hearing::ReportNoiseEvent(GetWorld(), CurrentLocation, Loudness, OwnerChar, Range, TEXT("Footstep"));
+	UAISense_Hearing::ReportNoiseEvent(GetWorld(), CurrentLocation, Loudness, OwnerChar, Range, NoiseTag);
 }
 
-void UFootstepNoiseComponent::PickNoiseProfile(float& OutLoudness, float& OutRange) const
+void UFootstepNoiseComponent::PickNoiseProfile(float& OutLoudness, float& OutRange, FName& OutTag) const
 {
+	// A takedown-volume enemy muffles quiet noise but still reacts to a sprint (see
+	// UEnemyAwarenessComponent::HandleHearingStimulus), so sprint steps carry a distinct tag.
+	static const FName WalkTag(TEXT("Footstep"));
+	static const FName SprintTag(TEXT("FootstepSprint"));
+
 	const ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
 
 	bool bQuiet = OwnerChar && OwnerChar->bIsCrouched;
@@ -86,11 +92,31 @@ void UFootstepNoiseComponent::PickNoiseProfile(float& OutLoudness, float& OutRan
 	{
 		OutLoudness = QuietLoudness;
 		OutRange = QuietRange;
+		OutTag = WalkTag;
 		return;
 	}
 
 	const float Speed = OwnerChar ? OwnerChar->GetVelocity().Size2D() : 0.f;
-	const bool bSprinting = Speed >= SprintSpeedThreshold;
-	OutLoudness = bSprinting ? SprintLoudness : WalkLoudness;
-	OutRange = bSprinting ? SprintRange : WalkRange;
+
+	if (Speed >= SprintSpeedThreshold)
+	{
+		OutLoudness = SprintLoudness;
+		OutRange = SprintRange;
+		OutTag = SprintTag;
+		return;
+	}
+
+	// Slow-walk (held-Ctrl) tier: quieter than an ordinary jog, tag stays "Footstep" (not exempt
+	// from the takedown-volume muffle the way a sprint step is).
+	if (Speed < WalkSpeedThreshold)
+	{
+		OutLoudness = SlowWalkLoudness;
+		OutRange = SlowWalkRange;
+		OutTag = WalkTag;
+		return;
+	}
+
+	OutLoudness = WalkLoudness;
+	OutRange = WalkRange;
+	OutTag = WalkTag;
 }

@@ -1,6 +1,7 @@
 // ACompanionRoute — designer-placed one-shot companion route.
 
 #include "Companion/CompanionRoute.h"
+#include "Companion/CompanionRouteVisComponent.h"
 #include "Components/BillboardComponent.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
@@ -36,6 +37,9 @@ ACompanionRoute::ACompanionRoute()
 	Billboard = CreateDefaultSubobject<UBillboardComponent>(TEXT("Billboard"));
 	Billboard->SetupAttachment(RootComponent);
 	Billboard->SetHiddenInGame(true);
+
+	RouteVisComponent = CreateDefaultSubobject<UCompanionRouteVisComponent>(TEXT("RouteVis"));
+	RouteVisComponent->SetupAttachment(RootComponent);
 }
 
 // ---------------------------------------------------------------------
@@ -80,6 +84,14 @@ FVector ACompanionRoute::GetWorldPoint(int32 Index) const
 	return GetActorTransform().TransformPosition(Waypoints[Idx].Location);
 }
 
+// Bounds-center reads as "the door" better than an actor's floor-level origin; fall back to
+// actor location if the bounding box is degenerate (e.g. a component-less actor).
+static FVector GetActorAimPoint(const AActor& Actor)
+{
+	const FBox Bounds = Actor.GetComponentsBoundingBox();
+	return Bounds.IsValid ? Bounds.GetCenter() : Actor.GetActorLocation();
+}
+
 FVector ACompanionRoute::GetWaypointAimWorld(int32 Index) const
 {
 	if (Waypoints.Num() == 0) return GetActorLocation() + FVector::ForwardVector * LookAheadDistance;
@@ -87,10 +99,22 @@ FVector ACompanionRoute::GetWaypointAimWorld(int32 Index) const
 	const int32 Idx = FMath::Clamp(Index, 0, Waypoints.Num() - 1);
 	const FCompanionRouteWaypoint& WP = Waypoints[Idx];
 
+	// Highest priority: the waypoint's own authored focus actor.
+	if (IsValid(WP.AimTargetActor))
+	{
+		return GetActorAimPoint(*WP.AimTargetActor);
+	}
+
 	// Explicit aim override — transform the authored local-space target.
 	if (WP.bOverrideAim)
 	{
 		return GetActorTransform().TransformPosition(WP.AimTargetLocal);
+	}
+
+	// Route-wide focus actor — used by every leg that authors nothing of its own.
+	if (IsValid(AimTargetActor))
+	{
+		return GetActorAimPoint(*AimTargetActor);
 	}
 
 	// Procedural look-ahead toward the next waypoint.
@@ -121,6 +145,11 @@ FVector ACompanionRoute::GetWaypointAimWorld(int32 Index) const
 	}
 
 	return Current + Direction * LookAheadDistance;
+}
+
+bool ACompanionRoute::HasAuthoredAim(int32 Index) const
+{
+	return GetWaypoint(Index).HasAuthoredAim() || IsValid(AimTargetActor);
 }
 
 const FCompanionRouteWaypoint& ACompanionRoute::GetWaypoint(int32 Index) const
@@ -201,3 +230,44 @@ void ACompanionRoute::DrawDebugRoute() const
 		DrawDebugDirectionalArrow(World, WorldPt, AimWorld, ArrowSize, FColor::Orange, false, -1.f);
 	}
 }
+
+// ---------------------------------------------------------------------
+// Editor authoring UX
+// ---------------------------------------------------------------------
+
+#if WITH_EDITOR
+void ACompanionRoute::PostEditChangeChainProperty(FPropertyChangedChainEvent& PropertyChangedEvent)
+{
+	Super::PostEditChangeChainProperty(PropertyChangedEvent);
+
+	if (PropertyChangedEvent.GetMemberPropertyName() != GET_MEMBER_NAME_CHECKED(ACompanionRoute, Waypoints))
+		return;
+
+	const bool bIsAdd = PropertyChangedEvent.ChangeType == EPropertyChangeType::ArrayAdd;
+	const bool bIsDuplicate = PropertyChangedEvent.ChangeType == EPropertyChangeType::Duplicate;
+	if (!bIsAdd && !bIsDuplicate) return;
+
+	const int32 NewIndex = PropertyChangedEvent.GetArrayIndex(TEXT("Waypoints"));
+	if (!Waypoints.IsValidIndex(NewIndex)) return;
+
+	const int32 PrevIndex = NewIndex - 1;
+
+	// ArrayAdd starts from a blank default-constructed entry — copy the previous waypoint's full
+	// settings so the new leg inherits stance/aim/dwell/speed authoring. Duplicate already carries
+	// a copy of the source entry's settings, so this step is add-only.
+	if (bIsAdd && Waypoints.IsValidIndex(PrevIndex))
+		Waypoints[NewIndex] = Waypoints[PrevIndex];
+
+	// Offset along the last leg's direction so the new/duplicated widget doesn't land stacked on
+	// the entry it was copied from. Fewer than 2 prior points to derive a direction from: local +X.
+	FVector OffsetDir = FVector::ForwardVector;
+	const int32 PrevPrevIndex = PrevIndex - 1;
+	if (Waypoints.IsValidIndex(PrevIndex) && Waypoints.IsValidIndex(PrevPrevIndex))
+		OffsetDir = (Waypoints[PrevIndex].Location - Waypoints[PrevPrevIndex].Location).GetSafeNormal();
+
+	if (OffsetDir.IsNearlyZero())
+		OffsetDir = FVector::ForwardVector;
+
+	Waypoints[NewIndex].Location += OffsetDir * NewWaypointOffsetDistance;
+}
+#endif

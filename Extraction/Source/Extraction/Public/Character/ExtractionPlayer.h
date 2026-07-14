@@ -26,7 +26,10 @@ class UFootstepNoiseComponent;
 class UWeaponComponent;
 class UTraversalComponent;
 class UCompanionCommandComponent;
+class UConsumableInventoryComponent;
 class UAnimMontage;
+class USpringArmComponent;
+class USceneComponent;
 struct FInputActionValue;
 
 // Distinct name from the legacy AExtractionCharacter declaration to avoid linker conflicts during the migration period.
@@ -53,7 +56,7 @@ class EXTRACTION_API AExtractionPlayer : public ACharacter, public IExtractionPl
 
 public:
 
-	AExtractionPlayer();
+	AExtractionPlayer(const FObjectInitializer& ObjectInitializer);
 
 	virtual void PostInitializeComponents() override;
 
@@ -111,6 +114,10 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Takedown|Events")
 	void OnTakedownFinished();
 
+	/** Animation hook fired locally only after the server successfully consumes a stim. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory|Consumables")
+	void OnStimUsed();
+
 	// ---- Input handlers (BlueprintCallable so kit BP can delegate if needed) ----
 
 	UFUNCTION(BlueprintCallable, Category = "Input")
@@ -119,10 +126,31 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Input")
 	virtual void DoMove(float Right, float Forward);
 
+	/** Gate at the pawn function, not the input handler: the kit BP feeds move input straight
+	 *  into AddMovementInput (same bypass as its IA_Look wiring), which dragged the revive pair
+	 *  from 88cm to 165cm mid-hold. Every input path funnels through this override. */
+	virtual void AddMovementInput(FVector WorldDirection, float ScaleValue = 1.0f, bool bForce = false) override;
+
+	UFUNCTION(BlueprintCallable, Category = "Input")
+	void UseStimInput(const FInputActionValue& Value);
+
 	// ---- Revive API ----
 
 	/** Exit DBNO state and restore health/movement. Called server-side. */
 	virtual void ExitDBNO() override;
+
+	/** Plays/stops the being-revived montage on the body mesh while a reviver holds the revive.
+	 *  ExpectedDuration > 0 rate-scales the montage to span the hold exactly. Also locks look/move
+	 *  input and suspends controller-yaw follow so AlignForRevive's facing sticks. */
+	virtual void SetBeingRevived(bool bBeingRevived, float ExpectedDuration = 0.f) override;
+
+	/** Rotates the downed body to face the reviver for the paired revive anims. */
+	virtual void AlignForRevive(const FVector& ReviverLocation) override;
+
+	/** True while BeingRevivedMontage is playing on the body mesh. */
+	virtual bool IsBeingRevivedMontagePlaying() const override;
+
+	virtual const UAnimMontage* GetBeingRevivedMontage() const override { return BeingRevivedMontage; }
 
 	// ---- IExtractionPlayerInterface ----
 
@@ -135,8 +163,28 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Components")
 	virtual UTraversalComponent* GetTraversalComponent() const override { return TraversalComponent; }
 
+	UFUNCTION(BlueprintPure, Category = "Components")
+	UConsumableInventoryComponent* GetConsumableInventoryComponent() const { return ConsumableInventoryComponent; }
+
 	UFUNCTION(BlueprintPure, Category = "Health")
 	virtual bool GetIsDBNO() const override { return bIsDBNO; }
+
+	UFUNCTION(BlueprintPure, Category = "Health")
+	virtual float GetBleedoutTimeRemaining() const override { return BleedoutTimeRemaining; }
+
+	// ---- Revive prompt (local-only; URevivePromptWidget polls these) ----
+
+	/** Downed teammate under the crosshair (low-rate local scan), or nullptr. */
+	UFUNCTION(BlueprintPure, Category = "Revive")
+	AActor* GetReviveCandidate() const { return ReviveCandidate.Get(); }
+
+	/** True while the local hold-E revive is running. */
+	UFUNCTION(BlueprintPure, Category = "Revive")
+	bool IsRevivingTarget() const { return bIsReviving; }
+
+	/** Normalized 0-1 progress of the local revive hold. */
+	UFUNCTION(BlueprintPure, Category = "Revive")
+	float GetReviveProgress() const { return ReviveDuration > 0.f ? FMath::Clamp(ReviveElapsed / ReviveDuration, 0.f, 1.f) : 0.f; }
 
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const override { return CachedAnimInstance; }
@@ -176,6 +224,42 @@ public:
 	/** No WeaponSpawn component on this class — kit BP attaches via socket directly. */
 	virtual USceneComponent* GetWeaponSpawn() const override { return nullptr; }
 
+	/** Locks the player's ground/air speed to Speed for the duration of an active companion route.
+	 *  Enforced by UExtractionPlayerMovement::GetMaxSpeed (consumption-side — kit-BP MaxWalkSpeed
+	 *  writes can't race it): standing speed = Speed exactly, crouch capped but never boosted,
+	 *  DBNO crawl untouched. Called by BTTask_CompanionFollowRoute when Route->PlayerSpeedLock > 0. */
+	UFUNCTION(BlueprintCallable, Category = "Movement")
+	void SetRouteSpeedLock(float Speed) { RouteSpeedLock = Speed; OnRouteSpeedLockChanged(Speed > 0.f); }
+
+	/** Clears the route speed lock. Idempotent — no speed restore needed since the lock never
+	 *  writes movement-component properties. */
+	UFUNCTION(BlueprintCallable, Category = "Movement")
+	void ClearRouteSpeedLock() { RouteSpeedLock = 0.f; OnRouteSpeedLockChanged(false); }
+
+	/** Read by UExtractionPlayerMovement::GetMaxSpeed. 0 = no lock. */
+	float GetRouteSpeedLock() const { return RouteSpeedLock; }
+
+	/** True while the route speed lock is active OR the player is holding the walk key. The kit
+	 *  BP's sprint input handler checks this so shift can't engage the sprint anim in either case. */
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool IsSprintBlocked() const { return RouteSpeedLock > 0.f || bWalkHeld; }
+
+	/** Fired when the route speed lock engages or clears. Kit BP implements this to cancel an
+	 *  already-running sprint on engage (the input-handler gate only covers new presses). */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Movement")
+	void OnRouteSpeedLockChanged(bool bLocked);
+
+	/** True while the hold-to-walk key (Left Ctrl) is held. Consumed by
+	 *  UExtractionPlayerMovement::GetMaxSpeed to cap ground speed; footsteps key off velocity, not
+	 *  this flag, so no replication is needed (single-player feature). */
+	UFUNCTION(BlueprintPure, Category = "Movement")
+	bool IsWalkHeld() const { return bWalkHeld; }
+
+	/** Fired on the true/false edge of the walk-hold key. Kit BP implements this to cancel an
+	 *  already-running sprint on engage, mirroring OnRouteSpeedLockChanged. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Movement")
+	void OnWalkHeldChanged(bool bHeld);
+
 	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
 	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }
 
@@ -183,10 +267,11 @@ public:
 	 *  Also serves as the fallback when the montage ends/interrupts before the notify fires. */
 	void FinishPendingTakedown();
 
-	/** True while the takedown finisher montage is playing.
-	 *  AnimBP reads this to gate the procedural FP-arm layer off during the finisher. */
+	/** True while a full-body montage owns this body: the takedown finisher OR the revive kneel.
+	 *  AnimBP reads this to gate the procedural FP-arm layer off (the kit's transient dynamic
+	 *  montages stomp DefaultSlot otherwise); WeaponBase gates recoil recovery on it. */
 	UFUNCTION(BlueprintPure, Category = "Takedown")
-	virtual bool IsInTakedown() const override { return bTakedownMontageActive; }
+	virtual bool IsInTakedown() const override { return bTakedownMontageActive || bIsReviving; }
 
 protected:
 
@@ -206,6 +291,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UCompanionCommandComponent> CompanionCommandComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UConsumableInventoryComponent> ConsumableInventoryComponent;
 
 	// ---- Input Mapping Context (assigned in BP child class) ----
 
@@ -235,11 +323,19 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> VaultAction;
 
+	/** Hold-to-walk (Left Ctrl). Started sets bWalkHeld true, Completed/Canceled clear it. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> WalkAction;
+
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> InteractAction;
 
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> TakedownAction;
+
+	/** Slot 3 health-stim action. Assigned in the BP child class. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> UseStimAction;
 
 	// ---- Companion Command Input Actions (assigned in BP child class) ----
 
@@ -258,6 +354,22 @@ protected:
 	/** Confirm a companion breach command. */
 	UPROPERTY(EditAnywhere, Category = "Input|Companion")
 	TObjectPtr<UInputAction> IA_CompanionBreach;
+
+	/** Open/close the companion mode picker (X key). */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionModeToggle;
+
+	/** Mode picker — select Stealth (1). Mapped in IMC_CompanionModeSelect, live only while the picker is open. */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionModeStealth;
+
+	/** Mode picker — select Normal (2). */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionModeNormal;
+
+	/** Mode picker — select Combat (3). */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionModeCombat;
 
 	// ---- Takedown Config ----
 
@@ -282,11 +394,17 @@ protected:
 
 	// ---- DBNO / Revive Config ----
 
-	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
-	float BleedoutDuration = 30.f;
+	/** Movement speed while downed (DBNO crawl). */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "10.0"))
+	float DBNOCrawlSpeed = 100.f;
 
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
+	float BleedoutDuration = 90.f;
+
+	/** 2.0 matches the companion's revive hold (BP_Companion.ReviveDuration) — both directions
+	 *  of the pair play the same clips at the same pace. */
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.5"))
-	float ReviveDuration = 4.f;
+	float ReviveDuration = 2.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.01", ClampMax = "1.0"))
 	float ReviveHealthPercent = 0.3f;
@@ -299,6 +417,34 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "5.0"))
 	float ReviveTraceSphereRadius = 30.f;
+
+	/** Montage played once while someone revives this player, rate-scaled to the hold. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
+	TObjectPtr<UAnimMontage> BeingRevivedMontage;
+
+	/** Kneel montage played on this player's OWN body while they hold E reviving a downed
+	 *  teammate — rate-scaled so one cycle spans ReviveDuration. The FP camera rides the head
+	 *  bone through it (takedown-style), so this is what "locks" the reviver's view. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
+	TObjectPtr<UAnimMontage> ReviverMontage;
+
+	/** Seconds of full damage immunity after a revive — without it a mid-burst enemy re-downs the
+	 *  player the frame they stand up. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
+	float PostReviveDamageGraceSeconds = 3.f;
+
+	/** Extra yaw applied to the revive-kneel mesh seat. Compensates ABP_Manny's static
+	 *  Rotate Root Bone (Yaw=45) that shifts the player's whole pose off capsule forward —
+	 *  the companion (no such node) doesn't need it. Tune live on the BP CDO if the kneel
+	 *  lands off-angle from the downed body. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
+	float ReviverSeatYawCorrectionDeg = -45.f;
+
+	/** Clip time skipped at the start of the kneel montage. The clip's first ~0.4s is an
+	 *  authored stand-turn-kneel intro whose head arc drags the head-mounted FP camera a full
+	 *  lap — starting past it opens the hold directly on the kneel facing the patient. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
+	float ReviverKneelStartOffsetSeconds = 0.4f;
 
 	// ---- Auto-Lean Config ----
 
@@ -395,10 +541,33 @@ private:
 	void ADSStart(const FInputActionValue& Value);
 	void ADSStop(const FInputActionValue& Value);
 
+	void WalkStart(const FInputActionValue& Value);
+	void WalkStop(const FInputActionValue& Value);
+
+	/** True while the hold-to-walk key is down. See IsWalkHeld/OnWalkHeldChanged. */
+	bool bWalkHeld = false;
+
 	void VaultStart(const FInputActionValue& Value);
 
 	void InteractStart(const FInputActionValue& Value);
 	void InteractStop(const FInputActionValue& Value);
+
+	/** Camera-forward interact trace: IWorldInteractable first, then ILootable containers,
+	 *  then keycard-unlock locked doors.
+	 *  Returns true when the press was consumed by a world interaction (revive check is skipped). */
+	bool TryWorldInteract();
+
+	/** Server RPC for IWorldInteractable interactions initiated by a client. */
+	UFUNCTION(Server, Reliable)
+	void Server_WorldInteract(AActor* Target);
+
+	/** Max distance (cm) for the Interact world trace. */
+	UPROPERTY(EditAnywhere, Category = "Interaction", meta = (ClampMin = "0.0"))
+	float InteractTraceRange = 250.f;
+
+	/** Extra distance (cm) tolerance on the server validation for world interactions,
+	 *  absorbing network latency and minor position desync. */
+	static constexpr float WorldInteractDistanceSlack = 50.f;
 
 	void TakedownInput(const FInputActionValue& Value);
 	void StartMontageDeferred(AEnemyCharacter* Victim);
@@ -408,6 +577,10 @@ private:
 	void CompanionConfirmTakedownKnifeInput(const FInputActionValue& Value);
 	void CompanionConfirmTakedownShootInput(const FInputActionValue& Value);
 	void CompanionConfirmBreachInput(const FInputActionValue& Value);
+	void CompanionModeToggleInput(const FInputActionValue& Value);
+	void CompanionModeSelectStealthInput(const FInputActionValue& Value);
+	void CompanionModeSelectNormalInput(const FInputActionValue& Value);
+	void CompanionModeSelectCombatInput(const FInputActionValue& Value);
 
 	UFUNCTION()
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);
@@ -429,6 +602,25 @@ private:
 	void OnBleedoutExpired();
 	void FullDeath();
 
+	/** While downed outside a revive, switch the BP spring arm to pawn-control free look. */
+	void SetDBNOCameraFreeLook(bool bEnable);
+
+	/** BP-owned spring arm, resolved lazily by class (C++ has no camera components). */
+	TWeakObjectPtr<USpringArmComponent> CachedSpringArm;
+
+	bool bDBNOFreeLookActive = false;
+	bool bSavedSpringArmUsePawnControlRotation = false;
+
+	/** Local patient-role state; gates input and prevents montage re-triggering. */
+	bool bBeingRevivedAnimActive = false;
+
+	void SetBeingRevivedCameraAnimationControl(bool bActive);
+	bool bBeingRevivedCameraOverrideActive = false;
+	bool bBeingRevivedSavedSpringArmUsePawnControlRotation = false;
+
+	/** bUseControllerRotationYaw as it was before the being-revived lock suspended it. */
+	bool bSavedUseControllerRotationYaw = false;
+
 	float GetHitboxDamageMultiplier(const FDamageEvent& DamageEvent) const;
 
 	UFUNCTION()
@@ -436,6 +628,18 @@ private:
 
 	/** Temp debug: apply 25 damage to self (bound to H key) */
 	void DebugApplyDamage();
+
+	void HandleStimUsed();
+
+	/** Pre-DBNO crouched speed, restored on ExitDBNO. */
+	float SavedMaxWalkSpeedCrouched = 0.f;
+
+	/** Active companion-route speed lock (cm/s). 0 = no lock. Consumed by
+	 *  UExtractionPlayerMovement::GetMaxSpeed — never written into the movement component. */
+	float RouteSpeedLock = 0.f;
+
+	/** World time of the last revive — drives the post-revive damage grace. */
+	float LastReviveWorldTime = -1e9f;
 
 	FTimerHandle BleedoutTimerHandle;
 
@@ -470,6 +674,16 @@ private:
 	UFUNCTION(Exec)
 	void CompDebug(bool bFreeze);
 
+	/** console: PlayerDown — force this player into DBNO (zeroes health via the normal death path)
+	 *  so the companion revive can be tested on demand. */
+	UFUNCTION(Exec)
+	void PlayerDown();
+
+	/** console: CompDown — force the companion into DBNO (zeroes health via its normal death path)
+	 *  so the player-revives-companion path can be tested on demand. */
+	UFUNCTION(Exec)
+	void CompDown();
+
 	// ---- Takedown state ----
 
 	/** Victim held during a montage-deferred takedown. Cleared after kill or montage abort. */
@@ -487,16 +701,53 @@ private:
 	// ---- Revive ----
 
 	void UpdateRevive(float DeltaTime);
-	AExtractionPlayer* FindReviveTarget() const;
+	AActor* FindReviveTarget() const;
 	void CancelRevive();
-	void CompleteRevive();
-
-	UFUNCTION(Server, Reliable)
-	void Server_CompleteRevive(AExtractionPlayer* Target);
 
 	UPROPERTY()
-	TObjectPtr<AExtractionPlayer> ReviveTarget;
+	TObjectPtr<AActor> ReviveTarget;
 
 	float ReviveElapsed = 0.f;
 	bool bIsReviving = false;
+
+	/** Low-rate crosshair scan feeding the revive prompt (local player only). */
+	void UpdateReviveCandidateScan(float DeltaTime);
+
+	TWeakObjectPtr<AActor> ReviveCandidate;
+	float ReviveCandidateScanAccumulator = 0.f;
+
+	/** Mirror of BTTask_RevivePlayer's first-tick gate: guards, patient montage + AI-stop via
+	 *  SetBeingRevived, rotation-only AlignForRevive on the target, reviver MESH seat at the
+	 *  authored pair yaw (capsule never rotates), then the reviver-side anims bundle. */
+	void BeginReviveHold(AActor* Target);
+
+	/** Reviver-side bundle, mirror of BTTask_RevivePlayer::SetReviveAnimsActive: weapon
+	 *  hide/suppress, mutual move-ignore with ReviveTarget, kneel montage rate-scaled to
+	 *  ReviveDuration (zero-blend stop on teardown). */
+	void SetReviveAnimsActive(bool bActive);
+
+	/** Hide/show the held weapon visuals (weapon actor + the kit's hand-socket visual actors). */
+	void SetHeldWeaponHidden(bool bHideWeapon);
+
+	/** Snaps this reviver into the authored pair frame anchored on the (already rotated) downed
+	 *  companion — radial step to the authored 88cm along the approach line, capsule at the
+	 *  authored yaw, control rotation synced to the seat (zero aim-offset delta = no head twist). */
+	void SeatReviverForHold(const ACompanionCharacter& Companion);
+
+	/** bUseControllerRotationYaw as it was before the revive-hold capsule seat suspended it. */
+	bool bReviverSavedUseControllerRotationYaw = false;
+
+	/** Control rotation as it was at hold start; restored on teardown so the view lands back
+	 *  exactly where the player was aiming. */
+	FRotator ReviverSavedControlRotation = FRotator::ZeroRotator;
+
+	/** Mesh relative rotation as it was before the seat rotated the body for the kneel. The seat
+	 *  rotates the MESH, never the capsule — a capsule snap feeds the kit ABP's turn-in-place
+	 *  chain (TurnDir/UpperYaw) and spins the head at hold start and end. */
+	FRotator ReviverSavedMeshRelativeRotation = FRotator::ZeroRotator;
+	bool bReviverSeated = false;
+
+	/** Controller whose look input the hold suppressed (SetIgnoreLookInput is a refcount —
+	 *  the release must land on the same controller even after an unpossess mid-hold). */
+	TWeakObjectPtr<APlayerController> ReviverLookIgnoredPC;
 };

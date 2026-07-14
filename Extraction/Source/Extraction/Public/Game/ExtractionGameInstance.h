@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/GameInstance.h"
+#include "World/LevelObjectiveFlow.h"
 #include "ExtractionGameInstance.generated.h"
 
 /**
@@ -18,4 +19,18 @@ class EXTRACTION_API UExtractionGameInstance : public UGameInstance
 
 public:
 	UExtractionGameInstance();
+
+	/** Records the checkpoint the current run has reached. LevelName keys the record so a stale
+	 *  checkpoint can never leak into a different map. */
+	void SetCheckpoint(FName LevelName, ELevelObjectiveStep Step);
+
+	/** The recorded checkpoint for LevelName, or Inactive when none exists for that level. */
+	ELevelObjectiveStep GetCheckpointForLevel(FName LevelName) const;
+
+	/** Drops the record — call on level completion so the next run starts clean. */
+	void ClearCheckpoint();
+
+private:
+	FName CheckpointLevelName;
+	ELevelObjectiveStep LastCheckpointStep = ELevelObjectiveStep::Inactive;
 };

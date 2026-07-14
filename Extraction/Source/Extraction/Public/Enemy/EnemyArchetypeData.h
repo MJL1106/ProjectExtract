@@ -69,6 +69,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception", meta = (ClampMin = "0.1"))
 	float HearingMaxAge = 3.f;
 
+	/** Suspicion multiplier for noise heard through a closed-but-openable door (0..1). 1 = a door
+	 *  doesn't muffle at all; 0 = doors block like walls. Solid geometry and locked doors always
+	 *  block fully regardless of this value. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Perception", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ThroughDoorNoiseMultiplier = 0.6f;
+
 	// --- Combat ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
@@ -116,6 +122,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "100.0"))
 	float CoverSearchRadius = 1200.f;
 
+	/** When true, enemies fighting WITHOUT cover try to claim one on CombatReseekCooldown even at
+	 *  Confident morale (Shaken/Broken already reseek in their hold branches). Turn off for
+	 *  commit-rush archetypes that should stay in the open. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover")
+	bool bCombatReseeksCover = true;
+
+	/** Seconds between exposed-in-combat cover reseek attempts (bCombatReseeksCover). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.5"))
+	float CombatReseekCooldown = 5.f;
+
 	/** Within this range the enemy skips cover-seeking and fires in place (selector falls through to the open-ground fire branch). 0 = always seek cover. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
 	float PointBlankFireRange = 0.f;
@@ -126,7 +142,7 @@ public:
 
 	/** Seconds of no LOS before transitioning from Combat to Searching. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
-	float LostContactGrace = 8.f;
+	float LostContactGrace = 45.f;
 
 	/** Maximum yaw offset (degrees) between actor forward and the aim target before GetAIAimTarget/GetAIAimLocation
 	 *  returns null/false — forces the weapon to fall back to forward-fire while the body rotates.
@@ -156,9 +172,23 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
 	float AutoCombatRange = 350.f;
 
+	/** Range (cm) of the close-proximity fill boost: a sighted target closer than this fills the
+	 *  meter faster the closer it is, scaling from NearFillBoostMax at 0 down to x1 at this range.
+	 *  Naturally makes tight interiors detect faster than open maps. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
+	float NearFillBoostRange = 1200.f;
+
+	/** Fill multiplier at point-blank (0 cm), tapering linearly to 1 at NearFillBoostRange. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "1.0"))
+	float NearFillBoostMax = 3.f;
+
 	/** Suspicion added per unit of noise-event loudness. Noise alone never confirms Combat. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
 	float NoiseSuspicionGain = 30.f;
+
+	/** Minimum suspicion after an in-scope Search/Breach door startle. Hearing still cannot confirm Combat. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0", ClampMax = "99.0"))
+	float BreachStartleSuspicionFloor = 75.f;
 
 	/** Fill multiplier at the edge of the view cone (1 at centre). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.05", ClampMax = "1.0"))
@@ -335,6 +365,17 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.1", ClampMax = "1.0"))
 	float GrenadeLandingDistanceScale = 1.0f;
 
+	/** Per-Pause-cycle chance to proactively lob a grenade over the top while holding crouch cover
+	 *  during live engagement (independent of the LOS-blocked hiding lob). Naturally rate-limited by
+	 *  GrenadeCooldown + GrenadeSupply, so this just adds variety on top of the cooldown. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GrenadeCoverLobChance = 0.20f;
+
+	/** Of the proactive cover lobs, the fraction that pop up over the wall (stand + throw + duck) vs
+	 *  lobbing from the tucked crouch pose. 0.35 = ~35% pop-up, ~65% tucked. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float GrenadeCoverLobPopUpChance = 0.35f;
+
 	// --- Officer aura (Phase 3) ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Officer")
@@ -414,6 +455,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suppression", meta = (ClampMin = "0.0"))
 	float SuppressionSpreadPenaltyDeg = 4.f;
 
+	/** Extra spread (degrees) added when targeting a companion that is actively reviving the player. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
+	float RevivingCompanionExtraSpreadDeg = 6.f;
+
 	// --- Morale (Phase 4) ---
 
 	/** If true, morale events are ignored and the enemy stays Confident permanently (e.g. rusher archetype). */
@@ -489,6 +534,20 @@ public:
 	/** Incumbent target must be beaten by this factor before switching. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "1.0"))
 	float TargetSwitchHysteresis = 1.25f;
+
+	/** Threat-score multiplier for companion candidates during target SELECTION. 1 = equal priority
+	 *  to the player, 0 = deprioritised out of ScoreAndSelectTarget. Not a hard immunity: a
+	 *  Combat-mode companion can initiate combat, and damage/near-misses from a non-stealth
+	 *  companion still enter combat against it (enemies defend themselves). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CompanionThreatScoreMultiplier = 0.75f;
+
+	/** Sighted hostiles inside this range (cm) dominate target selection: selection restricts to
+	 *  the point-blank set, preempting squad focus-fire, the recent-damage term held by a distant
+	 *  attacker, and incumbent hysteresis vs targets outside the set. Self-preservation beats
+	 *  orders — an enemy never ignores the player standing in its face. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Targeting", meta = (ClampMin = "0.0"))
+	float PointBlankTargetRange = 600.f;
 
 	// --- Flanking (Phase 5) ---
 
@@ -602,6 +661,13 @@ public:
 
 	// --- Cover Flank Break (Part B) ---
 
+	/** Half-angle (degrees) of the cover's usable fire arc — replaces the old per-slot FireArcDegrees.
+	 *  60 = 120° total arc (old default). Used by the compromise arc test in BTTask_EnemyCombatFire. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ClampMin = "10.0", ClampMax = "180.0",
+		ToolTip = "Half-angle of the cover fire arc (degrees). 60 = old 120 degree default."))
+	float CoverFlankArcHalfAngleDeg = 60.f;
+
 	/** When true, the enemy will leave a compromised cover slot and seek a new one when flanked. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
 		meta = (ToolTip = "Enable cover-flank detection: enemy relocates when the current slot no longer protects against the combat target."))
@@ -651,11 +717,61 @@ public:
 		ToolTip = "Cap (s) on how long Expose waits for LOS before recovering. Stops a permanently-blocked enemy hanging in Expose."))
 	float ExposeLosWaitMax = 1.5f;
 
-	/** Consecutive Expose-phase LOS timeouts before the enemy treats the slot as unworkable and
-	 *  forces a flank-break relocate (same path as a compromise). Resets to 0 when fire is opened. */
+	/** Ladder stage 0 threshold: consecutive Expose-phase LOS timeouts on the first peek side
+	 *  before the failed-peek ladder advances to the next stage. Resets to 0 when fire is opened. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "1",
-		ToolTip = "How many consecutive Expose LOS-timeouts (no shot fired) before the enemy relocates off this slot."))
+		ToolTip = "Ladder stage 0: consecutive Expose LOS-timeouts (no shot fired) on the first side before the failed-peek ladder advances."))
 	int32 MaxExposeLosTimeouts = 2;
+
+	/** Ladder stage 2: consecutive LOS-timeouts on the second side before advancing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "1",
+		ToolTip = "LOS-timeout threshold on the second side of the failed-peek ladder before the enemy advances to the next stage."))
+	int32 LadderSecondSideTimeouts = 1;
+
+	/** Ladder stage 1/3: consecutive LOS-timeouts while peeking over top before advancing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "1",
+		ToolTip = "LOS-timeout threshold for over-top peek stages of the failed-peek ladder before advancing."))
+	int32 LadderOverTopTimeouts = 1;
+
+	// --- Cover Peek (vision cone + endpoint options) ---
+
+	/** Half-angle (degrees) of the engagement cone centred on the current peek direction while the
+	 *  enemy is posed in cover. Targets outside this cone are treated as no-LOS for fire decisions
+	 *  only — perception and flank-break remain live. 180 = disabled (full sweep). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
+		meta = (ClampMin = "5.0", ClampMax = "180.0",
+		ToolTip = "Half-angle of the in-cover engagement cone (degrees). Targets outside it are treated as out-of-LOS for fire decisions. 180 disables the cone."))
+	float CoverPeekConeHalfAngleDeg = 75.f;
+
+	/** DEPRECATED — no longer read by the fire test. The peek cone is a single unbiased cone about
+	 *  the fire-arc forward so fire reach always matches the torso aim-offset reach (a lean-biased
+	 *  extension let the enemy fire at bearings the gun model could not visually point at). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
+		meta = (ClampMin = "0.0", ClampMax = "85.0",
+		ToolTip = "DEPRECATED: unused. The peek cone is unbiased; fire reach matches torso aim reach."))
+	float CoverPeekConeBiasDeg = 20.f;
+
+	/** Seconds bRelocatePending may linger before the task force-executes the relocate even if the
+	 *  enemy is still firing. Ensures a flanked enemy that keeps getting LOS eventually breaks cover. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
+		meta = (ClampMin = "0.5",
+		ToolTip = "Max seconds a flank-relocate stays pending before force-executing (stops a continuously-firing flanked enemy deferring forever)."))
+	float CoverRelocatePendingTimeout = 2.f;
+
+	/** Probability (0-1) that a crouch-cover peek at a wall end-point will swap from a side peek to
+	 *  a stand-up over-top peek. Applied at Expose entry and in the failed-peek escalation ladder.
+	 *  0 = never stand up; 1 = always stand up when the over-top path is physically valid. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Peek",
+		meta = (ClampMin = "0.0", ClampMax = "1.0",
+		ToolTip = "Roll chance for a crouch end-point to stand up and peek over the top instead of leaning sideways."))
+	float CoverEndpointStandPeekChance = 0.3f;
+
+	/** When true, a compromised cover is broken instantly (bypassing debounce/cooldown/safe-phase gates)
+	 *  when the enemy has effective LOS to the threat (cone-gated, i.e. they can actually see them).
+	 *  The slow-path debounce still applies when the enemy cannot see the threat (flanked from behind). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
+		meta = (ToolTip = "Instant cover break when compromised AND the enemy has effective LOS to the threat. Slow path kept for blind flanks."))
+	bool bCoverInstantBreakWithLOS = true;
 
 	/** Flank-break relocate only accepts a slot whose hunkered body is geometry-shielded from the
 	 *  threat. Disable to fall back to can-shoot-only selection. */
@@ -675,6 +791,210 @@ public:
 		ToolTip = "Min extra distance (cm) away from the threat a fallback strafe should add when no protective cover exists."))
 	float FlankBreakRetreatBias = 250.f;
 
+	// --- Cover Scoring (shared scorer — C++ picker paths AND the EQS scoring test) ---
+
+	/** Weight for closeness of the candidate to the enemy (1 at the enemy, 0 at CoverSearchRadius). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreProximityWeight = 1.f;
+
+	/** Weight for the candidate sitting at/beyond the ideal engagement distance from the threat. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreDistanceBandWeight = 0.7f;
+
+	/** Flat additive term (legacy cover bonus). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreFlatBonus = 0.15f;
+
+	/** Distance (cm) to the threat below which the distance-band term scores 0. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreIdealDistMin = 500.f;
+
+	/** Range (cm) over which the distance-band term ramps from 0 to 1 past CoverScoreIdealDistMin. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "1.0"))
+	float CoverScoreIdealDistRange = 700.f;
+
+	/** Bonus for a candidate with a stance-matched lean flag on the threat-facing side (a corner the
+	 *  enemy can peek around toward the threat). 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreSideFlagWeight = 0.f;
+
+	/** Fraction of CoverScoreSideFlagWeight granted when the candidate has a lean flag only on the
+	 *  side facing away from the threat. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverScoreSideFlagOpposite = 0.35f;
+
+	/** Bonus for a candidate with at least one other free cover point within
+	 *  CoverScoreRetreatViabilityRadius (an escape option exists). 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreRetreatViabilityWeight = 0.f;
+
+	/** Radius (cm) of the retreat-viability neighbour search. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "100.0"))
+	float CoverScoreRetreatViabilityRadius = 600.f;
+
+	/** A relocate candidate must beat the CURRENT cover's score by this margin before a voluntary
+	 *  (score-driven) relocate is taken. Never applied to compromise/flank breaks. 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float CoverScoreStickinessMargin = 0.f;
+
+	// --- Cover Path Exposure (route-safety penalty on relocate/reseek picks) ---
+
+	/** Score penalty at 100% route exposure (scaled by the exposed fraction of route samples).
+	 *  0 = off (no route traces run). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|PathExposure", meta = (ClampMin = "0.0"))
+	float PathExposureWeight = 0.f;
+
+	/** Sample points traced along the route to each evaluated candidate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|PathExposure", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 PathExposureSampleCount = 3;
+
+	/** Hard cap on route-exposure traces per selection round (spread across the top candidates). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|PathExposure", meta = (ClampMin = "3", ClampMax = "64"))
+	int32 PathExposureMaxTracesPerSelection = 24;
+
+	// --- Cover Multi-Threat (score penalty for exposure to hostiles beyond the combat target) ---
+
+	/** Score multiplier per extra sighted hostile a candidate fails to shield the body from
+	 *  (Score *= penalty^uncovered). Soft penalty only — a partially-exposed cover still beats none.
+	 *  1 = off. Mirrors the companion's MultiThreatExposurePenalty. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MultiThreatExposurePenalty = 0.5f;
+
+	/** Max known hostiles (beyond the combat target) considered for the multi-threat penalty.
+	 *  Bounds the extra body-protection traces per candidate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0", ClampMax = "4"))
+	int32 MaxExtraThreats = 2;
+
+	/** Seconds a hostile stays a multi-threat factor after sight of it is lost (scored at its
+	 *  frozen last-perceived position — honest knowledge). Covers the aggro-switch case: the
+	 *  hostile this enemy was JUST trading fire with must not vanish from its cover math the
+	 *  moment the combat target changes. 0 = currently-sighted hostiles only. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float ExtraThreatMemorySeconds = 20.f;
+
+	/** Hard reject for cover candidates within this 2D distance (cm) of a cover a hostile is
+	 *  moving to (declared intent). Kills claim collisions with the companion. 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float MinHostileCoverDistance = 250.f;
+
+	/** Hard reject for cover candidates within this 2D distance (cm) of a living hostile pawn —
+	 *  an enemy must never set up on a spot a hostile is holding. 0 = off. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Scoring", meta = (ClampMin = "0.0"))
+	float MinHostilePawnDistance = 300.f;
+
+	// --- Cover Blind Fire (suppression response) ---
+
+	/** Weight for hiding when suppressed (stay hunkered, wait). Default is the only non-zero
+	 *  weight, so all existing archetypes keep today's hide-only behaviour. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.0"))
+	float SuppressedHideWeight = 1.f;
+
+	/** Weight for blind-firing when suppressed (fire from hunker without LOS). 0 = never blind-fire. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.0"))
+	float SuppressedBlindFireWeight = 0.f;
+
+	/** Extra spread (degrees) applied during a blind-fire burst. Restored to 0 after burst ends. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.0"))
+	float BlindFireExtraSpreadDeg = 12.f;
+
+	/** Minimum blind-fire burst duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.05"))
+	float BlindFireBurstMin = 0.3f;
+
+	/** Maximum blind-fire burst duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|BlindFire", meta = (ClampMin = "0.05"))
+	float BlindFireBurstMax = 0.8f;
+
+	// --- Cover Shuffle (move within cover) ---
+
+	/** Weight (0-1) for shuffling to a neighbouring cover point during the Pause phase. 0 = never shuffle. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float CoverShuffleWeight = 0.f;
+
+	/** Minimum distance (cm) for a shuffle destination from the current point. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleDistanceMin = 50.f;
+
+	/** Maximum distance (cm) for a shuffle destination from the current point. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "1.0"))
+	float ShuffleDistanceMax = 125.f;
+
+	/** Composite shuffle score weight for having a threat-facing side flag. 0 = ignore flags. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleSideFlagWeight = 1.5f;
+
+	/** Composite shuffle score weight for lateral projection toward the wall end. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleWallEndWeight = 0.75f;
+
+	/** Composite shuffle score weight for angle-to-threat improvement vs current point. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleAngleWeight = 1.0f;
+
+	/** Composite shuffle score penalty per unit of normalized distance. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "0.0"))
+	float ShuffleDistancePenalty = 0.5f;
+
+	/** MaxWalkSpeed cap (cm/s) applied while a same-wall cover move (shuffle or ladder reposition)
+	 *  is in flight. Walk clip stride matches this speed — higher speeds cause foot-sliding.
+	 *  Original MaxWalkSpeed is restored on arrival, abort, task teardown, death, or relocate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle",
+		meta = (ClampMin = "50.0",
+		ToolTip = "Walk speed (cm/s) used during same-wall cover shuffles. Matches the walk clip stride to prevent foot-sliding."))
+	float CoverMoveSpeed = 170.f;
+
+	/** Multiplier on the effective CoverShuffleWeight at Pause-exit when the current point
+	 *  lacks a threat-facing side flag but a flagged same-wall candidate exists. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Shuffle", meta = (ClampMin = "1.0"))
+	float CoverAngleShuffleMultiplier = 2.0f;
+
+	// --- Cover Timing (peek/hide variance) ---
+
+	/** Seconds the enemy holds its idle-side swap pose before executing a cover move that
+	 *  requires turning around (move direction != current LastCoverSide). Lets the idle
+	 *  montage blend to the new side before the walk starts. 0 = instant move. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float CoverMoveSideSwapDelay = 0.5f;
+
+	/** Minimum Expose-phase settle duration (seconds) before opening fire. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.05"))
+	float ExposePhaseMin = 0.15f;
+
+	/** Maximum Expose-phase settle duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.05"))
+	float ExposePhaseMax = 0.45f;
+
+	/** Minimum Recover-phase re-crouch settle duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.05"))
+	float RecoverPhaseMin = 0.10f;
+
+	/** Maximum Recover-phase re-crouch settle duration (seconds). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.05"))
+	float RecoverPhaseMax = 0.40f;
+
+	/** Completed peek-fire cycles at a cover before shuffle/relocate may move on. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0"))
+	int32 MinPeekCyclesBeforeRelocate = 1;
+
+	/** Per-pause probability of a long-hide feint (multiplied into pause duration). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float LongHideChance = 0.15f;
+
+	/** Multiplier on pause duration when the long-hide feint triggers. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Timing", meta = (ClampMin = "1.0"))
+	float LongHideMultiplier = 2.5f;
+
+	// --- Cover Reload (tucked reload gate) ---
+
+	/** When true, the enemy proactively reloads behind cover during the Pause phase
+	 *  if ammo is below TuckedReloadAmmoFraction. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Reload")
+	bool bReloadWhileTuckedWhenLow = true;
+
+	/** Ammo fraction (0-1) below which a proactive tucked reload triggers during Pause. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover|Reload", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float TuckedReloadAmmoFraction = 0.34f;
+
 	// --- Cover Positioning & Advance Fire ---
 
 	/** Extra depth (cm) behind the cover line the enemy targets, beyond capsule radius.
@@ -682,6 +1002,13 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
 		ToolTip = "Extra standoff padding behind the cover wall surface, in cm, added on top of capsule radius."))
 	float CoverStandoffPadding = 25.f;
+
+	/** Lateral gap (cm) between the capsule's edge and the wall's actual end at endpoint covers.
+	 *  Arrival positions are corner-snapped so the shoulder sits this far inside the edge regardless
+	 *  of how far from the corner the bake left the point (fixes too-deep / past-the-edge covers). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0", ClampMax = "100.0",
+		ToolTip = "Lateral gap in cm between the capsule edge and the wall corner at endpoint covers."))
+	float CoverCornerGap = 5.f;
 
 	/** When true the enemy fires at the combat target while advancing to cover (BTTask_EnemyMoveToCover only). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover",
@@ -714,4 +1041,184 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.05",
 		ToolTip = "Longest inter-burst pause while advancing to cover. Independent of BurstPauseMax."))
 	float AdvanceFireBurstPauseMax = 3.0f;
+
+	// --- Posture (pressure/advance — Hold / Press / FallBack) ---
+
+	/** Master gate for the posture system. Off = enemy holds today's fixed engagement band. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture")
+	bool bPostureSystemEnabled = false;
+
+	/** Whether this archetype may enter Press at all (snipers: false). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture")
+	bool bCanPress = true;
+
+	/** Seconds between posture evaluations (staggered per enemy by a random phase). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.1"))
+	float PostureEvalInterval = 0.5f;
+
+	/** Aggression (0-1) at or above which Press is entered (requires Confident morale, unsuppressed). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PressEnterThreshold = 0.65f;
+
+	/** Aggression below which Press is abandoned (hysteresis — keep below PressEnterThreshold). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PressExitThreshold = 0.45f;
+
+	/** Aggression at or below which the enemy falls back (also forced by Broken morale). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FallBackEnterThreshold = 0.25f;
+
+	/** Continuous seconds in Press before a proactive advance to closer cover is requested. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.5"))
+	float PressAdvanceHoldTime = 2.5f;
+
+	/** Minimum seconds between committed advance relocates. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "1.0"))
+	float AdvanceRelocateCooldown = 12.f;
+
+	/** Weight: the threat hasn't damaged this enemy within PostureRecentDamageWindow. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float PostureWeightNoDamageRecently = 1.f;
+
+	/** Weight: the threat is fully passive (no recent damage AND own suppression low). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float PostureWeightThreatPassive = 1.f;
+
+	/** Weight: squad numeric advantage (living members). 0 = ignore squad size. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float PostureWeightSquadAdvantage = 0.f;
+
+	/** Seconds of no incoming damage from the threat before it starts reading as passive. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "1.0"))
+	float PostureRecentDamageWindow = 4.f;
+
+	/** Delta (cm, negative = closer) applied to CoverScoreIdealDistMin while Pressing. Press also
+	 *  flips the distance-band term to prefer covers NEARER the threat, down to the shifted min. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture")
+	float PosturePressDistMinDelta = -300.f;
+
+	/** Delta (cm) applied to CoverScoreIdealDistMin while falling back — deeper covers score higher. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float PostureFallBackDistMinDelta = 400.f;
+
+	/** Minimum distance (cm) an advance relocate must close toward the threat vs the current cover. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "50.0"))
+	float PostureAdvanceMinGain = 200.f;
+
+	// --- Posture: Press cadence (bounded Press episodes — officerless grunt pressure) ---
+	// All-zero defaults disable the cadence and preserve legacy always-available Press exactly.
+
+	/** Min seconds after combat begins before the first Press opportunity. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressInitialDelayMin = 0.f;
+
+	/** Max seconds after combat begins before the first Press opportunity. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressInitialDelayMax = 0.f;
+
+	/** Max seconds a Press episode may run before it ends and recovery is rolled.
+	 *  0 = cadence disabled (legacy: Press never expires, no recovery windows). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressMaxEpisodeDuration = 0.f;
+
+	/** Min seconds of recovery after a committed advance or an interrupted episode. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressRecoveryMin = 0.f;
+
+	/** Max seconds of recovery after a committed advance or an interrupted episode. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressRecoveryMax = 0.f;
+
+	/** Advance candidates closer than this (cm) to the threat are rejected before scoring, so a
+	 *  Press stops at medium range instead of walking onto the player. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture|Press", meta = (ClampMin = "0.0"))
+	float PressMinThreatDistance = 0.f;
+
+	/** While a hostile player is DBNO: enemies inside this radius (cm) of the downed player are forced
+	 *  to FallBack (with a one-shot retreat relocate), everyone else is capped at Hold — no pressing.
+	 *  Keep above the companion's ReviveThreatRadius so the revive window can actually open. 0 = off.
+	 *  Applies even when bPostureSystemEnabled is false. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
+	float DBNOStandoffRadius = 1800.f;
+
+	// --- Rusher (three-phase: cover approach → circle-strafe standoff → triggered charge) ---
+
+	/** Ring radius (cm) the rusher orbits the target at while circle-strafing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "100.0",
+		ToolTip = "Orbit ring radius (cm) for the circle-strafe standoff phase."))
+	float RushStandoffRadius = 700.f;
+
+	/** Distance (cm) to the target at which the rusher leaves the cover-advance approach and starts circling. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "100.0",
+		ToolTip = "Enter the circle-strafe phase when the target is inside this range (cm)."))
+	float RushStandoffEnterRange = 1100.f;
+
+	/** Hysteresis band (cm) — the target must open distance past EnterRange + this before the rusher
+	 *  drops back to the cover-advance approach (prevents flip-flopping at the boundary). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0",
+		ToolTip = "Extra distance (cm) beyond EnterRange before circling is abandoned for the cover approach."))
+	float RushStandoffHysteresis = 300.f;
+
+	/** Degrees stepped around the orbit ring per circle-strafe repick. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "10.0", ClampMax = "120.0",
+		ToolTip = "Angular step (degrees) along the standoff ring per strafe repick."))
+	float RushCircleStepDeg = 40.f;
+
+	/** Max distance (cm) from the target a charge may launch. Beyond it the commit decorator stays closed
+	 *  and the rusher keeps circling / advancing instead. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "100.0",
+		ToolTip = "Charges may only start when the target is inside this range (cm)."))
+	float RushChargeMaxRange = 1300.f;
+
+	/** Hysteresis band (cm) — a committed charge holds until the target opens distance past
+	 *  ChargeMaxRange + this, then the charger drops back to circling. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0",
+		ToolTip = "Extra distance (cm) beyond ChargeMaxRange before a committed charge is abandoned."))
+	float RushChargeHysteresis = 300.f;
+
+	/** Max squad members allowed to charge simultaneously (rush tokens). Squadless rushers are uncapped. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "1",
+		ToolTip = "Rush-token cap per squad: how many rushers may be in the charge phase at once."))
+	int32 MaxSimultaneousRushers = 2;
+
+	/** Seconds between push-trigger evaluations (reload/low-health/LoS-lost reads and the base-chance roll). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.1",
+		ToolTip = "Interval (seconds) between charge-trigger evaluations while not charging."))
+	float RushEvalInterval = 0.5f;
+
+	/** Chance (0-1) per evaluation to charge with no vulnerability trigger — keeps pressure organic. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0", ClampMax = "1.0",
+		ToolTip = "Per-evaluation probability of an untriggered charge. 0 = only triggered charges."))
+	float RushBaseChance = 0.03f;
+
+	/** When true, seeing the target reload triggers a charge (requires current LoS — no wallhack reads). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher",
+		meta = (ToolTip = "Charge when the target is seen reloading."))
+	bool bRushOnTargetReload = true;
+
+	/** Target health fraction at or below which a charge triggers. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0", ClampMax = "1.0",
+		ToolTip = "Charge when the target's health fraction is at or below this. 0 disables."))
+	float RushTargetLowHealthFraction = 0.35f;
+
+	/** Continuous seconds without LoS to the target (it ducked behind cover) before a charge triggers. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0",
+		ToolTip = "Charge when LoS to the target has been lost for this many seconds. 0 disables."))
+	float RushLosLostTriggerTime = 1.5f;
+
+	/** Inside this range (cm) the rusher always charges — self-defence beats the token cap and triggers. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0",
+		ToolTip = "Point-blank override (cm): a target this close always provokes the charge branch."))
+	float RushPointBlankRange = 350.f;
+
+	/** Bearing offset (degrees) applied per charger slot so simultaneous chargers approach from
+	 *  different sides, converging only at melee range. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0", ClampMax = "80.0",
+		ToolTip = "Per-slot approach bearing spread (degrees) so two chargers come in from different sides."))
+	float RushApproachSpreadDeg = 35.f;
+
+	/** Health fraction below which a charge aborts. 0 = never abort (fearless default). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Rusher", meta = (ClampMin = "0.0", ClampMax = "0.95",
+		ToolTip = "Health fraction below which a committed charge is abandoned. 0 = fearless."))
+	float RushAbortHealthFraction = 0.f;
 };

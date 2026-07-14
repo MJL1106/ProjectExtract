@@ -5,11 +5,13 @@
 #include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
 #include "Enemy/Debug/EnemyDebug.h"
+#include "AI/Cover/CoverPoseComponent.h"
 #include "Components/Image.h"
 #include "Materials/MaterialInstanceDynamic.h"
 
 const FName UEnemyAwarenessWidget::ParamFill      = TEXT("Fill");
 const FName UEnemyAwarenessWidget::ParamFillColor = TEXT("FillColor");
+const FName UEnemyAwarenessWidget::ParamPulse     = TEXT("Pulse");
 
 void UEnemyAwarenessWidget::SetEnemy(AEnemyCharacter* InEnemy)
 {
@@ -80,6 +82,18 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	// UpdateInterval is used as delta so the interp rate is frame-rate-independent across throttle ticks.
 	DisplayMeter = FMath::FInterpTo(DisplayMeter, TargetMeter, UpdateInterval, MeterInterpSpeed);
 
+	// Dim (not hide) while the enemy holds cover — the overhead widget's own occlusion exemption
+	// keeps it visible, this makes it read as "behind cover" rather than full brightness.
+	const UCoverPoseComponent* CoverPose = Enemy.IsValid() ? Enemy->GetCoverPoseComponent() : nullptr;
+	const bool bInCover = IsValid(CoverPose) && CoverPose->bInCover;
+	const float TargetCoverDimAlpha = bInCover ? InCoverOpacity : 1.f;
+	CoverDimAlpha = FMath::FInterpTo(CoverDimAlpha, TargetCoverDimAlpha, UpdateInterval, CoverDimInterpSpeed);
+
+	// Full-combat hide: the locked red ring is pure view clutter mid-fight. Fade out (not snap)
+	// so the Combat entry reads as the meter "locking in" before it clears the screen.
+	const bool bCombatHidden = bHideInCombat && State == EEnemyAwarenessState::Combat;
+	CombatHideAlpha = FMath::FInterpTo(CombatHideAlpha, bCombatHidden ? 0.f : 1.f, UpdateInterval, CombatHideInterpSpeed);
+
 	// Collapse (and bail early) while DisplayMeter is negligible — handles Unaware and the
 	// tail of a draining Searching state without leaving an empty ring visible.
 	if (DisplayMeter <= VisibleMeterThreshold)
@@ -90,8 +104,8 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	}
 
 	// Fade-in: ramp render opacity from 0→1 over the first FadeInThreshold of fill,
-	// giving a real fade-in on spawn and a fade-out as the meter drains near zero.
-	SetRenderOpacity(FMath::Clamp(DisplayMeter / FadeInThreshold, 0.f, 1.f));
+	// giving a real fade-in on spawn and a fade-out as the meter drains near zero, then dim for cover.
+	SetRenderOpacity(FMath::Clamp(DisplayMeter / FadeInThreshold, 0.f, 1.f) * CoverDimAlpha * CombatHideAlpha);
 
 	if (!IsValid(FillMID))
 	{
@@ -103,6 +117,8 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	const bool bMeterChanged = !FMath::IsNearlyEqual(DisplayMeter, LastWrittenMeter, KINDA_SMALL_NUMBER);
 	const FLinearColor NewColor = ResolveColor(State, DisplayMeter);
 	const bool bColorChanged = !NewColor.Equals(LastWrittenColor);
+	const float NewPulse = State == EEnemyAwarenessState::Combat ? 1.f : 0.f;
+	const bool bPulseChanged = !FMath::IsNearlyEqual(NewPulse, LastWrittenPulse, KINDA_SMALL_NUMBER);
 
 	if (bMeterChanged)
 	{
@@ -114,6 +130,12 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	{
 		FillMID->SetVectorParameterValue(ParamFillColor, NewColor);
 		LastWrittenColor = NewColor;
+	}
+
+	if (bPulseChanged)
+	{
+		FillMID->SetScalarParameterValue(ParamPulse, NewPulse);
+		LastWrittenPulse = NewPulse;
 	}
 
 	EmitDiagLog(static_cast<int32>(State), TargetMeter, DisplayMeter);

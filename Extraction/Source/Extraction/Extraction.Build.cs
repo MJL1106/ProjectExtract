@@ -21,8 +21,18 @@ public class Extraction : ModuleRules
 			"GameplayTags",
 			"AIModule",
 			"GameplayTasks",
-			"NavigationSystem"
+			"NavigationSystem",
+			"AICoverSystem",
+			"Niagara"
 		});
+
+		if (Target.bBuildEditor)
+		{
+			PrivateDependencyModuleNames.AddRange(new string[] {
+				"UnrealEd",
+				"AssetTools"
+			});
+		}
 
 		SetupGameplayDebuggerSupport(Target);
 
@@ -75,7 +85,8 @@ public class Extraction : ModuleRules
 			"Extraction/Private/AI/EQS",
 			"Extraction/Private/AI/Navigation",
 			"Extraction/Private/AI/Cover",
-			"Extraction/Private/World"
+			"Extraction/Private/World",
+			"Extraction/Private/Tests"
 		});
 	}
 }

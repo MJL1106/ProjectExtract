@@ -12,6 +12,7 @@ class UWeaponComponent;
 class UTraversalComponent;
 class UExtractionAnimInstance;
 class AWeaponBase;
+class UAnimMontage;
 class USceneComponent;
 
 UINTERFACE(MinimalAPI, BlueprintType, meta = (CannotImplementInterfaceInBlueprint))
@@ -38,6 +39,7 @@ public:
 	virtual UTraversalComponent* GetTraversalComponent() const = 0;
 	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const = 0;
 	virtual bool GetIsDBNO() const = 0;
+	virtual float GetBleedoutTimeRemaining() const = 0;
 	virtual void ExitDBNO() = 0;
 	virtual ETraversalType GetActiveTraversalType() const = 0;
 	virtual bool IsInTraversal() const = 0;
@@ -73,4 +75,20 @@ public:
 	/** Normalized auto-lean suggestion: -1 = lean left, 0 = none, +1 = lean right.
 	 *  Cosmetic, local-only. Default 0 for classes that don't implement auto-lean. */
 	virtual float GetAutoLeanAlpha() const { return 0.f; }
+
+	/** Cosmetic notify: someone (companion or player) started/stopped actively reviving this
+	 *  character — implementations play/stop the being-revived montage, lock look/move input, and
+	 *  suspend controller-yaw follow so the paired anims stay aligned. ExpectedDuration > 0
+	 *  rate-scales the montage to span the reviver's hold exactly (companion and player revives
+	 *  have independent durations). Default no-op. */
+	virtual void SetBeingRevived(bool /*bBeingRevived*/, float /*ExpectedDuration*/ = 0.f) {}
+
+	/** Rotate this downed character's body to face the reviver before paired montage playback. */
+	virtual void AlignForRevive(const FVector& /*ReviverLocation*/) {}
+
+	/** True while this character's being-revived montage is active. */
+	virtual bool IsBeingRevivedMontagePlaying() const { return false; }
+
+	/** The montage this character plays while being revived, or nullptr. */
+	virtual const UAnimMontage* GetBeingRevivedMontage() const { return nullptr; }
 };

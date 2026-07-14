@@ -11,6 +11,7 @@
 #include "AIShooterInterface.h"
 #include "ExtractionTypes.h"
 #include "EnemyTypes.h"
+#include "World/LootTypes.h"
 #include "EnemyCharacter.generated.h"
 
 class UHealthComponent;
@@ -28,14 +29,20 @@ class UEnemyArmourComponent;
 class UEnemyGrenadierComponent;
 class USquadAuraComponent;
 class UEnemySniperTelegraphComponent;
+class ALootPickup;
+
+// Cover pose (AICS migration — default subobject)
+class UCoverPoseComponent;
 
 // Phase 4 — suppression & morale (default subobjects, not bolt-ons)
 class USuppressionComponent;
 class UEnemyMoraleComponent;
+class UEnemyPostureComponent;
 
 // Phase 5 — squad coordination
 class UEnemySquadSubsystem;
 class UEnemySquad;
+class UAmmoDropTableDataAsset;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTakedownExecuted, AActor*, Instigator);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleePerformed);
@@ -134,6 +141,11 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Grenadier")
 	FOnGrenadeThrow OnGrenadeThrow;
 
+	// --- Target LOS flag (written by BTService_EnemyCombat, read by anim instance) ---
+
+	void SetHasTargetLOS(bool bInLOS) { bHasTargetLOS = bInLOS; }
+	bool HasTargetLOS() const { return bHasTargetLOS; }
+
 	/** Resolves which hit region a damage event maps to (used by armour component and internal hitbox path). */
 	EHitRegion ResolveHitRegion(const FDamageEvent& DamageEvent) const;
 
@@ -151,6 +163,11 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
 	UEnemySniperTelegraphComponent* GetSniperTelegraphComponent() const { return SniperTelegraphComp.Get(); }
 
+	// --- Cover pose (AICS migration — default subobject, always present) ---
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	UCoverPoseComponent* GetCoverPoseComponent() const { return CoverPoseComponent; }
+
 	// --- Phase 4: suppression & morale accessors (default subobjects — always present) ---
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
@@ -158,6 +175,9 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
 	UEnemyMoraleComponent* GetMoraleComponent() const { return MoraleComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
+	UEnemyPostureComponent* GetPostureComponent() const { return PostureComponent; }
 
 	/** Broadcast when alive and taking damage — region resolved from the damage event. BP/ABP binds for flinch montages. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Combat")
@@ -212,6 +232,11 @@ public:
 	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it; only the companion BT service calls it. */
 	bool HasDetectedPlayer() const;
 
+	/** World seconds of this enemy's most recent transition into Combat awareness, or a large
+	 *  negative sentinel if never / component missing. Companion stealth-break compares this
+	 *  against the stealth pin time to distinguish a NEW fight from a stale Combat-state tail. */
+	float GetTimeEnteredCombat() const;
+
 	/** True when this enemy is alert enough for the companion to ready its weapon.
 	 *  Searching and Combat count; Suspicious does not. */
 	bool IsAlertedForCompanionReadiness() const;
@@ -254,6 +279,10 @@ public:
 	/** Set true by the takedown instigator once its finisher montage is confirmed playing,
 	 *  so the victim ragdolls immediately on kill (no reaction-beat delay / pose snap). */
 	void SetTakedownWasMontageDriven(bool bDriven) { bTakedownWasMontageDriven = bDriven; }
+
+	/** True from BeginTakedownHold until the kill lands (or the hold aborts) — the enemy is
+	 *  frozen in a finisher and shouldn't react to the world (barks, morale theatrics). */
+	bool IsTakedownPending() const { return bPendingTakedownDeath; }
 
 	/** Fired when a takedown begins (BeginTakedownHold succeeds) — animation/FX hook for BP. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Takedown")
@@ -310,6 +339,19 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Data")
 	TObjectPtr<UEnemyArchetypeData> ArchetypeData;
 
+	/** Central ammo-drop economy table (chance/amount per weapon category). Assigned once on the
+	 *  base enemy BP — null disables death drops for this enemy. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Data")
+	TObjectPtr<UAmmoDropTableDataAsset> AmmoDropTable;
+
+	/** Guaranteed loot dropped as a physical pickup on death (e.g. keycards). Authored per placed instance. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Loot")
+	TArray<FLootGrant> DeathLoot;
+
+	/** Blueprint class to spawn for death loot. Assigned on the base enemy BP. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Loot")
+	TSubclassOf<ALootPickup> LootPickupClass;
+
 	// When true, this enemy detects by sight only (ignores hearing) and neither raises nor reacts to
 	// the global alert. For isolating test-gym encounters; leave false in real gameplay.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Testing")
@@ -320,6 +362,13 @@ public:
 	 *  Leave false in real gameplay. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Testing")
 	bool bDebugStandAndShoot = false;
+
+	/** Debug: when true, this enemy immediately and persistently treats the player as a detected
+	 *  combat target — no perception required. Engages silently: does not alert the Director or
+	 *  broadcast to the squad, so other enemies stay unaffected. Composes with bDebugStandAndShoot
+	 *  (both ticked = stands planted, firing at the player from spawn). Leave false in real gameplay. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Enemy|Testing")
+	bool bDebugAutoEngagePlayer = false;
 
 	// --- Perception: head-driven sight cone ---
 
@@ -340,6 +389,12 @@ public:
 	FVector HeadSightForwardAxis = FVector(0.f, 1.f, 0.f);
 
 	bool IsIsolatedEncounter() const { return bIsolatedEncounter; }
+
+	/** True while standing inside at least one ATakedownVolume. Drives awareness "muffling": a pocket
+	 *  enemy ignores gunfire, walking and reload noise so taking one down doesn't cascade to its
+	 *  neighbours — but a sprint footstep and a level-wide Loud alert still wake it. Distinct from the
+	 *  bIsolatedEncounter test flag, which is fully deaf. */
+	bool IsInTakedownVolume() const { return TakedownVolumeRefCount > 0; }
 
 	/** Designer-assigned squad identifier. Enemies with the same SquadId share sightings and coordinate.
 	 *  NAME_None = squadless (radius-based morale fallback, no coordination). */
@@ -380,6 +435,9 @@ private:
 
 	/** True when the weapon is currently attached to the patrol-hand socket (DA-driven hand-swap). */
 	bool bWeaponOnPatrolHand = false;
+
+	/** True while the combat service's eye-to-target trace is clear. AI-side only (not replicated). */
+	bool bHasTargetLOS = false;
 
 	TWeakObjectPtr<AActor> CurrentAimTarget;
 	TWeakObjectPtr<AController> LastDamageInstigator;
@@ -426,12 +484,20 @@ private:
 	UPROPERTY()
 	TObjectPtr<UEnemySniperTelegraphComponent> SniperTelegraphComp;
 
+	// Cover pose — AICS migration (default subobject, every enemy gets it)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
+	TObjectPtr<UCoverPoseComponent> CoverPoseComponent;
+
 	// Phase 4 — default subobjects (every enemy gets both)
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
 	TObjectPtr<USuppressionComponent> SuppressionComponent;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
 	TObjectPtr<UEnemyMoraleComponent> MoraleComponent;
+
+	// Posture (pressure/advance — default subobject, gated per-archetype by bPostureSystemEnabled)
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
+	TObjectPtr<UEnemyPostureComponent> PostureComponent;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Enemy|Tags")
 	FGameplayTagContainer OwnedTags;
@@ -560,4 +626,14 @@ private:
 
 	void ApplyRagdoll();
 	void DestroyAfterDeath();
+
+	/** Authority-only death-drop roll: chance from AmmoDropTable keyed by the held weapon's
+	 *  category; spawns an AAmmoPickup next to the corpse on success. */
+	void TrySpawnAmmoDrop();
+
+	/** Authority-only: spawns a loot pickup with DeathLoot contents next to the corpse. */
+	void TrySpawnDeathLoot();
+
+	/** Finds a clear lateral + ground-snapped spawn location for death loot. */
+	FVector FindDeathLootSpawnLocation() const;
 };

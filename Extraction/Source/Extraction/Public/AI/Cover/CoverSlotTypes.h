@@ -1,14 +1,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "AI/Cover/CoverPoseTypes.h"
 #include "CoverSlotTypes.generated.h"
 
-UENUM(BlueprintType)
-enum class ECoverHeight : uint8
-{
-	Stand,
-	Crouch
-};
+// ECoverHeight now lives in CoverPoseTypes.h — this include keeps all existing includers compiling.
 
 UENUM(BlueprintType)
 enum class ECoverPeekSide : uint8

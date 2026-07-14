@@ -11,6 +11,8 @@
 #include "HealthComponent.h"
 #include "EnemySquadSubsystem.h"
 #include "Squad/EnemySquad.h"
+#include "Companion/CompanionCharacter.h"
+#include "Components/CapsuleComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "NavigationSystem.h"
 #include "Engine/World.h"
@@ -44,6 +46,9 @@ void UEnemyDirectorSubsystem::Deinitialize()
 	SpawnZones.Empty();
 	ScopeVolumes.Empty();
 	Corpses.Empty();
+	WaveMembers.Empty();
+	PunishmentSource.Reset();
+	PunishmentConfig = nullptr;
 
 	Super::Deinitialize();
 }
@@ -59,6 +64,10 @@ void UEnemyDirectorSubsystem::ReportEnemySearching()
 
 void UEnemyDirectorSubsystem::ReportEnemyCombat()
 {
+	// Stamped before Escalate — Escalate early-outs once already Loud, but the event time must
+	// keep refreshing for every enemy that enters Combat (companion stealth-break reads it).
+	if (const UWorld* World = GetWorld())
+		LastCombatReportTime = World->GetTimeSeconds();
 	Escalate(EGlobalAlertLevel::Loud);
 }
 
@@ -301,15 +310,46 @@ void UEnemyDirectorSubsystem::DirectorTick()
 
 	PruneStaleZones();
 	PruneStaleScopeVolumes();
+	PruneStaleWaveMembers();
+	ReassertWaveMemberEngagement();
 
 	const FEnemySweepResult Sweep = SweepEnemies();
 
 	UpdateTension(DirectorTickInterval, Sweep.EngagedCount);
 	UpdateSawtooth(DirectorTickInterval);
 
-	if (ShouldSpawn(Sweep.AliveCount))
+	if (WaveProgress.IsActive() && WaveProgress.IsComplete())
 	{
-		TrySpawn(Sweep.AliveCount);
+		CompleteWave();
+	}
+	else
+	{
+		const bool bWaveBlocksSpawn = WaveProgress.IsActive() && !WaveProgress.CanSpawnMore();
+
+		if (!bWaveBlocksSpawn && ShouldSpawn(Sweep.AliveCount))
+		{
+			TArray<AEnemyCharacter*> Spawned;
+			const bool bSpawned = TrySpawn(Sweep.AliveCount, &Spawned);
+
+			if (WaveProgress.IsActive())
+			{
+				if (bSpawned)
+				{
+					WaveProgress.RecordSuccessfulSquad(Spawned.Num());
+					for (AEnemyCharacter* Member : Spawned)
+					{
+						if (IsValid(Member)) WaveMembers.Add(Member);
+					}
+					WaveBlockedTime = 0.f;
+					OnDirectorWaveProgress.Broadcast(ActiveWaveRequest.WaveId,
+						WaveProgress.SpawnedSquads, WaveProgress.RemainingMembers);
+				}
+				else
+				{
+					AccrueWaveBlockedTime();
+				}
+			}
+		}
 	}
 
 	TimeSinceLastSpawn += DirectorTickInterval;
@@ -321,6 +361,15 @@ void UEnemyDirectorSubsystem::DirectorTick()
 
 void UEnemyDirectorSubsystem::HandleEnemyKilled(AEnemyCharacter* DeadEnemy, FVector Location, bool bWasOfficer)
 {
+	if (WaveProgress.IsActive() && IsValid(DeadEnemy))
+	{
+		const TWeakObjectPtr<AEnemyCharacter> WeakEnemy(DeadEnemy);
+		if (WaveMembers.Remove(WeakEnemy) > 0)
+		{
+			WaveProgress.RecordMemberEnded();
+		}
+	}
+
 	const bool bUseScopeVolumes = HasActiveScopeVolumes();
 	if (bUseScopeVolumes && !IsPointInsideAnyScope(Location) && !IsActorInsideAnyScope(DeadEnemy)) return;
 
@@ -406,12 +455,13 @@ void UEnemyDirectorSubsystem::UpdateTension(float DeltaSeconds, float EngagedCou
 	float PerKill = DefaultTensionPerKill;
 	float PerEngaged = DefaultTensionPerEngaged;
 
-	if (IsValid(Config))
+	const UDirectorConfigData* Effective = GetEffectiveConfig();
+	if (IsValid(Effective))
 	{
-		DecayPerSec = Config->TensionDecayPerSecond;
-		PerHealthLost = Config->TensionPerPlayerHealthLost;
-		PerKill = Config->TensionPerKill;
-		PerEngaged = Config->TensionPerEngagedEnemy;
+		DecayPerSec = Effective->TensionDecayPerSecond;
+		PerHealthLost = Effective->TensionPerPlayerHealthLost;
+		PerKill = Effective->TensionPerKill;
+		PerEngaged = Effective->TensionPerEngagedEnemy;
 	}
 
 	float TensionDelta = 0.f;
@@ -434,11 +484,12 @@ void UEnemyDirectorSubsystem::UpdateSawtooth(float DeltaSeconds)
 	float ReliefEntry = DefaultReliefEntry;
 	float ReliefDur = DefaultReliefDuration;
 
-	if (IsValid(Config))
+	const UDirectorConfigData* Effective = GetEffectiveConfig();
+	if (IsValid(Effective))
 	{
-		PeakThreshold = Config->PeakTensionThreshold;
-		ReliefEntry = Config->ReliefEntryThreshold;
-		ReliefDur = Config->ReliefDuration;
+		PeakThreshold = Effective->PeakTensionThreshold;
+		ReliefEntry = Effective->ReliefEntryThreshold;
+		ReliefDur = Effective->ReliefDuration;
 	}
 
 	switch (DirectorState)
@@ -478,19 +529,36 @@ void UEnemyDirectorSubsystem::UpdateSawtooth(float DeltaSeconds)
 
 bool UEnemyDirectorSubsystem::ShouldSpawn(int32 AliveCount) const
 {
-	if (AlertLevel != EGlobalAlertLevel::Loud) return false;
-	if (DirectorState != EDirectorState::Build) return false;
-
 	const FMissionPhaseConfig& PhaseConfig = GetCurrentPhaseConfig();
 
-	if (TimeSinceLastSpawn < PhaseConfig.SpawnCadenceSeconds) return false;
+	// A finite scripted wave OWNS the director while it lives. Two rules:
+	// - While it can still field squads, bypass the ambient pacing gates: StartWave forces Build
+	//   once, but a mid-wave Peak transition (tension over threshold — guaranteed during an
+	//   endgame assault) froze the remaining squads until Relief ("the wave never spawns").
+	//   Waves pace on cadence + MaxAlive only.
+	// - Once all squads are fielded, the director goes SILENT until the wave resolves — the
+	//   ambient/punishment trickle resuming underneath the defence both diluted the scripted
+	//   pacing and used zones the wave deliberately avoids (the player-visible lifts box).
+	const bool bWaveActive = WaveProgress.IsActive();
+	const bool bWaveCanSpawn = WaveProgress.CanSpawnMore();
+	if (bWaveActive && !bWaveCanSpawn) return false;
+	if (!bWaveActive)
+	{
+		if (AlertLevel != EGlobalAlertLevel::Loud) return false;
+		if (DirectorState != EDirectorState::Build) return false;
+		if (Tension >= PhaseConfig.IntensityCeiling) return false;
+	}
+
+	const float Cadence = (bWaveCanSpawn && ActiveWaveRequest.SpawnCadenceOverride > 0.f)
+		? ActiveWaveRequest.SpawnCadenceOverride
+		: PhaseConfig.SpawnCadenceSeconds;
+	if (TimeSinceLastSpawn < Cadence) return false;
 	if (AliveCount >= PhaseConfig.MaxAlive) return false;
-	if (Tension >= PhaseConfig.IntensityCeiling) return false;
 
 	return true;
 }
 
-void UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount)
+bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*>* OutSpawned)
 {
 	const FMissionPhaseConfig& PhaseConfig = GetCurrentPhaseConfig();
 
@@ -500,41 +568,49 @@ void UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount)
 		if (!bLoggedNoComposition)
 		{
 			UE_LOG(LogEnemyAI, Verbose, TEXT("Director: no valid composition fits (alive %d, max %d, phase %d)"),
-				AliveCount, PhaseConfig.MaxAlive, static_cast<int32>(CurrentMissionPhase));
+				AliveCount, PhaseConfig.MaxAlive, static_cast<int32>(GetEffectivePhase()));
 			bLoggedNoComposition = true;
 		}
-		return;
+		return false;
 	}
 
 	UWorld* World = GetWorld();
-	if (!IsValid(World)) return;
+	if (!IsValid(World)) return false;
 
 	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
-	if (!IsValid(PlayerPawn)) return;
+	if (!IsValid(PlayerPawn)) return false;
 
 	APlayerController* PC = UGameplayStatics::GetPlayerController(World, 0);
-	if (!IsValid(PC)) return;
+	if (!IsValid(PC)) return false;
 
 	FVector ViewLoc;
 	FRotator ViewRot;
 	PC->GetPlayerViewPoint(ViewLoc, ViewRot);
 
-	AEnemySpawnZone* Zone = PickSpawnZone(PlayerPawn->GetActorLocation(), ViewLoc, ViewRot);
+	AEnemySpawnZone* Zone = PickSpawnZone(PlayerPawn->GetActorLocation(), ViewLoc, ViewRot, GetCompositionSize(Composition));
 	if (!IsValid(Zone))
 	{
 		if (!bLoggedNoZone)
 		{
 			UE_LOG(LogEnemyAI, Warning, TEXT("Director: no eligible spawn zone (phase %d, %d zones registered)"),
-				static_cast<int32>(CurrentMissionPhase), SpawnZones.Num());
+				static_cast<int32>(GetEffectivePhase()), SpawnZones.Num());
 			bLoggedNoZone = true;
 		}
-		return;
+		return false;
 	}
 
-	SpawnSquadAtZone(Composition, Zone);
+	TArray<AEnemyCharacter*> Spawned;
+	SpawnSquadAtZone(Composition, Zone, Spawned);
+
+	if (Spawned.Num() == 0) return false;
+
 	TimeSinceLastSpawn = 0.f;
 	bLoggedNoComposition = false;
 	bLoggedNoZone = false;
+
+	if (OutSpawned) *OutSpawned = MoveTemp(Spawned);
+
+	return true;
 }
 
 int32 UEnemyDirectorSubsystem::GetCompositionSize(const FSquadComposition& Comp) const
@@ -549,7 +625,8 @@ int32 UEnemyDirectorSubsystem::GetCompositionSize(const FSquadComposition& Comp)
 
 const FMissionPhaseConfig& UEnemyDirectorSubsystem::GetCurrentPhaseConfig() const
 {
-	if (IsValid(Config)) return Config->GetPhaseConfig(CurrentMissionPhase);
+	const UDirectorConfigData* Effective = GetEffectiveConfig();
+	if (IsValid(Effective)) return Effective->GetPhaseConfig(GetEffectivePhase());
 
 	static const FMissionPhaseConfig DefaultConfig;
 	return DefaultConfig;
@@ -589,59 +666,66 @@ bool UEnemyDirectorSubsystem::PickComposition(const FMissionPhaseConfig& PhaseCo
 	return false;
 }
 
-AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot) const
+AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize) const
 {
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return nullptr;
 
 	float DistMin = DefaultSpawnDistMin;
 	float DistMax = DefaultSpawnDistMax;
-	if (IsValid(Config))
+	const UDirectorConfigData* Effective = GetEffectiveConfig();
+	if (IsValid(Effective))
 	{
-		DistMin = Config->SpawnDistanceMin;
-		DistMax = Config->SpawnDistanceMax;
+		DistMin = Effective->SpawnDistanceMin;
+		DistMax = Effective->SpawnDistanceMax;
 	}
 
-	const float DistMinSq = DistMin * DistMin;
-	const float DistMaxSq = DistMax * DistMax;
 	const FVector ViewDir = ViewRot.Vector();
 
 	FCollisionQueryParams QueryParams;
 	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
 	if (IsValid(PlayerPawn)) QueryParams.AddIgnoredActor(PlayerPawn);
 
+	const ACompanionCharacter* Companion = FindCompanion();
+	const bool bHasCompanion = IsValid(Companion);
+	FVector CompanionLoc = FVector::ZeroVector;
+	if (bHasCompanion)
+	{
+		CompanionLoc = Companion->GetActorLocation();
+		// The companion's body must not count as an occluder for "is this zone hidden".
+		QueryParams.AddIgnoredActor(Companion);
+	}
+
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
 	const bool bUseScopeVolumes = HasActiveScopeVolumes();
 
-	TArray<AEnemySpawnZone*> Candidates;
-	Candidates.Reserve(MaxZoneCandidates);
+	AEnemySpawnZone* BestZone = nullptr;
+	float BestScore = -FLT_MAX;
+
+	// Wave-eligibility: scripted waves must never use zones the player can watch from the fight
+	// room (the hidden-check trace reads glass as an occluder, so "hidden" lies there) — the
+	// designer flags those zones off for waves. Ambient spawns keep the full zone set. Keyed on
+	// IsActive: while a wave lives, every spawn the director makes IS a wave spawn (ShouldSpawn
+	// silences the ambient trickle for the wave's whole lifetime).
+	const bool bWaveActive = WaveProgress.IsActive();
 
 	for (const TWeakObjectPtr<AEnemySpawnZone>& WeakZone : SpawnZones)
 	{
 		AEnemySpawnZone* Zone = WeakZone.Get();
 		if (!IsValid(Zone)) continue;
-		if (!Zone->IsActiveForPhase(CurrentMissionPhase)) continue;
+		if (!Zone->IsActiveForPhase(GetEffectivePhase())) continue;
+		if (bWaveActive && !Zone->bWaveEligible) continue;
 
 		const FVector ZoneLoc = Zone->GetZoneOrigin();
 		if (bUseScopeVolumes && !IsPointInsideAnyScope(ZoneLoc)) continue;
 
-		const float DistSq = FVector::DistSquared(PlayerLoc, ZoneLoc);
-		if (DistSq < DistMinSq || DistSq > DistMaxSq) continue;
+		// Min distance against the closest point of the box (a wide zone can put spawn
+		// points far nearer than its origin); max distance against the origin so large
+		// zones don't starve availability.
+		if (FVector::DistSquared(PlayerLoc, Zone->GetClosestPointInZone(PlayerLoc)) < DistMin * DistMin) continue;
+		if (FVector::DistSquared(PlayerLoc, ZoneLoc) > DistMax * DistMax) continue;
 
-		if (IsPointInPlayerSightline(ZoneLoc, ViewLoc, ViewDir, QueryParams)) continue;
-
-		static constexpr int32 SightlineSampleCount = 3;
-		bool bAnySampleVisible = false;
-		for (int32 Si = 0; Si < SightlineSampleCount; ++Si)
-		{
-			const FVector Pt = Zone->GetSpawnTransform(Si).GetLocation();
-			if (IsPointInPlayerSightline(Pt, ViewLoc, ViewDir, QueryParams))
-			{
-				bAnySampleVisible = true;
-				break;
-			}
-		}
-		if (bAnySampleVisible) continue;
+		if (!IsZoneHiddenFromPlayer(Zone, FMath::Max(MinSightlineSamples, SquadSize), ViewLoc, ViewDir, QueryParams, NavSys)) continue;
 
 		if (IsValid(NavSys))
 		{
@@ -650,12 +734,93 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 			if (!NavSys->ProjectPointToNavigation(ZoneLoc, NavLoc, Extent)) continue;
 		}
 
-		Candidates.Add(Zone);
-		if (Candidates.Num() >= MaxZoneCandidates) break;
+		const float Score = ScoreZone(Zone, PlayerLoc, CompanionLoc, bHasCompanion, DistMin, DistMax);
+		if (Score > BestScore)
+		{
+			BestScore = Score;
+			BestZone = Zone;
+		}
 	}
 
-	if (Candidates.Num() == 0) return nullptr;
-	return Candidates[FMath::RandRange(0, Candidates.Num() - 1)];
+	return BestZone;
+}
+
+bool UEnemyDirectorSubsystem::IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const
+{
+	// Sample where spawned enemies will actually stand: floor-projected points raised to
+	// head height, one per squad member. Tracing to the raw box base (at/below the floor)
+	// hits the floor and reports "occluded" for zones sitting in plain view.
+	const FVector Extent(NavProjectExtentXY, NavProjectExtentXY, NavProjectExtentZ);
+
+	// SpawnEntryAtZone falls back to the projected zone origin when a point fails to
+	// project — so that's the location the visibility check must cover too.
+	FNavLocation OriginNav;
+	bool bOriginProjected = false;
+	if (IsValid(NavSys))
+		bOriginProjected = NavSys->ProjectPointToNavigation(Zone->GetZoneOrigin(), OriginNav, Extent);
+
+	for (int32 Si = 0; Si < SampleCount; ++Si)
+	{
+		FVector Pt = Zone->GetSpawnTransform(Si).GetLocation();
+
+		if (IsValid(NavSys))
+		{
+			FNavLocation NavLoc;
+			if (NavSys->ProjectPointToNavigation(Pt, NavLoc, Extent))
+				Pt = NavLoc.Location;
+			else if (bOriginProjected)
+				Pt = OriginNav.Location;
+			else
+				return false; // can't establish where this member would stand — fail closed
+		}
+
+		Pt.Z += SpawnEyeHeightOffset;
+		if (IsPointInPlayerSightline(Pt, ViewLoc, ViewDir, QueryParams)) return false;
+	}
+
+	return true;
+}
+
+float UEnemyDirectorSubsystem::ScoreZone(const AEnemySpawnZone* Zone, const FVector& PlayerLoc, const FVector& CompanionLoc, bool bHasCompanion, float DistMin, float DistMax) const
+{
+	// Jitter keeps repeated spawns from always electing the same room when scores tie.
+	float Score = FMath::FRandRange(0.f, ZoneScoreJitter);
+
+	// Prefer zones a little past min distance — keeps pressure on without pop-in range.
+	const float Band = FMath::Max(DistMax - DistMin, 1.f);
+	const float IdealDist = DistMin + Band * IdealDistanceFrac;
+	const float Dist = FVector::Dist(PlayerLoc, Zone->GetZoneOrigin());
+	Score += DistanceBandBonus * (1.f - FMath::Min(FMath::Abs(Dist - IdealDist) / Band, 1.f));
+
+	// Soft penalty near the companion: don't materialise a squad on the second teammate,
+	// but don't hard-starve small interiors either.
+	if (bHasCompanion)
+	{
+		const float CompanionDist = FVector::Dist(CompanionLoc, Zone->GetClosestPointInZone(CompanionLoc));
+		if (CompanionDist < DistMin)
+			Score -= CompanionProximityPenalty * (1.f - CompanionDist / DistMin);
+	}
+
+	return Score;
+}
+
+const ACompanionCharacter* UEnemyDirectorSubsystem::FindCompanion() const
+{
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return nullptr;
+
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
+	{
+		const ACompanionCharacter* Companion = *It;
+		if (!IsValid(Companion)) continue;
+
+		const UHealthComponent* HC = Companion->FindComponentByClass<UHealthComponent>();
+		if (IsValid(HC) && HC->IsDead()) continue;
+
+		return Companion;
+	}
+
+	return nullptr;
 }
 
 bool UEnemyDirectorSubsystem::IsPointInPlayerSightline(const FVector& Point, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams) const
@@ -702,6 +867,16 @@ AEnemyCharacter* UEnemyDirectorSubsystem::SpawnEntryAtZone(UWorld* World, TSubcl
 		}
 	}
 
+	// Nav-projected locations are on the floor; SpawnActor places the capsule CENTRE
+	// there, embedding the character waist-deep. Raise by the class's capsule half-height.
+	float CapsuleHalfHeight = 88.f;
+	if (const AEnemyCharacter* ClassDefaults = EnemyClass->GetDefaultObject<AEnemyCharacter>())
+	{
+		if (const UCapsuleComponent* Capsule = ClassDefaults->GetCapsuleComponent())
+			CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
+	}
+	SpawnLoc.Z += CapsuleHalfHeight + SpawnGroundClearance;
+
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 
@@ -725,7 +900,7 @@ AEnemyCharacter* UEnemyDirectorSubsystem::SpawnEntryAtZone(UWorld* World, TSubcl
 	return Spawned;
 }
 
-void UEnemyDirectorSubsystem::SpawnSquadAtZone(const FSquadComposition& Composition, AEnemySpawnZone* Zone)
+void UEnemyDirectorSubsystem::SpawnSquadAtZone(const FSquadComposition& Composition, AEnemySpawnZone* Zone, TArray<AEnemyCharacter*>& OutSpawned)
 {
 	UWorld* World = GetWorld();
 	if (!IsValid(World) || !IsValid(Zone)) return;
@@ -736,8 +911,7 @@ void UEnemyDirectorSubsystem::SpawnSquadAtZone(const FSquadComposition& Composit
 	}
 
 	const int32 ExpectedSize = GetCompositionSize(Composition);
-	TArray<AEnemyCharacter*> SpawnedMembers;
-	SpawnedMembers.Reserve(ExpectedSize);
+	OutSpawned.Reserve(ExpectedSize);
 	int32 SpawnIndex = 0;
 
 	for (const FSquadCompositionEntry& Entry : Composition.Entries)
@@ -747,15 +921,15 @@ void UEnemyDirectorSubsystem::SpawnSquadAtZone(const FSquadComposition& Composit
 		for (int32 i = 0; i < Entry.Count; ++i)
 		{
 			AEnemyCharacter* Spawned = SpawnEntryAtZone(World, Entry.EnemyClass, Zone, SpawnIndex);
-			if (IsValid(Spawned)) SpawnedMembers.Add(Spawned);
+			if (IsValid(Spawned)) OutSpawned.Add(Spawned);
 			++SpawnIndex;
 		}
 	}
 
 	UEnemySquad* Squad = nullptr;
-	if (SpawnedMembers.Num() > 0 && CachedSquadSubsystem.IsValid())
+	if (OutSpawned.Num() > 0 && CachedSquadSubsystem.IsValid())
 	{
-		Squad = CachedSquadSubsystem->CreateSquadForGroup(SpawnedMembers);
+		Squad = CachedSquadSubsystem->CreateSquadForGroup(OutSpawned);
 	}
 
 	if (IsValid(Squad))
@@ -764,7 +938,7 @@ void UEnemyDirectorSubsystem::SpawnSquadAtZone(const FSquadComposition& Composit
 	}
 
 	UE_LOG(LogEnemyAI, Log, TEXT("Director spawned squad (%d/%d members) at zone %s"),
-		SpawnedMembers.Num(), SpawnIndex, *Zone->GetName());
+		OutSpawned.Num(), SpawnIndex, *Zone->GetName());
 }
 
 void UEnemyDirectorSubsystem::SeedSquadWithFight(UEnemySquad* Squad) const
@@ -775,5 +949,185 @@ void UEnemyDirectorSubsystem::SeedSquadWithFight(UEnemySquad* Squad) const
 	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
 	if (!IsValid(PlayerPawn)) return;
 
+	if (WaveProgress.IsActive() && ActiveWaveRequest.bAutoEngage)
+	{
+		Squad->ForceEngage(PlayerPawn, PlayerPawn->GetActorLocation());
+		return;
+	}
+
 	Squad->ReportSighting(PlayerPawn, PlayerPawn->GetActorLocation());
+}
+
+// ============================================================
+// v2: Effective Config / Phase Selection
+// ============================================================
+
+const UDirectorConfigData* UEnemyDirectorSubsystem::GetEffectiveConfig() const
+{
+	return FDirectorProfileSelector::SelectConfig(
+		WaveProgress.IsActive(), ActiveWaveRequest.ConfigOverride,
+		PunishmentSource.IsValid(), PunishmentConfig, Config);
+}
+
+EMissionPhase UEnemyDirectorSubsystem::GetEffectivePhase() const
+{
+	return FDirectorProfileSelector::SelectPhase(
+		WaveProgress.IsActive(), ActiveWaveRequest.MissionPhase,
+		PunishmentSource.IsValid(), PunishmentPhase, CurrentMissionPhase);
+}
+
+// ============================================================
+// v2: Finite Wave Lifecycle
+// ============================================================
+
+bool UEnemyDirectorSubsystem::StartWave(const FDirectorWaveRequest& Request)
+{
+	if (GetWorld()->GetNetMode() == NM_Client) return false;
+	if (WaveProgress.IsActive()) return false;
+	if (Request.TargetSquads < 1) return false;
+
+	ActiveWaveRequest = Request;
+	WaveProgress.Begin(Request.TargetSquads);
+	WaveBlockedTime = 0.f;
+	bWaveBlockedBroadcast = false;
+
+	TripAlarm();
+
+	DirectorState = EDirectorState::Build;
+	ReliefTimer = 0.f;
+	TimeSinceLastSpawn = 0.f;
+
+	OnDirectorWaveStarted.Broadcast(Request.WaveId);
+
+	UE_LOG(LogEnemyAI, Log, TEXT("Director wave started: %s (target %d squads)"),
+		*Request.WaveId.ToString(), Request.TargetSquads);
+
+	return true;
+}
+
+void UEnemyDirectorSubsystem::CancelWave(FName WaveId)
+{
+	if (GetWorld()->GetNetMode() == NM_Client) return;
+	if (!WaveProgress.IsActive()) return;
+	if (ActiveWaveRequest.WaveId != WaveId) return;
+
+	UE_LOG(LogEnemyAI, Log, TEXT("Director wave cancelled: %s"), *WaveId.ToString());
+	ClearWaveState();
+}
+
+void UEnemyDirectorSubsystem::CompleteWave()
+{
+	const FName WaveId = ActiveWaveRequest.WaveId;
+	const int32 Squads = WaveProgress.SpawnedSquads;
+	const int32 Remaining = WaveProgress.RemainingMembers;
+
+	ClearWaveState();
+
+	UE_LOG(LogEnemyAI, Log, TEXT("Director wave completed: %s (%d squads)"),
+		*WaveId.ToString(), Squads);
+
+	OnDirectorWaveProgress.Broadcast(WaveId, Squads, Remaining);
+	OnDirectorWaveCompleted.Broadcast(WaveId);
+}
+
+void UEnemyDirectorSubsystem::ClearWaveState()
+{
+	ActiveWaveRequest = FDirectorWaveRequest();
+	WaveProgress = FDirectorWaveProgress();
+	WaveMembers.Empty();
+	WaveBlockedTime = 0.f;
+	bWaveBlockedBroadcast = false;
+}
+
+void UEnemyDirectorSubsystem::PruneStaleWaveMembers()
+{
+	if (!WaveProgress.IsActive()) return;
+
+	for (auto It = WaveMembers.CreateIterator(); It; ++It)
+	{
+		if (!It->IsValid())
+		{
+			It.RemoveCurrent();
+			WaveProgress.RecordMemberEnded();
+		}
+	}
+}
+
+void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
+{
+	if (!WaveProgress.IsActive() || !ActiveWaveRequest.bAutoEngage) return;
+
+	UWorld* World = GetWorld();
+	APawn* PlayerPawn = IsValid(World) ? UGameplayStatics::GetPlayerPawn(World, 0) : nullptr;
+	if (!IsValid(PlayerPawn)) return;
+
+	for (const TWeakObjectPtr<AEnemyCharacter>& WeakMember : WaveMembers)
+	{
+		AEnemyCharacter* Member = WeakMember.Get();
+		if (!IsValid(Member)) continue;
+		const UHealthComponent* HP = Member->GetHealthComponent();
+		if (HP && HP->IsDead()) continue;
+
+		AEnemyAIController* AIC = Cast<AEnemyAIController>(Member->GetController());
+		UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
+		if (!Awareness) continue;
+
+		// Searching still hunts. Only a member that fully gave up (Unaware — decayed out of the
+		// fight and walked back to a guard post, e.g. parked behind a door) gets re-seeded; the
+		// kill-all wave can never complete around a passive holdout the player can't find.
+		if (Awareness->GetAwarenessState() != EEnemyAwarenessState::Unaware) continue;
+		Awareness->ForceEngage(PlayerPawn);
+		UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: re-engaging idle member %s"),
+			*ActiveWaveRequest.WaveId.ToString(), *Member->GetName());
+	}
+}
+
+void UEnemyDirectorSubsystem::AccrueWaveBlockedTime()
+{
+	if (!WaveProgress.CanSpawnMore()) return;
+
+	WaveBlockedTime += DirectorTickInterval;
+
+	if (bWaveBlockedBroadcast) return;
+	if (WaveBlockedTime < ActiveWaveRequest.BlockedWarningSeconds) return;
+
+	bWaveBlockedBroadcast = true;
+	OnDirectorWaveBlocked.Broadcast(ActiveWaveRequest.WaveId,
+		FText::FromString(TEXT("Wave spawn blocked: no valid zone or composition")));
+
+	UE_LOG(LogEnemyAI, Warning, TEXT("Director wave %s blocked for %.0fs"),
+		*ActiveWaveRequest.WaveId.ToString(), WaveBlockedTime);
+}
+
+// ============================================================
+// v2: Punishment Profile
+// ============================================================
+
+bool UEnemyDirectorSubsystem::ActivatePunishmentProfile(AActor* Source, UDirectorConfigData* Profile, EMissionPhase Phase)
+{
+	if (GetWorld()->GetNetMode() == NM_Client) return false;
+	if (!IsValid(Source) || !IsValid(Profile)) return false;
+	if (PunishmentSource.IsValid() && PunishmentSource.Get() != Source) return false;
+
+	PunishmentSource = Source;
+	PunishmentConfig = Profile;
+	PunishmentPhase = Phase;
+
+	UE_LOG(LogEnemyAI, Log, TEXT("Punishment profile activated: %s from %s (phase %d)"),
+		*Profile->GetName(), *Source->GetName(), static_cast<int32>(Phase));
+
+	return true;
+}
+
+void UEnemyDirectorSubsystem::DeactivatePunishmentProfile(AActor* Source)
+{
+	if (GetWorld()->GetNetMode() == NM_Client) return;
+	if (PunishmentSource.IsValid() && PunishmentSource.Get() != Source) return;
+
+	UE_LOG(LogEnemyAI, Log, TEXT("Punishment profile deactivated by %s"),
+		IsValid(Source) ? *Source->GetName() : TEXT("stale source"));
+
+	PunishmentSource.Reset();
+	PunishmentConfig = nullptr;
+	PunishmentPhase = EMissionPhase::Infiltration;
 }

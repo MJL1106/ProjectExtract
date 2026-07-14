@@ -9,6 +9,7 @@
 #include "EnemyAwarenessComponent.generated.h"
 
 class AEnemyCharacter;
+class ACompanionCharacter;
 class UBlackboardComponent;
 class UEnemyArchetypeData;
 class UEnemyDirectorSubsystem;
@@ -16,6 +17,15 @@ class UEnemySquadSubsystem;
 class UEnemySquad;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAwarenessStateChanged, EEnemyAwarenessState, OldState, EEnemyAwarenessState, NewState);
+
+/** A hostile the enemy currently factors into cover decisions: live position when sighted,
+ *  frozen last-stimulus position while memory of it is still fresh (honest knowledge). */
+struct FEnemyKnownThreat
+{
+	AActor* Actor = nullptr;
+	FVector Location = FVector::ZeroVector;
+	bool bSighted = false;
+};
 
 UCLASS(ClassGroup = (Enemy), meta = (BlueprintSpawnableComponent))
 class EXTRACTION_API UEnemyAwarenessComponent : public UActorComponent
@@ -36,6 +46,15 @@ public:
 
 	/** Called by AEnemyCharacter::TakeDamage to force Combat state toward the instigator's pawn. */
 	void NotifyDamaged(AController* Instigator);
+
+	/** Debug: force-set Combat state with the given actor as target, bypassing perception, suspicion,
+	 *  barks, and squad broadcast. Re-assert every awareness tick to prevent decay. */
+	void DebugForceEngage(AActor* Target);
+
+	/** Force full Combat entry toward Target through the normal EnterCombat path (barks, BB writes,
+	 *  Director tension report). No confirmed visual — LOS establishes via the enemy's own perception.
+	 *  Used by UEnemySquad::ForceEngage to seed Director wave squads into the fight on spawn. */
+	void ForceEngage(AActor* Target);
 
 	/** Called by AWeaponBase::ReportNearMisses when a near-miss bullet passes close to this enemy.
 	 *  ShotOrigin is the bullet trace start (eye/muzzle of the shooter) — sent as the investigate
@@ -59,6 +78,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	EEnemyAwarenessState GetAwarenessState() const { return CurrentState; }
 
+	/** World seconds of the most recent transition INTO Combat. Per-enemy decaying event stamp —
+	 *  covers isolated-encounter enemies that never report to the director. */
+	float GetLastCombatEnterTime() const { return LastCombatEnterTime; }
+
 	/** Highest current per-target suspicion (0-100). Debug/UI use. */
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	float GetHighestSuspicion() const;
@@ -73,6 +96,33 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	bool IsAnyHostileSighted() const;
 
+	/** Current combat target, or nullptr outside Combat. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	AActor* GetCombatTarget() const { return CombatTarget.Get(); }
+
+	/** Last position the combat target was confirmed at — live while sighted, frozen once LOS is lost. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	FVector GetLastKnownLocation() const { return LastKnownLocation; }
+
+	/** True while the enemy currently has line of sight to its combat target. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	bool HasLOSToTarget() const { return bHadLOS; }
+
+	/** Seconds since the given pawn last damaged this enemy, or a large value if it never has (recently). */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	float GetTimeSinceDamagedBy(const AActor* Pawn) const;
+
+	/** Living hostiles beyond ExcludeTarget this enemy either sees now (live location) or has
+	 *  perceived within MemorySeconds (frozen last-stimulus location — honest knowledge), closest
+	 *  first, capped at MaxCount. MemorySeconds <= 0 = currently-sighted only. Cloaked companions
+	 *  are excluded (their track is stale by definition). */
+	void GetExtraKnownThreats(const AActor* ExcludeTarget, int32 MaxCount, float MemorySeconds,
+		TArray<FEnemyKnownThreat>& OutThreats) const;
+
+	/** The local player's pawn if it is currently DBNO, else nullptr. Shared by the posture
+	 *  standoff override and the search-converge clamp. */
+	static APawn* FindDownedPlayerPawn(const UObject* WorldContext);
+
 private:
 
 	/** Per-stimulus-source suspicion bookkeeping. */
@@ -81,9 +131,28 @@ private:
 		float Suspicion = 0.f;
 		bool bSighted = false;
 		FVector LastStimulusLocation = FVector::ZeroVector;
+		/** World time LastStimulusLocation was last written (multi-threat memory window). */
+		float LastStimulusTime = -1e9f;
 		/** World time of last NotifyShotAt processing for this instigator (rate-limit). */
 		float LastShotAtTime = -1e9f;
 	};
+
+	/** Writes Track's stimulus location + timestamp together — keep every write on this path. */
+	void StampTrack(FSuspicionTrack& Track, const FVector& Location) const;
+
+	/** Acoustic-occlusion cache entry: one computed multiplier per quantized stimulus cell. */
+	struct FAcousticCacheEntry
+	{
+		FIntVector Cell = FIntVector::ZeroValue;
+		float Multiplier = 1.f;
+		float ExpiryTime = -1.f;
+	};
+
+	/** Occlusion-aware audibility (0..1) of a noise at StimLoc for the owning pawn — 1 through a
+	 *  clear line or open door, muffled through a closed openable door, 0 through walls/floors/
+	 *  locked doors (see AIAcoustics). Cached per AcousticCellSize stimulus cell for
+	 *  AcousticCacheTTL so automatic fire doesn't re-trace every shot. */
+	float GetCachedAcousticMultiplier(const FVector& StimLoc, const AActor* Instigator);
 
 	void SetState(EEnemyAwarenessState NewState);
 	void SetCombatTarget(AActor* NewTarget);
@@ -101,6 +170,10 @@ private:
 
 	void HandleSightStimulus(AActor* Actor, const FAIStimulus& Stimulus);
 	void HandleHearingStimulus(AActor* Actor, const FAIStimulus& Stimulus);
+	bool TryApplyBreachSearchRoomStartle(AActor* Actor, const FAIStimulus& Stimulus,
+		float NormalGain, FSuspicionTrack& Track);
+	/** Ally coordination: a mate's heard gunfire raises suspicion toward what he is shooting at. */
+	void HandleAllyGunfireHeard(class AEnemyCharacter* Shooter, const FAIStimulus& Stimulus);
 	void HandleBodySighted(class AEnemyCharacter* Body);
 	void Bark(EBarkType Type) const;
 
@@ -110,7 +183,32 @@ private:
 
 	bool IsCompanionActor(const AActor* Actor) const;
 	bool ShouldIgnoreCompanionStimulus(const AActor* Actor) const;
-	bool CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, bool bHasVisibleNonCompanionTarget, float WorldTime) const;
+	bool CanSelectCompanionTarget(const AActor* Candidate, const FSuspicionTrack& Track, float WorldTime) const;
+
+	/** Mode-dependent companion sight cloak.
+	 *  Combat mode: never cloaked (guns blazing — fully perceivable).
+	 *  Stealth (unbroken): always cloaked, even to in-Combat enemies.
+	 *  Normal (and broken stealth): cloaked until the fight is on — this enemy in Combat, or the
+	 *  global alert has gone Loud (player spotted / firing). Isolated encounters ignore the alert. */
+	bool IsCompanionSightCloaked(const AActor* Actor) const;
+
+	/** Companion gunfire audibility. Stealth: audible unless the weapon is suppressed (the
+	 *  suppressor buys the silence). Normal: silent while sight-cloaked. Combat: always audible. */
+	bool IsCompanionFireInaudible(const AActor* Actor) const;
+
+	/** Seeds/refreshes bSighted tracks for currently-perceived, currently-uncloaked companions.
+	 *  Called on cloak-lift transitions (combat entry, global alert Loud) — sight events swallowed
+	 *  while cloaked left no track, and perception only fires on edges. */
+	void SeedCompanionSightTracks();
+
+	/** Player-DBNO combat handoff fallback: the live, hostile, uncloaked companion within
+	 *  SightRadius, with a suspicion track stamped at its current location — or nullptr. Only
+	 *  called at the moment a DBNO player drops out of Combat and normal selection found nothing,
+	 *  so the position grant reads as mid-fight squad awareness, not a wallhack. */
+	AActor* FindDBNOHandoffCompanion();
+
+	void RefreshSearchRoomExposure();
+	void ApplySilentSearchRoomStartle(ACompanionCharacter* Companion, FSuspicionTrack& Track);
 
 	/** Egress: report our current combat target + last-known to the squad (rate-limited by the squad). */
 	void BroadcastSightingToSquad();
@@ -120,6 +218,11 @@ private:
 
 	/** True when the controlled pawn has bIsolatedEncounter set (sight-only, no global alert). */
 	bool IsOwnerIsolatedEncounter() const;
+
+	/** True when the controlled pawn is inside a takedown volume — awareness is "muffled": gunfire,
+	 *  walking and reload noise is dropped so taking one enemy down doesn't cascade to its pocket
+	 *  neighbours. A sprint footstep and the global Loud alert still wake it (both bypass the muffle). */
+	bool IsOwnerTakedownMuffled() const;
 
 	bool IsHostile(AActor* Actor) const;
 	static bool IsActorAlive(const AActor* Actor);
@@ -133,11 +236,16 @@ private:
 	TWeakObjectPtr<UEnemyDirectorSubsystem> Director;
 
 	EEnemyAwarenessState CurrentState = EEnemyAwarenessState::Unaware;
+	float LastCombatEnterTime = -1e9f;
 
 	TWeakObjectPtr<AActor> CombatTarget;
 	FVector LastKnownLocation = FVector::ZeroVector;
 
 	TMap<TWeakObjectPtr<AActor>, FSuspicionTrack> SuspicionTracks;
+
+	TWeakObjectPtr<ACompanionCharacter> CachedPerceivedCompanion;
+	uint32 LastSeededSearchRoomExposureGeneration = 0;
+	uint32 LastStartledSearchRoomExposureGeneration = 0;
 
 	/** Bodies this enemy has already reacted to (one search trigger per body per enemy). */
 	TSet<TWeakObjectPtr<const AActor>> DiscoveredBodies;
@@ -151,6 +259,11 @@ private:
 
 	/** Clears the investigate-body reference and the target flag on the corpse. */
 	void ClearInvestigateBody();
+
+	TArray<FAcousticCacheEntry> AcousticCache;
+
+	static constexpr float AcousticCacheTTL = 0.35f;
+	static constexpr float AcousticCellSize = 128.f;
 
 	static constexpr float UpdateInterval = 0.15f;
 	/** Minimum seconds between NotifyShotAt processing for the same instigator (below Combat). */
@@ -175,8 +288,20 @@ private:
 	TWeakObjectPtr<AActor> RecentDamageInstigatorPawn;
 	float RecentDamageWorldTime = -1e9f;
 
+	// Per-attacker damage timestamps for GetTimeSinceDamagedBy — the single slot above is
+	// last-writer-wins, so a companion hit would otherwise erase the player's recent damage
+	// and make an actively-firing player read as passive to the posture system. Bounded by
+	// the hostile count (player + companion).
+	TMap<TWeakObjectPtr<const AActor>, float> DamageTimesByAttacker;
+
 	// Guard against squad sighting relay feedback loops: ReportSquadSighting must NOT re-broadcast
 	bool bInSquadSightingRelay = false;
+
+	// Debug auto-engage: suppresses Director report in SetState while true
+	bool bDebugForcedCombat = false;
+
+	// Edge detection for debug auto-engage flag-off: true while the flag was active last tick
+	bool bWasDebugEngaged = false;
 
 	// Bark hysteresis: suppress re-acquire Contact bark shortly after leaving Combat
 	float LastCombatExitWorldTime = -1e9f;

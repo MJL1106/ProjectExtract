@@ -7,16 +7,16 @@
 DEFINE_LOG_CATEGORY(LogCoverRegistry);
 
 // Scoring weights — tune here, not in scoring logic
-static constexpr float Weight_Proximity   = 1.0f;
-static constexpr float Weight_Distance    = 0.7f;
+static constexpr float RegistryWeight_Proximity   = 1.0f;
+static constexpr float RegistryWeight_Distance    = 0.7f;
 // Part C de-bias: was Weight_StandFire = 0.3 with StandScore (crouch=1.0, stand=0.5),
 // giving crouch +0.30 and stand +0.15 — a 0.15 differential disfavouring stand slots.
 // Split into two independent weights so the terms are fully neutral between the two heights.
-static constexpr float Weight_CoverBonus  = 0.15f;
+static constexpr float RegistryWeight_CoverBonus  = 0.15f;
 
 // Target distance scoring: sweet spot between MinIdealDist and MaxIdealDist (cm)
-static constexpr float IdealDistMin       = 500.f;
-static constexpr float IdealDistRange     = 700.f;
+static constexpr float RegistryIdealDistMin       = 500.f;
+static constexpr float RegistryIdealDistRange     = 700.f;
 
 // Initial reservation size for the slot registry
 static constexpr int32 InitialReserveSize = 32;
@@ -69,6 +69,10 @@ void UCoverRegistrySubsystem::GetSlotsInRadius(const FVector& Origin, float Radi
 		if (Slot->IsClaimed())
 			continue;
 
+		// Per-instance kill-switch: slots tagged "CoverDisabled" in-editor sit out of all queries (AICS migration aid)
+		if (Slot->ActorHasTag(TEXT("CoverDisabled")))
+			continue;
+
 		if (FVector::DistSquared(Origin, Slot->GetActorLocation()) <= RadiusSq)
 			OutSlots.Add(Slot);
 	}
@@ -116,6 +120,10 @@ AAICoverSlot* UCoverRegistrySubsystem::FindBestCoverFor(const FVector& QuerierLo
 
 		AAICoverSlot* Slot = WeakSlot.Get();
 		if (!IsValid(Slot))
+			continue;
+
+		// Per-instance kill-switch: slots tagged "CoverDisabled" in-editor sit out of all queries (AICS migration aid)
+		if (Slot->ActorHasTag(TEXT("CoverDisabled")))
 			continue;
 
 		++SlotCount;
@@ -248,13 +256,13 @@ float UCoverRegistrySubsystem::ScoreSlotFor(const AAICoverSlot* Slot, const FVec
 	const float ProximityScore = 1.f - FMath::Clamp(DistToQuerier / MaxRadius, 0.f, 1.f);
 
 	const float DistToTarget = FVector::Dist(StandPos, Target->GetActorLocation());
-	const float DistanceScore = FMath::Clamp((DistToTarget - IdealDistMin) / IdealDistRange, 0.f, 1.f);
+	const float DistanceScore = FMath::Clamp((DistToTarget - RegistryIdealDistMin) / RegistryIdealDistRange, 0.f, 1.f);
 
 	// Part C: flat cover bonus — applied equally to crouch and flagged-stand slots.
 	// Hide-only stand slots are already rejected before scoring reaches here.
-	return Weight_Proximity * ProximityScore
-		+ Weight_Distance * DistanceScore
-		+ Weight_CoverBonus;
+	return RegistryWeight_Proximity * ProximityScore
+		+ RegistryWeight_Distance * DistanceScore
+		+ RegistryWeight_CoverBonus;
 }
 
 void UCoverRegistrySubsystem::PruneStaleSlots()

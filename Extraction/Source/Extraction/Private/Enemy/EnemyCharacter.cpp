@@ -24,13 +24,19 @@
 #include "EnemySniperTelegraphComponent.h"
 #include "SuppressionComponent.h"
 #include "EnemyMoraleComponent.h"
+#include "CoverPoseComponent.h"
+#include "EnemyPostureComponent.h"
 #include "EnemySquadSubsystem.h"
 #include "Components/CapsuleComponent.h"
-#include "Components/WidgetComponent.h"
+#include "UI/OverheadWidgetComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/DamageEvents.h"
 #include "TimerManager.h"
 #include "EnemyAwarenessWidget.h"
+#include "Data/AmmoDropTableDataAsset.h"
+#include "World/AmmoPickup.h"
+#include "World/LootPickup.h"
+#include "Companion/CompanionCharacter.h"
 
 static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
 	TEXT("enemy.PersistCorpses"), 1,
@@ -49,6 +55,8 @@ AEnemyCharacter::AEnemyCharacter()
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
 	MoraleComponent = CreateDefaultSubobject<UEnemyMoraleComponent>(TEXT("MoraleComponent"));
+	CoverPoseComponent = CreateDefaultSubobject<UCoverPoseComponent>(TEXT("CoverPoseComponent"));
+	PostureComponent = CreateDefaultSubobject<UEnemyPostureComponent>(TEXT("PostureComponent"));
 
 	AIControllerClass = AEnemyAIController::StaticClass();
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
@@ -64,9 +72,9 @@ AEnemyCharacter::AEnemyCharacter()
 	OwnedTags.AddTag(TAG_Character_Enemy);
 
 	static constexpr float AwarenessWidgetOffsetZ = 30.f;
-	static constexpr float AwarenessWidgetSize     = 64.f;
+	static constexpr float AwarenessWidgetSize     = 76.f;
 
-	AwarenessWidgetComponent = CreateDefaultSubobject<UWidgetComponent>(TEXT("AwarenessWidget"));
+	AwarenessWidgetComponent = CreateDefaultSubobject<UOverheadWidgetComponent>(TEXT("AwarenessWidget"));
 	AwarenessWidgetComponent->SetupAttachment(GetMesh(), TEXT("head"));
 	AwarenessWidgetComponent->SetRelativeLocation(FVector(0.f, 0.f, AwarenessWidgetOffsetZ));
 	AwarenessWidgetComponent->SetWidgetSpace(EWidgetSpace::Screen);
@@ -426,6 +434,14 @@ float AEnemyCharacter::GetAIAimSpreadDegrees() const
 	// Phase 4: suppression widens spread before the command multiplier
 	if (IsValid(SuppressionComponent))
 		Spread += ArchetypeData->SuppressionSpreadPenaltyDeg * SuppressionComponent->GetSuppression01();
+
+	// Mercy spread: widen when targeting a companion that is mid-revive or committed to a rescue
+	// (sprinting to the body) — the approach has to be survivable, not just the hold.
+	if (const ACompanionCharacter* TargetCompanion = Cast<ACompanionCharacter>(CurrentAimTarget.Get()))
+	{
+		if (TargetCompanion->IsRevivingPlayer() || TargetCompanion->IsRescueCommitted())
+			Spread += ArchetypeData->RevivingCompanionExtraSpreadDeg;
+	}
 
 	// Phase 3: squad aura narrows spread; extra spread from BT tasks widens it.
 	Spread *= CommandSpreadMultiplier;
@@ -843,6 +859,9 @@ void AEnemyCharacter::HandleDeath()
 	if (IsValid(MoraleComponent))
 		MoraleComponent->DeactivateForDeath();
 
+	if (IsValid(PostureComponent))
+		PostureComponent->DeactivateForDeath();
+
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
 	{
@@ -886,6 +905,9 @@ void AEnemyCharacter::HandleDeath()
 
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
+
+	TrySpawnAmmoDrop();
+	TrySpawnDeathLoot();
 
 	// Sight perception bakes the listener-target affiliation into its query at registration and never
 	// re-evaluates a runtime team change. This pawn just flipped to NoTeam (dead) — living enemies
@@ -944,6 +966,13 @@ void AEnemyCharacter::ApplyRagdoll()
 	MeshComp->SetCollisionProfileName(TEXT("Ragdoll"));
 	MeshComp->SetSimulatePhysics(true);
 
+	// A takedown corpse starts from a held floor pose — bodies already touching (or slightly
+	// inside) the ground get a depenetration kick at physics start that reads as the corpse
+	// bouncing. Cap the resolve speed so overlaps ease out instead of popping.
+	static constexpr float CorpseMaxDepenetrationVelocity = 120.f;
+	for (FBodyInstance* Body : MeshComp->Bodies)
+		if (Body) Body->SetMaxDepenetrationVelocity(CorpseMaxDepenetrationVelocity);
+
 	// Snapshot the corpse location after the ragdoll settles to avoid per-tick bone lookups.
 	if (UWorld* World = GetWorld())
 	{
@@ -958,6 +987,108 @@ void AEnemyCharacter::ApplyRagdoll()
 void AEnemyCharacter::DestroyAfterDeath()
 {
 	Destroy();
+}
+
+void AEnemyCharacter::TrySpawnAmmoDrop()
+{
+	if (!HasAuthority() || !AmmoDropTable) return;
+
+	const AWeaponBase* Weapon = CurrentWeapon.Get();
+	const UWeaponDataAsset* Data = Weapon ? Weapon->GetWeaponData() : nullptr;
+	if (!Data) return; // died weaponless — no drop
+
+	const EEnemyWeaponAnimType Category = Data->EnemyWeaponAnimType;
+	const FAmmoDropEntry* Entry = AmmoDropTable->Find(Category);
+	if (!Entry || !Entry->PickupClass) return;
+	if (FMath::FRand() > Entry->DropChance) return;
+
+	const int32 Amount = FMath::RandRange(Entry->MinAmount, Entry->MaxAmount);
+	if (Amount <= 0) return;
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	const FTransform SpawnTransform(FRotator::ZeroRotator, GetActorLocation() + FVector(0.f, 0.f, 30.f));
+	AAmmoPickup* Pickup = World->SpawnActorDeferred<AAmmoPickup>(
+		Entry->PickupClass, SpawnTransform, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!Pickup) return;
+
+	Pickup->InitPickup(Category, Amount);
+	Pickup->FinishSpawning(SpawnTransform);
+}
+
+FVector AEnemyCharacter::FindDeathLootSpawnLocation() const
+{
+	const FVector Origin = GetActorLocation();
+	const FVector Fallback = Origin + FVector(0.f, 0.f, 30.f);
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return Fallback;
+
+	// Candidate lateral directions: behind facing, left, right, forward.
+	const FVector Forward = GetActorForwardVector();
+	const FVector Candidates[4] = {
+		-Forward, FVector::CrossProduct(FVector::UpVector, Forward),
+		FVector::CrossProduct(Forward, FVector::UpVector), Forward
+	};
+
+	constexpr float LateralDist = 80.f;
+	constexpr float SweepRadius = 15.f;
+	constexpr float TraceDown = 500.f;
+	constexpr float GroundOffset = 5.f;
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(DeathLoot), false, this);
+
+	for (const FVector& Dir : Candidates)
+	{
+		const FVector TestPoint = Origin + Dir * LateralDist + FVector(0.f, 0.f, 30.f);
+
+		// Candidate must be reachable from the corpse — reject spots on the far side of a wall.
+		FHitResult PathHit;
+		if (World->LineTraceSingleByChannel(PathHit, Origin + FVector(0.f, 0.f, 30.f),
+				TestPoint, ECC_WorldStatic, Params))
+			continue;
+
+		// Check the candidate spot isn't inside blocking geometry.
+		if (World->OverlapBlockingTestByChannel(TestPoint, FQuat::Identity,
+				ECC_WorldStatic, FCollisionShape::MakeSphere(SweepRadius), Params))
+			continue;
+
+		// Ground-snap: line trace down to find the floor.
+		FHitResult GroundHit;
+		if (World->LineTraceSingleByChannel(GroundHit, TestPoint,
+				TestPoint - FVector(0.f, 0.f, TraceDown), ECC_WorldStatic, Params))
+			return GroundHit.ImpactPoint + FVector(0.f, 0.f, GroundOffset);
+	}
+
+	return Fallback;
+}
+
+void AEnemyCharacter::TrySpawnDeathLoot()
+{
+	if (!HasAuthority() || DeathLoot.Num() == 0) return;
+
+	if (!LootPickupClass)
+	{
+		UE_LOG(LogEnemyAI, Warning, TEXT("%s: DeathLoot authored but LootPickupClass is unset — loot will not drop"),
+			*GetName());
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	const FVector SpawnLocation = FindDeathLootSpawnLocation();
+	const FTransform SpawnTransform(FRotator::ZeroRotator, SpawnLocation);
+
+	ALootPickup* Pickup = World->SpawnActorDeferred<ALootPickup>(
+		LootPickupClass, SpawnTransform, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn);
+	if (!IsValid(Pickup)) return;
+
+	Pickup->SetContents(DeathLoot);
+	Pickup->FinishSpawning(SpawnTransform);
 }
 
 // --- Silent takedown ---
@@ -1072,6 +1203,17 @@ bool AEnemyCharacter::HasDetectedPlayer() const
 	if (!IsValid(Awareness)) return false;
 
 	return Awareness->GetAwarenessState() == EEnemyAwarenessState::Combat;
+}
+
+float AEnemyCharacter::GetTimeEnteredCombat() const
+{
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return -1e9f;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return -1e9f;
+
+	return Awareness->GetLastCombatEnterTime();
 }
 
 bool AEnemyCharacter::IsAlertedForCompanionReadiness() const

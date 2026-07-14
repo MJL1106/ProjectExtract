@@ -43,11 +43,32 @@ public:
 	/** Called by awareness component on Combat entry + LOS updates. Rate-limited per squad. */
 	void ReportSighting(AActor* Target, const FVector& LastKnown);
 
+	/** One-shot Combat seed for every living member (Director wave spawns). Unlike ReportSighting,
+	 *  forces full Combat entry rather than Searching, and skips the relay throttle. */
+	void ForceEngage(AActor* Target, const FVector& LastKnown);
+
 	// --- Role tokens ---
 
 	bool TryClaimRole(EEnemySquadRole Role, AEnemyCharacter* Claimant);
 	void ReleaseRole(EEnemySquadRole Role, AEnemyCharacter* Claimant);
 	AEnemyCharacter* GetRoleHolder(EEnemySquadRole Role) const;
+
+	// --- Rush tokens (counted — caps simultaneous rusher charges per squad) ---
+
+	/** Claims a rush token. Idempotent for an existing holder. Returns false when MaxTokens are
+	 *  already held by other living members. */
+	bool TryClaimRushToken(AEnemyCharacter* Claimant, int32 MaxTokens);
+
+	/** Releases the claimant's rush token. No-op if it holds none. */
+	void ReleaseRushToken(AEnemyCharacter* Claimant);
+
+	/** True when the claimant already holds a token or one is free under MaxTokens.
+	 *  Read-only availability check for decorators (no side effects). */
+	bool IsRushTokenAvailable(const AEnemyCharacter* Claimant, int32 MaxTokens) const;
+
+	/** Stable slot index (0..MaxTokens-1) of the claimant's held token, or INDEX_NONE.
+	 *  Chargers use it to spread approach bearings. */
+	int32 GetRushSlotIndex(const AEnemyCharacter* Claimant) const;
 
 	// --- Focus fire ---
 
@@ -59,6 +80,15 @@ public:
 
 	void NotifyMemberDied(AEnemyCharacter* Dead, bool bWasOfficer);
 	void Rally(AEnemyCharacter* Officer);
+
+	// --- Advance staggering ---
+
+	/** True when no squad member has committed a posture advance within AdvanceWindowSeconds.
+	 *  Caps the squad to one advancing enemy at a time so pushes read as probing, not a rush. */
+	bool CanClaimAdvanceWindow() const;
+
+	/** Records the current world time as the squad's last committed advance. */
+	void RecordAdvance();
 
 	// --- Flank attempt tracking ---
 
@@ -128,12 +158,24 @@ private:
 	// Role tokens (mutable: GetRoleHolder lazily clears dead holders)
 	mutable TMap<EEnemySquadRole, TWeakObjectPtr<AEnemyCharacter>> RoleHolders;
 
+	// Rush tokens (slot-indexed; mutable: reads lazily prune dead/stale holders).
+	// Dead holders become empty slots that keep their index, so a surviving charger's
+	// approach bearing never flips mid-charge.
+	mutable TArray<TWeakObjectPtr<AEnemyCharacter>> RushTokenHolders;
+
+	/** Clears dead/stale holders in place (keeps slot indices stable) and trims empty tail slots. */
+	void PruneRushTokens() const;
+
 	// Focus fire (mutable: GetFocusTarget resets officer flag when weak ptr goes stale)
 	mutable TWeakObjectPtr<AActor> FocusTarget;
 	mutable bool bFocusSetByOfficer = false;
 
 	// Bark dedup
 	TMap<EBarkType, float> LastSquadBarkTime;
+
+	// Advance staggering
+	float LastAdvanceWorldTime = -1e9f;
+	static constexpr float AdvanceWindowSeconds = 6.f;
 
 	// --- Bounding overwatch state ---
 

@@ -65,7 +65,7 @@ If your environment does **not** expose the graph tools (some AIK transports may
 - Read or modify the user's memory files (`MEMORY.md` and friends are CLI-only).
 
 ## When CLAUDE.md mentions things you don't have
-The CLI-targeted sections of `CLAUDE.md` reference: `ue5-cpp-implementer`, `ue5-safety-reviewer`, `ue5-performance-reviewer`, `agent-teams:team-spawn`, `Bash`, custom skills like `ue5-class-scaffold`, etc. **None of these exist in your environment.** Skip them. Your reference is this skill file.
+The CLI-targeted sections of `CLAUDE.md` reference: `ue5-cpp-implementer`, `ue5-reviewer`, `agent-teams:team-spawn`, `Bash`, custom skills like `ue5-class-scaffold`, etc. **None of these exist in your environment.** Skip them. Your reference is this skill file.
 
 ## Communication style
 - Confirm scope before reading files: "Want me to inspect the BP graph, or also look at C++? (C++ would be a job for your CLI session.)"

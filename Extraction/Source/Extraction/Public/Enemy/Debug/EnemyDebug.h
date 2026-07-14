@@ -40,3 +40,25 @@ bool IsReloadDebugEnabled();
 /** Returns the current enemy.FlankBreakLog cvar value (0=off, 1=on). When on, logs [FLANKDBG] per
  *  cover-compromise eval: arc verdict, hunkered body-shield verdict, debounce count, cooldown, phase. */
 int32 GetFlankBreakLogLevel();
+
+/** Returns the current enemy.ForceCover cvar value (0=off, 1=always seek + hold cover in combat —
+ *  shuffle/relocate/compromise disabled so cover animation can be observed in place). */
+int32 GetForceCoverLevel();
+
+/** Returns the current enemy.CoverAnimLog cvar value (0=off, 1=log [COVERANIM] pose mirror edges,
+ *  velocity-gate transitions, montage selection and play results). */
+int32 GetCoverAnimLogLevel();
+
+/** Returns the current enemy.ForceCoverPeekSide cvar value (0=auto, 1=force left corner peek,
+ *  2=force right corner peek, 3=force over-top). Skips the gap/LOS side checks entirely so the
+ *  side-peek montages and weapon-align poses can be observed regardless of baked cover flags. */
+int32 GetForceCoverPeekSide();
+
+/** Returns the current enemy.ForceCoverReposition cvar value (0=off, 1=same-wall shuffle every
+ *  pause cycle, 2=full relocate every pause cycle). For visual testing of cover movement. */
+int32 GetForceCoverRepositionLevel();
+
+/** Returns the current enemy.CoverMoveDebug cvar value (0=off, 1=per-tick [COVERMOVEDBG] log +
+ *  directional arrows during cover-move windows: shuffle hold, facing-active transit, SeekingCover
+ *  phase, and a post-arrival soak window). */
+int32 GetCoverMoveDebugLevel();

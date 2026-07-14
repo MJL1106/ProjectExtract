@@ -1,7 +1,9 @@
 // BTTask_EnemySuppressFire — suppressor role: sustained area fire at target or last-known.
 
 #include "BTTask_EnemySuppressFire.h"
+#include "CoverPoseComponent.h"
 #include "EnemyAIController.h"
+#include "EnemyDebug.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
 #include "EnemyMoraleComponent.h"
@@ -37,12 +39,20 @@ EBTNodeResult::Type UBTTask_EnemySuppressFire::ExecuteTask(UBehaviorTreeComponen
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
 	if (!IsValid(Enemy)) return EBTNodeResult::Failed;
 
+	// enemy.ForceCover debug: keep enemies in the cover loop — non-cover branches fail outright.
+	if (GetForceCoverLevel() > 0) return EBTNodeResult::Failed;
+
 	AActor* Target = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
 	if (!IsValid(Target)) return EBTNodeResult::Failed;
 
 	// Verify ManeuverRole == Suppressor
 	const uint8 RoleVal = BB->GetValueAsEnum(AEnemyAIController::BB_ManeuverRole);
 	if (static_cast<EEnemyManeuverRole>(RoleVal) != EEnemyManeuverRole::Suppressor) return EBTNodeResult::Failed;
+
+	// Cover-pose hygiene: suppressing is its own stance — a latched pose would fight the fire loop.
+	if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
+	if (GetCoverAnimLogLevel() > 0)
+		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s TASK(SuppressFire) start"), *GetNameSafe(Pawn));
 
 	// Anchor in place
 	Controller->StopMovement();

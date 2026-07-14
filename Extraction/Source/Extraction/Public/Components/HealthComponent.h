@@ -61,6 +61,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Health")
 	float GetShieldPercent() const { return MaxShield > 0.f ? CurrentShield / MaxShield : 0.f; }
 
+	/** Attempts to consume a gated damage slot. Returns true if enough time has elapsed since the
+	 *  last damaging hit (any attacker). Returns false if the cadence cap blocks it. Server-only. */
+	bool TryConsumeGatedDamage(float Now, float MinInterval);
+
+	/** World seconds of the last damaging TakeDamage call (any source), or a large negative
+	 *  sentinel if never damaged. Server-side event stamp — companion stealth-break reads the
+	 *  player's to detect an out-of-envelope shooter. */
+	float GetLastDamageWorldTime() const { return LastDamageWorldTime; }
+
 	UPROPERTY(BlueprintAssignable, Category = "Health|Events")
 	FOnHealthChanged OnHealthChanged;
 
@@ -95,6 +104,19 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shield", meta = (ClampMin = "0.0"))
 	float ShieldRegenDelay = 3.f;
 
+	/** Passive health regen (shield-style: damage restarts the delay). Off for players/enemies;
+	 *  the companion enables it on its BP. Blocked while dead/DBNO (bIsDead). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Health")
+	bool bHealthRegenEnabled = false;
+
+	/** Health regained per second while regenerating — tuned slower than the shield's rate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Health", meta = (ClampMin = "0.0", EditCondition = "bHealthRegenEnabled"))
+	float HealthRegenRate = 4.f;
+
+	/** Seconds without damage before health regen starts. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Health", meta = (ClampMin = "0.0", EditCondition = "bHealthRegenEnabled"))
+	float HealthRegenDelay = 8.f;
+
 private:
 	UFUNCTION()
 	void OnRep_CurrentHealth();
@@ -105,9 +127,20 @@ private:
 	void StartShieldRegen();
 	void RegenShield();
 
+	void StartHealthRegen();
+	void RegenHealth();
+
 	FTimerHandle ShieldRegenDelayHandle;
 	FTimerHandle ShieldRegenTickHandle;
+	FTimerHandle HealthRegenDelayHandle;
+	FTimerHandle HealthRegenTickHandle;
 
 	UPROPERTY(Replicated)
 	bool bIsDead = false;
+
+	/** World time of the last gated damaging hit (any attacker). Non-replicated, server-only. */
+	float LastGatedDamageWorldTime = -1e9f;
+
+	/** World time of the last damaging TakeDamage call. Non-replicated, server-only. */
+	float LastDamageWorldTime = -1e9f;
 };

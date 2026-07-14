@@ -12,10 +12,43 @@ class USkeletalMeshComponent;
 class UMeshComponent;
 class UWeaponDataAsset;
 class USuppressionComponent;
+class UNiagaraComponent;
+class UNiagaraSystem;
+class UDamageMitigationSettings;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponFired);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnReloadComplete);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAmmoChanged, int32, CurrentAmmo, int32, ReserveAmmo);
+
+/** Cover-align scenario — which tuned weapon-socket target the gun eases toward while posed in cover. */
+enum class ECoverWeaponAlign : uint8
+{
+	None,           // out of cover — ease home to the rest socket
+	Idle,           // tucked crouch cover idle (side-agnostic)
+	OverTop,        // over-the-top stand-up peek from low cover
+	PeekLeft,       // left corner peek aim (crouch)
+	PeekRight,      // right corner peek aim (crouch)
+	StandIdleLeft,  // tucked standing cover idle — left side
+	StandIdleRight, // tucked standing cover idle — right side
+	StandPeekLeft,  // standing left corner peek aim
+	StandPeekRight, // standing right corner peek aim
+};
+
+/** Total number of per-scenario targets (ECoverWeaponAlign minus None). */
+inline constexpr int32 CoverAlignScenarioCount = 8;
+
+/** Pack of per-scenario socket transforms for SetupCoverAlign. Plain C++ — tuned values live as ABP UPROPERTYs. */
+struct FCoverAlignPoses
+{
+	FTransform Idle;
+	FTransform OverTop;
+	FTransform PeekLeft;
+	FTransform PeekRight;
+	FTransform StandIdleLeft;
+	FTransform StandIdleRight;
+	FTransform StandPeekLeft;
+	FTransform StandPeekRight;
+};
 
 UCLASS(Blueprintable)
 class EXTRACTION_API AWeaponBase : public AActor, public IKitWeaponInterface
@@ -124,9 +157,20 @@ public:
 	/** Initialize ammo from data asset (called after spawn/equip) */
 	void InitializeAmmo();
 
+	/** Adds Amount to reserve ammo (pickup/loot grants). Authority-only; broadcasts OnAmmoChanged.
+	 *  Returns the amount actually added (0 when rejected). Reserve is uncapped for now. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
+	int32 AddReserveAmmo(int32 Amount);
+
 	/** Override the auto-reload flag set in the data asset. Enemies force this true so they never
 	 *  go permanently silent — no BT reload task exists for enemies. */
 	void SetAutoReloadOnEmpty(bool bEnable) { bAutoReloadOnEmpty = bEnable; }
+
+	/** Registers the kit FP weapon's muzzle anchor so the owning player's flash renders on the
+	 *  visible first-person gun (the TP WeaponMesh is OwnerNoSee). Called by the character BP on
+	 *  equip; pass null on unequip to drop the flash component. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|FX")
+	void SetFirstPersonMuzzle(USceneComponent* InMuzzle);
 
 	// ---- Magazine swap (enemy reload visual) ----
 
@@ -233,6 +277,32 @@ public:
 
 	/** True once SetupPatrolAlign succeeded (non-zero DA offsets present). */
 	bool IsPatrolAlignReady() const { return bPatrolAlignReady; }
+
+	// ---- Weapon cover alignment (per-scenario cover pose visual) ----
+
+	/**
+	 * One-time setup: captures the rest relative transform and computes one align target per
+	 * cover scenario from ABP-tuned socket poses expressed in SocketSpaceBone bone space (the
+	 * values read straight off the skeleton's WeaponSocket panel). Same bone-pose-invariant math
+	 * as SetupFireAlign, cached at equip. Identity transforms disable just their scenario;
+	 * ready when at least one target resolved.
+	 */
+	void SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName SocketSpaceBone,
+		const FCoverAlignPoses& Poses);
+
+	/**
+	 * Eases WeaponMesh's relative transform toward the target for Scenario (None = rest) and
+	 * writes it while off-rest. Continuous across target switches (idle→peek mid-blend is fine).
+	 * Call per-frame from the anim instance. Runs after fire/melee align in the frame, so while
+	 * it is writing it owns the weapon (last-writer-wins).
+	 */
+	void UpdateCoverAlign(ECoverWeaponAlign Scenario, float DeltaSeconds, float InterpSpeed);
+
+	/** True once SetupCoverAlign resolved at least one scenario socket. */
+	bool IsCoverAlignReady() const { return bCoverAlignReady; }
+
+	/** True while cover-align is actively writing WeaponMesh's relative transform. */
+	bool IsCoverAlignWriting() const { return bCoverAlignWriting; }
 
 	// ---- Hand-swap settle (two-socket weapon carry) ----
 
@@ -422,6 +492,27 @@ private:
 	/** True when SetupFireAlign succeeded — both sockets found and targets computed. */
 	bool bFireAlignReady = false;
 
+	// ---- Cover alignment runtime state ----
+
+	/** Relative transform of WeaponMesh at rest (captured by SetupCoverAlign). Scenario=None target. */
+	FTransform CoverAlignRestRelative = FTransform::Identity;
+
+	/** Pre-composed relative targets per scenario (index = ECoverWeaponAlign - 1). Same socket math
+	 *  as fire-align; bone-pose-invariant, cached at equip. */
+	FTransform CoverAlignTargets[CoverAlignScenarioCount];
+
+	/** Per-scenario resolve flags — a missing socket disables just that scenario (falls back to rest). */
+	bool bCoverAlignTargetReady[CoverAlignScenarioCount] = {};
+
+	/** Eased current relative transform — persists across target switches for continuity. */
+	FTransform CoverAlignCurrent = FTransform::Identity;
+
+	/** True once at least one scenario target resolved. */
+	bool bCoverAlignReady = false;
+
+	/** True while UpdateCoverAlign is writing WeaponMesh's relative transform (off-rest). */
+	bool bCoverAlignWriting = false;
+
 	// ---- Recoil offset runtime state ----
 
 	/**
@@ -574,6 +665,11 @@ private:
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Suppression", meta = (ClampMin = "0.0"))
 	float NearMissRadius = 150.f;
 
+	/** Near-miss weight when the firing owner is the companion (player/enemy fire = 1). Enemies
+	 *  should acknowledge companion fire, weighted below the player's. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Suppression", meta = (ClampMin = "0.0", ClampMax = "2.0"))
+	float CompanionNearMissWeight = 0.75f;
+
 	struct FSuppressionTarget
 	{
 		TWeakObjectPtr<APawn> Pawn;
@@ -584,4 +680,45 @@ private:
 	TArray<FSuppressionTarget> CachedSuppressionTargets;
 	/** World time when CachedSuppressionTargets was last built. */
 	float SuppressionTargetsBuiltTime = -1e9f;
+
+	// ---- AI damage mitigation ramp state ----
+
+	/** Current ramp target (resets ramp when target changes). */
+	TWeakObjectPtr<AActor> GateRampTarget;
+
+	/** World time when the ramp began for the current target. */
+	float GateRampStartTime = -1e9f;
+
+	/** World time of the last shot evaluated by the gate (for gap-based ramp reset). */
+	float GateLastShotTime = -1e9f;
+
+	/** Rolls the per-shot damage gate. Returns true if the shot should deal damage.
+	 *  Manages ramp state (target tracking, gap-based reset). */
+	bool RollShotDamage(const UDamageMitigationSettings& S, AActor* Target, float Now);
+
+	// ---- Muzzle flash ----
+
+	/** Persistent Niagara component for muzzle flash FX. Re-activated per shot (never spawned per shot). */
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraComponent> MuzzleFlashComponent;
+
+	/** Lazily creates and attaches the muzzle flash component from WeaponData->MuzzleFlashFX. */
+	void EnsureMuzzleFlashComponent();
+
+	/** First-person muzzle anchor on the kit's FP weapon item (BP_Item_Base "Muzzle" component).
+	 *  Set by the character BP on equip; the TP WeaponMesh is OwnerNoSee so the owning player's
+	 *  flash must attach here instead. */
+	UPROPERTY(Transient)
+	TObjectPtr<USceneComponent> FirstPersonMuzzle;
+
+	/** Owner-only-see Niagara flash attached to FirstPersonMuzzle. Re-activated per shot. */
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraComponent> FirstPersonMuzzleFlashComponent;
+
+	/** Lazily creates the first-person flash on FirstPersonMuzzle. No-ops until the anchor is set. */
+	void EnsureFirstPersonMuzzleFlashComponent();
+
+	/** Spawns a one-shot Niagara tracer streak from MuzzleLocation toward EndPoint.
+	 *  Engine-pooled (AutoRelease). No-ops when WeaponData->TracerFX is null. */
+	void SpawnTracer(const FVector& MuzzleLocation, const FVector& EndPoint);
 };

@@ -7,8 +7,11 @@
 #include "Movement/TraversalTypes.h"
 #include "Companion/CompanionTypes.h"
 #include "AI/Cover/CoverSlotTypes.h"
+#include "AI/Cover/CoverPoseTypes.h"
 #include "Enemy/EnemyTypes.h"
 #include "CompanionAnimInstance.generated.h"
+
+class UCoverPoseComponent;
 
 class ACompanionCharacter;
 class AWeaponBase;
@@ -54,6 +57,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Animation|Actions")
 	UAnimMontage* GetMontageForType(ETraversalType Type) const;
 
+	/** Diagnostic: the DBNO flag exactly as the AnimGraph reads it this frame (per-tick mirror of
+	 *  the character's bIsDBNO). A true here with no downed pose showing = ABP-side fault. */
+	bool GetIsDBNOMirrored() const { return bIsDBNO; }
+
 	// --- Left-Hand IK ---
 
 	/**
@@ -88,6 +95,24 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Recoil")
 	FVector RecoilSpineOffset = FVector::ZeroVector;
 
+	/**
+	 * Captured spine_01 component-space rotation for the cover-reload tuck — the ABP reads this
+	 * as the target of a REPLACE component-space Transform(Modify)Bone on spine_01. Sampled every
+	 * frame while tucked in cover idle (the "tucked" torso), then HELD while reloading so the reload
+	 * montage's arms animate on top of the idle torso orientation. Component space is mesh-relative,
+	 * so this is facing-independent. Driven at CoverReloadSpineAlpha so it eases in/out.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	FRotator CoverReloadSpineRefRotation = FRotator::ZeroRotator;
+
+	/**
+	 * Eased 0..1 alpha for the cover-reload spine Replace modify bone. Interpolates to 1 while
+	 * bInCover && bIsReloading, else to 0. The ABP feeds this into the modify bone's Alpha so the
+	 * captured torso orientation blends in when the reload starts and out when it ends.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	float CoverReloadSpineAlpha = 0.f;
+
 	/** Called by the character's OnWeaponFiredCallback to add one shot's impulse to the spring. */
 	void AddRecoilImpulse();
 
@@ -104,6 +129,11 @@ public:
 	/** Play the matching peek montage; returns it so caller can bind OnMontageEnded. */
 	UFUNCTION(BlueprintCallable, Category = "Cover")
 	UAnimMontage* PlayPeekFire(EPeekSide Side, float PlayRate = 1.f);
+
+	/** Play the over-top peek (crouch cover, no usable side gap): stops the idles, picks the
+	 *  side-matched entry variant, returns the montage (nullptr when unset — caller falls back to
+	 *  a plain montage-less stand-up). */
+	UAnimMontage* PlayOverTopPeek(EPeekSide FromSide, float PlayRate = 1.f);
 
 	UFUNCTION(BlueprintPure, Category = "Cover")
 	bool IsInCover() const { return bInCover; }
@@ -162,6 +192,9 @@ protected:
 
 	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Locomotion")
 	bool bIsAlive = true;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|DBNO")
+	bool bIsDBNO = false;
 
 	// --- Aim Offset ---
 
@@ -236,6 +269,7 @@ protected:
 
 	// --- Cover Montages (designer-assigned on ABP_Companion) ---
 
+	// Crouch-height cover montages (existing)
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	TObjectPtr<UAnimMontage> CoverIdleLeftMontage;
 
@@ -247,6 +281,92 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	TObjectPtr<UAnimMontage> CoverPeekRightMontage;
+
+	// Stand-height cover montages
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverIdleLeftMontage_Stand;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverIdleRightMontage_Stand;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekLeftMontage_Stand;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekRightMontage_Stand;
+
+	/** Over-top peek for crouch cover (stand up, fire over the wall) — enemy LoU parity; the task
+	 *  UnCrouches at commit and this montage owns the stand-up-and-aim visual. Entered from the
+	 *  RIGHT-side idle by default. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekOverTopMontage;
+
+	/** Over-top variant entered from the LEFT-side idle. Falls back to CoverPeekOverTopMontage when unset. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	TObjectPtr<UAnimMontage> CoverPeekOverTopLeftMontage;
+
+	/** Global clamp on AimYaw fed to the aim offset — raw deltas reach ±180 while the body lags the
+	 *  focal bearing (route legs down a switchback), extrapolating the spine past the AO's authored
+	 *  range and pulling the gun off the hands. Enemy parity (AimYawClampDeg). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|AimOffset")
+	float AimYawClampDeg = 75.f;
+
+	/** Global clamp on AimPitch fed to the aim offset. Enemy parity (AimPitchClampDeg). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|AimOffset")
+	float AimPitchClampDeg = 55.f;
+
+	/** Eased aim gate speed — scales AimPitch/AimYaw to 0 while tucked in cover idle. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	float CoverAimGateSpeed = 8.f;
+
+	/** Max spine yaw twist (deg) the aim offset may drive while in cover — the peek montage owns
+	 *  the body rotation; the offset only fine-aims. Mirrors the enemy's CoverAimYawClampDeg. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	float CoverAimYawClampDeg = 75.f;
+
+	/** Pre-clamp |yaw| (deg) beyond which the whole cover aim offset eases to zero — the target is
+	 *  far outside the pose's reach (behind the wall / behind the body), so twisting toward it
+	 *  reads as a broken spine. Mirrors the enemy's CoverAimTrackLimitDeg. */
+	UPROPERTY(EditDefaultsOnly, Category = "Cover")
+	float CoverAimTrackLimitDeg = 80.f;
+
+	// --- Cover-Reload Spine Tuck (dynamic capture: reproduce cover-idle torso during reload) ---
+
+	/** FInterpTo speed for CoverReloadSpineAlpha ease-in/out. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|Cover")
+	float CoverReloadSpineBlendSpeed = 10.f;
+
+	// --- Cover-Align Config (weapon-socket poses for cover scenario alignment) ---
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FName CoverAlignBoneName = TEXT("hand_r");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignIdleTransform = FTransform(FRotator(21.496962, 96.317499, -2.231149), FVector(-20.773425, -0.492783, 8.053094));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignOverTopTransform = FTransform(FRotator(20.988338, 87.989429, -5.253666), FVector(-20.538873, 1.471584, 8.793081));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignPeekLeftTransform = FTransform(FRotator(21.298056, 92.214519, -3.730851), FVector(-20.684166, 1.605956, 8.089899));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignPeekRightTransform = FTransform(FRotator(20.942675, 95.956006, 1.921055), FVector(-19.839732, -0.012652, 6.100975));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignStandIdleLeftTransform = FTransform(FRotator(37.371757, 88.738964, -2.988765), FVector(-19.728897, -2.63442, 9.25047));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignStandIdleRightTransform = FTransform(FRotator(37.371757, 88.738964, -2.988765), FVector(-19.829018, -1.06718, 7.20189));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignStandPeekLeftTransform = FTransform(FRotator(19.891578, 89.147858, -3.965413), FVector(-19.577595, 0.723464, 7.839758));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	FTransform CoverAlignStandPeekRightTransform = FTransform(FRotator(19.430915, 82.007391, -5.116891), FVector(-19.577595, 0.723464, 7.839758));
+
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
+	float CoverAlignBlendSpeed = 8.f;
 
 	// --- Fire-Align Config (dormant until designer sets FireAlignSocketName on ABP defaults) ---
 
@@ -273,11 +393,40 @@ protected:
 
 	// --- Cover strafe override ---
 
-	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
 	bool bInCover = false;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	ECoverHeight CoverHeight = ECoverHeight::Stand;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	ECoverLean CoverLeanDirection = ECoverLean::None;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	bool bCoverBlindFiring = false;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	bool bCoverPeeking = false;
+
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
 	bool bCoverStrafeActive = false;
+
+	/** Eased 0..1 gate — 0 while tucked in cover (not peeking), 1 otherwise. Scales AimPitch/AimYaw
+	 *  in C++ AND is read by the ABP as the aim-offset layer weight, because the AO's centre sample
+	 *  is not identity and at full weight it bends the tucked idle's arms into an ADS hold even with
+	 *  the aim angles at zero. Name must match the ABP's existing Get nodes. */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	float CompCoverAimGate = 1.f;
+
+	/**
+	 * Active cover-aim scenario for the ABP's blend-by-int aim-offset selector.
+	 * 0 = None (out-of-cover, tucked, or blind-firing) — standing rifle AO.
+	 * 1 = CrouchPeekLeft, 2 = CrouchPeekRight, 3 = over-top (neutral no-AO passthrough — the
+	 * over-top montage owns the pose). 4 = StandPeekLeft, 5 = StandPeekRight.
+	 * Name must match the ABP's existing Get nodes.
+	 */
+	UPROPERTY(Transient, BlueprintReadOnly, Category = "Companion|Animation|Cover")
+	int32 CompCoverAimScenario = 0;
 
 	FVector CoverStrafeVelocity = FVector::ZeroVector;
 	float CoverStrafeStaleTimer = 0.f;
@@ -318,6 +467,12 @@ private:
 	float PatrolAlignAlpha = 0.f;
 	bool bPatrolAlignSetup = false;
 
+	// --- Cover-align state ---
+	bool bCoverAlignSetup = false;
+
+	// --- Cover pose cache (resolved at init, re-resolved if stale) ---
+	TWeakObjectPtr<UCoverPoseComponent> CachedCoverPoseComponent;
+
 	// --- Weapon cache ---
 	TWeakObjectPtr<AWeaponBase> CachedWeapon;
 
@@ -331,4 +486,31 @@ private:
 
 	EPeekSide ActivePeekSide = EPeekSide::Right;
 	bool bPrevIsReloading = false;
+
+	/** Throttle accumulator for the [RELOADTUCK] cover-reload-spine diagnostic line. */
+	float CoverReloadTuckLogAccum = 0.f;
+
+	/** Unclamped aim yaw (deg) captured before the cover clamp — feeds the track-limit test. */
+	float RawAimYawDeg = 0.f;
+
+	/** Eased 0..1 — fades the cover aim offset out while the raw bearing exceeds
+	 *  CoverAimTrackLimitDeg, back in otherwise. Reset to 1 outside cover. */
+	float CoverAimTrackAlpha = 1.f;
+
+	/** Cover height latched at EnterCoverPose — PlayPeekFire selects from this rather than the
+	 *  pose-component mirror, which can be stale right after an ExitCoverPose reset. */
+	ECoverHeight LatchedCoverHeight = ECoverHeight::Crouch;
+
+	/** True while any cover peek montage plays (four side peeks + the over-top pair) — companion-side
+	 *  peek signal for the aim gate (nothing companion-side sets the pose component's bPeeking).
+	 *  BlueprintPure so the ABP's grip/aim-gate EventGraph can read ONE call instead of per-asset checks. */
+	UFUNCTION(BlueprintPure, Category = "Cover")
+	bool IsAnyCoverPeekMontagePlaying() const;
+
+	/** True while either over-top peek montage plays — selects the neutral aim scenario. */
+	bool IsOverTopPeekMontagePlaying() const;
+
+	/** Capture spine_01 while tucked-idle, hold it while reloading in cover, and ease
+	 *  CoverReloadSpineAlpha 0..1 so the Replace modify bone blends in/out. */
+	void UpdateCoverReloadSpine(float DeltaSeconds);
 };

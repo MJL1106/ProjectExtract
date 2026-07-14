@@ -8,6 +8,7 @@
 #include "ExtractionDamageType.h"
 #include "HealthComponent.h"
 #include "SuppressionComponent.h"
+#include "CompanionCharacter.h"
 #include "EnemyCharacter.h"
 #include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
@@ -30,6 +31,10 @@
 #include "EngineUtils.h"
 #include "Extraction.h"
 #include "EnemyDebug.h"
+#include "DamageMitigationSettings.h"
+#include "NiagaraComponent.h"
+#include "NiagaraDataInterfaceArrayFunctionLibrary.h"
+#include "NiagaraFunctionLibrary.h"
 
 namespace WeaponConstants
 {
@@ -41,7 +46,7 @@ namespace WeaponConstants
 
 static TAutoConsoleVariable<int32> CVarShowBulletTracers(
 	TEXT("weapon.ShowTracers"),
-	1,
+	0,
 	TEXT("If non-zero, draw a tracer from muzzle to impact and an impact marker for every shot (player + AI)."),
 	ECVF_Cheat);
 
@@ -61,6 +66,14 @@ static TAutoConsoleVariable<int32> CVarFireAlignDebug(
 	TEXT("weapon.FireAlignDebug"),
 	0,
 	TEXT("If non-zero, log enemy weapon fire-align: SetupFireAlign captures (rest/fire relative, sockets, fire offset) and SetFireAlignAlpha (alpha + resulting WeaponMesh relative/world transform). Diagnoses misalignment from the WeaponSocket_Fire blend. Default 0 = no logging, no behavior change."),
+	ECVF_Cheat);
+
+// Single definition — other translation units (companion BT service/task) re-query this by name
+// via IConsoleManager::Get().FindConsoleVariable to avoid duplicate CVar registration.
+static TAutoConsoleVariable<int32> CVarCompanionFireDebug(
+	TEXT("companion.FireDebug"),
+	0,
+	TEXT("If non-zero, log companion fire-decision denials (state/ammo), stealth-break signal state, and burst fire-withhold transitions."),
 	ECVF_Cheat);
 
 AWeaponBase::AWeaponBase()
@@ -253,6 +266,18 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		bRecoilRestCaptured = false;
 	}
 
+	if (IsValid(MuzzleFlashComponent))
+	{
+		MuzzleFlashComponent->DestroyComponent();
+		MuzzleFlashComponent = nullptr;
+	}
+
+	if (IsValid(FirstPersonMuzzleFlashComponent))
+	{
+		FirstPersonMuzzleFlashComponent->DestroyComponent();
+		FirstPersonMuzzleFlashComponent = nullptr;
+	}
+
 	if (IsValid(SpawnedVisualActor))
 	{
 		SpawnedVisualActor->Destroy();
@@ -335,7 +360,23 @@ void AWeaponBase::StartFiring()
 	if (IsValid(OwnerChar))
 		RebuildSuppressionTargets();
 
-	if (!CanFire()) return;
+	if (!CanFire())
+	{
+		if (CVarCompanionFireDebug.GetValueOnGameThread() != 0
+			&& IsValid(GetOwner()) && GetOwner()->IsA<ACompanionCharacter>())
+		{
+			const float FireReadyIn = (FireReadyTimeSeconds > 0.f && GetWorld())
+				? FireReadyTimeSeconds - GetWorld()->GetTimeSeconds() : 0.f;
+			UE_LOG(LogCompanionDiag, Warning,
+				TEXT("%s: [FireDebug] StartFiring DENIED state=%d ammo=%d reserve=%d fireReadyIn=%.2f dataValid=%d"),
+				*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, ReserveAmmo,
+				FireReadyIn, IsValid(WeaponData) ? 1 : 0);
+		}
+		// Dry trigger press on an empty mag — kick the reload instead of silently no-oping.
+		if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
+			Reload();
+		return;
+	}
 
 	if (HasAuthority())
 		CurrentState = EWeaponState::Firing;
@@ -397,6 +438,15 @@ void AWeaponBase::OnAutoFireTimer()
 {
 	if (!bWantsToFire || !CanFire())
 	{
+		if (bWantsToFire && CVarCompanionFireDebug.GetValueOnGameThread() != 0
+			&& IsValid(GetOwner()) && GetOwner()->IsA<ACompanionCharacter>())
+		{
+			UE_LOG(LogCompanionDiag, Warning,
+				TEXT("%s: [FireDebug] AutoFire DENIED state=%d ammo=%d reserve=%d dataValid=%d"),
+				*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, ReserveAmmo,
+				IsValid(WeaponData) ? 1 : 0);
+		}
+
 		if (const UWorld* World = GetWorld())
 			World->GetTimerManager().ClearTimer(AutoFireTimerHandle);
 
@@ -495,6 +545,10 @@ void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& Tra
 
 	const float NearMissRadiusSq = NearMissRadius * NearMissRadius;
 
+	// Per-shooter weight: enemies acknowledge companion fire below player/enemy fire.
+	const bool bCompanionShooter = GetOwner() && GetOwner()->IsA<ACompanionCharacter>();
+	const float NearMissWeight = bCompanionShooter ? CompanionNearMissWeight : 1.f;
+
 	for (const FSuppressionTarget& Target : CachedSuppressionTargets)
 	{
 		APawn* Pawn = Target.Pawn.Get();
@@ -509,7 +563,10 @@ void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& Tra
 
 		if (DistSq <= NearMissRadiusSq)
 		{
-			Comp->RegisterNearMiss();
+			Comp->RegisterNearMiss(NearMissWeight);
+			if (bCompanionShooter)
+				UE_LOG(LogCompanionDiag, Verbose, TEXT("COMPANION-NEARMISS -> %s w=%.2f supp=%.2f"),
+					*GetNameSafe(Pawn), NearMissWeight, Comp->GetSuppression01());
 
 			// Part A: notify enemy awareness so near-misses escalate alertness.
 			if (const AEnemyCharacter* EnemyChar = Cast<AEnemyCharacter>(Pawn))
@@ -657,12 +714,13 @@ void AWeaponBase::PerformHitscan()
 	};
 	TArray<FPelletRecord, TInlineAllocator<8>> PelletRecords;
 
-	// Per-victim dedup for morale — populated on first hit per victim, caches the HealthComponent.
+	// Per-victim dedup for morale + mitigation — populated on first hit per victim, caches the HealthComponent.
 	struct FVictimRecord
 	{
 		TWeakObjectPtr<AActor> Victim;
 		UHealthComponent* Health; // cached once, reused in morale pass
 		bool bWasAlive;
+		bool bGateAllowsDamage = true; // set false by the mitigation gate when the shot is suppressed
 	};
 	TArray<FVictimRecord, TInlineAllocator<4>> VictimRecords;
 
@@ -701,11 +759,35 @@ void AWeaponBase::PerformHitscan()
 		if (!bAlreadySeen)
 		{
 			UHealthComponent* VH = HitActor->FindComponentByClass<UHealthComponent>();
-			VictimRecords.Add({ HitActor, VH, VH && VH->IsAlive() });
+			VictimRecords.Add({ HitActor, VH, VH && VH->IsAlive(), true });
 		}
 
 		const float PelletDamage = WeaponData->BaseDamage * ComputeFalloffScale(PelletHit.Distance);
 		PelletRecords.Add({ HitActor, PelletHit, PelletDir, PelletDamage });
+	}
+
+	// === AI DAMAGE MITIGATION GATE (between trace and damage passes) ===
+	const UDamageMitigationSettings* MitS = WeaponData->DamageMitigation;
+	const bool bGateActive = bAIOwned && MitS && MitS->bEnabled;
+	if (bGateActive)
+	{
+		const float Now = World->GetTimeSeconds();
+		const IAIShooterInterface* GateShooter = Cast<IAIShooterInterface>(OwnerChar);
+		AActor* GateTarget = GateShooter ? GateShooter->GetAIAimTarget() : CenterHitActor;
+		const bool bShotDamages = RollShotDamage(*MitS, GateTarget, Now);
+		for (FVictimRecord& VR : VictimRecords)
+		{
+			if (!bShotDamages)
+			{
+				VR.bGateAllowsDamage = false;
+				continue;
+			}
+			// Shot passed the roll; check per-victim cadence cap.
+			if (VR.Health)
+				VR.bGateAllowsDamage = VR.Health->TryConsumeGatedDamage(Now, MitS->PerVictimDamageInterval);
+			else
+				VR.bGateAllowsDamage = bShotDamages; // no HealthComponent (world geometry) = pass through
+		}
 	}
 
 	// === DAMAGE PASS (per-pellet TakeDamage preserves per-bone hitbox multipliers) ===
@@ -716,6 +798,17 @@ void AWeaponBase::PerformHitscan()
 	{
 		AActor* HitActor = PR.Victim.Get();
 		if (!IsValid(HitActor)) continue;
+
+		// Check mitigation gate: find this pellet's victim record and skip TakeDamage if gated.
+		if (bGateActive)
+		{
+			const FVictimRecord* VR = nullptr;
+			for (const FVictimRecord& V : VictimRecords)
+			{
+				if (V.Victim.Get() == HitActor) { VR = &V; break; }
+			}
+			if (VR && !VR->bGateAllowsDamage) continue;
+		}
 
 		FPointDamageEvent DamageEvent;
 		DamageEvent.Damage = PR.Damage;
@@ -803,6 +896,19 @@ FVector AWeaponBase::ApplyConeSpread(const FVector& Dir, float HalfAngleDeg)
 
 void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocation, const FVector& EndPoint, bool bHit)
 {
+	// Muzzle flash: persistent component, re-activated per shot.
+	EnsureMuzzleFlashComponent();
+	if (IsValid(MuzzleFlashComponent))
+		MuzzleFlashComponent->Activate(true);
+
+	// First-person flash on the kit FP gun — the TP flash above is OwnerNoSee.
+	EnsureFirstPersonMuzzleFlashComponent();
+	if (IsValid(FirstPersonMuzzleFlashComponent))
+		FirstPersonMuzzleFlashComponent->Activate(true);
+
+	// Bullet tracer: one-shot pooled Niagara streak along the fire line.
+	SpawnTracer(MuzzleLocation, EndPoint);
+
 #if ENABLE_DRAW_DEBUG
 	if (CVarShowBulletTracers.GetValueOnGameThread() == 0) return;
 	UWorld* World = GetWorld();
@@ -937,6 +1043,78 @@ void AWeaponBase::SetFireAlignAlpha(float Alpha)
 			*GetNameSafe(this), Alpha,
 			*Blended.GetLocation().ToString(), *Blended.Rotator().ToString(),
 			*WeaponMesh->GetComponentLocation().ToString());
+	}
+}
+
+// ---- Weapon cover alignment ----
+
+void AWeaponBase::SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName SocketSpaceBone,
+	const FCoverAlignPoses& Poses)
+{
+	bCoverAlignReady = false;
+	bCoverAlignWriting = false;
+	for (bool& bReady : bCoverAlignTargetReady) bReady = false;
+
+	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+
+	const FName RestSocket = WeaponMesh->GetAttachSocketName();
+	if (!EnemyMesh->DoesSocketExist(RestSocket) || !EnemyMesh->DoesSocketExist(SocketSpaceBone))
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("SetupCoverAlign: %s — rest socket '%s' or bone '%s' not found on enemy mesh (cover-align disabled)"),
+			*GetNameSafe(this), *RestSocket.ToString(), *SocketSpaceBone.ToString());
+		return;
+	}
+
+	CoverAlignRestRelative = WeaponMesh->GetRelativeTransform();
+	const FTransform TRest = EnemyMesh->GetSocketTransform(RestSocket, RTS_Component);
+	const FTransform TBone = EnemyMesh->GetSocketTransform(SocketSpaceBone, RTS_Component);
+
+	const FTransform* ScenarioPoses[CoverAlignScenarioCount] = {
+		&Poses.Idle, &Poses.OverTop, &Poses.PeekLeft, &Poses.PeekRight,
+		&Poses.StandIdleLeft, &Poses.StandIdleRight, &Poses.StandPeekLeft, &Poses.StandPeekRight
+	};
+	for (int32 i = 0; i < CoverAlignScenarioCount; ++i)
+	{
+		if (ScenarioPoses[i]->Equals(FTransform::Identity)) continue;
+		const FTransform TScenario = *ScenarioPoses[i] * TBone;
+		CoverAlignTargets[i] = CoverAlignRestRelative * (TScenario * TRest.Inverse());
+		bCoverAlignTargetReady[i] = true;
+		bCoverAlignReady = true;
+	}
+
+	CoverAlignCurrent = CoverAlignRestRelative;
+}
+
+void AWeaponBase::UpdateCoverAlign(ECoverWeaponAlign Scenario, float DeltaSeconds, float InterpSpeed)
+{
+	if (!bCoverAlignReady) return;
+	if (!IsValid(WeaponMesh)) return;
+
+	const FTransform* Target = &CoverAlignRestRelative;
+	if (Scenario != ECoverWeaponAlign::None)
+	{
+		const int32 Index = static_cast<int32>(Scenario) - 1;
+		if (Index < 0 || Index >= CoverAlignScenarioCount) return;
+		if (bCoverAlignTargetReady[Index]) Target = &CoverAlignTargets[Index];
+	}
+
+	// Dormant: settled at rest with no off-rest blend in flight — write nothing so fire/melee/
+	// patrol align and the hand-swap settle own the weapon out of cover.
+	const bool bWantsRest = (Target == &CoverAlignRestRelative);
+	if (bWantsRest && !bCoverAlignWriting) return;
+
+	CoverAlignCurrent.SetLocation(FMath::VInterpTo(CoverAlignCurrent.GetLocation(), Target->GetLocation(), DeltaSeconds, InterpSpeed));
+	CoverAlignCurrent.SetRotation(FMath::QInterpTo(CoverAlignCurrent.GetRotation(), Target->GetRotation(), DeltaSeconds, InterpSpeed));
+	CoverAlignCurrent.SetScale3D(Target->GetScale3D());
+
+	WeaponMesh->SetRelativeTransform(CoverAlignCurrent);
+	bCoverAlignWriting = true;
+
+	// Settled home — release the write so out-of-cover writers resume.
+	if (bWantsRest && CoverAlignCurrent.Equals(CoverAlignRestRelative, 0.05f))
+	{
+		WeaponMesh->SetRelativeTransform(CoverAlignRestRelative);
+		bCoverAlignWriting = false;
 	}
 }
 
@@ -1167,7 +1345,7 @@ bool AWeaponBase::CanReload() const
 	return CurrentState == EWeaponState::Idle
 		&& IsValid(WeaponData)
 		&& CurrentAmmo < WeaponData->MagazineSize
-		&& ReserveAmmo > 0;
+		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
 }
 
 void AWeaponBase::Reload()
@@ -1240,10 +1418,12 @@ void AWeaponBase::OnReloadFinished()
 	if (HasAuthority())
 	{
 		const int32 AmmoNeeded = WeaponData->MagazineSize - CurrentAmmo;
-		const int32 AmmoToLoad = FMath::Min(AmmoNeeded, ReserveAmmo);
+		const int32 AmmoToLoad = WeaponData->bInfiniteReserve
+			? AmmoNeeded : FMath::Min(AmmoNeeded, ReserveAmmo);
 
 		CurrentAmmo += AmmoToLoad;
-		ReserveAmmo -= AmmoToLoad;
+		if (!WeaponData->bInfiniteReserve)
+			ReserveAmmo -= AmmoToLoad;
 		CurrentState = EWeaponState::Idle;
 
 		// Post-reload settle: hold fire briefly so the reload anim finishes seating the gun.
@@ -1278,8 +1458,12 @@ void AWeaponBase::OnReloadFinished()
 
 	OnReloadComplete.Broadcast();
 
-	// Resume firing if input is still held
-	if (bWantsToFire)
+	// Resume firing if input is still held. Player-controlled weapons skip this: the kit BP owns
+	// fire cadence there (KitBeginFire never arms AutoFireTimer), and a post-reload StartFiring
+	// would run the C++ auto-fire loop against the kit's own dispatch.
+	const ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
+	const bool bPlayerOwned = IsValid(OwnerChar) && IsValid(Cast<APlayerController>(OwnerChar->GetController()));
+	if (bWantsToFire && !bPlayerOwned)
 		StartFiring();
 }
 
@@ -1290,7 +1474,8 @@ void AWeaponBase::HandleShellInserted()
 	if (!IsValid(WeaponData) || !WeaponData->bShellByShellReload) return;
 
 	// If the mag is already full or reserve is exhausted, end the reload now.
-	if (CurrentAmmo >= WeaponData->MagazineSize || ReserveAmmo <= 0)
+	if (CurrentAmmo >= WeaponData->MagazineSize
+		|| (!WeaponData->bInfiniteReserve && ReserveAmmo <= 0))
 	{
 		AdvanceShellReloadSection(false);
 		FinishShellReload();
@@ -1299,10 +1484,12 @@ void AWeaponBase::HandleShellInserted()
 
 	// Seat one shell.
 	CurrentAmmo = FMath::Min(CurrentAmmo + 1, WeaponData->MagazineSize);
-	ReserveAmmo = FMath::Max(ReserveAmmo - 1, 0);
+	if (!WeaponData->bInfiniteReserve)
+		ReserveAmmo = FMath::Max(ReserveAmmo - 1, 0);
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
 
-	const bool bMore = (CurrentAmmo < WeaponData->MagazineSize && ReserveAmmo > 0);
+	const bool bMore = CurrentAmmo < WeaponData->MagazineSize
+		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
 
 	if (IsReloadDebugEnabled())
 	{
@@ -1576,6 +1763,15 @@ void AWeaponBase::InitializeAmmo()
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
 }
 
+int32 AWeaponBase::AddReserveAmmo(int32 Amount)
+{
+	if (!HasAuthority() || Amount <= 0) return 0;
+
+	ReserveAmmo += Amount;
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	return Amount;
+}
+
 // ---- RepNotify ----
 
 void AWeaponBase::OnRep_CurrentState()
@@ -1620,6 +1816,12 @@ void AWeaponBase::KitBeginFire_Implementation()
 		RebuildFFIgnoreList();
 		RebuildSuppressionTargets();
 	}
+
+	// Dry trigger press on an empty mag — kick the reload instead of silently no-oping.
+	// Lives here as well as the per-shot dispatch: the kit BP may gate its own HitScan
+	// dispatches on its mirrored ammo count, but it always signals the trigger press.
+	if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
+		Reload();
 }
 
 void AWeaponBase::KitStopFire_Implementation()
@@ -1650,6 +1852,9 @@ void AWeaponBase::KitFire_HitScan_Implementation()
 					*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, *GetNameSafe(WeaponData));
 			}
 		}
+		// Dry dispatch on an empty mag — kick the reload instead of silently no-oping.
+		if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
+			Reload();
 		return;
 	}
 
@@ -1797,4 +2002,135 @@ void AWeaponBase::KitSetAmmo_Implementation(int32 AmmoCount, int32 MaxAmmo)
 
 	bDryFireLogged = false;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+}
+
+// ---- AI Damage Mitigation ----
+
+bool AWeaponBase::RollShotDamage(const UDamageMitigationSettings& S, AActor* Target, float Now)
+{
+	if (!IsValid(WeaponData)) return true;
+
+	const float EffGap = UDamageMitigationSettings::EffectiveResetGap(S, WeaponData->FireRate);
+
+	// Reset ramp when target changes or the gap between shots exceeds the effective threshold.
+	if (Target != GateRampTarget.Get() || (Now - GateLastShotTime) > EffGap)
+		GateRampStartTime = Now;
+
+	GateRampTarget = Target;
+	GateLastShotTime = Now;
+
+	const float TimeOnTarget = Now - GateRampStartTime;
+	const float Chance = UDamageMitigationSettings::RampChance01(S, TimeOnTarget);
+	return FMath::FRand() < Chance;
+}
+
+// ---- Muzzle Flash ----
+
+void AWeaponBase::EnsureMuzzleFlashComponent()
+{
+	if (IsValid(MuzzleFlashComponent)) return;
+	if (!IsValid(WeaponData) || !IsValid(WeaponData->MuzzleFlashFX)) return;
+
+	USkeletalMeshComponent* GripMesh = GetThirdPersonGripMesh();
+	if (!IsValid(GripMesh)) return;
+
+	if (!GripMesh->DoesSocketExist(WeaponConstants::MuzzleSocketName))
+		UE_LOG(LogExtraction, Warning, TEXT("'%s': grip mesh '%s' lacks socket '%s' — muzzle flash will attach at origin"),
+			*GetNameSafe(this), *GetNameSafe(GripMesh->GetSkeletalMeshAsset()), *WeaponConstants::MuzzleSocketName.ToString());
+
+	MuzzleFlashComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+		WeaponData->MuzzleFlashFX,
+		GripMesh,
+		WeaponConstants::MuzzleSocketName,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		EAttachLocation::SnapToTarget,
+		false,  // bAutoDestroy
+		false); // bAutoActivate
+
+	if (IsValid(MuzzleFlashComponent))
+		MuzzleFlashComponent->SetOwnerNoSee(GripMesh->bOwnerNoSee);
+}
+
+void AWeaponBase::SetFirstPersonMuzzle(USceneComponent* InMuzzle)
+{
+	if (FirstPersonMuzzle == InMuzzle) return;
+
+	FirstPersonMuzzle = InMuzzle;
+
+	// Anchor changed (weapon swap) or cleared (unequip) — drop the old component; it will be
+	// lazily rebuilt on the new anchor by the next shot.
+	if (IsValid(FirstPersonMuzzleFlashComponent))
+	{
+		FirstPersonMuzzleFlashComponent->DestroyComponent();
+		FirstPersonMuzzleFlashComponent = nullptr;
+	}
+}
+
+void AWeaponBase::EnsureFirstPersonMuzzleFlashComponent()
+{
+	if (IsValid(FirstPersonMuzzleFlashComponent)) return;
+	if (!IsValid(FirstPersonMuzzle)) return;
+	if (!IsValid(WeaponData) || !IsValid(WeaponData->MuzzleFlashFX)) return;
+	if (GetNetMode() == NM_DedicatedServer) return;
+
+	// Only the owning player's screen shows the FP gun — gate on local control rather than
+	// SetOnlyOwnerSee, which silently hides the flash if the kit item's Owner chain doesn't
+	// reach the pawn. Remote clients never receive the anchor, so this only filters the server
+	// copy on a listen host.
+	const APawn* OwnerPawn = Cast<APawn>(GetOwner());
+	if (!IsValid(OwnerPawn) || !OwnerPawn->IsLocallyControlled()) return;
+
+	FirstPersonMuzzleFlashComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
+		WeaponData->MuzzleFlashFX,
+		FirstPersonMuzzle,
+		NAME_None,
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		EAttachLocation::SnapToTarget,
+		false,  // bAutoDestroy
+		false); // bAutoActivate
+
+}
+
+void AWeaponBase::SpawnTracer(const FVector& MuzzleLocation, const FVector& EndPoint)
+{
+	if (!IsValid(WeaponData)) return;
+	if (!IsValid(WeaponData->TracerFX)) return;
+
+	// Skip degenerate segments (e.g. point-blank melee range).
+	static constexpr float MinTracerLengthSq = 100.f; // 10 cm squared
+	if (FVector::DistSquared(MuzzleLocation, EndPoint) < MinTracerLengthSq) return;
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	const FRotator TracerRotation = (EndPoint - MuzzleLocation).Rotation();
+
+	UNiagaraComponent* TracerComp = UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		World,
+		WeaponData->TracerFX,
+		MuzzleLocation,
+		TracerRotation,
+		FVector(1.f),
+		true,  // bAutoDestroy
+		true,  // bAutoActivate
+		ENCPoolMethod::AutoRelease);
+
+	if (!IsValid(TracerComp)) return;
+	if (!WeaponData->TracerEndParamName.IsNone())
+		TracerComp->SetVectorParameter(WeaponData->TracerEndParamName, EndPoint);
+
+	// Lyra NS_WeaponFire_Tracer contract: MuzzlePosition (Position) + ImpactPositions
+	// (Vector-array data interface) + Trigger gate. Trigger's authored type isn't
+	// introspectable here, so both bool and int are set — a type-mismatched user-param
+	// set is a silent no-op, which also makes this whole block harmless on systems
+	// that don't expose these names.
+	static const FName TracerMuzzleParam(TEXT("MuzzlePosition"));
+	static const FName TracerImpactsParam(TEXT("ImpactPositions"));
+	static const FName TracerTriggerParam(TEXT("Trigger"));
+	TracerComp->SetVariablePosition(TracerMuzzleParam, MuzzleLocation);
+	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector(TracerComp, TracerImpactsParam, { EndPoint });
+	TracerComp->SetVariableBool(TracerTriggerParam, true);
+	TracerComp->SetVariableInt(TracerTriggerParam, 1);
 }

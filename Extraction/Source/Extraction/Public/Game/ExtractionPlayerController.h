@@ -10,9 +10,16 @@
 class UInputMappingContext;
 class UUserWidget;
 class UPlayerHealthWidget;
-class UCrosshairWidget;
 class UAmmoWidget;
 class UBarkFeedWidget;
+class UCompanionModeWidget;
+class UObjectiveMarkerLayer;
+class UObjectiveTextPanelWidget;
+class AObjectiveMarkerDisplay;
+class ULootNotificationWidget;
+class ULevelCompleteWidget;
+class ULevelFailedWidget;
+class URevivePromptWidget;
 
 /**
  *  Simple first person Player Controller
@@ -32,7 +39,38 @@ public:
 	// --- IGenericTeamAgentInterface ---
 	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(0); }
 
+	/** Shows the Level Complete screen on the owning client and switches to UI-only input. */
+	UFUNCTION(Client, Reliable)
+	void ClientShowLevelComplete();
+
+	/** Shows the Level Failed screen on the owning client and switches to UI-only input. */
+	UFUNCTION(Client, Reliable)
+	void ClientShowLevelFailed(const FText& Reason);
+
+	/** Called by the completion/failure widget: routes the restart to the server's GameMode. */
+	void RequestRestartLevel();
+
 protected:
+
+	/** Server side of the restart request. */
+	UFUNCTION(Server, Reliable)
+	void ServerRequestRestartLevel();
+
+	/** Level Complete screen class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<ULevelCompleteWidget> LevelCompleteWidgetClass;
+
+	/** Active Level Complete screen instance */
+	UPROPERTY()
+	TObjectPtr<ULevelCompleteWidget> LevelCompleteWidget;
+
+	/** Level Failed screen class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<ULevelFailedWidget> LevelFailedWidgetClass;
+
+	/** Active Level Failed screen instance */
+	UPROPERTY()
+	TObjectPtr<ULevelFailedWidget> LevelFailedWidget;
 
 	/** Input Mapping Contexts */
 	UPROPERTY(EditAnywhere, Category="Input|Input Mappings")
@@ -58,14 +96,6 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UPlayerHealthWidget> HUDWidget;
 
-	/** Crosshair widget class */
-	UPROPERTY(EditDefaultsOnly, Category = "UI")
-	TSubclassOf<UCrosshairWidget> CrosshairWidgetClass;
-
-	/** Active crosshair widget instance */
-	UPROPERTY()
-	TObjectPtr<UCrosshairWidget> CrosshairWidget;
-
 	/** Ammo display widget class */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<UAmmoWidget> AmmoWidgetClass;
@@ -81,6 +111,51 @@ protected:
 	/** Active bark feed widget instance */
 	UPROPERTY()
 	TObjectPtr<UBarkFeedWidget> BarkFeedWidget;
+
+	/** Companion mode HUD chip class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UCompanionModeWidget> CompanionModeWidgetClass;
+
+	/** Active companion mode chip instance */
+	UPROPERTY()
+	TObjectPtr<UCompanionModeWidget> CompanionModeWidget;
+
+	/** Objective waypoint layer class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UObjectiveMarkerLayer> ObjectiveLayerWidgetClass;
+
+	/** Active objective waypoint layer instance */
+	UPROPERTY()
+	TObjectPtr<UObjectiveMarkerLayer> ObjectiveLayerWidget;
+
+	/** Screen-space objective text panel class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UObjectiveTextPanelWidget> ObjectiveTextPanelWidgetClass;
+
+	/** Active objective text panel instance */
+	UPROPERTY()
+	TObjectPtr<UObjectiveTextPanelWidget> ObjectiveTextPanelWidget;
+
+	/** World-space marker display actor class (assigned in BP defaults — no C++ asset path).
+	 *  Supplied to UObjectiveSubsystem::SetMarkerDisplayClass during local player setup. */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<AObjectiveMarkerDisplay> MarkerDisplayClass;
+
+	/** Loot acquisition toast class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<ULootNotificationWidget> LootToastWidgetClass;
+
+	/** Active loot toast instance */
+	UPROPERTY()
+	TObjectPtr<ULootNotificationWidget> LootToastWidget;
+
+	/** "[E] Revive" prompt class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<URevivePromptWidget> RevivePromptWidgetClass;
+
+	/** Active revive prompt instance */
+	UPROPERTY()
+	TObjectPtr<URevivePromptWidget> RevivePromptWidget;
 
 	/** If true, the player will use UMG touch controls even if not playing on mobile platforms */
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")

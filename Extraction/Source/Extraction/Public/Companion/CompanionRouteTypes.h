@@ -3,6 +3,7 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "GameFramework/Actor.h"
 #include "CompanionRouteTypes.generated.h"
 
 UENUM(BlueprintType)
@@ -34,13 +35,19 @@ struct FCompanionRouteWaypoint
 	ECompanionRouteStance Stance = ECompanionRouteStance::Relaxed;
 
 	/** When true, the companion aims at AimTargetLocal on this leg instead of the procedural look-ahead.
-	 *  On the FINAL waypoint this also defines the authored hold facing. */
+	 *  On the FINAL waypoint this also defines the authored hold facing. Ignored when AimTargetActor is set. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Waypoint")
 	bool bOverrideAim = false;
 
-	/** Local-space aim target; draggable. Used when bOverrideAim. */
+	/** Local-space aim target; draggable. Used when bOverrideAim and AimTargetActor is unset. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Waypoint", meta = (MakeEditWidget, EditCondition = "bOverrideAim"))
 	FVector AimTargetLocal = FVector(300.f, 0.f, 0.f);
+
+	/** Level actor to keep looking at on this leg (e.g. a door), highest aim priority. Assign the same
+	 *  actor across a run of waypoints to hold focus down a whole stretch (a stairwell descent, say).
+	 *  Null = unused. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Waypoint")
+	TObjectPtr<AActor> AimTargetActor;
 
 	/** Hold at this waypoint until the player is within WaitForPlayerRadius before continuing. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Waypoint")
@@ -56,4 +63,9 @@ struct FCompanionRouteWaypoint
 	/** Per-leg movement speed override (cm/s). 0 = use the stance's default speed. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Waypoint", meta = (ClampMin = "0.0"))
 	float SpeedOverride = 0.f;
+
+	/** True if this waypoint authors an aim target (actor or local point) rather than relying on the
+	 *  procedural look-ahead. Used to decide whether the BT task's aim-focus tick should hold on the
+	 *  authored target instead of following the path. */
+	bool HasAuthoredAim() const { return IsValid(AimTargetActor) || bOverrideAim; }
 };

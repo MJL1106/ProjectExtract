@@ -1,7 +1,9 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionPlayer.h"
+#include "ExtractionPlayerMovement.h"
 #include "Components/CompanionCommandComponent.h"
+#include "Components/ConsumableInventoryComponent.h"
 #include "AI/AITargetingStatics.h"
 #include "Perception/AISightTargetInterface.h"
 #include "Perception/AISense_Sight.h"
@@ -11,6 +13,7 @@
 #include "Animation/AnimMontage.h"
 #include "Components/CapsuleComponent.h"
 #include "Camera/CameraComponent.h"
+#include "GameFramework/SpringArmComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
@@ -37,9 +40,15 @@
 #include "AIController.h"
 #include "BrainComponent.h"
 #include "EnemyDebug.h"
+#include "World/Lootable.h"
+#include "World/BreachableDoor.h"
+#include "World/WorldInteractable.h"
+#include "Game/ExtractionGameMode.h"
 
-AExtractionPlayer::AExtractionPlayer()
-	: bIsDBNO(false)
+AExtractionPlayer::AExtractionPlayer(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UExtractionPlayerMovement>(
+		ACharacter::CharacterMovementComponentName))
+	, bIsDBNO(false)
 	, BleedoutTimeRemaining(0.f)
 	, ReviveElapsed(0.f)
 	, bIsReviving(false)
@@ -52,6 +61,7 @@ AExtractionPlayer::AExtractionPlayer()
 	WeaponComponent   = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
 	CompanionCommandComponent = CreateDefaultSubobject<UCompanionCommandComponent>(TEXT("CompanionCommandComponent"));
+	ConsumableInventoryComponent = CreateDefaultSubobject<UConsumableInventoryComponent>(TEXT("ConsumableInventoryComponent"));
 
 	// Bug 6: weapon hitscan traces ECC_Visibility, which the inherited CharacterMesh profile ignores —
 	// block it on the mesh so enemy fire registers on the player.
@@ -160,6 +170,9 @@ void AExtractionPlayer::BeginPlay()
 	if (IsValid(HealthComponent))
 		HealthComponent->OnDeath.AddDynamic(this, &AExtractionPlayer::HandleDeath);
 
+	if (IsValid(ConsumableInventoryComponent))
+		ConsumableInventoryComponent->OnStimUsedNative.AddUObject(this, &AExtractionPlayer::HandleStimUsed);
+
 	// Late-join / standalone catch-up: re-fire OnWeaponEquipped if weapon already equipped
 	if (IsLocallyControlled() && !GetIsDBNO() && IsValid(WeaponComponent))
 	{
@@ -184,6 +197,9 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (IsValid(HealthComponent))
 		HealthComponent->OnDeath.RemoveDynamic(this, &AExtractionPlayer::HandleDeath);
 
+	if (IsValid(ConsumableInventoryComponent))
+		ConsumableInventoryComponent->OnStimUsedNative.RemoveAll(this);
+
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
 
@@ -192,6 +208,9 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		Victim->FinishTakedownKill(this);
 	PendingTakedownVictim.Reset();
 	bTakedownMontageActive = false;
+
+	CancelRevive();          // reviver-side teardown (idempotent no-op when not reviving)
+	SetBeingRevived(false);  // patient-side teardown (companion-revives-player direction)
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -203,8 +222,37 @@ void AExtractionPlayer::Tick(float DeltaTime)
 	if (bIsDBNO && BleedoutTimeRemaining > 0.f)
 		BleedoutTimeRemaining = FMath::Max(BleedoutTimeRemaining - DeltaTime, 0.f);
 
+	if (bIsDBNO)
+	{
+		UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+		if (IsValid(MoveComp))
+		{
+			MoveComp->MaxWalkSpeed = DBNOCrawlSpeed;
+			MoveComp->MaxWalkSpeedCrouched = DBNOCrawlSpeed;
+			if (!bIsCrouched && MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
+		}
+	}
+
+	// Yaw-follow watchdog: three systems save/restore bUseControllerRotationYaw and a cross-
+	// clobbered restore leaves it stuck off — the body stops tracking the camera and the kit
+	// ABP's aim-offset layers contort the pose (the recurring "float at doors"). Nothing holds
+	// yaw-follow off outside these states (the kit BP's freelook rows are unwired), so a stuck
+	// flag here is always the latch: heal it and name the moment.
+	if (!bUseControllerRotationYaw && !bIsReviving && !bBeingRevivedAnimActive && !bIsDBNO
+		&& !bTakedownMontageActive && !IsInTraversal())
+	{
+		const UAnimInstance* WatchdogAnim = GetMesh() ? GetMesh()->GetAnimInstance() : nullptr;
+		UE_LOG(LogExtraction, Warning,
+			TEXT("'%s': yaw-follow stuck off with no owning system — restoring (montage=%s)"),
+			*GetName(), *GetNameSafe(WatchdogAnim ? WatchdogAnim->GetCurrentActiveMontage() : nullptr));
+		bUseControllerRotationYaw = true;
+	}
+
 	if (IsLocallyControlled() && bIsReviving)
 		UpdateRevive(DeltaTime);
+
+	if (IsLocallyControlled())
+		UpdateReviveCandidateScan(DeltaTime);
 
 	if (IsLocallyControlled() && IsValid(WeaponComponent))
 	{
@@ -294,6 +342,15 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	else
 		UE_LOG(LogExtraction, Warning, TEXT("'%s': VaultAction is null — assign in BP child class."), *GetNameSafe(this));
 
+	if (WalkAction)
+	{
+		EnhancedInput->BindAction(WalkAction, ETriggerEvent::Started, this, &AExtractionPlayer::WalkStart);
+		EnhancedInput->BindAction(WalkAction, ETriggerEvent::Completed, this, &AExtractionPlayer::WalkStop);
+		EnhancedInput->BindAction(WalkAction, ETriggerEvent::Canceled, this, &AExtractionPlayer::WalkStop);
+	}
+	else
+		UE_LOG(LogExtraction, Warning, TEXT("'%s': WalkAction is null — assign in BP child class."), *GetNameSafe(this));
+
 	if (InteractAction)
 	{
 		EnhancedInput->BindAction(InteractAction, ETriggerEvent::Started, this, &AExtractionPlayer::InteractStart);
@@ -307,6 +364,9 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	if (TakedownAction)
 		EnhancedInput->BindAction(TakedownAction, ETriggerEvent::Started, this, &AExtractionPlayer::TakedownInput);
 
+	if (UseStimAction)
+		EnhancedInput->BindAction(UseStimAction, ETriggerEvent::Started, this, &AExtractionPlayer::UseStimInput);
+
 	if (IA_CompanionPing)
 		EnhancedInput->BindAction(IA_CompanionPing, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionPingInput);
 
@@ -318,6 +378,18 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 	if (IA_CompanionBreach)
 		EnhancedInput->BindAction(IA_CompanionBreach, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionConfirmBreachInput);
+
+	if (IA_CompanionModeToggle)
+		EnhancedInput->BindAction(IA_CompanionModeToggle, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeToggleInput);
+
+	if (IA_CompanionModeStealth)
+		EnhancedInput->BindAction(IA_CompanionModeStealth, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeSelectStealthInput);
+
+	if (IA_CompanionModeNormal)
+		EnhancedInput->BindAction(IA_CompanionModeNormal, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeSelectNormalInput);
+
+	if (IA_CompanionModeCombat)
+		EnhancedInput->BindAction(IA_CompanionModeCombat, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeSelectCombatInput);
 
 	// Temp debug: H key applies 25 damage
 	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionPlayer::DebugApplyDamage);
@@ -351,6 +423,8 @@ void AExtractionPlayer::MoveInput(const FInputActionValue& Value)
 
 void AExtractionPlayer::LookInput(const FInputActionValue& Value)
 {
+	if (bIsReviving || bBeingRevivedAnimActive) return;
+
 	const FVector2D LookAxisVector = Value.Get<FVector2D>();
 
 	// Cancel recoil recovery when player moves mouse
@@ -367,27 +441,40 @@ void AExtractionPlayer::LookInput(const FInputActionValue& Value)
 void AExtractionPlayer::DoAim(float Yaw, float Pitch)
 {
 	if (!IsValid(GetController())) return;
-	if (bTakedownMontageActive) return;
-
+	if (bTakedownMontageActive || bIsReviving || bBeingRevivedAnimActive) return;
 	AddControllerYawInput(Yaw);
 	AddControllerPitchInput(Pitch);
 }
 
 void AExtractionPlayer::DoMove(float Right, float Forward)
 {
-	if (bIsDBNO) return;
 	if (IsInTraversal()) return;
+	if (bBeingRevivedAnimActive) return;
+	if (bIsReviving) return;
 	if (!IsValid(GetController())) return;
 
 	AddMovementInput(GetActorRightVector(), Right);
 	AddMovementInput(GetActorForwardVector(), Forward);
 }
 
+void AExtractionPlayer::AddMovementInput(FVector WorldDirection, float ScaleValue, bool bForce)
+{
+	if (bIsReviving || bBeingRevivedAnimActive) return;
+	Super::AddMovementInput(WorldDirection, ScaleValue, bForce);
+}
+
 void AExtractionPlayer::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 {
 	Super::CalcCamera(DeltaTime, OutResult);
-	if (bTakedownMontageActive && TakedownNearClipPlane > 0.f)
+	// Revive kneel shares the takedown's geometry problem: head-mounted camera riding a montage
+	// right up against another body.
+	if ((bTakedownMontageActive || bIsReviving) && TakedownNearClipPlane > 0.f)
 		OutResult.PerspectiveNearClipPlane = TakedownNearClipPlane;
+
+	// No hold-camera manipulation: like traversal, the camera rides the head bone exactly as
+	// the kneel montage animates it (look input is ignored for the hold). The historical spin
+	// sources are fixed at THEIR sinks — intro skipped, zero blend-in, aim layers zeroed,
+	// turn-in-place synced — so the head-following camera is clean.
 }
 
 // ---- Weapon Input ----
@@ -395,11 +482,26 @@ void AExtractionPlayer::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 {
 	if (bIsDBNO) return;
+	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
 	if (!IsValid(WeaponComponent)) return;
 
-	WeaponComponent->StartFire();
+	// Snapshot the companion shoot-takedown state BEFORE broadcasting: the synchronous
+	// takedown listener disarms before the actual weapon shot lands.
+	bool bTakedownSnapshot = false;
+	if (HasAuthority() && IsValid(CompanionCommandComponent))
+	{
+		ACompanionCharacter* Companion = CompanionCommandComponent->GetCompanion();
+		if (IsValid(Companion))
+			bTakedownSnapshot = Companion->IsShootTakedownArmed();
+	}
+
+	// Broadcast BEFORE the shot: StartFire's hitscan/kill/alert chain runs synchronously, and a
+	// synced companion shoot-takedown listening on this delegate must land its kill while the
+	// victim is still Unaware -- after StartFire, the player's own gunshot has already alerted it
+	// and the takedown whiffs.
 	OnPlayerFiredWeapon.Broadcast();
+	WeaponComponent->StartFire(bTakedownSnapshot);
 }
 
 void AExtractionPlayer::FireStop(const FInputActionValue& Value)
@@ -411,6 +513,7 @@ void AExtractionPlayer::FireStop(const FInputActionValue& Value)
 void AExtractionPlayer::ReloadStart(const FInputActionValue& Value)
 {
 	if (bIsDBNO) return;
+	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
 	if (!IsValid(WeaponComponent)) return;
 
@@ -420,6 +523,7 @@ void AExtractionPlayer::ReloadStart(const FInputActionValue& Value)
 void AExtractionPlayer::ADSStart(const FInputActionValue& Value)
 {
 	if (bIsDBNO) return;
+	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
 	if (!IsValid(WeaponComponent)) return;
 
@@ -439,6 +543,22 @@ void AExtractionPlayer::ADSStop(const FInputActionValue& Value)
 	bAutoLeanActive = false;
 }
 
+// ---- Walk Input ----
+
+void AExtractionPlayer::WalkStart(const FInputActionValue& Value)
+{
+	if (bWalkHeld) return;
+	bWalkHeld = true;
+	OnWalkHeldChanged(true);
+}
+
+void AExtractionPlayer::WalkStop(const FInputActionValue& Value)
+{
+	if (!bWalkHeld) return;
+	bWalkHeld = false;
+	OnWalkHeldChanged(false);
+}
+
 // ---- Traversal Input ----
 
 void AExtractionPlayer::VaultStart(const FInputActionValue& Value)
@@ -450,6 +570,9 @@ void AExtractionPlayer::VaultStart(const FInputActionValue& Value)
 bool AExtractionPlayer::TryStartTraversal()
 {
 	if (bIsDBNO) return false;
+	// Mid-revive-hold: a vault would displace the kneeling reviver AND cross-clobber the shared
+	// yaw-follow save with the traversal component's own (leaves yaw-follow stuck off).
+	if (bIsReviving) return false;
 	if (IsInTraversal()) return false;
 	if (!IsValid(TraversalComponent)) return false;
 
@@ -570,6 +693,11 @@ void AExtractionPlayer::UpdateCompanionSoftCollision()
 	UCapsuleComponent* CompCapsule = Companion->GetCapsuleComponent();
 	if (!IsValid(CompCapsule) || CompCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) return;
 
+	// Old-companion-instance cleanup only (respawn swap) — the live pair's ignore flags are
+	// asserted unconditionally below, every tick, instead of latch-gated on this. A latch-gated
+	// one-time wire never noticed BTTask_RevivePlayer's SetReviveAnimsActive(false) stripping the
+	// player's ignore of the companion at hold teardown (MoveIgnoreActorRemove on both capsules) —
+	// pass-through stayed broken for the rest of the level after the first companion-revives-player.
 	if (WiredCompanion.Get() != Companion)
 	{
 		if (ACompanionCharacter* Old = WiredCompanion.Get())
@@ -578,10 +706,15 @@ void AExtractionPlayer::UpdateCompanionSoftCollision()
 				OldCap->IgnoreActorWhenMoving(this, false);
 			GetCapsuleComponent()->IgnoreActorWhenMoving(Old, false);
 		}
-		GetCapsuleComponent()->IgnoreActorWhenMoving(Companion, true);
-		CompCapsule->IgnoreActorWhenMoving(this, true);
 		WiredCompanion = Companion;
 	}
+
+	// Idempotent per-tick assert (self-heals any external clear, e.g. the revive teardown above):
+	// the player still ignores the companion (existing pass-through feel); the companion no longer
+	// ignores the player, so ITS movement sweeps block against the player's capsule — CMC
+	// wall-slide walks it around instead of shoving through (asymmetric blocking, F2).
+	GetCapsuleComponent()->IgnoreActorWhenMoving(Companion, true);
+	CompCapsule->IgnoreActorWhenMoving(this, false);
 
 	FVector Delta = GetActorLocation() - Companion->GetActorLocation();
 	Delta.Z = 0.f;
@@ -661,22 +794,105 @@ void AExtractionPlayer::UpdateAutoLean(float DeltaTime)
 void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 {
 	if (bIsDBNO) return;
+	// Mid-takedown E would start the revive: the kneel's stop-all Montage_Play kills the takedown
+	// montage (orphaning the victim) and the seat snap flips the capsule mid-kill.
+	if (bTakedownMontageActive) return;
+	// Mid-traversal E is the reverse of TryStartTraversal's bIsReviving guard: the revive hold
+	// would snapshot bUseControllerRotationYaw while traversal already holds it false, and
+	// its restore then leaves yaw-follow stuck off — the body stops tracking the camera and the
+	// kit's turn/aim layers contort the pose (the "player floats at doors" latch).
+	if (IsInTraversal()) return;
 	if (!IsLocallyControlled()) return;
 
-	AExtractionPlayer* Target = FindReviveTarget();
+	if (bIsReviving) return;
+
+	// World interactions (loot container / keycard door) win over the revive hold.
+	if (TryWorldInteract()) return;
+
+	AActor* Target = FindReviveTarget();
 	if (!IsValid(Target)) return;
 
-	ReviveTarget = Target;
-	ReviveElapsed = 0.f;
-	bIsReviving = true;
-
-	UE_LOG(LogExtraction, Verbose, TEXT("'%s' began reviving '%s'"), *GetNameSafe(this), *GetNameSafe(Target));
+	BeginReviveHold(Target);
 }
 
 void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 {
 	if (!IsLocallyControlled()) return;
-	if (bIsReviving) CancelRevive();
+	if (!bIsReviving) return;
+
+	UE_LOG(LogExtraction, Log, TEXT("Revive cancel: E released at %.2fs / %.2fs"), ReviveElapsed, ReviveDuration);
+	CancelRevive();
+}
+
+bool AExtractionPlayer::TryWorldInteract()
+{
+	UWorld* World = GetWorld();
+	if (!World) return false;
+
+	// Controller view point tracks CalcCamera (kit-driven FP camera) — more accurate than eyes.
+	FVector ViewLoc; FRotator ViewRot;
+	GetActorEyesViewPoint(ViewLoc, ViewRot);
+	if (const AController* C = GetController())
+		C->GetPlayerViewPoint(ViewLoc, ViewRot);
+
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(PlayerInteract), false, this);
+	const FVector TraceEnd = ViewLoc + ViewRot.Vector() * InteractTraceRange;
+	if (!World->LineTraceSingleByChannel(Hit, ViewLoc, TraceEnd, ECC_Visibility, Params)) return false;
+
+	AActor* HitActor = Hit.GetActor();
+	if (!IsValid(HitActor)) return false;
+
+	// Generic world interactable — extraction targets, terminals, etc.
+	if (HitActor->Implements<UWorldInteractable>() && IWorldInteractable::Execute_CanWorldInteract(HitActor, this))
+	{
+		if (HasAuthority())
+		{
+			IWorldInteractable::Execute_WorldInteract(HitActor, this);
+		}
+		else
+		{
+			Server_WorldInteract(HitActor);
+		}
+		return true;
+	}
+
+	// Lootable container — instant press-to-loot; the container animates itself (no player anim yet).
+	if (HitActor->Implements<ULootable>() && ILootable::Execute_CanLoot(HitActor))
+	{
+		ILootable::Execute_Loot(HitActor, this);
+		return true;
+	}
+
+	// Locked door — keycard unlock (opens on success, "requires keycard" toast otherwise).
+	if (ABreachableDoor* Door = Cast<ABreachableDoor>(HitActor))
+	{
+		if (Door->IsLocked())
+		{
+			Door->TryUnlock(this);
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void AExtractionPlayer::Server_WorldInteract_Implementation(AActor* Target)
+{
+	if (!IsValid(Target)) return;
+	if (!Target->Implements<UWorldInteractable>()) return;
+	if (!IWorldInteractable::Execute_CanWorldInteract(Target, this)) return;
+
+	const float MaxDistSq = FMath::Square(InteractTraceRange + WorldInteractDistanceSlack);
+	const float BoundsDistSq = Target->GetComponentsBoundingBox().ComputeSquaredDistanceToPoint(GetActorLocation());
+	if (BoundsDistSq > MaxDistSq)
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("Server_WorldInteract: '%s' too far from '%s'"),
+			*GetNameSafe(this), *GetNameSafe(Target));
+		return;
+	}
+
+	IWorldInteractable::Execute_WorldInteract(Target, this);
 }
 
 void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
@@ -687,6 +903,11 @@ void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
 	if (!HasAuthority()) return;
 	// Re-entrancy guard: a second press during an active montage takedown would orphan the frozen victim.
 	if (bTakedownMontageActive) return;
+	// Mid-revive-hold: the takedown align/montage would stomp the kneel and teleport the reviver.
+	if (bIsReviving) return;
+	// Mid-traversal: the takedown montage would interrupt the vault montage and force-end the
+	// traversal mid-obstacle while the seat snap fights the traversal rotation lock.
+	if (IsInTraversal()) return;
 
 	static constexpr float FacingDotMin = 0.3f;
 	AEnemyCharacter* Best = nullptr;
@@ -840,7 +1061,49 @@ void AExtractionPlayer::CompanionConfirmTakedownShootInput(const FInputActionVal
 void AExtractionPlayer::CompanionConfirmBreachInput(const FInputActionValue& /*Value*/)
 {
 	if (!IsValid(CompanionCommandComponent)) return;
-	CompanionCommandComponent->ConfirmBreach();
+
+	// One confirm key — routes to whatever the ping prompt is showing.
+	switch (CompanionCommandComponent->GetPendingCommand())
+	{
+	case ECompanionCommand::Loot:    CompanionCommandComponent->ConfirmLoot();    break;
+	case ECompanionCommand::Explore: CompanionCommandComponent->ConfirmExplore(); break;
+	default:                         CompanionCommandComponent->ConfirmBreach();  break;
+	}
+}
+
+void AExtractionPlayer::CompanionModeToggleInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->ToggleModeMenu();
+}
+
+void AExtractionPlayer::CompanionModeSelectStealthInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->SelectCompanionMode(ECompanionMode::Stealth);
+}
+
+void AExtractionPlayer::CompanionModeSelectNormalInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->SelectCompanionMode(ECompanionMode::Normal);
+}
+
+void AExtractionPlayer::CompanionModeSelectCombatInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->SelectCompanionMode(ECompanionMode::Combat);
+}
+
+void AExtractionPlayer::UseStimInput(const FInputActionValue& /*Value*/)
+{
+	if (IsValid(ConsumableInventoryComponent))
+		ConsumableInventoryComponent->TryUseStim();
+}
+
+void AExtractionPlayer::HandleStimUsed()
+{
+	OnStimUsed();
 }
 
 void AExtractionPlayer::FinishPendingTakedown()
@@ -909,6 +1172,12 @@ float AExtractionPlayer::GetHitboxDamageMultiplier(const FDamageEvent& DamageEve
 
 float AExtractionPlayer::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
 {
+	// Post-revive grace: full immunity for a beat after standing up, or a mid-burst enemy re-downs
+	// the player the frame the revive completes.
+	if (!bIsDBNO && GetWorld()
+		&& (GetWorld()->GetTimeSeconds() - LastReviveWorldTime) < PostReviveDamageGraceSeconds)
+		return 0.f;
+
 	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 	const float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent);
 
@@ -929,7 +1198,6 @@ void AExtractionPlayer::EnterDBNO()
 {
 	if (bIsDBNO) return;
 	bIsDBNO = true;
-
 	// Stop auto-lean: ADSStop may never fire if the player is downed mid-ADS, which would leave the probe
 	// driving lean on a downed pawn. The per-frame FInterpTo eases AutoLeanAlpha back to 0.
 	bAutoLeanActive = false;
@@ -946,7 +1214,11 @@ void AExtractionPlayer::EnterDBNO()
 	if (IsValid(MoveComp))
 	{
 		MoveComp->StopMovementImmediately();
-		MoveComp->DisableMovement();
+		MoveComp->SetMovementMode(MOVE_Walking);
+		SavedMaxWalkSpeedCrouched = MoveComp->MaxWalkSpeedCrouched;
+		MoveComp->MaxWalkSpeed = DBNOCrawlSpeed;
+		MoveComp->MaxWalkSpeedCrouched = DBNOCrawlSpeed;
+		if (MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
 	}
 
 	// Start bleedout timer (server only)
@@ -962,7 +1234,20 @@ void AExtractionPlayer::EnterDBNO()
 				&AExtractionPlayer::OnBleedoutExpired,
 				BleedoutDuration, false);
 		}
+
+		// Both-DBNO check: if the companion is also downed, immediate mission fail
+		for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It)
+		{
+			if (It->GetIsDBNO())
+			{
+				if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+					GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
+				break;
+			}
+		}
 	}
+
+	SetDBNOCameraFreeLook(true);
 
 	OnDBNOStateChanged.Broadcast(true, BleedoutDuration);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' entered DBNO (%.0fs bleedout)"), *GetNameSafe(this), BleedoutDuration);
@@ -983,7 +1268,21 @@ void AExtractionPlayer::ExitDBNO()
 
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (IsValid(MoveComp))
+	{
 		MoveComp->SetMovementMode(MOVE_Walking);
+		MoveComp->MaxWalkSpeedCrouched = SavedMaxWalkSpeedCrouched;
+		if (const UCharacterMovementComponent* Archetype = Cast<UCharacterMovementComponent>(MoveComp->GetArchetype()))
+			MoveComp->MaxWalkSpeed = Archetype->MaxWalkSpeed;
+		else
+			MoveComp->MaxWalkSpeed = GetClass()->GetDefaultObject<AExtractionPlayer>()->GetCharacterMovement()->MaxWalkSpeed;
+	}
+	UnCrouch();
+
+	SetBeingRevived(false);
+	SetDBNOCameraFreeLook(false);
+
+	if (const UWorld* World = GetWorld())
+		LastReviveWorldTime = World->GetTimeSeconds();
 
 	OnDBNOStateChanged.Broadcast(false, 0.f);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' revived at %.0f%% health"), *GetNameSafe(this), ReviveHealthPercent * 100.f);
@@ -1004,12 +1303,387 @@ void AExtractionPlayer::FullDeath()
 
 	bAutoLeanActive = false;
 	AutoLeanTargetAlpha = 0.f;
+	SetBeingRevived(false);
+	SetDBNOCameraFreeLook(false);
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
 
-	// TODO: Ragdoll, drop loot, spectate camera
 	UE_LOG(LogExtraction, Log, TEXT("'%s' is fully dead"), *GetNameSafe(this));
+
+	if (HasAuthority())
+	{
+		if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+			GM->FailLevel(NSLOCTEXT("Extraction", "PlayerDiedReason", "You died."));
+	}
+}
+
+void AExtractionPlayer::SetDBNOCameraFreeLook(bool bEnable)
+{
+	if (!IsLocallyControlled()) return;
+	if (bEnable == bDBNOFreeLookActive) return;
+
+	USpringArmComponent* Arm = CachedSpringArm.Get();
+	if (!IsValid(Arm))
+	{
+		Arm = FindComponentByClass<USpringArmComponent>();
+		CachedSpringArm = Arm;
+	}
+	if (!IsValid(Arm)) return;
+
+	bDBNOFreeLookActive = bEnable;
+	if (bEnable)
+	{
+		bSavedSpringArmUsePawnControlRotation = Arm->bUsePawnControlRotation;
+		Arm->bUsePawnControlRotation = true;
+	}
+	else
+		Arm->bUsePawnControlRotation = bSavedSpringArmUsePawnControlRotation;
+}
+
+void AExtractionPlayer::SetBeingRevived(bool bBeingRevived, float ExpectedDuration)
+{
+	if (bBeingRevivedAnimActive == bBeingRevived) return;
+	bBeingRevivedAnimActive = bBeingRevived;
+	if (bBeingRevived)
+	{
+		bSavedUseControllerRotationYaw = bUseControllerRotationYaw;
+		bUseControllerRotationYaw = false;
+		SetBeingRevivedCameraAnimationControl(true);
+	}
+	else
+	{
+		bUseControllerRotationYaw = bSavedUseControllerRotationYaw;
+		SetBeingRevivedCameraAnimationControl(false);
+	}
+
+	if (bBeingRevived && IsValid(WeaponComponent))
+	{
+		WeaponComponent->StopFire();
+		WeaponComponent->SetAiming(false);
+		OnADSChanged(false);
+		bAutoLeanActive = false;
+		AutoLeanTargetAlpha = 0.f;
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon()) Weapon->CancelReload();
+	}
+	// After the ADS/pose drops: OnADSChanged drives the kit's NewHandPose, which can re-show
+	// the hand-socket item a hide-first ordering just hid.
+	SetHeldWeaponHidden(bBeingRevived);
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst) || !BeingRevivedMontage) return;
+	if (bBeingRevived && bIsDBNO)
+	{
+		AnimInst->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
+		const float Length = BeingRevivedMontage->GetPlayLength();
+		const float Rate = ExpectedDuration > 0.f && Length > 0.f ? Length / ExpectedDuration : 1.f;
+		AnimInst->Montage_Play(BeingRevivedMontage, Rate);
+	}
+	else if (AnimInst->Montage_IsPlaying(BeingRevivedMontage))
+	{
+		AnimInst->Montage_Stop(0.25f, BeingRevivedMontage);
+	}
+}
+
+void AExtractionPlayer::SetBeingRevivedCameraAnimationControl(bool bActive)
+{
+	if (!IsLocallyControlled() || bBeingRevivedCameraOverrideActive == bActive) return;
+	USpringArmComponent* Arm = CachedSpringArm.Get();
+	if (!IsValid(Arm))
+	{
+		Arm = FindComponentByClass<USpringArmComponent>();
+		CachedSpringArm = Arm;
+	}
+	if (!IsValid(Arm)) return;
+
+	bBeingRevivedCameraOverrideActive = bActive;
+	if (bActive)
+	{
+		bBeingRevivedSavedSpringArmUsePawnControlRotation = Arm->bUsePawnControlRotation;
+		Arm->bUsePawnControlRotation = false;
+	}
+	else
+	{
+		Arm->bUsePawnControlRotation = bBeingRevivedSavedSpringArmUsePawnControlRotation;
+	}
+}
+
+void AExtractionPlayer::SetHeldWeaponHidden(bool bHideWeapon)
+{
+	// SetWeaponHidden, not SetActorHiddenInGame: the visible gun is a separate visual actor.
+	if (IsValid(WeaponComponent))
+	{
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
+			Weapon->SetWeaponHidden(bHideWeapon);
+	}
+
+	// The kit's VISIBLE third-person gun is a separate BP-spawned actor (BP_Item_Base's Item_Mesh)
+	// attached to a hand socket — C++ has no direct ref (BP-only SpawnedItemRef), so hide any actor
+	// hanging off the weapon-hand sockets. Covers the gun body + its attachment meshes in one call.
+	TArray<AActor*> AttachedActors;
+	GetAttachedActors(AttachedActors);
+	for (AActor* Attached : AttachedActors)
+	{
+		const USceneComponent* AttachedRoot = IsValid(Attached) ? Attached->GetRootComponent() : nullptr;
+		const FName Socket = AttachedRoot ? AttachedRoot->GetAttachSocketName() : NAME_None;
+		if (Socket == TEXT("ik_hand_gun") || Socket == TEXT("ItemHand_R") || Socket == TEXT("ItemHand_L"))
+			Attached->SetActorHiddenInGame(bHideWeapon);
+	}
+}
+
+// Reads a float-ish BP variable off an anim instance (UE5 BP floats are doubles).
+static float ReadAnimFloat(const UAnimInstance* AnimInst, const TCHAR* Name)
+{
+	if (!AnimInst) return 0.f;
+	const FProperty* Prop = AnimInst->GetClass()->FindPropertyByName(Name);
+	if (const FDoubleProperty* D = CastField<FDoubleProperty>(Prop))
+		return static_cast<float>(D->GetPropertyValue_InContainer(AnimInst));
+	if (const FFloatProperty* F = CastField<FFloatProperty>(Prop))
+		return F->GetPropertyValue_InContainer(AnimInst);
+	if (const FBoolProperty* B = CastField<FBoolProperty>(Prop))
+		return B->GetPropertyValue_InContainer(AnimInst) ? 1.f : 0.f;
+	return 0.f;
+}
+
+// One-line dump of every rotation participating in the revive pair — playtest logs name the
+// system that moves when the head misbehaves, instead of another guess.
+static void LogReviveDebugState(const TCHAR* Phase, AExtractionPlayer& Player, AActor* TargetActor)
+{
+	const USkeletalMeshComponent* PMesh = Player.GetMesh();
+	const UAnimInstance* AnimInst = PMesh ? PMesh->GetAnimInstance() : nullptr;
+	const AController* C = Player.GetController();
+	const APlayerCameraManager* Cam = UGameplayStatics::GetPlayerCameraManager(&Player, 0);
+
+	float CompYaw = 0.f, CompMeshYaw = 0.f, CompPelvisYaw = 0.f, Bearing = 0.f, Dist = 0.f, PlayerLocalAngle = 0.f;
+	if (const ACharacter* Comp = Cast<ACharacter>(TargetActor))
+	{
+		CompYaw = Comp->GetActorRotation().Yaw;
+		if (const USkeletalMeshComponent* CMesh = Comp->GetMesh())
+		{
+			CompMeshYaw = CMesh->GetComponentRotation().Yaw;
+			CompPelvisYaw = CMesh->GetSocketRotation(TEXT("pelvis")).Yaw;
+		}
+		const FVector ToPlayer = Player.GetActorLocation() - Comp->GetActorLocation();
+		Bearing = ToPlayer.GetSafeNormal2D().Rotation().Yaw;
+		Dist = ToPlayer.Size2D();
+		PlayerLocalAngle = FRotator::NormalizeAxis(Bearing - CompYaw);
+	}
+
+	UE_LOG(LogExtraction, Log,
+		TEXT("[REVIVE DBG %s] comp: actorYaw=%.1f meshYaw=%.1f pelvisYaw=%.1f | player: actorYaw=%.1f meshRelYaw=%.1f meshWorldYaw=%.1f headYaw=%.1f | ctrlYaw=%.1f camYaw=%.1f camPitch=%.1f | AimYaw=%.1f AimPitch=%.1f UpperYaw=%.1f IsTurn=%.0f | bearingC2P=%.1f dist=%.0f playerLocalAngle=%.1f (authored -47.1) relCapYaw=%.1f (authored -46.0)"),
+		Phase,
+		CompYaw, CompMeshYaw, CompPelvisYaw,
+		Player.GetActorRotation().Yaw,
+		PMesh ? PMesh->GetRelativeRotation().Yaw : 0.f,
+		PMesh ? PMesh->GetComponentRotation().Yaw : 0.f,
+		PMesh ? PMesh->GetSocketRotation(TEXT("head")).Yaw : 0.f,
+		C ? C->GetControlRotation().Yaw : 0.f,
+		Cam ? Cam->GetCameraRotation().Yaw : 0.f,
+		Cam ? Cam->GetCameraRotation().Pitch : 0.f,
+		ReadAnimFloat(AnimInst, TEXT("AimYaw")),
+		ReadAnimFloat(AnimInst, TEXT("AimPitch")),
+		ReadAnimFloat(AnimInst, TEXT("UpperYaw")),
+		ReadAnimFloat(AnimInst, TEXT("IsTurn")),
+		Bearing, Dist, PlayerLocalAngle,
+		FRotator::NormalizeAxis(Player.GetActorRotation().Yaw - CompYaw));
+}
+
+void AExtractionPlayer::BeginReviveHold(AActor* Target)
+{
+	if (bIsReviving) return;
+	IExtractionPlayerInterface* TargetIface = Cast<IExtractionPlayerInterface>(Target);
+	if (!IsValid(Target) || !TargetIface || !TargetIface->GetIsDBNO()) return;
+	if (FVector::DistSquared(GetActorLocation(), Target->GetActorLocation()) > FMath::Square(ReviveProximityRadius)) return;
+	// Root motion needs a grounded CMC mode; an airborne E would kneel in mid-air.
+	if (GetCharacterMovement() && GetCharacterMovement()->IsFalling()) return;
+
+	ReviveTarget = Target;
+	ReviveElapsed = 0.f;
+	bIsReviving = true;
+
+	// Clear approach velocity, but keep a grounded movement mode so CMC consumes the revive
+	// montage's authored root motion. Input remains locked for the full hold.
+	if (UCharacterMovementComponent* Move = GetCharacterMovement())
+	{
+		Move->StopMovementImmediately();
+		Move->SetMovementMode(MOVE_Walking);
+	}
+
+	// Patient first: SetBeingRevived stops its AI movement, so the rotation-only align below
+	// can't be fought by the downed crawl's orient-to-movement.
+	TargetIface->SetBeingRevived(true, ReviveDuration);
+	TargetIface->AlignForRevive(GetActorLocation());
+
+	bReviverSavedUseControllerRotationYaw = bUseControllerRotationYaw;
+	bUseControllerRotationYaw = false;
+	if (AController* C = GetController())
+		ReviverSavedControlRotation = C->GetControlRotation();
+
+	// The kit BP pumps IA_Look straight into AddControllerYaw/PitchInput, bypassing the C++
+	// gates — SetIgnoreLookInput blocks that path at the controller (AddYaw/PitchInput check it).
+	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	{
+		PC->SetIgnoreLookInput(true);
+		ReviverLookIgnoredPC = PC;
+	}
+
+	// Montage-less hold (companion's bPlayPlayerReviveMontages off): skip the kneel seat and
+	// montages — the seat's mesh yaw exists to line up the kneel clip, and with no kneel pose
+	// to own it the yaw would spin the head-mounted FP camera on a standing body.
+	if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Target))
+	{
+		if (Companion->ShouldPlayPlayerReviveMontages())
+		{
+			SeatReviverForHold(*Companion);
+			SetReviveAnimsActive(true);
+		}
+	}
+
+	LogReviveDebugState(TEXT("START"), *this, Target);
+}
+
+void AExtractionPlayer::SeatReviverForHold(const ACompanionCharacter& Companion)
+{
+	// Mirror of BTTask_RevivePlayer's pair snap with roles swapped: the reviver steps to the
+	// authored offset anchored on the patient's (post-align) yaw. The offset lies along the
+	// original approach bearing by construction, so this is a purely radial correction to the
+	// authored 88cm — direction is untouched.
+	// Anchor on the UNTRIMMED patient frame: the patient-yaw trim rotates only the companion's
+	// body; the seat and the kneel facing must not swing with it.
+	const float CompanionYaw = Companion.GetActorRotation().Yaw - Companion.PlayerRevivePatientYawTrimDeg;
+	// PLAYER-direction pair constants — same values as the companion reviver's tuned constants
+	// (both directions play the one authored clip pair), kept separate so this side trims live
+	// without touching the working direction.
+	const FVector AuthoredOffset(Companion.PlayerRevivePairOffset.X, Companion.PlayerRevivePairOffset.Y, 0.f);
+	FVector SeatLocation = Companion.GetActorLocation()
+		+ FRotator(0.f, CompanionYaw, 0.f).RotateVector(AuthoredOffset);
+	SeatLocation.Z = GetActorLocation().Z;
+
+	// Sweep the initial radial correction so a downed companion beside tight cover cannot snap
+	// the player capsule or camera into geometry before root motion takes ownership.
+	if (const UCapsuleComponent* Capsule = GetCapsuleComponent())
+	{
+		FCollisionQueryParams SeatParams;
+		SeatParams.AddIgnoredActor(this);
+		SeatParams.AddIgnoredActor(&Companion);
+		FHitResult SeatHit;
+		if (GetWorld()->SweepSingleByChannel(SeatHit, GetActorLocation(), SeatLocation, FQuat::Identity, ECC_Pawn,
+				FCollisionShape::MakeCapsule(Capsule->GetScaledCapsuleRadius(), Capsule->GetScaledCapsuleHalfHeight()), SeatParams))
+			SeatLocation = SeatHit.Location;
+	}
+	SetActorLocation(SeatLocation, false, nullptr, ETeleportType::TeleportPhysics);
+
+	// Rotate the MESH to the seat, never the capsule: a capsule snap feeds the kit ABP's
+	// turn-in-place chain (TurnDir/UpperYaw = clamped delta ×10) and spins the head at hold
+	// start and end. The mesh-only rotation is invisible to every actor-rotation reader.
+	// SeatYaw points the kneel clip's visual (authored ~180° from forward, plus ABP_Manny's
+	// static Rotate Root Bone 45 — the correction) at the patient.
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	if (!IsValid(MeshComp)) return;
+	// Authored pair yaw plus the side-agnostic ABP Rotate-Root-Bone correction.
+	const float SeatYaw = CompanionYaw + Companion.PlayerRevivePairYawOffset + ReviverSeatYawCorrectionDeg;
+	const float MeshYawDelta = FRotator::NormalizeAxis(SeatYaw - GetActorRotation().Yaw);
+	ReviverSavedMeshRelativeRotation = MeshComp->GetRelativeRotation();
+	MeshComp->SetRelativeRotation(ReviverSavedMeshRelativeRotation + FRotator(0.f, MeshYawDelta, 0.f));
+	bReviverSeated = true;
+
+	// Sync the kit ABP's turn-in-place snapshot to the body: UpperYaw = clamped
+	// delta(rotation, TurnDir) recomputes every anim update, and whatever it froze at
+	// pre-hold (28° in the diagnostic run) stays baked into the kneel as a torso twist.
+	// With TurnDir == the current rotation the chain computes zero for the whole hold.
+	if (UAnimInstance* AnimInst = MeshComp->GetAnimInstance())
+	{
+		const FRotator ActorRot = GetActorRotation();
+		for (const TCHAR* VarName : { TEXT("TurnDir"), TEXT("TurnDirEnd") })
+		{
+			const FStructProperty* Prop = CastField<FStructProperty>(AnimInst->GetClass()->FindPropertyByName(VarName));
+			if (Prop && Prop->Struct == TBaseStructure<FRotator>::Get())
+				*Prop->ContainerPtrToValuePtr<FRotator>(AnimInst) = ActorRot;
+		}
+	}
+}
+
+
+void AExtractionPlayer::SetReviveAnimsActive(bool bActive)
+{
+	if (bActive && IsValid(WeaponComponent))
+	{
+		WeaponComponent->StopFire();
+		WeaponComponent->SetAiming(false);
+		OnADSChanged(false);
+		bAutoLeanActive = false;
+		AutoLeanTargetAlpha = 0.f;
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
+		{
+			Weapon->CancelRecoilRecovery();
+			Weapon->CancelReload();
+		}
+	}
+	// After the ADS/pose drops: OnADSChanged drives the kit's NewHandPose, which can re-show
+	// the hand-socket item a hide-first ordering just hid.
+	SetHeldWeaponHidden(bActive);
+
+	if (ACharacter* Target = Cast<ACharacter>(ReviveTarget))
+	{
+		if (bActive)
+		{
+			MoveIgnoreActorAdd(Target);
+			Target->MoveIgnoreActorAdd(this);
+		}
+		else
+		{
+			MoveIgnoreActorRemove(Target);
+			if (IsValid(Target)) Target->MoveIgnoreActorRemove(this);
+		}
+	}
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst) || !ReviverMontage) return;
+
+	if (bActive)
+	{
+		AnimInst->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
+		// Skip the authored stand-turn-kneel intro AND keep the auto blend-out region off the
+		// timeline: playable = [offset, length - blendout], rate-scaled to span the full hold
+		// so the clip never starts blending back to standing while the player is still holding.
+		// Zero blend-in: the standing and kneel poses differ ~145° in facing, so any blend slerps
+		// the whole body (and its visible FP arms/shadow) the long way round.
+		const float Length = ReviverMontage->GetPlayLength();
+		const float StartAt = FMath::Min(ReviverKneelStartOffsetSeconds, Length);
+		const float Playable = Length - StartAt - ReviverMontage->BlendOut.GetBlendTime();
+		const float Rate = (ReviveDuration > 0.f && Playable > 0.f) ? Playable / ReviveDuration : 1.f;
+		const FMontageBlendSettings BlendIn(0.f);
+		if (AnimInst->Montage_PlayWithBlendSettings(ReviverMontage, BlendIn, Rate, EMontagePlayReturnType::MontageLength, StartAt) <= 0.f)
+			UE_LOG(LogExtraction, Warning, TEXT("SetReviveAnimsActive: Montage_Play failed for '%s' — hold continues without the kneel."),
+				*GetNameSafe(ReviverMontage));
+	}
+	else if (AnimInst->Montage_IsPlaying(ReviverMontage))
+	{
+		// Zero blend: the capsule un-seats the same frame — a blended stop would swing the
+		// head-mounted camera through the body while the capsule flips back to control yaw.
+		AnimInst->Montage_Stop(0.f, ReviverMontage);
+	}
+}
+
+void AExtractionPlayer::AlignForRevive(const FVector& ReviverLocation)
+{
+	// Legacy plain look-at, currently unreachable: the companion-revives-player task positions
+	// itself (never calls this), and BeginReviveHold only ever targets the companion, whose
+	// override carries the authored-angle math.
+	if (!bIsDBNO) return;
+	const FVector ToReviver = (ReviverLocation - GetActorLocation()).GetSafeNormal2D();
+	if (!ToReviver.IsNearlyZero())
+		SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw, 0.f));
+}
+
+bool AExtractionPlayer::IsBeingRevivedMontagePlaying() const
+{
+	if (!BeingRevivedMontage) return false;
+	const USkeletalMeshComponent* MeshComp = GetMesh();
+	const UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+	return IsValid(AnimInst) && AnimInst->Montage_IsPlaying(BeingRevivedMontage);
 }
 
 void AExtractionPlayer::OnRep_IsDBNO()
@@ -1020,16 +1694,36 @@ void AExtractionPlayer::OnRep_IsDBNO()
 		if (bIsDBNO)
 		{
 			MoveComp->StopMovementImmediately();
-			MoveComp->DisableMovement();
+			MoveComp->SetMovementMode(MOVE_Walking);
+			SavedMaxWalkSpeedCrouched = MoveComp->MaxWalkSpeedCrouched;
+			MoveComp->MaxWalkSpeed = DBNOCrawlSpeed;
+			MoveComp->MaxWalkSpeedCrouched = DBNOCrawlSpeed;
+			if (MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
 		}
 		else
 		{
 			MoveComp->SetMovementMode(MOVE_Walking);
+			MoveComp->MaxWalkSpeedCrouched = SavedMaxWalkSpeedCrouched;
+			if (const UCharacterMovementComponent* Archetype = Cast<UCharacterMovementComponent>(MoveComp->GetArchetype()))
+				MoveComp->MaxWalkSpeed = Archetype->MaxWalkSpeed;
+			else
+				MoveComp->MaxWalkSpeed = GetClass()->GetDefaultObject<AExtractionPlayer>()->GetCharacterMovement()->MaxWalkSpeed;
+			UnCrouch();
 		}
 	}
 
 	if (bIsDBNO)
 		BleedoutTimeRemaining = BleedoutDuration;
+
+	if (!bIsDBNO)
+	{
+		SetBeingRevived(false);
+		SetDBNOCameraFreeLook(false);
+	}
+	else if (!bBeingRevivedAnimActive)
+	{
+		SetDBNOCameraFreeLook(true);
+	}
 
 	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
 }
@@ -1047,12 +1741,11 @@ void AExtractionPlayer::DebugApplyDamage()
 
 // ---- Revive ----
 
-AExtractionPlayer* AExtractionPlayer::FindReviveTarget() const
+AActor* AExtractionPlayer::FindReviveTarget() const
 {
 	const UWorld* World = GetWorld();
 	if (!IsValid(World)) return nullptr;
 
-	// Use the active camera manager for view location/direction — works regardless of BP camera naming
 	const APlayerCameraManager* CamManager = UGameplayStatics::GetPlayerCameraManager(this, 0);
 	if (!IsValid(CamManager)) return nullptr;
 
@@ -1071,18 +1764,48 @@ AExtractionPlayer* AExtractionPlayer::FindReviveTarget() const
 
 	if (!bHit) return nullptr;
 
-	AExtractionPlayer* HitPlayer = Cast<AExtractionPlayer>(HitResult.GetActor());
-	if (!IsValid(HitPlayer)) return nullptr;
-	if (!HitPlayer->GetIsDBNO()) return nullptr;
+	AActor* HitActor = HitResult.GetActor();
+	if (!IsValid(HitActor)) return nullptr;
 
-	// TODO: Validate team membership when team system exists
-	return HitPlayer;
+	IExtractionPlayerInterface* Iface = Cast<IExtractionPlayerInterface>(HitActor);
+	if (!Iface || !Iface->GetIsDBNO()) return nullptr;
+
+	// The camera trace reaches further than the hold allows — only offer targets where
+	// BeginReviveHold's actor-distance gate will actually accept the press.
+	if (FVector::DistSquared(GetActorLocation(), HitActor->GetActorLocation()) > FMath::Square(ReviveProximityRadius))
+		return nullptr;
+
+	return HitActor;
+}
+
+void AExtractionPlayer::UpdateReviveCandidateScan(float DeltaTime)
+{
+	ReviveCandidateScanAccumulator += DeltaTime;
+	if (ReviveCandidateScanAccumulator < 0.1f) return;
+	ReviveCandidateScanAccumulator = 0.f;
+
+	// While the hold runs, the prompt tracks the held target (progress bar); a downed player
+	// can't revive anyone.
+	if (bIsReviving) { ReviveCandidate = ReviveTarget; return; }
+	if (bIsDBNO) { ReviveCandidate = nullptr; return; }
+	ReviveCandidate = FindReviveTarget();
 }
 
 void AExtractionPlayer::UpdateRevive(float DeltaTime)
 {
-	if (!IsValid(ReviveTarget) || !ReviveTarget->GetIsDBNO())
+	// Shot down mid-hold: tear the lock down cleanly instead of leaving a kneeling DBNO body.
+	if (bIsDBNO)
 	{
+		UE_LOG(LogExtraction, Log, TEXT("Revive cancel: reviver went DBNO at %.2fs"), ReviveElapsed);
+		CancelRevive();
+		return;
+	}
+
+	IExtractionPlayerInterface* TargetIface = Cast<IExtractionPlayerInterface>(ReviveTarget);
+	if (!IsValid(ReviveTarget) || !TargetIface || !TargetIface->GetIsDBNO())
+	{
+		UE_LOG(LogExtraction, Log, TEXT("Revive cancel: target '%s' invalid or no longer DBNO at %.2fs"),
+			*GetNameSafe(ReviveTarget), ReviveElapsed);
 		CancelRevive();
 		return;
 	}
@@ -1090,60 +1813,69 @@ void AExtractionPlayer::UpdateRevive(float DeltaTime)
 	const float DistSq = FVector::DistSquared(GetActorLocation(), ReviveTarget->GetActorLocation());
 	if (DistSq > FMath::Square(ReviveProximityRadius))
 	{
+		UE_LOG(LogExtraction, Log, TEXT("Revive cancel: target %.0fcm away (limit %.0f) at %.2fs"),
+			FMath::Sqrt(DistSq), ReviveProximityRadius, ReviveElapsed);
 		CancelRevive();
 		return;
 	}
 
 	ReviveElapsed += DeltaTime;
-	if (ReviveElapsed >= ReviveDuration) CompleteRevive();
+
+	// Per-frame dump through the spin window (montage blend-in + pose-branch blend), 4Hz after.
+	if (ReviveElapsed < 0.6f
+		|| FMath::FloorToInt(ReviveElapsed * 4.f) != FMath::FloorToInt((ReviveElapsed - DeltaTime) * 4.f))
+		LogReviveDebugState(TEXT("TICK"), *this, ReviveTarget);
+
+	if (ReviveElapsed < ReviveDuration) return;
+
+	TargetIface->ExitDBNO();
+	CancelRevive();
 }
 
 void AExtractionPlayer::CancelRevive()
 {
 	if (!bIsReviving) return;
 
-	UE_LOG(LogExtraction, Verbose, TEXT("'%s' cancelled revive on '%s'"),
-		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
+	LogReviveDebugState(TEXT("END-PRE"), *this, ReviveTarget);
+
+	// Mirror of BTTask_RevivePlayer::CleanupRevive — single teardown for every exit
+	// (E-release, completion, reviver DBNO, target dead/invalid, EndPlay). Reads
+	// ReviveTarget, so state resets last.
+	SetReviveAnimsActive(false);
+	if (IsValid(ReviveTarget))
+	{
+		if (IExtractionPlayerInterface* TargetIface = Cast<IExtractionPlayerInterface>(ReviveTarget))
+			TargetIface->SetBeingRevived(false);
+	}
+
+	if (bReviverSeated)
+	{
+		if (USkeletalMeshComponent* MeshComp = GetMesh())
+		{
+			MeshComp->SetRelativeRotation(ReviverSavedMeshRelativeRotation);
+			MeshComp->TickPose(0.f, false);
+			MeshComp->RefreshBoneTransforms();
+		}
+		bReviverSeated = false;
+	}
+	if (APlayerController* IgnoredPC = ReviverLookIgnoredPC.Get())
+		IgnoredPC->SetIgnoreLookInput(false);
+	ReviverLookIgnoredPC.Reset();
+	if (AController* C = GetController())
+		C->SetControlRotation(ReviverSavedControlRotation);
+	bUseControllerRotationYaw = bReviverSavedUseControllerRotationYaw;
+	bReviverSavedUseControllerRotationYaw = false;
+
+	// Reassert normal grounded movement after completion or interruption. The hold rejects
+	// starts from falling and blocks all movement input while active.
+	if (UCharacterMovementComponent* Move = GetCharacterMovement())
+		Move->SetMovementMode(MOVE_Walking);
+
+	LogReviveDebugState(TEXT("END-POST"), *this, ReviveTarget);
 
 	bIsReviving = false;
 	ReviveElapsed = 0.f;
 	ReviveTarget = nullptr;
-}
-
-void AExtractionPlayer::CompleteRevive()
-{
-	if (!IsValid(ReviveTarget))
-	{
-		CancelRevive();
-		return;
-	}
-
-	UE_LOG(LogExtraction, Log, TEXT("'%s' completed revive on '%s'"),
-		*GetNameSafe(this), *GetNameSafe(ReviveTarget));
-
-	Server_CompleteRevive(ReviveTarget);
-
-	bIsReviving = false;
-	ReviveElapsed = 0.f;
-	ReviveTarget = nullptr;
-}
-
-void AExtractionPlayer::Server_CompleteRevive_Implementation(AExtractionPlayer* Target)
-{
-	if (!IsValid(Target)) return;
-	if (!Target->GetIsDBNO()) return;
-	if (bIsDBNO) return;
-
-	const float DistSq = FVector::DistSquared(GetActorLocation(), Target->GetActorLocation());
-	if (DistSq > FMath::Square(ReviveProximityRadius))
-	{
-		UE_LOG(LogExtraction, Warning, TEXT("Server_CompleteRevive: '%s' too far from '%s'"),
-			*GetNameSafe(this), *GetNameSafe(Target));
-		return;
-	}
-
-	// TODO: Validate team membership when team system exists
-	Target->ExitDBNO();
 }
 
 // ---- Companion Debug Exec Commands ----
@@ -1206,4 +1938,33 @@ void AExtractionPlayer::CompDebug(bool bFreeze)
 	else Brain->RestartLogic();
 
 	UE_LOG(LogCompanion, Log, TEXT("CompDebug freeze -> %d"), bFreeze);
+}
+
+void AExtractionPlayer::PlayerDown()
+{
+	if (!HasAuthority()) { UE_LOG(LogExtraction, Warning, TEXT("PlayerDown: no authority")); return; }
+	if (bIsDBNO) { UE_LOG(LogExtraction, Warning, TEXT("PlayerDown: already DBNO")); return; }
+	if (!IsValid(HealthComponent)) { UE_LOG(LogExtraction, Warning, TEXT("PlayerDown: no health component")); return; }
+	// After a full death HealthComponent stays bIsDead; Die() would early-return, so the exec would
+	// silently no-op while logging success. Revive resets bIsDead, so this only blocks post-bleedout.
+	if (HealthComponent->IsDead()) { UE_LOG(LogExtraction, Warning, TEXT("PlayerDown: already fully dead — revive/respawn first")); return; }
+
+	UE_LOG(LogExtraction, Log, TEXT("PlayerDown: forcing DBNO via console"));
+	HealthComponent->Die();
+}
+
+void AExtractionPlayer::CompDown()
+{
+	if (!HasAuthority()) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: no authority")); return; }
+
+	ACompanionCharacter* Comp = ResolveDebugCompanion();
+	if (!Comp) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: no companion found")); return; }
+	if (Comp->GetIsDBNO()) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: already DBNO")); return; }
+
+	UHealthComponent* CompHealth = Comp->GetHealthComponent();
+	if (!IsValid(CompHealth)) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: no health component")); return; }
+	if (CompHealth->IsDead()) { UE_LOG(LogCompanion, Warning, TEXT("CompDown: already dead")); return; }
+
+	UE_LOG(LogCompanion, Log, TEXT("CompDown: forcing companion DBNO via console"));
+	CompHealth->Die();
 }

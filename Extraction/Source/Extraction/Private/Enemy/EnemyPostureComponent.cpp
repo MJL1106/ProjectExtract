@@ -1,0 +1,359 @@
+// UEnemyPostureComponent — per-enemy Hold / Press / FallBack evaluation on a staggered timer.
+
+#include "EnemyPostureComponent.h"
+#include "EnemyCharacter.h"
+#include "EnemyAIController.h"
+#include "EnemyArchetypeData.h"
+#include "EnemyAwarenessComponent.h"
+#include "EnemyMoraleComponent.h"
+#include "SuppressionComponent.h"
+#include "Squad/EnemySquad.h"
+#include "Engine/World.h"
+#include "TimerManager.h"
+
+/** Own suppression must be below this for the threat to count as passive (they're not pinning us). */
+static constexpr float PassiveSuppressionThreshold = 0.25f;
+/** Squad size at which the numeric-advantage term saturates. */
+static constexpr float SquadAdvantageSaturation = 3.f;
+/** Fallback eval interval when the archetype DA is not yet available at BeginPlay. */
+static constexpr float DefaultEvalInterval = 0.5f;
+/** Minimum seconds between DBNO-standoff retreat relocates for one enemy. */
+static constexpr float RetreatRepeatCooldown = 8.f;
+
+// --- FEnemyPressCadence ---
+
+void FEnemyPressCadence::Configure(bool bInEnabled, float InMaxEpisodeDuration)
+{
+	bEnabled = bInEnabled;
+	MaxEpisodeDurationSeconds = InMaxEpisodeDuration;
+}
+
+void FEnemyPressCadence::ResetForCombat(float CombatStartTime, float InitialDelay)
+{
+	bEpisodeActive = false;
+	EpisodeStartTime = CombatStartTime;
+	NextOpportunityTime = CombatStartTime + InitialDelay;
+}
+
+bool FEnemyPressCadence::CanEnterPress(float Now) const
+{
+	if (!bEnabled) return true;
+	if (bEpisodeActive) return false;
+	return Now >= NextOpportunityTime;
+}
+
+bool FEnemyPressCadence::TryEnterPress(float Now)
+{
+	if (!CanEnterPress(Now)) return false;
+	bEpisodeActive = true;
+	EpisodeStartTime = Now;
+	return true;
+}
+
+bool FEnemyPressCadence::HasEpisodeExpired(float Now) const
+{
+	if (!bEnabled || !bEpisodeActive) return false;
+	return (Now - EpisodeStartTime) >= MaxEpisodeDurationSeconds;
+}
+
+bool FEnemyPressCadence::IsEpisodeActive() const
+{
+	return bEnabled && bEpisodeActive;
+}
+
+void FEnemyPressCadence::CompleteAdvanceAndScheduleRecovery(float Now, float RecoveryDuration)
+{
+	EndEpisode(Now, RecoveryDuration);
+}
+
+void FEnemyPressCadence::EndEpisodeAndScheduleRecovery(float Now, float RecoveryDuration)
+{
+	EndEpisode(Now, RecoveryDuration);
+}
+
+void FEnemyPressCadence::EndEpisode(float Now, float RecoveryDuration)
+{
+	bEpisodeActive = false;
+	if (!bEnabled) return;
+	NextOpportunityTime = Now + RecoveryDuration;
+}
+
+bool FEnemyPressCadence::IsAdvanceCandidateDistanceValid(float CurrentDistToThreat,
+	float CandidateDistToThreat, float MinGain, float MinThreatDistance)
+{
+	if (CandidateDistToThreat < MinThreatDistance) return false;
+	if ((CurrentDistToThreat - CandidateDistToThreat) < MinGain) return false;
+	return true;
+}
+
+// --- UEnemyPostureComponent ---
+
+UEnemyPostureComponent::UEnemyPostureComponent()
+{
+	PrimaryComponentTick.bCanEverTick = false;
+}
+
+void UEnemyPostureComponent::BeginPlay()
+{
+	Super::BeginPlay();
+
+	const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(GetOwner());
+	const UEnemyArchetypeData* DA = IsValid(Enemy) ? Enemy->GetArchetypeData() : nullptr;
+	const float Interval = IsValid(DA) ? DA->PostureEvalInterval : DefaultEvalInterval;
+
+	// Random first-fire phase is the ONLY anti-sync mechanism — enemies evaluate (and therefore
+	// advance) on independent clocks, so grunts never move as a synchronized line.
+	GetWorld()->GetTimerManager().SetTimer(EvalTimerHandle, this,
+		&UEnemyPostureComponent::EvaluatePosture, Interval, true,
+		FMath::FRandRange(0.f, Interval));
+}
+
+void UEnemyPostureComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(EvalTimerHandle);
+	Super::EndPlay(EndPlayReason);
+}
+
+void UEnemyPostureComponent::DeactivateForDeath()
+{
+	bStopped = true;
+	CurrentPosture = EEnemyPosture::Hold;
+	bAdvanceRequested = false;
+	bRetreatRequested = false;
+	bPressCombatActive = false;
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(EvalTimerHandle);
+}
+
+bool UEnemyPostureComponent::ConsumeAdvanceRequest()
+{
+	if (!bAdvanceRequested) return false;
+	bAdvanceRequested = false;
+	return true;
+}
+
+void UEnemyPostureComponent::NotifyAdvanceExecuted()
+{
+	const UWorld* World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.f;
+	LastAdvanceWorldTime = Now;
+	PressHeldSeconds = 0.f;
+
+	// One committed advance ends the Press episode. No-op when the cadence is disabled — legacy
+	// archetypes keep pressing purely on aggression/suppression/morale as before.
+	const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(GetOwner());
+	const UEnemyArchetypeData* DA = IsValid(Enemy) ? Enemy->GetArchetypeData() : nullptr;
+	if (IsValid(DA) && PressCadence.IsEpisodeActive())
+	{
+		const float Recovery = FMath::FRandRange(DA->PressRecoveryMin, DA->PressRecoveryMax);
+		PressCadence.CompleteAdvanceAndScheduleRecovery(Now, Recovery);
+	}
+}
+
+void UEnemyPostureComponent::EndPressEpisodeIfActive(float Now, const UEnemyArchetypeData* DA)
+{
+	if (!PressCadence.IsEpisodeActive()) return;
+	const float Recovery = IsValid(DA) ? FMath::FRandRange(DA->PressRecoveryMin, DA->PressRecoveryMax) : 0.f;
+	PressCadence.EndEpisodeAndScheduleRecovery(Now, Recovery);
+}
+
+bool UEnemyPostureComponent::ConsumeRetreatRequest()
+{
+	if (!bRetreatRequested) return false;
+	bRetreatRequested = false;
+	const UWorld* World = GetWorld();
+	LastRetreatConsumeWorldTime = World ? World->GetTimeSeconds() : 0.f;
+	return true;
+}
+
+void UEnemyPostureComponent::EvaluatePosture()
+{
+	if (bStopped) return;
+
+	const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(GetOwner());
+	if (!IsValid(Enemy)) return;
+
+	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+	if (!IsValid(DA))
+	{
+		CurrentPosture = EEnemyPosture::Hold;
+		PressHeldSeconds = 0.f;
+		bAdvanceRequested = false;
+		bRetreatRequested = false;
+		return;
+	}
+
+	// Downed hostile player = full posture override (runs even with the posture system disabled,
+	// so rushers and posture-off archetypes still back off from a DBNO player). Ends any live
+	// Press episode — otherwise a stranded bEpisodeActive blocks Press for the rest of the fight.
+	if (ApplyDBNOStandoffOverride(Enemy, DA))
+	{
+		const UWorld* DBNOWorld = GetWorld();
+		EndPressEpisodeIfActive(DBNOWorld ? DBNOWorld->GetTimeSeconds() : 0.f, DA);
+		return;
+	}
+
+	if (!DA->bPostureSystemEnabled)
+	{
+		CurrentPosture = EEnemyPosture::Hold;
+		PressHeldSeconds = 0.f;
+		bAdvanceRequested = false;
+		bRetreatRequested = false;
+		return;
+	}
+
+	const AEnemyAIController* Controller = Cast<AEnemyAIController>(Enemy->GetController());
+	const UEnemyAwarenessComponent* Awareness = Controller ? Controller->GetAwarenessComponent() : nullptr;
+	const AActor* Target = IsValid(Awareness) ? Awareness->GetCombatTarget() : nullptr;
+
+	if (!IsValid(Target))
+	{
+		CurrentPosture = EEnemyPosture::Hold;
+		PressHeldSeconds = 0.f;
+		bAdvanceRequested = false;
+		bPressCombatActive = false;
+		return;
+	}
+
+	const UWorld* World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.f;
+
+	// New engagement: configure the cadence from the DA and roll the randomized initial Press
+	// opportunity once. Zero-valued tuning configures a disabled cadence — legacy behavior.
+	if (!bPressCombatActive)
+	{
+		PressCadence.Configure(DA->PressMaxEpisodeDuration > 0.f, DA->PressMaxEpisodeDuration);
+		PressCadence.ResetForCombat(Now,
+			FMath::FRandRange(DA->PressInitialDelayMin, DA->PressInitialDelayMax));
+		bPressCombatActive = true;
+	}
+
+	const UEnemyMoraleComponent* Morale = Enemy->GetMoraleComponent();
+	const EMoraleState MoraleState = IsValid(Morale) ? Morale->GetMoraleState() : EMoraleState::Confident;
+	const USuppressionComponent* Suppression = Enemy->GetSuppressionComponent();
+	const bool bSuppressed = IsValid(Suppression) && Suppression->IsSuppressed();
+
+	const float Aggression = ComputeAggression01(Enemy, DA, Target);
+
+	if (MoraleState == EMoraleState::Broken || Aggression <= DA->FallBackEnterThreshold)
+	{
+		EndPressEpisodeIfActive(Now, DA);
+		CurrentPosture = EEnemyPosture::FallBack;
+		PressHeldSeconds = 0.f;
+		bAdvanceRequested = false;
+		return;
+	}
+
+	if (CurrentPosture == EEnemyPosture::Press)
+	{
+		// Timeout ends the episode with recovery; a committed advance already ended it via
+		// NotifyAdvanceExecuted. Either way an enabled cadence without a live episode exits Press.
+		if (PressCadence.HasEpisodeExpired(Now))
+			EndPressEpisodeIfActive(Now, DA);
+
+		const bool bEpisodeLive = !PressCadence.IsEnabled() || PressCadence.IsEpisodeActive();
+		const bool bStayPressing = bEpisodeLive && DA->bCanPress && !bSuppressed
+			&& MoraleState == EMoraleState::Confident
+			&& Aggression >= DA->PressExitThreshold;
+		if (!bStayPressing)
+		{
+			// Suppression / morale interruption ends the episode and rolls recovery too.
+			// Leaving Press invalidates any pending advance — a re-entered Press must re-earn
+			// the hold time, or a stale latch fires the moment the next Pause arrives.
+			EndPressEpisodeIfActive(Now, DA);
+			CurrentPosture = EEnemyPosture::Hold;
+			PressHeldSeconds = 0.f;
+			bAdvanceRequested = false;
+			return;
+		}
+
+		PressHeldSeconds += DA->PostureEvalInterval;
+		if (PressHeldSeconds >= DA->PressAdvanceHoldTime
+			&& (Now - LastAdvanceWorldTime) >= DA->AdvanceRelocateCooldown)
+			bAdvanceRequested = true;
+		return;
+	}
+
+	if (DA->bCanPress && !bSuppressed && MoraleState == EMoraleState::Confident
+		&& Aggression >= DA->PressEnterThreshold
+		&& PressCadence.TryEnterPress(Now))
+	{
+		CurrentPosture = EEnemyPosture::Press;
+		PressHeldSeconds = 0.f;
+		return;
+	}
+
+	CurrentPosture = EEnemyPosture::Hold;
+	PressHeldSeconds = 0.f;
+}
+
+bool UEnemyPostureComponent::ApplyDBNOStandoffOverride(const AEnemyCharacter* Enemy, const UEnemyArchetypeData* DA)
+{
+	if (DA->DBNOStandoffRadius <= 0.f)
+	{
+		bRetreatRequested = false;
+		return false;
+	}
+
+	const APawn* Downed = UEnemyAwarenessComponent::FindDownedPlayerPawn(this);
+	if (!IsValid(Downed))
+	{
+		// Player revived or bled out — drop any unconsumed retreat latch so a later legitimate
+		// FallBack (morale break) doesn't fire a spurious forced relocate.
+		bRetreatRequested = false;
+		return false;
+	}
+
+	PressHeldSeconds = 0.f;
+	bAdvanceRequested = false;
+
+	const float DistSq = FVector::DistSquared(Enemy->GetActorLocation(), Downed->GetActorLocation());
+	if (DistSq < FMath::Square(DA->DBNOStandoffRadius))
+	{
+		CurrentPosture = EEnemyPosture::FallBack;
+		const UWorld* World = GetWorld();
+		const float Now = World ? World->GetTimeSeconds() : 0.f;
+		if (Now - LastRetreatConsumeWorldTime >= RetreatRepeatCooldown)
+			bRetreatRequested = true;
+	}
+	else
+	{
+		CurrentPosture = EEnemyPosture::Hold;
+		bRetreatRequested = false;
+	}
+	return true;
+}
+
+float UEnemyPostureComponent::ComputeAggression01(const AEnemyCharacter* Enemy,
+	const UEnemyArchetypeData* DA, const AActor* Target) const
+{
+	const AEnemyAIController* Controller = Cast<AEnemyAIController>(Enemy->GetController());
+	const UEnemyAwarenessComponent* Awareness = Controller ? Controller->GetAwarenessComponent() : nullptr;
+
+	// Term A: the threat hasn't hurt us recently (ramps 0 -> 1 across the window).
+	const float TimeSinceDamaged = IsValid(Awareness) ? Awareness->GetTimeSinceDamagedBy(Target) : BIG_NUMBER;
+	const float NoDamageTerm = FMath::Clamp(TimeSinceDamaged / DA->PostureRecentDamageWindow, 0.f, 1.f);
+
+	// Term B: the threat is fully passive — not hurting us AND not pinning us with fire.
+	const USuppressionComponent* Suppression = Enemy->GetSuppressionComponent();
+	const float Suppression01 = IsValid(Suppression) ? Suppression->GetSuppression01() : 0.f;
+	const float ThreatPassiveTerm = (NoDamageTerm >= 1.f && Suppression01 < PassiveSuppressionThreshold) ? 1.f : 0.f;
+
+	// Term C: numeric advantage (optional, weight defaults to 0).
+	float SquadTerm = 0.f;
+	if (DA->PostureWeightSquadAdvantage > 0.f)
+	{
+		const UEnemySquad* Squad = Enemy->GetSquad();
+		if (IsValid(Squad))
+			SquadTerm = FMath::Clamp(static_cast<float>(Squad->NumAlive()) / SquadAdvantageSaturation, 0.f, 1.f);
+	}
+
+	const float WeightSum = DA->PostureWeightNoDamageRecently + DA->PostureWeightThreatPassive
+		+ DA->PostureWeightSquadAdvantage;
+	if (WeightSum <= 0.f) return 0.f;
+
+	return FMath::Clamp((DA->PostureWeightNoDamageRecently * NoDamageTerm
+		+ DA->PostureWeightThreatPassive * ThreatPassiveTerm
+		+ DA->PostureWeightSquadAdvantage * SquadTerm) / WeightSum, 0.f, 1.f);
+}

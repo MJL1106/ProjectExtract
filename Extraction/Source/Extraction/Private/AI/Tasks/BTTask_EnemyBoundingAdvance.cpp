@@ -1,7 +1,9 @@
 // BTTask_EnemyBoundingAdvance — bounding flanker: short hop toward target, move+fire, notify squad on arrival.
 
 #include "BTTask_EnemyBoundingAdvance.h"
+#include "CoverPoseComponent.h"
 #include "EnemyAIController.h"
+#include "EnemyDebug.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
 #include "EnemyMoraleComponent.h"
@@ -40,6 +42,9 @@ EBTNodeResult::Type UBTTask_EnemyBoundingAdvance::ExecuteTask(UBehaviorTreeCompo
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
 	if (!IsValid(Enemy)) return EBTNodeResult::Failed;
 
+	// enemy.ForceCover debug: keep enemies in the cover loop — non-cover branches fail outright.
+	if (GetForceCoverLevel() > 0) return EBTNodeResult::Failed;
+
 	AActor* Target = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
 	if (!IsValid(Target)) return EBTNodeResult::Failed;
 
@@ -70,6 +75,11 @@ EBTNodeResult::Type UBTTask_EnemyBoundingAdvance::ExecuteTask(UBehaviorTreeCompo
 		return EBTNodeResult::Failed;
 	}
 	Mem->BoundPoint = BoundPoint;
+
+	// Cover-pose hygiene: leaving cover for the bound — a latched pose would montage-slide the run.
+	if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
+	if (GetCoverAnimLogLevel() > 0)
+		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s TASK(BoundingAdvance) start"), *GetNameSafe(Pawn));
 
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 	Enemy->SetAimTarget(Target);

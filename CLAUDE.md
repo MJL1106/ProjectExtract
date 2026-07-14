@@ -94,8 +94,16 @@ Current agent model assignments live in `.claude/agents/*.md` frontmatter.
 Prefer custom subagents wherever the task matches an agent description. Main chat should rarely be the one writing code — its role is orchestration and review.
 
 - Solo C++ work → dispatch `ue5-cpp-implementer`. Never freelance edits from main chat for anything beyond trivial typos / renames / single-line tweaks.
-- For parallelisable dispatches (safety + performance reviewers, multiple plan agents), issue them in a single message, not sequentially.
+- For parallelisable dispatches (reviewer + multiple plan agents), issue them in a single message, not sequentially.
 - Pure research / "where does X live" → use `Glob` / `Grep` directly. Don't spawn an agent for a one-line answer.
+
+### Engine state is a source of truth — check it, don't guess
+
+When planning, investigating a bug, or forming a picture of "what does this actually do right now" for anything in-engine (current BP graph wiring, DataAsset/DataTable values, live AnimBP state, level actor placement, EQS/BT authoring, widget layout) — this applies beyond explicit "wire this up" requests, including planning and bug investigation:
+- If the answer would be more reliable read from the running editor than inferred from `.uasset` diffs or memory, **check the engine** — dispatch `ue5-inengine-scout` (Sonnet, read-only) rather than guessing from C++ or asking the user to go look. Reserve `ue5-inengine-agent` (Opus) for when the inspection turns into an edit.
+- **Scale scouts to the question, favoring speed over conservatism.** If the recon splits into independent inspection threads (e.g. "check the BT, the Blackboard, and the EQS query" or "inspect 3 unrelated widgets"), dispatch one scout per thread **in a single message** so they run concurrently — up to 5 at once. Don't default to 1 scout doing everything sequentially when 3-5 parallel scouts would answer it faster; don't over-split a single-thread question into multiple scouts either. Judge the split by independence of the sub-questions, not by a fixed count.
+- If the editor isn't running, **boot it first** — route through `ue5-inengine-agent` (it self-boots via the `boot-engine` skill) since scouts can't boot the editor themselves. Don't skip the check just because the editor is currently down, and don't ask the user to open it.
+- This is read-only reconnaissance for planning purposes — it does not replace the implement/review/build loop, and it does not authorize edits during an investigation.
 
 ### The loop in detail
 
@@ -103,15 +111,13 @@ Prefer custom subagents wherever the task matches an agent description. Main cha
 1. **Implement:**
    - Solo → `ue5-cpp-implementer`
    - Team → `agent-teams:team-spawn` preset `feature` (parallel implementers with file ownership)
-2. **Review (parallel, single message):**
-   - `ue5-safety-reviewer` — always, every C++ change
-   - `ue5-performance-reviewer` — always, every C++ change
-   - `ue5-edge-case-reviewer` — always, every C++ change. MUST be briefed with: (a) the task goal in one or two sentences, (b) the list of changed files with brief description, (c) the plan file path if one exists. Without the goal it can't review functional correctness — it will refuse.
+2. **Review (single consolidated reviewer, covers safety + performance + edge-case in one pass):**
+   - `ue5-reviewer` — always, every C++ change. MUST be briefed with: (a) the task goal in one or two sentences, (b) the list of changed files with brief description, (c) the plan file path if one exists. Without the goal the edge-case dimension is degraded (safety/performance still run).
    - `ue5-ui-specialist` — if UMG / Slate / widget code touched
    - `ue5-build-specialist` — if `Build.cs` / `Target.cs` / `.uproject` / plugin config / include paths touched
 3. **Fix review findings:** any `CRITICAL` or `WARNING` → re-dispatch `ue5-cpp-implementer` with the consolidated findings. **Do NOT fix in main chat.** Loop back to step 2 if the fix is non-trivial.
-4. **Own the close→build→reboot loop yourself — never make the user the build/editor operator.** For any C++ change that needs testing:
-   - **(a) Close ONLY this project's editor.** Scope by the `.uproject` in the process command line. ⚠️ **NEVER `Stop-Process -Name UnrealEditor`** — the user keeps other projects' editors open at the same time, and blanket-kill terminates all of them (lost unsaved work). Use:
+4. **Own the close→build→reboot loop yourself — never make the user the build/editor operator.** **Build only AFTER the review round is clean — never start (or run in parallel with) the reviewer.** The reviewer reads source, not binaries; a finding means edits and a second build, so a pre-review build is wasted compile time and a wasted editor close. Sequence is strictly: review → fix findings → re-review if non-trivial → THEN close/build/reboot once. For any C++ change that needs testing:
+   - **(a) ALWAYS confirm before closing — no exceptions, every time.** Before touching the process, call `AskUserQuestion` with question "Close the Unreal Editor to build?" and options **"Yes, close now"** / **"No, hold off — another chat is still working"**. Never force-close autonomously on the assumption a prior approval still applies — ask fresh each time a close is about to happen. If the user picks hold off, wait and re-ask later instead of proceeding. Only on an explicit "yes, close now" do you proceed. Then close ONLY this project's editor, scoped by the `.uproject` in the process command line. ⚠️ **NEVER `Stop-Process -Name UnrealEditor`** — the user keeps other projects' editors open at the same time, and blanket-kill terminates all of them (lost unsaved work). Use:
      ```
      Get-CimInstance Win32_Process -Filter "Name='UnrealEditor.exe'" | Where-Object { $_.CommandLine -like '*Extraction.uproject*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
      ```
@@ -128,6 +134,7 @@ Prefer custom subagents wherever the task matches an agent description. Main cha
 | Task | Agent |
 |---|---|
 | In-engine asset/BP/material/UMG/Niagara/DataAsset/level wiring, asset import, **Behavior Trees/Blackboards/EQS** — via MCP, no C++ | `ue5-inengine-agent` (or invoke the `inengine-agent` skill) |
+| Read-only in-engine recon — "what's wired", "what does X currently look like", pre-flight brief before an edit, planning/bug-investigation lookups. Cheap, parallelizable (up to 5 at once) | `ue5-inengine-scout` |
 | Unresolved externals, IWYU warnings, missing API macros, Build.cs edits, linker errors | `ue5-build-specialist` |
 | Writing automation tests, scaffolding a test module | `ue5-qa-tester` |
 | UE5 API behaviour unclear / new engine feature / want to confirm best practice | `ue5-doc-researcher` |
@@ -181,7 +188,7 @@ If unsure whether to invoke, **bias toward invoking the skill** (cheap — just 
 
 ## Model rule — no Haiku for substantive work
 
-The custom subagents in `.claude/agents/` (Opus 4.8 (1M context) / Sonnet 4.6) are the right tool for any UE5 work. The default `Explore` and `general-purpose` agents fall back to Haiku, which is too weak for this codebase.
+The custom subagents in `.claude/agents/` (Opus 4.8 / Sonnet 5, both 1M context) are the right tool for any UE5 work. The default `Explore` and `general-purpose` agents fall back to Haiku, which is too weak for this codebase.
 
 - **For UE5 codebase exploration / research / implementation / review** → use the custom agents above. Never use the generic `Explore` agent for substantive work.
 - **For trivial file-path lookups** ("what file lives at X", "find all callers of Y") → `Glob` / `Grep` directly in the main session, no agent needed.
@@ -211,9 +218,7 @@ Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a c
 
 ## Shortcuts (project-specific — `QPLAN`/`QCHECK`/`QPERF` in global)
 
-- **QSAFETY**: Run `ue5-safety-reviewer` over the current change.
-- **QEDGE**: Run `ue5-edge-case-reviewer` over the current change. Must brief it with the task goal.
-- **QFULL**: Run safety + performance + edge-case reviewers in parallel over the current change.
+- **QSAFETY / QEDGE / QFULL**: Run `ue5-reviewer` over the current change (single consolidated pass covers safety + performance + edge-case). Brief it with the task goal for a full edge-case pass.
 
 ## Session Start
 

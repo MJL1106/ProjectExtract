@@ -1,9 +1,11 @@
 // BTTask_EnemyMoveAndShoot — cover-anchored strafe-while-firing combat behaviour.
 
 #include "BTTask_EnemyMoveAndShoot.h"
+#include "CoverPoseComponent.h"
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
+#include "EnemyDebug.h"
 #include "SuppressionComponent.h"
 #include "WeaponBase.h"
 #include "AICoverSlot.h"
@@ -39,6 +41,9 @@ EBTNodeResult::Type UBTTask_EnemyMoveAndShoot::ExecuteTask(UBehaviorTreeComponen
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
 	if (!IsValid(Enemy)) return EBTNodeResult::Failed;
 
+	// enemy.ForceCover debug: keep enemies in the cover loop — non-cover branches fail outright.
+	if (GetForceCoverLevel() > 0) return EBTNodeResult::Failed;
+
 	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
 	if (!IsValid(DA)) return EBTNodeResult::Failed;
 
@@ -70,6 +75,12 @@ EBTNodeResult::Type UBTTask_EnemyMoveAndShoot::ExecuteTask(UBehaviorTreeComponen
 	{
 		Mem->AnchorPoint = Pawn->GetActorLocation();
 	}
+
+	// Cover-pose hygiene: this task moves/aims independently of the cover system — a latched
+	// pose would montage-slide the strafe and pin the body while focus tracks the target.
+	if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
+	if (GetCoverAnimLogLevel() > 0)
+		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s TASK(MoveAndShoot) start"), *GetNameSafe(Pawn));
 
 	// Set strafe speed via the canonical single-writer API
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Strafe);

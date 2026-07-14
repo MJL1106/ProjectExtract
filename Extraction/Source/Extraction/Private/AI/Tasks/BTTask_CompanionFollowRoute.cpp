@@ -3,7 +3,9 @@
 #include "BTTask_CompanionFollowRoute.h"
 #include "CompanionAIController.h"
 #include "CompanionCharacter.h"
+#include "Animation/CompanionAnimInstance.h"
 #include "Companion/CompanionRoute.h"
+#include "Character/ExtractionPlayer.h"
 #include "HealthComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
@@ -92,6 +94,21 @@ EBTNodeResult::Type UBTTask_CompanionFollowRoute::ExecuteTask(
 	Mem->CachedCharacter = Companion;
 	Mem->CachedController = Controller;
 
+	// Fresh route — the walk is starting, so the hold flag must be down.
+	Companion->SetRouteHoldingAtFinal(false);
+
+	// Stale-cover teardown: a cover task aborted around route start (e.g. the post-breach combat
+	// window) can leave the pose component latched bInCover with no owner. The anim rig correctly
+	// zeroes the aim gate AND the grip layer for a tucked companion, so a stale latch walks the
+	// whole route with the gun off the hands and no aim offset. The route owns the body now.
+	if (const USkeletalMeshComponent* Mesh = Companion->GetMesh())
+		if (UCompanionAnimInstance* Anim = Cast<UCompanionAnimInstance>(Mesh->GetAnimInstance()))
+			if (Anim->IsInCover())
+			{
+				UE_LOG(LogCompanionRoute, Warning, TEXT("%s: route start with stale cover pose — tearing down"), *Companion->GetName());
+				Anim->ExitCoverPose();
+			}
+
 	const int32 StartIndex = ComputeRouteStartIndex(*Route, Companion->GetActorLocation());
 	Mem->CurrentIndex = StartIndex;
 	Mem->Phase = (StartIndex == 0) ? ERoutePhase::MovingToStart : ERoutePhase::Moving;
@@ -107,6 +124,16 @@ EBTNodeResult::Type UBTTask_CompanionFollowRoute::ExecuteTask(
 
 	const FCompanionRouteWaypoint& StartWP = Route->GetWaypoint(StartIndex);
 	ApplyStance(*Mem, StartWP.Stance, StartWP.SpeedOverride);
+
+	// Route-wide player speed lock — released in OnTaskFinished regardless of exit path.
+	if (Route->PlayerSpeedLock > 0.f)
+	{
+		if (AExtractionPlayer* LockedPlayer = Cast<AExtractionPlayer>(Controller->GetPlayerCharacter()))
+		{
+			LockedPlayer->SetRouteSpeedLock(Route->PlayerSpeedLock);
+			Mem->CachedSpeedLockedPlayer = LockedPlayer;
+		}
+	}
 
 	if (!IssueMoveToWaypoint(*Controller, *Mem, StartIndex))
 		return EBTNodeResult::Failed;
@@ -327,6 +354,12 @@ void UBTTask_CompanionFollowRoute::OnTaskFinished(
 	// Idempotent locomotion restore — safe to run twice (AbortTask may have run first)
 	RestoreDefaults(*Mem);
 
+	// Release the route-wide player speed lock, if one was applied. Safe to run when already
+	// cleared or if the player went DBNO mid-route (crawl speed must not be stomped) — it just
+	// re-fires OnRouteSpeedLockChanged(false), which the kit BP handles idempotently.
+	if (AExtractionPlayer* LockedPlayer = Mem->CachedSpeedLockedPlayer.Get())
+		LockedPlayer->ClearRouteSpeedLock();
+
 	// Idempotent BB key clear — StopRoute is safe on already-cleared keys
 	ACompanionAIController* Controller = Mem->CachedController.Get();
 	if (IsValid(Controller))
@@ -374,7 +407,7 @@ bool UBTTask_CompanionFollowRoute::IssueMoveToWaypoint(
 }
 
 // ---------------------------------------------------------------------------
-// ApplyStance (fix 5: MaxWalkSpeedCrouched for crouch)
+// ApplyStance (fix 5: MaxWalkSpeedCrouched for crouch; route-wide CompanionSpeed resolution)
 // ---------------------------------------------------------------------------
 
 void UBTTask_CompanionFollowRoute::ApplyStance(
@@ -386,7 +419,8 @@ void UBTTask_CompanionFollowRoute::ApplyStance(
 	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
 	if (!CMC) return;
 
-	// Determine walk speed
+	// Determine walk speed. Resolution order: per-waypoint SpeedOverride > route-wide
+	// CompanionSpeed > stance default.
 	float TargetSpeed = RelaxedSpeed;
 	switch (Stance)
 	{
@@ -394,6 +428,10 @@ void UBTTask_CompanionFollowRoute::ApplyStance(
 	case ECompanionRouteStance::Crouch: TargetSpeed = CrouchSpeed; break;
 	default: break;
 	}
+
+	const ACompanionRoute* Route = Mem.CachedRoute.Get();
+	if (IsValid(Route) && Route->CompanionSpeed > 0.f)
+		TargetSpeed = Route->CompanionSpeed;
 
 	if (SpeedOverride > 0.f)
 		TargetSpeed = SpeedOverride;
@@ -432,8 +470,9 @@ void UBTTask_CompanionFollowRoute::UpdateAimFocus(
 	// Fix 6: use WP.Stance directly, not DefaultStance substitution
 	const ECompanionRouteStance Stance = WP.Stance;
 
-	// Authored aim override takes priority regardless of stance
-	if (WP.bOverrideAim)
+	// Authored aim (waypoint focus actor / local override, or the route-wide focus actor)
+	// takes priority regardless of stance
+	if (Route->HasAuthoredAim(TargetIndex))
 	{
 		SetFocalPointCached(Mem, *Controller, Route->GetWaypointAimWorld(TargetIndex));
 		return;
@@ -453,7 +492,11 @@ void UBTTask_CompanionFollowRoute::UpdateAimFocus(
 
 		if (!ToTarget.IsNearlyZero())
 		{
-			const FVector LookAhead = PawnLoc + ToTarget * AimLookAheadDistance;
+			// Look-ahead at VIEW height, not actor-centre height: the controller now preserves
+			// focal-point pitch (UpdateControlRotation override), so a centre-height point 300cm
+			// out would aim the weapon ~13 degrees down for the whole leg.
+			FVector LookAhead = PawnLoc + ToTarget * AimLookAheadDistance;
+			LookAhead.Z = Companion->GetPawnViewLocation().Z;
 			SetFocalPointCached(Mem, *Controller, LookAhead);
 			return;
 		}
@@ -565,6 +608,11 @@ EBTNodeResult::Type UBTTask_CompanionFollowRoute::HandleReachFinal(
 		Mem.Phase = ERoutePhase::Holding;
 		SetFocalPointCached(Mem, *Controller, Route->GetWaypointAimWorld(LastIndex));
 
+		// The walk is done — flag the hold so player commands (breach) re-enable even though
+		// this task stays latent and BB_RouteActive stays true.
+		if (ACompanionCharacter* Character = Mem.CachedCharacter.Get())
+			Character->SetRouteHoldingAtFinal(true);
+
 		UE_LOG(LogCompanionRoute, Log, TEXT("Route complete — holding at final WP %d"), LastIndex);
 		return EBTNodeResult::InProgress;
 	}
@@ -588,8 +636,9 @@ void UBTTask_CompanionFollowRoute::RestoreDefaults(FRouteMemory& Mem) const
 		if (Companion->bIsCrouched)
 			Companion->UnCrouch();
 
-		// Always clear scripted aim on route exit
+		// Always clear scripted aim + the hold flag on route exit
 		Companion->SetScriptedAim(false);
+		Companion->SetRouteHoldingAtFinal(false);
 
 		// Restore both walk speeds
 		if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())

@@ -7,8 +7,10 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "EnemyTypes.h"
+#include "DirectorWaveTypes.h"
 #include "EnemyDirectorSubsystem.generated.h"
 
+class ACompanionCharacter;
 class AEnemyCharacter;
 class AEnemyDirectorScopeVolume;
 class AEnemySpawnZone;
@@ -16,6 +18,7 @@ class UDirectorConfigData;
 class UHealthComponent;
 class UEnemySquadSubsystem;
 class UEnemySquad;
+class UNavigationSystemV1;
 struct FMissionPhaseConfig;
 struct FSquadComposition;
 
@@ -30,6 +33,11 @@ enum class EDirectorState : uint8
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnGlobalAlertChanged, EGlobalAlertLevel, OldLevel, EGlobalAlertLevel, NewLevel);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnEnemyDied, AEnemyCharacter*, DeadEnemy, FVector, Location, bool, bWasOfficer);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnMissionPhaseChanged, EMissionPhase, OldPhase, EMissionPhase, NewPhase);
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDirectorWaveStarted, FName, WaveId);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnDirectorWaveProgress, FName, WaveId, int32, SpawnedSquads, int32, RemainingMembers);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDirectorWaveCompleted, FName, WaveId);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDirectorWaveBlocked, FName, WaveId, FText, Reason);
 
 UCLASS()
 class EXTRACTION_API UEnemyDirectorSubsystem : public UWorldSubsystem
@@ -48,6 +56,11 @@ public:
 	void ReportEnemySearching();
 	void ReportEnemyCombat();
 	void ReportBodyDiscovered();
+
+	/** World seconds of the most recent enemy Combat-state entry reported to the director.
+	 *  Unlike the alert ladder (a ratchet that never de-escalates), this is a decaying event
+	 *  stamp — compare against a reference time to ask "has a fight started since X?". */
+	float GetLastCombatReportTime() const { return LastCombatReportTime; }
 
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Director")
 	void TripAlarm();
@@ -95,6 +108,41 @@ public:
 	void RegisterScopeVolume(AEnemyDirectorScopeVolume* ScopeVolume);
 	void UnregisterScopeVolume(AEnemyDirectorScopeVolume* ScopeVolume);
 
+	// ---------- v2 API: finite wave lifecycle ----------
+
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Director|Wave")
+	bool StartWave(const FDirectorWaveRequest& Request);
+
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Director|Wave")
+	void CancelWave(FName WaveId);
+
+	bool ActivatePunishmentProfile(AActor* Source, UDirectorConfigData* Profile, EMissionPhase Phase);
+	void DeactivatePunishmentProfile(AActor* Source);
+
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Director|Wave")
+	FOnDirectorWaveStarted OnDirectorWaveStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Director|Wave")
+	FOnDirectorWaveProgress OnDirectorWaveProgress;
+
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Director|Wave")
+	FOnDirectorWaveCompleted OnDirectorWaveCompleted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Director|Wave")
+	FOnDirectorWaveBlocked OnDirectorWaveBlocked;
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director|Wave")
+	FName GetActiveWaveId() const { return ActiveWaveRequest.WaveId; }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director|Wave")
+	bool IsWaveActive() const { return WaveProgress.IsActive(); }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director|Wave")
+	int32 GetWaveSpawnedSquads() const { return WaveProgress.SpawnedSquads; }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director|Wave")
+	int32 GetWaveRemainingMembers() const { return WaveProgress.RemainingMembers; }
+
 private:
 
 	// ---------- v1 internals ----------
@@ -105,6 +153,7 @@ private:
 
 	EGlobalAlertLevel AlertLevel = EGlobalAlertLevel::Calm;
 	int32 BodiesDiscovered = 0;
+	float LastCombatReportTime = -1e9f;
 
 	TArray<TWeakObjectPtr<AEnemyCharacter>> Corpses;
 
@@ -122,7 +171,17 @@ private:
 	static constexpr float DefaultSpawnDistMax = 4500.f;
 	static constexpr float NavProjectExtentXY = 200.f;
 	static constexpr float NavProjectExtentZ = 400.f;
-	static constexpr int32 MaxZoneCandidates = 5;
+
+	// Zone selection: sightline samples are raised to head height above the projected
+	// floor, and zones are scored (distance band + companion proximity) instead of
+	// picked randomly from the first few that pass.
+	static constexpr float SpawnEyeHeightOffset = 160.f;
+	static constexpr float SpawnGroundClearance = 2.f;
+	static constexpr int32 MinSightlineSamples = 3;
+	static constexpr float IdealDistanceFrac = 0.35f;
+	static constexpr float DistanceBandBonus = 25.f;
+	static constexpr float CompanionProximityPenalty = 60.f;
+	static constexpr float ZoneScoreJitter = 10.f;
 
 	// ---------- v2: tension ----------
 
@@ -130,8 +189,13 @@ private:
 	void UpdateTension(float DeltaSeconds, float EngagedCount);
 	float PollPlayerHealthLost();
 	void UpdateSawtooth(float DeltaSeconds);
-	void TrySpawn(int32 AliveCount);
+	bool TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*>* OutSpawned = nullptr);
 	bool ShouldSpawn(int32 AliveCount) const;
+
+	// ---------- v2: effective config / phase selection ----------
+
+	const UDirectorConfigData* GetEffectiveConfig() const;
+	EMissionPhase GetEffectivePhase() const;
 
 	struct FEnemySweepResult
 	{
@@ -181,9 +245,12 @@ private:
 	const FMissionPhaseConfig& GetCurrentPhaseConfig() const;
 	int32 GetCompositionSize(const FSquadComposition& Comp) const;
 	bool PickComposition(const FMissionPhaseConfig& PhaseConfig, int32 AliveCount, FSquadComposition& OutComposition) const;
-	AEnemySpawnZone* PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot) const;
+	AEnemySpawnZone* PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize) const;
 	bool IsPointInPlayerSightline(const FVector& Point, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams) const;
-	void SpawnSquadAtZone(const FSquadComposition& Composition, AEnemySpawnZone* Zone);
+	bool IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const;
+	float ScoreZone(const AEnemySpawnZone* Zone, const FVector& PlayerLoc, const FVector& CompanionLoc, bool bHasCompanion, float DistMin, float DistMax) const;
+	const ACompanionCharacter* FindCompanion() const;
+	void SpawnSquadAtZone(const FSquadComposition& Composition, AEnemySpawnZone* Zone, TArray<AEnemyCharacter*>& OutSpawned);
 	AEnemyCharacter* SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index);
 	void SeedSquadWithFight(UEnemySquad* Squad) const;
 
@@ -196,6 +263,36 @@ private:
 
 	UFUNCTION()
 	void HandleEnemyKilled(AEnemyCharacter* DeadEnemy, FVector Location, bool bWasOfficer);
+
+	// ---------- v2: wave lifecycle ----------
+
+	void CompleteWave();
+	void ClearWaveState();
+	void PruneStaleWaveMembers();
+	void AccrueWaveBlockedTime();
+
+	/** Auto-engage waves only: re-seed Combat on any live wave member that decayed to Unaware
+	 *  (gave up and returned to a guard post) — a passive holdout stalls the kill-all wave. */
+	void ReassertWaveMemberEngagement();
+
+	UPROPERTY()
+	FDirectorWaveRequest ActiveWaveRequest;
+
+	FDirectorWaveProgress WaveProgress;
+
+	TSet<TWeakObjectPtr<AEnemyCharacter>> WaveMembers;
+
+	float WaveBlockedTime = 0.f;
+	bool bWaveBlockedBroadcast = false;
+
+	// ---------- v2: punishment profile ----------
+
+	TWeakObjectPtr<AActor> PunishmentSource;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UDirectorConfigData> PunishmentConfig;
+
+	EMissionPhase PunishmentPhase = EMissionPhase::Infiltration;
 
 	// ---------- timers ----------
 

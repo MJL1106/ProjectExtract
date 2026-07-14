@@ -14,6 +14,7 @@
 #include "Companion/CompanionRoute.h"
 #include "WeaponBase.h"
 #include "Movement/TraversalComponent.h"
+#include "Components/SuppressionComponent.h"
 #include "GameFramework/Pawn.h"
 #include "NavigationSystem.h"
 #include "Engine/World.h"
@@ -54,6 +55,7 @@ const FName ACompanionAIController::BB_CompanionCommand(TEXT("CompanionCommand")
 const FName ACompanionAIController::BB_CommandTargetActor(TEXT("CommandTargetActor"));
 const FName ACompanionAIController::BB_CommandTargetLocation(TEXT("CommandTargetLocation"));
 const FName ACompanionAIController::BB_TakedownMethod(TEXT("TakedownMethod"));
+const FName ACompanionAIController::BB_BreachType(TEXT("BreachType"));
 
 ACompanionAIController::ACompanionAIController()
 {
@@ -68,8 +70,8 @@ ACompanionAIController::ACompanionAIController()
 
 	// Sight config
 	SightConfig = CreateDefaultSubobject<UAISenseConfig_Sight>(TEXT("SightConfig"));
-	SightConfig->SightRadius = 3000.0f;
-	SightConfig->LoseSightRadius = 3500.0f;
+	SightConfig->SightRadius = 4200.0f;
+	SightConfig->LoseSightRadius = 4900.0f;
 	SightConfig->PeripheralVisionAngleDegrees = 90.0f;
 	SightConfig->SetMaxAge(5.0f);
 	SightConfig->AutoSuccessRangeFromLastSeenLocation = 500.0f;
@@ -89,6 +91,18 @@ ACompanionAIController::ACompanionAIController()
 	PerceptionComponent->ConfigureSense(*HearingConfig);
 	PerceptionComponent->SetDominantSense(UAISense_Sight::StaticClass());
 }
+
+float ACompanionAIController::GetHearingSenseMaxAge() const
+{
+	return HearingConfig ? HearingConfig->GetMaxAge() : 3.f;
+}
+
+// NB deliberately NO UpdateControlRotation override (2nd attempt REVERTED 2026-07-12, director
+// call): restoring pitch for location focals makes route/watch aims pitch the AO, and even with
+// the aim gate + global clamps live and combat AO playtest-validated, the route look degraded
+// (grip layer drops on cover-state flicker; gun off the hands on the stairs). Location focals
+// stay pitch-flat (engine zeroes pitch for non-pawn focus); combat is unaffected (SetFocus on a
+// pawn keeps pitch). Don't re-add without fixing the ABP grip cluster's bInCover zeroing first.
 
 void ACompanionAIController::OnPossess(APawn* InPawn)
 {
@@ -112,6 +126,17 @@ void ACompanionAIController::OnPossess(APawn* InPawn)
 
 	// Diagnostic: log possession state so user can confirm config at a glance.
 	const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(InPawn);
+
+	// Suppression resistance from tuning — without this the companion keeps the component default
+	// (1.0, two near-misses = pinned) while every enemy gets its archetype resistance.
+	if (Companion)
+	{
+		if (USuppressionComponent* Supp = Companion->GetSuppressionComponent())
+		{
+			const UCompanionTuningDataAsset* SuppTuning = GetTuning();
+			Supp->ConfigureSuppression(SuppTuning ? SuppTuning->SuppressionResistance : 2.5f);
+		}
+	}
 	const FString WeaponClassName = (Companion && Companion->GetWeaponClass()) ? Companion->GetWeaponClass()->GetName() : TEXT("NONE");
 	const float MaxEngageRange = Companion ? Companion->MaxEngageRange : -1.0f;
 	const float SightRadius = SightConfig ? SightConfig->SightRadius : -1.0f;
@@ -404,7 +429,8 @@ void ACompanionAIController::ReleaseNextCoverSlotIfClaimed()
 	BB->SetValueAsObject(BB_NextCoverSlot, nullptr);
 }
 
-void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor, const FVector& TargetLocation)
+void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor,
+	const FVector& TargetLocation, bool bPreserveSearchRoomExposure)
 {
 	// Tear down any armed takedown from a prior command before overwriting BB keys.
 	// Guarantees "latest ping replaces previous" even if the BT branch lacks an observer-abort.
@@ -414,7 +440,7 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 	UBlackboardComponent* BB = GetBlackboardComponent();
 	if (!BB) return;
 
-	const bool bNeedsTarget = (Command == ECompanionCommand::Breach || Command == ECompanionCommand::Takedown);
+	const bool bNeedsTarget = (Command == ECompanionCommand::Breach || Command == ECompanionCommand::Takedown || Command == ECompanionCommand::Loot);
 	if (bNeedsTarget && !IsValid(TargetActor))
 	{
 		UE_LOG(LogCompanionAI, Warning,
@@ -423,10 +449,16 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 		return;
 	}
 
-	BB->SetValueAsEnum(BB_CompanionCommand,       static_cast<uint8>(Command));
+	if (!bPreserveSearchRoomExposure)
+		if (ACompanionCharacter* Comp = Cast<ACompanionCharacter>(GetPawn()))
+			Comp->EndSearchRoomExposure();
+
 	BB->SetValueAsObject(BB_CommandTargetActor,   TargetActor);
 	BB->SetValueAsVector(BB_CommandTargetLocation, TargetLocation);
 	BB->SetValueAsEnum(BB_TakedownMethod,         static_cast<uint8>(Method));
+	// CompanionCommand is the BT transition edge. Commit it last so a newly selected
+	// branch always observes the complete payload for this command.
+	BB->SetValueAsEnum(BB_CompanionCommand,       static_cast<uint8>(Command));
 
 	UE_LOG(LogCompanionAI, Warning,
 		TEXT("[IssueCommand] BB written: Command=%d Method=%d Target=%s Loc=%s"),
@@ -436,8 +468,19 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 		*TargetLocation.ToString());
 }
 
+void ACompanionAIController::SetBreachType(EBreachType Type)
+{
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	BB->SetValueAsEnum(BB_BreachType, static_cast<uint8>(Type));
+}
+
 void ACompanionAIController::ClearActiveCommand()
 {
+	if (ACompanionCharacter* Comp = Cast<ACompanionCharacter>(GetPawn()))
+		Comp->EndSearchRoomExposure();
+
 	UBlackboardComponent* BB = GetBlackboardComponent();
 	if (!BB) return;
 

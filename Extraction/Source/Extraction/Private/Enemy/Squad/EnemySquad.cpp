@@ -98,6 +98,27 @@ void UEnemySquad::ReportSighting(AActor* Target, const FVector& LastKnown)
 	}
 }
 
+void UEnemySquad::ForceEngage(AActor* Target, const FVector& LastKnown)
+{
+	if (!IsValid(Target)) return;
+
+	SquadTarget = Target;
+	SquadLastKnown = LastKnown;
+
+	for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
+	{
+		if (!IsMemberAlive(M)) continue;
+
+		AEnemyAIController* AIC = Cast<AEnemyAIController>(M->GetController());
+		if (!IsValid(AIC)) continue;
+
+		UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+		if (!IsValid(Awareness)) continue;
+
+		Awareness->ForceEngage(Target);
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Role tokens
 // ---------------------------------------------------------------------------
@@ -141,6 +162,75 @@ AEnemyCharacter* UEnemySquad::GetRoleHolder(EEnemySquadRole Role) const
 	}
 
 	return Holder->Get();
+}
+
+// ---------------------------------------------------------------------------
+// Rush tokens
+// ---------------------------------------------------------------------------
+
+void UEnemySquad::PruneRushTokens() const
+{
+	for (TWeakObjectPtr<AEnemyCharacter>& Holder : RushTokenHolders)
+	{
+		if (Holder.IsValid() && !IsMemberAlive(Holder)) Holder.Reset();
+	}
+	while (RushTokenHolders.Num() > 0 && !RushTokenHolders.Last().IsValid())
+		RushTokenHolders.Pop();
+}
+
+bool UEnemySquad::TryClaimRushToken(AEnemyCharacter* Claimant, int32 MaxTokens)
+{
+	if (!IsValid(Claimant)) return false;
+
+	PruneRushTokens();
+
+	if (RushTokenHolders.Contains(Claimant)) return true;
+
+	int32 HeldCount = 0;
+	int32 FreeSlot = INDEX_NONE;
+	for (int32 i = 0; i < RushTokenHolders.Num(); ++i)
+	{
+		if (RushTokenHolders[i].IsValid()) ++HeldCount;
+		else if (FreeSlot == INDEX_NONE) FreeSlot = i;
+	}
+	if (HeldCount >= MaxTokens) return false;
+
+	if (FreeSlot != INDEX_NONE) RushTokenHolders[FreeSlot] = Claimant;
+	else RushTokenHolders.Add(Claimant);
+
+	UE_LOG(LogEnemySquad, Verbose, TEXT("[%s] %s claimed rush token (%d/%d held)"),
+		*SquadId.ToString(), *Claimant->GetName(), HeldCount + 1, MaxTokens);
+	return true;
+}
+
+void UEnemySquad::ReleaseRushToken(AEnemyCharacter* Claimant)
+{
+	const int32 Slot = RushTokenHolders.IndexOfByKey(Claimant);
+	if (Slot == INDEX_NONE) return;
+
+	RushTokenHolders[Slot].Reset();
+	PruneRushTokens();
+	UE_LOG(LogEnemySquad, Verbose, TEXT("[%s] %s released rush token"), *SquadId.ToString(), *GetNameSafe(Claimant));
+}
+
+bool UEnemySquad::IsRushTokenAvailable(const AEnemyCharacter* Claimant, int32 MaxTokens) const
+{
+	PruneRushTokens();
+
+	int32 HeldCount = 0;
+	for (const TWeakObjectPtr<AEnemyCharacter>& Holder : RushTokenHolders)
+	{
+		if (!Holder.IsValid()) continue;
+		if (Holder.Get() == Claimant) return true;
+		++HeldCount;
+	}
+	return HeldCount < MaxTokens;
+}
+
+int32 UEnemySquad::GetRushSlotIndex(const AEnemyCharacter* Claimant) const
+{
+	PruneRushTokens();
+	return RushTokenHolders.IndexOfByKey(Claimant);
 }
 
 // ---------------------------------------------------------------------------
@@ -297,6 +387,23 @@ bool UEnemySquad::AnyMemberAwareAtOrAbove(EEnemyAwarenessState MinState, const A
 		if (Awareness->GetAwarenessState() >= MinState) return true;
 	}
 	return false;
+}
+
+// ---------------------------------------------------------------------------
+// Advance staggering
+// ---------------------------------------------------------------------------
+
+bool UEnemySquad::CanClaimAdvanceWindow() const
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return true;
+	return (World->GetTimeSeconds() - LastAdvanceWorldTime) >= AdvanceWindowSeconds;
+}
+
+void UEnemySquad::RecordAdvance()
+{
+	const UWorld* World = GetWorld();
+	if (IsValid(World)) LastAdvanceWorldTime = World->GetTimeSeconds();
 }
 
 // ---------------------------------------------------------------------------

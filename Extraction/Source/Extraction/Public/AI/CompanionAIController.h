@@ -48,15 +48,20 @@ public:
 	static const FName BB_CommandTargetActor;            // Object
 	static const FName BB_CommandTargetLocation;         // Vector
 	static const FName BB_TakedownMethod;                // enum ETakedownMethod
+	static const FName BB_BreachType;                    // enum EBreachType
 
 	/**
 	 * Write a command into the companion blackboard.
 	 * Breach and Takedown both require a valid TargetActor — logs and early-returns if missing.
 	 */
-	void IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor, const FVector& TargetLocation);
+	void IssueCommand(ECompanionCommand Command, ETakedownMethod Method, AActor* TargetActor,
+		const FVector& TargetLocation, bool bPreserveSearchRoomExposure = false);
 
 	/** Reset BB_CompanionCommand to None and clear related keys. */
 	void ClearActiveCommand();
+
+	/** Writes BB_BreachType — call before IssueCommand(Breach). Derived from companion mode at confirm time. */
+	void SetBreachType(EBreachType Type);
 
 	UFUNCTION(BlueprintPure, Category = "Companion|AI")
 	APawn* GetPlayerCharacter() const { return CachedPlayerCharacter.Get(); }
@@ -64,6 +69,10 @@ public:
 	void SetPlayerCharacter(APawn* InPlayer) { CachedPlayerCharacter = InPlayer; }
 
 	const UCompanionTuningDataAsset* GetTuning() const { return Tuning; }
+
+	/** Hearing stimulus MaxAge (seconds). Stealth-break gates its heard-enemy signal past this so
+	 *  stimuli from before a fresh Stealth order can't break it. */
+	float GetHearingSenseMaxAge() const;
 
 	/** Resets the BB_PlayerTraversal* keys. Public so BT tasks can call on early-finish paths. */
 	void ClearTraversalBlackboard();

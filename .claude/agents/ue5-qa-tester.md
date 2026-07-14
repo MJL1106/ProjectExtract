@@ -1,7 +1,7 @@
 ---
 name: ue5-qa-tester
-description: UE5 automation test writer for ProjectExtract. Creates and runs automation tests for FPS systems including weapons, health, AI behavior, and replication.
-model: claude-sonnet-5[1m]
+description: UE5 automation test writer for ProjectExtract. Creates and runs automation tests for single-player FPS systems including weapons, health, and AI behavior.
+model: claude-sonnet-5
 tools:
   - Glob
   - Grep
@@ -81,14 +81,9 @@ If the test category needs world setup (PIE), use `FAutomationEditorCommonUtils:
 
 ### Companion Character
 - `SetSprinting(true)` raises `MaxWalkSpeed` to `SprintSpeed`
-- `OnRep_IsSprinting` applies speed on remote clients
+- Sprint state applies the configured speed
 - Death sequence disables tick + collision + schedules destroy
-- Weapon spawned + attached on `BeginPlay` when authority + `WeaponClass` valid
-
-### Replication (functional tests, not unit)
-- Companion sprint state visible on remote client after `SetSprinting`
-- Health changes propagate to clients via `OnRep_CurrentHealth`
-- Weapon fire montage plays on remote clients
+- Weapon spawned + attached on `BeginPlay` when `WeaponClass` is valid
 
 ### Traversal (when `UTraversalComponent` lands)
 - `DetectTraversalAhead` returns correct `ETraversalType` for vault/climb/mantle heights
@@ -101,7 +96,7 @@ If the test category needs world setup (PIE), use `FAutomationEditorCommonUtils:
 - Name tests hierarchically: `"Extraction.System.Component.Behavior"`
 - One test per behavior, not per method
 - Cleanup: `NewObject` UObjects in test scope GC after the test
-- For functional tests needing multiplayer, use `FFunctionalTest` actors placed in a test map
+- For functional tests needing a world, use `FFunctionalTest` actors placed in a test map
 
 ## Output
 When writing tests, produce the complete .cpp file ready to compile. Include all necessary headers. Follow IWYU.

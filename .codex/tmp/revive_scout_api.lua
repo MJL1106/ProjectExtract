@@ -1,0 +1,1 @@
+print("REVIVE_SCOUT_PONG")

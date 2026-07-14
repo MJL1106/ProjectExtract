@@ -1,4 +1,5 @@
-// BTTask_HeavySuppress — heavy anchors in place, drives sustained burst fire at target or last-known.
+// BTTask_HeavySuppress — heavy pushes toward the threat firing on the move, anchors inside
+// EngageRangeMin, and drives sustained burst fire at target or last-known.
 
 #include "BTTask_HeavySuppress.h"
 #include "EnemyAIController.h"
@@ -8,6 +9,62 @@
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "GameFramework/Pawn.h"
+
+/** Repath cadence while advancing (mirrors the rusher's 0.5s rhythm). */
+static constexpr float AdvanceRepathInterval = 0.5f;
+/** Extra distance past EngageRangeMin before an anchored heavy resumes the push (no band-edge stutter). */
+static constexpr float AdvanceResumeHysteresis = 200.f;
+/** Threat-point drift that forces an immediate repath regardless of cadence. */
+static constexpr float AdvanceGoalMovedRepathDist = 150.f;
+
+void UBTTask_HeavySuppress::UpdateAdvance(AAIController* Controller, const APawn* Pawn,
+	const UEnemyArchetypeData* DA, FHeavySuppressMemory* Mem,
+	bool bHasAimSource, const FVector& ThreatLoc, float DeltaSeconds)
+{
+	if (!Controller || !IsValid(Pawn) || !IsValid(DA) || !Mem) return;
+
+	// Nothing to act on — hold position rather than wander.
+	if (!bHasAimSource)
+	{
+		if (Mem->bAdvancing)
+		{
+			Controller->StopMovement();
+			Mem->bAdvancing = false;
+		}
+		return;
+	}
+
+	const float Dist = FVector::Dist2D(Pawn->GetActorLocation(), ThreatLoc);
+
+	if (Mem->bAdvancing)
+	{
+		// Close enough — anchor and hose from here.
+		if (Dist <= DA->EngageRangeMin)
+		{
+			Controller->StopMovement();
+			Mem->bAdvancing = false;
+			return;
+		}
+
+		Mem->RepathTimer -= DeltaSeconds;
+		const bool bGoalMoved = FVector::Dist2D(ThreatLoc, Mem->LastMoveGoal) > AdvanceGoalMovedRepathDist;
+		if (Mem->RepathTimer > 0.f && !bGoalMoved) return;
+
+		Controller->MoveToLocation(ThreatLoc, DA->EngageRangeMin, false, true, true, true);
+		Mem->LastMoveGoal = ThreatLoc;
+		Mem->RepathTimer = AdvanceRepathInterval;
+		return;
+	}
+
+	// Anchored — resume the push only once the gap clearly exceeds the band edge.
+	if (Dist > DA->EngageRangeMin + AdvanceResumeHysteresis)
+	{
+		Controller->MoveToLocation(ThreatLoc, DA->EngageRangeMin, false, true, true, true);
+		Mem->LastMoveGoal = ThreatLoc;
+		Mem->RepathTimer = AdvanceRepathInterval;
+		Mem->bAdvancing = true;
+	}
+}
 
 UBTTask_HeavySuppress::UBTTask_HeavySuppress()
 {
@@ -39,7 +96,7 @@ EBTNodeResult::Type UBTTask_HeavySuppress::ExecuteTask(UBehaviorTreeComponent& O
 	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
 	if (!IsValid(DA)) return EBTNodeResult::Failed;
 
-	// Anchor — no movement for the heavy while suppressing
+	// Clear any stale move from a prior branch; UpdateAdvance below owns movement from here.
 	Controller->StopMovement();
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 
@@ -65,6 +122,12 @@ EBTNodeResult::Type UBTTask_HeavySuppress::ExecuteTask(UBehaviorTreeComponent& O
 			bHasAimSource = true;
 		}
 	}
+
+	// Push toward the threat when outside EngageRangeMin; anchor once inside.
+	const FVector EntryThreatLoc = bHasLOS
+		? Target->GetActorLocation()
+		: BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
+	UpdateAdvance(Controller, Pawn, DA, Mem, bHasAimSource, EntryThreatLoc, 0.f);
 
 	// Only start firing if there is a valid aim source — don't forward-hose into the void
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
@@ -128,6 +191,13 @@ void UBTTask_HeavySuppress::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		}
 	}
 
+	// Advance/anchor decision each tick — the burst state machine below runs either way,
+	// so the push is a walking hose, not a silent reposition.
+	const FVector TickThreatLoc = bHasLOS
+		? Target->GetActorLocation()
+		: BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
+	UpdateAdvance(Controller, Pawn, DA, Mem, bHasAimSource, TickThreatLoc, DeltaSeconds);
+
 	Mem->PhaseTimer -= DeltaSeconds;
 
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
@@ -168,6 +238,14 @@ void UBTTask_HeavySuppress::CleanUp(UBehaviorTreeComponent& OwnerComp, FHeavySup
 {
 	AAIController* Controller = OwnerComp.GetAIOwner();
 	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
+
+	// An in-flight advance would otherwise keep walking into the next branch.
+	if (Controller && Mem && Mem->bAdvancing)
+	{
+		Controller->StopMovement();
+		Mem->bAdvancing = false;
+	}
+
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
 	if (!IsValid(Enemy)) return;
 
@@ -189,5 +267,5 @@ void UBTTask_HeavySuppress::CleanUp(UBehaviorTreeComponent& OwnerComp, FHeavySup
 
 FString UBTTask_HeavySuppress::GetStaticDescription() const
 {
-	return TEXT("Anchor in place, drive sustained burst fire at target or last-known location");
+	return TEXT("Push to EngageRangeMin firing on the move, then anchor and drive sustained burst fire at target or last-known location");
 }
