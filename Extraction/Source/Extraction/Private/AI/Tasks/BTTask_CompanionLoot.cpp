@@ -10,6 +10,24 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogCompanionLoot, Log, All);
 
+// Same-room gate (mirrors ExploreViewerHasLoS in BTTask_CompanionExplore): the sweep radius alone
+// reaches through walls into neighbouring rooms — the companion chased crates behind closed doors,
+// auto-opening every door on the way. A candidate only counts when the companion can actually see
+// it from where it stands: eyes -> candidate bounds centre (crate pivots sit at a base corner).
+static bool LootViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor* Candidate)
+{
+	FVector EyeLoc; FRotator EyeRot;
+	Viewer->GetActorEyesViewPoint(EyeLoc, EyeRot);
+
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionLootSweepLoS), false);
+	Params.AddIgnoredActor(Viewer);
+	Params.AddIgnoredActor(Candidate);
+
+	const FVector Target = Candidate->GetComponentsBoundingBox().GetCenter();
+	return !World->LineTraceSingleByChannel(Hit, EyeLoc, Target, ECC_Visibility, Params);
+}
+
 // Distance from pawn to the nearest point on the container's collision bounds (not its origin) —
 // robust to wide cabinets whose pivot sits at one end. Mirrors BTTask_CompanionBreach's helper.
 static float DistanceFromPawnToActor(const APawn* Pawn, const AActor* Target)
@@ -227,6 +245,10 @@ AActor* UBTTask_CompanionLoot::FindNextContainer(UBehaviorTreeComponent& OwnerCo
 		if (!IsValid(Candidate) || !ILootable::Execute_CanLoot(Candidate)) continue;
 		if (SkippedThisSweep.Contains(Candidate)) continue;
 		if (FVector::DistSquared(Candidate->GetActorLocation(), SweepAnchor) > SweepRadiusSq) continue;
+		// Same-room gate — a crate it can't see is a crate in another room; never chain through
+		// walls/closed doors. The commanded (pinged) first target never routes through here, so
+		// an explicitly pinged far crate still works.
+		if (!LootViewerHasLoS(World, Pawn, Candidate)) continue;
 
 		const float DistSq = FVector::DistSquared(Candidate->GetActorLocation(), Pawn->GetActorLocation());
 		if (DistSq < BestDistSq)

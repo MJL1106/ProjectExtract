@@ -104,6 +104,19 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Shield", meta = (ClampMin = "0.0"))
 	float ShieldRegenDelay = 3.f;
 
+	/** Passive health regen (shield-style: damage restarts the delay). Off for players/enemies;
+	 *  the companion enables it on its BP. Blocked while dead/DBNO (bIsDead). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Health")
+	bool bHealthRegenEnabled = false;
+
+	/** Health regained per second while regenerating — tuned slower than the shield's rate. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Health", meta = (ClampMin = "0.0", EditCondition = "bHealthRegenEnabled"))
+	float HealthRegenRate = 4.f;
+
+	/** Seconds without damage before health regen starts. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Health", meta = (ClampMin = "0.0", EditCondition = "bHealthRegenEnabled"))
+	float HealthRegenDelay = 8.f;
+
 private:
 	UFUNCTION()
 	void OnRep_CurrentHealth();
@@ -114,8 +127,13 @@ private:
 	void StartShieldRegen();
 	void RegenShield();
 
+	void StartHealthRegen();
+	void RegenHealth();
+
 	FTimerHandle ShieldRegenDelayHandle;
 	FTimerHandle ShieldRegenTickHandle;
+	FTimerHandle HealthRegenDelayHandle;
+	FTimerHandle HealthRegenTickHandle;
 
 	UPROPERTY(Replicated)
 	bool bIsDead = false;

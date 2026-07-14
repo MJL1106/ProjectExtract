@@ -11,6 +11,7 @@
 class UCompanionTuningDataAsset;
 class ACompanionAIController;
 class ACompanionCharacter;
+class ACharacter;
 class UEnvQuery;
 struct FEnvQueryResult;
 
@@ -69,7 +70,29 @@ private:
 	float TimeSinceLastEqs = 0.f;
 	FVector EqsTarget = FVector::ZeroVector;
 
+	// Player floor-transit detector (see UpdatePlayerZTransit). Envelope follower over the
+	// player's grounded vertical rate; while hot, follow pursues the player directly instead
+	// of trusting the EQS slot / formation anchor.
+	float LastPlayerZ = 0.f;
+	bool bHasPlayerZSample = false;
+	float PlayerZTransitEnvelope = 0.f;
+	bool bWasPursuingPlayer = false;
+
+	/** Envelope drain rate (cm/s per second) — sets how long pursuit holds after the player settles. */
+	static constexpr float ZTransitEnvelopeDecay = 200.f;
+
+	/** Envelope rise rate (cm/s per second) — only a SUSTAINED vertical rate (~0.1s+) can cross the
+	 *  pursuit threshold. Without it a single-tick Z blip (curb step-up, ground-height adjustment)
+	 *  reads as hundreds of cm/s and trips seconds of pursuit. Real floor drops that happen in one
+	 *  frame are covered by the off-level pursuit arm instead. */
+	static constexpr float ZTransitEnvelopeAttack = 400.f;
+
+	/** Single-tick rate cap — bounds one-frame dZ/dt spikes (ledge-drop landings) so the envelope
+	 *  math stays in sane range regardless of frame time. */
+	static constexpr float ZTransitRateClamp = 600.f;
+
 	void OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Result);
+	void UpdatePlayerZTransit(const ACharacter* PlayerChar, float PlayerZ, float DeltaSeconds);
 
 	UPROPERTY()
 	TObjectPtr<UBehaviorTreeComponent> CachedOwnerComp;

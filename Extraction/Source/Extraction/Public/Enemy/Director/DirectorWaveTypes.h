@@ -28,6 +28,16 @@ struct EXTRACTION_API FDirectorWaveRequest
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave", meta = (ClampMin = "5.0"))
 	float BlockedWarningSeconds = 30.f;
+
+	/** Seed each spawned wave squad straight into Combat targeting the player. Off = squads get the
+	 *  default sighting seed (Searching) and must confirm the fight through their own perception. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave")
+	bool bAutoEngage = true;
+
+	/** Seconds between wave squad spawns. 0 = use the effective phase config's SpawnCadenceSeconds
+	 *  (tuned for ambient pacing — often too slow for a scripted assault). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave", meta = (ClampMin = "0.0"))
+	float SpawnCadenceOverride = 0.f;
 };
 
 UENUM(BlueprintType)

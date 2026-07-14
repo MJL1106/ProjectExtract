@@ -168,6 +168,12 @@ private:
 		// --- Cached subsystem pointers (PERF #8) ---
 		TWeakObjectPtr<ACoverSystem> CachedCoverSys;
 		TWeakObjectPtr<UCoverReservationSubsystem> CachedResSub;
+
+		// --- Stale-cover validation cache (edge-align corner-march traces are too hot per tick) ---
+		/** Cover handle the cached stale-check hunker position was computed for. */
+		FCoverHandle StaleCheckHandle;
+		/** Edge-aligned hunker position for StaleCheckHandle (the point the pawn actually stands at). */
+		FVector StaleCheckHunkerPos = FVector::ZeroVector;
 		/** World-time of last mis-wiring warning log (throttle). */
 		float LastMiswiringLogTime = -10.f;
 
@@ -292,9 +298,16 @@ private:
 	/** Clear the CoverTarget BB key. */
 	void ClearCoverBB(UBlackboardComponent* BB) const;
 
+	/** Drop the cover claim (BB_HasCover + CoverTarget) when deliberately leaving cover to pursue.
+	 *  A lingering claim survives the chase and re-enters the cover FSM wherever the pawn ends up,
+	 *  posing "in cover" in the open. No MarkVacated — a pursue that circles back may re-take the
+	 *  same point without a post-vacate cooldown (same rule as StopFireAndCleanUp's reseek clear). */
+	void DropCoverClaimForPursue(UBlackboardComponent* BB) const;
+
 	/** Self-correcting cover truth: BB_HasCover means "AT my cover", not "arrived once". When the
-	 *  pawn has moved beyond the abandon distance from the BB cover (pursue, bounding advance,
-	 *  searching wander, branch switch), clears BB_HasCover + CoverTarget + latched pose/crouch and
-	 *  returns false. Callers skip this during SeekingCover (transit is legitimate). */
-	bool ValidateCoverStillHeld(UBlackboardComponent* BB, APawn* Pawn, AEnemyCharacter* Enemy) const;
+	 *  pawn has moved beyond the abandon distance from the BB cover's edge-aligned hunker position
+	 *  (pursue, bounding advance, searching wander, branch switch), clears BB_HasCover + CoverTarget
+	 *  + latched pose/crouch and returns false. Callers skip this during SeekingCover (transit is
+	 *  legitimate). Mem caches the edge-aligned position per handle (null Mem = Location fallback). */
+	bool ValidateCoverStillHeld(UBlackboardComponent* BB, APawn* Pawn, AEnemyCharacter* Enemy, FFireMemory* Mem) const;
 };

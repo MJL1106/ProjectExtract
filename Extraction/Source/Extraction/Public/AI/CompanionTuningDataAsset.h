@@ -110,6 +110,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
 	float SprintSpeed = 850.f;
 
+	// Follow-task catch-up sprint cap — the full SprintSpeed read as too fast for closing formation
+	// gaps. Rescue sprint-to-target and the stealth catch-up ladder keep full SprintSpeed.
+	// 0 = no reduction (use SprintSpeed).
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float FollowCatchupSprintSpeed = 650.f;
+
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
 	float CrouchedWalkSpeed = 250.f;
 
@@ -378,6 +384,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
 	float CoverMaxCommitTime = 12.f;
 
+	// Minimum dwell after arriving at cover before the triggers-cleared exit may vacate. The commit
+	// triggers are momentary (an under-fire window can lapse during the walk in), and ducking into
+	// cover only to stand straight back up reads as broken. 0 restores the instant exit.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
+	float CoverMinCommitTime = 2.f;
+
 	// Suppression01 at/above this counts as strong pressure and blocks the natural release (as do
 	// low health and outnumbered-at-commit-count).
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -460,6 +472,15 @@ public:
 	// entirely (including the pull-back cover snap).
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0", ClampMax = "4.0"))
 	float LooseCoverBiasWeight = 1.0f;
+
+	// Max |Z delta| (cm) between the companion and a cover candidate for the pick to count — cover
+	// only shields on the floor you stand on, and the 3D bounds scans (and the EQS pick) span
+	// floors: a slot one storey up scored "nearest" and sent the companion crouch-walking into the
+	// open toward an unreachable point. Applied at the commit gate, the re-rank, the open-engage
+	// re-seek, the switch monitor, and the downed retreat. 250 tolerates ramps/half-landings.
+	// 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float CoverPickMaxZDelta = 250.f;
 
 	// --- Combat leash (decoupled from the follow-task SprintDistanceThreshold) ---
 
@@ -809,6 +830,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0"))
 	float FollowMaxZDelta = 150.f;
 
+	// Sustained player vertical rate (cm/s) that flags the player as changing floors. While
+	// flagged, follow skips the EQS slot and formation anchor and pursues the player's location
+	// directly — mid-flight the player's Z sits within FollowMaxZDelta of the floor ABOVE, so
+	// upper-landing slots pass the wrong-floor gate and yo-yo the companion on the stairs.
+	// Must sit above flat-ground noise but under stair descent rate (~100-200). 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0"))
+	float FollowPursuitZRate = 50.f;
+
 	// --- Non-combat facing (F3 watch-threats + F1 ambient facing) ---
 	// Out-of-combat presentation only — never flips posture to Combat, never fires, never touches
 	// the actual combat-target key. See UBTService_UpdateCompanionState::UpdateNonCombatFacing.
@@ -859,4 +888,5 @@ public:
 	// Max magnitude (degrees) of the idle scan-glance yaw offset.
 	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0", ClampMax = "90.0"))
 	float AmbientScanOffsetMaxDeg = 20.f;
+
 };

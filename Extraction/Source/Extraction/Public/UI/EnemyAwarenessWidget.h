@@ -70,6 +70,11 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Awareness", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float InCoverOpacity = 0.45f;
 
+	/** Fade the meter out entirely while the enemy is in full Combat — the locked red ring
+	 *  carries no information and sits over the firefight. Fades back in on Combat->Searching. */
+	UPROPERTY(EditAnywhere, Category = "Awareness")
+	bool bHideInCombat = true;
+
 private:
 
 	/** Tick accumulator — widget work runs every UpdateInterval seconds, not every frame. */
@@ -88,11 +93,17 @@ private:
 	/** Interp speed applied to CoverDimAlpha each UpdateInterval tick. */
 	static constexpr float CoverDimInterpSpeed = 8.f;
 
+	/** Interp speed applied to CombatHideAlpha each UpdateInterval tick. */
+	static constexpr float CombatHideInterpSpeed = 8.f;
+
 	/** Smoothed display value — interps toward the raw awareness meter, drives all visuals. */
 	float DisplayMeter = 0.f;
 
 	/** Smoothed opacity multiplier — interps toward InCoverOpacity while the enemy holds cover, 1 otherwise. */
 	float CoverDimAlpha = 1.f;
+
+	/** Smoothed opacity multiplier — interps toward 0 while in Combat (bHideInCombat), 1 otherwise. */
+	float CombatHideAlpha = 1.f;
 
 	/** Change-detection caches — MID writes are skipped when nothing has changed. */
 	float LastWrittenMeter = -1.f;

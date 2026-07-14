@@ -27,6 +27,8 @@ void UHealthComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		World->GetTimerManager().ClearTimer(ShieldRegenDelayHandle);
 		World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+		World->GetTimerManager().ClearTimer(HealthRegenDelayHandle);
+		World->GetTimerManager().ClearTimer(HealthRegenTickHandle);
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -64,6 +66,8 @@ void UHealthComponent::TakeDamage(float Damage)
 
 	World->GetTimerManager().ClearTimer(ShieldRegenDelayHandle);
 	World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+	World->GetTimerManager().ClearTimer(HealthRegenDelayHandle);
+	World->GetTimerManager().ClearTimer(HealthRegenTickHandle);
 
 	LastDamageWorldTime = World->GetTimeSeconds();
 
@@ -96,6 +100,17 @@ void UHealthComponent::TakeDamage(float Damage)
 		ShieldRegenDelay,
 		false
 	);
+
+	if (bHealthRegenEnabled)
+	{
+		World->GetTimerManager().SetTimer(
+			HealthRegenDelayHandle,
+			this,
+			&UHealthComponent::StartHealthRegen,
+			HealthRegenDelay,
+			false
+		);
+	}
 }
 
 void UHealthComponent::Heal(float Amount)
@@ -118,6 +133,8 @@ void UHealthComponent::Die()
 	{
 		World->GetTimerManager().ClearTimer(ShieldRegenDelayHandle);
 		World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+		World->GetTimerManager().ClearTimer(HealthRegenDelayHandle);
+		World->GetTimerManager().ClearTimer(HealthRegenTickHandle);
 	}
 
 	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
@@ -149,6 +166,19 @@ void UHealthComponent::Revive(float HealthPercent)
 			ShieldRegenDelay,
 			false
 		);
+
+		if (bHealthRegenEnabled)
+		{
+			World->GetTimerManager().ClearTimer(HealthRegenDelayHandle);
+			World->GetTimerManager().ClearTimer(HealthRegenTickHandle);
+			World->GetTimerManager().SetTimer(
+				HealthRegenDelayHandle,
+				this,
+				&UHealthComponent::StartHealthRegen,
+				HealthRegenDelay,
+				false
+			);
+		}
 	}
 }
 
@@ -184,6 +214,41 @@ void UHealthComponent::RegenShield()
 	{
 		if (const UWorld* World = GetWorld())
 			World->GetTimerManager().ClearTimer(ShieldRegenTickHandle);
+	}
+}
+
+void UHealthComponent::StartHealthRegen()
+{
+	if (bIsDead || !bHealthRegenEnabled || CurrentHealth >= MaxHealth) return;
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	World->GetTimerManager().SetTimer(
+		HealthRegenTickHandle,
+		this,
+		&UHealthComponent::RegenHealth,
+		0.1f,
+		true
+	);
+}
+
+void UHealthComponent::RegenHealth()
+{
+	if (bIsDead)
+	{
+		if (const UWorld* World = GetWorld())
+			World->GetTimerManager().ClearTimer(HealthRegenTickHandle);
+		return;
+	}
+
+	CurrentHealth = FMath::Min(CurrentHealth + HealthRegenRate * 0.1f, MaxHealth);
+	OnHealthChanged.Broadcast(CurrentHealth, MaxHealth);
+
+	if (CurrentHealth >= MaxHealth)
+	{
+		if (const UWorld* World = GetWorld())
+			World->GetTimerManager().ClearTimer(HealthRegenTickHandle);
 	}
 }
 

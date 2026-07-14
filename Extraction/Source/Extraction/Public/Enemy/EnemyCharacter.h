@@ -280,6 +280,10 @@ public:
 	 *  so the victim ragdolls immediately on kill (no reaction-beat delay / pose snap). */
 	void SetTakedownWasMontageDriven(bool bDriven) { bTakedownWasMontageDriven = bDriven; }
 
+	/** True from BeginTakedownHold until the kill lands (or the hold aborts) — the enemy is
+	 *  frozen in a finisher and shouldn't react to the world (barks, morale theatrics). */
+	bool IsTakedownPending() const { return bPendingTakedownDeath; }
+
 	/** Fired when a takedown begins (BeginTakedownHold succeeds) — animation/FX hook for BP. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Takedown")
 	FOnTakedownExecuted OnTakedownExecuted;

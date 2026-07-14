@@ -313,6 +313,24 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "100.0"))
 	float FinalApproachMaxStartDist = 450.f;
 
+	/** Hunker divergence (cm) beyond which a wall-adjacent pawn TRUSTS its delivered position and
+	 *  enters cover in place instead of trekking. The corner-march is trace-based against live
+	 *  geometry (a pawn on the march line shifts the perceived corner), so a recompute at task entry
+	 *  can disagree metres from where MoveToCoverPoint just correctly delivered — walking that order
+	 *  mid-fight is a silent, unarmed trek (playtest death: 6s mannequin at a perfect corner). */
+	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "50.0"))
+	float TrustArrivalMaxHunkerDivergence = 150.f;
+
+	/** Seconds of near-zero physical displacement during the final approach before bailing. Catches
+	 *  the path-follower reporting Moving while the pawn is wedged — the Idle-based stall never
+	 *  fires there. Bail skips the retry (an identical re-issued move that moved 0cm stays at 0cm). */
+	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "0.25", ClampMax = "5.0"))
+	float FinalApproachNoProgressBailSeconds = 1.0f;
+
+	/** Displacement speed (cm/s) below which a final-approach tick counts as "no progress". */
+	UPROPERTY(EditAnywhere, Category = "Cover|Entry", meta = (ClampMin = "1.0"))
+	float FinalApproachMinProgressSpeed = 15.f;
+
 	/** Duration of the smooth-snap tween that replaces cover entry / return teleport pops (seconds). */
 	UPROPERTY(EditAnywhere, Category = "Combat|Movement", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float SmoothSnapDuration = 0.2f;
@@ -711,6 +729,10 @@ private:
 	float FinalApproachStalledTime = 0.f;
 	/** One retry allowed per approach when the stall/timeout failsafe fires beyond FinalApproachSnapMaxDist. */
 	bool bFinalApproachRetried = false;
+	/** Pawn location last watch tick — drives the displacement-based no-progress bail. */
+	FVector LastFinalApproachPawnLoc = FVector::ZeroVector;
+	/** Accumulated seconds of sub-threshold displacement during the final approach. */
+	float FinalApproachNoProgressTime = 0.f;
 
 	// Smooth-snap tween state
 	bool bSmoothSnapping = false;

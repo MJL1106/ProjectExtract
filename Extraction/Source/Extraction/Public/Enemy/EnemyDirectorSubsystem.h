@@ -271,6 +271,10 @@ private:
 	void PruneStaleWaveMembers();
 	void AccrueWaveBlockedTime();
 
+	/** Auto-engage waves only: re-seed Combat on any live wave member that decayed to Unaware
+	 *  (gave up and returned to a guard post) — a passive holdout stalls the kill-all wave. */
+	void ReassertWaveMemberEngagement();
+
 	UPROPERTY()
 	FDirectorWaveRequest ActiveWaveRequest;
 

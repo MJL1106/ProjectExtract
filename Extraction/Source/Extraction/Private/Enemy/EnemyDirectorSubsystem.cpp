@@ -311,6 +311,7 @@ void UEnemyDirectorSubsystem::DirectorTick()
 	PruneStaleZones();
 	PruneStaleScopeVolumes();
 	PruneStaleWaveMembers();
+	ReassertWaveMemberEngagement();
 
 	const FEnemySweepResult Sweep = SweepEnemies();
 
@@ -528,14 +529,31 @@ void UEnemyDirectorSubsystem::UpdateSawtooth(float DeltaSeconds)
 
 bool UEnemyDirectorSubsystem::ShouldSpawn(int32 AliveCount) const
 {
-	if (AlertLevel != EGlobalAlertLevel::Loud) return false;
-	if (DirectorState != EDirectorState::Build) return false;
-
 	const FMissionPhaseConfig& PhaseConfig = GetCurrentPhaseConfig();
 
-	if (TimeSinceLastSpawn < PhaseConfig.SpawnCadenceSeconds) return false;
+	// A finite scripted wave OWNS the director while it lives. Two rules:
+	// - While it can still field squads, bypass the ambient pacing gates: StartWave forces Build
+	//   once, but a mid-wave Peak transition (tension over threshold — guaranteed during an
+	//   endgame assault) froze the remaining squads until Relief ("the wave never spawns").
+	//   Waves pace on cadence + MaxAlive only.
+	// - Once all squads are fielded, the director goes SILENT until the wave resolves — the
+	//   ambient/punishment trickle resuming underneath the defence both diluted the scripted
+	//   pacing and used zones the wave deliberately avoids (the player-visible lifts box).
+	const bool bWaveActive = WaveProgress.IsActive();
+	const bool bWaveCanSpawn = WaveProgress.CanSpawnMore();
+	if (bWaveActive && !bWaveCanSpawn) return false;
+	if (!bWaveActive)
+	{
+		if (AlertLevel != EGlobalAlertLevel::Loud) return false;
+		if (DirectorState != EDirectorState::Build) return false;
+		if (Tension >= PhaseConfig.IntensityCeiling) return false;
+	}
+
+	const float Cadence = (bWaveCanSpawn && ActiveWaveRequest.SpawnCadenceOverride > 0.f)
+		? ActiveWaveRequest.SpawnCadenceOverride
+		: PhaseConfig.SpawnCadenceSeconds;
+	if (TimeSinceLastSpawn < Cadence) return false;
 	if (AliveCount >= PhaseConfig.MaxAlive) return false;
-	if (Tension >= PhaseConfig.IntensityCeiling) return false;
 
 	return true;
 }
@@ -684,11 +702,19 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 	AEnemySpawnZone* BestZone = nullptr;
 	float BestScore = -FLT_MAX;
 
+	// Wave-eligibility: scripted waves must never use zones the player can watch from the fight
+	// room (the hidden-check trace reads glass as an occluder, so "hidden" lies there) — the
+	// designer flags those zones off for waves. Ambient spawns keep the full zone set. Keyed on
+	// IsActive: while a wave lives, every spawn the director makes IS a wave spawn (ShouldSpawn
+	// silences the ambient trickle for the wave's whole lifetime).
+	const bool bWaveActive = WaveProgress.IsActive();
+
 	for (const TWeakObjectPtr<AEnemySpawnZone>& WeakZone : SpawnZones)
 	{
 		AEnemySpawnZone* Zone = WeakZone.Get();
 		if (!IsValid(Zone)) continue;
 		if (!Zone->IsActiveForPhase(GetEffectivePhase())) continue;
+		if (bWaveActive && !Zone->bWaveEligible) continue;
 
 		const FVector ZoneLoc = Zone->GetZoneOrigin();
 		if (bUseScopeVolumes && !IsPointInsideAnyScope(ZoneLoc)) continue;
@@ -923,6 +949,12 @@ void UEnemyDirectorSubsystem::SeedSquadWithFight(UEnemySquad* Squad) const
 	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
 	if (!IsValid(PlayerPawn)) return;
 
+	if (WaveProgress.IsActive() && ActiveWaveRequest.bAutoEngage)
+	{
+		Squad->ForceEngage(PlayerPawn, PlayerPawn->GetActorLocation());
+		return;
+	}
+
 	Squad->ReportSighting(PlayerPawn, PlayerPawn->GetActorLocation());
 }
 
@@ -1018,6 +1050,35 @@ void UEnemyDirectorSubsystem::PruneStaleWaveMembers()
 			It.RemoveCurrent();
 			WaveProgress.RecordMemberEnded();
 		}
+	}
+}
+
+void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
+{
+	if (!WaveProgress.IsActive() || !ActiveWaveRequest.bAutoEngage) return;
+
+	UWorld* World = GetWorld();
+	APawn* PlayerPawn = IsValid(World) ? UGameplayStatics::GetPlayerPawn(World, 0) : nullptr;
+	if (!IsValid(PlayerPawn)) return;
+
+	for (const TWeakObjectPtr<AEnemyCharacter>& WeakMember : WaveMembers)
+	{
+		AEnemyCharacter* Member = WeakMember.Get();
+		if (!IsValid(Member)) continue;
+		const UHealthComponent* HP = Member->GetHealthComponent();
+		if (HP && HP->IsDead()) continue;
+
+		AEnemyAIController* AIC = Cast<AEnemyAIController>(Member->GetController());
+		UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
+		if (!Awareness) continue;
+
+		// Searching still hunts. Only a member that fully gave up (Unaware — decayed out of the
+		// fight and walked back to a guard post, e.g. parked behind a door) gets re-seeded; the
+		// kill-all wave can never complete around a passive holdout the player can't find.
+		if (Awareness->GetAwarenessState() != EEnemyAwarenessState::Unaware) continue;
+		Awareness->ForceEngage(PlayerPawn);
+		UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: re-engaging idle member %s"),
+			*ActiveWaveRequest.WaveId.ToString(), *Member->GetName());
 	}
 }
 

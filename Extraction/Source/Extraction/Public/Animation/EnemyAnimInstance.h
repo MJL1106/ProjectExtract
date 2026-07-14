@@ -471,6 +471,10 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Animation|Montages")
 	TObjectPtr<UAnimMontage> TakedownReactionMontage;
 
+	/** Pauses TakedownReactionMontage on its last authored frame so the victim holds the downed
+	 *  pose until the attacker's montage fires the kill (see HandleTakedown). */
+	FTimerHandle TakedownPoseHoldTimerHandle;
+
 	// Single-shot fire montage — plays via OnWeaponFired delegate for weapons whose fire
 	// duration is too short for the loop-montage rising-edge to catch (snipers, shotguns).
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Animation|Montages")

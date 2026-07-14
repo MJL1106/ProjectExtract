@@ -332,7 +332,15 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 				&& Mem.TimeSinceArrival >= MaxCommitTime
 				&& !CompanionCover::IsStrongPressure(*ExitCompanion, *Tuning, ExitThreatCount);
 
-			if (!bFiringNow && (!Release.Any() || bNaturalRelease))
+			// Min-commit dwell for the triggers-cleared exit, keyed on the combat task's COMMIT stamp
+			// (not Mem.TimeSinceArrival — arrival memory persists across task restarts at a retained
+			// slot, so a fresh re-commit inherited a pre-satisfied dwell and vacated on the first
+			// check: the observed claim/instant-vacate/re-claim loop). Commit triggers are momentary
+			// (an under-fire window can lapse during the walk in); give each commit its dwell.
+			const float SinceCommit = World->GetTimeSeconds() - ExitCompanion->GetLastCoverCommitTime();
+			const bool bCommitDwellMet = SinceCommit >= Tuning->CoverMinCommitTime;
+
+			if (!bFiringNow && ((!Release.Any() && bCommitDwellMet) || bNaturalRelease))
 			{
 				if (UCoverReservationSubsystem* ExitResSub = World->GetSubsystem<UCoverReservationSubsystem>())
 					ExitResSub->MarkVacated(CurrentCover.Handle, Controller);
@@ -342,15 +350,19 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 				BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 				const float TimeAtCover = Mem.TimeSinceArrival;
 				Mem = {};
+				// Stamp the recommit cooldown on BOTH exit flavors — a triggers-cleared vacate
+				// without it re-committed the moment a trigger blipped again (in-out-in loop).
+				// HasPressureSpiked still bypasses the cooldown for genuine fresh pressure.
+				ExitCompanion->StampNaturalCoverRelease();
 				if (bNaturalRelease && Release.Any())
 				{
-					ExitCompanion->StampNaturalCoverRelease();
 					UE_LOG(LogCompanionAI, Log, TEXT("CoverExit: %s NATURAL release after %.1fs (low-grade pressure) — vacating to open-engage"),
 						*GetNameSafe(Pawn), TimeAtCover);
 				}
 				else
 				{
-					UE_LOG(LogCompanionAI, Log, TEXT("CoverExit: %s triggers cleared — vacating to open-engage"), *GetNameSafe(Pawn));
+					UE_LOG(LogCompanionAI, Log, TEXT("CoverExit: %s triggers cleared %.1fs after commit — vacating to open-engage"),
+						*GetNameSafe(Pawn), SinceCommit);
 				}
 				return;
 			}
@@ -479,6 +491,11 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	{
 		if (!Candidate.IsValid()) continue;
 		if (Candidate.Handle == CurrentCover.Handle) continue;
+
+		// Same-floor gate (vs the PAWN, not the formation anchor) — the 3D bounds query spans
+		// storeys; a switch must never march the companion to another floor's slot.
+		if (Tuning->CoverPickMaxZDelta > 0.f
+			&& FMath::Abs(Pawn->GetActorLocation().Z - Candidate.Data.Location.Z) > Tuning->CoverPickMaxZDelta) continue;
 
 		// Skip occupied covers (single lookup — treat occupied-by-self as available).
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);

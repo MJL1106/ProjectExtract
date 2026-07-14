@@ -1528,10 +1528,17 @@ void AExtractionPlayer::BeginReviveHold(AActor* Target)
 		ReviverLookIgnoredPC = PC;
 	}
 
+	// Montage-less hold (companion's bPlayPlayerReviveMontages off): skip the kneel seat and
+	// montages — the seat's mesh yaw exists to line up the kneel clip, and with no kneel pose
+	// to own it the yaw would spin the head-mounted FP camera on a standing body.
 	if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Target))
-		SeatReviverForHold(*Companion);
-
-	SetReviveAnimsActive(true);
+	{
+		if (Companion->ShouldPlayPlayerReviveMontages())
+		{
+			SeatReviverForHold(*Companion);
+			SetReviveAnimsActive(true);
+		}
+	}
 
 	LogReviveDebugState(TEXT("START"), *this, Target);
 }

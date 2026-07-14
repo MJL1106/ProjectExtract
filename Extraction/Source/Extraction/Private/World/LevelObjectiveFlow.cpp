@@ -328,6 +328,22 @@ void ALevelObjectiveFlow::Advance(ELevelObjectiveEvent Event)
 	UpdatePrimaryObjective();
 	RefreshRecordedEnemyDeaths();
 	EvaluateCurrentEnemyStep();
+
+	// Late-entry catch-up: an event that fires before its step is current (keycard looted
+	// mid-fight, exit door unlocked early) is dropped by the linear machine, and the source
+	// broadcasts are one-shot — they never re-fire once the step activates. Re-check world
+	// state on entry and advance again; the recursion walks through every already-satisfied step.
+	if (CurrentStep == ELevelObjectiveStep::FindOfficeKeycard
+		&& IsValid(KeycardContainer) && KeycardContainer->IsLooted())
+	{
+		Advance(ELevelObjectiveEvent::KeycardLooted);
+		return;
+	}
+	if (CurrentStep == ELevelObjectiveStep::UnlockStairwellDoor
+		&& IsValid(Room1ExitDoor) && Room1ExitDoor->IsOpenForAcoustics())
+	{
+		Advance(ELevelObjectiveEvent::ExitDoorOpened);
+	}
 }
 
 void ALevelObjectiveFlow::TryApplyCompanionCheckpointHeal()

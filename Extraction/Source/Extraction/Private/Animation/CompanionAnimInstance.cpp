@@ -16,6 +16,11 @@
 #include "Enemy/Debug/EnemyDebug.h"
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
 
+namespace CompanionAnimConstants
+{
+	static constexpr float DirectionInterpSpeed = 15.0f;
+}
+
 void UCompanionAnimInstance::NativeInitializeAnimation()
 {
 	Super::NativeInitializeAnimation();
@@ -166,7 +171,13 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	Speed = EffectiveVelocity.Size2D();
 	bHasVelocity = Speed > 1.f;
-	Direction = UKismetAnimationLibrary::CalculateDirection(EffectiveVelocity, OwningCompanion->GetActorRotation());
+	const float TargetDirection = bHasVelocity
+		? UKismetAnimationLibrary::CalculateDirection(EffectiveVelocity, OwningCompanion->GetActorRotation())
+		: 0.f;
+	const float UnwrappedTargetDirection = Direction + FMath::FindDeltaAngleDegrees(Direction, TargetDirection);
+	Direction = FMath::FInterpTo(Direction, UnwrappedTargetDirection, DeltaSeconds,
+		CompanionAnimConstants::DirectionInterpSpeed);
+	Direction = FMath::UnwindDegrees(Direction);
 
 	// Crouched movement is capped by MaxWalkSpeedCrouched — normalizing against the standing cap
 	// starves the locomotion blend while crouched and reads as foot-slide. (Component query, not

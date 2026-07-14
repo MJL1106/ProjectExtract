@@ -2,6 +2,7 @@
 
 #include "BarkSubsystem.h"
 #include "BarkSetData.h"
+#include "EnemyCharacter.h"
 #include "EnemyDebug.h"
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
@@ -15,6 +16,11 @@ DEFINE_LOG_CATEGORY(LogEnemyBark);
 void UBarkSubsystem::RequestBark(const AActor* Speaker, const UBarkSetData* BarkSet, EBarkType Type, const FText& SpeakerName)
 {
 	if (!IsValid(Speaker) || !IsValid(BarkSet)) return;
+
+	// A victim frozen in a takedown finisher is seconds from death — it calling "man down" about
+	// the other half of a double takedown (or anything else) reads as a bug. Drop its barks.
+	if (const AEnemyCharacter* SpeakerEnemy = Cast<AEnemyCharacter>(Speaker))
+		if (SpeakerEnemy->IsTakedownPending()) return;
 
 	const bool bDebug = IsEnemyBarkDebugEnabled();
 

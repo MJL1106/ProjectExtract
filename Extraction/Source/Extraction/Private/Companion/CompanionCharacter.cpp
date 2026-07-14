@@ -240,6 +240,12 @@ void ACompanionCharacter::BeginPlay()
 	{
 		HealthWidgetComponent->SetWidgetClass(HealthWidgetClass);
 		HealthWidgetComponent->SetVisibility(true);
+
+		// The widget binds OnHealthChanged itself, but delegate-bind nodes for OnShieldChanged
+		// can't be authored in its graph externally — C++ pushes shield changes into the widget's
+		// OnShieldUpdated custom event instead.
+		if (HealthComponent && !HealthComponent->OnShieldChanged.IsAlreadyBound(this, &ACompanionCharacter::HandleShieldChangedForWidget))
+			HealthComponent->OnShieldChanged.AddDynamic(this, &ACompanionCharacter::HandleShieldChangedForWidget);
 	}
 
 	if (ModeWidgetClass && ModeWidgetComponent)
@@ -268,12 +274,14 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
 		World->GetTimerManager().ClearTimer(ModeWidgetLinkTimerHandle);
+		World->GetTimerManager().ClearTimer(KnifeKillTimerHandle);
 	}
 
 	if (HealthComponent)
 	{
 		HealthComponent->OnDeath.RemoveDynamic(this, &ACompanionCharacter::HandleDeath);
 		HealthComponent->OnRevive.RemoveDynamic(this, &ACompanionCharacter::HandleRevive);
+		HealthComponent->OnShieldChanged.RemoveDynamic(this, &ACompanionCharacter::HandleShieldChangedForWidget);
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -375,6 +383,19 @@ void ACompanionCharacter::StampNaturalCoverRelease()
 {
 	if (GetWorld())
 		LastNaturalReleaseTime = GetWorld()->GetTimeSeconds();
+}
+
+void ACompanionCharacter::StampCoverCommit()
+{
+	if (GetWorld())
+		LastCoverCommitTime = GetWorld()->GetTimeSeconds();
+}
+
+void ACompanionCharacter::SetFollowCatchupPace(bool bPace)
+{
+	if (bFollowCatchupPace == bPace) return;
+	bFollowCatchupPace = bPace;
+	ApplyMovementSpeeds();
 }
 
 void ACompanionCharacter::SetCoverCommitGrant(bool bPending)
@@ -730,6 +751,17 @@ float ACompanionCharacter::TunedSprintSpeed() const
 	return T ? T->SprintSpeed : SprintSpeed;
 }
 
+float ACompanionCharacter::TunedFollowCatchupSprintSpeed() const
+{
+	// Stealth's catch-up ladder owns its own pace — the reduced follow tier never applies there.
+	if (IsStealthActive()) return TunedSprintSpeed();
+
+	const UCompanionTuningDataAsset* T = GetTuning();
+	const float Full = TunedSprintSpeed();
+	const float Reduced = T ? T->FollowCatchupSprintSpeed : 0.f;
+	return Reduced > 0.f ? FMath::Min(Reduced, Full) : Full;
+}
+
 float ACompanionCharacter::TunedCrouchedWalkSpeed() const
 {
 	const UCompanionTuningDataAsset* T = GetTuning();
@@ -759,7 +791,9 @@ void ACompanionCharacter::ApplyMovementSpeeds()
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (!MoveComp) return;
 
-	MoveComp->MaxWalkSpeed = bIsSprinting ? TunedSprintSpeed() : TunedWalkSpeed();
+	MoveComp->MaxWalkSpeed = bIsSprinting
+		? (bFollowCatchupPace ? TunedFollowCatchupSprintSpeed() : TunedSprintSpeed())
+		: TunedWalkSpeed();
 	MoveComp->MaxWalkSpeedCrouched = TunedCrouchedWalkSpeed();
 }
 
@@ -1118,7 +1152,7 @@ void ACompanionCharacter::SetBeingRevived(bool bRevived, float ExpectedDuration)
 		return;
 	}
 
-	if (bRevived && bIsDBNO)
+	if (bRevived && bIsDBNO && bPlayPlayerReviveMontages)
 	{
 		AnimInst->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
 		const float MontageLength = BeingRevivedMontage->GetPlayLength();
@@ -1147,6 +1181,14 @@ void ACompanionCharacter::AlignForRevive(const FVector& ReviverLocation)
 	const FVector ToReviver = (ReviverLocation - GetActorLocation()).GetSafeNormal2D();
 	if (ToReviver.IsNearlyZero()) return;
 
+	// Montage-less hold: the authored-angle math below exists purely to line up the montage
+	// pair — without it, just face the reviver.
+	if (!bPlayPlayerReviveMontages)
+	{
+		SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw, 0.f));
+		return;
+	}
+
 	// Rotation-only mirror of BTTask_RevivePlayer's position snap: instead of moving the reviver
 	// to the authored offset, face so the reviver's actual position sits at the authored local
 	// angle (atan2 of the PLAYER-direction pair offset, ≈ -47°). Works from any approach
@@ -1156,6 +1198,19 @@ void ACompanionCharacter::AlignForRevive(const FVector& ReviverLocation)
 	// The trim rotates only this body; SeatReviverForHold subtracts it back out of its anchor,
 	// so the reviver's seat and facing stay put in world.
 	SetActorRotation(FRotator(0.f, ToReviver.Rotation().Yaw - AuthoredLocalAngle + PlayerRevivePatientYawTrimDeg, 0.f));
+}
+
+void ACompanionCharacter::HandleShieldChangedForWidget(float CurrentShield, float MaxShield)
+{
+	UUserWidget* Widget = IsValid(HealthWidgetComponent) ? HealthWidgetComponent->GetWidget() : nullptr;
+	if (!IsValid(Widget)) return;
+
+	UFunction* Fn = Widget->FindFunction(TEXT("OnShieldUpdated"));
+	if (!Fn) return;
+
+	// BP-defined event params are doubles (BP "float" = real) — layout must match exactly.
+	struct { double CurrentShield; double MaxShield; } Params{ CurrentShield, MaxShield };
+	Widget->ProcessEvent(Fn, &Params);
 }
 
 void ACompanionCharacter::HandleRevive()
@@ -1338,7 +1393,12 @@ void ACompanionCharacter::DisarmCommandedTakedown()
 	}
 
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
+		// A pending mid-montage knife kill must not fire into the next takedown's state
+		// (already-fired timers make this a no-op on the normal completion path).
+		World->GetTimerManager().ClearTimer(KnifeKillTimerHandle);
+	}
 
 	if (AActor* IgnoredVictim = TakedownVictim.Get())
 	{
@@ -1486,7 +1546,16 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 		// Companion stands behind the victim (victim − offset). Keep our OWN grounded Z (capsule
 		// half-heights can differ), and sweep from the victim toward the spot so an enemy backed
 		// against a wall can't embed us in geometry — mirrors AExtractionPlayer::StartMontageDeferred.
-		const FVector OffsetWorld = FRotator(0.f, SnapYaw, 0.f).RotateVector(CommandedTakedownOffset);
+		// Backpad extends the authored offset along its own direction — radial only, so the
+		// approach angle the pair anims were tuned around never changes.
+		FVector OffsetLocal = CommandedTakedownOffset;
+		if (CommandedTakedownBackpad > 0.f)
+		{
+			FVector Dir(OffsetLocal.X, OffsetLocal.Y, 0.f);
+			Dir = Dir.IsNearlyZero() ? FVector::ForwardVector : Dir.GetSafeNormal();
+			OffsetLocal += Dir * CommandedTakedownBackpad;
+		}
+		const FVector OffsetWorld = FRotator(0.f, SnapYaw, 0.f).RotateVector(OffsetLocal);
 		FVector CompLoc(SnapLoc.X - OffsetWorld.X, SnapLoc.Y - OffsetWorld.Y, GetActorLocation().Z);
 		if (const UWorld* World = GetWorld())
 		{
@@ -1525,6 +1594,18 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 		FOnMontageEnded EndDelegate;
 		EndDelegate.BindUObject(this, &ACompanionCharacter::OnTakedownMontageEnded);
 		AnimInst->Montage_SetEndDelegate(EndDelegate, KnifeTakedownMontage);
+
+		// Kill mid-collapse (the player takedown's stab-notify timing) instead of at montage end:
+		// the ragdoll inherits the fall and settles naturally, where engaging it on the already-
+		// flat end pose pops on floor contact. The montage-end kill stays as the safety net.
+		const float KillAt = FMath::Clamp(KnifeTakedownKillAtSeconds, 0.1f, MontageLen - 0.05f);
+		GetWorldTimerManager().SetTimer(KnifeKillTimerHandle,
+			FTimerDelegate::CreateWeakLambda(this, [this, WeakVictim = TWeakObjectPtr<AEnemyCharacter>(Enemy)]()
+			{
+				if (AEnemyCharacter* KillVictim = WeakVictim.Get())
+					KillVictim->FinishTakedownKill(this);
+			}),
+			KillAt, false);
 		UE_LOG(LogCompanion, Warning, TEXT("[Takedown-Companion] knife executed (behind victim) on victim=%s"), *GetNameSafe(Victim));
 	}
 	else // Shoot — phased aim-in → cosmetic fire → kill → lower
@@ -1730,7 +1811,12 @@ void ACompanionCharacter::FinishCommandedTakedown()
 	}
 
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
+		// A pending mid-montage knife kill must not fire into the next takedown's state
+		// (already-fired timers make this a no-op on the normal completion path).
+		World->GetTimerManager().ClearTimer(KnifeKillTimerHandle);
+	}
 
 	if (AActor* IgnoredVictim = TakedownVictim.Get())
 	{

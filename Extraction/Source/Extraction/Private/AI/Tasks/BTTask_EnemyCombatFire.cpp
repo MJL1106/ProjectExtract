@@ -84,11 +84,17 @@ static constexpr float ForceCoverReseekCooldown = 0.5f;
  *  (mops up root-motion residue from peeks whose Return doesn't land exactly home). */
 static constexpr float CoverDriftCorrectDist = 30.f;
 
-/** 2D distance from the BB cover beyond which BB_HasCover is a lie and gets cleared. Must exceed
- *  every legitimate in-cover offset: the edge-align corner march (300) + corner gap (≤100) +
- *  capsule (~34) + peek step-out margin — endpoint covers park the pawn that far from the baked
- *  point while genuinely in cover. */
-static constexpr float StaleCoverAbandonDist = 500.f;
+/** 2D distance from the EDGE-ALIGNED HUNKER position beyond which BB_HasCover is a lie and gets
+ *  cleared. Legit in-cover offsets from the hunker are small: peek root-motion step (~65) +
+ *  idle-arrival tolerance (45) + drift residue (30); the corner-peek apex adds ~2 capsules + margin.
+ *  200 clears all of them while catching the "posed 3-5m into open floor" case the old 500-vs-
+ *  Data.Location compare let through (Location legitimately sits corner-march 300 + standoff away
+ *  on long-wall endpoint covers — which is what forced 500 in the first place). */
+static constexpr float StaleCoverAbandonDist = 200.f;
+
+/** Fallback budget vs Cover.Data.Location when the edge-aligned position can't be computed
+ *  (no DA / no memory) — must stay at the old bound for the long-wall endpoint reason above. */
+static constexpr float StaleCoverAbandonDistFallback = 500.f;
 
 /** Roll a pause duration with the canonical composition: base RandRange -> Hunker scalar -> feint multiplier. */
 static float RollPauseDuration(const UEnemyArchetypeData* DA, bool bHunkered)
@@ -876,15 +882,46 @@ void UBTTask_EnemyCombatFire::ClearCoverBB(UBlackboardComponent* BB) const
 	BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
 }
 
-bool UBTTask_EnemyCombatFire::ValidateCoverStillHeld(UBlackboardComponent* BB, APawn* Pawn, AEnemyCharacter* Enemy) const
+void UBTTask_EnemyCombatFire::DropCoverClaimForPursue(UBlackboardComponent* BB) const
+{
+	if (!BB) return;
+	BB->SetValueAsBool(AEnemyAIController::BB_HasCover, false);
+	ClearCoverBB(BB);
+}
+
+bool UBTTask_EnemyCombatFire::ValidateCoverStillHeld(UBlackboardComponent* BB, APawn* Pawn, AEnemyCharacter* Enemy, FFireMemory* Mem) const
 {
 	if (!BB || !IsValid(Pawn)) return false;
 	if (!BB->GetValueAsBool(AEnemyAIController::BB_HasCover)) return false;
 
 	const FCover Cover = ReadCoverFromBB(BB);
 	bool bStale = !Cover.IsValid();
+	float StaleDist = -1.f;
 	if (!bStale)
-		bStale = FVector::Dist2D(Pawn->GetActorLocation(), Cover.Data.Location) > StaleCoverAbandonDist;
+	{
+		const UEnemyArchetypeData* DA = IsValid(Enemy) ? Enemy->GetArchetypeData() : nullptr;
+		if (Mem && IsValid(DA))
+		{
+			// Measure against the edge-aligned hunker — the point the pawn actually stands at.
+			// Cached per handle: the corner march traces, too hot to recompute every BT tick.
+			if (Mem->StaleCheckHandle != Cover.Handle)
+			{
+				const UCapsuleComponent* Cap = Enemy->GetCapsuleComponent();
+				const float CapRadius = Cap ? Cap->GetScaledCapsuleRadius() : DefaultCapsuleRadius;
+				Mem->StaleCheckHunkerPos = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
+					Pawn->GetWorld(), Cover.Data, CapRadius + DA->CoverStandoffPadding, CapRadius,
+					DA->CoverCornerGap, Pawn);
+				Mem->StaleCheckHandle = Cover.Handle;
+			}
+			StaleDist = FVector::Dist2D(Pawn->GetActorLocation(), Mem->StaleCheckHunkerPos);
+			bStale = StaleDist > StaleCoverAbandonDist;
+		}
+		else
+		{
+			StaleDist = FVector::Dist2D(Pawn->GetActorLocation(), Cover.Data.Location);
+			bStale = StaleDist > StaleCoverAbandonDistFallback;
+		}
+	}
 	if (!bStale) return true;
 
 	// The pawn left this cover without anything clearing the flag (pursue / bounding advance /
@@ -904,7 +941,7 @@ bool UBTTask_EnemyCombatFire::ValidateCoverStillHeld(UBlackboardComponent* BB, A
 
 	if (GetCoverAnimLogLevel() > 0)
 		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s STALE cover cleared (dist=%.0f) — was acting in-cover in the open"),
-			*GetNameSafe(Pawn), Cover.IsValid() ? FVector::Dist2D(Pawn->GetActorLocation(), Cover.Data.Location) : -1.f);
+			*GetNameSafe(Pawn), StaleDist);
 	return false;
 }
 
@@ -935,7 +972,7 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 	// Stale-cover correction on entry: the pawn may arrive here from a searching wander, pursue,
 	// or maneuver task with BB_HasCover still true from a cover it left long ago — every branch
 	// below trusts that flag, so validate before anything reads it.
-	ValidateCoverStillHeld(BB, Pawn, Enemy);
+	ValidateCoverStillHeld(BB, Pawn, Enemy, Mem);
 
 	// Only allow Failed from ExecuteTask when NOT in combat — Bug 2 fix.
 	const EEnemyAwarenessState Awareness = static_cast<EEnemyAwarenessState>(
@@ -959,6 +996,7 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 				// A pose latched by MoveToCoverPoint's arrival would montage-slide the whole pursue
 				// (and leave its wall-facing focal point steering the body sideways) — clear both.
 				if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
+				DropCoverClaimForPursue(BB);
 				Controller->ClearFocus(EAIFocusPriority::Gameplay);
 				Mem->Phase = EFireTaskPhase::Pursuing;
 				Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
@@ -1007,6 +1045,7 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 				// Out of range/LOS but combat — pursue.
 				// Clear any pose latched by MoveToCoverPoint's arrival (montage-slide + wall-facing yaw).
 				if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
+				DropCoverClaimForPursue(BB);
 				Controller->SetFocus(Target);
 				Mem->Phase = EFireTaskPhase::Pursuing;
 				Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
@@ -1085,7 +1124,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// Stale-cover correction: BB_HasCover must mean "AT my cover" every tick, not "arrived once".
 	// Skipped during SeekingCover — a reseek/ladder transit is legitimately far from the old point.
 	if (Mem->Phase != EFireTaskPhase::SeekingCover)
-		ValidateCoverStillHeld(BB, Pawn, Enemy);
+		ValidateCoverStillHeld(BB, Pawn, Enemy, Mem);
 
 	// Drift-correct facing lock: the corrective MoveToLocation steers the pawn toward the wall
 	// (bUseControllerDesiredRotation follows path-following during the move). Re-assert the
@@ -1382,6 +1421,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			// Still in Combat with no target — pursue last known.
 			Mem->Phase = EFireTaskPhase::Pursuing;
+			DropCoverClaimForPursue(BB);
 			const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
 			if (!LastKnown.IsNearlyZero() && Controller->GetMoveStatus() != EPathFollowingStatus::Moving)
 				Controller->MoveToLocation(LastKnown, 100.f, false, true, false, true);
@@ -1538,6 +1578,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			// Transition to pursue.
 			Mem->Phase = EFireTaskPhase::Pursuing;
+			DropCoverClaimForPursue(BB);
 			const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
 			const FVector PursueTarget = LastKnown.IsNearlyZero() ? Target->GetActorLocation() : LastKnown;
 			Controller->MoveToLocation(PursueTarget, 100.f, false, true, false, true);

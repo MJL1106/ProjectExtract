@@ -152,6 +152,18 @@ public:
 	void StampNaturalCoverRelease();
 	float GetLastNaturalReleaseTime() const { return LastNaturalReleaseTime; }
 
+	// --- Cover commit stamp (combat-task ExecuteTask cover entry) ---
+	// The switch monitor's triggers-cleared exit gates on time-since-COMMIT, not time-since-arrival:
+	// the monitor's arrival memory persists across task restarts at a retained slot, so a fresh
+	// re-commit would otherwise inherit a pre-satisfied dwell and vacate on the first check.
+
+	void StampCoverCommit();
+	float GetLastCoverCommitTime() const { return LastCoverCommitTime; }
+
+	// --- Follow catch-up pace (reduced sprint tier for formation catch-up only) ---
+
+	void SetFollowCatchupPace(bool bPace);
+
 	// --- Purposeful cover-commit grant (combat-task-written, MoveToCoverPoint-consumed one-shot) ---
 	// Set while the pending CoverTarget was deliberately chosen by the combat task (angle-seek pick
 	// or Combat-mode advance hop) — bypasses the EvaluateTriggers decline at commit (reservation /
@@ -426,6 +438,9 @@ public:
 	virtual bool IsBeingRevivedMontagePlaying() const override;
 	virtual const UAnimMontage* GetBeingRevivedMontage() const override { return BeingRevivedMontage; }
 
+	/** See bPlayPlayerReviveMontages. */
+	bool ShouldPlayPlayerReviveMontages() const { return bPlayPlayerReviveMontages; }
+
 	/** Broadcast when a KNIFE commanded takedown begins executing — BP shows the knife mesh here. */
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Takedown")
 	FOnCommandedTakedownStarted OnCommandedTakedownStarted;
@@ -676,6 +691,12 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Revive")
 	TObjectPtr<UAnimMontage> BeingRevivedMontage;
 
+	/** Master switch for the player-revives-companion animation pair (reviver kneel + patient
+	 *  montage + the seat/align math that lines them up). Off = the hold works identically but
+	 *  plays no montages on either body. Companion-revives-player is unaffected. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Revive")
+	bool bPlayPlayerReviveMontages = false;
+
 	/** Victim-relative-to-attacker placement for the knife takedown, in the shared facing frame:
 	 *  X = forward gap (the companion stands this far BEHIND the victim), Y = lateral, Z = height.
 	 *  Default 90 = the contact spacing the player takedown uses for this same ClavicleStabDown pair
@@ -683,6 +704,18 @@ protected:
 	 *  wider at-rest spacing). Tunable per finisher on BP_Companion. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Takedown")
 	FVector CommandedTakedownOffset = FVector(90.f, 0.f, 0.f);
+
+	/** Extra straight-back distance (cm) added along the authored offset's OWN direction — a pure
+	 *  radial push away from the victim. Tune THIS to move the companion back: scaling
+	 *  CommandedTakedownOffset's components rotates the placement when X and Y are both set. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float CommandedTakedownBackpad = 0.f;
+
+	/** Seconds into the knife montage when the victim dies and ragdolls. Mid-collapse (the Vic
+	 *  clip's pelvis dive runs ~2.0-2.5s) so physics inherits the fall — engaging the ragdoll on
+	 *  the already-flat end pose pops on floor contact. Clamped to the montage length at runtime. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Takedown", meta = (ClampMin = "0.1"))
+	float KnifeTakedownKillAtSeconds = 2.15f;
 
 	/** Shoot takedown: how many frames to hold aim before firing the lethal shot (legacy, unused). */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
@@ -751,6 +784,11 @@ private:
 	UFUNCTION()
 	void HandleRevive();
 
+	/** Pushes shield changes into the overhead health widget's OnShieldUpdated custom event —
+	 *  the widget graph can't bind OnShieldChanged itself (see BeginPlay). */
+	UFUNCTION()
+	void HandleShieldChangedForWidget(float CurrentShield, float MaxShield);
+
 	UFUNCTION()
 	void OnWeaponFiredCallback();
 
@@ -805,6 +843,13 @@ private:
 	/** World time of the last committed-time natural cover release. */
 	float LastNaturalReleaseTime = -1e9f;
 
+	/** World time of the last combat-task cover commit (ExecuteTask cover entry). */
+	float LastCoverCommitTime = -1e9f;
+
+	/** True while the follow task's catch-up sprint should use the reduced FollowCatchupSprintSpeed
+	 *  tier instead of full SprintSpeed. Never set by rescue sprint-to-target or stealth catch-up. */
+	bool bFollowCatchupPace = false;
+
 	/** World time the purposeful cover-commit grant was stamped; -1e9 = none. See SetCoverCommitGrant. */
 	float CoverCommitGrantStamp = -1e9f;
 
@@ -814,6 +859,7 @@ private:
 	const UCompanionTuningDataAsset* GetTuning() const;
 	float TunedWalkSpeed() const;
 	float TunedSprintSpeed() const;
+	float TunedFollowCatchupSprintSpeed() const;
 	float TunedCrouchedWalkSpeed() const;
 
 	/** Pushes the current sprint/stealth-catchup state into CMC MaxWalkSpeed / MaxWalkSpeedCrouched. */
@@ -856,6 +902,9 @@ private:
 	TWeakObjectPtr<AExtractionPlayer> TakedownPlayerRef;
 	ETakedownMethod TakedownActiveMethod = ETakedownMethod::Knife;
 	FTimerHandle ShootDelayTimerHandle;
+
+	/** Mid-montage knife-kill timer (see KnifeTakedownKillAtSeconds). */
+	FTimerHandle KnifeKillTimerHandle;
 
 	/** True when the pending shoot execution was triggered by the player's own shot — selects the
 	 *  instant double-tap chain instead of the phased autonomous cadence. */

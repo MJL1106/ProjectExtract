@@ -51,8 +51,15 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	TimeSinceLastEqs = EqsQueryInterval; // allow an immediate query on first tick
 	EqsTarget = FVector::ZeroVector;
 
+	// Reset the floor-transit detector — a re-entry mid-descent re-arms from the first sample.
+	bHasPlayerZSample = false;
+	PlayerZTransitEnvelope = 0.f;
+	bWasPursuingPlayer = false;
+
 	// Clear any stale sprint flag from a prior abort (e.g. combat or revive re-entry).
 	// Skip for sprint-to-target so the revive branch keeps sprint speed on entry.
+	// Pace always clears: rescue sprint must run at full SprintSpeed, never the catch-up tier.
+	Companion->SetFollowCatchupPace(false);
 	if (!bSprintToTarget)
 		Companion->SetSprinting(false);
 
@@ -85,6 +92,11 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		bIsIdling = false;
 		LastMoveTarget = FVector::ZeroVector;
 	}
+
+	// Floor-transit detector samples every tick — the idle/back-out branches below early-return,
+	// and the envelope must already be live the moment formation logic resumes.
+	const ACharacter* PlayerChar = Cast<ACharacter>(Player);
+	UpdatePlayerZTransit(PlayerChar, PlayerLocation.Z, DeltaSeconds);
 
 	// Stealth catch-up staging — evaluated before the idle/back-out early-returns so the stage
 	// releases as soon as the companion closes the gap. One-way ladder with wide bands: each stage
@@ -198,7 +210,6 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	// would otherwise latch it idle at their side until the gap exceeded 1.5x AcceptableRadius).
 	// Mode shapes the formation: Combat leads AHEAD of the player (capped at the lead distance by
 	// construction), Stealth tucks in tight behind, Normal keeps the standard offsets.
-	const ACharacter* PlayerChar = Cast<ACharacter>(Player);
 	const ECompanionMode Mode = Companion->GetMode();
 	const bool bCombatLead = Mode == ECompanionMode::Combat;
 
@@ -308,13 +319,30 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 			FQueryFinishedSignature::CreateUObject(this, &UBTTask_FollowPlayer::OnFollowQueryFinished));
 	}
 
-	// Wrong-floor EQS slots are discarded, not just down-scored: the query's donut projects onto
-	// whatever navmesh is in vertical range, and its Distance3D scoring can rank a slot directly
-	// above/below the player as near-perfect. FormationDir sits at the player's Z, so the
-	// fallback paths to their floor.
-	const bool bEqsSlotLevel = bHasEqsTarget
-		&& (EffMaxZDelta <= 0.f || FMath::Abs(EqsTarget.Z - PlayerLocation.Z) <= EffMaxZDelta);
-	const FVector MoveTarget = (bEqsSlotLevel && !bCombatLead) ? EqsTarget : FormationDir;
+	// Wrong-floor EQS slots are discarded AND forgotten — not just down-scored: the query's donut
+	// projects onto whatever navmesh is in vertical range, and its Distance3D scoring can rank a
+	// slot directly above/below the player as near-perfect. Forgetting matters mid-stairwell: a
+	// stale upper-floor slot must not be re-accepted when the player's Z drifts back into its band.
+	if (bHasEqsTarget && EffMaxZDelta > 0.f && FMath::Abs(EqsTarget.Z - PlayerLocation.Z) > EffMaxZDelta)
+		bHasEqsTarget = false;
+
+	// Floor transit = pursue the player's location directly. Mid-flight the player's Z sits within
+	// FollowMaxZDelta of the floor ABOVE, so upper-landing slots legitimately pass the wrong-floor
+	// gate and yo-yo the companion on the stairs; the formation anchor (player Z, offset into the
+	// stair slab) is off-mesh and only churns Failed->fallback. Off-level pursues unconditionally
+	// for the same reason.
+	const bool bPlayerZTransit = T->FollowPursuitZRate > 0.f
+		&& PlayerZTransitEnvelope > T->FollowPursuitZRate;
+	const bool bPursuePlayer = bPlayerZTransit || !bZAligned;
+	if (bPursuePlayer != bWasPursuingPlayer)
+	{
+		bWasPursuingPlayer = bPursuePlayer;
+		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] PURSUIT %s (ZRate=%.0f zAligned=%d)"),
+			bPursuePlayer ? TEXT("ENTER") : TEXT("EXIT"), PlayerZTransitEnvelope, (int32)bZAligned);
+	}
+
+	const FVector MoveTarget = bPursuePlayer ? PlayerLocation
+		: (bHasEqsTarget && !bCombatLead) ? EqsTarget : FormationDir;
 
 	// Blocked-move re-issue: MoveToLocation can silently fail to path (e.g. the player is standing
 	// exactly on the formation anchor) and the path-following component settles to Idle without
@@ -351,9 +379,13 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	const bool bWantSprint = DistToPlayer > T->SprintDistanceThreshold
 		|| (bPlayerSprinting && DistToPlayer > T->SprintDistanceThreshold * 0.5f)
 		|| (!bZAligned && !Companion->IsStealthActive());
-	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f Thresh=%.0f EqsSlot=%d -> SetSprinting(%d)"),
-		DistToPlayer, T->SprintDistanceThreshold, bEqsSlotLevel ? 1 : 0, bWantSprint ? 1 : 0);
+	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f Thresh=%.0f EqsSlot=%d Pursue=%d -> SetSprinting(%d)"),
+		DistToPlayer, T->SprintDistanceThreshold, bHasEqsTarget ? 1 : 0, bPursuePlayer ? 1 : 0, bWantSprint ? 1 : 0);
 
+	// Catch-up rides the reduced sprint tier (FollowCatchupSprintSpeed) — full SprintSpeed read as
+	// too fast for closing formation gaps. Pace set before the sprint flag so the speed applies on
+	// the same ApplyMovementSpeeds pass.
+	Companion->SetFollowCatchupPace(bWantSprint);
 	Companion->SetSprinting(bWantSprint);
 
 	// Only re-issue move if target shifted significantly
@@ -362,7 +394,56 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	LastMoveTarget = MoveTarget;
 
-	Controller->MoveToLocation(MoveTarget, T->AcceptableRadius * 0.5f, false, true, false, true);
+	// Pursuit targets the player's own location — always nav-adjacent, so projection is safe ON.
+	// The anchor path keeps it OFF: a projected in-wall anchor lands on the wrong side of the wall.
+	// Pursuit accepts at the standoff ring, not AcceptableRadius: reach the player's AREA — the
+	// live radius (30cm) is unreachable through two capsules and would shove the companion into
+	// the player's back until the transit envelope decays.
+	const EPathFollowingRequestResult::Type MoveRes = bPursuePlayer
+		? Controller->MoveToLocation(MoveTarget, EffStandoff, false, true, true, true)
+		: Controller->MoveToLocation(MoveTarget, T->AcceptableRadius * 0.5f, false, true, false, true);
+
+	// Off-mesh formation anchor fallback: with the companion on another floor, the stationary-player
+	// anchor (player + 2D bearing toward the companion) can land inside the stairwell wall/void —
+	// and with destination projection off, that move FAILS outright. The Idle-debounce above then
+	// re-issued the same doomed move forever: companion parked one floor up while the player stood
+	// still. Path to the player instead (always nav-adjacent; projection on; the acceptance ring
+	// keeps follow distance) so the stairwell route actually runs.
+	// LastMoveTarget stays keyed on the ANCHOR (set above): the dedup then suppresses re-issuing
+	// the doomed anchor while the fallback move runs, and the Idle-debounce re-opens the gate if
+	// the fallback itself ends short.
+	// A failed PURSUIT move has no better target to fall back to — the Idle-debounce above retries
+	// it once the path-following component settles.
+	if (MoveRes == EPathFollowingRequestResult::Failed && !bPursuePlayer)
+	{
+		Controller->MoveToLocation(PlayerLocation, T->AcceptableRadius, false, true, true, true);
+		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] FORMATION anchor off-mesh (zAligned=%d) — falling back to player-location move"),
+			(int32)bZAligned);
+	}
+}
+
+void UBTTask_FollowPlayer::UpdatePlayerZTransit(const ACharacter* PlayerChar, float PlayerZ, float DeltaSeconds)
+{
+	// Envelope follower over the player's grounded vertical rate. Position-delta based: CMC keeps
+	// reported velocity horizontal in walking mode, so GetVelocity().Z reads ~0 on stairs. Airborne
+	// frames don't sample — a jump apex must not read as floor transit.
+	const UCharacterMovementComponent* Move = PlayerChar ? PlayerChar->GetCharacterMovement() : nullptr;
+	const bool bOnGround = !Move || Move->IsMovingOnGround();
+
+	float Rate = 0.f;
+	if (bOnGround)
+	{
+		if (bHasPlayerZSample)
+			Rate = FMath::Min(FMath::Abs(PlayerZ - LastPlayerZ) / FMath::Max(DeltaSeconds, KINDA_SMALL_NUMBER), ZTransitRateClamp);
+		LastPlayerZ = PlayerZ;
+		bHasPlayerZSample = true;
+	}
+
+	// Slew both directions: the attack slope rejects single-tick blips (only a sustained rate can
+	// climb to the threshold), the decay sets how long pursuit holds after the player settles.
+	PlayerZTransitEnvelope = FMath::Clamp(Rate,
+		FMath::Max(PlayerZTransitEnvelope - ZTransitEnvelopeDecay * DeltaSeconds, 0.f),
+		PlayerZTransitEnvelope + ZTransitEnvelopeAttack * DeltaSeconds);
 }
 
 void UBTTask_FollowPlayer::OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Result)
@@ -387,7 +468,10 @@ void UBTTask_FollowPlayer::OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Res
 void UBTTask_FollowPlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult)
 {
 	if (ACompanionCharacter* Companion = CachedCompanion.Get())
+	{
 		Companion->SetSprinting(false);
+		Companion->SetFollowCatchupPace(false);
+	}
 
 	bEqsQueryInProgress = false;
 	bHasEqsTarget = false;

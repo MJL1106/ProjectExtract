@@ -51,6 +51,11 @@ public:
 	 *  barks, and squad broadcast. Re-assert every awareness tick to prevent decay. */
 	void DebugForceEngage(AActor* Target);
 
+	/** Force full Combat entry toward Target through the normal EnterCombat path (barks, BB writes,
+	 *  Director tension report). No confirmed visual — LOS establishes via the enemy's own perception.
+	 *  Used by UEnemySquad::ForceEngage to seed Director wave squads into the fight on spawn. */
+	void ForceEngage(AActor* Target);
+
 	/** Called by AWeaponBase::ReportNearMisses when a near-miss bullet passes close to this enemy.
 	 *  ShotOrigin is the bullet trace start (eye/muzzle of the shooter) — sent as the investigate
 	 *  point when LOS is blocked so the enemy advances toward the shot corner, not through walls.
@@ -195,6 +200,13 @@ private:
 	 *  Called on cloak-lift transitions (combat entry, global alert Loud) — sight events swallowed
 	 *  while cloaked left no track, and perception only fires on edges. */
 	void SeedCompanionSightTracks();
+
+	/** Player-DBNO combat handoff fallback: the live, hostile, uncloaked companion within
+	 *  SightRadius, with a suspicion track stamped at its current location — or nullptr. Only
+	 *  called at the moment a DBNO player drops out of Combat and normal selection found nothing,
+	 *  so the position grant reads as mid-fight squad awareness, not a wallhack. */
+	AActor* FindDBNOHandoffCompanion();
+
 	void RefreshSearchRoomExposure();
 	void ApplySilentSearchRoomStartle(ACompanionCharacter* Companion, FSuspicionTrack& Track);
 

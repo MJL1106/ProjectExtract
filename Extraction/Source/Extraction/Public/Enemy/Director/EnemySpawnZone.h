@@ -35,6 +35,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ToolTip = "Optional config asset pushed to the world director when this zone registers and no explicit config has been set. Prefer using the same config for all zones in a level."))
 	TObjectPtr<UDirectorConfigData> DirectorConfig;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ToolTip = "Allow the director's finite WAVES to use this zone. Turn off for zones the player can watch from the fight room (e.g. behind glass — the hidden-check trace treats glass as an occluder). Ambient/tension spawns are unaffected."))
+	bool bWaveEligible = true;
+
 	// --- API for the director ---
 
 	/** True if this zone should produce spawns during the given phase. Empty ActivePhases = all phases. */

@@ -966,6 +966,13 @@ void AEnemyCharacter::ApplyRagdoll()
 	MeshComp->SetCollisionProfileName(TEXT("Ragdoll"));
 	MeshComp->SetSimulatePhysics(true);
 
+	// A takedown corpse starts from a held floor pose — bodies already touching (or slightly
+	// inside) the ground get a depenetration kick at physics start that reads as the corpse
+	// bouncing. Cap the resolve speed so overlaps ease out instead of popping.
+	static constexpr float CorpseMaxDepenetrationVelocity = 120.f;
+	for (FBodyInstance* Body : MeshComp->Bodies)
+		if (Body) Body->SetMaxDepenetrationVelocity(CorpseMaxDepenetrationVelocity);
+
 	// Snapshot the corpse location after the ragdoll settles to avoid per-tick bone lookups.
 	if (UWorld* World = GetWorld())
 	{

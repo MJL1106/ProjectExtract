@@ -2522,6 +2522,8 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	FinalApproachElapsed = 0.f;
 	FinalApproachStalledTime = 0.f;
 	bFinalApproachRetried = false;
+	FinalApproachNoProgressTime = 0.f;
+	LastFinalApproachPawnLoc = FVector::ZeroVector;
 	bSmoothSnapping = false;
 	SmoothSnapElapsed = 0.f;
 	bPendingCrouchAfterSnap = false;
@@ -2765,6 +2767,10 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	{
 		LastTickCoverHandle = Cover.Handle;
 
+		// Fresh commit cycle — the switch monitor's triggers-cleared exit dwells against this stamp
+		// (its own arrival memory survives task restarts at a retained slot and reads pre-satisfied).
+		Companion->StampCoverCommit();
+
 		const FVector ArrivalLoc = Companion->GetActorLocation();
 		ResolvePeekSideForCover(Companion, Target, Cover.Data, AITargeting::GetSightLocation(Target));
 		// Cycles are per-physical-cover: re-claiming the point we just exited at (target died /
@@ -2792,13 +2798,43 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 		const FVector HunkerLoc = CompanionCover::CompanionHunkerPosition(*Companion, Cover.Data, Standoff);
 		const float DistToHunker = FVector::Dist(ArrivalLoc, HunkerLoc);
 
+		// Trust-the-delivered-spot guard: MoveToCoverPoint just delivered this pawn and stamped
+		// HasCoverPosition using the SAME edge-align computation. The corner-march is trace-based
+		// against live geometry (a pawn standing on the march line shifts the perceived corner), so
+		// a recompute at task entry can disagree by metres with where the pawn was just correctly
+		// delivered — and walking that order mid-fight is a silent, unarmed trek (playtest death:
+		// 6s mannequin at a perfect peek corner). If the pawn is genuinely wall-adjacent where it
+		// stands, the delivered position wins: enter cover HERE.
+		bool bTrustArrivalSnap = false;
+		if (DistToHunker > TrustArrivalMaxHunkerDivergence)
+		{
+			const FVector WallDir = Cover.Data.DirectionToWall.GetSafeNormal2D();
+			UWorld* AdjWorld = Companion->GetWorld();
+			if (AdjWorld && !WallDir.IsNearlyZero())
+			{
+				FCollisionQueryParams AdjParams(SCENE_QUERY_STAT(CoverArrivalWallAdjacent), false);
+				AdjParams.AddIgnoredActor(Companion);
+				AdjParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+				// ArrivalLoc is capsule centre (~chest) — same height band as the march's ProbeZ.
+				FHitResult AdjHit;
+				const float CapR = Cap ? Cap->GetScaledCapsuleRadius() : 34.f;
+				bTrustArrivalSnap = AdjWorld->LineTraceSingleByChannel(AdjHit, ArrivalLoc,
+					ArrivalLoc + WallDir * (Standoff + 60.f + CapR), ECC_Visibility, AdjParams);
+			}
+			if (bTrustArrivalSnap)
+				UE_LOG(LogCompanionAI, Warning,
+					TEXT("%s: HUNKER-DIVERGENCE-SNAP distToHunker=%.0f > %.0f, pawn wall-adjacent — entering cover at delivered position"),
+					*Companion->GetName(), DistToHunker, TrustArrivalMaxHunkerDivergence);
+		}
+
 		// Entry sanity guard: MoveToCoverPoint delivers within ~45cm, so a hunker beyond the
 		// edge-align divergence budget means the BB claim is stale/bogus — release for a re-pick
 		// instead of physically trekking there in cover posture (the "crouch-walk across the room"
 		// failure). MarkVacated so the EQS PostVacate filter blocks an instant re-pick of the point.
 		// 2D: the hunker keeps the baked cover Z while the pawn sits at nav-biased Z — a 3D compare
 		// would eat the divergence headroom in vertical offset and reject legitimate far-corner claims.
-		if (FVector::Dist2D(ArrivalLoc, HunkerLoc) > FinalApproachMaxStartDist)
+		// Skipped when the wall-adjacency check above already validated the delivered position.
+		if (!bTrustArrivalSnap && FVector::Dist2D(ArrivalLoc, HunkerLoc) > FinalApproachMaxStartDist)
 		{
 			UE_LOG(LogCompanionAI, Warning,
 				TEXT("%s: FINALAPPROACH-REJECT distToHunker2D=%.0f max=%.0f coverLoc=%s pawnLoc=%s — releasing stale claim for re-pick"),
@@ -2813,19 +2849,23 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 			return EBTNodeResult::Failed;
 		}
 
-		if (DistToHunker <= FinalApproachAcceptRadius)
+		if (DistToHunker <= FinalApproachAcceptRadius || bTrustArrivalSnap)
 		{
-			// Already at the cover point — snap and enter cover immediately.
+			// Already at the cover point (or trusting the delivered spot over a divergent
+			// recompute) — snap and enter cover immediately.
 			if (AAIController* AIC = Cast<AAIController>(Companion->GetController()))
 				AIC->StopMovement();
 			if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
 				CMC->StopMovementImmediately();
 
 			const FRotator SlotYawRot(0.f, UCoverGeometryStatics::GetFireArcForward(Cover.Data).Rotation().Yaw, 0.f);
-			if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: ALREADY-CLOSE-SNAP distToHunker=%.1f acceptRadius=%.1f arrival=%s hunker=%s"),
-				*Companion->GetName(), DistToHunker, FinalApproachAcceptRadius, *ArrivalLoc.ToString(), *HunkerLoc.ToString());
+			if (bDebugLogging) UE_LOG(LogCompanionDiag, Log, TEXT("%s: ALREADY-CLOSE-SNAP distToHunker=%.1f acceptRadius=%.1f arrival=%s hunker=%s trustArrival=%d"),
+				*Companion->GetName(), DistToHunker, FinalApproachAcceptRadius, *ArrivalLoc.ToString(), *HunkerLoc.ToString(), (int32)bTrustArrivalSnap);
 			// Ground-snap: nav-mesh-arrival Z is biased above the floor; trace down to find the real floor.
-			FVector SnapLoc(HunkerLoc.X, HunkerLoc.Y, ArrivalLoc.Z);
+			// Trust-snap keeps the pawn's own XY — the whole point is NOT walking to the recomputed hunker.
+			FVector SnapLoc = bTrustArrivalSnap
+				? ArrivalLoc
+				: FVector(HunkerLoc.X, HunkerLoc.Y, ArrivalLoc.Z);
 			if (UWorld* SnapWorld = Companion->GetWorld())
 			{
 				const FVector TraceStart = SnapLoc + FVector(0.f, 0.f, 80.f);
@@ -2840,7 +2880,8 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 				}
 			}
 			const ECoverHeight ArrivalHeight = UCoverGeometryStatics::GetCoverHeight(Cover.Data);
-			BeginSmoothSnap(Companion, SnapLoc, SlotYawRot, ArrivalHeight == ECoverHeight::Crouch, TEXT("AlreadyClose"));
+			BeginSmoothSnap(Companion, SnapLoc, SlotYawRot, ArrivalHeight == ECoverHeight::Crouch,
+				bTrustArrivalSnap ? TEXT("TrustArrival") : TEXT("AlreadyClose"));
 			if (UCompanionAnimInstance* Anim = GetCompanionAnim(Companion))
 				Anim->EnterCoverPose(ResolvedPeekSide, ArrivalHeight);
 		}
@@ -2851,6 +2892,8 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 			FinalApproachTarget = HunkerLoc;
 			FinalApproachElapsed = 0.f;
 			LastFinalApproachDist = DistToHunker;
+			FinalApproachNoProgressTime = 0.f;
+			LastFinalApproachPawnLoc = ArrivalLoc;
 
 			if (AAIController* AIC = Cast<AAIController>(Companion->GetController()))
 			{
@@ -2964,6 +3007,25 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			FinalApproachStalledTime = 0.f;
 		const bool bStalled = FinalApproachStalledTime >= FinalApproachStalledGracePeriod;
 
+		// Displacement-based no-progress bail: the path-follower can report Moving while the pawn
+		// is physically wedged (playtest: 6s at a frozen dist, PF Moving throughout) — the Idle-based
+		// stall above never fires there. Track real displacement; a sustained sub-threshold crawl
+		// bails AND skips the retry: an identical re-issued move that produced 0cm stays at 0cm.
+		const FVector PawnLocNow = Ctx.Companion->GetActorLocation();
+		if (!bArrived && FVector::DistSquared(PawnLocNow, LastFinalApproachPawnLoc)
+			< FMath::Square(FinalApproachMinProgressSpeed * DeltaSeconds))
+			FinalApproachNoProgressTime += DeltaSeconds;
+		else
+			FinalApproachNoProgressTime = 0.f;
+		LastFinalApproachPawnLoc = PawnLocNow;
+		const bool bNoProgress = !bArrived && FinalApproachNoProgressTime >= FinalApproachNoProgressBailSeconds;
+		if (bNoProgress && !bFinalApproachRetried)
+		{
+			UE_LOG(LogCompanionAI, Warning, TEXT("%s: FINALAPPROACH-NOPROGRESS frozen %.1fs at dist=%.0f — bailing without retry"),
+				*Ctx.Companion->GetName(), FinalApproachNoProgressTime, Dist);
+			bFinalApproachRetried = true;
+		}
+
 		if (bDebugLogging)
 		{
 			const float Delta = LastFinalApproachDist - Dist;
@@ -2977,12 +3039,15 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				*Ctx.Companion->GetName(), FinalApproachElapsed, Dist, Delta, Vel, PFStatus, FinalApproachStalledTime);
 		}
 
-		if (!bArrived && !bTimedOut && !bStalled)
+		if (!bArrived && !bTimedOut && !bStalled && !bNoProgress)
 			return;
 
 		// Far-out failsafe: never glide across the room in cover pose. Re-issue the move once
 		// (a crossing enemy can stall path-following well short of the slot), then release the
-		// claim and fail so the BT re-picks reachable cover.
+		// claim and stay in-task so the next tick falls into OpenEngage. Finishing Failed here
+		// left CombatTarget set — BB observer aborts only fire on value CHANGE, so the tree sat
+		// in FollowPlayer (companion trailing the player mid-firefight) until the state service
+		// happened to write a different target identity.
 		if (!bArrived && Dist > FinalApproachSnapMaxDist)
 		{
 			if (!bFinalApproachRetried)
@@ -2990,13 +3055,15 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				bFinalApproachRetried = true;
 				FinalApproachElapsed = 0.f;
 				FinalApproachStalledTime = 0.f;
+				FinalApproachNoProgressTime = 0.f;
+				LastFinalApproachPawnLoc = Ctx.Companion->GetActorLocation();
 				if (AAIController* RetryAIC = Cast<AAIController>(Ctx.Companion->GetController()))
 					RetryAIC->MoveToLocation(FinalApproachTarget, FinalApproachAcceptRadius, false, true, true, true);
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: FINALAPPROACH-RETRY dist=%.0f timedOut=%d stalled=%d"),
 					*Ctx.Companion->GetName(), Dist, (int32)bTimedOut, (int32)bStalled);
 				return;
 			}
-			UE_LOG(LogCompanionAI, Warning, TEXT("%s: FINALAPPROACH-UNREACHABLE dist=%.0f — releasing claim for re-pick"),
+			UE_LOG(LogCompanionAI, Warning, TEXT("%s: FINALAPPROACH-UNREACHABLE dist=%.0f — releasing claim, dropping to open-engage"),
 				*Ctx.Companion->GetName(), Dist);
 			if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
 				AIC->StopMovement();
@@ -3015,8 +3082,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						VacSub->MarkVacated(UnreachableHandle, VacCtrl);
 				}
 			}
+			// ResetTaskState clears CoverTarget + HasCoverPosition and every final-approach member,
+			// so next tick computes bHasCover=false and runs branch 2 (OpenEngage) — the companion
+			// keeps engaging from the open while the switch monitor hunts for a reachable slot.
 			ResetTaskState(Ctx.Companion, Ctx.Blackboard, UnreachableHandle, true);
-			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			return;
 		}
 
 		if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
@@ -3268,7 +3338,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		const FVector HunkerLoc = CachedIdleHunkerLoc;
 
 #if ENABLE_DRAW_DEBUG
-		if (bDebugLogging)
+		// CovDbg-only (NOT bDebugLogging - that flag ships enabled on the BT asset for the log
+		// stream, and these spheres render as gameplay markers to a playtester).
+		if (CovDbg())
 		{
 			const FVector HunkerPt = HunkerLoc + FVector(0.f, 0.f, 10.f);
 			DrawDebugSphere(Ctx.Companion->GetWorld(), HunkerPt, 22.f, 8, FColor::Red, false, 0.f, 0, 1.5f);
@@ -4274,7 +4346,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				*CornerPeekHomeLocation.ToString(), *CornerPeekApexLocation.ToString(),
 				BurstTimer, Ctx.Companion->GetCurrentAmmo());
 #if ENABLE_DRAW_DEBUG
-			if (bDebugLogging)
+			// CovDbg-only (NOT bDebugLogging) - same playtester-visibility rule as the idle draws.
+			if (CovDbg())
 			{
 				DrawDebugLine(Ctx.Companion->GetWorld(), CornerPeekHomeLocation + FVector(0, 0, 20.f),
 					CornerPeekApexLocation + FVector(0, 0, 20.f), FColor::Magenta, false, 3.f, 0, 4.f);
@@ -4713,6 +4786,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if (!Candidate.IsValid()) continue;
 					// Bounds query is a box — enforce the commit radius as a true distance.
 					if (FVector::DistSquared(MyLocation, Candidate.Data.Location) > FMath::Square(CommitRadius)) continue;
+					// Same-floor gate — the box spans storeys; a slot one floor up is never a re-seek target.
+					if (CoverTuning->CoverPickMaxZDelta > 0.f
+						&& FMath::Abs(MyLocation.Z - Candidate.Data.Location.Z) > CoverTuning->CoverPickMaxZDelta) continue;
 					AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
 					if (Occupant && Occupant != CoverController) continue;
 					if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, CoverController, CoverTuning->CoverSwitchPostVacateCooldown))

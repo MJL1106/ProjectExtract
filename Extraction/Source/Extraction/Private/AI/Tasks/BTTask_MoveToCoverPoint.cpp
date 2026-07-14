@@ -200,17 +200,25 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 					&& Controller->LineOfSightTo(PbTarget);
 			}
 
+			// Wrong-floor pick: cover only shields on the floor you stand on, and the EQS/scans can
+			// hand back a slot one storey up (baked multi-floor cover set). Committing to it sends
+			// the companion crouch-walking into the open toward an unreachable hunker. Overrides
+			// grants too — no trigger justifies a cross-floor duck spot.
+			const bool bOffLevel = Tuning->CoverPickMaxZDelta > 0.f
+				&& FMath::Abs(Pawn->GetActorLocation().Z - Cover.Data.Location.Z) > Tuning->CoverPickMaxZDelta;
+
 			// CoverCommitMaxDistance is now an outer sanity cap (never trek across the map for a
 			// duck spot), not the old decline-happy 6.5m radius.
 			const float OuterCap = FMath::Max(Tuning->CoverCommitMaxDistance, Tuning->CoverSearchRadius);
 			if (CommitDist > OuterCap || (!Triggers.Any() && !bCommitGrant) || bRecommitBlocked || !bDashAllowed
-				|| bPointBlankThreat)
+				|| bPointBlankThreat || bOffLevel)
 			{
 				UE_LOG(LogCompanionAI, Log,
-					TEXT("%s: cover-commit DECLINED dist=%.0f cap=%.0f triggers[fire=%d hp=%d ammo=%d out#=%d(n=%d)] grant=%d recommitBlock=%d dashOK=%d pointBlank=%d — open-engage"),
+					TEXT("%s: cover-commit DECLINED dist=%.0f cap=%.0f triggers[fire=%d hp=%d ammo=%d out#=%d(n=%d)] grant=%d recommitBlock=%d dashOK=%d pointBlank=%d offLevel=%d — open-engage"),
 					*Pawn->GetName(), CommitDist, OuterCap, Triggers.bUnderFire ? 1 : 0, Triggers.bLowHealth ? 1 : 0,
 					Triggers.bLowAmmoOrReloading ? 1 : 0, Triggers.bOutnumbered ? 1 : 0, ThreatCount,
-					bCommitGrant ? 1 : 0, bRecommitBlocked ? 1 : 0, bDashAllowed ? 1 : 0, bPointBlankThreat ? 1 : 0);
+					bCommitGrant ? 1 : 0, bRecommitBlocked ? 1 : 0, bDashAllowed ? 1 : 0, bPointBlankThreat ? 1 : 0,
+					bOffLevel ? 1 : 0);
 				// Drop any lingering own intent — same stale-restore guard as the claim decline above.
 				if (UCoverReservationSubsystem* DeclineResSub = OwnerComp.GetWorld() ? OwnerComp.GetWorld()->GetSubsystem<UCoverReservationSubsystem>() : nullptr)
 					DeclineResSub->ClearIntendedCover(Controller);
@@ -935,6 +943,9 @@ FCover UBTTask_MoveToCoverPoint::RerankCoverForMultiThreat(UBehaviorTreeComponen
 	{
 		if (!Candidate.IsValid() || Candidate.Handle == ChosenCover.Handle) continue;
 		if (FVector::DistSquared(MyLoc, Candidate.Data.Location) > OuterCapSq) continue;
+		// Same-floor gate — the bounds query spans storeys (see the commit gate's off-level decline).
+		if (Tuning.CoverPickMaxZDelta > 0.f
+			&& FMath::Abs(MyLoc.Z - Candidate.Data.Location.Z) > Tuning.CoverPickMaxZDelta) continue;
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
 		if (Occupant && Occupant != CoverController) continue;
 		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, CoverController)) continue;

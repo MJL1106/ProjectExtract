@@ -1,4 +1,5 @@
-// BT task — anchors the heavy in place and drives sustained burst fire at target or last-known location.
+// BT task — heavy pushes toward the threat firing on the move, anchors inside EngageRangeMin,
+// and drives sustained burst fire at target or last-known location.
 
 #pragma once
 
@@ -34,7 +35,16 @@ private:
 		EHeavySuppressPhase Phase = EHeavySuppressPhase::Fire;
 		float PhaseTimer = 0.f;
 		bool bAimOverrideActive = false;
+		bool bAdvancing = false;
+		float RepathTimer = 0.f;
+		FVector LastMoveGoal = FVector::ZeroVector;
 	};
+
+	/** Advance/anchor decision: push toward ThreatLoc while outside EngageRangeMin (+hysteresis),
+	 *  stop and anchor once inside. bHasAimSource=false always anchors. */
+	static void UpdateAdvance(class AAIController* Controller, const class APawn* Pawn,
+		const class UEnemyArchetypeData* DA, FHeavySuppressMemory* Mem,
+		bool bHasAimSource, const FVector& ThreatLoc, float DeltaSeconds);
 
 	void CleanUp(UBehaviorTreeComponent& OwnerComp, FHeavySuppressMemory* Mem) const;
 };

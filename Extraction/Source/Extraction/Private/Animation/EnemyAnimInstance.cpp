@@ -110,6 +110,9 @@ void UEnemyAnimInstance::NativeInitializeAnimation()
 
 void UEnemyAnimInstance::NativeUninitializeAnimation()
 {
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(TakedownPoseHoldTimerHandle);
+
 	if (BoundFireWeapon.IsValid())
 	{
 		BoundFireWeapon->OnWeaponFired.RemoveDynamic(this, &UEnemyAnimInstance::HandleWeaponFired);
@@ -1065,10 +1068,31 @@ void UEnemyAnimInstance::HandleMeleePerformed()
 
 void UEnemyAnimInstance::HandleTakedown(AActor* Instigator)
 {
-	if (IsValid(TakedownReactionMontage))
-		Montage_Play(TakedownReactionMontage);
-	else
+	if (!IsValid(TakedownReactionMontage))
+	{
 		PlayDeathMontage();
+		return;
+	}
+
+	const float PlaySeconds = Montage_Play(TakedownReactionMontage);
+	if (PlaySeconds <= 0.f) return;
+
+	// The victim stays alive-and-frozen until the ATTACKER's montage fires the kill. A reaction
+	// clip shorter than that hold would auto-blend back to standing locomotion for the gap (a
+	// visible stand-up before the ragdoll drop) — pause on the last authored frame instead, and
+	// let ApplyRagdoll's Montage_StopGroupByName clear the paused montage at the kill.
+	const float PauseAt = FMath::Max(PlaySeconds - TakedownReactionMontage->BlendOut.GetBlendTime() - 0.05f, 0.f);
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(
+			TakedownPoseHoldTimerHandle,
+			FTimerDelegate::CreateWeakLambda(this, [this]()
+			{
+				if (Montage_IsPlaying(TakedownReactionMontage))
+					Montage_Pause(TakedownReactionMontage);
+			}),
+			PauseAt, false);
+	}
 }
 
 UAnimMontage* UEnemyAnimInstance::SelectGrenadeMontage() const

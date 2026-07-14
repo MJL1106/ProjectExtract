@@ -10,6 +10,7 @@
 #include "World/Breachable.h"
 #include "DoorBase.generated.h"
 
+class AEnemyCharacter;
 class UBoxComponent;
 class UStaticMeshComponent;
 
@@ -160,6 +161,20 @@ private:
 	UFUNCTION()
 	void OnDoorwayOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
+
+	/** Pawn left the doorway approach volume — drop its doorway move-ignore pairs. */
+	UFUNCTION()
+	void OnDoorwayOverlapEnd(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
+		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
+
+	/** Enemies currently inside DoorwayTrigger. Everyone in this list mutually move-ignores
+	 *  everyone else, so a doorway funnel squeezes through instead of hard-stacking on capsules.
+	 *  Enemy-vs-enemy only and scoped to the trigger volume — player/companion still block, and
+	 *  movement everywhere else is untouched. Lever: the per-door trigger Box Extent. */
+	TArray<TWeakObjectPtr<AEnemyCharacter>> EnemiesInDoorway;
+
+	/** Add/remove the mutual move-ignore pairs between Enemy and every current list member. */
+	void SetDoorwayIgnorePairs(AEnemyCharacter* Enemy, bool bIgnore);
 
 	/** Closed-state mesh bounds snapshot (actor-local), taken at BeginPlay. */
 	FBox ClosedDoorLocalBounds = FBox(ForceInit);

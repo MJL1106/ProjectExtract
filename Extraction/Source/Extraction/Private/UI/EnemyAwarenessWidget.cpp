@@ -89,6 +89,11 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	const float TargetCoverDimAlpha = bInCover ? InCoverOpacity : 1.f;
 	CoverDimAlpha = FMath::FInterpTo(CoverDimAlpha, TargetCoverDimAlpha, UpdateInterval, CoverDimInterpSpeed);
 
+	// Full-combat hide: the locked red ring is pure view clutter mid-fight. Fade out (not snap)
+	// so the Combat entry reads as the meter "locking in" before it clears the screen.
+	const bool bCombatHidden = bHideInCombat && State == EEnemyAwarenessState::Combat;
+	CombatHideAlpha = FMath::FInterpTo(CombatHideAlpha, bCombatHidden ? 0.f : 1.f, UpdateInterval, CombatHideInterpSpeed);
+
 	// Collapse (and bail early) while DisplayMeter is negligible — handles Unaware and the
 	// tail of a draining Searching state without leaving an empty ring visible.
 	if (DisplayMeter <= VisibleMeterThreshold)
@@ -100,7 +105,7 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 
 	// Fade-in: ramp render opacity from 0→1 over the first FadeInThreshold of fill,
 	// giving a real fade-in on spawn and a fade-out as the meter drains near zero, then dim for cover.
-	SetRenderOpacity(FMath::Clamp(DisplayMeter / FadeInThreshold, 0.f, 1.f) * CoverDimAlpha);
+	SetRenderOpacity(FMath::Clamp(DisplayMeter / FadeInThreshold, 0.f, 1.f) * CoverDimAlpha * CombatHideAlpha);
 
 	if (!IsValid(FillMID))
 	{

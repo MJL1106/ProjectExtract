@@ -43,7 +43,10 @@ void ADoorBase::PostInitializeComponents()
 	// fire. Bound unconditionally — bAutoOpenForAI is checked in the handler, so a runtime
 	// flag flip works both ways.
 	if (DoorwayTrigger)
+	{
 		DoorwayTrigger->OnComponentBeginOverlap.AddDynamic(this, &ADoorBase::OnDoorwayOverlap);
+		DoorwayTrigger->OnComponentEndOverlap.AddDynamic(this, &ADoorBase::OnDoorwayOverlapEnd);
+	}
 
 	// No door surface is ever a floor: frame sills and paneled-leaf collision read as walkable
 	// steps/ramps to the CMC, so pawns walking into a door step onto it and ride upward (the
@@ -83,7 +86,21 @@ void ADoorBase::BeginPlay()
 void ADoorBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (DoorwayTrigger)
+	{
 		DoorwayTrigger->OnComponentBeginOverlap.RemoveDynamic(this, &ADoorBase::OnDoorwayOverlap);
+		DoorwayTrigger->OnComponentEndOverlap.RemoveDynamic(this, &ADoorBase::OnDoorwayOverlapEnd);
+	}
+
+	// Drop every doorway ignore pair this door still holds — a destroyed door must not leave
+	// enemies permanently pass-through with each other.
+	for (int32 i = EnemiesInDoorway.Num() - 1; i >= 0; --i)
+	{
+		AEnemyCharacter* Enemy = EnemiesInDoorway[i].Get();
+		EnemiesInDoorway.RemoveAt(i);
+		if (IsValid(Enemy))
+			SetDoorwayIgnorePairs(Enemy, false);
+	}
+
 	if (UWorld* World = GetWorld())
 		if (UDoorRegistrySubsystem* Registry = World->GetSubsystem<UDoorRegistrySubsystem>())
 			Registry->Unregister(this);
@@ -117,6 +134,43 @@ void ADoorBase::OnDoorwayOverlap(UPrimitiveComponent* OverlappedComponent, AActo
 	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult)
 {
 	TryAutoOpenFor(OtherActor);
+
+	// Doorway anti-stack: enemies inside the trigger mutually move-ignore so a funnel squeezes
+	// through the frame instead of hard-blocking on the lead pawn's capsule.
+	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(OtherActor);
+	if (!Enemy) return;
+
+	EnemiesInDoorway.RemoveAll([](const TWeakObjectPtr<AEnemyCharacter>& E) { return !E.IsValid(); });
+	if (EnemiesInDoorway.Contains(Enemy)) return;
+
+	SetDoorwayIgnorePairs(Enemy, true);
+	EnemiesInDoorway.Add(Enemy);
+}
+
+void ADoorBase::OnDoorwayOverlapEnd(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
+	UPrimitiveComponent* OtherComp, int32 OtherBodyIndex)
+{
+	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(OtherActor);
+	if (!Enemy) return;
+
+	if (EnemiesInDoorway.Remove(Enemy) > 0)
+		SetDoorwayIgnorePairs(Enemy, false);
+	EnemiesInDoorway.RemoveAll([](const TWeakObjectPtr<AEnemyCharacter>& E) { return !E.IsValid(); });
+}
+
+void ADoorBase::SetDoorwayIgnorePairs(AEnemyCharacter* Enemy, bool bIgnore)
+{
+	UCapsuleComponent* Capsule = IsValid(Enemy) ? Enemy->GetCapsuleComponent() : nullptr;
+	if (!Capsule) return;
+
+	for (const TWeakObjectPtr<AEnemyCharacter>& OtherWeak : EnemiesInDoorway)
+	{
+		AEnemyCharacter* Other = OtherWeak.Get();
+		if (!IsValid(Other) || Other == Enemy) continue;
+		Capsule->IgnoreActorWhenMoving(Other, bIgnore);
+		if (UCapsuleComponent* OtherCapsule = Other->GetCapsuleComponent())
+			OtherCapsule->IgnoreActorWhenMoving(Enemy, bIgnore);
+	}
 }
 
 void ADoorBase::TryAutoOpenFor(AActor* OtherActor)
