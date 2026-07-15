@@ -67,7 +67,13 @@ AEnemyCharacter::AEnemyCharacter()
 	// Bug 6: weapon hitscan traces ECC_Visibility, but the inherited CharacterMesh profile ignores it,
 	// so player/companion shots passed straight through. Block Visibility on the mesh so hits register
 	// (the trace returns the struck bone, so hit-region multipliers resolve correctly).
-	if (USkeletalMeshComponent* MeshComp = GetMesh()) MeshComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+	if (USkeletalMeshComponent* MeshComp = GetMesh())
+	{
+		MeshComp->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+		// Throttle anim eval for offscreen/distant enemies. Head-cone sight and fire sockets read
+		// component-relative transforms, so the reduced-rate pose is accurate enough while unseen.
+		MeshComp->bEnableUpdateRateOptimizations = true;
+	}
 
 	OwnedTags.AddTag(TAG_Character_Enemy);
 
