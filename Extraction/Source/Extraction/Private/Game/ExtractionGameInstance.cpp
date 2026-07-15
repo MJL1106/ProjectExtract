@@ -1,9 +1,20 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionGameInstance.h"
+#include "Misc/App.h"
 
 UExtractionGameInstance::UExtractionGameInstance()
 {
+}
+
+void UExtractionGameInstance::Init()
+{
+	Super::Init();
+
+	// Placeholder mute: the only audio right now is kit-default leftovers (breathing,
+	// footsteps, aim whoosh) — silence everything until the sound pass starts.
+	// DELETE this line when audio work begins.
+	FApp::SetVolumeMultiplier(0.f);
 }
 
 void UExtractionGameInstance::SetCheckpoint(FName LevelName, ELevelObjectiveStep Step)

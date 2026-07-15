@@ -20,6 +20,8 @@ class EXTRACTION_API UExtractionGameInstance : public UGameInstance
 public:
 	UExtractionGameInstance();
 
+	virtual void Init() override;
+
 	/** Records the checkpoint the current run has reached. LevelName keys the record so a stale
 	 *  checkpoint can never leak into a different map. */
 	void SetCheckpoint(FName LevelName, ELevelObjectiveStep Step);
