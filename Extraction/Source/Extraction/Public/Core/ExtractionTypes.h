@@ -65,6 +65,16 @@ enum class EWeaponState : uint8
 	Equipping	UMETA(DisplayName = "Equipping"),
 };
 
+/** Accepted reload transitions exposed to presentation listeners. */
+UENUM(BlueprintType)
+enum class EWeaponReloadPhase : uint8
+{
+	Started			UMETA(DisplayName = "Started"),
+	ShellInserted	UMETA(DisplayName = "Shell Inserted"),
+	Completed		UMETA(DisplayName = "Completed"),
+	Interrupted		UMETA(DisplayName = "Interrupted"),
+};
+
 /**
  * Per-weapon recoil pattern data.
  * Points define camera offset per shot (X=yaw, Y=pitch).

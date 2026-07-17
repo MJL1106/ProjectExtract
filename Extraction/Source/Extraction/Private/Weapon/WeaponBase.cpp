@@ -1407,6 +1407,9 @@ void AWeaponBase::Reload()
 			false
 		);
 	}
+
+	if (HasAuthority())
+		OnReloadPhaseChangedNative.Broadcast(EWeaponReloadPhase::Started);
 }
 
 void AWeaponBase::OnReloadFinished()
@@ -1456,6 +1459,8 @@ void AWeaponBase::OnReloadFinished()
 			(int32)bWantsToFire);
 	}
 
+	if (HasAuthority())
+		OnReloadPhaseChangedNative.Broadcast(EWeaponReloadPhase::Completed);
 	OnReloadComplete.Broadcast();
 
 	// Resume firing if input is still held. Player-controlled weapons skip this: the kit BP owns
@@ -1487,6 +1492,7 @@ void AWeaponBase::HandleShellInserted()
 	if (!WeaponData->bInfiniteReserve)
 		ReserveAmmo = FMath::Max(ReserveAmmo - 1, 0);
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	OnReloadPhaseChangedNative.Broadcast(EWeaponReloadPhase::ShellInserted);
 
 	const bool bMore = CurrentAmmo < WeaponData->MagazineSize
 		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
@@ -1519,6 +1525,9 @@ void AWeaponBase::CancelReload()
 	// so it doesn't keep looping after an interrupt.
 	if (IsValid(WeaponData) && WeaponData->bShellByShellReload)
 		StopBodyReloadMontage();
+
+	if (HasAuthority())
+		OnReloadPhaseChangedNative.Broadcast(EWeaponReloadPhase::Interrupted);
 }
 
 void AWeaponBase::AdvanceShellReloadSection(bool bContinue)
@@ -1585,6 +1594,8 @@ void AWeaponBase::FinishShellReload()
 		FireReadyTimeSeconds = GetWorld()->GetTimeSeconds() + WeaponData->PostReloadFireDelay;
 
 	bDryFireLogged = false;
+	if (HasAuthority())
+		OnReloadPhaseChangedNative.Broadcast(EWeaponReloadPhase::Completed);
 	OnReloadComplete.Broadcast();
 
 	if (bWantsToFire) StartFiring();
@@ -1906,6 +1917,7 @@ void AWeaponBase::KitSpawnAttachments_Implementation()
 
 void AWeaponBase::KitUnequip_Implementation()
 {
+	CancelReload();
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(ReloadTimerHandle);
 	StopVisualWeaponReload();
@@ -1974,22 +1986,13 @@ bool AWeaponBase::GetKitIsFire_Implementation() const
 void AWeaponBase::KitSetAmmo_Implementation(int32 AmmoCount, int32 MaxAmmo)
 {
 	if (!HasAuthority()) return;
+	CancelReload();
 
 	// (0,0) sentinel: no loadout override — use the weapon's own data-driven defaults.
 	if (MaxAmmo <= 0)
 	{
 		InitializeAmmo();
 		return;
-	}
-
-	// Cancel an in-flight reload so OnReloadFinished can't stack ammo on top of what we set.
-	if (CurrentState == EWeaponState::Reloading)
-	{
-		if (const UWorld* World = GetWorld())
-			World->GetTimerManager().ClearTimer(ReloadTimerHandle);
-		CurrentState = EWeaponState::Idle;
-		ReattachMagazine();
-		StopVisualWeaponReload();
 	}
 
 	// ST_Item carries no reserve figure, so seed reserve from our data — otherwise the

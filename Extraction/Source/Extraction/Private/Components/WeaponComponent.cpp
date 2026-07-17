@@ -50,9 +50,11 @@ void UWeaponComponent::BeginPlay()
 void UWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	bNextShotStealthExempt = false;
+	bTriggerHeld = false;
 
-	if (IsValid(CurrentWeapon))
-		CurrentWeapon->OnWeaponFired.RemoveAll(this);
+	UnbindWeaponEvents(CurrentWeapon);
+	if (PreviousWeapon != CurrentWeapon)
+		UnbindWeaponEvents(PreviousWeapon);
 
 	OwnerIface = nullptr;
 
@@ -67,18 +69,32 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	if (!IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return;
 
 	bNextShotStealthExempt = false;
+	if (bTriggerHeld)
+	{
+		bTriggerHeld = false;
+		OnTriggerChangedNative.Broadcast(false);
+	}
 
 	// Destroy existing weapon
 	if (IsValid(CurrentWeapon))
 	{
+		UnbindWeaponEvents(CurrentWeapon);
 		CurrentWeapon->Destroy();
 		CurrentWeapon = nullptr;
 	}
 
-	if (!WeaponClass) return;
+	if (!WeaponClass)
+	{
+		OnCurrentWeaponChangedNative.Broadcast(nullptr);
+		return;
+	}
 
 	UWorld* World = GetWorld();
-	if (!IsValid(World)) return;
+	if (!IsValid(World))
+	{
+		OnCurrentWeaponChangedNative.Broadcast(nullptr);
+		return;
+	}
 
 	ACharacter* OwnerChar = Cast<ACharacter>(OwnerActor);
 
@@ -88,7 +104,11 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	CurrentWeapon = World->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
-	if (!IsValid(CurrentWeapon)) return;
+	if (!IsValid(CurrentWeapon))
+	{
+		OnCurrentWeaponChangedNative.Broadcast(nullptr);
+		return;
+	}
 
 	// Attach to the kit IK-rig gun bone (ik_hand_gun) so AC_ProceduralAnimation drives the weapon transform
 	if (IsValid(OwnerChar))
@@ -106,10 +126,9 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	}
 
 	CurrentWeapon->InitializeAmmo();
-
-	// Bind weapon fire delegate to multicast for 3P effects
-	if (!CurrentWeapon->OnWeaponFired.IsAlreadyBound(this, &UWeaponComponent::OnWeaponFiredCallback))
-		CurrentWeapon->OnWeaponFired.AddDynamic(this, &UWeaponComponent::OnWeaponFiredCallback);
+	CurrentWeapon->SetOwnerIsAiming(bIsAiming);
+	BindWeaponEvents(CurrentWeapon);
+	OnCurrentWeaponChangedNative.Broadcast(CurrentWeapon);
 
 	// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose.
 	// Skip on dedicated server (no visuals) and when downed.
@@ -121,6 +140,11 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 void UWeaponComponent::StartFire(bool bAuthorityTakedownSnapshot)
 {
 	if (!IsValid(OwnerActor)) return;
+	if (!bTriggerHeld)
+	{
+		bTriggerHeld = true;
+		OnTriggerChangedNative.Broadcast(true);
+	}
 
 	// Authority path: trust the caller's snapshot directly (ExtractionPlayer resolved it).
 	if (OwnerActor->HasAuthority())
@@ -136,6 +160,11 @@ void UWeaponComponent::StartFire(bool bAuthorityTakedownSnapshot)
 void UWeaponComponent::StopFire()
 {
 	if (!IsValid(OwnerActor)) return;
+	if (bTriggerHeld)
+	{
+		bTriggerHeld = false;
+		OnTriggerChangedNative.Broadcast(false);
+	}
 
 	bNextShotStealthExempt = false;
 
@@ -156,10 +185,12 @@ void UWeaponComponent::StartReload()
 
 void UWeaponComponent::SetAiming(bool bNewAiming)
 {
+	if (bIsAiming == bNewAiming) return;
 	bIsAiming = bNewAiming;
 
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->SetOwnerIsAiming(bNewAiming);
+	OnAimingChangedNative.Broadcast(bNewAiming);
 
 	Server_SetAiming(bNewAiming);
 }
@@ -207,6 +238,8 @@ void UWeaponComponent::Server_SetAiming_Implementation(bool bNewAiming)
 
 void UWeaponComponent::OnWeaponFiredCallback()
 {
+	OnWeaponShotNative.Broadcast();
+
 	// Only the server should multicast
 	if (IsValid(OwnerActor) && OwnerActor->HasAuthority())
 	{
@@ -217,6 +250,38 @@ void UWeaponComponent::OnWeaponFiredCallback()
 		OnPlayerWeaponShot.Broadcast(bExempt);
 		Multicast_OnFired();
 	}
+}
+
+void UWeaponComponent::OnWeaponAmmoChangedCallback(int32 CurrentAmmo, int32 ReserveAmmo)
+{
+	OnWeaponAmmoChangedNative.Broadcast(CurrentAmmo, ReserveAmmo);
+}
+
+void UWeaponComponent::OnWeaponReloadPhaseChangedCallback(EWeaponReloadPhase Phase)
+{
+	OnWeaponReloadPhaseChangedNative.Broadcast(Phase);
+}
+
+void UWeaponComponent::BindWeaponEvents(AWeaponBase* Weapon)
+{
+	if (!IsValid(Weapon)) return;
+
+	if (!Weapon->OnWeaponFired.IsAlreadyBound(this, &UWeaponComponent::OnWeaponFiredCallback))
+		Weapon->OnWeaponFired.AddDynamic(this, &UWeaponComponent::OnWeaponFiredCallback);
+	if (!Weapon->OnAmmoChanged.IsAlreadyBound(this, &UWeaponComponent::OnWeaponAmmoChangedCallback))
+		Weapon->OnAmmoChanged.AddDynamic(this, &UWeaponComponent::OnWeaponAmmoChangedCallback);
+
+	Weapon->OnReloadPhaseChangedNative.RemoveAll(this);
+	Weapon->OnReloadPhaseChangedNative.AddUObject(this, &UWeaponComponent::OnWeaponReloadPhaseChangedCallback);
+}
+
+void UWeaponComponent::UnbindWeaponEvents(AWeaponBase* Weapon)
+{
+	if (!Weapon) return;
+
+	Weapon->OnWeaponFired.RemoveDynamic(this, &UWeaponComponent::OnWeaponFiredCallback);
+	Weapon->OnAmmoChanged.RemoveDynamic(this, &UWeaponComponent::OnWeaponAmmoChangedCallback);
+	Weapon->OnReloadPhaseChangedNative.RemoveAll(this);
 }
 
 // ---- Multicast ----
@@ -241,12 +306,31 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 		OwnerIface = Cast<IExtractionPlayerInterface>(OwnerActor);
 	}
 
-	if (!IsValid(CurrentWeapon) || !IsValid(OwnerActor) || !OwnerIface) return;
+	if (PreviousWeapon == CurrentWeapon) return;
 
-	// Detach previous weapon if the server swapped without destroying the old one
-	if (IsValid(PreviousWeapon) && PreviousWeapon != CurrentWeapon)
-		PreviousWeapon->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+	if (PreviousWeapon)
+	{
+		UnbindWeaponEvents(PreviousWeapon);
+		if (IsValid(PreviousWeapon))
+			PreviousWeapon->DetachFromActor(FDetachmentTransformRules::KeepWorldTransform);
+	}
+
+	if (!IsValid(CurrentWeapon))
+	{
+		PreviousWeapon = nullptr;
+		OnCurrentWeaponChangedNative.Broadcast(nullptr);
+		return;
+	}
+
 	PreviousWeapon = CurrentWeapon;
+	CurrentWeapon->SetOwnerIsAiming(bIsAiming);
+	BindWeaponEvents(CurrentWeapon);
+
+	if (!IsValid(OwnerActor) || !OwnerIface)
+	{
+		OnCurrentWeaponChangedNative.Broadcast(CurrentWeapon);
+		return;
+	}
 
 	ACharacter* OwnerChar = Cast<ACharacter>(OwnerActor);
 	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
@@ -286,11 +370,15 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 			);
 		}
 	}
+
+	OnCurrentWeaponChangedNative.Broadcast(CurrentWeapon);
 }
 
 void UWeaponComponent::OnRep_IsAiming()
 {
-	// Proxies can blend to ADS pose here
+	if (IsValid(CurrentWeapon))
+		CurrentWeapon->SetOwnerIsAiming(bIsAiming);
+	OnAimingChangedNative.Broadcast(bIsAiming);
 }
 
 // ---- Grip Re-seat ----

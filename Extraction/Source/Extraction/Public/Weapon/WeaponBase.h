@@ -19,6 +19,7 @@ class UDamageMitigationSettings;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponFired);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnReloadComplete);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnAmmoChanged, int32, CurrentAmmo, int32, ReserveAmmo);
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnWeaponReloadPhaseChangedNative, EWeaponReloadPhase);
 
 /** Cover-align scenario — which tuned weapon-socket target the gun eases toward while posed in cover. */
 enum class ECoverWeaponAlign : uint8
@@ -353,6 +354,9 @@ public:
 
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FOnAmmoChanged OnAmmoChanged;
+
+	/** Native accepted-transition stream for presentation and other non-Blueprint listeners. */
+	FOnWeaponReloadPhaseChangedNative OnReloadPhaseChangedNative;
 
 	// ---- IKitWeaponInterface (bridge for kit BP_FPCharacter dispatch) ----
 

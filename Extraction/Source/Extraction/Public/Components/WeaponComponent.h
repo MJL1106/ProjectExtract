@@ -8,9 +8,15 @@
 
 class AWeaponBase;
 class IExtractionPlayerInterface;
+enum class EWeaponReloadPhase : uint8;
 
 /** Broadcast per actual shot with stealth exemption context. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerWeaponShot, bool, bStealthExempt);
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnCurrentWeaponChangedNative, AWeaponBase*);
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnWeaponBooleanStateChangedNative, bool);
+DECLARE_MULTICAST_DELEGATE(FOnWeaponShotNative);
+DECLARE_MULTICAST_DELEGATE_TwoParams(FOnWeaponAmmoChangedNative, int32, int32);
+DECLARE_MULTICAST_DELEGATE_OneParam(FOnWeaponReloadPhaseRelayNative, EWeaponReloadPhase);
 
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class EXTRACTION_API UWeaponComponent : public UActorComponent
@@ -40,6 +46,14 @@ public:
 	/** Per-shot relay with stealth discipline exemption flag. Authority-only. */
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FOnPlayerWeaponShot OnPlayerWeaponShot;
+
+	/** Native presentation-facing state stream. The gameplay methods above remain authoritative. */
+	FOnCurrentWeaponChangedNative OnCurrentWeaponChangedNative;
+	FOnWeaponBooleanStateChangedNative OnAimingChangedNative;
+	FOnWeaponBooleanStateChangedNative OnTriggerChangedNative;
+	FOnWeaponShotNative OnWeaponShotNative;
+	FOnWeaponAmmoChangedNative OnWeaponAmmoChangedNative;
+	FOnWeaponReloadPhaseRelayNative OnWeaponReloadPhaseChangedNative;
 
 	// ---- Getters ----
 
@@ -71,6 +85,9 @@ private:
 
 	UPROPERTY(ReplicatedUsing = OnRep_IsAiming)
 	bool bIsAiming;
+
+	/** Local input edge state used only by the normalized presentation event stream. */
+	bool bTriggerHeld = false;
 
 	/** True for the FIRST shot of a trigger pull that coincides with a companion shoot-takedown.
 	 *  Consumed (cleared) on the first OnWeaponFiredCallback. */
@@ -106,6 +123,13 @@ private:
 	/** Bound to weapon's OnWeaponFired — triggers multicast for 3P effects */
 	UFUNCTION()
 	void OnWeaponFiredCallback();
+
+	UFUNCTION()
+	void OnWeaponAmmoChangedCallback(int32 CurrentAmmo, int32 ReserveAmmo);
+
+	void OnWeaponReloadPhaseChangedCallback(EWeaponReloadPhase Phase);
+	void BindWeaponEvents(AWeaponBase* Weapon);
+	void UnbindWeaponEvents(AWeaponBase* Weapon);
 
 	/** Re-seats the weapon after SnapToTarget so GripSocket coincides with ik_hand_gun. */
 	void SeatWeaponGripSocket();
