@@ -1802,6 +1802,11 @@ void AWeaponBase::OnRep_CurrentAmmo()
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
 }
 
+void AWeaponBase::OnRep_ReserveAmmo()
+{
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+}
+
 // ---- IKitWeaponInterface ----
 // Bridge dispatch from kit's BP_FPCharacter into AWeaponBase. Methods we have map
 // to existing logic; gameplay surfaces we don't yet implement are Verbose no-op stubs.

@@ -130,8 +130,8 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	BindWeaponEvents(CurrentWeapon);
 	OnCurrentWeaponChangedNative.Broadcast(CurrentWeapon);
 
-	// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose.
-	// Skip on dedicated server (no visuals) and when downed.
+	// Preserve the generic interface path for legacy pawns. AExtractionPlayer uses its
+	// dedicated presentation component and inherits the interface's no-op implementation.
 	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
 	if (IsValid(CurrentWeapon) && IsValid(OwnerActor) && OwnerIface && IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled() && !OwnerIface->GetIsDBNO())
 		OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
@@ -352,8 +352,7 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 			}
 		}
 
-		// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose.
-		// Skip when downed — arms aren't visible and the pose system may not be ready.
+		// Preserve the generic interface path for legacy pawns.
 		if (IsValid(OwnerActor) && OwnerIface && !OwnerIface->GetIsDBNO())
 			OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
 	}

@@ -24,6 +24,7 @@ class UExtractionAnimInstance;
 class UHealthComponent;
 class UFootstepNoiseComponent;
 class UWeaponComponent;
+class UPlayerWeaponPresentationComponent;
 class UTraversalComponent;
 class UCompanionCommandComponent;
 class UConsumableInventoryComponent;
@@ -161,6 +162,9 @@ public:
 	virtual UWeaponComponent* GetWeaponComponent() const override { return WeaponComponent; }
 
 	UFUNCTION(BlueprintPure, Category = "Components")
+	UPlayerWeaponPresentationComponent* GetWeaponPresentationComponent() const { return WeaponPresentationComponent; }
+
+	UFUNCTION(BlueprintPure, Category = "Components")
 	virtual UTraversalComponent* GetTraversalComponent() const override { return TraversalComponent; }
 
 	UFUNCTION(BlueprintPure, Category = "Components")
@@ -260,9 +264,6 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Movement")
 	void OnWalkHeldChanged(bool bHeld);
 
-	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
-	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }
-
 	/** Called by UAnimNotify_TakedownKill at the death frame of the finisher montage.
 	 *  Also serves as the fallback when the montage ends/interrupts before the notify fires. */
 	void FinishPendingTakedown();
@@ -285,6 +286,9 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UWeaponComponent> WeaponComponent;
+
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
+	TObjectPtr<UPlayerWeaponPresentationComponent> WeaponPresentationComponent;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")
 	TObjectPtr<UTraversalComponent> TraversalComponent;

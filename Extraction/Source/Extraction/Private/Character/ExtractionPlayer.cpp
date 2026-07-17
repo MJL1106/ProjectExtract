@@ -27,6 +27,7 @@
 #include "Companion/CompanionCharacter.h"
 #include "EngineUtils.h"
 #include "WeaponComponent.h"
+#include "Components/PlayerWeaponPresentationComponent.h"
 #include "WeaponBase.h"
 #include "ExtractionDamageType.h"
 #include "TimerManager.h"
@@ -59,6 +60,7 @@ AExtractionPlayer::AExtractionPlayer(const FObjectInitializer& ObjectInitializer
 	HealthComponent   = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 	FootstepNoiseComponent = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepNoiseComponent"));
 	WeaponComponent   = CreateDefaultSubobject<UWeaponComponent>(TEXT("WeaponComponent"));
+	WeaponPresentationComponent = CreateDefaultSubobject<UPlayerWeaponPresentationComponent>(TEXT("WeaponPresentationComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
 	CompanionCommandComponent = CreateDefaultSubobject<UCompanionCommandComponent>(TEXT("CompanionCommandComponent"));
 	ConsumableInventoryComponent = CreateDefaultSubobject<UConsumableInventoryComponent>(TEXT("ConsumableInventoryComponent"));
@@ -173,13 +175,6 @@ void AExtractionPlayer::BeginPlay()
 	if (IsValid(ConsumableInventoryComponent))
 		ConsumableInventoryComponent->OnStimUsedNative.AddUObject(this, &AExtractionPlayer::HandleStimUsed);
 
-	// Late-join / standalone catch-up: re-fire OnWeaponEquipped if weapon already equipped
-	if (IsLocallyControlled() && !GetIsDBNO() && IsValid(WeaponComponent))
-	{
-		AWeaponBase* ExistingWeapon = WeaponComponent->GetCurrentWeapon();
-		if (IsValid(ExistingWeapon))
-			OnWeaponEquipped(ExistingWeapon);
-	}
 }
 
 void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -530,7 +525,6 @@ void AExtractionPlayer::ADSStart(const FInputActionValue& Value)
 	// TODO: notify kit BP to cancel sprint on ADS entry via BIE
 
 	WeaponComponent->SetAiming(true);
-	OnADSChanged(true);
 	bAutoLeanActive = true;
 }
 
@@ -539,7 +533,6 @@ void AExtractionPlayer::ADSStop(const FInputActionValue& Value)
 	if (!IsValid(WeaponComponent)) return;
 
 	WeaponComponent->SetAiming(false);
-	OnADSChanged(false);
 	bAutoLeanActive = false;
 }
 
@@ -1134,15 +1127,8 @@ void AExtractionPlayer::NotifyControllerChanged()
 {
 	Super::NotifyControllerChanged();
 
-	// Late-join catch-up: controller may arrive after OnRep_CurrentWeapon already fired
-	if (!IsLocallyControlled() || GetIsDBNO() || !IsValid(WeaponComponent)) return;
-
-	AWeaponBase* CurrentWeapon = WeaponComponent->GetCurrentWeapon();
-	if (!IsValid(CurrentWeapon)) return;
-
-	UE_LOG(LogExtraction, Verbose, TEXT("'%s': NotifyControllerChanged catch-up fired OnWeaponEquipped for '%s'."),
-		*GetNameSafe(this), *GetNameSafe(CurrentWeapon));
-	OnWeaponEquipped(CurrentWeapon);
+	if (IsValid(WeaponPresentationComponent))
+		WeaponPresentationComponent->RefreshPresentation();
 }
 
 // ---- Damage ----
@@ -1361,7 +1347,6 @@ void AExtractionPlayer::SetBeingRevived(bool bBeingRevived, float ExpectedDurati
 	{
 		WeaponComponent->StopFire();
 		WeaponComponent->SetAiming(false);
-		OnADSChanged(false);
 		bAutoLeanActive = false;
 		AutoLeanTargetAlpha = 0.f;
 		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon()) Weapon->CancelReload();
@@ -1611,7 +1596,6 @@ void AExtractionPlayer::SetReviveAnimsActive(bool bActive)
 	{
 		WeaponComponent->StopFire();
 		WeaponComponent->SetAiming(false);
-		OnADSChanged(false);
 		bAutoLeanActive = false;
 		AutoLeanTargetAlpha = 0.f;
 		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())

@@ -63,6 +63,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsAiming() const { return bIsAiming; }
 
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	bool IsTriggerHeld() const { return bTriggerHeld; }
+
 protected:
 
 	virtual void BeginPlay() override;

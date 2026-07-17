@@ -431,7 +431,7 @@ protected:
 	UPROPERTY(ReplicatedUsing = OnRep_CurrentAmmo, BlueprintReadOnly, Category = "Weapon|State")
 	int32 CurrentAmmo;
 
-	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Weapon|State")
+	UPROPERTY(ReplicatedUsing = OnRep_ReserveAmmo, BlueprintReadOnly, Category = "Weapon|State")
 	int32 ReserveAmmo;
 
 private:
@@ -603,6 +603,9 @@ private:
 
 	UFUNCTION()
 	void OnRep_CurrentAmmo();
+
+	UFUNCTION()
+	void OnRep_ReserveAmmo();
 
 	// ---- Timers ----
 
