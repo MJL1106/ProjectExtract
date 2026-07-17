@@ -7,6 +7,7 @@
 #include "ExtractionTypes.h"
 #include "EnemyTypes.h"
 #include "Animation/AnimMontage.h"
+#include "Data/PlayerWeaponPresentationProfile.h"
 #include "WeaponDataAsset.generated.h"
 
 class UExtractionDamageType;
@@ -78,6 +79,28 @@ class EXTRACTION_API UWeaponDataAsset : public UDataAsset
 public:
 
 	virtual void PostLoad() override;
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Presentation")
+	UPlayerWeaponPresentationProfile* GetPlayerPresentationProfile() const
+	{
+		return PlayerPresentationProfile;
+	}
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Presentation")
+	EPlayerWeaponPresentationMigrationState GetPlayerPresentationMigrationState() const;
+
+	void ValidatePlayerPresentation(
+		TArray<FString>& OutErrors, bool bResolveSoftReferences = false) const;
+
+#if WITH_EDITOR
+	virtual EDataValidationResult IsDataValid(FDataValidationContext& Context) const override;
+#endif
+
+	// ---- Identity ----
+
+	/** Shared gameplay family used by weapon logic and presentation profile selection. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Identity")
+	EWeaponType WeaponType = EWeaponType::Rifle;
 
 	// ---- Fire ----
 
@@ -249,6 +272,13 @@ public:
 	/** The kit BP_Item_Base weapon spawned for the first-person visual + arm posing (the kit's procedural animation drives the arms for this weapon). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Kit Weapon Bridge")
 	TSubclassOf<AActor> KitVisualWeaponClass;
+
+	/**
+	 * Project-owned player presentation configuration. Null preserves the existing kit bridge
+	 * so current DataAssets migrate without changing gameplay or visuals.
+	 */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Player Presentation")
+	TObjectPtr<UPlayerWeaponPresentationProfile> PlayerPresentationProfile;
 
 	// ---- Enemy Animation ----
 
