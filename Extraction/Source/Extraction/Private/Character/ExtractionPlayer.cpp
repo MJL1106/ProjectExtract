@@ -29,6 +29,8 @@
 #include "WeaponComponent.h"
 #include "Components/PlayerWeaponPresentationComponent.h"
 #include "WeaponBase.h"
+#include "Weapon/KitWeaponInterface.h"
+#include "Weapon/PlayerWeaponView.h"
 #include "ExtractionDamageType.h"
 #include "TimerManager.h"
 #include "Engine/DamageEvents.h"
@@ -1015,6 +1017,7 @@ void AExtractionPlayer::StartMontageDeferred(AEnemyCharacter* Victim)
 	}
 
 	Victim->SetTakedownWasMontageDriven(true);
+	SetTakedownPresentationActive(true);
 
 	UE_LOG(LogExtraction, Warning, TEXT("[Takedown-Player] montage PLAYING len=%.2f on victim=%s (mesh=%s)"),
 		PlayedLength, *GetNameSafe(Victim), *GetNameSafe(GetMesh()));
@@ -1116,9 +1119,17 @@ void AExtractionPlayer::OnTakedownMontageEnded(UAnimMontage* Montage, bool bInte
 	// Restore camera/gun/knife regardless of whether the kill already fired via notify.
 	// The started/finished pair is always balanced: this delegate only binds after OnTakedownStarted fires.
 	OnTakedownFinished();
+	SetTakedownPresentationActive(false);
 
 	// Fallback: if the notify didn't fire before the montage ended/was interrupted, apply the kill now.
 	if (bTakedownMontageActive) FinishPendingTakedown();
+}
+
+void AExtractionPlayer::SetTakedownPresentationActive(bool bActive)
+{
+	if (IsValid(WeaponPresentationComponent))
+		WeaponPresentationComponent->SetWeaponViewSuppressed(
+			EPlayerWeaponViewSuppressionReason::Takedown, bActive);
 }
 
 // ---- Controller Changed ----
@@ -1331,6 +1342,9 @@ void AExtractionPlayer::SetBeingRevived(bool bBeingRevived, float ExpectedDurati
 {
 	if (bBeingRevivedAnimActive == bBeingRevived) return;
 	bBeingRevivedAnimActive = bBeingRevived;
+	if (IsValid(WeaponPresentationComponent))
+		WeaponPresentationComponent->SetWeaponViewSuppressed(
+			EPlayerWeaponViewSuppressionReason::BeingRevived, bBeingRevived);
 	if (bBeingRevived)
 	{
 		bSavedUseControllerRotationYaw = bUseControllerRotationYaw;
@@ -1410,11 +1424,33 @@ void AExtractionPlayer::SetHeldWeaponHidden(bool bHideWeapon)
 	GetAttachedActors(AttachedActors);
 	for (AActor* Attached : AttachedActors)
 	{
+		if (IsValid(WeaponPresentationComponent)
+			&& Attached == WeaponPresentationComponent->GetActiveWeaponView())
+			continue;
 		const USceneComponent* AttachedRoot = IsValid(Attached) ? Attached->GetRootComponent() : nullptr;
 		const FName Socket = AttachedRoot ? AttachedRoot->GetAttachSocketName() : NAME_None;
 		if (Socket == TEXT("ik_hand_gun") || Socket == TEXT("ItemHand_R") || Socket == TEXT("ItemHand_L"))
 			Attached->SetActorHiddenInGame(bHideWeapon);
 	}
+}
+
+void AExtractionPlayer::ClearLegacyWeaponPresentation()
+{
+	TArray<AActor*> AttachedActors;
+	GetAttachedActors(AttachedActors);
+	for (AActor* Attached : AttachedActors)
+	{
+		if (!IsValid(Attached)
+			|| Attached->IsA<AWeaponBase>()
+			|| Attached->IsA<APlayerWeaponView>()
+			|| !Attached->GetClass()->ImplementsInterface(
+				UKitWeaponInterface::StaticClass()))
+			continue;
+
+		Attached->SetActorHiddenInGame(true);
+		Attached->Destroy();
+	}
+	OnLegacyWeaponPresentationCleared();
 }
 
 // Reads a float-ish BP variable off an anim instance (UE5 BP floats are doubles).
@@ -1486,6 +1522,9 @@ void AExtractionPlayer::BeginReviveHold(AActor* Target)
 	ReviveTarget = Target;
 	ReviveElapsed = 0.f;
 	bIsReviving = true;
+	if (IsValid(WeaponPresentationComponent))
+		WeaponPresentationComponent->SetWeaponViewSuppressed(
+			EPlayerWeaponViewSuppressionReason::Reviving, true);
 
 	// Clear approach velocity, but keep a grounded movement mode so CMC consumes the revive
 	// montage's authored root motion. Input remains locked for the full hold.
@@ -1858,6 +1897,9 @@ void AExtractionPlayer::CancelRevive()
 	LogReviveDebugState(TEXT("END-POST"), *this, ReviveTarget);
 
 	bIsReviving = false;
+	if (IsValid(WeaponPresentationComponent))
+		WeaponPresentationComponent->SetWeaponViewSuppressed(
+			EPlayerWeaponViewSuppressionReason::Reviving, false);
 	ReviveElapsed = 0.f;
 	ReviveTarget = nullptr;
 }

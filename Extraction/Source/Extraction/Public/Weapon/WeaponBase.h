@@ -173,6 +173,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|FX")
 	void SetFirstPersonMuzzle(USceneComponent* InMuzzle);
 
+	UFUNCTION(BlueprintPure, Category = "Weapon|FX")
+	USceneComponent* GetFirstPersonMuzzle() const { return FirstPersonMuzzle; }
+
 	// ---- Magazine swap (enemy reload visual) ----
 
 	/**

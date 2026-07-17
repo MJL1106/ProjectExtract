@@ -148,7 +148,20 @@ void AWeaponBase::BeginPlay()
 		SpawnedVisualActor = GetWorld()->SpawnActor<AActor>(ThirdPersonVisualActorClass, GetActorTransform(), SpawnParams);
 		if (IsValid(SpawnedVisualActor))
 		{
-			SpawnedVisualActor->AttachToComponent(WeaponMesh, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			const bool bAttached = SpawnedVisualActor->AttachToComponent(
+				WeaponMesh,
+				FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+			if (!bAttached || SpawnedVisualActor->GetAttachParentActor() != this)
+			{
+				UE_LOG(LogExtraction, Warning,
+					TEXT("%s: ThirdPersonVisualActor spawned but attach failed - keeping WeaponMesh visible"),
+					*GetName());
+				SpawnedVisualActor->Destroy();
+				SpawnedVisualActor = nullptr;
+				RecoilRestRelative = WeaponMesh->GetRelativeTransform();
+				bRecoilRestCaptured = true;
+				return;
+			}
 			SpawnedVisualActor->SetActorTickEnabled(false);
 
 			// Disable collision on every primitive in the visual actor so it can't shove/block its owner.
@@ -157,20 +170,14 @@ void AWeaponBase::BeginPlay()
 			for (UPrimitiveComponent* Prim : Primitives)
 			{
 				if (IsValid(Prim))
+				{
 					Prim->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+					Prim->SetOwnerNoSee(true);
+				}
 			}
 
-			// Only hide the bare frame once the visual is confirmed attached.
-			// On attach failure the enemy keeps the skeletal mesh as a visible fallback.
-			if (SpawnedVisualActor->GetAttachParentActor() == this)
-			{
-				WeaponMesh->SetVisibility(false, false);
-			}
-			else
-			{
-				UE_LOG(LogExtraction, Warning, TEXT("%s: ThirdPersonVisualActor spawned but attach failed — keeping WeaponMesh visible"),
-					*GetName());
-			}
+			// Only hide the bare frame after the visual is confirmed attached.
+			WeaponMesh->SetVisibility(false, false);
 
 			// Resolve magazine component for reload swap (enemy weapons only).
 			// When MagazineComponentName is NAME_None (player kit weapons) skip entirely.
@@ -272,6 +279,7 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		MuzzleFlashComponent = nullptr;
 	}
 
+	SetFirstPersonMuzzle(nullptr);
 	if (IsValid(FirstPersonMuzzleFlashComponent))
 	{
 		FirstPersonMuzzleFlashComponent->DestroyComponent();
@@ -1965,7 +1973,11 @@ FTransform AWeaponBase::GetKitIK_HandLSocketOffset_Implementation() const
 
 TSubclassOf<AActor> AWeaponBase::GetKitVisualWeaponClass_Implementation() const
 {
-	return IsValid(WeaponData) ? WeaponData->KitVisualWeaponClass : nullptr;
+	if (!IsValid(WeaponData)) return nullptr;
+	if (WeaponData->GetPlayerPresentationMigrationState()
+		== EPlayerWeaponPresentationMigrationState::Profile)
+		return nullptr;
+	return WeaponData->KitVisualWeaponClass;
 }
 
 float AWeaponBase::GetKitAimDistanceFromCamera_Implementation() const

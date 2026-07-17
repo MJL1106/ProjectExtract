@@ -34,6 +34,14 @@ public:
 	/** Spawn and equip a weapon by class */
 	void EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass);
 
+#if WITH_DEV_AUTOMATION_TESTS
+	void SetPreFinishWeaponSpawnHookForTesting(
+		TFunction<void(AWeaponBase&)> Hook)
+	{
+		PreFinishWeaponSpawnHookForTesting = MoveTemp(Hook);
+	}
+#endif
+
 	/** Begin firing. bAuthorityTakedownSnapshot = true when the authority has confirmed a
 	 *  companion shoot-takedown is armed at trigger-pull time (first shot only is exempt). */
 	void StartFire(bool bAuthorityTakedownSnapshot = false);
@@ -146,4 +154,8 @@ private:
 
 	/** Interface pointer into the same UObject — valid as long as OwnerActor is alive */
 	IExtractionPlayerInterface* OwnerIface = nullptr;
+
+#if WITH_DEV_AUTOMATION_TESTS
+	TFunction<void(AWeaponBase&)> PreFinishWeaponSpawnHookForTesting;
+#endif
 };

@@ -51,6 +51,9 @@ void UWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	bNextShotStealthExempt = false;
 	bTriggerHeld = false;
+#if WITH_DEV_AUTOMATION_TESTS
+	PreFinishWeaponSpawnHookForTesting = {};
+#endif
 
 	UnbindWeaponEvents(CurrentWeapon);
 	if (PreviousWeapon != CurrentWeapon)
@@ -79,6 +82,7 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	if (IsValid(CurrentWeapon))
 	{
 		UnbindWeaponEvents(CurrentWeapon);
+		CurrentWeapon->SetFirstPersonMuzzle(nullptr);
 		CurrentWeapon->Destroy();
 		CurrentWeapon = nullptr;
 	}
@@ -102,13 +106,35 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 	SpawnParams.Owner = OwnerActor;
 	SpawnParams.Instigator = Cast<APawn>(OwnerActor);
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+#if WITH_DEV_AUTOMATION_TESTS
+	const bool bRunPreFinishHook =
+		static_cast<bool>(PreFinishWeaponSpawnHookForTesting);
+	SpawnParams.bDeferConstruction = bRunPreFinishHook;
+#endif
 
-	CurrentWeapon = World->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
-	if (!IsValid(CurrentWeapon))
+	AWeaponBase* SpawnedWeapon = World->SpawnActor<AWeaponBase>(
+		WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
+	if (!IsValid(SpawnedWeapon))
 	{
 		OnCurrentWeaponChangedNative.Broadcast(nullptr);
 		return;
 	}
+
+#if WITH_DEV_AUTOMATION_TESTS
+	if (bRunPreFinishHook)
+	{
+		TFunction<void(AWeaponBase&)> Hook =
+			MoveTemp(PreFinishWeaponSpawnHookForTesting);
+		Hook(*SpawnedWeapon);
+		SpawnedWeapon->FinishSpawning(FTransform::Identity);
+		if (!IsValid(SpawnedWeapon))
+		{
+			OnCurrentWeaponChangedNative.Broadcast(nullptr);
+			return;
+		}
+	}
+#endif
+	CurrentWeapon = SpawnedWeapon;
 
 	// Attach to the kit IK-rig gun bone (ik_hand_gun) so AC_ProceduralAnimation drives the weapon transform
 	if (IsValid(OwnerChar))

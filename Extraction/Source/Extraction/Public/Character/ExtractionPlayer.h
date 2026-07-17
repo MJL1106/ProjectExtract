@@ -100,6 +100,13 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
 	void OnWeaponEquipped(AWeaponBase* EquippedWeapon);
 
+	/** Clears any kit-owned first-person actor before a replacement/profile view is presented. */
+	void ClearLegacyWeaponPresentation();
+
+	/** Lets the kit Blueprint clear SpawnedItemRef and slot references after native cleanup. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
+	void OnLegacyWeaponPresentationCleared();
+
 	/** Fired locally when ADS state changes (input down = true, input up = false).
 	 *  BP implements this to call AC_ProceduralAnimation->NewHandPose with Aim/Base pose. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
@@ -513,6 +520,10 @@ protected:
 
 private:
 
+#if WITH_DEV_AUTOMATION_TESTS
+	friend class FPlayerWeaponProfileViewLifecycleTest;
+#endif
+
 	// ---- Companion Soft Collision State ----
 
 	/** Tracks which companion instance has its IgnoreActorWhenMoving wired, so respawns re-wire correctly. */
@@ -588,6 +599,7 @@ private:
 
 	UFUNCTION()
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+	void SetTakedownPresentationActive(bool bActive);
 
 	// ---- Traversal ----
 

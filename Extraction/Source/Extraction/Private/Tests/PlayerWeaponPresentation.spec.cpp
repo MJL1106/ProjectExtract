@@ -6,16 +6,61 @@
 
 #include "Character/ExtractionPlayer.h"
 #include "Components/PlayerWeaponPresentationComponent.h"
+#include "Components/PrimitiveComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/WeaponComponent.h"
+#include "Data/PlayerWeaponPresentationProfile.h"
+#include "Data/WeaponDataAsset.h"
 #include "Engine/Engine.h"
 #include "Engine/LocalPlayer.h"
+#include "Engine/SkeletalMesh.h"
+#include "Engine/SkeletalMeshSocket.h"
+#include "Engine/World.h"
+#include "EngineUtils.h"
+#include "GameFramework/Character.h"
 #include "GameFramework/PlayerController.h"
+#include "Movement/TraversalComponent.h"
+#include "ReferenceSkeleton.h"
 #include "Tests/AutomationEditorCommon.h"
 #include "UObject/UnrealType.h"
+#include "Weapon/KitWeaponInterface.h"
 #include "Weapon/WeaponBase.h"
+#include "Weapon/PlayerWeaponView.h"
 
 namespace PlayerWeaponPresentationTest
 {
+	bool InstallHandSocket(AExtractionPlayer& Player)
+	{
+		USkeletalMeshComponent* Mesh = Player.GetMesh();
+		if (!IsValid(Mesh)) return false;
+
+		USkeletalMesh* TestMesh =
+			NewObject<USkeletalMesh>(&Player, NAME_None, RF_Transient);
+		if (!IsValid(TestMesh)) return false;
+
+		static const FName RootBone(TEXT("root"));
+		{
+			FReferenceSkeletonModifier Modifier(
+				TestMesh->GetRefSkeleton(), nullptr);
+			Modifier.Add(
+				FMeshBoneInfo(
+					RootBone, RootBone.ToString(), INDEX_NONE),
+				FTransform::Identity);
+		}
+		TestMesh->CalculateInvRefMatrices();
+
+		static const FName HandSocketName(TEXT("ik_hand_gun"));
+		USkeletalMeshSocket* HandSocket =
+			NewObject<USkeletalMeshSocket>(
+				TestMesh, NAME_None, RF_Transient);
+		HandSocket->SocketName = HandSocketName;
+		HandSocket->BoneName = RootBone;
+		TestMesh->GetMeshOnlySocketList().Add(HandSocket);
+		TestMesh->RebuildSocketMap();
+		Mesh->SetSkeletalMeshAsset(TestMesh);
+		return Mesh->DoesSocketExist(HandSocketName);
+	}
+
 	AExtractionPlayer* SpawnPlayerWithDefaultWeapon(UWorld* World)
 	{
 		if (!IsValid(World)) return nullptr;
@@ -36,13 +81,18 @@ namespace PlayerWeaponPresentationTest
 		return Player;
 	}
 
-	void FinishPlayerSpawn(AExtractionPlayer* Player)
+	bool FinishPlayerSpawn(AExtractionPlayer* Player)
 	{
-		if (!IsValid(Player)) return;
+		if (!IsValid(Player)) return false;
 
 		Player->FinishSpawning(FTransform::Identity);
 		if (!Player->HasActorBegunPlay())
 			Player->DispatchBeginPlay();
+		if (UWeaponComponent* Weapons = Player->GetWeaponComponent())
+			if (AWeaponBase* Weapon = Weapons->GetCurrentWeapon())
+				if (!Weapon->HasActorBegunPlay())
+					Weapon->DispatchBeginPlay();
+		return InstallHandSocket(*Player);
 	}
 
 	APlayerController* PossessPlayerLocally(UWorld* World, AExtractionPlayer* Player)
@@ -58,6 +108,84 @@ namespace PlayerWeaponPresentationTest
 		if (UPlayerWeaponPresentationComponent* Presentation = Player->GetWeaponPresentationComponent())
 			Presentation->RefreshPresentation();
 		return Controller;
+	}
+
+	UWeaponDataAsset* CreateProfileData(UObject& Outer)
+	{
+		UWeaponDataAsset* Data = NewObject<UWeaponDataAsset>(&Outer);
+		UPlayerWeaponPresentationProfile* Profile =
+			NewObject<UPlayerWeaponPresentationProfile>(Data);
+		if (!Data || !Profile) return nullptr;
+
+		Profile->ProfileId = TEXT("profile.test.lifecycle");
+		Profile->ViewClass = APlayerWeaponView::StaticClass();
+		Data->PlayerPresentationProfile = Profile;
+		Data->KitVisualWeaponClass = AActor::StaticClass();
+		return Data;
+	}
+
+	UWeaponDataAsset* ConfigureProfileWeapon(AWeaponBase& Weapon)
+	{
+		UWeaponDataAsset* Data = CreateProfileData(Weapon);
+		FObjectPropertyBase* Property =
+			FindFProperty<FObjectPropertyBase>(
+				Weapon.GetClass(), TEXT("WeaponData"));
+		check(Property);
+		Property->SetObjectPropertyValue_InContainer(&Weapon, Data);
+		return Data;
+	}
+
+	AWeaponBase* EquipProfileWeapon(
+		UWeaponComponent& Component,
+		TSubclassOf<AActor> ThirdPersonVisualClass = nullptr,
+		bool* bOutDeferredHookSawNoCurrentWeapon = nullptr)
+	{
+		if (bOutDeferredHookSawNoCurrentWeapon)
+			*bOutDeferredHookSawNoCurrentWeapon = false;
+		UWeaponDataAsset* ConfiguredData = nullptr;
+		Component.SetPreFinishWeaponSpawnHookForTesting(
+			[&Component, &ConfiguredData, ThirdPersonVisualClass,
+				bOutDeferredHookSawNoCurrentWeapon](AWeaponBase& Weapon)
+			{
+				if (bOutDeferredHookSawNoCurrentWeapon)
+					*bOutDeferredHookSawNoCurrentWeapon =
+						Component.GetCurrentWeapon() == nullptr;
+				ConfiguredData = ConfigureProfileWeapon(Weapon);
+				FObjectPropertyBase* VisualProperty =
+					FindFProperty<FObjectPropertyBase>(
+						Weapon.GetClass(),
+						TEXT("ThirdPersonVisualActorClass"));
+				check(VisualProperty);
+				VisualProperty->SetObjectPropertyValue_InContainer(
+					&Weapon, ThirdPersonVisualClass.Get());
+			});
+
+		Component.EquipWeapon(AWeaponBase::StaticClass());
+		AWeaponBase* Equipped = Component.GetCurrentWeapon();
+		if (IsValid(Equipped) && !Equipped->HasActorBegunPlay())
+			Equipped->DispatchBeginPlay();
+		const bool bCopiedProfile =
+			IsValid(Equipped)
+			&& Equipped->GetWeaponData() == ConfiguredData;
+		Component.SetPreFinishWeaponSpawnHookForTesting({});
+		return bCopiedProfile ? Equipped : nullptr;
+	}
+
+	AActor* GetThirdPersonVisual(AWeaponBase& Weapon)
+	{
+		FObjectProperty* Property = FindFProperty<FObjectProperty>(
+			Weapon.GetClass(), TEXT("SpawnedVisualActor"));
+		check(Property);
+		return Cast<AActor>(
+			Property->GetObjectPropertyValue_InContainer(&Weapon));
+	}
+
+	int32 CountLiveWeaponViews(UWorld& World)
+	{
+		int32 Count = 0;
+		for (TActorIterator<APlayerWeaponView> It(&World); It; ++It)
+			if (IsValid(*It) && !It->IsActorBeingDestroyed()) ++Count;
+		return Count;
 	}
 }
 
@@ -103,7 +231,9 @@ bool FPlayerWeaponPresentationPresenceAndCatchUpTest::RunTest(const FString& Par
 			ActiveStates.Add(bActive);
 		});
 
-	PlayerWeaponPresentationTest::FinishPlayerSpawn(Player);
+	if (!TestTrue(TEXT("player finishes with a valid hand socket"),
+		PlayerWeaponPresentationTest::FinishPlayerSpawn(Player)))
+		return false;
 
 	UWeaponComponent* WeaponComponent = Player->GetWeaponComponent();
 	AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
@@ -175,7 +305,9 @@ bool FPlayerWeaponPresentationRelayAndCleanupTest::RunTest(const FString& Parame
 	TestNotNull(TEXT("player spawned deferred"), Player);
 	if (!Player) return false;
 
-	PlayerWeaponPresentationTest::FinishPlayerSpawn(Player);
+	if (!TestTrue(TEXT("player finishes with a valid hand socket"),
+		PlayerWeaponPresentationTest::FinishPlayerSpawn(Player)))
+		return false;
 	UWeaponComponent* WeaponComponent = Player->GetWeaponComponent();
 	UPlayerWeaponPresentationComponent* Presentation = Player->GetWeaponPresentationComponent();
 	TestNotNull(TEXT("weapon component exists"), WeaponComponent);
@@ -345,6 +477,437 @@ bool FPlayerWeaponPresentationAmmoReplicationContractTest::RunTest(const FString
 		TEXT("reserve replication uses the ammo presentation notify"),
 		ReserveAmmoProperty->RepNotifyFunc,
 		FName(TEXT("OnRep_ReserveAmmo")));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlayerWeaponProfileViewLifecycleTest,
+	"Extraction.PlayerWeapon.Presentation.ProfileViewLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FPlayerWeaponProfileViewLifecycleTest::RunTest(const FString& Parameters)
+{
+	AddExpectedMessagePlain(
+		TEXT("shipping without KitWeaponPoseAsset"),
+		ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains,
+		0);
+	AddExpectedMessagePlain(
+		TEXT("WeaponVisualMeshName 'WeaponMesh' not found"),
+		ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains);
+	AddExpectedMessagePlain(
+		TEXT("cannot seat a player weapon view: socket ik_hand_gun is missing"),
+		ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains);
+	AddExpectedMessagePlain(
+		TEXT("has an invalid required WeaponSeat marker"),
+		ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains,
+		0);
+
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	AExtractionPlayer* Player =
+		PlayerWeaponPresentationTest::SpawnPlayerWithDefaultWeapon(World);
+	TestNotNull(TEXT("player spawned deferred"), Player);
+	if (!Player) return false;
+	if (!TestTrue(TEXT("player finishes with a valid hand socket"),
+		PlayerWeaponPresentationTest::FinishPlayerSpawn(Player)))
+		return false;
+
+	UWeaponComponent* Weapons = Player->GetWeaponComponent();
+	UPlayerWeaponPresentationComponent* Presentation =
+		Player->GetWeaponPresentationComponent();
+	AWeaponBase* FirstWeapon = Weapons ? Weapons->GetCurrentWeapon() : nullptr;
+	TestNotNull(TEXT("default weapon exists"), FirstWeapon);
+	TestNotNull(TEXT("presentation exists"), Presentation);
+	if (!FirstWeapon || !Presentation) return false;
+	TestNotNull(TEXT("profile data is assigned"),
+		PlayerWeaponPresentationTest::ConfigureProfileWeapon(*FirstWeapon));
+	TestNull(TEXT("non-local profile does not spawn a view"),
+		Presentation->GetActiveWeaponView());
+	TestEqual(TEXT("non-local world has no passive views"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 0);
+
+	APlayerController* Controller =
+		PlayerWeaponPresentationTest::PossessPlayerLocally(World, Player);
+	TestNotNull(TEXT("local controller possesses player"), Controller);
+	if (!Controller) return false;
+
+	APlayerWeaponView* FirstView = Presentation->GetActiveWeaponView();
+	TestNotNull(TEXT("profile spawns one passive view"), FirstView);
+	if (!FirstView) return false;
+	FObjectPropertyBase* RetainedViewClassProperty =
+		FindFProperty<FObjectPropertyBase>(
+			Presentation->GetClass(), TEXT("CachedLoadedViewClass"));
+	TestNotNull(TEXT("loaded view class uses a GC-visible cache"),
+		RetainedViewClassProperty);
+	if (RetainedViewClassProperty)
+	{
+		TestEqual(TEXT("cache retains the validated current view class"),
+			Cast<UClass>(RetainedViewClassProperty->GetObjectPropertyValue_InContainer(
+				Presentation)),
+			FirstView->GetClass());
+	}
+	TestEqual(TEXT("one-view invariant holds"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 1);
+	TestEqual(TEXT("local player owns the view"),
+		FirstView->GetOwner(), static_cast<AActor*>(Player));
+	TestFalse(TEXT("local presentation view does not replicate"),
+		FirstView->GetIsReplicated());
+	TestEqual(TEXT("view is attached to player mesh"),
+		FirstView->GetAttachParentActor(), static_cast<AActor*>(Player));
+	TestEqual(TEXT("view uses procedural gun socket"),
+		FirstView->GetRootComponent()->GetAttachSocketName(), FName(TEXT("ik_hand_gun")));
+	TestEqual(TEXT("visible muzzle is registered"),
+		FirstWeapon->GetFirstPersonMuzzle(),
+		static_cast<USceneComponent*>(FirstView->GetMuzzleMarker()));
+	TestTrue(TEXT("seat placement is cached"), Presentation->HasCachedViewPlacement());
+	TestNull(TEXT("profile suppresses legacy visual class"),
+		IKitWeaponInterface::Execute_GetKitVisualWeaponClass(FirstWeapon));
+
+	Weapons->OnCurrentWeaponChangedNative.Broadcast(FirstWeapon);
+	TestEqual(TEXT("duplicate equip retains the same view"),
+		Presentation->GetActiveWeaponView(), FirstView);
+	TestEqual(TEXT("duplicate equip cannot create a second view"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 1);
+
+	Presentation->SetWeaponViewHidden(true);
+	TestTrue(TEXT("view can be hidden for blocked states"), FirstView->IsHidden());
+	AWeaponBase* EventWeapon = nullptr;
+	bool bReplacementReadyAtEvent = false;
+	const FDelegateHandle ReplacementHandle =
+		Presentation->OnPresentedWeaponChangedNative.AddLambda(
+			[Presentation, &EventWeapon, &bReplacementReadyAtEvent](AWeaponBase* Weapon)
+			{
+				EventWeapon = Weapon;
+				APlayerWeaponView* View = Presentation->GetActiveWeaponView();
+				bReplacementReadyAtEvent = IsValid(Weapon) && IsValid(View)
+					&& Weapon->GetFirstPersonMuzzle() == View->GetMuzzleMarker();
+			});
+	bool bDeferredHookSawNoCurrentWeapon = false;
+	AWeaponBase* Replacement =
+		PlayerWeaponPresentationTest::EquipProfileWeapon(
+			*Weapons, ACharacter::StaticClass(),
+			&bDeferredHookSawNoCurrentWeapon);
+	Presentation->OnPresentedWeaponChangedNative.Remove(ReplacementHandle);
+	TestNotNull(TEXT("production replacement profile weapon spawns"), Replacement);
+	if (!Replacement) return false;
+	APlayerWeaponView* ReplacementView = Presentation->GetActiveWeaponView();
+	TestNotNull(TEXT("replacement gets a view"), ReplacementView);
+	TestEqual(TEXT("production equip publishes the replacement"),
+		EventWeapon, Replacement);
+	TestTrue(TEXT("replacement view is ready before weapon event"),
+		bReplacementReadyAtEvent);
+	TestTrue(TEXT("deferred test hook observes production assignment order"),
+		bDeferredHookSawNoCurrentWeapon);
+	TestNotEqual(TEXT("replacement destroys the old view"), ReplacementView, FirstView);
+	TestTrue(TEXT("production equip destroys the old weapon"),
+		FirstWeapon->IsActorBeingDestroyed());
+	TestTrue(TEXT("replacement inherits hidden state"),
+		ReplacementView && ReplacementView->IsHidden());
+	TestNull(TEXT("old weapon muzzle is cleared"), FirstWeapon->GetFirstPersonMuzzle());
+	TestEqual(TEXT("replacement muzzle is registered"),
+		Replacement->GetFirstPersonMuzzle(),
+		ReplacementView
+			? static_cast<USceneComponent*>(ReplacementView->GetMuzzleMarker())
+			: nullptr);
+	TestEqual(TEXT("replacement preserves one-view invariant"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 1);
+	AActor* ThirdPersonVisual =
+		PlayerWeaponPresentationTest::GetThirdPersonVisual(*Replacement);
+	TestNotNull(TEXT("configured third-person visual spawns"), ThirdPersonVisual);
+	if (ThirdPersonVisual)
+	{
+		TInlineComponentArray<UPrimitiveComponent*> Primitives;
+		ThirdPersonVisual->GetComponents(Primitives);
+		TestTrue(TEXT("third-person visual has render primitives"),
+			Primitives.Num() > 0);
+		for (const UPrimitiveComponent* Primitive : Primitives)
+			if (IsValid(Primitive))
+				TestTrue(TEXT("third-person primitive is hidden from its owner"),
+					Primitive->bOwnerNoSee);
+	}
+	Presentation->SetWeaponViewHidden(false);
+	UTraversalComponent* Traversal = Player->GetTraversalComponent();
+	TestNotNull(TEXT("traversal visibility source exists"), Traversal);
+	if (!Traversal) return false;
+	Traversal->OnTraversalStarted.Broadcast(
+		ETraversalType::Vault, 1.f, FVector::ZeroVector, FVector::ZeroVector);
+	Player->OnDBNOStateChanged.Broadcast(true, 30.f);
+	Traversal->OnTraversalEnded.Broadcast();
+	TestTrue(TEXT("overlapping DBNO suppression keeps view hidden"),
+		ReplacementView && ReplacementView->IsHidden());
+	Player->OnDBNOStateChanged.Broadcast(false, 0.f);
+	TestFalse(TEXT("view restores after final suppression clears"),
+		ReplacementView && ReplacementView->IsHidden());
+	Player->SetBeingRevived(true, 1.f);
+	TestTrue(TEXT("being revived hides profile view"),
+		ReplacementView && ReplacementView->IsHidden());
+	Player->SetBeingRevived(false);
+	TestFalse(TEXT("ending revive restores profile view"),
+		ReplacementView && ReplacementView->IsHidden());
+	Presentation->SetWeaponViewHidden(true);
+
+	if (ReplacementView) ReplacementView->Destroy();
+	Presentation->RefreshPresentation();
+	APlayerWeaponView* RecreatedView = Presentation->GetActiveWeaponView();
+	TestNotNull(TEXT("missing active view is recreated"), RecreatedView);
+	TestNotEqual(TEXT("recreation uses a new instance"), RecreatedView, ReplacementView);
+	TestTrue(TEXT("recreated view reuses hidden state"),
+		RecreatedView && RecreatedView->IsHidden());
+	TestEqual(TEXT("recreation still has exactly one live view"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 1);
+
+	Player->GetMesh()->SetSkeletalMeshAsset(nullptr);
+	if (RecreatedView) RecreatedView->Destroy();
+	Presentation->RefreshPresentation();
+	TestNull(TEXT("missing hand socket rejects the candidate view"),
+		Presentation->GetActiveWeaponView());
+	TestEqual(TEXT("failed seating leaves no view actor"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 0);
+	TestNull(TEXT("failed seating leaves no visible muzzle"),
+		Replacement->GetFirstPersonMuzzle());
+	TestTrue(TEXT("test hand socket restores"),
+		PlayerWeaponPresentationTest::InstallHandSocket(*Player));
+	Presentation->RefreshPresentation();
+	APlayerWeaponView* SocketRestoredView =
+		Presentation->GetActiveWeaponView();
+	TestNotNull(TEXT("restoring the hand socket recreates the view"),
+		SocketRestoredView);
+	TestEqual(TEXT("socket recovery preserves one-view invariant"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 1);
+	Presentation->SetWeaponViewHidden(false);
+
+	Player->SetTakedownPresentationActive(true);
+	TestTrue(TEXT("takedown presentation state hides the view"),
+		SocketRestoredView && SocketRestoredView->IsHidden());
+	Player->SetTakedownPresentationActive(false);
+	TestFalse(TEXT("ending takedown restores the view"),
+		SocketRestoredView && SocketRestoredView->IsHidden());
+
+	AExtractionPlayer* Patient = World->SpawnActor<AExtractionPlayer>();
+	TestNotNull(TEXT("revive patient spawns"), Patient);
+	if (!Patient) return false;
+	Patient->EnterDBNO();
+	Player->BeginReviveHold(Patient);
+	TestTrue(TEXT("production revive hold starts"), Player->IsRevivingTarget());
+	TestTrue(TEXT("reviver-side hold hides the view"),
+		SocketRestoredView && SocketRestoredView->IsHidden());
+	Player->CancelRevive();
+	TestFalse(TEXT("production revive hold ends"), Player->IsRevivingTarget());
+	TestFalse(TEXT("ending reviver-side hold restores the view"),
+		SocketRestoredView && SocketRestoredView->IsHidden());
+	Patient->ExitDBNO();
+
+	Controller->UnPossess();
+	Presentation->RefreshPresentation();
+	TestNull(TEXT("unpossession destroys local view"),
+		Presentation->GetActiveWeaponView());
+	TestNull(TEXT("unpossession clears visible muzzle"),
+		Replacement->GetFirstPersonMuzzle());
+	TestEqual(TEXT("unpossession leaves no live views"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 0);
+	CollectGarbage(RF_NoFlags);
+	if (RetainedViewClassProperty)
+	{
+		TestEqual(TEXT("current view class remains retained while unpossessed"),
+			Cast<UClass>(RetainedViewClassProperty->GetObjectPropertyValue_InContainer(
+				Presentation)),
+			APlayerWeaponView::StaticClass());
+	}
+	Controller->Possess(Player);
+	Presentation->RefreshPresentation();
+	APlayerWeaponView* RepossessedView =
+		Presentation->GetActiveWeaponView();
+	TestNotNull(TEXT("repossess after garbage collection recreates the view"),
+		RepossessedView);
+	TestTrue(TEXT("repossess reuses cached placement safely"),
+		Presentation->HasCachedViewPlacement());
+	TestEqual(TEXT("repossess still has exactly one view"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 1);
+
+	Presentation->SetWeaponViewCreatedHookForTesting(
+		[](APlayerWeaponView& Candidate)
+		{
+			Candidate.GetWeaponSeatMarker()->ConfigureMarker(
+				EPlayerWeaponMarkerKind::AimPoint);
+		});
+	AWeaponBase* InvalidViewWeapon =
+		PlayerWeaponPresentationTest::EquipProfileWeapon(*Weapons);
+	Presentation->SetWeaponViewCreatedHookForTesting({});
+	TestNotNull(TEXT("weapon survives invalid presentation view"),
+		InvalidViewWeapon);
+	TestNull(TEXT("invalid candidate is destroyed"),
+		Presentation->GetActiveWeaponView());
+	TestNull(TEXT("invalid candidate never registers a muzzle"),
+		InvalidViewWeapon
+			? InvalidViewWeapon->GetFirstPersonMuzzle()
+			: nullptr);
+	TestFalse(TEXT("invalid candidate does not leave cached placement"),
+		Presentation->HasCachedViewPlacement());
+	TestEqual(TEXT("invalid candidate leaves no passive view"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 0);
+
+	AWeaponBase* FinalWeapon =
+		PlayerWeaponPresentationTest::EquipProfileWeapon(*Weapons);
+	APlayerWeaponView* FinalView =
+		Presentation->GetActiveWeaponView();
+	TestNotNull(TEXT("valid replacement recovers after invalid view"),
+		FinalView);
+	TestTrue(TEXT("traversal source is bound before player teardown"),
+		Traversal->OnTraversalStarted.IsBoundToObject(Presentation));
+	TestTrue(TEXT("DBNO source is bound before player teardown"),
+		Presentation->AreVisibilitySourcesBoundForTesting());
+
+	Player->EndPlay(EEndPlayReason::Destroyed);
+	TestTrue(TEXT("player EndPlay destroys its view"),
+		!IsValid(FinalView) || FinalView->IsActorBeingDestroyed());
+	TestNull(TEXT("player EndPlay clears the visible muzzle"),
+		FinalWeapon ? FinalWeapon->GetFirstPersonMuzzle() : nullptr);
+	TestFalse(TEXT("player EndPlay unbinds traversal visibility"),
+		Traversal->OnTraversalStarted.IsBoundToObject(Presentation));
+	TestFalse(TEXT("player EndPlay unbinds DBNO visibility"),
+		Presentation->AreVisibilitySourcesBoundForTesting());
+	TestEqual(TEXT("player EndPlay leaves no passive views"),
+		PlayerWeaponPresentationTest::CountLiveWeaponViews(*World), 0);
+	if (RetainedViewClassProperty)
+	{
+		TestNull(TEXT("player EndPlay releases the retained view class"),
+			Cast<UClass>(RetainedViewClassProperty->GetObjectPropertyValue_InContainer(
+				Presentation)));
+	}
+	Player->Destroy();
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlayerWeaponThirdPersonAttachFailureTest,
+	"Extraction.PlayerWeapon.Presentation.ThirdPersonAttachFailure",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FPlayerWeaponThirdPersonAttachFailureTest::RunTest(
+	const FString& Parameters)
+{
+	AddExpectedMessagePlain(
+		TEXT("shipping without KitWeaponPoseAsset"),
+		ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains,
+		0);
+	AddExpectedMessagePlain(
+		TEXT("ThirdPersonVisualActor spawned but attach failed"),
+		ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains);
+
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	AExtractionPlayer* Player =
+		PlayerWeaponPresentationTest::SpawnPlayerWithDefaultWeapon(World);
+	TestNotNull(TEXT("player spawns deferred"), Player);
+	if (!Player) return false;
+	if (!TestTrue(TEXT("player finishes with a valid hand socket"),
+		PlayerWeaponPresentationTest::FinishPlayerSpawn(Player)))
+		return false;
+
+	UWeaponComponent* Weapons = Player->GetWeaponComponent();
+	TestNotNull(TEXT("weapon component exists"), Weapons);
+	if (!Weapons) return false;
+
+	bool bDeferredHookSawNoCurrentWeapon = false;
+	AActor* FailedVisualCandidate = nullptr;
+	const FDelegateHandle SpawnedHandle = World->AddOnActorSpawnedHandler(
+		FOnActorSpawned::FDelegate::CreateLambda(
+			[&FailedVisualCandidate](AActor* SpawnedActor)
+			{
+				if (IsValid(SpawnedActor)
+					&& SpawnedActor->GetClass() == AActor::StaticClass())
+					FailedVisualCandidate = SpawnedActor;
+			}));
+	AWeaponBase* Weapon = PlayerWeaponPresentationTest::EquipProfileWeapon(
+		*Weapons, AActor::StaticClass(),
+		&bDeferredHookSawNoCurrentWeapon);
+	World->RemoveOnActorSpawnedHandler(SpawnedHandle);
+	TestNotNull(TEXT("weapon survives visual attach failure"), Weapon);
+	TestTrue(TEXT("deferred test hook matches production assignment order"),
+		bDeferredHookSawNoCurrentWeapon);
+	TestNotNull(TEXT("failed visual candidate was spawned"),
+		FailedVisualCandidate);
+	TestTrue(TEXT("failed visual candidate is pending destruction"),
+		FailedVisualCandidate
+			&& FailedVisualCandidate->IsActorBeingDestroyed());
+	if (Weapon)
+	{
+		TestNull(TEXT("failed third-person visual is destroyed and released"),
+			PlayerWeaponPresentationTest::GetThirdPersonVisual(*Weapon));
+		TestTrue(TEXT("bare weapon mesh remains visible as fallback"),
+			IsValid(Weapon->GetWeaponMesh())
+				&& Weapon->GetWeaponMesh()->IsVisible());
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlayerWeaponSeatPlacementTest,
+	"Extraction.PlayerWeapon.Presentation.SeatPlacement",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FPlayerWeaponSeatPlacementTest::RunTest(const FString& Parameters)
+{
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	AExtractionPlayer* Player = World->SpawnActor<AExtractionPlayer>();
+	APlayerWeaponView* View = World->SpawnActor<APlayerWeaponView>();
+	TestNotNull(TEXT("player spawns"), Player);
+	TestNotNull(TEXT("view spawns"), View);
+	if (!Player || !View) return false;
+
+	const FTransform SeatRelative(
+		FRotator(7.f, -21.f, 13.f), FVector(14.f, -3.f, 8.f));
+	const FVector AuthoredArtScale(1.4f, 0.8f, 1.9f);
+	View->GetArtRoot()->SetRelativeScale3D(AuthoredArtScale);
+	View->GetWeaponSeatMarker()->SetRelativeTransform(SeatRelative);
+	TestTrue(TEXT("offset view remains valid"), View->InitializeView());
+	FTransform Placement = FTransform::Identity;
+	TestTrue(TEXT("offset seat resolves"),
+		UPlayerWeaponPresentationComponent::ResolveViewPlacement(
+			*View, EPlayerWeaponSeatPolicy::WeaponSeatMarker, Placement));
+
+	TestTrue(TEXT("test hand socket installs"),
+		PlayerWeaponPresentationTest::InstallHandSocket(*Player));
+	USkeletalMeshComponent* Mesh = Player->GetMesh();
+	TestNotNull(TEXT("player mesh exists"), Mesh);
+	if (!Mesh) return false;
+	const FName HandSocket(TEXT("ik_hand_gun"));
+	View->AttachToComponent(
+		Mesh,
+		FAttachmentTransformRules::SnapToTargetNotIncludingScale,
+		HandSocket);
+	View->GetRootComponent()->SetRelativeLocationAndRotation(
+		Placement.GetLocation(), Placement.GetRotation());
+	const FTransform Target = Mesh->GetSocketTransform(HandSocket);
+	TestTrue(TEXT("weapon seat lands on hand target"),
+		View->GetWeaponSeatMarker()->GetComponentLocation().Equals(
+			Target.GetLocation(), 0.01f));
+	TestTrue(TEXT("weapon seat orientation matches hand target"),
+		View->GetWeaponSeatMarker()->GetComponentQuat().Equals(
+			Target.GetRotation(), 0.001f));
+	TestTrue(TEXT("seating preserves authored art scale"),
+		View->GetArtRoot()->GetRelativeScale3D().Equals(AuthoredArtScale));
+
+	View->GetWeaponSeatMarker()->SetRelativeScale3D(FVector(1.2f));
+	TestFalse(TEXT("scaled seat marker is rejected"),
+		UPlayerWeaponPresentationComponent::ResolveViewPlacement(
+			*View, EPlayerWeaponSeatPolicy::WeaponSeatMarker, Placement));
+	View->GetWeaponSeatMarker()->SetRelativeScale3D(FVector::OneVector);
+	View->GetRootComponent()->SetRelativeScale3D(FVector(0.8f));
+	TestFalse(TEXT("scaled view root is rejected"),
+		UPlayerWeaponPresentationComponent::ResolveViewPlacement(
+			*View, EPlayerWeaponSeatPolicy::WeaponSeatMarker, Placement));
+	View->GetRootComponent()->SetRelativeScale3D(FVector::OneVector);
+	View->GetWeaponSeatMarker()->ConfigureMarker(EPlayerWeaponMarkerKind::AimPoint);
+	TestFalse(TEXT("missing typed seat rejects placement"),
+		UPlayerWeaponPresentationComponent::ResolveViewPlacement(
+			*View, EPlayerWeaponSeatPolicy::WeaponSeatMarker, Placement));
+	TestTrue(TEXT("legacy root policy remains identity"),
+		UPlayerWeaponPresentationComponent::ResolveViewPlacement(
+			*View, EPlayerWeaponSeatPolicy::LegacyViewRoot, Placement));
+	TestTrue(TEXT("legacy root placement is identity"),
+		Placement.Equals(FTransform::Identity));
 	return true;
 }
 
