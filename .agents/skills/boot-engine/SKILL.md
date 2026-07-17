@@ -35,8 +35,9 @@ How it guarantees **exactly one editor**:
 ```powershell
 $tok = [guid]::NewGuid().ToString()   # keep this value for the whole session
 ```
-If context was reset and you've lost `$tok`, that's fine: you will only ever ADOPT an existing
-editor (never duplicate) and you must **never auto-close** one you can't prove you booted.
+If context was reset and you've lost `$tok`, generate a new token and run `can-close`.
+ProjectExtract has standing user permission to close/rebuild/reopen, but only when the guard reports
+no other active chat; never close while the guard reports another user.
 
 `& "$guard" ...` below is shorthand for:
 `& "C:\Users\matth\Documents\Github\ProjectExtract\.agents\skills\boot-engine\engine-guard.ps1"`
@@ -48,7 +49,7 @@ editor (never duplicate) and you must **never auto-close** one you can't prove y
    & "$guard" -Action boot-check -Token $tok
    ```
    - `ADOPT <pid> owner=… build=fresh` → an editor is already up and its build contains current C++. **Do NOT launch, do NOT rebuild.** Skip to step 5, confirm the MCPs respond, and proceed.
-   - `ADOPT <pid> owner=… build=stale` → editor is up but a C++ source edit is newer than its DLL — **the running editor's base module (and any naive reboot) is missing that change.** To get it you need a close+rebuild: gate on `can-close` (if another chat is active, **ask the user**; don't yank it), close this project's editor, run `ensure-fresh-build.ps1` (step 2), then boot. `build=unknown` = no DLL to compare; treat as adopt-and-proceed unless you know you changed C++.
+   - `ADOPT <pid> owner=… build=stale` → editor is up but a C++ source edit is newer than its DLL — **the running editor's base module (and any naive reboot) is missing that change.** Run `can-close`; close+rebuild immediately when no other chat is active, otherwise wait for the active chat's restart. Then run `ensure-fresh-build.ps1` (step 2) and boot. `build=unknown` = no DLL to compare; treat as adopt-and-proceed unless you know you changed C++.
    - `BOOT` (or `BOOT (reclaimed stale lock)`) → nothing running and you now hold the boot lock. Continue to steps 2–4, then `register`.
    - `WAIT owner=…` → another chat is mid-boot right now. Wait ~20–30 s and re-run `boot-check`; it flips to `ADOPT` once their editor is up.
    - `DUPLICATE <pids>` → more than one editor is already running (a pre-existing mess). **Stop and tell the user** which PIDs — do not add a third; they decide which to close.
@@ -70,7 +71,7 @@ editor (never duplicate) and you must **never auto-close** one you can't prove y
    $p = Start-Process "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe" -ArgumentList '"C:\Users\matth\Documents\Github\ProjectExtract\Extraction\Extraction.uproject"' -PassThru
    & "$guard" -Action register -Token $tok -EditorPid $p.Id
    ```
-   `register` prints `REGISTERED <pid>` normally. If it prints `DEDUP-KILLED-SELF adopted=<pid>`, a duplicate had slipped through — the guard killed the editor you just launched and adopted the survivor; **don't relaunch**, just confirm the surviving editor's MCPs (step 5). You're now a co-user, not the owner, so you can't auto-close it.
+   `register` prints `REGISTERED <pid>` normally. If it prints `DEDUP-KILLED-SELF adopted=<pid>`, a duplicate had slipped through — the guard killed the editor you just launched and adopted the survivor; **don't relaunch**, just confirm the surviving editor's MCPs (step 5). Do not close while the guard reports another active chat.
    On a prior crash, add `-ddc=InstalledNoZenLocalFallback` and first kill **only this project's** frozen `UnrealEditor` / `CrashReportClientEditor` (match the `.uproject` in the command line — see the project-scoped kill in Gotchas; never blanket-kill all editors) (§1.7).
 
 4. **Start the VibeUE proxy** (idempotent):
@@ -85,11 +86,13 @@ editor (never duplicate) and you must **never auto-close** one you can't prove y
 
 6. **You're live.** Proceed with the in-engine task. Before the first edit in a VibeUE domain (blueprints/materials/UMG/etc.), run `manage_skills(action="list")` once, then load the matching skill — see `agent_docs/UnrealWorkflow.md` (the tooling map + gotchas). Note VibeUE needs its API key set in-editor on a fresh install. Optionally refresh your heartbeat (`& "$guard" -Action heartbeat -Token $tok`) when you do in-engine work, so other chats see this editor is actively in use.
 
-## Closing the editor — ALWAYS ask the user first (never auto-close, never stall, never yank another chat's editor)
+## Closing the editor — standing permission, guarded and project-scoped
 
-A full C++ rebuild needs the editor closed. The user multitasks several chats on this **one shared editor**, so the rule is simple: **before any close you ALWAYS ask the user — even when you own it.** You never auto-close, and you never get stuck either (asking IS the action). One shared working tree means *any* chat's rebuild already contains *your* saved changes, so often the answer is "let another chat reboot it and just listen."
+A full C++ rebuild needs the editor closed. The user has granted standing permission to close,
+build, and reopen ProjectExtract without another prompt. The guard still protects other active chats,
+and every process operation remains scoped to `Extraction.uproject`.
 
-1. **Ask the guard who's on it** (this fills in the question, it does not decide for you):
+1. **Ask the guard who's on it:**
    ```powershell
    & "$guard" -Action can-close -Token $tok
    ```
@@ -97,12 +100,10 @@ A full C++ rebuild needs the editor closed. The user multitasks several chats on
    - `OK <pids>` → you booted it, no other chat is active.
    - `BLOCKED not-owner owner=…` / `BLOCKED other-users=… pids=…` → another chat is using it.
 
-2. **ALWAYS ask the user before closing — use the available Codex user-question tool when present, otherwise ask a concise plain-text question:**
-   - **Q (quote the guard line):** "Close & rebuild this project's editor to bake in C++ changes? Guard: `<can-close output>`."
-   - **Option A — "Yes, rebuild now (no other chat working)"** → close + rebuild + reboot (step 3).
-   - **Option B — "No — another chat's using it; wait & listen for its restart"** → don't close; start the watcher (step 4).
-   - **Other** → the user types an explicit instruction (e.g. "nothing else is live, close it" = A; "leave it, I'll reboot shortly" = B).
-   Order the **guard-appropriate option first (it's the recommended one):** `BLOCKED` → put B first; `OK` → put A first. Always surface `owner=`/`pids=` so the user knows which chat. When the user gives no steer and the guard is `BLOCKED`, bias to B — they're usually multitasking.
+2. **Act on the guard result:**
+   - `NO-EDITOR` → skip closing and build.
+   - `OK <pids>` → close, rebuild, and reboot immediately under the standing permission (step 3).
+   - `BLOCKED …` → do not yank another chat's editor; start the watcher (step 4).
 
 3. **Option A — close (PROJECT-SCOPED), rebuild, reboot:**
    ```powershell
@@ -119,7 +120,7 @@ A full C++ rebuild needs the editor closed. The user multitasks several chats on
    Receive-Job $job -Wait
    ```
    - `RESTARTED pid=… dll=…` → editor rebooted on a fresh build that includes your changes. Confirm the MCPs respond and continue — **nothing to build or close.**
-   - `RESTART-TIMEOUT waited=…m` → no restart yet. Re-ask the user (if nothing else is actually live, fall to Option A and close it yourself).
+   - `RESTART-TIMEOUT waited=…m` → no restart yet. Re-run `can-close`; close under the standing permission if no other chat remains active, otherwise keep listening.
    Tip: tell the user (and any other chat) *what* your change is, so the chat doing the rebuild knows your edit is riding along — it always is, as long as your `.cpp/.h` is saved before their build starts.
 
 ## Are my changes in the build? (quick check — don't re-derive this each time)

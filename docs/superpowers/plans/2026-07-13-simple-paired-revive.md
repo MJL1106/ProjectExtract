@@ -133,9 +133,9 @@ Compile modified Blueprints with zero errors, save only modified assets, and rer
 
 Dispatch `ue5-reviewer` with the task goal, changed files, and this plan. Fix every `CRITICAL` or `WARNING` through `ue5-cpp-implementer`, then re-review until clean.
 
-- [ ] **Step 2: Confirm before closing the editor**
+- [ ] **Step 2: Guard and close the editor**
 
-Ask exactly: `Close the Unreal Editor to build?` and proceed only after `Yes, close now`.
+Use the standing permission: run the active engine guard, then close only the `Extraction.uproject` editor when no other chat is active.
 
 - [ ] **Step 3: Build and reboot**
 

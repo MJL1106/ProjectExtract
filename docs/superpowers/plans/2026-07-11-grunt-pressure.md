@@ -86,7 +86,7 @@
 
   Confirm shared awareness/focus paths are untouched, officer behavior is unchanged, Rusher defaults preserve legacy behavior, timers are cleared, and no per-tick work was added.
 
-- [ ] **Step 2: After explicit editor-close approval, build**
+- [ ] **Step 2: After the engine guard allows the project-scoped close, build**
 
   Close only the `Extraction.uproject` editor process, build `ExtractionEditor Win64 Development`, and require `Result: Succeeded` in the build log.
 
@@ -101,4 +101,3 @@
   Officer squad: existing coordinated flank/bounding behavior still runs.
 
   Officer killed mid-fight: no new flanks start; shared awareness remains active.
-

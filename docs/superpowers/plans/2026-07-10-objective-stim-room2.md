@@ -141,7 +141,7 @@
 - Create in editor: one `IA_UseStim` asset if Task 2 did not create it before the build
 - Modify in editor: the active gameplay mapping context and player Blueprint defaults
 
-- [ ] Ask the user fresh permission to close this project’s Unreal Editor.
+- [ ] Run the active engine guard; standing permission covers the project-scoped editor close.
 - [ ] Close only the Unreal Editor process whose command line contains `Extraction.uproject`.
 - [ ] Build `ExtractionEditor Win64 Development` and require `Result: Succeeded` in the log.
 - [ ] Reboot through the guarded boot-engine workflow and confirm NeoStack and VibeUE connectivity.
@@ -171,4 +171,3 @@
 ## File Note
 
 Primary source areas: `Components`, `World`, `Game`, `Character`, `UI`, `Tests`, `Extraction.Build.cs`, DemoMap, input assets, player Blueprint defaults, and `agent_docs/project_roadmap.md`.
-

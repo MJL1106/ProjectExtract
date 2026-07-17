@@ -499,9 +499,9 @@ Run `ue5-reviewer` plus `ue5-ui-specialist`; fix all warnings, compile WBP again
 
 Run one consolidated `ue5-reviewer` over all changed source with the approved spec and plan paths. Fix and re-review until no CRITICAL/WARNING remains. Do not build before this gate is clean.
 
-- [ ] **Step 2: Ask before closing, then full-build and reboot**
+- [ ] **Step 2: Guard, full-build, and reboot**
 
-Use `engine-guard.ps1 can-close`, ask the user fresh, close only the Extraction editor by `.uproject` command line, and build `ExtractionEditor Win64 Development`. Require `Result: Succeeded`; reboot through `boot-engine`; verify VibeUE and NeoStack respond.
+Use `engine-guard.ps1 can-close`, then use the standing permission to close only the Extraction editor by `.uproject` command line when no other chat is active, and build `ExtractionEditor Win64 Development`. Require `Result: Succeeded`; reboot through `boot-engine`; verify VibeUE and NeoStack respond.
 
 - [ ] **Step 3: Inspect the live Room 2 assets before editing**
 
@@ -559,5 +559,4 @@ Mark the Room 2 gameplay-spine items complete or in progress based on verified U
 - `ue5-cpp-implementer` on `gpt-5.6-terra`: World actors, door gate, interaction ownership.
 - `ue5-inengine-agent` on `gpt-5.6-terra`: UMG/assets/DemoMap wiring after build.
 - `ue5-reviewer` inheriting the current model: consolidated safety, replication, performance, and edge-case review after each task.
-
 

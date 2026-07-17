@@ -139,9 +139,9 @@ Re-dispatch C++ findings to the C++ implementer and asset/AnimBP findings to the
 - Consumes: clean reviewed source/assets.
 - Produces: successful editor build, live editor, and requirement-by-requirement runtime evidence.
 
-- [ ] **Step 1: Obtain fresh permission and close only ProjectExtract's editor**
+- [ ] **Step 1: Guard and close only ProjectExtract's editor**
 
-Ask `Close the Unreal Editor to build?` immediately before closing. Scope process termination to command lines containing `Extraction.uproject`.
+Use the standing permission after the active engine guard allows it. Scope process termination to command lines containing `Extraction.uproject`.
 
 - [ ] **Step 2: Build and verify the authoritative result**
 
