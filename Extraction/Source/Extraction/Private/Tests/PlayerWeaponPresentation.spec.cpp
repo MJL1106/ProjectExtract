@@ -9,6 +9,7 @@
 #include "Components/PrimitiveComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/WeaponComponent.h"
+#include "Data/PlayerWeaponAttachmentDefinition.h"
 #include "Data/PlayerWeaponPresentationProfile.h"
 #include "Data/WeaponDataAsset.h"
 #include "Engine/Engine.h"
@@ -186,6 +187,104 @@ namespace PlayerWeaponPresentationTest
 		for (TActorIterator<APlayerWeaponView> It(&World); It; ++It)
 			if (IsValid(*It) && !It->IsActorBeingDestroyed()) ++Count;
 		return Count;
+	}
+
+	int32 CountLiveAttachmentViews(UWorld& World)
+	{
+		int32 Count = 0;
+		for (TActorIterator<APlayerWeaponAttachmentView> It(&World); It; ++It)
+			if (IsValid(*It) && !It->IsActorBeingDestroyed()) ++Count;
+		return Count;
+	}
+
+	bool ResolvedSightsMatch(
+		const FPlayerWeaponResolvedSight& A,
+		const FPlayerWeaponResolvedSight& B)
+	{
+		return A.bIsValid == B.bIsValid
+			&& A.bUsesOptic == B.bUsesOptic
+			&& A.OpticId == B.OpticId
+			&& A.AimSourceInHandSpace.Equals(B.AimSourceInHandSpace)
+			&& FMath::IsNearlyEqual(
+				A.ADSSettings.FieldOfView, B.ADSSettings.FieldOfView)
+			&& FMath::IsNearlyEqual(
+				A.ADSSettings.TransitionTime, B.ADSSettings.TransitionTime)
+			&& FMath::IsNearlyEqual(
+				A.ADSSettings.SensitivityMultiplier,
+				B.ADSSettings.SensitivityMultiplier)
+			&& FMath::IsNearlyEqual(
+				A.ADSSettings.AimDistanceFromCameraCm,
+				B.ADSSettings.AimDistanceFromCameraCm)
+			&& FMath::IsNearlyEqual(
+				A.ADSSettings.EyeReliefCm, B.ADSSettings.EyeReliefCm);
+	}
+
+	UWeaponDataAsset* ConfigureOpticProfileWeapon(AWeaponBase& Weapon)
+	{
+		UWeaponDataAsset* Data = ConfigureProfileWeapon(Weapon);
+		UPlayerWeaponPresentationProfile* Profile =
+			IsValid(Data) ? Data->PlayerPresentationProfile.Get() : nullptr;
+		if (!IsValid(Data) || !IsValid(Profile)) return nullptr;
+
+		Data->WeaponType = EWeaponType::Rifle;
+		Profile->WeaponType = EWeaponType::Rifle;
+		Profile->ADSDefaults.FieldOfView = 70.f;
+		Profile->ADSDefaults.TransitionTime = 0.22f;
+		Profile->ADSDefaults.SensitivityMultiplier = 0.8f;
+		Profile->ADSDefaults.AimDistanceFromCameraCm = 47.f;
+		Profile->ADSDefaults.EyeReliefCm = 4.f;
+		Profile->MarkerRequirements.bRequireWeaponSeat = true;
+		Profile->MarkerRequirements.bRequireIronRear = true;
+		Profile->MarkerRequirements.bRequireIronFront = true;
+		Profile->MarkerRequirements.bRequireOpticMount = true;
+		Profile->DefaultOpticId = TEXT("optic.a");
+
+		Profile->CompatibleAttachments.Reset();
+		Profile->CompatibleAttachments.Reserve(4);
+		auto AddDefinition = [Profile](
+			FName Id,
+			EPlayerWeaponAttachmentSlot Slot,
+			EWeaponType CompatibleType)
+		{
+			UPlayerWeaponAttachmentDefinition* Definition =
+				NewObject<UPlayerWeaponAttachmentDefinition>(Profile);
+			check(Definition);
+			Definition->AttachmentId = Id;
+			Definition->Slot = Slot;
+			Definition->ViewClass =
+				APlayerWeaponAttachmentView::StaticClass();
+			Definition->CompatibleWeaponTypes.Add(CompatibleType);
+			Profile->CompatibleAttachments.Add(Definition);
+			return Definition;
+		};
+
+		UPlayerWeaponAttachmentDefinition* OpticA = AddDefinition(
+			TEXT("optic.a"),
+			EPlayerWeaponAttachmentSlot::Optic,
+			EWeaponType::Rifle);
+		OpticA->OpticOverride.bOverrideFieldOfView = true;
+		OpticA->OpticOverride.FieldOfView = 48.f;
+		OpticA->OpticOverride.bOverrideAimDistance = true;
+		OpticA->OpticOverride.AimDistanceFromCameraCm = 51.f;
+
+		UPlayerWeaponAttachmentDefinition* OpticB = AddDefinition(
+			TEXT("optic.b"),
+			EPlayerWeaponAttachmentSlot::Optic,
+			EWeaponType::Rifle);
+		OpticB->OpticOverride.bOverrideFieldOfView = true;
+		OpticB->OpticOverride.FieldOfView = 58.f;
+		OpticB->OpticOverride.bOverrideAimDistance = true;
+		OpticB->OpticOverride.AimDistanceFromCameraCm = 63.f;
+
+		AddDefinition(
+			TEXT("optic.incompatible"),
+			EPlayerWeaponAttachmentSlot::Optic,
+			EWeaponType::Pistol);
+		AddDefinition(
+			TEXT("grip.wrong-slot"),
+			EPlayerWeaponAttachmentSlot::UnderbarrelGrip,
+			EWeaponType::Rifle);
+		return Data;
 	}
 }
 
@@ -506,6 +605,8 @@ bool FPlayerWeaponProfileViewLifecycleTest::RunTest(const FString& Parameters)
 		0);
 
 	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	TestNotNull(TEXT("automation world exists"), World);
+	if (!World) return false;
 	AExtractionPlayer* Player =
 		PlayerWeaponPresentationTest::SpawnPlayerWithDefaultWeapon(World);
 	TestNotNull(TEXT("player spawned deferred"), Player);
@@ -908,6 +1009,518 @@ bool FPlayerWeaponSeatPlacementTest::RunTest(const FString& Parameters)
 			*View, EPlayerWeaponSeatPolicy::LegacyViewRoot, Placement));
 	TestTrue(TEXT("legacy root placement is identity"),
 		Placement.Equals(FTransform::Identity));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPlayerWeaponOpticLifecycleTest,
+	"Extraction.PlayerWeapon.Presentation.OpticLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FPlayerWeaponOpticLifecycleTest::RunTest(const FString& Parameters)
+{
+	AddExpectedMessagePlain(
+		TEXT("shipping without KitWeaponPoseAsset"),
+		ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains,
+		0);
+	AddExpectedMessagePlain(
+		TEXT("WeaponVisualMeshName 'WeaponMesh' not found"),
+		ELogVerbosity::Warning,
+		EAutomationExpectedMessageFlags::Contains,
+		0);
+
+	UWorld* World = FAutomationEditorCommonUtils::CreateNewMap();
+	AExtractionPlayer* Player =
+		PlayerWeaponPresentationTest::SpawnPlayerWithDefaultWeapon(World);
+	TestNotNull(TEXT("player spawns deferred"), Player);
+	if (!Player) return false;
+	if (!TestTrue(TEXT("player finishes with a valid hand socket"),
+		PlayerWeaponPresentationTest::FinishPlayerSpawn(Player)))
+		return false;
+
+	UWeaponComponent* Weapons = Player->GetWeaponComponent();
+	UPlayerWeaponPresentationComponent* Presentation =
+		Player->GetWeaponPresentationComponent();
+	AWeaponBase* InitialWeapon =
+		Weapons ? Weapons->GetCurrentWeapon() : nullptr;
+	TestNotNull(TEXT("weapon component exists"), Weapons);
+	TestNotNull(TEXT("presentation component exists"), Presentation);
+	TestNotNull(TEXT("initial weapon exists"), InitialWeapon);
+	if (!Weapons || !Presentation || !InitialWeapon) return false;
+
+
+	UWeaponDataAsset* InitialData =
+		PlayerWeaponPresentationTest::ConfigureOpticProfileWeapon(
+			*InitialWeapon);
+	UPlayerWeaponPresentationProfile* InitialProfile =
+		IsValid(InitialData)
+			? InitialData->PlayerPresentationProfile.Get()
+			: nullptr;
+	TestNotNull(TEXT("optic profile data is assigned"), InitialData);
+	TestNotNull(TEXT("optic profile exists"), InitialProfile);
+	if (!InitialData || !InitialProfile) return false;
+
+	Presentation->SetWeaponViewCreatedHookForTesting(
+		[](APlayerWeaponView& Candidate)
+		{
+			Candidate.GetIronRearMarker()->SetRelativeTransform(
+				FTransform(FQuat::Identity, FVector(14.f, 0.f, 5.f)));
+			Candidate.GetIronFrontMarker()->SetRelativeTransform(
+				FTransform(FQuat::Identity, FVector(44.f, 0.f, 5.f)));
+			Candidate.GetOpticMountMarker()->SetRelativeTransform(
+				FTransform(
+					FRotator(2.f, 3.f, -1.f),
+					FVector(20.f, 1.f, 7.f)));
+		});
+
+	int32 AttachmentViewsCreated = 0;
+	const FDelegateHandle AttachmentSpawnHandle =
+		World->AddOnActorSpawnedHandler(
+			FOnActorSpawned::FDelegate::CreateLambda(
+				[&AttachmentViewsCreated](AActor* SpawnedActor)
+				{
+					APlayerWeaponAttachmentView* Candidate =
+						Cast<APlayerWeaponAttachmentView>(
+							SpawnedActor);
+					if (!IsValid(Candidate)) return;
+
+					++AttachmentViewsCreated;
+					check(Candidate->GetAttachmentMountMarker());
+					check(Candidate->GetAimPointMarker());
+					Candidate->GetAttachmentMountMarker()->
+						SetRelativeTransform(
+							FTransform(
+								FRotator(-1.f, 5.f, 2.f),
+								FVector(-3.f, 1.f, 2.f)));
+					Candidate->GetAimPointMarker()->
+						SetRelativeTransform(
+							FTransform(
+								FRotator(-2.f, 1.f, 4.f),
+								FVector(4.f, 0.f, 3.f)));
+				}));
+
+	int32 SightEvents = 0;
+	bool bSightReadyBeforeEvent = true;
+	const FDelegateHandle SightHandle =
+		Presentation->OnPresentedSightChangedNative.AddLambda(
+			[Presentation, &SightEvents, &bSightReadyBeforeEvent](
+				const FPlayerWeaponResolvedSight& Sight)
+			{
+				++SightEvents;
+				bSightReadyBeforeEvent &=
+					PlayerWeaponPresentationTest::ResolvedSightsMatch(
+						Presentation->GetResolvedSight(), Sight);
+				bSightReadyBeforeEvent &=
+					Presentation->GetSelectedOpticId()
+					== Sight.OpticId;
+
+				APlayerWeaponAttachmentView* ActiveOptic =
+					Presentation->GetActiveOpticView();
+				if (Sight.bIsValid && Sight.bUsesOptic)
+				{
+					bSightReadyBeforeEvent &=
+						IsValid(ActiveOptic)
+						&& !ActiveOptic->IsActorBeingDestroyed()
+						&& ActiveOptic->IsViewInitialized();
+				}
+				else
+				{
+					bSightReadyBeforeEvent &= !IsValid(ActiveOptic);
+				}
+			});
+
+	APlayerController* Controller =
+		PlayerWeaponPresentationTest::PossessPlayerLocally(
+			World, Player);
+	TestNotNull(TEXT("local controller possesses player"), Controller);
+	if (!Controller)
+	{
+		Presentation->OnPresentedSightChangedNative.Remove(SightHandle);
+		World->RemoveOnActorSpawnedHandler(AttachmentSpawnHandle);
+		Presentation->SetWeaponViewCreatedHookForTesting({});
+		return false;
+	}
+
+	const FName OpticAId(TEXT("optic.a"));
+	const FName OpticBId(TEXT("optic.b"));
+	APlayerWeaponAttachmentView* DefaultOptic =
+		Presentation->GetActiveOpticView();
+	const FPlayerWeaponResolvedSight DefaultSight =
+		Presentation->GetResolvedSight();
+	TestNotNull(TEXT("default stable optic ID spawns a view"), DefaultOptic);
+	TestEqual(TEXT("default optic commits by stable ID"),
+		Presentation->GetSelectedOpticId(), OpticAId);
+	TestEqual(TEXT("default optic creates exactly one view"),
+		AttachmentViewsCreated, 1);
+	TestEqual(TEXT("default optic keeps exactly one live view"),
+		PlayerWeaponPresentationTest::CountLiveAttachmentViews(*World), 1);
+	TestTrue(TEXT("default optic view is initialized before publication"),
+		IsValid(DefaultOptic) && DefaultOptic->IsViewInitialized());
+	TestTrue(TEXT("default optic resolves a valid sight"),
+		DefaultSight.bIsValid && DefaultSight.bUsesOptic);
+	TestEqual(TEXT("default resolved sight keeps stable ID"),
+		DefaultSight.OpticId, OpticAId);
+	TestEqual(TEXT("default optic applies its FOV override"),
+		DefaultSight.ADSSettings.FieldOfView, 48.f);
+	TestEqual(TEXT("default optic applies its aim-distance override"),
+		DefaultSight.ADSSettings.AimDistanceFromCameraCm, 51.f);
+	TestEqual(TEXT("default optic publishes one sight edge"),
+		SightEvents, 1);
+	TestTrue(TEXT("default resolved state is ready before its event"),
+		bSightReadyBeforeEvent);
+	if (!DefaultOptic)
+	{
+		Presentation->OnPresentedSightChangedNative.Remove(SightHandle);
+		World->RemoveOnActorSpawnedHandler(AttachmentSpawnHandle);
+		Presentation->SetWeaponViewCreatedHookForTesting({});
+		return false;
+	}
+
+	const FName CommittedId = Presentation->GetSelectedOpticId();
+	APlayerWeaponAttachmentView* CommittedView =
+		Presentation->GetActiveOpticView();
+	const FPlayerWeaponResolvedSight CommittedSight =
+		Presentation->GetResolvedSight();
+	const int32 CommittedSightEvents = SightEvents;
+	const int32 CommittedCreatedViews = AttachmentViewsCreated;
+	auto TestRejectedSelection =
+		[this, Presentation, World, CommittedId, CommittedView,
+			CommittedSight, CommittedSightEvents, &SightEvents,
+			CommittedCreatedViews, &AttachmentViewsCreated](
+				FName RejectedId, const TCHAR* Description)
+		{
+			TestFalse(
+				FString::Printf(
+					TEXT("%s selection is rejected"), Description),
+				Presentation->SetSelectedOpticId(RejectedId));
+			TestEqual(
+				FString::Printf(
+					TEXT("%s cannot change the committed ID"),
+					Description),
+				Presentation->GetSelectedOpticId(),
+				CommittedId);
+			TestEqual(
+				FString::Printf(
+					TEXT("%s cannot swap the committed view"),
+					Description),
+				Presentation->GetActiveOpticView(),
+				CommittedView);
+			TestTrue(
+				FString::Printf(
+					TEXT("%s cannot change the resolved sight"),
+					Description),
+				PlayerWeaponPresentationTest::ResolvedSightsMatch(
+					Presentation->GetResolvedSight(),
+					CommittedSight));
+			TestEqual(
+				FString::Printf(
+					TEXT("%s cannot publish a sight event"),
+					Description),
+				SightEvents,
+				CommittedSightEvents);
+			TestEqual(
+				FString::Printf(
+					TEXT("%s cannot create an attachment view"),
+					Description),
+				AttachmentViewsCreated,
+				CommittedCreatedViews);
+			TestEqual(
+				FString::Printf(
+					TEXT("%s preserves one live attachment view"),
+					Description),
+				PlayerWeaponPresentationTest::CountLiveAttachmentViews(
+					*World),
+				1);
+		};
+
+	TestRejectedSelection(
+		FName(TEXT("optic.incompatible")),
+		TEXT("incompatible optic ID"));
+	TestRejectedSelection(
+		FName(TEXT("optic.missing")),
+		TEXT("missing optic ID"));
+	TestRejectedSelection(
+		FName(TEXT("grip.wrong-slot")),
+		TEXT("wrong-slot attachment ID"));
+	TestEqual(TEXT("all rejected selections preserve event count"),
+		SightEvents, CommittedSightEvents);
+
+	const int32 EventsBeforeSwap = SightEvents;
+	const int32 ViewsBeforeSwap = AttachmentViewsCreated;
+	TestTrue(TEXT("compatible optic B selection succeeds"),
+		Presentation->SetSelectedOpticId(OpticBId));
+	APlayerWeaponAttachmentView* OpticB =
+		Presentation->GetActiveOpticView();
+	const FPlayerWeaponResolvedSight OpticBSight =
+		Presentation->GetResolvedSight();
+	TestNotNull(TEXT("optic B owns an active view"), OpticB);
+	TestNotEqual(TEXT("optic B swaps the view once"),
+		OpticB, DefaultOptic);
+	TestTrue(TEXT("optic A is destroyed by the committed swap"),
+		!IsValid(DefaultOptic)
+			|| DefaultOptic->IsActorBeingDestroyed());
+	TestEqual(TEXT("optic B commits its stable ID"),
+		Presentation->GetSelectedOpticId(), OpticBId);
+	TestEqual(TEXT("optic B creates exactly one replacement view"),
+		AttachmentViewsCreated, ViewsBeforeSwap + 1);
+	TestEqual(TEXT("optic B emits exactly one sight edge"),
+		SightEvents, EventsBeforeSwap + 1);
+	TestEqual(TEXT("optic swap preserves one live attachment"),
+		PlayerWeaponPresentationTest::CountLiveAttachmentViews(*World), 1);
+	TestTrue(TEXT("optic B resolves valid optic ADS"),
+		OpticBSight.bIsValid && OpticBSight.bUsesOptic);
+	TestEqual(TEXT("optic B resolved sight keeps stable ID"),
+		OpticBSight.OpticId, OpticBId);
+	TestEqual(TEXT("optic B applies its FOV override"),
+		OpticBSight.ADSSettings.FieldOfView, 58.f);
+	TestEqual(TEXT("optic B applies its aim-distance override"),
+		OpticBSight.ADSSettings.AimDistanceFromCameraCm, 63.f);
+	TestTrue(TEXT("optic B state is ready before its event"),
+		bSightReadyBeforeEvent);
+
+	const int32 EventsBeforeReorder = SightEvents;
+	const int32 ViewsBeforeReorder = AttachmentViewsCreated;
+	APlayerWeaponAttachmentView* ViewBeforeReorder =
+		Presentation->GetActiveOpticView();
+	const FPlayerWeaponResolvedSight SightBeforeReorder =
+		Presentation->GetResolvedSight();
+	InitialProfile->CompatibleAttachments.Swap(0, 1);
+	Presentation->RefreshPresentation();
+	TestEqual(TEXT("array reorder preserves optic B stable ID"),
+		Presentation->GetSelectedOpticId(), OpticBId);
+	TestEqual(TEXT("array reorder preserves the active optic instance"),
+		Presentation->GetActiveOpticView(), ViewBeforeReorder);
+	TestTrue(TEXT("array reorder preserves resolved ADS"),
+		PlayerWeaponPresentationTest::ResolvedSightsMatch(
+			Presentation->GetResolvedSight(),
+			SightBeforeReorder));
+	TestEqual(TEXT("array reorder creates no attachment view"),
+		AttachmentViewsCreated, ViewsBeforeReorder);
+	TestEqual(TEXT("array reorder emits no sight edge"),
+		SightEvents, EventsBeforeReorder);
+
+	UPlayerWeaponAttachmentDefinition* InactiveOpticA =
+		InitialProfile->FindAttachmentDefinition(OpticAId);
+	UPlayerWeaponAttachmentDefinition* SelectedOpticB =
+		InitialProfile->FindAttachmentDefinition(OpticBId);
+	TestNotNull(TEXT("inactive optic A definition exists"),
+		InactiveOpticA);
+	TestNotNull(TEXT("selected optic B definition exists"),
+		SelectedOpticB);
+	if (!InactiveOpticA || !SelectedOpticB)
+	{
+		Presentation->OnPresentedSightChangedNative.Remove(SightHandle);
+		World->RemoveOnActorSpawnedHandler(AttachmentSpawnHandle);
+		Presentation->SetWeaponViewCreatedHookForTesting({});
+		return false;
+	}
+
+	const int32 EventsBeforeInactiveRemoval = SightEvents;
+	const int32 ViewsBeforeInactiveRemoval = AttachmentViewsCreated;
+	const FPlayerWeaponResolvedSight SightBeforeInactiveRemoval =
+		Presentation->GetResolvedSight();
+	APlayerWeaponAttachmentView* ViewBeforeInactiveRemoval =
+		Presentation->GetActiveOpticView();
+	TestEqual(TEXT("inactive optic A definition is removed once"),
+		InitialProfile->CompatibleAttachments.Remove(InactiveOpticA), 1);
+	Presentation->RefreshPresentation();
+	TestEqual(TEXT("inactive removal preserves selected optic B ID"),
+		Presentation->GetSelectedOpticId(), OpticBId);
+	TestEqual(TEXT("inactive removal preserves selected optic B view"),
+		Presentation->GetActiveOpticView(), ViewBeforeInactiveRemoval);
+	TestTrue(TEXT("inactive removal preserves resolved optic B ADS"),
+		PlayerWeaponPresentationTest::ResolvedSightsMatch(
+			Presentation->GetResolvedSight(),
+			SightBeforeInactiveRemoval));
+	TestEqual(TEXT("inactive removal creates no attachment view"),
+		AttachmentViewsCreated, ViewsBeforeInactiveRemoval);
+	TestEqual(TEXT("inactive removal emits no sight edge"),
+		SightEvents, EventsBeforeInactiveRemoval);
+
+	InitialProfile->CompatibleAttachments.Add(InactiveOpticA);
+	Presentation->RefreshPresentation();
+	TestEqual(TEXT("restoring inactive optic A remains presentation-silent"),
+		SightEvents, EventsBeforeInactiveRemoval);
+	TestEqual(TEXT("restoring inactive optic A preserves optic B view"),
+		Presentation->GetActiveOpticView(), ViewBeforeInactiveRemoval);
+
+	const int32 EventsBeforeSelectedRemoval = SightEvents;
+	const int32 ViewsBeforeSelectedRemoval = AttachmentViewsCreated;
+	APlayerWeaponAttachmentView* ViewBeforeSelectedRemoval =
+		Presentation->GetActiveOpticView();
+	TestEqual(TEXT("selected optic B definition is removed once"),
+		InitialProfile->CompatibleAttachments.Remove(SelectedOpticB), 1);
+	Presentation->RefreshPresentation();
+	APlayerWeaponAttachmentView* DefaultAfterSelectedRemoval =
+		Presentation->GetActiveOpticView();
+	const FPlayerWeaponResolvedSight SightAfterSelectedRemoval =
+		Presentation->GetResolvedSight();
+	TestEqual(TEXT("selected removal falls back by default stable ID"),
+		Presentation->GetSelectedOpticId(), OpticAId);
+	TestNotNull(TEXT("selected removal spawns the default optic"),
+		DefaultAfterSelectedRemoval);
+	TestNotEqual(TEXT("selected removal replaces the stale optic view"),
+		DefaultAfterSelectedRemoval, ViewBeforeSelectedRemoval);
+	TestTrue(TEXT("selected removal destroys the stale optic view"),
+		!IsValid(ViewBeforeSelectedRemoval)
+			|| ViewBeforeSelectedRemoval->IsActorBeingDestroyed());
+	TestEqual(TEXT("selected removal creates exactly one default view"),
+		AttachmentViewsCreated, ViewsBeforeSelectedRemoval + 1);
+	TestEqual(TEXT("selected removal emits exactly one sight edge"),
+		SightEvents, EventsBeforeSelectedRemoval + 1);
+	TestEqual(TEXT("selected removal preserves one live optic"),
+		PlayerWeaponPresentationTest::CountLiveAttachmentViews(*World), 1);
+	TestTrue(TEXT("selected removal resolves the default optic"),
+		SightAfterSelectedRemoval.bIsValid
+			&& SightAfterSelectedRemoval.bUsesOptic
+			&& SightAfterSelectedRemoval.OpticId == OpticAId);
+	TestEqual(TEXT("selected removal reapplies default optic settings"),
+		SightAfterSelectedRemoval.ADSSettings.AimDistanceFromCameraCm,
+		51.f);
+	TestTrue(TEXT("selected removal commits before its event"),
+		bSightReadyBeforeEvent);
+
+	const int32 EventsBeforeIrons = SightEvents;
+	const int32 ViewsBeforeIrons = AttachmentViewsCreated;
+	TestTrue(TEXT("NAME_None selects authored iron sights"),
+		Presentation->SetSelectedOpticId(NAME_None));
+	const FPlayerWeaponResolvedSight IronSight =
+		Presentation->GetResolvedSight();
+	TestEqual(TEXT("irons commit NAME_None"),
+		Presentation->GetSelectedOpticId(), NAME_None);
+	TestNull(TEXT("irons atomically clear the active optic"),
+		Presentation->GetActiveOpticView());
+	TestTrue(TEXT("active default optic is destroyed when irons commit"),
+		!IsValid(DefaultAfterSelectedRemoval)
+			|| DefaultAfterSelectedRemoval->IsActorBeingDestroyed());
+	TestEqual(TEXT("irons leave no live attachment views"),
+		PlayerWeaponPresentationTest::CountLiveAttachmentViews(*World), 0);
+	TestEqual(TEXT("irons do not create an attachment view"),
+		AttachmentViewsCreated, ViewsBeforeIrons);
+	TestEqual(TEXT("irons emit one resolved sight edge"),
+		SightEvents, EventsBeforeIrons + 1);
+	TestTrue(TEXT("paired irons resolve valid ADS"),
+		IronSight.bIsValid && !IronSight.bUsesOptic);
+	TestEqual(TEXT("resolved irons retain NAME_None"),
+		IronSight.OpticId, NAME_None);
+	TestEqual(TEXT("irons retain profile FOV"),
+		IronSight.ADSSettings.FieldOfView, 70.f);
+	TestEqual(TEXT("irons retain the profile aim distance"),
+		IronSight.ADSSettings.AimDistanceFromCameraCm, 47.f);
+	TestTrue(TEXT("irons are committed before their event"),
+		bSightReadyBeforeEvent);
+
+	const int32 EventsBeforeUnpossess = SightEvents;
+	Controller->UnPossess();
+	Presentation->RefreshPresentation();
+	TestNull(TEXT("unpossess clears the active weapon view"),
+		Presentation->GetActiveWeaponView());
+	TestNull(TEXT("unpossess clears the active optic view"),
+		Presentation->GetActiveOpticView());
+	TestFalse(TEXT("unpossess invalidates resolved sight"),
+		Presentation->GetResolvedSight().bIsValid);
+	TestEqual(TEXT("unpossess emits one sight clear edge"),
+		SightEvents, EventsBeforeUnpossess + 1);
+	TestEqual(TEXT("unpossess leaves no live optic"),
+		PlayerWeaponPresentationTest::CountLiveAttachmentViews(*World), 0);
+
+	Controller->Possess(Player);
+	Presentation->RefreshPresentation();
+	const FPlayerWeaponResolvedSight RepossessedSight =
+		Presentation->GetResolvedSight();
+	TestEqual(TEXT("repossess retains selected irons"),
+		Presentation->GetSelectedOpticId(), NAME_None);
+	TestNull(TEXT("repossess does not fabricate an optic"),
+		Presentation->GetActiveOpticView());
+	TestTrue(TEXT("repossess restores valid paired irons"),
+		RepossessedSight.bIsValid && !RepossessedSight.bUsesOptic);
+	TestEqual(TEXT("repossess emits one restored sight edge"),
+		SightEvents, EventsBeforeUnpossess + 2);
+	TestEqual(TEXT("repossess creates no attachment view"),
+		AttachmentViewsCreated, ViewsBeforeIrons);
+	TestTrue(TEXT("possession lifecycle events see committed state"),
+		bSightReadyBeforeEvent);
+
+	const int32 EventsBeforeReplacement = SightEvents;
+	const int32 ViewsBeforeReplacement = AttachmentViewsCreated;
+	UWeaponDataAsset* ReplacementData = nullptr;
+	Weapons->SetPreFinishWeaponSpawnHookForTesting(
+		[&ReplacementData](AWeaponBase& Weapon)
+		{
+			ReplacementData =
+				PlayerWeaponPresentationTest::
+					ConfigureOpticProfileWeapon(Weapon);
+		});
+	Weapons->EquipWeapon(AWeaponBase::StaticClass());
+	AWeaponBase* ReplacementWeapon = Weapons->GetCurrentWeapon();
+	if (IsValid(ReplacementWeapon)
+		&& !ReplacementWeapon->HasActorBegunPlay())
+		ReplacementWeapon->DispatchBeginPlay();
+	Weapons->SetPreFinishWeaponSpawnHookForTesting({});
+	Presentation->RefreshPresentation();
+
+	UPlayerWeaponPresentationProfile* ReplacementProfile =
+		IsValid(ReplacementData)
+			? ReplacementData->PlayerPresentationProfile.Get()
+			: nullptr;
+	APlayerWeaponAttachmentView* ReplacementOptic =
+		Presentation->GetActiveOpticView();
+	const FPlayerWeaponResolvedSight ReplacementSight =
+		Presentation->GetResolvedSight();
+	TestNotNull(TEXT("replacement profile weapon equips"),
+		ReplacementWeapon);
+	TestNotNull(TEXT("replacement profile data is assigned"),
+		ReplacementData);
+	TestNotNull(TEXT("replacement profile exists"),
+		ReplacementProfile);
+	TestNotNull(TEXT("replacement default optic spawns"),
+		ReplacementOptic);
+	TestEqual(TEXT("replacement shares the same default stable ID"),
+		ReplacementProfile
+			? ReplacementProfile->DefaultOpticId
+			: NAME_None,
+		OpticAId);
+	TestEqual(TEXT("replacement reinitializes its default optic ID"),
+		Presentation->GetSelectedOpticId(), OpticAId);
+	TestNotEqual(TEXT("same default ID still creates a new optic view"),
+		ReplacementOptic, DefaultOptic);
+	TestEqual(TEXT("replacement creates exactly one optic view"),
+		AttachmentViewsCreated, ViewsBeforeReplacement + 1);
+	TestEqual(TEXT("replacement preserves one live optic"),
+		PlayerWeaponPresentationTest::CountLiveAttachmentViews(*World), 1);
+	TestEqual(TEXT("replacement clears the stale sight then publishes the new sight"),
+		SightEvents, EventsBeforeReplacement + 2);
+	TestTrue(TEXT("replacement resolves valid default optic ADS"),
+		ReplacementSight.bIsValid
+			&& ReplacementSight.bUsesOptic
+			&& ReplacementSight.OpticId == OpticAId);
+	TestEqual(TEXT("replacement default reapplies its ADS override"),
+		ReplacementSight.ADSSettings.AimDistanceFromCameraCm, 51.f);
+	TestTrue(TEXT("replacement state is ready before its event"),
+		bSightReadyBeforeEvent);
+
+	APlayerWeaponView* ReplacementWeaponView =
+		Presentation->GetActiveWeaponView();
+	TestNotNull(TEXT("replacement weapon view exists"),
+		ReplacementWeaponView);
+	Presentation->SetWeaponViewHidden(true);
+	TestTrue(TEXT("suppression hides the weapon view"),
+		IsValid(ReplacementWeaponView)
+			&& ReplacementWeaponView->IsHidden());
+	TestTrue(TEXT("suppression hides the optic with its weapon"),
+		IsValid(ReplacementOptic)
+			&& ReplacementOptic->IsHidden());
+	Presentation->SetWeaponViewHidden(false);
+	TestTrue(TEXT("suppression release restores the weapon view"),
+		IsValid(ReplacementWeaponView)
+			&& !ReplacementWeaponView->IsHidden());
+	TestTrue(TEXT("suppression release restores the optic"),
+		IsValid(ReplacementOptic)
+			&& !ReplacementOptic->IsHidden());
+
+	Presentation->OnPresentedSightChangedNative.Remove(SightHandle);
+	World->RemoveOnActorSpawnedHandler(AttachmentSpawnHandle);
+	Presentation->SetWeaponViewCreatedHookForTesting({});
 	return true;
 }
 

@@ -63,6 +63,7 @@ The user is the director, not the engineer. Cut everything that isn't load-beari
 
 - **In-engine work = invoke `inengine-checklist` skill EVERY TIME — no exceptions.** Whenever the response would tell the user to do something in the Unreal editor (open a BP, set a property, place an actor, add a component, edit a DataAsset, create a child class), invoke `inengine-checklist` first. The skill enforces a tight numbered-list format with exact menu paths and verbatim values, and strips all code/architecture commentary. Even a single editor step goes through it. If the work is large (BP graph edits, repetitive bulk, many reference wires), use `ue5-inengine-agent` instead — do not freehand prose for editor instructions.
 - **Codex MUST NOT start PIE, Simulate, inject gameplay input, or autonomously playtest.** The user owns all gameplay playtesting. Codex may build, boot the editor, inspect/edit assets at edit time, and provide concise test scenarios, but must stop before pressing Play.
+- **Do not use test-driven development for Unreal Engine work unless the user explicitly asks for it.** Implement from the real source and in-engine asset state, then use focused automation only as a final regression check where it adds value.
 
 **The loop:** Plan → Execute → Review → Fix-findings → Review → ... → Done.
 Continue the implement/review loop until no `CRITICAL` or `WARNING` findings remain.

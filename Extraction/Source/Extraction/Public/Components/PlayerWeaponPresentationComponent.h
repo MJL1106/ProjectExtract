@@ -5,12 +5,15 @@
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "Core/ExtractionTypes.h"
+#include "Data/PlayerWeaponPresentationTypes.h"
 #include "PlayerWeaponPresentationComponent.generated.h"
 
 class AExtractionPlayer;
 class AWeaponBase;
+class APlayerWeaponAttachmentView;
 class APlayerWeaponView;
 struct FStreamableHandle;
+class UPlayerWeaponAttachmentDefinition;
 class UPlayerWeaponPresentationProfile;
 class UWeaponComponent;
 enum class EPlayerWeaponSeatPolicy : uint8;
@@ -34,6 +37,8 @@ DECLARE_MULTICAST_DELEGATE_OneParam(FOnPresentationActiveChangedNative, bool);
 DECLARE_MULTICAST_DELEGATE(FOnPresentedShotNative);
 DECLARE_MULTICAST_DELEGATE_TwoParams(FOnPresentedAmmoChangedNative, int32, int32);
 DECLARE_MULTICAST_DELEGATE_OneParam(FOnPresentedReloadPhaseChangedNative, EWeaponReloadPhase);
+DECLARE_MULTICAST_DELEGATE_OneParam(
+	FOnPresentedSightChangedNative, const FPlayerWeaponResolvedSight&);
 
 /**
  * Event-driven owner of the player's weapon presentation state.
@@ -61,6 +66,7 @@ public:
 	FOnPresentedShotNative OnPresentedShotNative;
 	FOnPresentedAmmoChangedNative OnPresentedAmmoChangedNative;
 	FOnPresentedReloadPhaseChangedNative OnPresentedReloadPhaseChangedNative;
+	FOnPresentedSightChangedNative OnPresentedSightChangedNative;
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Presentation")
 	AWeaponBase* GetCurrentWeapon() const { return CurrentWeapon.Get(); }
@@ -88,6 +94,25 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Presentation|View")
 	APlayerWeaponView* GetActiveWeaponView() const { return ActiveWeaponView; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Presentation|ADS")
+	APlayerWeaponAttachmentView* GetActiveOpticView() const
+	{
+		return ActiveOpticView;
+	}
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Presentation|ADS")
+	FName GetSelectedOpticId() const { return SelectedOpticId; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Presentation|ADS")
+	FPlayerWeaponResolvedSight GetResolvedSight() const { return ResolvedSight; }
+
+	/** Reconstructs the single canonical aim anchor consumed by the kit adapter. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Presentation|ADS")
+	bool GetResolvedAimSourceWorld(FTransform& OutAimSourceWorld) const;
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Presentation|ADS")
+	bool SetSelectedOpticId(FName OpticId);
 
 	UFUNCTION(BlueprintPure, Category = "Weapon|Presentation|View")
 	bool HasCachedViewPlacement() const { return bHasCachedViewPlacement; }
@@ -145,6 +170,52 @@ private:
 		uint32 RequestGeneration);
 	void CancelPendingWeaponViewLoad();
 	void DestroyWeaponView();
+	void SynchronizeWeaponSight();
+	void InitializeSightSelection(
+		AWeaponBase& Weapon,
+		UPlayerWeaponPresentationProfile& Profile);
+	bool CommitIronSight(const UPlayerWeaponPresentationProfile& Profile);
+	bool CommitIronSightFallback(
+		const UPlayerWeaponPresentationProfile& Profile);
+	bool SelectOpticDefinition(
+		AWeaponBase& Weapon,
+		UPlayerWeaponPresentationProfile& Profile,
+		const UPlayerWeaponAttachmentDefinition& Definition);
+	bool SpawnAndCommitOptic(
+		AWeaponBase& Weapon,
+		UPlayerWeaponPresentationProfile& Profile,
+		const UPlayerWeaponAttachmentDefinition& Definition,
+		TSubclassOf<APlayerWeaponAttachmentView> ViewClass,
+		const FSoftObjectPath& ViewClassPath);
+	APlayerWeaponAttachmentView* CreateOpticView(
+		TSubclassOf<APlayerWeaponAttachmentView> ViewClass);
+	bool PlaceOpticView(APlayerWeaponAttachmentView& View) const;
+	bool ResolveIronSight(
+		const UPlayerWeaponPresentationProfile& Profile,
+		FPlayerWeaponResolvedSight& OutSight) const;
+	bool ResolveOpticSight(
+		const UPlayerWeaponAttachmentDefinition& Definition,
+		const APlayerWeaponAttachmentView& View,
+		const UPlayerWeaponPresentationProfile& Profile,
+		FPlayerWeaponResolvedSight& OutSight) const;
+	bool GetHandSocketWorld(FTransform& OutTransform) const;
+	void CommitResolvedSight(const FPlayerWeaponResolvedSight& Sight);
+	void ClearResolvedSight();
+	void RecoverFromFailedOpticSelection(
+		const UPlayerWeaponPresentationProfile& Profile,
+		FName FailedOpticId);
+	void DestroyOpticView();
+	void RequestOpticViewLoad(
+		AWeaponBase& Weapon,
+		UPlayerWeaponPresentationProfile& Profile,
+		const UPlayerWeaponAttachmentDefinition& Definition);
+	void HandleOpticViewClassLoaded(
+		TWeakObjectPtr<AWeaponBase> RequestedWeapon,
+		TWeakObjectPtr<UPlayerWeaponPresentationProfile> RequestedProfile,
+		FName LoadedOpticId,
+		FSoftObjectPath RequestedClassPath,
+		uint32 RequestGeneration);
+	void CancelPendingOpticViewLoad();
 	bool SpawnWeaponView(
 		AWeaponBase& Weapon,
 		const UPlayerWeaponPresentationProfile& Profile,
@@ -169,7 +240,7 @@ private:
 	UFUNCTION()
 	void HandleDBNOStateChanged(bool bNewIsDBNO, float BleedoutDuration);
 
-	const UPlayerWeaponPresentationProfile* ResolveProfile(
+	UPlayerWeaponPresentationProfile* ResolveProfile(
 		const AWeaponBase* Weapon) const;
 
 	UPROPERTY(Transient)
@@ -181,6 +252,12 @@ private:
 	UPROPERTY(Transient)
 	TObjectPtr<APlayerWeaponView> ActiveWeaponView;
 
+	UPROPERTY(Transient)
+	TObjectPtr<APlayerWeaponAttachmentView> ActiveOpticView;
+
+	UPROPERTY(Transient)
+	FPlayerWeaponResolvedSight ResolvedSight;
+
 	/** Validated class retained for the current weapon across local view recreation. */
 	UPROPERTY(Transient)
 	TObjectPtr<UClass> CachedLoadedViewClass;
@@ -188,13 +265,25 @@ private:
 	TWeakObjectPtr<AExtractionPlayer> PlayerOwner;
 	TWeakObjectPtr<AWeaponBase> LastRoutedWeapon;
 	TWeakObjectPtr<AWeaponBase> ViewWeapon;
+	TWeakObjectPtr<AWeaponBase> SightWeapon;
+	TWeakObjectPtr<UPlayerWeaponPresentationProfile> SightProfile;
 	TWeakObjectPtr<AWeaponBase> PendingViewLoadWeapon;
+	TWeakObjectPtr<AWeaponBase> PendingOpticLoadWeapon;
+	TWeakObjectPtr<UPlayerWeaponPresentationProfile> PendingOpticLoadProfile;
 	TSharedPtr<FStreamableHandle> PendingViewLoad;
+	TSharedPtr<FStreamableHandle> PendingOpticLoad;
 	FSoftObjectPath PendingViewClassPath;
+	FSoftObjectPath PendingOpticClassPath;
+	FSoftObjectPath ActiveOpticClassPath;
 	FSoftObjectPath CachedLoadedViewClassPath;
 	FSoftObjectPath CachedPlacementViewClassPath;
 	FTransform CachedViewPlacement = FTransform::Identity;
 	uint32 ViewLoadGeneration = 0;
+	uint32 OpticLoadGeneration = 0;
+	FName PendingOpticId = NAME_None;
+	/** Requested preference; committed selection remains SelectedOpticId. */
+	FName RequestedOpticId = NAME_None;
+	FName SelectedOpticId = NAME_None;
 
 	int32 CurrentAmmo = 0;
 	int32 ReserveAmmo = 0;
@@ -210,6 +299,7 @@ private:
 	bool bHasCachedViewPlacement = false;
 	bool bVisibilitySourcesBound = false;
 	bool bLegacyPresentationCleared = false;
+	bool bForceNextSightPublish = false;
 	EPlayerWeaponViewSuppressionReason ViewSuppressionReasons =
 		EPlayerWeaponViewSuppressionReason::None;
 

@@ -111,6 +111,29 @@ struct EXTRACTION_API FPlayerWeaponADSDefaults
 };
 
 USTRUCT(BlueprintType)
+struct EXTRACTION_API FPlayerWeaponResolvedSight
+{
+	GENERATED_BODY()
+
+	UPROPERTY(BlueprintReadOnly, Category = "Weapon|Presentation|ADS")
+	bool bIsValid = false;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Weapon|Presentation|ADS")
+	bool bUsesOptic = false;
+
+	/** Stable optic attachment ID. NAME_None identifies the authored iron sights. */
+	UPROPERTY(BlueprintReadOnly, Category = "Weapon|Presentation|ADS")
+	FName OpticId = NAME_None;
+
+	/** Canonical aim anchor relative to the animated ik_hand_gun socket. */
+	UPROPERTY(BlueprintReadOnly, Category = "Weapon|Presentation|ADS")
+	FTransform AimSourceInHandSpace = FTransform::Identity;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Weapon|Presentation|ADS")
+	FPlayerWeaponADSDefaults ADSSettings;
+};
+
+USTRUCT(BlueprintType)
 struct EXTRACTION_API FPlayerWeaponSupportHandProfile
 {
 	GENERATED_BODY()
