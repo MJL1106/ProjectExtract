@@ -44,6 +44,42 @@ namespace WeaponConstants
 	static constexpr float ShellReloadSafetyMargin = 1.5f;
 }
 
+namespace
+{
+	/** The kit visual item (BP_Item_Base child stored in BP_ExtractionCharacter.SpawnedItem) keeps its own
+	 *  AmmoCount/MaxAmmo vars, and its Event Reload chain gates the reload ANIMATION on them. Nothing depletes
+	 *  them while our C++ owns firing, so after the first reload tops them up every later reload skips the
+	 *  animation. Mirror the real counts into it via its SetAmmo BP function whenever our ammo changes. */
+	void SyncKitVisualItemAmmo(AActor* OwnerActor, int32 InCurrentAmmo, int32 InReserveAmmo)
+	{
+		if (!IsValid(OwnerActor)) return;
+		const FObjectProperty* ItemProp = CastField<FObjectProperty>(OwnerActor->GetClass()->FindPropertyByName(TEXT("SpawnedItem")));
+		if (!ItemProp) return;
+		UObject* Item = ItemProp->GetObjectPropertyValue_InContainer(OwnerActor);
+		if (!IsValid(Item)) return;
+		UFunction* SetAmmoFn = Item->FindFunction(TEXT("SetAmmo"));
+		if (!SetAmmoFn || SetAmmoFn->ParmsSize != sizeof(int32) * 2) return;
+		struct { int32 AmmoCount; int32 MaxAmmo; } Params{ InCurrentAmmo, InReserveAmmo };
+		Item->ProcessEvent(SetAmmoFn, &Params);
+	}
+
+	/** C++-initiated reloads (auto-reload on empty, held-fire dry reload) never pass through the kit
+	 *  character's IA_Reload chain, so the kit item's Event Reload — which owns the arms + weapon-mesh
+	 *  reload animation — doesn't fire for them. Trigger it directly; the kit chain's own Do Once and
+	 *  ammo gates make a duplicate call from the manual R-key path a no-op. */
+	void TriggerKitVisualItemReload(AActor* OwnerActor)
+	{
+		if (!IsValid(OwnerActor)) return;
+		const FObjectProperty* ItemProp = CastField<FObjectProperty>(OwnerActor->GetClass()->FindPropertyByName(TEXT("SpawnedItem")));
+		if (!ItemProp) return;
+		UObject* Item = ItemProp->GetObjectPropertyValue_InContainer(OwnerActor);
+		if (!IsValid(Item)) return;
+		UFunction* ReloadFn = Item->FindFunction(TEXT("Reload"));
+		if (!ReloadFn || ReloadFn->ParmsSize != 0) return;
+		Item->ProcessEvent(ReloadFn, nullptr);
+	}
+}
+
 static TAutoConsoleVariable<int32> CVarShowBulletTracers(
 	TEXT("weapon.ShowTracers"),
 	0,
@@ -594,6 +630,7 @@ void AWeaponBase::FireShot()
 	{
 		CurrentAmmo = FMath::Max(CurrentAmmo - 1, 0);
 		OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+		SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 	}
 
 	// Hitscan on server
@@ -1389,6 +1426,8 @@ void AWeaponBase::Reload()
 			UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetActorLocation(), WeaponData->ReloadNoiseLoudness, GetOwner(), WeaponData->ReloadNoiseRange, TEXT("Reload"));
 	}
 
+	TriggerKitVisualItemReload(GetOwner());
+
 	// Stop firing
 	bWantsToFire = false;
 	if (const UWorld* World = GetWorld())
@@ -1431,6 +1470,7 @@ void AWeaponBase::OnReloadFinished()
 			FireReadyTimeSeconds = GetWorld()->GetTimeSeconds() + WeaponData->PostReloadFireDelay;
 
 		OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+		SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 
 		// Safety net: snap the magazine home if the notify-end was missed (montage interrupted, etc.).
 		ReattachMagazine();
@@ -1487,6 +1527,7 @@ void AWeaponBase::HandleShellInserted()
 	if (!WeaponData->bInfiniteReserve)
 		ReserveAmmo = FMath::Max(ReserveAmmo - 1, 0);
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 
 	const bool bMore = CurrentAmmo < WeaponData->MagazineSize
 		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
@@ -1761,6 +1802,7 @@ void AWeaponBase::InitializeAmmo()
 	CurrentAmmo = WeaponData->MagazineSize;
 	ReserveAmmo = WeaponData->DefaultReserveAmmo;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 }
 
 int32 AWeaponBase::AddReserveAmmo(int32 Amount)
@@ -1769,6 +1811,7 @@ int32 AWeaponBase::AddReserveAmmo(int32 Amount)
 
 	ReserveAmmo += Amount;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 	return Amount;
 }
 
@@ -1789,6 +1832,7 @@ void AWeaponBase::OnRep_CurrentState()
 void AWeaponBase::OnRep_CurrentAmmo()
 {
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 }
 
 // ---- IKitWeaponInterface ----
@@ -2002,6 +2046,7 @@ void AWeaponBase::KitSetAmmo_Implementation(int32 AmmoCount, int32 MaxAmmo)
 
 	bDryFireLogged = false;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 }
 
 // ---- AI Damage Mitigation ----

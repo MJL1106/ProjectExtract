@@ -47,3 +47,48 @@ All facts below verified live in the editor (VibeUE python) or in C++ source on 
 ## Editor/session state at audit time
 
 Editor PID 54988 on `Extraction.uproject`, level `L_EnemyGym` open. Adaptation + plan committed: `fc64cf69` (3 uassets + roadmap), `99ca3775` (plan doc).
+
+---
+
+# Phase 1 round 1 — SHIPPED in-engine 2026-07-19, awaiting PIE (uncommitted)
+
+All edits disk-verified via package reload. NOT committed yet — commit after user PIE pass.
+
+1. **Authored weapon anims** (python AnimDataController, 30fps, smoothstep-interpolated keys from the kit's sampled timing):
+   - `/Game/Core/Weapons/Anims/Anim_Weapon_InfimaAR_Reload` (1.567s) — `Magazine` bone: drop starts 0.67s, bottom −10.6cm with −20° pitch tilt @0.86s, reinsert, seated 1.18s.
+   - `/Game/Core/Weapons/Anims/Anim_Weapon_InfimaAR_ReloadEmpty` (1.867s) — mag free-falls out (z−36 @0.33s), 1-frame swap to hand position (18.7,−27,−26.4 comp delta), arcs back, seats 1.21s; `Bolt` held −9.9cm back from t=0, slams forward 1.79→1.867s.
+   - Kit-timing source data and the keyframe tables are re-derivable: sample `Anim_Weapon_AmericanRifle_Reload*` w_magazine/w_bolt LOCAL per frame; kit local→comp delta = flip X,Y (w_frame is Y-180). Infima bone-local == component space (identity rots, `Grip` parent at origin).
+2. **Mag follows the bone**: `BP_Weapon_AmericanRifle` UserConstructionScript, after `Parent: Construction Script` → `Attach Component To Component` (Target=`SM_AssaultRifle_Magazine`, Parent=`Item_Mesh`, Socket=`Magazine`, rules KeepWorld×3, Weld=false). Node handle `F0D12D5842619DC59F4AA7A13071D8A0`. SCS `AttachToName` is NOT scriptable (no python/NeoStack surface) — the UCS attach is the scriptable equivalent.
+3. **Notify repoint (in-place)**: `Anim_Arms_AmericanRifle_Reload`/`_ReloadEmpty` `AN_WeaponAnim.Anim` → the two Infima anims above. In-place because BOTH play paths (weapon BP + our `AM_Kit_Rifle_Reload` montage) source these arms sequences; the kit originals (`Anim_Weapon_AmericanRifle_*`) are dead to us. If a second rifle-family gun (SMG) arrives sharing these arms anims, THAT is the point to duplicate per weapon.
+4. **3P gun**: `BP_Rifle.WeaponMesh` (CDO subobject) = `SK_AssaultRifle_Frame` (same as `BP_EnemyAssaultRifle`). Frame only — no mag on the 3P gun (enemies ship the same way).
+
+Known-unchecked: casing eject spawn point (`AN_WeaponBulletCasing` on the fire arms anim — Infima frame has no sockets; kit probably uses the weapon BP's `Muzzle`/component, user reports fire looks fine). Possible double-mag if `SK_AssaultRifle_Frame` turns out to contain skinned mag geometry (unlikely — Infima ships the mag as the separate SM we attached).
+
+Next after PIE: grip/left-hand + gun position tuning (`DT_RifleAnimationValues` BasePoseLoc/Rot, NormalLeftHandLoc/Rot, F12 runtime UI) — needs user in the loop; then Phase 2 attachments.
+
+## "Only the first reload animates" — long-standing bug, SOLVED (user-confirmed in PIE)
+
+The reload arms+gun animation is owned by the KIT ITEM actor, not by any montage on the character:
+`SpawnedItem` (spawned in `BP_ExtractionCharacter` `Event OnWeaponEquipped` from `GetKitVisualWeaponClass`) is a
+`BP_Item_Base → BP_Weapon_AutomaticBase → BP_Weapon_AmericanRifle` actor. The char's `IA_Reload` → direct `Reload`
+call on it → **`BP_Weapon_AutomaticBase` Event Reload** → gates `MaxAmmo <= 0` (reserve) and
+`AmmoCount < WeaponCapacity` → Do Once → `AC_ProceduralAnimation.Play Animation` (dynamic slot montage on the
+linked anim instance tagged `upperbody`, slot `defaultslot`) + plays the item's `WeaponAnim` on `Item_Mesh`.
+
+**Root cause:** the kit item's LOCAL `AmmoCount`/`MaxAmmo` never deplete (our C++ owns firing), so the first reload
+tops `AmmoCount` to `WeaponCapacity` and every later reload fails the `AmmoCount < WeaponCapacity` gate. (Item CDO
+spawns at 12/120 — why reload #1 always passed.)
+
+**Fix (WeaponBase.cpp, cpp-only):** two file-static reflection helpers —
+- `SyncKitVisualItemAmmo()` after every `OnAmmoChanged.Broadcast`: pushes our `CurrentAmmo`/`ReserveAmmo` into the
+  kit item via `FindFunction("SetAmmo")` + `ProcessEvent` (owner property `SpawnedItem` looked up by name; no-op for
+  AI weapons whose owners lack it).
+- `TriggerKitVisualItemReload()` in `Reload()`: C++-initiated reloads (auto-reload on empty / held-fire dry reload)
+  never pass through the char's `IA_Reload` chain, so C++ fires the kit item's `Reload` event directly; the kit
+  chain's Do Once + gates make the duplicate from the manual R path a no-op.
+
+Gotchas discovered on the way: `BP_Item_Base` does NOT implement `KitWeaponInterface` (migration doc section A never
+landed) — char→item calls are direct (SpawnedItem is BP_Item_Base-typed), and `KitSetAmmo` messages to the kit item
+no-op. NeoStack `find_nodes` cannot surface another BP's functions/vars (action DB is context-blind) — cross-BP calls
+are unauthorable via MCP; use the C++ reflection push pattern instead. The kit-item reload logic lives in
+`Interactables/WeaponBases/BP_Weapon_AutomaticBase` — findable only by binary-grepping uassets (`findstr /M /S`).
