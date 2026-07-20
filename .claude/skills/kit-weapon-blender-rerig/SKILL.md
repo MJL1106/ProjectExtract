@@ -37,10 +37,10 @@ The kit's char anims (arms + gun) are authored against the kit weapon skeleton (
 - **Anim check in UE:** preview the kit reload on the SKM — mag drops + reinserts, bolt slams; a mag that vanishes = bind-pose mismatch (see Phase 2 ⚠️).
 - **Ground truth if hands look wrong:** hand pose ≠ gun mesh. Measure live in PIE: `hand_l` position in gun space (make_relative_transform of Item_Mesh world vs `ik_hand_gun` socket). Kit-correct rifle reference: hand_l ≈ (7.6, 11.8, −1.2). If the measurement matches but looks wrong, suspect the project's anim-stack assets diverging from kit-stock — diff CDO T3D exports and AnimPose samples against a pristine kit project before touching the gun.
 
-## Polish loop (kit doc: "do not fix this in Unreal")
-1. User F8-moves the spawned item in PIE → read `item.root_component.relative_location` (gun-space delta, cm).
-2. Blender: `mesh.location += (UE_X, −UE_Y, UE_Z) / 100` (UE comp → Blender axis map; Z is 1:1), save .blend, re-export.
-3. Deferred reimport (materials/slots survive `replace_existing`). Iterate.
+## Polish loop — TWO different levers, pick by intent
+The kit IKs the hands onto the ITEM, so F8-moving the item in PIE moves gun **and hands together**.
+- **User F8-placed the item in PIE ("gun should sit here")** → that's an ASSEMBLY move: read `item.root_component.relative_location/rotation` and write it into the item BP's `ik_hand_gun_SocketOffset` transform (translation cm + rotation). Do NOT bake this into the mesh — mesh baking shifts gun-vs-hands and reads as "the hands moved".
+- **Gun wrong relative to the HANDS (palm floating off the handguard, trigger finger misses)** → THAT's the Blender mesh bake (kit doc: "do not fix this in Unreal"): `mesh.location += (UE_X, −UE_Y, UE_Z) / 100` (UE comp → Blender axis map; Z is 1:1), save .blend, re-export, deferred reimport (materials/slots survive `replace_existing`).
 
 ## Misc gotchas
 - Editor-locked uassets can't be overwritten by file copy — reimport the FBX inside that editor instead.
