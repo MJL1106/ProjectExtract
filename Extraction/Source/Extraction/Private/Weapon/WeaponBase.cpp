@@ -333,6 +333,10 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 FVector AWeaponBase::GetMuzzleLocation() const
 {
+	// The kit FP item's Muzzle component is the designer-placed barrel tip; the hidden TP frame
+	// has no Muzzle socket, so without this the fallback is the actor (hand) location.
+	if (IsValid(FirstPersonMuzzle))
+		return FirstPersonMuzzle->GetComponentLocation();
 	if (IsValid(WeaponMesh) && WeaponMesh->DoesSocketExist(WeaponConstants::MuzzleSocketName))
 		return WeaponMesh->GetSocketLocation(WeaponConstants::MuzzleSocketName);
 	return GetActorLocation();
@@ -939,9 +943,16 @@ void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocat
 		MuzzleFlashComponent->Activate(true);
 
 	// First-person flash on the kit FP gun — the TP flash above is OwnerNoSee.
-	EnsureFirstPersonMuzzleFlashComponent();
-	if (IsValid(FirstPersonMuzzleFlashComponent))
-		FirstPersonMuzzleFlashComponent->Activate(true);
+	// The kit's Muzzle slot component only carries a mesh when a muzzle attachment
+	// (suppressor) is equipped via the modding screen — no mesh = bare muzzle = flash.
+	const UStaticMeshComponent* MuzzleSlot = Cast<UStaticMeshComponent>(FirstPersonMuzzle);
+	const bool bMuzzleAttachmentEquipped = IsValid(MuzzleSlot) && IsValid(MuzzleSlot->GetStaticMesh());
+	if (!bMuzzleAttachmentEquipped)
+	{
+		EnsureFirstPersonMuzzleFlashComponent();
+		if (IsValid(FirstPersonMuzzleFlashComponent))
+			FirstPersonMuzzleFlashComponent->Activate(true);
+	}
 
 	// Bullet tracer: one-shot pooled Niagara streak along the fire line.
 	SpawnTracer(MuzzleLocation, EndPoint);
@@ -2131,8 +2142,8 @@ void AWeaponBase::EnsureFirstPersonMuzzleFlashComponent()
 		FirstPersonMuzzle,
 		NAME_None,
 		FVector::ZeroVector,
-		FRotator::ZeroRotator,
-		EAttachLocation::SnapToTarget,
+		WeaponData->FirstPersonMuzzleFlashRotation,
+		EAttachLocation::KeepRelativeOffset,
 		false,  // bAutoDestroy
 		false); // bAutoActivate
 

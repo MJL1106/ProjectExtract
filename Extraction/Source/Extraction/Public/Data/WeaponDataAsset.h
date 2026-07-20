@@ -229,6 +229,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
 	TObjectPtr<UNiagaraSystem> MuzzleFlashFX;
 
+	/** Relative rotation applied to the first-person muzzle flash where the kit item's Muzzle
+	 *  component axes don't match the FX forward axis (e.g. Infima frames are Y-forward while
+	 *  the flash emits along X — set Yaw=90 there). Zero = aligned with the Muzzle component. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	FRotator FirstPersonMuzzleFlashRotation = FRotator::ZeroRotator;
+
 	/** Niagara system spawned per shot as a bullet tracer streak along the fire line.
 	 *  Null = no tracer. Spawned at the muzzle, oriented toward the end point, engine-pooled
 	 *  via ENCPoolMethod::AutoRelease (satisfies >1/sec pooling rule without a hand-rolled pool). */

@@ -92,3 +92,81 @@ landed) — char→item calls are direct (SpawnedItem is BP_Item_Base-typed), an
 no-op. NeoStack `find_nodes` cannot surface another BP's functions/vars (action DB is context-blind) — cross-BP calls
 are unauthorable via MCP; use the C++ reflection push pattern instead. The kit-item reload logic lives in
 `Interactables/WeaponBases/BP_Weapon_AutomaticBase` — findable only by binary-grepping uassets (`findstr /M /S`).
+
+---
+
+# Phase 2 round 1 — attachments wired into the kit modding framework (2026-07-20, disk-verified, uncommitted)
+
+## How the kit attachment system actually works (recon)
+
+- Attachment state lives in `ST_Item.Attachments` (`ST_Attachments`: enums `ENUM_Sights` Empty/Holosight/Scope,
+  `ENUM_Laser` Empty/Laser/Flash, `ENUM_Muzzle` Empty/Supressor/MuzzleBreak, `ENUM_LeftHand` Normal/Vertical/Angled/Akimbo).
+- `BP_Weapon_AutomaticBase` `Event SpawnAttachments` switches on those enums and assigns STATIC MESHES from
+  per-weapon item VARIABLES (`OpticSightMesh`, `ScopeSightMesh`, `LaserMesh`, `SuppressorMesh`, `CompensatorMesh`,
+  `VerticalMesh`, `AngledMesh`, `FrontSightMesh`, `RearSightMesh`) onto the inherited components
+  (`OpticSight`/`Laser`/`Muzzle`/`Grip`/`FrontSight`/`RearSight`), spawns the scope render-target actor and `BP_Laser`,
+  swaps hand pose + FOV/ADS recalc. **The item's `Mesh` var (= `SK_AssaultRifle_Frame`) is what feeds `Item_Mesh`** —
+  earlier open question closed. Item var `WeaponAnim` = kit-skeleton fire anim → silently no-ops on the Infima frame
+  (bolt doesn't cycle while firing — polish item: author an Infima-skeleton fire anim like the reload ones).
+- The in-game modding screen exists: `Blueprints/Widgets/UI_WeaponModding`, opened via `IA_Modding`.
+- ADS socket convention confirmed kit-wide: sight/optic meshes carry `FrontAimPoint`/`RearAimPoint` sockets
+  (kit `SM_FrontSight`/`SM_RearSight`/`SM_Rifle_Sight_1`/`_2` all have them; the user's Infima iron sockets follow it).
+- The future loadout menu's contract = write `ST_Item.Attachments` + call `SpawnAttachments` — kit-native, nothing to build.
+
+## What was wired (all data, no graph changes)
+
+`BP_Weapon_AmericanRifle` CDO vars: OpticSightMesh=`SM_Attachment_Scope_Small`, ScopeSightMesh=`SM_Attachment_Scope`,
+LaserMesh=`SM_Attachment_Laser`, SuppressorMesh=`SM_Attachment_Silencer`, VerticalMesh=`SM_Attachment_Grip_Vertical`,
+AngledMesh=`SM_Attachment_Grip_Angled`, FrontSightMesh=`SM_AssaultRifle_Sight_Front`, RearSightMesh=`SM_AssaultRifle_Sight_Rear`.
+CompensatorMesh left None (Infima ships no muzzle brake — the MuzzleBreak enum option shows nothing).
+`RearAimPoint` sockets added to both Infima scope meshes at bounds-derived rear-lens positions
+(Scope_Small: (0,−1.59,2.74); Scope: (0,−3.92,3.06)) — nudge these numerically if ADS-through-optic misaligns.
+
+## Open items for the PIE pass
+
+- Kit `OpticSight`/`Grip`/`Muzzle`/`Laser` component POSITIONS on the Infima frame are inherited from BP_Item_Base's
+  SCS + child ICH overrides (not scriptable/readable offline) — where attachments visually land is PIE-observed;
+  fix-ups = component transform edits in the editor (or live-PIE reads to measure).
+- The user's SCS-added Infima sight/grip components may now DUPLICATE the enum-driven ones (two rear sights / two
+  grips visible when an attachment is equipped) — if so, retire the SCS copies (positions recorded in this doc).
+- `UI_WeaponModding` untested with the adaptation.
+
+---
+
+# Phase 2 round 2 — attachments WORKING end to end (2026-07-20, user-confirmed in PIE)
+
+User repositioned the inherited slots onto the Infima frame in-editor and deleted the SCS duplicate sight/grip
+components. Modding screen (J / `IA_Modding`) now swaps sights/scope/suppressor/grips with working ADS through each.
+
+**⚠️ The 8 attachment mesh vars on `BP_Weapon_AmericanRifle` were found WIPED (all None) after the user's
+compile/save round** — cause of "no sights by default + swaps spawn nothing" (the Sights-Empty branch writes
+`FrontSightMesh`/`RearSightMesh` onto the slots, so None erases the irons). Re-wired via NeoStack `a:set` on the CDO
++ compile + save, disk-verified via package reload. If it recurs after an in-editor save, re-run that wiring.
+
+**Axis conventions (the whole round in one line): Infima attachment meshes are authored Y-forward; every kit FX/beam
+emits along local X.** Fixes shipped:
+
+- **FP muzzle flash** (the one the player sees) is OUR C++ `FirstPersonMuzzleFlashComponent`, NOT the kit graph —
+  new `WeaponDataAsset.FirstPersonMuzzleFlashRotation` (FRotator, default zero) applied via KeepRelativeOffset in
+  `EnsureFirstPersonMuzzleFlashComponent`; `DA_AssaultRifle` + `_Suppressed` set to yaw 90.
+- **Tracer origin**: `GetMuzzleLocation()` now prefers the `FirstPersonMuzzle` anchor (kit Muzzle comp at the barrel
+  tip) — was falling back to actor (hand) location since the Infima frame has no `Muzzle` socket.
+- **Suppressed = no flash**: FP flash activation skipped when the Muzzle slot component carries a mesh (kit only
+  sets it when a muzzle attachment is equipped; Empty clears it). No reflection into the BP enum needed.
+- **Kit graph flash/ring/smoke** (dead code for player fire, fixed anyway): retargeted from nonexistent Item_Mesh
+  socket `muzzle` to the `Muzzle` component + shared `Make Rotator` yaw 90 (handle `18021EFF...`).
+- **Laser/flashlight beam**: kit attaches `BP_Laser.Mesh` to the Laser slot with KeepRelative, preserving the kit
+  mesh's authored yaw-180 → sideways beam on the Infima frame. Fix = `Set Relative Location And Rotation` spliced
+  after BOTH laser-variant attach nodes in `BP_Weapon_AutomaticBase` (handles `3B182DA3...` laser, `EC01294C...`
+  flashlight), rotation from `Make Rotator` yaw **+90** (handle `A8CEDF8A...`; -90 points into the gun). The nodes'
+  `New Location` pin = beam-origin micro-offset lever (cm, comp space: Y fwd / Z up), currently 0 — user declined
+  further tuning. Component rotations stay mesh-correct (0) — never rotate the slot comps for FX.
+- Sockets added: `OpticAimpoint` on both Infima scopes (kit optic-ADS socket name; the earlier `RearAimPoint` ones
+  remain, harmless), `LaserPoint` on `SM_Attachment_Laser` (unused after the graph fix, harmless). The scope
+  render-actor attach node (`D63D56EB...`) briefly had its Socket Name set to LaserPoint by mistake — reverted to "".
+
+**Grip facts for the next round**: Infima grips = `SM_Attachment_Grip_Vertical` / `_Grip_Angled` /
+`_Grip_Angled_Short` (all `_Common/Meshes`). Kit `ENUM_LeftHand` = Normal/Vertical/Angled/Akimbo — only TWO
+mesh-bearing options (`VerticalMesh`/`AngledMesh` vars), each with its own left-hand pose. Two grip choices max
+without extending the enum + SpawnAttachments switch + `UI_WeaponModding`; choosing WHICH two meshes fill the slots
+is free (data-only var swap).
