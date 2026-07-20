@@ -331,6 +331,12 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	if (ReloadAction)
 		EnhancedInput->BindAction(ReloadAction, ETriggerEvent::Started, this, &AExtractionPlayer::ReloadStart);
 
+	if (EquipPrimaryAction)
+		EnhancedInput->BindAction(EquipPrimaryAction, ETriggerEvent::Started, this, &AExtractionPlayer::EquipPrimaryInput);
+
+	if (EquipSecondaryAction)
+		EnhancedInput->BindAction(EquipSecondaryAction, ETriggerEvent::Started, this, &AExtractionPlayer::EquipSecondaryInput);
+
 	if (ADSAction)
 	{
 		EnhancedInput->BindAction(ADSAction, ETriggerEvent::Started, this, &AExtractionPlayer::ADSStart);
@@ -518,6 +524,26 @@ void AExtractionPlayer::ReloadStart(const FInputActionValue& Value)
 	if (!IsValid(WeaponComponent)) return;
 
 	WeaponComponent->StartReload();
+}
+
+void AExtractionPlayer::EquipPrimaryInput(const FInputActionValue& Value)
+{
+	if (bIsDBNO) return;
+	if (bIsReviving || bBeingRevivedAnimActive) return;
+	if (IsInTraversal()) return;
+	if (!IsValid(WeaponComponent)) return;
+
+	WeaponComponent->SwitchToPrimary();
+}
+
+void AExtractionPlayer::EquipSecondaryInput(const FInputActionValue& Value)
+{
+	if (bIsDBNO) return;
+	if (bIsReviving || bBeingRevivedAnimActive) return;
+	if (IsInTraversal()) return;
+	if (!IsValid(WeaponComponent)) return;
+
+	WeaponComponent->SwitchToSecondary();
 }
 
 void AExtractionPlayer::ADSStart(const FInputActionValue& Value)

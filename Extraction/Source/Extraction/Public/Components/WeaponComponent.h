@@ -25,8 +25,13 @@ public:
 
 	// ---- Weapon Control ----
 
-	/** Spawn and equip a weapon by class */
+	/** Spawn and equip a weapon into the primary slot by class */
 	void EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass);
+
+	/** Activate the primary/secondary slot weapon (1 / 2 keys). Server-authoritative;
+	 *  blocked while the current weapon is reloading or the owner is DBNO/in a takedown. */
+	void SwitchToPrimary();
+	void SwitchToSecondary();
 
 	/** Begin firing. bAuthorityTakedownSnapshot = true when the authority has confirmed a
 	 *  companion shoot-takedown is armed at trigger-pull time (first shot only is exempt). */
@@ -58,12 +63,23 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Config")
 	TSubclassOf<AWeaponBase> DefaultWeaponClass;
 
+	/** Secondary-slot weapon class spawned on BeginPlay (2 key). None = single-weapon loadout. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Config")
+	TSubclassOf<AWeaponBase> DefaultSecondaryWeaponClass;
+
 private:
 
 	// ---- Replicated State ----
 
 	UPROPERTY(ReplicatedUsing = OnRep_CurrentWeapon)
 	TObjectPtr<AWeaponBase> CurrentWeapon;
+
+	/** Slot weapons — both spawned on BeginPlay, both persist their own ammo across switches. */
+	UPROPERTY(Replicated)
+	TObjectPtr<AWeaponBase> PrimaryWeapon;
+
+	UPROPERTY(Replicated)
+	TObjectPtr<AWeaponBase> SecondaryWeapon;
 
 	/** Previous weapon — cached in OnRep so we can detach it if a swap occurs without destroy */
 	UPROPERTY()
@@ -76,7 +92,17 @@ private:
 	 *  Consumed (cleared) on the first OnWeaponFiredCallback. */
 	bool bNextShotStealthExempt = false;
 
+	/** Spawn + attach + init a slot weapon. Spawns hidden — SetActiveWeapon unhides on activation. */
+	AWeaponBase* SpawnWeaponActor(TSubclassOf<AWeaponBase> WeaponClass);
+
+	/** Authority: make NewWeapon the held weapon. Hides/silences the old slot, rebinds the fire
+	 *  delegate, syncs aim state, and fires the kit-visual equip flow. Never re-inits ammo. */
+	void SetActiveWeapon(AWeaponBase* NewWeapon);
+
 	// ---- Server RPCs ----
+
+	UFUNCTION(Server, Reliable)
+	void Server_SwitchWeapon(uint8 SlotIndex);
 
 	UFUNCTION(Server, Reliable)
 	void Server_StartFire();

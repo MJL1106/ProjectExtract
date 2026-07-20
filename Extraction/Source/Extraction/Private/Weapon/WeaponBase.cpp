@@ -78,6 +78,24 @@ namespace
 		if (!ReloadFn || ReloadFn->ParmsSize != 0) return;
 		Item->ProcessEvent(ReloadFn, nullptr);
 	}
+
+	/** The kit's procedural fire feel (arms + gun kick via AC_ProceduralAnimation::RecoilAnimation and
+	 *  the arms fire anim) is normally driven by the kit item's own Trigger flow, which our C++ fire
+	 *  path bypasses — so the camera moved but the hands didn't. Our item BPs implement a cosmetic-only
+	 *  FireKick(bADS) event mirroring that chain; invoke it per local shot. No-ops when the item BP
+	 *  has no FireKick (kit originals, enemies, companion). */
+	void TriggerKitVisualItemFireKick(AActor* OwnerActor, bool bADS)
+	{
+		if (!IsValid(OwnerActor)) return;
+		const FObjectProperty* ItemProp = CastField<FObjectProperty>(OwnerActor->GetClass()->FindPropertyByName(TEXT("SpawnedItem")));
+		if (!ItemProp) return;
+		UObject* Item = ItemProp->GetObjectPropertyValue_InContainer(OwnerActor);
+		if (!IsValid(Item)) return;
+		UFunction* KickFn = Item->FindFunction(TEXT("FireKick"));
+		if (!KickFn || KickFn->ParmsSize != sizeof(bool)) return;
+		bool bParam = bADS;
+		Item->ProcessEvent(KickFn, &bParam);
+	}
 }
 
 static TAutoConsoleVariable<int32> CVarShowBulletTracers(
@@ -647,7 +665,10 @@ void AWeaponBase::FireShot()
 	if (OwnerIface && IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled())
 	{
 		if (IsValid(Cast<APlayerController>(OwnerPawn->GetController())))
+		{
 			ApplyRecoil();
+			TriggerKitVisualItemFireKick(GetOwner(), bOwnerIsAiming);
+		}
 	}
 
 	OnWeaponFired.Broadcast();
@@ -1824,6 +1845,12 @@ int32 AWeaponBase::AddReserveAmmo(int32 Amount)
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
 	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 	return Amount;
+}
+
+void AWeaponBase::ResyncVisualAmmo()
+{
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 }
 
 // ---- RepNotify ----

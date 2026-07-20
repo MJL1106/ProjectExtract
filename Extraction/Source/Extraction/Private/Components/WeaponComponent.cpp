@@ -30,6 +30,8 @@ void UWeaponComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(UWeaponComponent, CurrentWeapon);
+	DOREPLIFETIME(UWeaponComponent, PrimaryWeapon);
+	DOREPLIFETIME(UWeaponComponent, SecondaryWeapon);
 	DOREPLIFETIME_CONDITION(UWeaponComponent, bIsAiming, COND_SkipOwner);
 }
 
@@ -42,9 +44,19 @@ void UWeaponComponent::BeginPlay()
 	OwnerIface = Cast<IExtractionPlayerInterface>(OwnerActor);
 	if (!OwnerIface) return;
 
-	// Server spawns default weapon
-	if (OwnerActor->HasAuthority() && DefaultWeaponClass)
-		EquipWeapon(DefaultWeaponClass);
+	// Server spawns both slot weapons; primary starts in hand
+	if (OwnerActor->HasAuthority())
+	{
+		if (DefaultWeaponClass)
+			PrimaryWeapon = SpawnWeaponActor(DefaultWeaponClass);
+		if (DefaultSecondaryWeaponClass)
+			SecondaryWeapon = SpawnWeaponActor(DefaultSecondaryWeaponClass);
+
+		if (IsValid(PrimaryWeapon))
+			SetActiveWeapon(PrimaryWeapon);
+		else if (IsValid(SecondaryWeapon))
+			SetActiveWeapon(SecondaryWeapon);
+	}
 }
 
 void UWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -53,6 +65,10 @@ void UWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->OnWeaponFired.RemoveAll(this);
+	if (IsValid(PrimaryWeapon))
+		PrimaryWeapon->OnWeaponFired.RemoveAll(this);
+	if (IsValid(SecondaryWeapon))
+		SecondaryWeapon->OnWeaponFired.RemoveAll(this);
 
 	OwnerIface = nullptr;
 
@@ -68,54 +84,116 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 
 	bNextShotStealthExempt = false;
 
-	// Destroy existing weapon
-	if (IsValid(CurrentWeapon))
+	// Replace the primary-slot weapon
+	if (IsValid(PrimaryWeapon))
 	{
-		CurrentWeapon->Destroy();
-		CurrentWeapon = nullptr;
+		if (CurrentWeapon == PrimaryWeapon)
+			CurrentWeapon = nullptr;
+		PrimaryWeapon->Destroy();
+		PrimaryWeapon = nullptr;
 	}
 
 	if (!WeaponClass) return;
 
-	UWorld* World = GetWorld();
-	if (!IsValid(World)) return;
+	PrimaryWeapon = SpawnWeaponActor(WeaponClass);
+	if (IsValid(PrimaryWeapon))
+		SetActiveWeapon(PrimaryWeapon);
+}
 
-	ACharacter* OwnerChar = Cast<ACharacter>(OwnerActor);
+AWeaponBase* UWeaponComponent::SpawnWeaponActor(TSubclassOf<AWeaponBase> WeaponClass)
+{
+	if (!WeaponClass) return nullptr;
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return nullptr;
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = OwnerActor;
 	SpawnParams.Instigator = Cast<APawn>(OwnerActor);
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	CurrentWeapon = World->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
-	if (!IsValid(CurrentWeapon)) return;
+	AWeaponBase* Weapon = World->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
+	if (!IsValid(Weapon)) return nullptr;
 
 	// Attach to the kit IK-rig gun bone (ik_hand_gun) so AC_ProceduralAnimation drives the weapon transform
+	ACharacter* OwnerChar = Cast<ACharacter>(OwnerActor);
 	if (IsValid(OwnerChar))
 	{
 		USkeletalMeshComponent* BodyMesh = OwnerChar->GetMesh();
 		if (IsValid(BodyMesh))
 		{
-			CurrentWeapon->AttachToComponent(
+			Weapon->AttachToComponent(
 				BodyMesh,
 				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
 				KitWeaponAttachSocket
 			);
-			SeatWeaponGripSocket();
 		}
 	}
 
-	CurrentWeapon->InitializeAmmo();
+	Weapon->InitializeAmmo();
+	Weapon->SetWeaponHidden(true); // slots spawn holstered; SetActiveWeapon unhides
+	return Weapon;
+}
+
+void UWeaponComponent::SetActiveWeapon(AWeaponBase* NewWeapon)
+{
+	if (!OwnerIface || !IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return;
+	if (!IsValid(NewWeapon) || NewWeapon == CurrentWeapon) return;
+
+	if (IsValid(CurrentWeapon))
+	{
+		if (CurrentWeapon->IsReloading()) return; // mid-reload switch would orphan the kit reload montage
+		CurrentWeapon->StopFiring();
+		CurrentWeapon->OnWeaponFired.RemoveAll(this);
+		CurrentWeapon->SetWeaponHidden(true);
+	}
+
+	bNextShotStealthExempt = false;
+	CurrentWeapon = NewWeapon;
+	CurrentWeapon->SetWeaponHidden(false);
+	CurrentWeapon->SetOwnerIsAiming(bIsAiming);
+	SeatWeaponGripSocket();
 
 	// Bind weapon fire delegate to multicast for 3P effects
 	if (!CurrentWeapon->OnWeaponFired.IsAlreadyBound(this, &UWeaponComponent::OnWeaponFiredCallback))
 		CurrentWeapon->OnWeaponFired.AddDynamic(this, &UWeaponComponent::OnWeaponFiredCallback);
 
-	// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose.
+	// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose + kit item respawn.
 	// Skip on dedicated server (no visuals) and when downed.
 	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
-	if (IsValid(CurrentWeapon) && IsValid(OwnerActor) && OwnerIface && IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled() && !OwnerIface->GetIsDBNO())
+	if (IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled() && !OwnerIface->GetIsDBNO())
+	{
 		OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
+		CurrentWeapon->ResyncVisualAmmo(); // fresh kit item starts with BP-default counts otherwise
+	}
+}
+
+void UWeaponComponent::SwitchToPrimary()
+{
+	if (!IsValid(OwnerActor)) return;
+	if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return;
+
+	if (OwnerActor->HasAuthority())
+		SetActiveWeapon(PrimaryWeapon);
+	else
+		Server_SwitchWeapon(0);
+}
+
+void UWeaponComponent::SwitchToSecondary()
+{
+	if (!IsValid(OwnerActor)) return;
+	if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return;
+
+	if (OwnerActor->HasAuthority())
+		SetActiveWeapon(SecondaryWeapon);
+	else
+		Server_SwitchWeapon(1);
+}
+
+void UWeaponComponent::Server_SwitchWeapon_Implementation(uint8 SlotIndex)
+{
+	if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return;
+	SetActiveWeapon(SlotIndex == 0 ? PrimaryWeapon.Get() : SecondaryWeapon.Get());
 }
 
 void UWeaponComponent::StartFire(bool bAuthorityTakedownSnapshot)
@@ -271,7 +349,10 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 		// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose.
 		// Skip when downed — arms aren't visible and the pose system may not be ready.
 		if (IsValid(OwnerActor) && OwnerIface && !OwnerIface->GetIsDBNO())
+		{
 			OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
+			CurrentWeapon->ResyncVisualAmmo();
+		}
 	}
 	else if (IsValid(OwnerChar))
 	{
@@ -286,6 +367,13 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 			);
 		}
 	}
+
+	// Client-side mirror of SetActiveWeapon's hide/show: only the held weapon renders.
+	AWeaponBase* Slots[] = { PrimaryWeapon.Get(), SecondaryWeapon.Get() };
+	for (AWeaponBase* Slot : Slots)
+		if (IsValid(Slot) && Slot != CurrentWeapon)
+			Slot->SetWeaponHidden(true);
+	CurrentWeapon->SetWeaponHidden(false);
 }
 
 void UWeaponComponent::OnRep_IsAiming()

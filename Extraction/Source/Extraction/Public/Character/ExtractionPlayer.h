@@ -317,6 +317,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> ReloadAction;
 
+	/** Weapon slot selection (1 / 2 keys). Assigned in the BP child class. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> EquipPrimaryAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> EquipSecondaryAction;
+
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> ADSAction;
 
@@ -538,6 +545,8 @@ private:
 	void FireStart(const FInputActionValue& Value);
 	void FireStop(const FInputActionValue& Value);
 	void ReloadStart(const FInputActionValue& Value);
+	void EquipPrimaryInput(const FInputActionValue& Value);
+	void EquipSecondaryInput(const FInputActionValue& Value);
 	void ADSStart(const FInputActionValue& Value);
 	void ADSStop(const FInputActionValue& Value);
 

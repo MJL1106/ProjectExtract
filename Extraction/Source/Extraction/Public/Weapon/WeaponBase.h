@@ -162,6 +162,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
 	int32 AddReserveAmmo(int32 Amount);
 
+	/** Re-broadcasts current ammo to the HUD and the kit visual item without changing counts.
+	 *  Called after a weapon switch — the freshly-spawned kit item holds BP-default counts. */
+	void ResyncVisualAmmo();
+
 	/** Override the auto-reload flag set in the data asset. Enemies force this true so they never
 	 *  go permanently silent — no BT reload task exists for enemies. */
 	void SetAutoReloadOnEmpty(bool bEnable) { bAutoReloadOnEmpty = bEnable; }
