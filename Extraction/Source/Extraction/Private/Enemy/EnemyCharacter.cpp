@@ -786,7 +786,9 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 
 	const EHitRegion HitRegion = ResolveHitRegion(DamageEvent);
 
-	// Headshot: fraction-of-max-health path (bullet point damage to Head only).
+	// Headshot: fraction-of-max-health floor (bullet point damage to Head only).
+	// High-damage weapons (sniper) keep their multiplied damage when it exceeds the
+	// flat fraction, so heavy calibres stay lethal on the head.
 	float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent, HitRegion);
 	if (HitRegion == EHitRegion::Head &&
 		DamageEvent.IsOfType(FPointDamageEvent::ClassID) &&
@@ -794,7 +796,7 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 	{
 		const float HeadshotFraction = IsValid(ArchetypeData) ? ArchetypeData->HeadshotMaxHealthFraction : 0.65f;
 		if (HeadshotFraction > 0.f)
-			FinalDamage = HeadshotFraction * HealthComponent->GetMaxHealth();
+			FinalDamage = FMath::Max(FinalDamage, HeadshotFraction * HealthComponent->GetMaxHealth());
 	}
 
 	UEnemyArmourComponent* Armour = ArmourComponent.Get();
@@ -933,7 +935,8 @@ void AEnemyCharacter::HandleDeath()
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 
-	TrySpawnAmmoDrop();
+	if (!TrySpawnWeaponDrop())
+		TrySpawnAmmoDrop();
 	TrySpawnDeathLoot();
 
 	// Sight perception bakes the listener-target affiliation into its query at registration and never
@@ -1043,6 +1046,56 @@ void AEnemyCharacter::TrySpawnAmmoDrop()
 
 	Pickup->InitPickup(Category, Amount);
 	Pickup->FinishSpawning(SpawnTransform);
+}
+
+bool AEnemyCharacter::TrySpawnWeaponDrop()
+{
+	if (!HasAuthority() || !AmmoDropTable) return false;
+
+	const AWeaponBase* Weapon = CurrentWeapon.Get();
+	if (!IsValid(Weapon)) return false; // died weaponless — no drop
+
+	const FWeaponDropEntry* Entry = AmmoDropTable->FindWeaponDrop(Weapon->GetClass());
+	if (!Entry || !Entry->PickupClass) return false;
+	if (FMath::FRand() > Entry->DropChance) return false;
+
+	UWorld* World = GetWorld();
+	if (!World) return false;
+
+	const FTransform SpawnTransform(
+		FRotator(0.f, FMath::FRandRange(0.f, 360.f), 0.f), FindDeathLootSpawnLocation());
+	AActor* Pickup = World->SpawnActorDeferred<AActor>(
+		Entry->PickupClass, SpawnTransform, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!Pickup) return false;
+
+	// Stamp the rolled ammo before FinishSpawning so the pickup's construction script builds
+	// its item payload from these values. Contract: BP custom event InitDropAmmo(Mag, Reserve).
+	if (UFunction* InitFn = Pickup->FindFunction(TEXT("InitDropAmmo")))
+	{
+		if (InitFn->ParmsSize == sizeof(int32) * 2)
+		{
+			int32 Parms[2] = {
+				FMath::RandRange(Entry->MinMag, Entry->MaxMag),
+				FMath::RandRange(Entry->MinReserve, Entry->MaxReserve) };
+			Pickup->ProcessEvent(InitFn, Parms);
+		}
+		else
+		{
+			UE_LOG(LogEnemyAI, Warning,
+				TEXT("%s: weapon-drop pickup '%s' InitDropAmmo signature mismatch — expected (int32, int32)."),
+				*GetName(), *GetNameSafe(Entry->PickupClass));
+		}
+	}
+	else
+	{
+		UE_LOG(LogEnemyAI, Warning,
+			TEXT("%s: weapon-drop pickup '%s' has no InitDropAmmo event — dropped gun ships BP-default ammo."),
+			*GetName(), *GetNameSafe(Entry->PickupClass));
+	}
+
+	Pickup->FinishSpawning(SpawnTransform);
+	return true;
 }
 
 FVector AEnemyCharacter::FindDeathLootSpawnLocation() const

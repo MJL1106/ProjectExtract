@@ -164,6 +164,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
 	int32 AddReserveAmmo(int32 Amount);
 
+	/** Overwrites ammo counts (weapon-pickup state restore). Authority-only. Pass a negative
+	 *  value to leave that count unchanged. Mag clamps to the data asset's magazine size. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
+	void SetAmmoState(int32 Mag, int32 Reserve);
+
 	/** Re-broadcasts current ammo to the HUD and the kit visual item without changing counts.
 	 *  Called after a weapon switch — the freshly-spawned kit item holds BP-default counts. */
 	void ResyncVisualAmmo();

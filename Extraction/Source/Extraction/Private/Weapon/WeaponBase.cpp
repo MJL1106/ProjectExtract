@@ -2012,8 +2012,25 @@ int32 AWeaponBase::AddReserveAmmo(int32 Amount)
 
 	ReserveAmmo += Amount;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
-	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
+	// A stowed weapon must not stomp the held weapon's kit item counts — the owner has ONE
+	// SpawnedItem (the held gun's); equip re-syncs via ResyncVisualAmmo when this slot activates.
+	if (!IsHidden())
+		SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 	return Amount;
+}
+
+void AWeaponBase::SetAmmoState(int32 Mag, int32 Reserve)
+{
+	if (!HasAuthority()) return;
+
+	if (Mag >= 0)
+		CurrentAmmo = IsValid(WeaponData) ? FMath::Min(Mag, WeaponData->MagazineSize) : Mag;
+	if (Reserve >= 0)
+		ReserveAmmo = Reserve;
+
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	if (!IsHidden())
+		SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 }
 
 void AWeaponBase::ResyncVisualAmmo()

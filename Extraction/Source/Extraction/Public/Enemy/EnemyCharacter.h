@@ -640,6 +640,11 @@ private:
 	 *  category; spawns an AAmmoPickup next to the corpse on success. */
 	void TrySpawnAmmoDrop();
 
+	/** Authority-only gun-drop roll: chance from AmmoDropTable's WeaponDropTable keyed by the
+	 *  held weapon's class; spawns the mapped weapon pickup with a rolled partial mag + reserve.
+	 *  Returns true when a gun dropped — that kill's ammo drop is skipped. */
+	bool TrySpawnWeaponDrop();
+
 	/** Authority-only: spawns a loot pickup with DeathLoot contents next to the corpse. */
 	void TrySpawnDeathLoot();
 

@@ -8,6 +8,7 @@
 
 class AWeaponBase;
 class IExtractionPlayerInterface;
+enum class EEnemyWeaponAnimType : uint8;
 
 /** Broadcast per actual shot with stealth exemption context. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerWeaponShot, bool, bStealthExempt);
@@ -33,6 +34,13 @@ public:
 	void SwitchToPrimary();
 	void SwitchToSecondary();
 
+	/** Replace a slot's weapon with a new class (weapon-pickup swap). Authority-only; refused
+	 *  while the held weapon is reloading or the owner is DBNO/in a takedown. Mag/Reserve < 0
+	 *  keep the new weapon's data-asset defaults. Activates the new weapon if the replaced slot
+	 *  was the held one. Returns the spawned weapon, or null when refused. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	AWeaponBase* ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<AWeaponBase> NewWeaponClass, int32 Mag = -1, int32 Reserve = -1);
+
 	/** Begin firing. bAuthorityTakedownSnapshot = true when the authority has confirmed a
 	 *  companion shoot-takedown is armed at trigger-pull time (first shot only is exempt). */
 	void StartFire(bool bAuthorityTakedownSnapshot = false);
@@ -50,6 +58,16 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	AWeaponBase* GetCurrentWeapon() const { return CurrentWeapon; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	AWeaponBase* GetPrimaryWeapon() const { return PrimaryWeapon; }
+
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	AWeaponBase* GetSecondaryWeapon() const { return SecondaryWeapon; }
+
+	/** First carried weapon whose ammo category matches — held weapon first, then the stowed
+	 *  slot. Null when neither carried weapon uses this category. */
+	AWeaponBase* FindWeaponByAmmoCategory(EEnemyWeaponAnimType Category) const;
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsAiming() const { return bIsAiming; }

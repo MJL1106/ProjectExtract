@@ -4,8 +4,6 @@
 #include "Game/MissionInventorySubsystem.h"
 #include "Character/ExtractionPlayer.h"
 #include "Components/WeaponComponent.h"
-#include "Weapon/WeaponBase.h"
-#include "Data/WeaponDataAsset.h"
 #include "Components/SphereComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "TimerManager.h"
@@ -58,12 +56,10 @@ void AAmmoPickup::OnSphereBeginOverlap(UPrimitiveComponent* /*OverlappedComponen
 	AExtractionPlayer* Player = Cast<AExtractionPlayer>(OtherActor);
 	if (!IsValid(Player)) return;
 
-	// Only collect when the drop matches the player's current weapon — otherwise leave it
-	// on the ground so a later weapon swap can pick it up (no walk-over toast spam).
+	// Only collect when the drop matches either carried weapon (held or stowed slot) —
+	// otherwise leave it on the ground for a later weapon swap (no walk-over toast spam).
 	const UWeaponComponent* WeaponComp = Player->FindComponentByClass<UWeaponComponent>();
-	const AWeaponBase* Weapon = WeaponComp ? WeaponComp->GetCurrentWeapon() : nullptr;
-	const UWeaponDataAsset* Data = Weapon ? Weapon->GetWeaponData() : nullptr;
-	if (!Data || Data->EnemyWeaponAnimType != Category) return;
+	if (!WeaponComp || !WeaponComp->FindWeaponByAmmoCategory(Category)) return;
 
 	UMissionInventorySubsystem* Subsystem = GetWorld() ? GetWorld()->GetSubsystem<UMissionInventorySubsystem>() : nullptr;
 	if (!Subsystem) return;

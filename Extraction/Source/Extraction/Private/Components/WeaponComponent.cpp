@@ -100,6 +100,55 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 		SetActiveWeapon(PrimaryWeapon);
 }
 
+AWeaponBase* UWeaponComponent::ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<AWeaponBase> NewWeaponClass, int32 Mag, int32 Reserve)
+{
+	if (!OwnerIface) return nullptr;
+	if (!IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return nullptr;
+	if (!NewWeaponClass) return nullptr;
+	if (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown()) return nullptr;
+	if (IsValid(CurrentWeapon) && CurrentWeapon->IsReloading()) return nullptr;
+
+	bNextShotStealthExempt = false;
+
+	if (IsValid(CurrentWeapon))
+		CurrentWeapon->StopFiring(); // no mid-burst swap — the held weapon may be replaced below
+
+	TObjectPtr<AWeaponBase>& Slot = bPrimarySlot ? PrimaryWeapon : SecondaryWeapon;
+	const bool bSlotWasHeld = !IsValid(CurrentWeapon) || CurrentWeapon == Slot;
+
+	if (IsValid(Slot))
+	{
+		if (CurrentWeapon == Slot)
+			CurrentWeapon = nullptr;
+		Slot->Destroy();
+		Slot = nullptr;
+	}
+
+	Slot = SpawnWeaponActor(NewWeaponClass);
+	if (!IsValid(Slot)) return nullptr;
+
+	if (Mag >= 0 || Reserve >= 0)
+		Slot->SetAmmoState(Mag, Reserve);
+
+	if (bSlotWasHeld)
+		SetActiveWeapon(Slot);
+
+	return Slot;
+}
+
+AWeaponBase* UWeaponComponent::FindWeaponByAmmoCategory(EEnemyWeaponAnimType Category) const
+{
+	AWeaponBase* const Candidates[] = { CurrentWeapon.Get(), PrimaryWeapon.Get(), SecondaryWeapon.Get() };
+	for (AWeaponBase* Candidate : Candidates)
+	{
+		if (!IsValid(Candidate)) continue;
+		const UWeaponDataAsset* Data = Candidate->GetWeaponData();
+		if (Data && Data->EnemyWeaponAnimType == Category)
+			return Candidate;
+	}
+	return nullptr;
+}
+
 AWeaponBase* UWeaponComponent::SpawnWeaponActor(TSubclassOf<AWeaponBase> WeaponClass)
 {
 	if (!WeaponClass) return nullptr;
