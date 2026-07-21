@@ -216,6 +216,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|ADS", meta = (ClampMin = "0.0"))
 	float ADSMovementSpeed = 400.0f;
 
+	/** Extra look-sensitivity multiplier while ADS, on top of the automatic ADSFOV/90 scaling.
+	 *  1 = FOV-relative only (CoD-style). Set below 1 for optics whose magnification lives in a
+	 *  render-target lens rather than the camera FOV (sniper scope). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|ADS", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float ADSLookSensitivityMult = 1.0f;
+
 	// ---- Recoil ----
 
 	/** Recoil pattern data for this weapon */

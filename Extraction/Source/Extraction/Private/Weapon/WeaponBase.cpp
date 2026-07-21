@@ -13,6 +13,7 @@
 #include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
 #include "EnemyMoraleComponent.h"
+#include "ExtractionPlayerController.h"
 #include "Animation/AnimInstance.h"
 #include "Components/AudioComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -449,6 +450,23 @@ UNiagaraSystem* AWeaponBase::GetEffectiveMuzzleFlashFX() const
 {
 	if (IsValid(AttachmentMuzzleFlashOverride)) return AttachmentMuzzleFlashOverride;
 	return IsValid(WeaponData) ? WeaponData->MuzzleFlashFX : nullptr;
+}
+
+void AWeaponBase::SetVisualHighlight(bool bHighlight)
+{
+	if (IsValid(WeaponMesh))
+		WeaponMesh->SetRenderCustomDepth(bHighlight);
+
+	if (IsValid(SpawnedVisualActor))
+	{
+		TInlineComponentArray<UPrimitiveComponent*> Primitives;
+		SpawnedVisualActor->GetComponents(Primitives);
+		for (UPrimitiveComponent* Prim : Primitives)
+		{
+			if (IsValid(Prim))
+				Prim->SetRenderCustomDepth(bHighlight);
+		}
+	}
 }
 
 void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -933,6 +951,9 @@ void AWeaponBase::PerformHitscan()
 		UHealthComponent* Health; // cached once, reused in morale pass
 		bool bWasAlive;
 		bool bGateAllowsDamage = true; // set false by the mitigation gate when the shot is suppressed
+		float AppliedDamage = 0.f;     // sum of TakeDamage returns this shot (post hitbox/armour)
+		float HeadshotDamage = 0.f;    // portion of AppliedDamage from head-region pellets
+		FVector LastImpact = FVector::ZeroVector; // impact point of the last damaging pellet
 	};
 	TArray<FVictimRecord, TInlineAllocator<4>> VictimRecords;
 
@@ -1011,16 +1032,13 @@ void AWeaponBase::PerformHitscan()
 		AActor* HitActor = PR.Victim.Get();
 		if (!IsValid(HitActor)) continue;
 
-		// Check mitigation gate: find this pellet's victim record and skip TakeDamage if gated.
-		if (bGateActive)
+		// Find this pellet's victim record — gate check + hit-feedback accumulation.
+		FVictimRecord* VR = nullptr;
+		for (FVictimRecord& V : VictimRecords)
 		{
-			const FVictimRecord* VR = nullptr;
-			for (const FVictimRecord& V : VictimRecords)
-			{
-				if (V.Victim.Get() == HitActor) { VR = &V; break; }
-			}
-			if (VR && !VR->bGateAllowsDamage) continue;
+			if (V.Victim.Get() == HitActor) { VR = &V; break; }
 		}
+		if (bGateActive && VR && !VR->bGateAllowsDamage) continue;
 
 		FPointDamageEvent DamageEvent;
 		DamageEvent.Damage = PR.Damage;
@@ -1031,7 +1049,28 @@ void AWeaponBase::PerformHitscan()
 		UE_LOG(LogExtraction, Verbose, TEXT("%s hit %s for %.1f damage"),
 			*GetNameSafe(OwnerChar), *GetNameSafe(HitActor), PR.Damage);
 
-		HitActor->TakeDamage(PR.Damage, DamageEvent, OwnerChar->GetController(), this);
+		const float Applied = HitActor->TakeDamage(PR.Damage, DamageEvent, OwnerChar->GetController(), this);
+
+		if (VR && Applied > 0.f)
+		{
+			VR->AppliedDamage += Applied;
+			VR->LastImpact = PR.Hit.ImpactPoint;
+			const AEnemyCharacter* VictimEnemy = Cast<AEnemyCharacter>(HitActor);
+			if (VictimEnemy && VictimEnemy->ResolveHitRegion(DamageEvent) == EHitRegion::Head)
+				VR->HeadshotDamage += Applied;
+		}
+	}
+
+	// === HIT FEEDBACK (player shooters only): one event per victim per shot ===
+	if (AExtractionPlayerController* FeedbackPC = Cast<AExtractionPlayerController>(PC))
+	{
+		for (const FVictimRecord& VR : VictimRecords)
+		{
+			// No HealthComponent = world geometry (walls return the engine-default TakeDamage value) — no feedback.
+			if (VR.AppliedDamage <= 0.f || !VR.Health) continue;
+			const bool bKilled = VR.bWasAlive && VR.Health->IsDead();
+			FeedbackPC->NotifyDamageDealt(VR.Victim.Get(), VR.AppliedDamage, VR.HeadshotDamage, bKilled, VR.LastImpact);
+		}
 	}
 
 	// === MORALE PASS (once per victim per shot, reusing cached HealthComponent) ===

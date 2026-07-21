@@ -26,6 +26,19 @@
 #include "Engine/DamageEvents.h"
 #include "ExtractionTypes.h"
 #include "Extraction.h"
+#include "HAL/IConsoleManager.h"
+
+/** Base look sensitivity multiplier, tunable live from the console while calibrating.
+ *  Applies to hip and ADS alike (ADS scaling stacks on top). Bake the chosen value
+ *  into the settings menu once one exists. */
+static TAutoConsoleVariable<float> CVarLookSensitivity(
+	TEXT("player.LookSensitivity"), 1.0f,
+	TEXT("Base look sensitivity multiplier (hip and ADS). Default 1."));
+
+/** Live override for ADS look sensitivity: <0 = use the weapon DA's ADSLookSensitivityMult. */
+static TAutoConsoleVariable<float> CVarADSSensMult(
+	TEXT("player.ADSSensMult"), -1.0f,
+	TEXT("Override for the weapon's ADSLookSensitivityMult while aiming. Negative = use DA value."));
 
 namespace ExtractionCharacterConstants
 {
@@ -407,8 +420,21 @@ void AExtractionCharacter::DoAim(float Yaw, float Pitch)
 {
 	if (IsValid(GetController()))
 	{
-		AddControllerYawInput(Yaw);
-		AddControllerPitchInput(Pitch);
+		// ADS look sensitivity scales with zoom (CoD-style relative sensitivity):
+		// on-screen turn speed stays constant across scopes.
+		float Scale = CVarLookSensitivity.GetValueOnGameThread();
+		if (IsValid(WeaponComponent) && WeaponComponent->IsAiming())
+		{
+			const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
+			if (IsValid(Weapon) && IsValid(Weapon->GetWeaponData()))
+			{
+				const float CVarMult = CVarADSSensMult.GetValueOnGameThread();
+				const float ADSMult = CVarMult >= 0.f ? CVarMult : Weapon->GetWeaponData()->ADSLookSensitivityMult;
+				Scale *= FMath::Clamp(Weapon->GetEffectiveADSFOV() / 90.f, 0.1f, 1.f) * ADSMult;
+			}
+		}
+		AddControllerYawInput(Yaw * Scale);
+		AddControllerPitchInput(Pitch * Scale);
 	}
 }
 

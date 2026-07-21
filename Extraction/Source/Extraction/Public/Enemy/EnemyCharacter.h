@@ -345,6 +345,15 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Data")
 	TObjectPtr<UAmmoDropTableDataAsset> AmmoDropTable;
 
+	/** When true, death ammo drops use AmmoDropCategoryOverride instead of the weapon DA's anim
+	 *  type. The Rusher's SMG is keyed Rifle for animation selection — this lets it still drop
+	 *  SMG-category ammo. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Data")
+	bool bOverrideAmmoDropCategory = false;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Data", meta = (EditCondition = "bOverrideAmmoDropCategory"))
+	EEnemyWeaponAnimType AmmoDropCategoryOverride = EEnemyWeaponAnimType::SMG;
+
 	/** Guaranteed loot dropped as a physical pickup on death (e.g. keycards). Authored per placed instance. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Loot")
 	TArray<FLootGrant> DeathLoot;
@@ -431,6 +440,10 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|FX")
 	TObjectPtr<UNiagaraSystem> BloodImpactFX;
 
+	/** Uniform scale applied to BloodImpactFX on head-region hits — headshots bleed bigger. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|FX", meta = (ClampMin = "1.0"))
+	float HeadshotBloodScale = 1.6f;
+
 private:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
@@ -442,8 +455,9 @@ private:
 	/** True when the weapon is currently attached to the patrol-hand socket (DA-driven hand-swap). */
 	bool bWeaponOnPatrolHand = false;
 
-	/** Spawns BloodImpactFX at the hit location for point-damage events (kit enemy-blood behaviour). */
-	void SpawnBloodImpactFX(const FDamageEvent& DamageEvent) const;
+	/** Spawns BloodImpactFX at the hit location for point-damage events (kit enemy-blood behaviour).
+	 *  Head-region hits scale the burst by HeadshotBloodScale. */
+	void SpawnBloodImpactFX(const FDamageEvent& DamageEvent, EHitRegion HitRegion) const;
 
 	/** True while the combat service's eye-to-target trace is clear. AI-side only (not replicated). */
 	bool bHasTargetLOS = false;
@@ -640,10 +654,10 @@ private:
 	 *  category; spawns an AAmmoPickup next to the corpse on success. */
 	void TrySpawnAmmoDrop();
 
-	/** Authority-only gun-drop roll: chance from AmmoDropTable's WeaponDropTable keyed by the
-	 *  held weapon's class; spawns the mapped weapon pickup with a rolled partial mag + reserve.
-	 *  Returns true when a gun dropped — that kill's ammo drop is skipped. */
-	bool TrySpawnWeaponDrop();
+	/** Authority-only: makes the corpse's held gun collectable. Spawns the mapped weapon pickup
+	 *  (WeaponDropTable keyed by weapon class) invisible and attached to the weapon actor, with a
+	 *  rolled partial mag + reserve. Weapons with no table entry offer nothing. */
+	void SetupCorpseWeaponPickup();
 
 	/** Authority-only: spawns a loot pickup with DeathLoot contents next to the corpse. */
 	void TrySpawnDeathLoot();

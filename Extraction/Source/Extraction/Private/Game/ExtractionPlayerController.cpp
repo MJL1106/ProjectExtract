@@ -19,6 +19,8 @@
 #include "LevelCompleteWidget.h"
 #include "LevelFailedWidget.h"
 #include "RevivePromptWidget.h"
+#include "HitmarkerWidget.h"
+#include "DamageNumberWidget.h"
 #include "ExtractionGameMode.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
@@ -154,6 +156,28 @@ void AExtractionPlayerController::BeginPlay()
 		if (IsValid(RevivePromptWidget))
 			RevivePromptWidget->AddToPlayerScreen();
 	}
+
+	// Spawn hitmarker for local player
+	if (IsLocalPlayerController() && HitmarkerWidgetClass)
+	{
+		HitmarkerWidget = CreateWidget<UHitmarkerWidget>(this, HitmarkerWidgetClass);
+		if (IsValid(HitmarkerWidget))
+			HitmarkerWidget->AddToPlayerScreen();
+	}
+
+	// Spawn damage-number layer for local player
+	if (IsLocalPlayerController() && DamageNumberWidgetClass)
+	{
+		DamageNumberWidget = CreateWidget<UDamageNumberWidget>(this, DamageNumberWidgetClass);
+		if (IsValid(DamageNumberWidget))
+			DamageNumberWidget->AddToPlayerScreen();
+	}
+}
+
+void AExtractionPlayerController::NotifyDamageDealt(AActor* Victim, float Damage, float HeadshotDamage, bool bKilled, const FVector& WorldLocation)
+{
+	if (!IsLocalPlayerController()) return;
+	OnDamageDealt.Broadcast(Victim, Damage, HeadshotDamage, bKilled, WorldLocation);
 }
 
 void AExtractionPlayerController::SetupInputComponent()

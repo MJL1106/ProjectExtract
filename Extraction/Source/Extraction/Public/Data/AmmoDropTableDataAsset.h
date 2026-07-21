@@ -32,15 +32,16 @@ struct FAmmoDropEntry
 	TSubclassOf<AAmmoPickup> PickupClass;
 };
 
-/** Chance for an enemy to drop its actual gun as a world weapon pickup. Keyed by the enemy's
- *  weapon CLASS (not anim category — e.g. the Rusher's SMG reports the Rifle anim type). */
+/** Corpse-gun pickup config, keyed by the enemy's weapon CLASS (not anim category — e.g. the
+ *  Rusher's SMG reports the Rifle anim type). Every corpse whose weapon has an entry offers its
+ *  gun for direct collection. */
 USTRUCT(BlueprintType)
 struct FWeaponDropEntry
 {
 	GENERATED_BODY()
 
-	/** Chance [0,1] that this enemy weapon drops as a pickup on death. A successful gun drop
-	 *  replaces that kill's ammo drop — the gun is the ammo that time. */
+	/** Unused since the corpse-pickup rework — corpse guns are always collectable when an entry
+	 *  exists. Kept so existing table assets load without data loss. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Drop", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float DropChance = 0.25f;
 

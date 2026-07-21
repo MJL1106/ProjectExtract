@@ -253,9 +253,21 @@ void AEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// CurrentWeapon is a separate owned/attached actor — UE does not auto-destroy it
 	// when this character is destroyed. Destroy server-side so removal replicates.
+	// The corpse weapon pickup (SetupCorpseWeaponPickup) rides the weapon actor and is not
+	// auto-destroyed with it either — take it down first so no orphaned interactable lingers.
 	if (HasAuthority())
 	{
-		if (AWeaponBase* Weapon = CurrentWeapon.Get()) Weapon->Destroy();
+		if (AWeaponBase* Weapon = CurrentWeapon.Get())
+		{
+			TArray<AActor*> Attached;
+			Weapon->GetAttachedActors(Attached);
+			for (AActor* AttachedActor : Attached)
+			{
+				if (IsValid(AttachedActor))
+					AttachedActor->Destroy();
+			}
+			Weapon->Destroy();
+		}
 		CurrentWeapon = nullptr;
 	}
 
@@ -823,12 +835,12 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 	if (FinalDamage > 0.f && IsValid(HealthComponent) && !HealthComponent->IsDead())
 		OnHitReact.Broadcast(HitRegion);
 
-	SpawnBloodImpactFX(DamageEvent);
+	SpawnBloodImpactFX(DamageEvent, HitRegion);
 
 	return FinalDamage;
 }
 
-void AEnemyCharacter::SpawnBloodImpactFX(const FDamageEvent& DamageEvent) const
+void AEnemyCharacter::SpawnBloodImpactFX(const FDamageEvent& DamageEvent, EHitRegion HitRegion) const
 {
 	if (!IsValid(BloodImpactFX)) return;
 	if (!DamageEvent.IsOfType(FPointDamageEvent::ClassID)) return;
@@ -840,9 +852,10 @@ void AEnemyCharacter::SpawnBloodImpactFX(const FDamageEvent& DamageEvent) const
 	// Face the burst back along the surface normal; fall back to opposing the shot when the
 	// normal is unset (e.g. hand-built damage events).
 	const FVector BurstDir = Hit.ImpactNormal.IsNearlyZero() ? -PointDamage.ShotDirection : FVector(Hit.ImpactNormal);
+	const float BurstScale = (HitRegion == EHitRegion::Head) ? HeadshotBloodScale : 1.f;
 	UNiagaraFunctionLibrary::SpawnSystemAtLocation(
 		GetWorld(), BloodImpactFX, Hit.ImpactPoint, BurstDir.Rotation(),
-		FVector(1.f), /*bAutoDestroy=*/true, /*bAutoActivate=*/true, ENCPoolMethod::AutoRelease);
+		FVector(BurstScale), /*bAutoDestroy=*/true, /*bAutoActivate=*/true, ENCPoolMethod::AutoRelease);
 }
 
 // --- Death ---
@@ -935,8 +948,8 @@ void AEnemyCharacter::HandleDeath()
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 
-	if (!TrySpawnWeaponDrop())
-		TrySpawnAmmoDrop();
+	SetupCorpseWeaponPickup();
+	TrySpawnAmmoDrop();
 	TrySpawnDeathLoot();
 
 	// Sight perception bakes the listener-target affiliation into its query at registration and never
@@ -1027,7 +1040,8 @@ void AEnemyCharacter::TrySpawnAmmoDrop()
 	const UWeaponDataAsset* Data = Weapon ? Weapon->GetWeaponData() : nullptr;
 	if (!Data) return; // died weaponless — no drop
 
-	const EEnemyWeaponAnimType Category = Data->EnemyWeaponAnimType;
+	const EEnemyWeaponAnimType Category =
+		bOverrideAmmoDropCategory ? AmmoDropCategoryOverride : Data->EnemyWeaponAnimType;
 	const FAmmoDropEntry* Entry = AmmoDropTable->Find(Category);
 	if (!Entry || !Entry->PickupClass) return;
 	if (FMath::FRand() > Entry->DropChance) return;
@@ -1038,7 +1052,7 @@ void AEnemyCharacter::TrySpawnAmmoDrop()
 	UWorld* World = GetWorld();
 	if (!World) return;
 
-	const FTransform SpawnTransform(FRotator::ZeroRotator, GetActorLocation() + FVector(0.f, 0.f, 30.f));
+	const FTransform SpawnTransform(FRotator::ZeroRotator, FindDeathLootSpawnLocation());
 	AAmmoPickup* Pickup = World->SpawnActorDeferred<AAmmoPickup>(
 		Entry->PickupClass, SpawnTransform, nullptr, nullptr,
 		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
@@ -1048,26 +1062,27 @@ void AEnemyCharacter::TrySpawnAmmoDrop()
 	Pickup->FinishSpawning(SpawnTransform);
 }
 
-bool AEnemyCharacter::TrySpawnWeaponDrop()
+void AEnemyCharacter::SetupCorpseWeaponPickup()
 {
-	if (!HasAuthority() || !AmmoDropTable) return false;
+	if (!HasAuthority() || !AmmoDropTable) return;
 
-	const AWeaponBase* Weapon = CurrentWeapon.Get();
-	if (!IsValid(Weapon)) return false; // died weaponless — no drop
+	AWeaponBase* Weapon = CurrentWeapon.Get();
+	if (!IsValid(Weapon)) return; // died weaponless — nothing to collect
 
 	const FWeaponDropEntry* Entry = AmmoDropTable->FindWeaponDrop(Weapon->GetClass());
-	if (!Entry || !Entry->PickupClass) return false;
-	if (FMath::FRand() > Entry->DropChance) return false;
+	if (!Entry || !Entry->PickupClass) return;
 
 	UWorld* World = GetWorld();
-	if (!World) return false;
+	if (!World) return;
 
-	const FTransform SpawnTransform(
-		FRotator(0.f, FMath::FRandRange(0.f, 360.f), 0.f), FindDeathLootSpawnLocation());
+	// The corpse keeps its gun in hand; the pickup actor spawns invisible and rides the weapon
+	// so the interact prompt sits on the gun wherever the ragdoll lands it. Collecting runs the
+	// normal swap flow; the pickup BP destroys the weapon it is attached to on success.
+	const FTransform SpawnTransform = Weapon->GetActorTransform();
 	AActor* Pickup = World->SpawnActorDeferred<AActor>(
 		Entry->PickupClass, SpawnTransform, nullptr, nullptr,
 		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
-	if (!Pickup) return false;
+	if (!Pickup) return;
 
 	// Stamp the rolled ammo before FinishSpawning so the pickup's construction script builds
 	// its item payload from these values. Contract: BP custom event InitDropAmmo(Mag, Reserve).
@@ -1095,7 +1110,17 @@ bool AEnemyCharacter::TrySpawnWeaponDrop()
 	}
 
 	Pickup->FinishSpawning(SpawnTransform);
-	return true;
+	Pickup->AttachToActor(Weapon, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+
+	// Hide the pickup's display meshes — the corpse's own gun is the visual. Collision and any
+	// interaction prompt widgets stay live.
+	TInlineComponentArray<UMeshComponent*> MeshComps;
+	Pickup->GetComponents(MeshComps);
+	for (UMeshComponent* MeshComp : MeshComps)
+	{
+		if (IsValid(MeshComp))
+			MeshComp->SetVisibility(false, false);
+	}
 }
 
 FVector AEnemyCharacter::FindDeathLootSpawnLocation() const

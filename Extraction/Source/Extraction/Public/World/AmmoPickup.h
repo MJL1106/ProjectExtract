@@ -1,5 +1,5 @@
-// AAmmoPickup — physical ammo drop collected by player overlap, but only when its category
-// matches the player's current weapon (mismatches stay on the ground for a later weapon swap).
+// AAmmoPickup — physical ammo drop the player collects through the kit interaction system
+// (BP children add the interaction area + prompt widget and call TryCollect on interact).
 // Spawned by AEnemyCharacter death rolls; mesh is assigned in the Blueprint subclass.
 
 #pragma once
@@ -22,6 +22,11 @@ public:
 
 	/** Stamp category + amount after a deferred spawn (before FinishSpawning). */
 	void InitPickup(EEnemyWeaponAnimType InCategory, int32 InAmount);
+
+	/** Grants the ammo to the collector and destroys the pickup. Returns false (and stays in
+	 *  the world) when the grant was refused — e.g. no carried weapon uses this category. */
+	UFUNCTION(BlueprintCallable, Category = "Pickup")
+	bool TryCollect(APawn* Collector);
 
 protected:
 	virtual void BeginPlay() override;
@@ -46,10 +51,6 @@ protected:
 	float Lifespan = 60.f;
 
 private:
-	UFUNCTION()
-	void OnSphereBeginOverlap(UPrimitiveComponent* OverlappedComponent, AActor* OtherActor,
-		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex, bool bFromSweep, const FHitResult& SweepResult);
-
 	void ExpireLifespan();
 
 	FTimerHandle LifespanTimerHandle;

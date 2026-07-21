@@ -173,6 +173,11 @@ public:
 	 *  Called after a weapon switch — the freshly-spawned kit item holds BP-default counts. */
 	void ResyncVisualAmmo();
 
+	/** Interaction-focus outline: toggles render custom depth on the weapon mesh and every
+	 *  primitive of the spawned visual actor (corpse-gun pickup highlight). */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	void SetVisualHighlight(bool bHighlight);
+
 	/** Override the auto-reload flag set in the data asset. Enemies force this true so they never
 	 *  go permanently silent — no BT reload task exists for enemies. */
 	void SetAutoReloadOnEmpty(bool bEnable) { bAutoReloadOnEmpty = bEnable; }

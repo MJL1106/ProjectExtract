@@ -9,6 +9,8 @@
 
 class UInputMappingContext;
 class UUserWidget;
+class UHitmarkerWidget;
+class UDamageNumberWidget;
 class UPlayerHealthWidget;
 class UAmmoWidget;
 class UBarkFeedWidget;
@@ -20,6 +22,11 @@ class ULootNotificationWidget;
 class ULevelCompleteWidget;
 class ULevelFailedWidget;
 class URevivePromptWidget;
+
+/** Fired on the local player controller when the player's weapon deals damage. One event per
+ *  trigger pull per victim (shotgun pellets aggregated). HeadshotDamage > 0 marks a headshot;
+ *  bKilled marks the hit that dropped the victim. Hitmarker + damage-number widgets bind here. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(FOnPlayerDamageDealt, AActor*, Victim, float, Damage, float, HeadshotDamage, bool, bKilled, FVector, WorldLocation);
 
 /**
  *  Simple first person Player Controller
@@ -49,6 +56,13 @@ public:
 
 	/** Called by the completion/failure widget: routes the restart to the server's GameMode. */
 	void RequestRestartLevel();
+
+	/** Called by the weapon damage pass when this controller's pawn dealt damage. */
+	void NotifyDamageDealt(AActor* Victim, float Damage, float HeadshotDamage, bool bKilled, const FVector& WorldLocation);
+
+	/** Broadcast on the local controller for HUD hit feedback (hitmarker, damage numbers). */
+	UPROPERTY(BlueprintAssignable, Category = "UI|Events")
+	FOnPlayerDamageDealt OnDamageDealt;
 
 protected:
 
@@ -156,6 +170,22 @@ protected:
 	/** Active revive prompt instance */
 	UPROPERTY()
 	TObjectPtr<URevivePromptWidget> RevivePromptWidget;
+
+	/** Hitmarker widget class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UHitmarkerWidget> HitmarkerWidgetClass;
+
+	/** Active hitmarker instance */
+	UPROPERTY()
+	TObjectPtr<UHitmarkerWidget> HitmarkerWidget;
+
+	/** Damage-number layer class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UDamageNumberWidget> DamageNumberWidgetClass;
+
+	/** Active damage-number layer instance */
+	UPROPERTY()
+	TObjectPtr<UDamageNumberWidget> DamageNumberWidget;
 
 	/** If true, the player will use UMG touch controls even if not playing on mobile platforms */
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")
