@@ -381,9 +381,5 @@ void UEnemyMoraleComponent::RequestBark(EBarkType Type) const
 	UBarkSubsystem* BarkSys = World->GetSubsystem<UBarkSubsystem>();
 	if (!IsValid(BarkSys)) return;
 
-	const FText SpeakerName = IsValid(OwnerEnemy->GetArchetypeData())
-		? OwnerEnemy->GetArchetypeData()->DisplayName
-		: FText::FromString(TEXT("Enemy"));
-
-	BarkSys->RequestBark(OwnerEnemy.Get(), CachedBarkSet.Get(), Type, SpeakerName);
+	BarkSys->RequestBark(OwnerEnemy.Get(), CachedBarkSet.Get(), Type);
 }

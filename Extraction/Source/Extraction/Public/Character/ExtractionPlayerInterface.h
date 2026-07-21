@@ -72,6 +72,10 @@ public:
 	/** Notify the implementing character that ADS state changed. Default no-op. */
 	virtual void NotifyADSChanged(bool /*bIsADS*/) {}
 
+	/** Fire pressed while the kit throwable (grenade) slot is equipped — implementations route the
+	 *  press to the kit item's BeginFire instead of the C++ hitscan weapon. Default no-op. */
+	virtual void NotifyThrowableFirePressed() {}
+
 	/** Normalized auto-lean suggestion: -1 = lean left, 0 = none, +1 = lean right.
 	 *  Cosmetic, local-only. Default 0 for classes that don't implement auto-lean. */
 	virtual float GetAutoLeanAlpha() const { return 0.f; }

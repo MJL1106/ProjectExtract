@@ -2,6 +2,8 @@
 
 #include "EnemySniperTelegraphComponent.h"
 #include "EnemyArchetypeData.h"
+#include "EnemyCharacter.h"
+#include "BarkSubsystem.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
 
@@ -38,6 +40,15 @@ void UEnemySniperTelegraphComponent::BeginTelegraph(AActor* Target)
 	bReadyToFire = false;
 
 	OnLaserChanged.Broadcast(true, Target);
+
+	// Overwatch line as the laser settles — the audible half of the sniper telegraph.
+	if (const AEnemyCharacter* OwnerEnemy = Cast<AEnemyCharacter>(GetOwner()))
+	{
+		const UEnemyArchetypeData* DA = OwnerEnemy->GetArchetypeData();
+		UBarkSubsystem* Barks = GetWorld() ? GetWorld()->GetSubsystem<UBarkSubsystem>() : nullptr;
+		if (IsValid(DA) && IsValid(DA->BarkSet) && Barks)
+			Barks->RequestBark(OwnerEnemy, DA->BarkSet, EBarkType::Overwatch);
+	}
 
 	if (UWorld* World = GetWorld(); IsValid(World))
 	{

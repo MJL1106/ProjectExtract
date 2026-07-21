@@ -231,6 +231,26 @@ void AExtractionPlayer::Tick(float DeltaTime)
 			MoveComp->MaxWalkSpeedCrouched = DBNOCrawlSpeed;
 			if (!bIsCrouched && MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
 		}
+
+		// Not during being-revived: look input is locked and AlignForRevive owns the body's facing.
+		if (IsLocallyControlled() && !bBeingRevivedAnimActive)
+		{
+			// Body drifts toward the camera yaw (rate-limited) instead of snapping or orienting
+			// to velocity — keeps the crawl blendspace's Direction input meaningful so the
+			// sideways/backward downed anims actually play.
+			if (const AController* C = GetController())
+			{
+				FRotator ActorRot = GetActorRotation();
+				const float NewYaw = FMath::FixedTurn(ActorRot.Yaw, C->GetControlRotation().Yaw, DBNOCrawlRotationRate * DeltaTime);
+				if (!FMath::IsNearlyEqual(NewYaw, ActorRot.Yaw))
+				{
+					ActorRot.Yaw = NewYaw;
+					SetActorRotation(ActorRot);
+				}
+			}
+
+			if (bDBNOFreeLookActive) ClampDBNOFreeLook();
+		}
 	}
 
 	// Yaw-follow watchdog: three systems save/restore bUseControllerRotationYaw and a cross-
@@ -459,6 +479,16 @@ void AExtractionPlayer::DoMove(float Right, float Forward)
 	if (bIsReviving) return;
 	if (!IsValid(GetController())) return;
 
+	// While downed the body no longer yaw-follows the camera (free look + orient-to-movement),
+	// so actor axes drift from where the player is looking — steer camera-relative instead.
+	if (bIsDBNO)
+	{
+		const FRotator YawRot(0.f, GetControlRotation().Yaw, 0.f);
+		AddMovementInput(FRotationMatrix(YawRot).GetScaledAxis(EAxis::Y), Right);
+		AddMovementInput(FRotationMatrix(YawRot).GetScaledAxis(EAxis::X), Forward);
+		return;
+	}
+
 	AddMovementInput(GetActorRightVector(), Right);
 	AddMovementInput(GetActorForwardVector(), Forward);
 }
@@ -491,6 +521,14 @@ void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
 	if (!IsValid(WeaponComponent)) return;
+
+	// Kit throwable equipped: route the press to the kit grenade item and skip the hitscan path —
+	// a grenade throw must not broadcast OnPlayerFiredWeapon (companion shoot-takedown sync).
+	if (WeaponComponent->IsThrowableEquipped())
+	{
+		NotifyThrowableFirePressed();
+		return;
+	}
 
 	// Snapshot the companion shoot-takedown state BEFORE broadcasting: the synchronous
 	// takedown listener disarms before the actual weapon shot lands.
@@ -1247,6 +1285,22 @@ void AExtractionPlayer::EnterDBNO()
 		if (MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
 	}
 
+	// Drop weapon state before hiding: the ADS/pose events can re-show the hand-socket item
+	// if they fire after the hide (same ordering rule as SetReviveAnimsActive).
+	if (IsValid(WeaponComponent))
+	{
+		WeaponComponent->StopFire();
+		WeaponComponent->SetAiming(false);
+		OnADSChanged(false);
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
+		{
+			Weapon->CancelRecoilRecovery();
+			Weapon->CancelReload();
+		}
+	}
+	SetHeldWeaponHidden(true);
+	SetDBNOMovementProfile(true);
+
 	// Start bleedout timer (server only)
 	if (HasAuthority())
 	{
@@ -1306,6 +1360,8 @@ void AExtractionPlayer::ExitDBNO()
 
 	SetBeingRevived(false);
 	SetDBNOCameraFreeLook(false);
+	SetHeldWeaponHidden(false);
+	SetDBNOMovementProfile(false);
 
 	if (const UWorld* World = GetWorld())
 		LastReviveWorldTime = World->GetTimeSeconds();
@@ -1331,6 +1387,8 @@ void AExtractionPlayer::FullDeath()
 	AutoLeanTargetAlpha = 0.f;
 	SetBeingRevived(false);
 	SetDBNOCameraFreeLook(false);
+	// Weapon stays hidden — the level-fail flow owns the screen from here.
+	SetDBNOMovementProfile(false);
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
@@ -1341,6 +1399,55 @@ void AExtractionPlayer::FullDeath()
 	{
 		if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
 			GM->FailLevel(NSLOCTEXT("Extraction", "PlayerDiedReason", "You died."));
+	}
+}
+
+void AExtractionPlayer::ClampDBNOFreeLook()
+{
+	AController* C = GetController();
+	if (!IsValid(C)) return;
+
+	FRotator ControlRot = C->GetControlRotation();
+	const float BodyYaw = GetActorRotation().Yaw;
+	const float YawDelta = FRotator::NormalizeAxis(ControlRot.Yaw - BodyYaw);
+	const float ClampedYawDelta = FMath::Clamp(YawDelta, -DBNOFreeLookYawLimit, DBNOFreeLookYawLimit);
+	const float Pitch = FRotator::NormalizeAxis(ControlRot.Pitch);
+	const float ClampedPitch = FMath::Clamp(Pitch, DBNOFreeLookPitchMin, DBNOFreeLookPitchMax);
+
+	if (FMath::IsNearlyEqual(YawDelta, ClampedYawDelta) && FMath::IsNearlyEqual(Pitch, ClampedPitch))
+		return;
+
+	ControlRot.Yaw = BodyYaw + ClampedYawDelta;
+	ControlRot.Pitch = ClampedPitch;
+	C->SetControlRotation(ControlRot);
+}
+
+void AExtractionPlayer::SetDBNOMovementProfile(bool bEnable)
+{
+	if (bDBNOMovementProfileActive == bEnable) return;
+
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp)) return;
+	bDBNOMovementProfileActive = bEnable;
+
+	if (bEnable)
+	{
+		SavedMaxAcceleration = MoveComp->MaxAcceleration;
+		SavedBrakingDecelerationWalking = MoveComp->BrakingDecelerationWalking;
+		SavedGroundFriction = MoveComp->GroundFriction;
+		bSavedDBNOUseControllerRotationYaw = bUseControllerRotationYaw;
+
+		MoveComp->MaxAcceleration = DBNOCrawlAcceleration;
+		MoveComp->BrakingDecelerationWalking = DBNOCrawlBrakingDeceleration;
+		MoveComp->GroundFriction = DBNOCrawlGroundFriction;
+		bUseControllerRotationYaw = false;
+	}
+	else
+	{
+		MoveComp->MaxAcceleration = SavedMaxAcceleration;
+		MoveComp->BrakingDecelerationWalking = SavedBrakingDecelerationWalking;
+		MoveComp->GroundFriction = SavedGroundFriction;
+		bUseControllerRotationYaw = bSavedDBNOUseControllerRotationYaw;
 	}
 }
 
@@ -1750,6 +1857,11 @@ void AExtractionPlayer::OnRep_IsDBNO()
 	{
 		SetDBNOCameraFreeLook(true);
 	}
+
+	// Restore order matters when leaving DBNO: SetBeingRevived above ran first, so the
+	// profile's saved bUseControllerRotationYaw wins (see SetDBNOMovementProfile).
+	SetHeldWeaponHidden(bIsDBNO);
+	SetDBNOMovementProfile(bIsDBNO);
 
 	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
 }

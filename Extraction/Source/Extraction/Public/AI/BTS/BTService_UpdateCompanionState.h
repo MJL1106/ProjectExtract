@@ -83,6 +83,22 @@ private:
 	/** Edge-detect for the window open/close diagnostic log. */
 	bool bLastReviveWindowOpen = false;
 
+	// --- Bark edge/pacing state (VO routes through ACompanionCharacter::Bark; the subsystem owns
+	// cooldowns/arbitration — these members only stop re-fires of one-shot reactions and pace the
+	// optional attempts) ---
+
+	/** PlayerDownReaction fired for the current player DBNO stint. */
+	bool bPlayerDownBarked = false;
+
+	/** PlayerHurtWarning fired; re-arms once the player recovers above the re-arm threshold. */
+	bool bPlayerHurtBarked = false;
+
+	/** World time of the next ambient Following/IdleAmbient attempt; <0 = not yet initialised. */
+	float NextAmbientBarkTime = -1.f;
+
+	/** World time of the next under-pressure Reassurance attempt. */
+	float NextReassuranceBarkTime = 0.f;
+
 	/** World time of the last body-charger target steal — gates the steal to BodyChargerStealCooldown. */
 	float LastBodyChargerStealTime = -1.f;
 
@@ -98,6 +114,48 @@ private:
 
 	void UpdateStealthCrouchMirror(ACompanionCharacter& Companion, const APawn* PlayerPawn,
 		const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
+
+	// --- Post-combat overwatch state (weapon held ready on the chokepoint/bearing the threat came
+	// from after the last kill; see UpdatePostCombatOverwatch/ComputeOverwatchAimPoint) ---
+
+	/** Where the FIRST target of the current fight stood when acquired. Set once per fight,
+	 *  cleared with the rest of the fight memory on the Exploration flip / stealth re-pin. */
+	FVector FightFirstContactLocation = FVector::ZeroVector;
+	bool bHasFightFirstContact = false;
+
+	/** Rolling location of the current combat target — the freshest "threat was here" point. */
+	FVector LastThreatLocation = FVector::ZeroVector;
+	bool bHasLastThreatLocation = false;
+
+	/** True while the post-fight hold owns aim/focus. Suspends the immediate weapon-lower and the
+	 *  Exploration decay accrual in the combat-decay branch, and Tier-0-yields UpdateNonCombatFacing. */
+	bool bOverwatchActive = false;
+	FVector OverwatchAimPoint = FVector::ZeroVector;
+	float OverwatchElapsed = 0.f;
+	/** Accumulated seconds of sustained self-movement — a real move (formation catch-up, command)
+	 *  breaks the hold rather than back-walking the companion while it aims. */
+	float OverwatchMovingTime = 0.f;
+
+	/** Runs the post-fight hold inside the combat-decay branch: enters on the fresh target-loss
+	 *  edge, faces the computed aim point weapon-up each tick, breaks on player-left / new owner /
+	 *  self-movement / timer cap. Returns true while it owns aim/focus this tick. */
+	bool UpdatePostCombatOverwatch(ACompanionAIController& Controller, ACompanionCharacter& Companion,
+		const APawn* PlayerPawn, const UCompanionTuningDataAsset* Tuning,
+		bool bTakedownOwnsAim, bool bPlayerDBNO, float DeltaSeconds);
+
+	/** Aim-point pick: nearest same-floor door on the portal path toward the threat memory (LoS
+	 *  checked), else the last-threat/first-contact point, else a point along the threat bearing.
+	 *  Returns false when no usable memory exists (overwatch is skipped). */
+	bool ComputeOverwatchAimPoint(const ACompanionCharacter& Companion,
+		const UCompanionTuningDataAsset* Tuning, FVector& OutAimPoint) const;
+
+	/** Drops the scripted-aim raise and resets the hold state. Lowering/focus-clear is left to the
+	 *  branch that runs next (the decay lower, or a new combat/ready owner). */
+	void EndPostCombatOverwatch(ACompanionCharacter& Companion);
+
+	/** Clears first-contact/last-threat memory — the fight is fully over (Exploration flip or
+	 *  stealth re-pin), the next acquisition starts a new fight. */
+	void ResetFightThreatMemory();
 
 	// --- F3 watch-threat state (nearest visible-or-lingering enemy the companion watches without
 	// engaging; see ComputeWatchThreat/ApplyWatchFacing) ---

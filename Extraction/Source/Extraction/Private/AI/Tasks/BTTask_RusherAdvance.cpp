@@ -2,6 +2,7 @@
 // move, melee on contact.
 
 #include "BTTask_RusherAdvance.h"
+#include "BarkSubsystem.h"
 #include "CoverPoseComponent.h"
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
@@ -69,6 +70,11 @@ EBTNodeResult::Type UBTTask_RusherAdvance::ExecuteTask(UBehaviorTreeComponent& O
 
 	// Cover-pose hygiene: the charge can start straight out of the cover-approach branch.
 	if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
+
+	// War-cry as the charge commits — content-gated (only the Rusher's set carries Rush lines).
+	if (IsValid(DA->BarkSet))
+		if (UBarkSubsystem* Barks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>())
+			Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::Rush);
 
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 	Enemy->SetAimTarget(Target);

@@ -7,6 +7,10 @@
 #include "AI/CompanionDiag.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "CompanionAIController.h"
+#include "CompanionBarkTypes.h"
+#include "BarkSubsystem.h"
+#include "EnemyGrenadeProjectile.h"
+#include "EnemyGrenadierComponent.h"
 #include "HealthComponent.h"
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
@@ -275,6 +279,7 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		World->GetTimerManager().ClearTimer(ShootDelayTimerHandle);
 		World->GetTimerManager().ClearTimer(ModeWidgetLinkTimerHandle);
 		World->GetTimerManager().ClearTimer(KnifeKillTimerHandle);
+		World->GetTimerManager().ClearTimer(CallForHelpTimerHandle);
 	}
 
 	if (HealthComponent)
@@ -295,6 +300,16 @@ void ACompanionCharacter::Tick(float DeltaTime)
 		TimeAimingAtCurrentTarget += DeltaTime;
 
 	TickPlayerSoftSeparation();
+}
+
+void ACompanionCharacter::Bark(ECompanionBarkType Type, FName Context) const
+{
+	if (!IsValid(BarkSet)) return;
+
+	const UWorld* World = GetWorld();
+	UBarkSubsystem* Barks = IsValid(World) ? World->GetSubsystem<UBarkSubsystem>() : nullptr;
+	if (Barks)
+		Barks->RequestCompanionBark(this, BarkSet, Type, Context);
 }
 
 float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -339,6 +354,8 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 			if (UCompanionAnimInstance* AnimInst = Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()))
 				AnimInst->PlayHitReactMontage(1.0f);
 		}
+
+		Bark(ECompanionBarkType::CompanionHurt);
 	}
 
 	return ActualDamage;
@@ -383,12 +400,16 @@ void ACompanionCharacter::StampNaturalCoverRelease()
 {
 	if (GetWorld())
 		LastNaturalReleaseTime = GetWorld()->GetTimeSeconds();
+
+	Bark(ECompanionBarkType::Repositioning);
 }
 
 void ACompanionCharacter::StampCoverCommit()
 {
 	if (GetWorld())
 		LastCoverCommitTime = GetWorld()->GetTimeSeconds();
+
+	Bark(ECompanionBarkType::TakingCover);
 }
 
 void ACompanionCharacter::SetFollowCatchupPace(bool bPace)
@@ -396,6 +417,9 @@ void ACompanionCharacter::SetFollowCatchupPace(bool bPace)
 	if (bFollowCatchupPace == bPace) return;
 	bFollowCatchupPace = bPace;
 	ApplyMovementSpeeds();
+
+	if (bPace)
+		Bark(ECompanionBarkType::FallingBehind);
 }
 
 void ACompanionCharacter::SetCoverCommitGrant(bool bPending)
@@ -517,6 +541,9 @@ void ACompanionCharacter::SetMode(ECompanionMode NewMode)
 
 	UE_LOG(LogCompanion, Log, TEXT("Companion mode -> %s"), *UEnum::GetValueAsString(Mode));
 	OnRep_Mode();
+
+	// Mode switches are player orders — acknowledge them (hushed for stealth).
+	Bark(NewMode == ECompanionMode::Stealth ? ECompanionBarkType::GoingStealth : ECompanionBarkType::AckGeneric);
 }
 
 void ACompanionCharacter::OnRep_Mode()
@@ -537,6 +564,9 @@ void ACompanionCharacter::SetStealthBroken(bool bBroken)
 	StealthCatchupStage = EStealthCatchup::None;
 	UE_LOG(LogCompanion, Log, TEXT("Companion stealth %s"), bBroken ? TEXT("BROKEN") : TEXT("re-pinned"));
 	ApplyStealthMovementClamps();
+
+	if (bBroken)
+		Bark(ECompanionBarkType::StealthBroken);
 }
 
 // --- Post-breach engagement grant ---
@@ -728,6 +758,72 @@ const UCompanionTuningDataAsset* ACompanionCharacter::GetTuning() const
 	return AIC ? AIC->GetTuning() : nullptr;
 }
 
+// --- Grenade (Grenadier-pattern reuse) ---
+
+UEnemyGrenadierComponent* ACompanionCharacter::GetOrCreateGrenadierComponent()
+{
+	if (IsValid(GrenadierComponent)) return GrenadierComponent;
+
+	const UCompanionTuningDataAsset* T = GetTuning();
+	if (!T || !T->bGrenadeEnabled || !T->GrenadeProjectileClass) return nullptr;
+
+	FGrenadierInitParams Params;
+	Params.GrenadeSupply = T->GrenadeSupply;
+	Params.GrenadeCooldown = T->GrenadeCooldown;
+	Params.GrenadeFuseTime = T->GrenadeFuseTime;
+	Params.GrenadeTelegraphTime = T->GrenadeTelegraphTime;
+	Params.GrenadeMinRange = T->GrenadeMinRange;
+	Params.GrenadeMaxRange = T->GrenadeMaxRange;
+	Params.GrenadeDamage = T->GrenadeDamage;
+	Params.GrenadeDamageRadius = T->GrenadeDamageRadius;
+	Params.GrenadeLandingDistanceScale = T->GrenadeLandingDistanceScale;
+	Params.GrenadeThrowSocket = T->GrenadeThrowSocket;
+	Params.GrenadeProjectileClass = T->GrenadeProjectileClass;
+
+	GrenadierComponent = NewObject<UEnemyGrenadierComponent>(this, UEnemyGrenadierComponent::StaticClass());
+	GrenadierComponent->RegisterComponent();
+	GrenadierComponent->InitFromParams(Params);
+	GrenadierComponent->OnGrenadeTelegraph.AddDynamic(this, &ACompanionCharacter::HandleGrenadeTelegraph);
+	GrenadierComponent->OnGrenadeCancelled.AddDynamic(this, &ACompanionCharacter::HandleGrenadeCancelled);
+	return GrenadierComponent;
+}
+
+void ACompanionCharacter::HandleGrenadeTelegraph(FVector PredictedLanding, float TimeToImpact)
+{
+	// Telegraph the throw out loud — the player is often inside the danger arc.
+	Bark(ECompanionBarkType::ThrowingGrenade);
+
+	const UCompanionTuningDataAsset* T = GetTuning();
+	if (!T) return;
+
+	UAnimMontage* Montage = nullptr;
+	if (bIsCrouched && IsValid(T->GrenadeThrowCrouchMontage))
+		Montage = T->GrenadeThrowCrouchMontage;
+	else if (T->GrenadeThrowStandMontages.Num() > 0)
+		Montage = T->GrenadeThrowStandMontages[FMath::RandRange(0, T->GrenadeThrowStandMontages.Num() - 1)];
+
+	if (!IsValid(Montage)) return;
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst)) return;
+
+	if (AnimInst->Montage_Play(Montage) > 0.f)
+		ActiveGrenadeThrowMontage = Montage;
+}
+
+void ACompanionCharacter::HandleGrenadeCancelled()
+{
+	if (!IsValid(ActiveGrenadeThrowMontage)) return;
+
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = MeshComp ? MeshComp->GetAnimInstance() : nullptr;
+	if (IsValid(AnimInst) && AnimInst->Montage_IsPlaying(ActiveGrenadeThrowMontage))
+		AnimInst->Montage_Stop(0.2f, ActiveGrenadeThrowMontage);
+
+	ActiveGrenadeThrowMontage = nullptr;
+}
+
 float ACompanionCharacter::TunedWalkSpeed() const
 {
 	const UCompanionTuningDataAsset* T = GetTuning();
@@ -848,6 +944,9 @@ void ACompanionCharacter::GetOwnedGameplayTags(FGameplayTagContainer& TagContain
 
 void ACompanionCharacter::StartWeaponFire()
 {
+	// Never spray one-handed over a grenade wind-up (enemy blind-burst parity).
+	if (IsValid(GrenadierComponent) && GrenadierComponent->IsTelegraphing()) return;
+
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->StartFiring();
 
@@ -888,6 +987,9 @@ void ACompanionCharacter::ReloadWeapon()
 		UE_LOG(LogCompanionDiag, Log, TEXT("%s: RELOAD-CALL vel=%.1f isMoving=%d alreadyReloading=%d"),
 			*GetName(), Vel, (int32)bIsMoving, (int32)bAlreadyReloading);
 	}
+	if (IsValid(CurrentWeapon) && CurrentWeapon->CanReload() && !CurrentWeapon->IsReloading())
+		Bark(CurrentWeapon->GetCurrentAmmo() == 0 ? ECompanionBarkType::LowAmmo : ECompanionBarkType::Reloading);
+
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->Reload();
 }
@@ -988,6 +1090,10 @@ void ACompanionCharacter::EnterDBNO()
 		CurrentWeapon->SetWeaponHidden(true);
 	}
 
+	// Abort an in-flight grenade wind-up (no-op unless telegraphing; the cancel broadcast stops the montage).
+	if (IsValid(GrenadierComponent))
+		GrenadierComponent->CancelThrow();
+
 	// If mid-reviving the player, clear that state
 	if (bIsRevivingPlayer)
 	{
@@ -1026,6 +1132,15 @@ void ACompanionCharacter::EnterDBNO()
 			BB->SetValueAsBool(NAME_IsDowned, true);
 			BB->ClearValue(ACompanionAIController::BB_CombatTarget);
 		}
+
+	// Going down is a priority telegraph; the repeating call-for-help keeps the revive on the
+	// player's mind while bleeding out (the bark set's cooldown paces any overlap).
+	Bark(ECompanionBarkType::CompanionDown);
+	constexpr float CallForHelpFirstDelay = 10.f;
+	constexpr float CallForHelpRepeatInterval = 18.f;
+	GetWorldTimerManager().SetTimer(CallForHelpTimerHandle,
+		FTimerDelegate::CreateUObject(this, &ACompanionCharacter::Bark, ECompanionBarkType::CompanionCallForHelp, FName(NAME_None)),
+		CallForHelpRepeatInterval, true, CallForHelpFirstDelay);
 
 	// Start bleedout timer (authority only)
 	if (HasAuthority())
@@ -1085,6 +1200,8 @@ void ACompanionCharacter::OnBleedoutExpired()
 	if (!bIsDBNO) return;
 
 	UE_LOG(LogCompanion, Log, TEXT("%s bleedout expired — mission failed"), *GetName());
+
+	GetWorldTimerManager().ClearTimer(CallForHelpTimerHandle);
 
 	if (HasAuthority())
 	{
@@ -1215,6 +1332,9 @@ void ACompanionCharacter::HandleRevive()
 {
 	UE_LOG(LogCompanion, Log, TEXT("%s HandleRevive fired"), *GetName());
 
+	GetWorldTimerManager().ClearTimer(CallForHelpTimerHandle);
+	Bark(ECompanionBarkType::CompanionRevived);
+
 	SetActorTickEnabled(true);
 
 	if (UCapsuleComponent* Capsule = GetCapsuleComponent())
@@ -1319,6 +1439,12 @@ void ACompanionCharacter::StopReviveMontage()
 
 float ACompanionCharacter::PlayBreachMontage(EBreachType Type)
 {
+	// Context-tagged variants let the loud kick shout and the quiet open whisper.
+	static const FName BreachContexts[] = { TEXT("Tactical"), TEXT("Loud"), TEXT("Quiet") };
+	const int32 TypeIndex = static_cast<int32>(Type);
+	Bark(ECompanionBarkType::Breaching,
+		BreachContexts[FMath::Clamp(TypeIndex, 0, static_cast<int32>(UE_ARRAY_COUNT(BreachContexts)) - 1)]);
+
 	const TObjectPtr<UAnimMontage>* Found = BreachMontages.Find(Type);
 	UAnimMontage* Montage = Found ? Found->Get() : nullptr;
 	if (!Montage) return 0.f;
@@ -1797,6 +1923,10 @@ void ACompanionCharacter::HandleTakedownLower()
 void ACompanionCharacter::FinishCommandedTakedown()
 {
 	const bool bWasArmed = bTakedownArmed;
+
+	// Finish only runs after an execution (kill applied or shot fired) — a disarm never routes here.
+	if (bWasArmed)
+		Bark(ECompanionBarkType::TakedownConfirm);
 
 	StopWeaponFire();
 

@@ -8,6 +8,9 @@
 #include "Companion/CompanionCommandTypes.h"
 #include "CompanionTuningDataAsset.generated.h"
 
+class AEnemyGrenadeProjectile;
+class UAnimMontage;
+
 /** Hearing-noise emitted when the companion breaches a door with a given breach type.
  *  Loudness <= 0 or MaxRange <= 0 (or a missing map entry) = silent — Quiet's default. */
 USTRUCT(BlueprintType)
@@ -777,6 +780,34 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0", EditCondition = "bAvoidPlayerADSCone"))
 	float ADSConeRange = 1500.f;
 
+	// --- Post-combat overwatch (weapon held ready on the threat chokepoint after the last kill) ---
+
+	// Master switch. Off = legacy behavior: weapon lowers the frame the last target is gone.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|PostCombatOverwatch")
+	bool bEnablePostCombatOverwatch = true;
+
+	// Ceiling (s) on the post-fight hold. The hold normally ends earlier — the player walking off,
+	// a command, a new contact, or the companion itself starting a move all break it immediately.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "1.0", ClampMax = "20.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float PostCombatOverwatchMaxTime = 6.f;
+
+	// Player distance (cm) beyond which the hold breaks — the player has moved on, follow wins.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "200.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchBreakDistance = 800.f;
+
+	// Max distance (cm) from the companion to a door for it to count as the aim chokepoint.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "300.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchDoorMaxDist = 1500.f;
+
+	// Threat-memory points closer than this (cm) are skipped (the fight ended at the companion's
+	// feet); the aim falls back to first-contact, then to the pure bearing.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "100.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchMinThreatDist = 400.f;
+
+	// Aim distance (cm) along the threat bearing when no usable door or threat point exists.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "300.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchBearingDistance = 1200.f;
+
 	// --- Mode (player-commanded Normal / Combat / Stealth) ---
 
 	// Combat mode: how far AHEAD of the player (along their facing / move direction) the companion
@@ -888,5 +919,70 @@ public:
 	// Max magnitude (degrees) of the idle scan-glance yaw offset.
 	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0", ClampMax = "90.0"))
 	float AmbientScanOffsetMaxDeg = 20.f;
+
+	// --- Grenade lob (Grenadier-pattern reuse: UEnemyGrenadierComponent attached to the companion;
+	// the projectile is team-blind radial damage, so companion grenades hurt everyone in the blast) ---
+
+	// Master switch. When false (or GrenadeProjectileClass unset) the companion never throws.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	bool bGrenadeEnabled = true;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "1"))
+	int32 GrenadeSupply = 4;
+
+	// Minimum seconds between throws.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.5"))
+	float GrenadeCooldown = 18.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.5"))
+	float GrenadeFuseTime = 2.5f;
+
+	// Wind-up seconds before the fallback spawn fires. Keep >= the throw montage's release-notify
+	// time — the notify releases first and clears this timer.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.1"))
+	float GrenadeTelegraphTime = 1.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.0"))
+	float GrenadeMinRange = 500.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.0"))
+	float GrenadeMaxRange = 2000.f;
+
+	// Damage at the blast centre.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "1.0"))
+	float GrenadeDamage = 120.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "1.0"))
+	float GrenadeDamageRadius = 350.f;
+
+	// Seconds the combat target must stay LOS-blocked before the companion lobs at last-known.
+	// Must stay below the combat task's LosBlockedAbandonSeconds (3.0) or the task exits first.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.5"))
+	float GrenadeLobTriggerLOSBlockedTime = 2.f;
+
+	// Scales the landing point toward the thrower (1.0 = exact last-known spot).
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float GrenadeLandingDistanceScale = 1.0f;
+
+	// Player-safety gate: refuse the throw when the player stands within
+	// GrenadeDamageRadius + this buffer (cm) of the predicted landing point.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.0"))
+	float GrenadePlayerSafetyBuffer = 100.f;
+
+	// Projectile spawned on throw (BP_EnemyGrenade — indicator + explosion FX come with it).
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	TSubclassOf<AEnemyGrenadeProjectile> GrenadeProjectileClass;
+
+	// Socket on the companion body mesh the grenade launches from.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	FName GrenadeThrowSocket = TEXT("GrenadeSocket");
+
+	// Stand throw montages (one picked at random per throw) + crouched variant. The enemy grenadier
+	// montages play directly — same skeleton, UpperBody slot, release notify included.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	TArray<TObjectPtr<UAnimMontage>> GrenadeThrowStandMontages;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	TObjectPtr<UAnimMontage> GrenadeThrowCrouchMontage;
 
 };

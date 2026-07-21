@@ -11,6 +11,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.h"
+#include "Companion/CompanionBarkTypes.h"
 #include "Companion/CompanionRoute.h"
 #include "WeaponBase.h"
 #include "Movement/TraversalComponent.h"
@@ -466,6 +467,19 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 		static_cast<int32>(Method),
 		*GetNameSafe(TargetActor),
 		*TargetLocation.ToString());
+
+	// Acknowledge the order out loud — the accepted-command confirm the player acts on.
+	if (const ACompanionCharacter* Comp = Cast<ACompanionCharacter>(GetPawn()))
+	{
+		switch (Command)
+		{
+		case ECompanionCommand::Breach:   Comp->Bark(ECompanionBarkType::AckBreach); break;
+		case ECompanionCommand::Takedown: Comp->Bark(ECompanionBarkType::AckTakedown); break;
+		case ECompanionCommand::Loot:     Comp->Bark(ECompanionBarkType::AckLoot); break;
+		case ECompanionCommand::Explore:  Comp->Bark(ECompanionBarkType::AckExplore); break;
+		default: break;
+		}
+	}
 }
 
 void ACompanionAIController::SetBreachType(EBreachType Type)

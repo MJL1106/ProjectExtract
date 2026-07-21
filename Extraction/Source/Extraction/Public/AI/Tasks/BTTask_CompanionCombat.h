@@ -537,6 +537,11 @@ private:
 	static constexpr float PeekResolveDistThresholdSq = 50.f * 50.f;
 
 	float LosBlockedAccum = 0.f;
+
+	/** Grenade-lob accumulator (enemy-grenadier parity) — separate from LosBlockedAccum because each
+	 *  throw attempt resets it for a full window between tries without disturbing the abandon clock. */
+	float GrenadeLosBlockedAccum = 0.f;
+
 	float TimeInOpenEngageNoCover = 0.f;
 	int8 LastTickBranch = -1;
 	bool bLastLosBlocked = false;

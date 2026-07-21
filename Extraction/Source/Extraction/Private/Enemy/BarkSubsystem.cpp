@@ -1,9 +1,10 @@
-// UBarkSubsystem — bark routing with dedup.
+// UBarkSubsystem — one-voice-at-a-time bark arbitration with 3D VO playback.
 
 #include "BarkSubsystem.h"
 #include "BarkSetData.h"
 #include "EnemyCharacter.h"
 #include "EnemyDebug.h"
+#include "Components/AudioComponent.h"
 #include "GameFramework/Pawn.h"
 #include "Kismet/GameplayStatics.h"
 #include "Sound/SoundBase.h"
@@ -13,7 +14,7 @@
 
 DEFINE_LOG_CATEGORY(LogEnemyBark);
 
-void UBarkSubsystem::RequestBark(const AActor* Speaker, const UBarkSetData* BarkSet, EBarkType Type, const FText& SpeakerName)
+void UBarkSubsystem::RequestBark(const AActor* Speaker, const UBarkSetData* BarkSet, EBarkType Type, FName Context)
 {
 	if (!IsValid(Speaker) || !IsValid(BarkSet)) return;
 
@@ -22,18 +23,49 @@ void UBarkSubsystem::RequestBark(const AActor* Speaker, const UBarkSetData* Bark
 	if (const AEnemyCharacter* SpeakerEnemy = Cast<AEnemyCharacter>(Speaker))
 		if (SpeakerEnemy->IsTakedownPending()) return;
 
-	const bool bDebug = IsEnemyBarkDebugEnabled();
+	// Enum-name stringification only matters for the debug channel — skip the per-request
+	// allocation otherwise (damage-driven attempts arrive at bullet-hit frequency).
+	RequestBarkInternal(Speaker, BarkSet->Barks.Find(Type), BarkSet->Attenuation,
+		EBarkChannel::Enemy, static_cast<uint8>(Type),
+		IsEnemyBarkDebugEnabled() ? UEnum::GetValueAsString(Type) : FString(), Context);
+}
 
-	const FBarkDefinition* Def = BarkSet->Barks.Find(Type);
-	if (!Def || Def->Lines.Num() == 0)
+void UBarkSubsystem::RequestCompanionBark(const AActor* Speaker, const UCompanionBarkSetData* BarkSet, ECompanionBarkType Type, FName Context)
+{
+	if (!IsValid(Speaker) || !IsValid(BarkSet)) return;
+
+	RequestBarkInternal(Speaker, BarkSet->Barks.Find(Type), BarkSet->Attenuation,
+		EBarkChannel::Companion, static_cast<uint8>(Type),
+		IsEnemyBarkDebugEnabled() ? UEnum::GetValueAsString(Type) : FString(), Context);
+}
+
+void UBarkSubsystem::RequestBarkInternal(const AActor* Speaker, const FBarkDefinition* Def, USoundAttenuation* Attenuation,
+	EBarkChannel Channel, uint8 RawType, const FString& TypeStr, FName Context)
+{
+	const bool bDebug = IsEnemyBarkDebugEnabled();
+	const uint16 TypeKey = MakeTypeKey(Channel, RawType);
+
+	if (!Def || Def->Variants.Num() == 0)
 	{
 		if (bDebug)
 		{
-			const FString TypeStr = UEnum::GetValueAsString(Type);
-			const FString SpeakerStr = SpeakerName.ToString();
-			UE_LOG(LogEnemyBark, Warning, TEXT("DROP NoLines type=%s speaker=%s"), *TypeStr, *SpeakerStr);
-			ShowBarkScreenMessage(Speaker, Type, FString::Printf(TEXT("DROP NoLines %s [%s]"), *TypeStr, *SpeakerStr), FColor::Silver);
+			UE_LOG(LogEnemyBark, Warning, TEXT("DROP NoLines type=%s speaker=%s"), *TypeStr, *GetNameSafe(Speaker));
+			ShowBarkScreenMessage(Speaker, TypeKey, FString::Printf(TEXT("DROP NoLines %s"), *TypeStr), FColor::Silver);
 		}
+		return;
+	}
+
+	// Context filter: untagged variants are always eligible; tagged variants only when the trigger
+	// asked for that tag (a "Sniper — get down!" line must never fire about a Heavy).
+	TArray<const FBarkVariant*, TInlineAllocator<8>> Eligible;
+	for (const FBarkVariant& Variant : Def->Variants)
+		if (Variant.Context.IsNone() || Variant.Context == Context)
+			Eligible.Add(&Variant);
+
+	if (Eligible.Num() == 0)
+	{
+		if (bDebug)
+			UE_LOG(LogEnemyBark, Log, TEXT("DROP NoContextMatch type=%s ctx=%s"), *TypeStr, *Context.ToString());
 		return;
 	}
 
@@ -46,49 +78,65 @@ void UBarkSubsystem::RequestBark(const AActor* Speaker, const UBarkSetData* Bark
 	if (const APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0))
 	{
 		const float DistSq = FVector::DistSquared(PlayerPawn->GetActorLocation(), Speaker->GetActorLocation());
-		if (DistSq > FMath::Square(MaxSubtitleRange))
+		if (DistSq > FMath::Square(MaxAudibleRange))
 		{
 			if (bDebug)
 			{
-				const FString TypeStr = UEnum::GetValueAsString(Type);
-				UE_LOG(LogEnemyBark, Log, TEXT("DROP OutOfRange type=%s (dist=%.0f > %.0f)"), *TypeStr, FMath::Sqrt(DistSq), MaxSubtitleRange);
-				ShowBarkScreenMessage(Speaker, Type, FString::Printf(TEXT("DROP Range %s (%.0f>%.0f)"), *TypeStr, FMath::Sqrt(DistSq), MaxSubtitleRange), FColor::Silver);
+				UE_LOG(LogEnemyBark, Log, TEXT("DROP OutOfRange type=%s (dist=%.0f > %.0f)"), *TypeStr, FMath::Sqrt(DistSq), MaxAudibleRange);
+				ShowBarkScreenMessage(Speaker, TypeKey, FString::Printf(TEXT("DROP Range %s (%.0f>%.0f)"), *TypeStr, FMath::Sqrt(DistSq), MaxAudibleRange), FColor::Silver);
 			}
 			return;
 		}
 	}
 
-	// One voice at a time: any bark inside the global gap is dropped; high-priority telegraphs
-	// (grenade out, man down) only wait out the short gap.
-	const float RequiredGap = Def->Priority >= 2 ? PriorityBarkGap : GlobalAnyBarkGap;
-	const float SinceAny = Now - LastAnyBarkTime;
-	if (SinceAny < RequiredGap)
+	// --- Voice channel arbitration: one line in the world at a time. ---
+	// A live line blocks everything below priority 2; a priority-2 telegraph interrupts it with a
+	// quick fade instead of talking over it. After a line ends, normal barks wait out a short gap
+	// and ambient (priority 0) needs a genuine lull.
+	UAudioComponent* CurrentVoice = ActiveVoice.Get();
+	const bool bVoiceLive = IsValid(CurrentVoice) && CurrentVoice->IsPlaying();
+
+	if (bVoiceLive && Def->Priority < 2)
 	{
 		if (bDebug)
 		{
-			const FString TypeStr = UEnum::GetValueAsString(Type);
-			UE_LOG(LogEnemyBark, Log, TEXT("DROP GlobalGap type=%s (since=%.2fs < gap=%.2fs, prio=%d)"), *TypeStr, SinceAny, RequiredGap, Def->Priority);
-			ShowBarkScreenMessage(Speaker, Type, FString::Printf(TEXT("DROP Gap %s (%.1fs<%.1fs)"), *TypeStr, SinceAny, RequiredGap), FColor::Silver);
+			UE_LOG(LogEnemyBark, Log, TEXT("DROP VoiceBusy type=%s (prio=%d)"), *TypeStr, Def->Priority);
+			ShowBarkScreenMessage(Speaker, TypeKey, FString::Printf(TEXT("DROP Busy %s"), *TypeStr), FColor::Silver);
 		}
 		return;
 	}
 
-	if (const float* GlobalLast = LastBarkTimePerType.Find(Type))
+	if (!bVoiceLive)
+	{
+		const float RequiredGap = Def->Priority >= 2 ? PriorityPostVoiceGapSeconds
+			: Def->Priority == 0 ? AmbientLullSeconds : PostVoiceGapSeconds;
+		const float SinceLast = Now - LastVoiceEndTime;
+		if (SinceLast < RequiredGap)
+		{
+			if (bDebug)
+			{
+				UE_LOG(LogEnemyBark, Log, TEXT("DROP Gap type=%s (since=%.2fs < gap=%.2fs, prio=%d)"), *TypeStr, SinceLast, RequiredGap, Def->Priority);
+				ShowBarkScreenMessage(Speaker, TypeKey, FString::Printf(TEXT("DROP Gap %s (%.1fs<%.1fs)"), *TypeStr, SinceLast, RequiredGap), FColor::Silver);
+			}
+			return;
+		}
+	}
+
+	if (const float* GlobalLast = LastBarkTimePerType.Find(TypeKey))
 	{
 		const float Since = Now - *GlobalLast;
 		if (Since < GlobalTypeDedupWindow)
 		{
 			if (bDebug)
 			{
-				const FString TypeStr = UEnum::GetValueAsString(Type);
 				UE_LOG(LogEnemyBark, Log, TEXT("DROP GlobalDedup type=%s (since=%.2fs < window=%.2fs)"), *TypeStr, Since, GlobalTypeDedupWindow);
-				ShowBarkScreenMessage(Speaker, Type, FString::Printf(TEXT("DROP GlobalDedup %s (%.1fs<%.1fs)"), *TypeStr, Since, GlobalTypeDedupWindow), FColor::Silver);
+				ShowBarkScreenMessage(Speaker, TypeKey, FString::Printf(TEXT("DROP GlobalDedup %s (%.1fs<%.1fs)"), *TypeStr, Since, GlobalTypeDedupWindow), FColor::Silver);
 			}
 			return;
 		}
 	}
 
-	const TPair<FObjectKey, uint8> SpeakerKey(FObjectKey(Speaker), static_cast<uint8>(Type));
+	const TPair<FObjectKey, uint16> SpeakerKey(FObjectKey(Speaker), TypeKey);
 	if (const float* SpeakerLast = LastBarkTimePerSpeaker.Find(SpeakerKey))
 	{
 		const float Since = Now - *SpeakerLast;
@@ -96,46 +144,62 @@ void UBarkSubsystem::RequestBark(const AActor* Speaker, const UBarkSetData* Bark
 		{
 			if (bDebug)
 			{
-				const FString TypeStr = UEnum::GetValueAsString(Type);
-				const FString SpeakerStr = SpeakerName.ToString();
-				UE_LOG(LogEnemyBark, Log, TEXT("DROP Cooldown type=%s speaker=%s (since=%.2fs < cd=%.2fs)"), *TypeStr, *SpeakerStr, Since, Def->CooldownSeconds);
-				ShowBarkScreenMessage(Speaker, Type, FString::Printf(TEXT("DROP CD %s [%s] (%.1fs<%.1fs)"), *TypeStr, *SpeakerStr, Since, Def->CooldownSeconds), FColor::Silver);
+				UE_LOG(LogEnemyBark, Log, TEXT("DROP Cooldown type=%s speaker=%s (since=%.2fs < cd=%.2fs)"), *TypeStr, *GetNameSafe(Speaker), Since, Def->CooldownSeconds);
+				ShowBarkScreenMessage(Speaker, TypeKey, FString::Printf(TEXT("DROP CD %s (%.1fs<%.1fs)"), *TypeStr, Since, Def->CooldownSeconds), FColor::Silver);
 			}
 			return;
 		}
 	}
 
-	LastBarkTimePerType.Add(Type, Now);
+	// Telegraph interrupt: fade the losing line out now that this bark has fully qualified.
+	if (bVoiceLive)
+		CurrentVoice->FadeOut(InterruptFadeSeconds, 0.f);
+
+	LastBarkTimePerType.Add(TypeKey, Now);
 	LastBarkTimePerSpeaker.Add(SpeakerKey, Now);
-	LastAnyBarkTime = Now;
 
-	const FText& Line = Def->Lines[FMath::RandRange(0, Def->Lines.Num() - 1)];
-	OnBarkRequested.Broadcast(SpeakerName, Line);
+	const FBarkVariant& Picked = *Eligible[FMath::RandRange(0, Eligible.Num() - 1)];
 
-	if (bDebug)
+	// A variant with no imported VO still stamps cooldowns (content-pending state) but frees the
+	// channel immediately.
+	LastVoiceEndTime = Now;
+	if (IsValid(Picked.Sound))
 	{
-		const FString TypeStr = UEnum::GetValueAsString(Type);
-		const FString SpeakerStr = SpeakerName.ToString();
-		UE_LOG(LogEnemyBark, Log, TEXT("FIRED type=%s speaker=%s line=\"%s\""), *TypeStr, *SpeakerStr, *Line.ToString());
-		ShowBarkScreenMessage(Speaker, Type, FString::Printf(TEXT("FIRED %s [%s] \"%s\""), *TypeStr, *SpeakerStr, *Line.ToString()), FColor::Green);
-
-		// Draw text above speaker's head in-world for 2 seconds
-		if (IsValid(World))
+		USceneComponent* AttachTo = Speaker->GetRootComponent();
+		UAudioComponent* Voice = UGameplayStatics::SpawnSoundAttached(Picked.Sound, AttachTo, NAME_None,
+			FVector::ZeroVector, EAttachLocation::KeepRelativeOffset, false, 1.f, 1.f, 0.f, Attenuation);
+		if (Voice)
 		{
-			const FVector HeadLocation = Speaker->GetActorLocation() + FVector(0.f, 0.f, 100.f);
-			DrawDebugString(World, HeadLocation, FString::Printf(TEXT("[%s] %s"), *TypeStr, *Line.ToString()), nullptr, FColor::Green, 2.f, true);
+			Voice->OnAudioFinishedNative.AddUObject(this, &UBarkSubsystem::HandleVoiceFinished);
+			ActiveVoice = Voice;
 		}
 	}
 
-	if (IsValid(Def->Sound))
-		UGameplayStatics::PlaySoundAtLocation(World, Def->Sound, Speaker->GetActorLocation());
+	if (bDebug)
+	{
+		UE_LOG(LogEnemyBark, Log, TEXT("FIRED type=%s speaker=%s line=\"%s\" sound=%s"),
+			*TypeStr, *GetNameSafe(Speaker), *Picked.Line.ToString(), *GetNameSafe(Picked.Sound));
+		ShowBarkScreenMessage(Speaker, TypeKey, FString::Printf(TEXT("FIRED %s \"%s\""), *TypeStr, *Picked.Line.ToString()), FColor::Green);
+
+		const FVector HeadLocation = Speaker->GetActorLocation() + FVector(0.f, 0.f, 100.f);
+		DrawDebugString(GetWorld(), HeadLocation, FString::Printf(TEXT("[%s] %s"), *TypeStr, *Picked.Line.ToString()), nullptr, FColor::Green, 2.f, true);
+	}
 }
 
-void UBarkSubsystem::ShowBarkScreenMessage(const AActor* Speaker, EBarkType Type, const FString& Message, const FColor& Color)
+void UBarkSubsystem::HandleVoiceFinished(UAudioComponent* Voice)
+{
+	if (Voice != ActiveVoice.Get()) return;
+
+	if (const UWorld* World = GetWorld())
+		LastVoiceEndTime = World->GetTimeSeconds();
+	ActiveVoice.Reset();
+}
+
+void UBarkSubsystem::ShowBarkScreenMessage(const AActor* Speaker, uint16 TypeKey, const FString& Message, const FColor& Color)
 {
 	if (!GEngine) return;
 
 	// Unique key per speaker+type so rapid-fire spam coalesces into a single on-screen slot
-	const uint64 Key = GetTypeHash(Speaker) ^ (static_cast<uint64>(Type) << 32);
+	const uint64 Key = GetTypeHash(Speaker) ^ (static_cast<uint64>(TypeKey) << 32);
 	GEngine->AddOnScreenDebugMessage(static_cast<int32>(Key & 0x7FFFFFFF), 4.f, Color, Message);
 }

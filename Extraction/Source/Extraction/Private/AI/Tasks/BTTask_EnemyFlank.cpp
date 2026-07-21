@@ -118,7 +118,7 @@ EBTNodeResult::Type UBTTask_EnemyFlank::ExecuteTask(UBehaviorTreeComponent& Owne
 	// Bark
 	UBarkSubsystem* Barks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
 	if (Barks && Squad->TryClaimSquadBark(EBarkType::Flanking))
-		Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::Flanking, DA->DisplayName);
+		Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::Flanking);
 
 	return EBTNodeResult::InProgress;
 }

@@ -6,6 +6,7 @@
 #include "CompanionAIController.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.h"
+#include "Companion/CompanionBarkTypes.h"
 #include "HealthComponent.h"
 #include "WeaponBase.h"
 #include "GameFramework/Character.h"
@@ -80,12 +81,14 @@ void UBTTask_RevivePlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 		bIsHoldingRevive = true;
 		SetReviveAnimsActive(true);
+		Companion->Bark(ECompanionBarkType::RevivingPlayer);
 	}
 
 	ReviveElapsed += DeltaSeconds;
 	if (ReviveElapsed < Companion->ReviveDuration) return;
 
 	Player->ExitDBNO();
+	Companion->Bark(ECompanionBarkType::PlayerRevived);
 
 	UE_LOG(LogCompanionAI, Log, TEXT("Companion revived %s"), *GetNameSafe(PlayerActor));
 	FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);

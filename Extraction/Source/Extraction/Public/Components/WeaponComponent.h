@@ -41,6 +41,16 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
 	AWeaponBase* ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<AWeaponBase> NewWeaponClass, int32 Mag = -1, int32 Reserve = -1);
 
+	/** Mark the kit throwable (grenade) slot equipped/unequipped — called by the char BP's kit
+	 *  swap pipeline. While set, fire/reload/ADS divert away from the C++ hitscan weapon and the
+	 *  char BP routes fire to the kit item. Returns false (and changes nothing) when the equip is
+	 *  refused: mid-reload, DBNO, or takedown. Cleared automatically on any real weapon switch. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Throwable")
+	bool SetThrowableEquipped(bool bEquipped);
+
+	UFUNCTION(BlueprintPure, Category = "Weapon|Throwable")
+	bool IsThrowableEquipped() const { return bThrowableEquipped; }
+
 	/** Begin firing. bAuthorityTakedownSnapshot = true when the authority has confirmed a
 	 *  companion shoot-takedown is armed at trigger-pull time (first shot only is exempt). */
 	void StartFire(bool bAuthorityTakedownSnapshot = false);
@@ -109,6 +119,9 @@ private:
 	/** True for the FIRST shot of a trigger pull that coincides with a companion shoot-takedown.
 	 *  Consumed (cleared) on the first OnWeaponFiredCallback. */
 	bool bNextShotStealthExempt = false;
+
+	/** Kit throwable slot held (single-player state, not replicated). See SetThrowableEquipped. */
+	bool bThrowableEquipped = false;
 
 	/** Spawn + attach + init a slot weapon. Spawns hidden — SetActiveWeapon unhides on activation. */
 	AWeaponBase* SpawnWeaponActor(TSubclassOf<AWeaponBase> WeaponClass);

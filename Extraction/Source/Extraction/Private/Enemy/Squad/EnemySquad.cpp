@@ -80,9 +80,27 @@ void UEnemySquad::ReportSighting(AActor* Target, const FVector& LastKnown)
 	const float Now = World->GetTimeSeconds();
 	if (Now - LastSightingRelayTime < SightingRelayInterval) return;
 
+	// First squad-wide alert of this engagement (no prior shared target) — the officer (else the
+	// first alive member) calls the contact for the whole squad. Content-gated: only bark sets
+	// carrying CallingContact lines actually speak.
+	const bool bFirstAlert = !SquadTarget.IsValid();
+
 	LastSightingRelayTime = Now;
 	SquadTarget = Target;
 	SquadLastKnown = LastKnown;
+
+	if (bFirstAlert)
+	{
+		AEnemyCharacter* Caller = GetOfficer();
+		if (!IsValid(Caller))
+			for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
+				if (IsMemberAlive(M)) { Caller = M.Get(); break; }
+
+		const UEnemyArchetypeData* CallerDA = IsValid(Caller) ? Caller->GetArchetypeData() : nullptr;
+		UBarkSubsystem* Barks = World->GetSubsystem<UBarkSubsystem>();
+		if (IsValid(CallerDA) && IsValid(CallerDA->BarkSet) && Barks && TryClaimSquadBark(EBarkType::CallingContact))
+			Barks->RequestBark(Caller, CallerDA->BarkSet, EBarkType::CallingContact);
+	}
 
 	for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
 	{
@@ -619,7 +637,7 @@ void UEnemySquad::NotifyFlankerArrived(AEnemyCharacter* Flanker)
 		const UEnemyArchetypeData* SuppDA = OldFlank->GetArchetypeData();
 		if (IsValid(SuppDA) && SuppDA->BarkSet != nullptr && TryClaimSquadBark(EBarkType::CoveringGo))
 		{
-			BarkSub->RequestBark(OldFlank, SuppDA->BarkSet, EBarkType::CoveringGo, SuppDA->DisplayName);
+			BarkSub->RequestBark(OldFlank, SuppDA->BarkSet, EBarkType::CoveringGo);
 		}
 	}
 

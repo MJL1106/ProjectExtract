@@ -111,7 +111,7 @@ EBTNodeResult::Type UBTTask_EnemySuppressFire::ExecuteTask(UBehaviorTreeComponen
 			const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
 			UBarkSubsystem* Barks = World->GetSubsystem<UBarkSubsystem>();
 			if (IsValid(DA) && Barks && Squad->TryClaimSquadBark(EBarkType::Suppressing))
-				Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::Suppressing, DA->DisplayName);
+				Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::Suppressing);
 		}
 	}
 

@@ -187,7 +187,10 @@ AWeaponBase* UWeaponComponent::SpawnWeaponActor(TSubclassOf<AWeaponBase> WeaponC
 void UWeaponComponent::SetActiveWeapon(AWeaponBase* NewWeapon)
 {
 	if (!OwnerIface || !IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return;
-	if (!IsValid(NewWeapon) || NewWeapon == CurrentWeapon) return;
+	if (!IsValid(NewWeapon)) return;
+	// Same-weapon re-equip is only allowed to restore the kit gun visual after a throwable —
+	// NotifyWeaponEquipped below respawns the kit item over the grenade.
+	if (NewWeapon == CurrentWeapon && !bThrowableEquipped) return;
 
 	if (IsValid(CurrentWeapon))
 	{
@@ -198,6 +201,7 @@ void UWeaponComponent::SetActiveWeapon(AWeaponBase* NewWeapon)
 	}
 
 	bNextShotStealthExempt = false;
+	bThrowableEquipped = false;
 	CurrentWeapon = NewWeapon;
 	CurrentWeapon->SetWeaponHidden(false);
 	CurrentWeapon->SetOwnerIsAiming(bIsAiming);
@@ -245,9 +249,30 @@ void UWeaponComponent::Server_SwitchWeapon_Implementation(uint8 SlotIndex)
 	SetActiveWeapon(SlotIndex == 0 ? PrimaryWeapon.Get() : SecondaryWeapon.Get());
 }
 
+bool UWeaponComponent::SetThrowableEquipped(bool bEquipped)
+{
+	if (bEquipped == bThrowableEquipped) return true;
+
+	if (bEquipped)
+	{
+		if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return false;
+		if (IsValid(CurrentWeapon))
+		{
+			if (CurrentWeapon->IsReloading()) return false;
+			CurrentWeapon->StopFiring();
+		}
+		if (bIsAiming)
+			SetAiming(false);
+	}
+
+	bThrowableEquipped = bEquipped;
+	return true;
+}
+
 void UWeaponComponent::StartFire(bool bAuthorityTakedownSnapshot)
 {
 	if (!IsValid(OwnerActor)) return;
+	if (bThrowableEquipped) return; // FireStart diverts to the kit item before reaching here — belt-and-braces
 
 	// Authority path: trust the caller's snapshot directly (ExtractionPlayer resolved it).
 	if (OwnerActor->HasAuthority())
@@ -275,6 +300,7 @@ void UWeaponComponent::StopFire()
 void UWeaponComponent::StartReload()
 {
 	if (!IsValid(OwnerActor)) return;
+	if (bThrowableEquipped) return; // R with the grenade out must not reload the stowed gun
 	if (!OwnerActor->HasAuthority() && IsValid(CurrentWeapon))
 		CurrentWeapon->Reload();
 
@@ -283,6 +309,8 @@ void UWeaponComponent::StartReload()
 
 void UWeaponComponent::SetAiming(bool bNewAiming)
 {
+	if (bThrowableEquipped && bNewAiming) return; // no ADS on the throwable; clearing is allowed
+
 	bIsAiming = bNewAiming;
 
 	if (IsValid(CurrentWeapon))

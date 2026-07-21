@@ -15,6 +15,8 @@
 #include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.generated.h"
 
+enum class ECompanionBarkType : uint8;
+class UCompanionBarkSetData;
 class UHealthComponent;
 class USuppressionComponent;
 class UCoverPoseComponent;
@@ -25,6 +27,7 @@ class UWidgetComponent;
 class UUserWidget;
 class AExtractionPlayer;
 class UCompanionTuningDataAsset;
+class UEnemyGrenadierComponent;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
 
@@ -59,6 +62,13 @@ public:
 
 	// --- IGenericTeamAgentInterface ---
 	virtual FGenericTeamId GetGenericTeamId() const override { return FGenericTeamId(0); }
+
+	// --- Barks ---
+
+	/** Routes a companion voice line through the world's shared bark channel. Safe to call from
+	 *  anywhere, any frequency — the subsystem owns cooldowns and one-voice arbitration. Context
+	 *  filters tagged variants (e.g. an archetype or direction the line names). */
+	void Bark(ECompanionBarkType Type, FName Context = NAME_None) const;
 
 	// --- Weapon Interface ---
 
@@ -119,6 +129,13 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Companion")
 	TSubclassOf<AWeaponBase> GetWeaponClass() const { return WeaponClass; }
+
+	/** Grenadier-pattern lob component (enemy reuse). Created lazily on first call when the tuning
+	 *  DA enables grenades and sets a projectile class; null otherwise. Combat task trigger point. */
+	UEnemyGrenadierComponent* GetOrCreateGrenadierComponent();
+
+	UFUNCTION(BlueprintPure, Category = "Companion|Grenade")
+	UEnemyGrenadierComponent* GetGrenadierComponent() const { return GrenadierComponent; }
 
 	/** Target the companion is currently aiming at. Used by WeaponBase to aim along muzzle->target. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
@@ -520,6 +537,10 @@ protected:
 
 	// --- Config ---
 
+	/** Companion voice lines + attenuation — designer assigns in BP. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Barks")
+	TObjectPtr<UCompanionBarkSetData> BarkSet;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Combat")
 	TSubclassOf<AWeaponBase> WeaponClass;
 
@@ -815,11 +836,30 @@ private:
 
 	FTimerHandle BleedoutTimerHandle;
 
+	/** Repeats the DBNO call-for-help bark while awaiting revive. Cleared on revive/death/EndPlay. */
+	FTimerHandle CallForHelpTimerHandle;
+
 	UPROPERTY(VisibleInstanceOnly, Category = "Companion|Tags")
 	FGameplayTagContainer OwnedTags;
 
 	UPROPERTY()
 	TObjectPtr<AWeaponBase> CurrentWeapon;
+
+	/** See GetOrCreateGrenadierComponent. */
+	UPROPERTY()
+	TObjectPtr<UEnemyGrenadierComponent> GrenadierComponent;
+
+	/** Montage started by HandleGrenadeTelegraph — stopped by HandleGrenadeCancelled. */
+	UPROPERTY()
+	TObjectPtr<UAnimMontage> ActiveGrenadeThrowMontage;
+
+	/** Plays the throw wind-up montage (crouch variant when crouched, else a random stand montage). */
+	UFUNCTION()
+	void HandleGrenadeTelegraph(FVector PredictedLanding, float TimeToImpact);
+
+	/** Stops the in-flight throw montage on a cancelled wind-up. */
+	UFUNCTION()
+	void HandleGrenadeCancelled();
 
 	UPROPERTY()
 	TWeakObjectPtr<AActor> CurrentAimTarget;

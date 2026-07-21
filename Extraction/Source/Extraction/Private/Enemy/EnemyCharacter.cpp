@@ -37,6 +37,9 @@
 #include "World/AmmoPickup.h"
 #include "World/LootPickup.h"
 #include "Companion/CompanionCharacter.h"
+#include "Companion/CompanionBarkTypes.h"
+#include "BarkSubsystem.h"
+#include "Kismet/GameplayStatics.h"
 #include "NiagaraFunctionLibrary.h"
 #include "NiagaraSystem.h"
 
@@ -833,7 +836,17 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 
 	// Phase 4: broadcast hit-react for flinch montages (only while alive)
 	if (FinalDamage > 0.f && IsValid(HealthComponent) && !HealthComponent->IsDead())
+	{
 		OnHitReact.Broadcast(HitRegion);
+
+		// Damage-defiance taunt while still healthy — content-gated (only the Heavy's bark set
+		// carries Taunt lines; everyone else's request drops on the no-lines check).
+		constexpr float TauntMinHealthFraction = 0.6f;
+		if (HealthComponent->GetHealthPercent() > TauntMinHealthFraction
+			&& IsValid(ArchetypeData) && IsValid(ArchetypeData->BarkSet))
+			if (UBarkSubsystem* Barks = GetWorld()->GetSubsystem<UBarkSubsystem>())
+				Barks->RequestBark(this, ArchetypeData->BarkSet, EBarkType::Taunt);
+	}
 
 	SpawnBloodImpactFX(DamageEvent, HitRegion);
 
@@ -862,6 +875,18 @@ void AEnemyCharacter::SpawnBloodImpactFX(const FDamageEvent& DamageEvent, EHitRe
 
 void AEnemyCharacter::HandleDeath()
 {
+	// Kill attribution for the companion's voice — its own confirm, or approval of the player's
+	// kill. Takedown deaths skip this (no instigator stamp); TakedownConfirm covers those.
+	if (AController* Killer = LastDamageInstigator.Get())
+	{
+		if (ACompanionCharacter* CompanionKiller = Cast<ACompanionCharacter>(Killer->GetPawn()))
+			CompanionKiller->Bark(ECompanionBarkType::TargetDown);
+		else if (Killer->IsPlayerController())
+			if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(
+					UGameplayStatics::GetActorOfClass(GetWorld(), ACompanionCharacter::StaticClass())))
+				Companion->Bark(ECompanionBarkType::ApprovePlayerKill);
+	}
+
 	if (IsValid(AwarenessWidgetComponent))
 		AwarenessWidgetComponent->SetVisibility(false);
 

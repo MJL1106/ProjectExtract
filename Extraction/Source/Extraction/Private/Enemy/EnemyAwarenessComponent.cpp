@@ -1371,7 +1371,7 @@ void UEnemyAwarenessComponent::Bark(EBarkType Type) const
 	const UWorld* World = GetWorld();
 	UBarkSubsystem* Barks = IsValid(World) ? World->GetSubsystem<UBarkSubsystem>() : nullptr;
 	if (Barks)
-		Barks->RequestBark(MyPawn, ArchetypeData->BarkSet, Type, ArchetypeData->DisplayName);
+		Barks->RequestBark(MyPawn, ArchetypeData->BarkSet, Type);
 }
 
 void UEnemyAwarenessComponent::ClearInvestigateBody()

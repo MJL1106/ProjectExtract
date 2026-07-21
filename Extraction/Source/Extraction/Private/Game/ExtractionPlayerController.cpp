@@ -9,7 +9,6 @@
 #include "Blueprint/UserWidget.h"
 #include "PlayerHealthWidget.h"
 #include "AmmoWidget.h"
-#include "BarkFeedWidget.h"
 #include "CompanionModeWidget.h"
 #include "ObjectiveMarkerLayer.h"
 #include "ObjectiveTextPanelWidget.h"
@@ -48,11 +47,6 @@ AExtractionPlayerController::AExtractionPlayerController()
 	if (AmmoBP.Succeeded())
 		AmmoWidgetClass = AmmoBP.Class;
 
-	// Default bark subtitle feed widget class
-	static ConstructorHelpers::FClassFinder<UBarkFeedWidget> BarkFeedBP(
-		TEXT("/Game/Core/UI/WBP_BarkFeed"));
-	if (BarkFeedBP.Succeeded())
-		BarkFeedWidgetClass = BarkFeedBP.Class;
 }
 
 void AExtractionPlayerController::BeginPlay()
@@ -93,14 +87,6 @@ void AExtractionPlayerController::BeginPlay()
 		AmmoWidget = CreateWidget<UAmmoWidget>(this, AmmoWidgetClass);
 		if (IsValid(AmmoWidget))
 			AmmoWidget->AddToPlayerScreen();
-	}
-
-	// Spawn enemy bark subtitle feed for local player
-	if (IsLocalPlayerController() && BarkFeedWidgetClass)
-	{
-		BarkFeedWidget = CreateWidget<UBarkFeedWidget>(this, BarkFeedWidgetClass);
-		if (IsValid(BarkFeedWidget))
-			BarkFeedWidget->AddToPlayerScreen();
 	}
 
 	// Spawn companion mode chip for local player

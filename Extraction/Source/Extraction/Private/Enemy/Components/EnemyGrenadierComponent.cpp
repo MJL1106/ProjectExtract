@@ -76,6 +76,24 @@ void UEnemyGrenadierComponent::InitFromArchetype(const UEnemyArchetypeData* Data
 		UE_LOG(LogTemp, Warning, TEXT("%s: UEnemyGrenadierComponent — bIsGrenadier is true but GrenadeProjectileClass is not set. Grenades will not spawn."), *GetNameSafe(GetOwner()));
 }
 
+void UEnemyGrenadierComponent::InitFromParams(const FGrenadierInitParams& Params)
+{
+	GrenadeSupply = Params.GrenadeSupply;
+	GrenadeCooldown = Params.GrenadeCooldown;
+	GrenadeFuseTime = Params.GrenadeFuseTime;
+	GrenadeTelegraphTime = Params.GrenadeTelegraphTime;
+	GrenadeMinRange = Params.GrenadeMinRange;
+	GrenadeMaxRange = Params.GrenadeMaxRange;
+	GrenadeDamage = Params.GrenadeDamage;
+	GrenadeDamageRadius = Params.GrenadeDamageRadius;
+	GrenadeProjectileClass = Params.GrenadeProjectileClass;
+	GrenadeThrowSocket = Params.GrenadeThrowSocket;
+	GrenadeLandingDistanceScale = Params.GrenadeLandingDistanceScale;
+
+	if (!GrenadeProjectileClass)
+		UE_LOG(LogTemp, Warning, TEXT("%s: UEnemyGrenadierComponent — InitFromParams without a GrenadeProjectileClass. Grenades will not spawn."), *GetNameSafe(GetOwner()));
+}
+
 bool UEnemyGrenadierComponent::CanThrow() const
 {
 	return GrenadeSupply > 0 && !bCooldownActive && !bTelegraphing && GrenadeProjectileClass != nullptr;
@@ -144,7 +162,7 @@ bool UEnemyGrenadierComponent::TryThrowAt(const FVector& TargetLocation)
 		{
 			const UEnemyArchetypeData* DA = EnemyChar->GetArchetypeData();
 			if (IsValid(DA) && IsValid(DA->BarkSet))
-				BarkSys->RequestBark(Owner, DA->BarkSet, EBarkType::GrenadeOut, DA->DisplayName);
+				BarkSys->RequestBark(Owner, DA->BarkSet, EBarkType::GrenadeOut);
 		}
 	}
 
@@ -189,11 +207,10 @@ void UEnemyGrenadierComponent::SpawnGrenadeFromSocket()
 	AActor* Owner = GetOwner();
 	if (!IsValid(Owner)) return;
 
-	// Don't spawn if the enemy died mid wind-up.
-	if (const AEnemyCharacter* EnemyChar = Cast<AEnemyCharacter>(Owner))
+	// Don't spawn if the thrower died mid wind-up (owner-agnostic: enemy or companion).
+	if (const UHealthComponent* HC = Owner->FindComponentByClass<UHealthComponent>())
 	{
-		const UHealthComponent* HC = EnemyChar->GetHealthComponent();
-		if (IsValid(HC) && HC->IsDead()) return;
+		if (HC->IsDead()) return;
 	}
 
 	UWorld* World = GetWorld();

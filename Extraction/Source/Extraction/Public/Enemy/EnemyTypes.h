@@ -156,4 +156,9 @@ enum class EBarkType : uint8
 	Suppressing		UMETA(DisplayName = "Suppressing"),
 	FocusTarget		UMETA(DisplayName = "Focus Target"),
 	CoveringGo		UMETA(DisplayName = "Covering Go"),
+	CallingContact	UMETA(DisplayName = "Calling Contact"),
+	Rally			UMETA(DisplayName = "Rally"),
+	Rush			UMETA(DisplayName = "Rush"),
+	Taunt			UMETA(DisplayName = "Taunt"),
+	Overwatch		UMETA(DisplayName = "Overwatch"),
 };

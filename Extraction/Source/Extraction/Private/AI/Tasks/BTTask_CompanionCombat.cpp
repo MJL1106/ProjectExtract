@@ -22,6 +22,7 @@
 #include "EnemyCharacter.h"
 #include "EnemyAIController.h"        // angle-seek: who is this enemy targeting
 #include "EnemyAwarenessComponent.h"  // angle-seek: GetCombatTarget
+#include "EnemyGrenadierComponent.h"  // grenade lob: shared grenadier component on the companion
 #include "Engine/OverlapResult.h"     // angle-seek: player-centered attacker scan
 #include "Animation/CompanionAnimInstance.h"
 #include "WeaponBase.h"
@@ -2535,6 +2536,7 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	LastDecisionTime = 0.f;
 	bHasLastKnownTargetLocation = false;
 	LastKnownTargetLocation = FVector::ZeroVector;
+	GrenadeLosBlockedAccum = 0.f;
 	// Angle-seek: deactivate but keep AngleSeekCooldownRemaining — target churn restarts this task
 	// several times per fight, and a reset cooldown would let the flank re-arm instantly after
 	// every kill (the exact ping-pong the cooldown exists to stop).
@@ -4862,6 +4864,37 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (bAngleSeekActive && LosBlockedAccum >= AimDropOnLosBlockedSeconds)
 			EndAngleSeek(Ctx.Companion, TEXT("los-blocked"));
 
+		// --- Grenade lob (enemy-grenadier parity): the target has stayed hidden — flush it out.
+		// CanThrow() covers supply/cooldown/telegraph-in-progress; a full window elapses between
+		// attempts whether the throw commits or fails (range/arc). Player-safety: never throw when
+		// the player stands inside blast radius + buffer of the landing point.
+		if (UEnemyGrenadierComponent* GrenComp = Ctx.Companion->GetOrCreateGrenadierComponent())
+		{
+			GrenadeLosBlockedAccum += DeltaSeconds;
+			const ACompanionAIController* GrenAIC = Cast<ACompanionAIController>(Ctx.Companion->GetController());
+			const UCompanionTuningDataAsset* GrenTuning = GrenAIC ? GrenAIC->GetTuning() : nullptr;
+			if (GrenTuning && GrenadeLosBlockedAccum >= GrenTuning->GrenadeLobTriggerLOSBlockedTime)
+			{
+				GrenadeLosBlockedAccum = 0.f;
+
+				bool bPlayerSafe = true;
+				if (const APawn* GrenPlayer = GrenAIC->GetPlayerCharacter())
+				{
+					const float SafeDist = GrenTuning->GrenadeDamageRadius + GrenTuning->GrenadePlayerSafetyBuffer;
+					bPlayerSafe = FVector::DistSquared(GrenPlayer->GetActorLocation(), LastKnownTargetLocation)
+						> FMath::Square(SafeDist);
+				}
+
+				if (bPlayerSafe && bHasLastKnownTargetLocation && !Ctx.Companion->IsReloading()
+					&& GrenComp->CanThrow() && GrenComp->TryThrowAt(LastKnownTargetLocation))
+				{
+					if (bDebugLogging)
+						UE_LOG(LogCompanionAI, Log, TEXT("%s: GRENADE LOB at last-known %s"),
+							*Ctx.Companion->GetName(), *LastKnownTargetLocation.ToCompactString());
+				}
+			}
+		}
+
 		if (bEnableOpenAreaMoveAndShoot)
 		{
 			// Drop the jiggle latch so the clear-LoS path re-anchors JiggleHome when LoS returns.
@@ -4893,7 +4926,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 		}
 
-		if (LosBlockedAbandonSeconds > 0.f && LosBlockedAccum >= LosBlockedAbandonSeconds)
+		// Hold the abandon while a grenade wind-up plays — OnTaskFinished would cancel the throw
+		// this same branch just committed.
+		const UEnemyGrenadierComponent* AbandonGren = Ctx.Companion->GetGrenadierComponent();
+		const bool bGrenadeWindingUp = IsValid(AbandonGren) && AbandonGren->IsTelegraphing();
+
+		if (!bGrenadeWindingUp && LosBlockedAbandonSeconds > 0.f && LosBlockedAccum >= LosBlockedAbandonSeconds)
 		{
 			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=los-block-abandon"), *Ctx.Companion->GetName());
@@ -4905,6 +4943,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	}
 
 	LosBlockedAccum = 0.f;
+	GrenadeLosBlockedAccum = 0.f;
 
 	// Snapshot the last confirmed LoS position so the blocked path has a frozen facing anchor.
 	LastKnownTargetLocation = TargetLocation;
@@ -5005,6 +5044,11 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 
 	if (Companion)
 	{
+		// Cancel an in-flight grenade wind-up (enemy-task parity) — no-op unless telegraphing;
+		// the cancel broadcast stops the throw montage.
+		if (UEnemyGrenadierComponent* GrenComp = Companion->GetGrenadierComponent())
+			GrenComp->CancelThrow();
+
 		if (bDebugLogging)
 		{
 			const TCHAR* ResultStr = (TaskResult == EBTNodeResult::Succeeded) ? TEXT("Succeeded")

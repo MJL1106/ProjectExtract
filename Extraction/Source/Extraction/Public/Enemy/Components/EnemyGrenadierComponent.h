@@ -12,6 +12,28 @@ class AEnemyGrenadeProjectile;
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnGrenadeTelegraph, FVector, PredictedLanding, float, TimeToImpact);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnGrenadeCancelled);
 
+/** Owner-agnostic init values — mirror of the UEnemyArchetypeData grenadier block, for non-enemy
+ *  throwers (the companion inits from UCompanionTuningDataAsset). */
+USTRUCT()
+struct FGrenadierInitParams
+{
+	GENERATED_BODY()
+
+	int32 GrenadeSupply = 3;
+	float GrenadeCooldown = 12.f;
+	float GrenadeFuseTime = 2.5f;
+	float GrenadeTelegraphTime = 1.f;
+	float GrenadeMinRange = 500.f;
+	float GrenadeMaxRange = 2000.f;
+	float GrenadeDamage = 80.f;
+	float GrenadeDamageRadius = 350.f;
+	float GrenadeLandingDistanceScale = 1.f;
+	FName GrenadeThrowSocket = TEXT("GrenadeSocket");
+
+	UPROPERTY()
+	TSubclassOf<AEnemyGrenadeProjectile> GrenadeProjectileClass;
+};
+
 UCLASS(ClassGroup = "Enemy", meta = (BlueprintSpawnableComponent))
 class EXTRACTION_API UEnemyGrenadierComponent : public UActorComponent
 {
@@ -24,6 +46,9 @@ public:
 
 	/** Initialise supply/timing/damage from the archetype data asset. */
 	void InitFromArchetype(const UEnemyArchetypeData* Data);
+
+	/** Initialise from explicit values — non-enemy throwers (companion). */
+	void InitFromParams(const FGrenadierInitParams& Params);
 
 	/** True when supply > 0, cooldown has elapsed, and no throw is currently telegraphing. */
 	UFUNCTION(BlueprintPure, Category = "Enemy|Grenadier")

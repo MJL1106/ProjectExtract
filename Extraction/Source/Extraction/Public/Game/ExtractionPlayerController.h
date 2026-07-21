@@ -13,7 +13,6 @@ class UHitmarkerWidget;
 class UDamageNumberWidget;
 class UPlayerHealthWidget;
 class UAmmoWidget;
-class UBarkFeedWidget;
 class UCompanionModeWidget;
 class UObjectiveMarkerLayer;
 class UObjectiveTextPanelWidget;
@@ -117,14 +116,6 @@ protected:
 	/** Active ammo display widget instance */
 	UPROPERTY()
 	TObjectPtr<UAmmoWidget> AmmoWidget;
-
-	/** Enemy bark subtitle feed widget class */
-	UPROPERTY(EditDefaultsOnly, Category = "UI")
-	TSubclassOf<UBarkFeedWidget> BarkFeedWidgetClass;
-
-	/** Active bark feed widget instance */
-	UPROPERTY()
-	TObjectPtr<UBarkFeedWidget> BarkFeedWidget;
 
 	/** Companion mode HUD chip class (assigned in BP defaults — no C++ asset path). */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")

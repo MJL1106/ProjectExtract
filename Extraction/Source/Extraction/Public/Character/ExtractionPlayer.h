@@ -104,6 +104,11 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
 	void OnADSChanged(bool bIsADS);
 
+	/** Fired on fire press while the kit throwable (grenade) slot is equipped. BP implements this
+	 *  to call BeginFire on the spawned kit grenade item — the C++ hitscan path is skipped. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
+	void OnThrowableFirePressed();
+
 	/** Fired once after Montage_Play succeeds and the end delegate is bound.
 	 *  BP uses this to lock the camera, hide the gun, and show the knife. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Takedown|Events")
@@ -262,6 +267,7 @@ public:
 
 	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
 	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }
+	virtual void NotifyThrowableFirePressed() override { OnThrowableFirePressed(); }
 
 	/** Called by UAnimNotify_TakedownKill at the death frame of the finisher montage.
 	 *  Also serves as the fallback when the montage ends/interrupts before the notify fires. */
@@ -404,6 +410,39 @@ protected:
 	/** Movement speed while downed (DBNO crawl). */
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "10.0"))
 	float DBNOCrawlSpeed = 100.f;
+
+	/** Acceleration while downed — well below the walking 2048 so the crawl eases in instead of snapping. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "50.0"))
+	float DBNOCrawlAcceleration = 300.f;
+
+	/** Braking while downed — lets the crawl drift to a stop instead of halting on key release. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "50.0"))
+	float DBNOCrawlBrakingDeceleration = 300.f;
+
+	/** Ground friction while downed. The walking 25 stops the capsule near-instantly regardless of
+	 *  braking deceleration; a low value here is what actually makes the stop read as a crawl. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
+	float DBNOCrawlGroundFriction = 4.f;
+
+	/** Body yaw chase rate (deg/s) toward the camera while downed. The body doesn't snap to the
+	 *  camera (no yaw-follow) and doesn't orient to velocity (that would zero the crawl blendspace's
+	 *  Direction input) — it drifts toward where the player looks so directional crawls stay readable. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "10.0"))
+	float DBNOCrawlRotationRate = 120.f;
+
+	/** Max yaw (deg) the downed free-look camera may swing away from the body's facing. The camera
+	 *  sits on the head socket at zero arm length, so an unclamped yaw lets the player turn the view
+	 *  back through their own mesh. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "10.0", ClampMax = "180.0"))
+	float DBNOFreeLookYawLimit = 80.f;
+
+	/** Downed free-look pitch floor (deg). Keeps the view off the player's own torso/floor. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "-89.0", ClampMax = "0.0"))
+	float DBNOFreeLookPitchMin = -35.f;
+
+	/** Downed free-look pitch ceiling (deg) — enough to look up at a reviver. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0", ClampMax = "89.0"))
+	float DBNOFreeLookPitchMax = 60.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
 	float BleedoutDuration = 90.f;
@@ -642,6 +681,19 @@ private:
 
 	/** Pre-DBNO crouched speed, restored on ExitDBNO. */
 	float SavedMaxWalkSpeedCrouched = 0.f;
+
+	/** Applies/restores the soft crawl movement profile (accel, braking, friction, body rotation).
+	 *  Restore must run AFTER SetBeingRevived(false) on exit — being-revived saves/restores
+	 *  bUseControllerRotationYaw itself, and this helper owns the pre-DBNO value. */
+	void SetDBNOMovementProfile(bool bEnable);
+	bool bDBNOMovementProfileActive = false;
+
+	/** Per-tick clamp of the downed free-look control rotation to a forward cone around the body. */
+	void ClampDBNOFreeLook();
+	float SavedMaxAcceleration = 0.f;
+	float SavedBrakingDecelerationWalking = 0.f;
+	float SavedGroundFriction = 0.f;
+	bool bSavedDBNOUseControllerRotationYaw = true;
 
 	/** Active companion-route speed lock (cm/s). 0 = no lock. Consumed by
 	 *  UExtractionPlayerMovement::GetMaxSpeed — never written into the movement component. */

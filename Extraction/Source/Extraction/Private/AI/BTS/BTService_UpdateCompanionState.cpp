@@ -10,6 +10,8 @@
 #include "Perception/AISense_Hearing.h" // heard-enemy-gunfire stealth-break signal
 #include "CompanionAIController.h" // for LogCompanionAI
 #include "CompanionCharacter.h"
+#include "Companion/CompanionBarkTypes.h"
+#include "EnemyArchetypeData.h" // specialist-archetype bark context
 #include "WeaponBase.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "Companion/CompanionTypes.h"
@@ -31,6 +33,8 @@
 #include "EnemyDirectorSubsystem.h" // last combat report stamp as an out-of-envelope stealth-break event
 #include "TraversalComponent.h"     // stealth-pin enforcement must not crouch mid-traversal
 #include "Navigation/PathFollowingComponent.h" // ready-only threat stance yields facing to an active move
+#include "World/DoorBase.h"              // post-combat overwatch aims at the chokepoint door
+#include "World/DoorRegistrySubsystem.h" // portal-path door lookup toward the threat memory
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics CVar
 
 // companion.AimLog 1 — per-service-tick dump of everything that drives the companion's aim/facing
@@ -47,6 +51,42 @@ static bool IsCompanionFireDebugEnabled()
 	static const IConsoleVariable* CVar =
 		IConsoleManager::Get().FindConsoleVariable(TEXT("companion.FireDebug"));
 	return CVar && CVar->GetInt() != 0;
+}
+
+namespace
+{
+	// Player-relative bearing tag for EnemyDirection bark variants (Left/Right/Front/High) — the
+	// lines name a direction, so an untagged random pick could call the wrong side.
+	FName DirectionBarkContext(const APawn* PlayerPawn, const AActor* Target)
+	{
+		if (!IsValid(PlayerPawn) || !IsValid(Target)) return NAME_None;
+
+		const FVector ToTarget = Target->GetActorLocation() - PlayerPawn->GetActorLocation();
+		// ~24 degrees of elevation reads as "up high" at typical engagement ranges.
+		if (ToTarget.Z > ToTarget.Size2D() * 0.45f) return FName(TEXT("High"));
+
+		const float YawDelta = FMath::FindDeltaAngleDegrees(
+			PlayerPawn->GetBaseAimRotation().Yaw, ToTarget.Rotation().Yaw);
+		if (FMath::Abs(YawDelta) <= 45.f) return FName(TEXT("Front"));
+		return YawDelta < 0.f ? FName(TEXT("Left")) : FName(TEXT("Right"));
+	}
+
+	// Specialist tag for EnemyArchetype bark variants; NAME_None for baseline infantry (no callout).
+	FName SpecialistBarkContext(const AActor* Target)
+	{
+		const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Target);
+		const UEnemyArchetypeData* DA = IsValid(Enemy) ? Enemy->GetArchetypeData() : nullptr;
+		if (!IsValid(DA)) return NAME_None;
+
+		switch (DA->Archetype)
+		{
+		case EEnemyArchetype::Sniper:    return FName(TEXT("Sniper"));
+		case EEnemyArchetype::Heavy:     return FName(TEXT("Heavy"));
+		case EEnemyArchetype::Grenadier: return FName(TEXT("Grenadier"));
+		case EEnemyArchetype::Rusher:    return FName(TEXT("Rusher"));
+		default: return NAME_None;
+		}
+	}
 }
 
 UBTService_UpdateCompanionState::UBTService_UpdateCompanionState()
@@ -111,6 +151,33 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	{
 		BB->SetValueAsObject(PlayerActorKey.SelectedKeyName, PlayerPawn);
 		BB->SetValueAsBool(PlayerNeedsReviveKey.SelectedKeyName, bPlayerDBNO);
+
+		// The player going down is the companion's own crisis — one reaction per down stint.
+		if (bPlayerDBNO && !bPlayerDownBarked)
+		{
+			bPlayerDownBarked = true;
+			Companion->Bark(ECompanionBarkType::PlayerDownReaction);
+		}
+		else if (!bPlayerDBNO)
+			bPlayerDownBarked = false;
+
+		// Low-HP warning, edge-triggered with hysteresis so it can't nag every service tick.
+		if (!bPlayerDBNO)
+		{
+			if (const UHealthComponent* PlayerHealth = PlayerIface->GetHealthComponent())
+			{
+				constexpr float HurtWarnFraction = 0.35f;
+				constexpr float HurtRearmFraction = 0.6f;
+				const float PlayerHealthFrac = PlayerHealth->GetHealthPercent();
+				if (PlayerHealthFrac > 0.f && PlayerHealthFrac <= HurtWarnFraction && !bPlayerHurtBarked)
+				{
+					bPlayerHurtBarked = true;
+					Companion->Bark(ECompanionBarkType::PlayerHurtWarning);
+				}
+				else if (PlayerHealthFrac >= HurtRearmFraction)
+					bPlayerHurtBarked = false;
+			}
+		}
 	}
 
 	// --- Range thresholds for acquisition/retention ---
@@ -772,6 +839,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 						BB->ClearValue(CombatTargetKey.SelectedKeyName);
 						BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 						ExistingTarget = nullptr;
+						Companion->Bark(ECompanionBarkType::LostContact);
 					}
 				}
 			}
@@ -791,6 +859,17 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		if (BestTarget != ExistingTarget && bDebugLogging)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target -> %s (dist=%.0f)"),
 				*Companion->GetName(), *BestTarget->GetName(), FMath::Sqrt(BestDistSq));
+
+		// Mid-fight target switch — call the new threat out (specialists by name, else a bearing).
+		// First acquisition is silent here; the posture flip below owns the contact call.
+		if (BestTarget != ExistingTarget && ExistingTarget != nullptr)
+		{
+			const FName Specialist = SpecialistBarkContext(BestTarget);
+			if (!Specialist.IsNone())
+				Companion->Bark(ECompanionBarkType::EnemyArchetype, Specialist);
+			else
+				Companion->Bark(ECompanionBarkType::EnemyDirection, DirectionBarkContext(PlayerPawn, BestTarget));
+		}
 
 		BB->SetValueAsObject(CombatTargetKey.SelectedKeyName, BestTarget);
 
@@ -847,6 +926,22 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			bReadyOnlyThreat = false;
 	}
 
+	// --- Fight threat memory (feeds the post-combat overwatch aim pick) ---
+	// First-contact records once per fight (flag survives mid-fight target churn and LoS gaps —
+	// PrevCombatTarget resets on every unperceived tick, so it can't gate this); the rolling
+	// last-threat point tracks whichever target is current. Both clear only when the fight fully
+	// ends (Exploration flip / stealth re-pin).
+	if (bHasTarget)
+	{
+		LastThreatLocation = TargetAfterUpdate->GetActorLocation();
+		bHasLastThreatLocation = true;
+		if (!bHasFightFirstContact)
+		{
+			FightFirstContactLocation = LastThreatLocation;
+			bHasFightFirstContact = true;
+		}
+	}
+
 	auto PostureName = [](ECompanionPosture P) -> const TCHAR*
 	{
 		switch (P)
@@ -857,6 +952,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		default:                             return TEXT("Unknown");
 		}
 	};
+
+	// True only when the combat-decay branch below evaluates this tick — any other branch winning
+	// (new target, ready threat, stealth re-pin) means a new owner has aim/focus, so a still-active
+	// overwatch hold must release without touching focus (see the safety end after the chain).
+	bool bCombatDecayRanThisTick = false;
 
 	if (Companion->IsStealthActive())
 	{
@@ -902,6 +1002,21 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
 					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Combat));
 			Companion->SetPosture(ECompanionPosture::Combat);
+
+			// Contact call for the fresh fight — a crowd beats a specialist warning beats the
+			// generic contact. One bark; the arbitration gap eats anything stacked after it.
+			constexpr int32 MultipleContactsThreshold = 3;
+			int32 PerceivedEnemyCount = 0;
+			for (const AActor* Perceived : PerceivedActors)
+				if (Cast<AEnemyCharacter>(Perceived)) ++PerceivedEnemyCount;
+
+			const FName Specialist = SpecialistBarkContext(TargetAfterUpdate);
+			if (PerceivedEnemyCount >= MultipleContactsThreshold)
+				Companion->Bark(ECompanionBarkType::MultipleContacts);
+			else if (!Specialist.IsNone())
+				Companion->Bark(ECompanionBarkType::EnemyArchetype, Specialist);
+			else
+				Companion->Bark(ECompanionBarkType::ContactCombat);
 		}
 		bLoweredOnTargetLoss = false;
 		// Revive hold owns aim/stance: the kneeling revive must not fight a per-tick ADS re-assert
@@ -949,6 +1064,23 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			Companion->SetLowReadyAim(false);
 		}
 		OutOfCombatTimer = 0.f;
+
+		// Steady-voice reassurance under sustained pressure (heavy suppression, or the squad's
+		// guns concentrated on the player). Attempt-paced; the bark set's cooldown paces further.
+		if (const UWorld* BarkWorld = Companion->GetWorld())
+		{
+			constexpr float ReassuranceAttemptInterval = 20.f;
+			constexpr float ReassuranceSuppressionThreshold = 0.5f;
+			constexpr int32 ReassurancePlayerFocusThreshold = 2;
+			const float NowSeconds = BarkWorld->GetTimeSeconds();
+			if (NowSeconds >= NextReassuranceBarkTime
+				&& (Companion->GetSuppression01() > ReassuranceSuppressionThreshold
+					|| Companion->GetPlayerFocusedEnemyCount() >= ReassurancePlayerFocusThreshold))
+			{
+				NextReassuranceBarkTime = NowSeconds + ReassuranceAttemptInterval;
+				Companion->Bark(ECompanionBarkType::Reassurance);
+			}
+		}
 	}
 	else if (Mode == ECompanionMode::Stealth && Companion->IsStealthBroken() && !bLiveFightSignal)
 	{
@@ -980,6 +1112,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Stealth));
 			Companion->SetStealthBroken(false); // re-applies stealth speed clamps + sprint lock (stance is the crouch-mirror's call, not this)
 			Companion->SetPosture(ECompanionPosture::Stealth);
+			ResetFightThreatMemory(); // fight fully over — next acquisition starts a new fight
 			// The timer keeps accruing through an armed takedown — its expiry must not stomp the
 			// takedown's aim/focus either (cosmetic wobble; execute re-raises, but don't fight it).
 			if (!bTakedownOwnsAim)
@@ -1000,37 +1133,85 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	}
 	else if (!bHasTarget && CurrentPosture == ECompanionPosture::Combat)
 	{
-		// Lower the weapon the moment the last target is gone — the ExploreReturnDelay below is BT
-		// posture stability, not a reason to hold a stale ADS pose aimed at a dead enemy's bearing.
-		// Edge-guarded by bLoweredOnTargetLoss (reset whenever a target/threat is live) so the lower
-		// still fires after a branch switch mid-accrual (e.g. stealth re-pin -> mode change).
-		// Yields to a commanded takedown, which owns aim/focus while armed.
+		bCombatDecayRanThisTick = true;
 		const bool bTakedownOwnsAim = Companion->IsCommandedTakedownArmed()
 			|| Companion->IsCommandedTakedownExecuting()
 			|| Companion->IsTakedownMontagePlaying();
-		if (!bLoweredOnTargetLoss && !bTakedownOwnsAim)
-		{
-			Companion->SetLowReadyAim(true);
-			// Same stale-aim-target backstop as the stealth re-pin branch above.
-			Companion->SetAimTarget(nullptr);
-			Controller->ClearFocus(EAIFocusPriority::Gameplay);
-			bLoweredOnTargetLoss = true;
-		}
 
-		OutOfCombatTimer += DeltaSeconds;
-		if (OutOfCombatTimer >= ExploreReturnDelay)
+		// Post-fight overwatch: instead of dropping the gun the frame the last enemy dies, hold it
+		// on the chokepoint/bearing the threat came from until the player moves on (or the timer
+		// cap). While it owns aim, both the immediate lower and the Exploration decay are paused —
+		// the hold must not be cut short by the posture flip at ExploreReturnDelay < MaxTime.
+		const bool bOverwatchOwnsAim = UpdatePostCombatOverwatch(
+			*Controller, *Companion, PlayerPawn, RangeTuning, bTakedownOwnsAim, bPlayerDBNO, DeltaSeconds);
+
+		if (!bOverwatchOwnsAim)
 		{
-			if (bDebugLogging)
-				UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
-					*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Exploration));
-			Companion->SetPosture(ECompanionPosture::Exploration);
-			// Expiry mirrors the edge-lower's takedown yield — see the re-pin branch.
-			if (!bTakedownOwnsAim)
+			// Lower the weapon the moment the hold releases (or never engaged) — the
+			// ExploreReturnDelay below is BT posture stability, not a reason to hold a stale ADS
+			// pose aimed at a dead enemy's bearing. Edge-guarded by bLoweredOnTargetLoss (reset
+			// whenever a target/threat is live) so the lower still fires after a branch switch
+			// mid-accrual (e.g. stealth re-pin -> mode change). Yields to a commanded takedown,
+			// which owns aim/focus while armed.
+			if (!bLoweredOnTargetLoss && !bTakedownOwnsAim)
 			{
 				Companion->SetLowReadyAim(true);
+				// Same stale-aim-target backstop as the stealth re-pin branch above.
+				Companion->SetAimTarget(nullptr);
 				Controller->ClearFocus(EAIFocusPriority::Gameplay);
+				bLoweredOnTargetLoss = true;
 			}
-			OutOfCombatTimer = 0.f;
+
+			OutOfCombatTimer += DeltaSeconds;
+			if (OutOfCombatTimer >= ExploreReturnDelay)
+			{
+				if (bDebugLogging)
+					UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
+						*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Exploration));
+				Companion->SetPosture(ECompanionPosture::Exploration);
+				// Only after a real fight (first-contact memory set) — an alert blip that never
+				// engaged doesn't earn an "all clear".
+				if (bHasFightFirstContact)
+					Companion->Bark(ECompanionBarkType::AreaClear);
+				// Expiry mirrors the edge-lower's takedown yield — see the re-pin branch.
+				if (!bTakedownOwnsAim)
+				{
+					Companion->SetLowReadyAim(true);
+					Controller->ClearFocus(EAIFocusPriority::Gameplay);
+				}
+				OutOfCombatTimer = 0.f;
+				ResetFightThreatMemory();
+			}
+		}
+	}
+
+	// Overwatch safety end: the hold only ever lives inside the combat-decay branch. If any other
+	// branch ran this tick (new target, ready threat, stealth re-pin, stealth pin), that owner has
+	// aim/focus — drop just our scripted-aim raise and state, leave their aim/focus untouched.
+	if (bOverwatchActive && !bCombatDecayRanThisTick)
+		EndPostCombatOverwatch(*Companion);
+
+	// --- Downtime chatter (priority-0 ambient; the subsystem's lull gate drops anything that
+	// would land near real combat audio) ---
+	if (CurrentPosture == ECompanionPosture::Exploration && !bHasTarget && !bReadyOnlyThreat
+		&& !Companion->IsStealthActive() && !bPlayerDBNO)
+	{
+		if (const UWorld* AmbientWorld = Companion->GetWorld())
+		{
+			constexpr float AmbientAttemptInterval = 45.f;
+			const float NowSeconds = AmbientWorld->GetTimeSeconds();
+			if (NextAmbientBarkTime < 0.f)
+			{
+				// First tick: push the first attempt out a full interval — no chatter on spawn.
+				NextAmbientBarkTime = NowSeconds + AmbientAttemptInterval;
+			}
+			else if (NowSeconds >= NextAmbientBarkTime)
+			{
+				NextAmbientBarkTime = NowSeconds + AmbientAttemptInterval;
+				const bool bPlayerMoving = IsValid(PlayerPawn)
+					&& PlayerPawn->GetVelocity().SizeSquared2D() > FMath::Square(150.f);
+				Companion->Bark(bPlayerMoving ? ECompanionBarkType::Following : ECompanionBarkType::IdleAmbient);
+			}
 		}
 	}
 
@@ -1272,6 +1453,154 @@ void UBTService_UpdateCompanionState::UpdateStealthCrouchMirror(
 // F3 + F1 — non-combat facing arbitration
 // ---------------------------------------------------------------------------
 
+namespace
+{
+	// Post-combat overwatch feel constants (structural, not designer levers — those live on
+	// UCompanionTuningDataAsset under Companion|PostCombatOverwatch).
+	constexpr float OverwatchBreakSpeed = 60.f;        // cm/s of self-movement that counts as a real move
+	constexpr float OverwatchMovingBreakTime = 0.3f;   // sustained-move seconds before the hold breaks
+	constexpr float OverwatchDoorAimZOffset = 110.f;   // chest height through the doorway, not the floor pivot
+	constexpr float OverwatchDoorMaxZDelta = 250.f;    // same-storey gate — the portal metric is 3D and can pick a stairwell door
+	constexpr float OverwatchDoorMinDist = 200.f;      // companion standing in the doorway itself — aiming at it points at its own feet
+	constexpr float OverwatchNearWallPullback = 50.f;  // aim just short of a blocking wall on the bearing fallback
+	constexpr float OverwatchDoorTowardThreatMinDot = 0.1f; // door must lie roughly toward the threat, not behind us
+}
+
+bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
+	ACompanionAIController& Controller, ACompanionCharacter& Companion, const APawn* PlayerPawn,
+	const UCompanionTuningDataAsset* Tuning, bool bTakedownOwnsAim, bool bPlayerDBNO, float DeltaSeconds)
+{
+	if (!Tuning || !Tuning->bEnablePostCombatOverwatch)
+	{
+		if (bOverwatchActive) EndPostCombatOverwatch(Companion);
+		return false;
+	}
+
+	const bool bPlayerAnchored = IsValid(PlayerPawn) && !bPlayerDBNO
+		&& FVector::DistSquared(Companion.GetActorLocation(), PlayerPawn->GetActorLocation())
+			<= FMath::Square(Tuning->OverwatchBreakDistance);
+	const bool bOwnerElsewhere = bTakedownOwnsAim || Companion.IsRevivingPlayer()
+		|| Companion.GetIsCompanionDBNO();
+
+	if (!bOverwatchActive)
+	{
+		// Enter only on the fresh target-loss edge (a branch switch that already lowered must not
+		// re-raise the gun), standing still, player nearby, with threat memory to aim from.
+		if (bLoweredOnTargetLoss || bOwnerElsewhere || !bPlayerAnchored) return false;
+		if (Companion.GetVelocity().Size2D() > OverwatchBreakSpeed) return false;
+		if (!ComputeOverwatchAimPoint(Companion, Tuning, OverwatchAimPoint)) return false;
+		bOverwatchActive = true;
+		OverwatchElapsed = 0.f;
+		OverwatchMovingTime = 0.f;
+		Companion.SetAimTarget(nullptr); // stale actor-aim backstop, mirrors the lower path
+		Companion.SetLowReadyAim(false);
+		Companion.SetScriptedAim(true);
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: post-combat overwatch START aim=%s"),
+				*Companion.GetName(), *OverwatchAimPoint.ToCompactString());
+	}
+
+	OverwatchElapsed += DeltaSeconds;
+	OverwatchMovingTime = Companion.GetVelocity().Size2D() > OverwatchBreakSpeed
+		? OverwatchMovingTime + DeltaSeconds : 0.f;
+	if (bOwnerElsewhere || !bPlayerAnchored
+		|| OverwatchMovingTime > OverwatchMovingBreakTime
+		|| OverwatchElapsed >= Tuning->PostCombatOverwatchMaxTime)
+	{
+		if (bDebugLogging)
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: post-combat overwatch END t=%.1f (anchored=%d moveT=%.1f)"),
+				*Companion.GetName(), OverwatchElapsed, (int32)bPlayerAnchored, OverwatchMovingTime);
+		EndPostCombatOverwatch(Companion);
+		return false;
+	}
+
+	Controller.SetFocalPoint(OverwatchAimPoint, EAIFocusPriority::Gameplay);
+	return true;
+}
+
+bool UBTService_UpdateCompanionState::ComputeOverwatchAimPoint(
+	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning, FVector& OutAimPoint) const
+{
+	if (!bHasLastThreatLocation && !bHasFightFirstContact) return false;
+
+	// Threat reference: freshest threat point that isn't at our feet; else first contact; else a
+	// point pushed out along the bearing of whatever memory we do have.
+	const FVector CompLoc = Companion.GetActorLocation();
+	const float MinDistSq = FMath::Square(Tuning->OverwatchMinThreatDist);
+	FVector ThreatRef;
+	if (bHasLastThreatLocation && FVector::DistSquared2D(LastThreatLocation, CompLoc) > MinDistSq)
+		ThreatRef = LastThreatLocation;
+	else if (bHasFightFirstContact && FVector::DistSquared2D(FightFirstContactLocation, CompLoc) > MinDistSq)
+		ThreatRef = FightFirstContactLocation;
+	else
+	{
+		const FVector Src = bHasLastThreatLocation ? LastThreatLocation : FightFirstContactLocation;
+		const FVector Dir = (Src - CompLoc).GetSafeNormal2D();
+		if (Dir.IsNearlyZero()) return false;
+		ThreatRef = CompLoc + Dir * Tuning->OverwatchBearingDistance;
+	}
+
+	const FVector Eye = Companion.GetPawnViewLocation();
+	FCollisionQueryParams LosParams(SCENE_QUERY_STAT(CompanionOverwatchLoS), true);
+	LosParams.AddIgnoredActor(&Companion);
+	LosParams.AddIgnoredActor(Companion.GetCurrentWeapon());
+
+	// Chokepoint first: nearest same-storey door on the portal path toward the threat, visible
+	// from here — "cover the door they came through".
+	if (UDoorRegistrySubsystem* DoorRegistry = Companion.GetWorld()->GetSubsystem<UDoorRegistrySubsystem>())
+	{
+		TArray<ADoorBase*> Doors;
+		Doors.Reserve(4);
+		DoorRegistry->CollectPortalCandidates(CompLoc, ThreatRef, 4, Doors);
+		const FVector ToThreat2D = (ThreatRef - CompLoc).GetSafeNormal2D();
+		for (ADoorBase* Door : Doors)
+		{
+			if (!IsValid(Door)) continue;
+			const FVector DoorLoc = Door->GetActorLocation();
+			const float DoorDistSq = FVector::DistSquared2D(DoorLoc, CompLoc);
+			if (DoorDistSq > FMath::Square(Tuning->OverwatchDoorMaxDist)) continue;
+			if (DoorDistSq < FMath::Square(OverwatchDoorMinDist)) continue;
+			if (FMath::Abs(DoorLoc.Z - CompLoc.Z) > OverwatchDoorMaxZDelta) continue;
+			if (FVector::DotProduct((DoorLoc - CompLoc).GetSafeNormal2D(), ToThreat2D)
+				< OverwatchDoorTowardThreatMinDot) continue;
+			// The door panel itself may block the eye-line (closed door) — that's still a valid
+			// "cover the door" aim; only a wall between us and the doorway disqualifies it.
+			FCollisionQueryParams DoorLosParams = LosParams;
+			DoorLosParams.AddIgnoredActor(Door);
+			const FVector Aim = DoorLoc + FVector(0.f, 0.f, OverwatchDoorAimZOffset);
+			FHitResult Hit;
+			if (Companion.GetWorld()->LineTraceSingleByChannel(Hit, Eye, Aim, ECC_Visibility, DoorLosParams))
+				continue;
+			OutAimPoint = Aim;
+			return true;
+		}
+	}
+
+	// No usable door: aim at the threat point directly; a wall on the way pulls the aim just short
+	// of it, which still reads as covering the direction the fight came from.
+	FHitResult Hit;
+	const bool bBlocked = Companion.GetWorld()->LineTraceSingleByChannel(
+		Hit, Eye, ThreatRef, ECC_Visibility, LosParams);
+	OutAimPoint = bBlocked
+		? Hit.ImpactPoint + (Eye - Hit.ImpactPoint).GetSafeNormal() * OverwatchNearWallPullback
+		: ThreatRef;
+	return true;
+}
+
+void UBTService_UpdateCompanionState::EndPostCombatOverwatch(ACompanionCharacter& Companion)
+{
+	Companion.SetScriptedAim(false);
+	bOverwatchActive = false;
+	OverwatchElapsed = 0.f;
+	OverwatchMovingTime = 0.f;
+}
+
+void UBTService_UpdateCompanionState::ResetFightThreatMemory()
+{
+	bHasFightFirstContact = false;
+	bHasLastThreatLocation = false;
+}
+
 void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 	ACompanionAIController& Controller, ACompanionCharacter& Companion, UBlackboardComponent& BB,
 	APawn* PlayerPawn, const UCompanionTuningDataAsset* Tuning,
@@ -1292,6 +1621,7 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 		Companion.IsStealthActive(), ActiveCommand, bPathMoving,
 		Companion.IsSearchRoomExposureActive());
 	const bool bTierZeroYield = bHasTarget || (bReadyOnlyThreat && bReadyThreatOwnsFacing)
+		|| bOverwatchActive // post-fight hold owns aim/focus for its whole window
 		|| Companion.IsRevivingPlayer()
 		|| Companion.IsCommandedTakedownArmed() || Companion.IsCommandedTakedownExecuting()
 		|| Companion.IsTakedownMontagePlaying()
@@ -1423,8 +1753,14 @@ void UBTService_UpdateCompanionState::ApplyWatchFacing(ACompanionAIController& C
 	// raises unconditionally regardless of mode), and Stealth->Normal keeps it wrongly lowered.
 	const bool bStealthNow = Companion.IsStealthActive();
 	if (bWatchStanceApplied && bWatchStanceStealth == bStealthNow) return;
+	const bool bFreshWatch = !bWatchStanceApplied;
 	bWatchStanceApplied = true;
 	bWatchStanceStealth = bStealthNow;
+
+	// Fresh stealth watch = hostile spotted while sneaking — whisper it once per watch entry
+	// (a mode flip mid-watch re-applies stance but is not a new sighting).
+	if (bFreshWatch && bStealthNow)
+		Companion.Bark(ECompanionBarkType::StealthSpotEnemy);
 
 	if (bStealthNow)
 	{

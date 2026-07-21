@@ -161,7 +161,7 @@ void UBTTask_OfficerCommand::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* 
 
 		UBarkSubsystem* Barks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
 		if (Barks && Squad->TryClaimSquadBark(EBarkType::FocusTarget))
-			Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::FocusTarget, DA->DisplayName);
+			Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::FocusTarget);
 	}
 
 	// Rally: if any living (non-dead) member is Broken and rally cooldown elapsed
@@ -188,6 +188,10 @@ void UBTTask_OfficerCommand::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* 
 		{
 			Squad->Rally(Enemy);
 			Mem->RallyCooldownTimer = DA->RallyCooldown;
+
+			if (UBarkSubsystem* RallyBarks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>())
+				if (Squad->TryClaimSquadBark(EBarkType::Rally))
+					RallyBarks->RequestBark(Enemy, DA->BarkSet, EBarkType::Rally);
 		}
 	}
 
@@ -203,7 +207,7 @@ void UBTTask_OfficerCommand::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* 
 			{
 				UBarkSubsystem* BoundingBarks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
 				if (BoundingBarks && Squad->TryClaimSquadBark(EBarkType::CoveringGo))
-					BoundingBarks->RequestBark(Enemy, DA->BarkSet, EBarkType::CoveringGo, DA->DisplayName);
+					BoundingBarks->RequestBark(Enemy, DA->BarkSet, EBarkType::CoveringGo);
 			}
 		}
 	}
