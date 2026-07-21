@@ -12,6 +12,8 @@
 class UExtractionDamageType;
 class UNiagaraSystem;
 class UDamageMitigationSettings;
+class UWeaponAttachmentDataAsset;
+class USoundBase;
 
 /**
  * Per-weapon animation slot set — every montage the enemy anim instance can play for this weapon.
@@ -124,6 +126,33 @@ public:
 	/** Damage type class applied on hit */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire")
 	TSubclassOf<UExtractionDamageType> DamageTypeClass;
+
+	/** Hip-fire cone half-angle (deg) applied to PLAYER shots when not ADS. 0 = laser-accurate
+	 *  hip fire (current behaviour). AI fire is unaffected — enemies/companion keep their own
+	 *  inaccuracy model via IAIShooterInterface. Attachments scale this via HipSpreadMult. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0"))
+	float HipFireSpreadDeg = 0.f;
+
+	// ---- Attachments ----
+
+	/** Per-slot attachment gameplay options, indexed by the kit ST_Attachments enum byte for that
+	 *  slot — index N holds the modifier asset for kit enum value N. Null / missing index = the
+	 *  selection has no gameplay effect (cosmetic only). Authored per weapon; a weapon without a
+	 *  slot (e.g. pistol handguard) leaves the array empty. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> SightAttachments;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> MuzzleAttachments;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> LaserAttachments;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> GripAttachments;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> HandguardAttachments;
 
 	// ---- Ammo ----
 
@@ -245,6 +274,31 @@ public:
 	 *  Keeps C++ agnostic to whichever tracer system pack is assigned. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
 	FName TracerEndParamName = TEXT("TracerEnd");
+
+	/** Fire report played at the muzzle per shot. Null = silent (enemy DAs stay null until assigned).
+	 *  Played from C++ (Multicast_PlayFireFX) — the kit BP fire-audio chain is dead code for the
+	 *  C++-driven fire path, so this field is the single source of the shot sound. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> FireSound;
+
+	/** Fire report used instead of FireSound while a suppressor is equipped (muzzle-slot attachment)
+	 *  or the weapon is effectively suppressed. Null = FireSound plays regardless of suppressor. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> SuppressedFireSound;
+
+	/** Click played once per trigger press when firing dry (empty mag, not reloading). Null = silent. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> DryFireSound;
+
+	/** Reload foley played attached to the weapon for the duration of a reload (authored to match
+	 *  the reload animation timings). Null = silent reload (current behaviour — enemy DAs stay null). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> ReloadSound;
+
+	/** Variant played when reloading from an empty magazine (adds the bolt/slide-release layer).
+	 *  Null = fall back to ReloadSound for both reload types. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> ReloadEmptySound;
 
 	// ---- Kit Weapon Bridge ----
 

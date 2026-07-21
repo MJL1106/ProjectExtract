@@ -66,6 +66,47 @@ enum class EWeaponState : uint8
 };
 
 /**
+ * Attachment slot categories, mirroring the kit ST_Attachments fields.
+ * Used by attachment DataAssets and world attachment pickups to identify which
+ * slot an attachment occupies.
+ */
+UENUM(BlueprintType)
+enum class EAttachmentSlot : uint8
+{
+	Sight		UMETA(DisplayName = "Sight"),
+	Muzzle		UMETA(DisplayName = "Muzzle"),
+	Laser		UMETA(DisplayName = "Laser"),
+	Grip		UMETA(DisplayName = "Grip"),
+	Handguard	UMETA(DisplayName = "Handguard"),
+};
+
+/**
+ * Per-slot attachment selection for a weapon — raw kit enum bytes as written into
+ * ST_Attachments by the loadout UI / attachment pickups. 0 = the slot's first kit
+ * enum value (typically empty/ironsight), which resolves to no stat modifiers.
+ */
+USTRUCT(BlueprintType)
+struct FWeaponAttachmentSelection
+{
+	GENERATED_BODY()
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Attachments")
+	uint8 Sight = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Attachments")
+	uint8 Muzzle = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Attachments")
+	uint8 Laser = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Attachments")
+	uint8 Grip = 0;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Attachments")
+	uint8 Handguard = 0;
+};
+
+/**
  * Per-weapon recoil pattern data.
  * Points define camera offset per shot (X=yaw, Y=pitch).
  */

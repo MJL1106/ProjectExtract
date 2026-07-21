@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ExtractionTypes.h"
+#include "WeaponAttachmentDataAsset.h"
 #include "Weapon/KitWeaponInterface.h"
 #include "WeaponBase.generated.h"
 
@@ -15,6 +16,7 @@ class USuppressionComponent;
 class UNiagaraComponent;
 class UNiagaraSystem;
 class UDamageMitigationSettings;
+class UAudioComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponFired);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnReloadComplete);
@@ -175,6 +177,48 @@ public:
 	 *  equip; pass null on unequip to drop the flash component. */
 	UFUNCTION(BlueprintCallable, Category = "Weapon|FX")
 	void SetFirstPersonMuzzle(USceneComponent* InMuzzle);
+
+	// ---- Attachments (gameplay effects) ----
+
+	/**
+	 * Applies the kit ST_Attachments selection (raw per-slot enum bytes) to this weapon's
+	 * gameplay stats. Each byte indexes the matching *Attachments option array on the weapon
+	 * DA; null/missing entries are neutral (cosmetic-only selection). Called by the character
+	 * BP equip flow after SpawnAttachments, and by attachment pickups on swap.
+	 * Client calls forward to the server; the selection replicates to other clients.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Attachments")
+	void SetAttachmentSelection(uint8 Sight, uint8 Muzzle, uint8 Laser, uint8 Grip, uint8 Handguard);
+
+	/** BaseDamage scaled by mounted attachments. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	float GetEffectiveDamage() const;
+
+	/** True when the weapon DA or any mounted attachment marks this weapon suppressed. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	bool IsSuppressedEffective() const;
+
+	/** ADSFOV after attachment override/delta, clamped to the DA's valid range. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	float GetEffectiveADSFOV() const;
+
+	/** ADSTransitionTime scaled by mounted attachments. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	float GetEffectiveADSTransitionTime() const;
+
+	/** ADSMovementSpeed scaled by mounted attachments. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	float GetEffectiveADSMovementSpeed() const;
+
+	/** Player hip-fire cone half-angle (deg) after attachment scaling. */
+	float GetEffectiveHipFireSpreadDeg() const;
+
+	/** NoiseLoudness / NoiseRange for AI hearing after attachment scaling. */
+	float GetEffectiveNoiseLoudness() const;
+	float GetEffectiveNoiseRange() const;
+
+	/** Muzzle flash FX honouring any attachment override (suppressor → silenced flash). */
+	UNiagaraSystem* GetEffectiveMuzzleFlashFX() const;
 
 	// ---- Magazine swap (enemy reload visual) ----
 
@@ -604,6 +648,35 @@ private:
 	UFUNCTION()
 	void OnRep_CurrentAmmo();
 
+	// ---- Attachment runtime state ----
+
+	/** Current per-slot selection (kit ST_Attachments enum bytes). Neutral zeros until set. */
+	UPROPERTY(ReplicatedUsing = OnRep_AttachmentSelection)
+	FWeaponAttachmentSelection AttachmentSelection;
+
+	UFUNCTION()
+	void OnRep_AttachmentSelection();
+
+	UFUNCTION(Server, Reliable)
+	void Server_SetAttachmentSelection(FWeaponAttachmentSelection NewSelection);
+
+	/** Stores the selection and recomputes cached effects. */
+	void ApplySelectionInternal(const FWeaponAttachmentSelection& NewSelection);
+
+	/** Recombines CombinedModifiers/suppressed/flash-override from the current selection.
+	 *  Drops the pooled muzzle-flash components when the effective flash FX changed. */
+	void RecalculateAttachmentEffects();
+
+	/** Product/sum of all mounted attachments' modifiers. Neutral defaults when nothing mounted. */
+	FWeaponStatModifiers CombinedModifiers;
+
+	/** True when any mounted attachment sets bSetsSuppressed. */
+	bool bAttachmentSuppressed = false;
+
+	/** Non-null when a mounted attachment overrides the muzzle flash FX. */
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraSystem> AttachmentMuzzleFlashOverride;
+
 	// ---- Timers ----
 
 	FTimerHandle AutoFireTimerHandle;
@@ -725,4 +798,18 @@ private:
 	/** Spawns a one-shot Niagara tracer streak from MuzzleLocation toward EndPoint.
 	 *  Engine-pooled (AutoRelease). No-ops when WeaponData->TracerFX is null. */
 	void SpawnTracer(const FVector& MuzzleLocation, const FVector& EndPoint);
+
+	// ---- Reload audio ----
+
+	/** Reload foley attached to the weapon for the current reload. Null while not reloading. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> ReloadAudioComponent;
+
+	/** Plays the DA reload sound (empty-mag variant when the mag is dry) attached to the weapon.
+	 *  No-ops when the DA has no reload sound assigned. */
+	void StartReloadAudio();
+
+	/** Fades out and drops the reload foley — called on cancel and EndPlay so a cut reload
+	 *  never leaves mag/bolt foley playing over idle. */
+	void StopReloadAudio();
 };

@@ -920,9 +920,7 @@ int32 ACompanionCharacter::GetCurrentAmmo() const
 
 bool ACompanionCharacter::IsCurrentWeaponSuppressed() const
 {
-	if (!IsValid(CurrentWeapon)) return false;
-	const UWeaponDataAsset* Data = CurrentWeapon->GetWeaponData();
-	return Data && Data->bSuppressed;
+	return IsValid(CurrentWeapon) && CurrentWeapon->IsSuppressedEffective();
 }
 
 float ACompanionCharacter::GetWeaponReloadTime() const

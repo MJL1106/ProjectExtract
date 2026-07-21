@@ -537,8 +537,7 @@ void AExtractionCharacter::ApplySprintSpeed()
 	else if (IsValid(WeaponComponent) && WeaponComponent->IsAiming())
 	{
 		const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
-		const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
-		MoveComp->MaxWalkSpeed = IsValid(Data) ? Data->ADSMovementSpeed : WalkSpeed;
+		MoveComp->MaxWalkSpeed = IsValid(Weapon) ? Weapon->GetEffectiveADSMovementSpeed() : WalkSpeed;
 	}
 	else
 	{
@@ -1486,15 +1485,13 @@ void AExtractionCharacter::UpdateWeaponFOV(float DeltaTime)
 	if (!IsValid(WeaponComponent)) return;
 
 	const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
-	const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
 
-	const float TargetFOV = (WeaponComponent->IsAiming() && IsValid(Data))
-		? Data->ADSFOV
+	const float TargetFOV = (WeaponComponent->IsAiming() && IsValid(Weapon))
+		? Weapon->GetEffectiveADSFOV()
 		: BaseFOV;
 
-	const float InterpSpeed = IsValid(Data) && Data->ADSTransitionTime > 0.f
-		? 1.0f / Data->ADSTransitionTime
-		: 10.0f;
+	const float TransitionTime = IsValid(Weapon) ? Weapon->GetEffectiveADSTransitionTime() : 0.f;
+	const float InterpSpeed = TransitionTime > 0.f ? 1.0f / TransitionTime : 10.0f;
 
 	const float CurrentFOV = FirstPersonCameraComponent->FieldOfView;
 	if (!FMath::IsNearlyEqual(CurrentFOV, TargetFOV, 0.1f))
@@ -1519,8 +1516,7 @@ void AExtractionCharacter::UpdateADSMovementSpeed()
 		PreADSWalkSpeed = MoveComp->MaxWalkSpeed;
 
 		const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
-		const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
-		const float ADSSpeed = IsValid(Data) ? Data->ADSMovementSpeed : ExtractionCharacterConstants::DefaultADSMovementSpeed;
+		const float ADSSpeed = IsValid(Weapon) ? Weapon->GetEffectiveADSMovementSpeed() : ExtractionCharacterConstants::DefaultADSMovementSpeed;
 
 		MoveComp->MaxWalkSpeed = ADSSpeed;
 	}

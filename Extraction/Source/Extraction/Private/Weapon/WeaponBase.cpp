@@ -14,7 +14,9 @@
 #include "EnemyAwarenessComponent.h"
 #include "EnemyMoraleComponent.h"
 #include "Animation/AnimInstance.h"
+#include "Components/AudioComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Sound/SoundBase.h"
 #include "Components/MeshComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Camera/CameraComponent.h"
@@ -35,6 +37,7 @@
 #include "NiagaraComponent.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 
 namespace WeaponConstants
 {
@@ -305,6 +308,147 @@ void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME_CONDITION(AWeaponBase, CurrentState, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AWeaponBase, CurrentAmmo, COND_OwnerOnly);
 	DOREPLIFETIME_CONDITION(AWeaponBase, ReserveAmmo, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(AWeaponBase, AttachmentSelection, COND_SkipOwner);
+}
+
+// ---- Attachments (gameplay effects) ----
+
+void AWeaponBase::SetAttachmentSelection(uint8 Sight, uint8 Muzzle, uint8 Laser, uint8 Grip, uint8 Handguard)
+{
+	FWeaponAttachmentSelection NewSelection;
+	NewSelection.Sight = Sight;
+	NewSelection.Muzzle = Muzzle;
+	NewSelection.Laser = Laser;
+	NewSelection.Grip = Grip;
+	NewSelection.Handguard = Handguard;
+
+	// Apply locally either way (owning-client feel); non-authority forwards to the server.
+	ApplySelectionInternal(NewSelection);
+	if (!HasAuthority())
+		Server_SetAttachmentSelection(NewSelection);
+}
+
+void AWeaponBase::Server_SetAttachmentSelection_Implementation(FWeaponAttachmentSelection NewSelection)
+{
+	ApplySelectionInternal(NewSelection);
+}
+
+void AWeaponBase::ApplySelectionInternal(const FWeaponAttachmentSelection& NewSelection)
+{
+	AttachmentSelection = NewSelection;
+	RecalculateAttachmentEffects();
+}
+
+void AWeaponBase::OnRep_AttachmentSelection()
+{
+	RecalculateAttachmentEffects();
+}
+
+void AWeaponBase::RecalculateAttachmentEffects()
+{
+	const UNiagaraSystem* OldFlash = GetEffectiveMuzzleFlashFX();
+
+	CombinedModifiers = FWeaponStatModifiers();
+	bAttachmentSuppressed = false;
+	AttachmentMuzzleFlashOverride = nullptr;
+
+	if (IsValid(WeaponData))
+	{
+		const auto Accumulate = [this](const TArray<TObjectPtr<UWeaponAttachmentDataAsset>>& Options, uint8 Index)
+		{
+			if (!Options.IsValidIndex(Index)) return;
+			const UWeaponAttachmentDataAsset* Attachment = Options[Index];
+			if (!IsValid(Attachment)) return;
+
+			const FWeaponStatModifiers& M = Attachment->Modifiers;
+			CombinedModifiers.DamageMult *= M.DamageMult;
+			CombinedModifiers.RecoilPitchMult *= M.RecoilPitchMult;
+			CombinedModifiers.RecoilYawMult *= M.RecoilYawMult;
+			CombinedModifiers.ADSTransitionMult *= M.ADSTransitionMult;
+			CombinedModifiers.ADSMoveSpeedMult *= M.ADSMoveSpeedMult;
+			CombinedModifiers.HipSpreadMult *= M.HipSpreadMult;
+			CombinedModifiers.NoiseLoudnessMult *= M.NoiseLoudnessMult;
+			CombinedModifiers.NoiseRangeMult *= M.NoiseRangeMult;
+			CombinedModifiers.FalloffStartMult *= M.FalloffStartMult;
+			CombinedModifiers.ADSFOVDelta += M.ADSFOVDelta;
+			if (M.ADSFOVOverride > 0.f)
+				CombinedModifiers.ADSFOVOverride = M.ADSFOVOverride;
+
+			bAttachmentSuppressed |= Attachment->bSetsSuppressed;
+			if (IsValid(Attachment->MuzzleFlashFXOverride))
+				AttachmentMuzzleFlashOverride = Attachment->MuzzleFlashFXOverride;
+		};
+
+		Accumulate(WeaponData->SightAttachments, AttachmentSelection.Sight);
+		Accumulate(WeaponData->MuzzleAttachments, AttachmentSelection.Muzzle);
+		Accumulate(WeaponData->LaserAttachments, AttachmentSelection.Laser);
+		Accumulate(WeaponData->GripAttachments, AttachmentSelection.Grip);
+		Accumulate(WeaponData->HandguardAttachments, AttachmentSelection.Handguard);
+	}
+
+	// Flash FX changed — drop the pooled components so the next shot rebuilds with the new system.
+	if (GetEffectiveMuzzleFlashFX() != OldFlash)
+	{
+		if (IsValid(MuzzleFlashComponent))
+		{
+			MuzzleFlashComponent->DestroyComponent();
+			MuzzleFlashComponent = nullptr;
+		}
+		if (IsValid(FirstPersonMuzzleFlashComponent))
+		{
+			FirstPersonMuzzleFlashComponent->DestroyComponent();
+			FirstPersonMuzzleFlashComponent = nullptr;
+		}
+	}
+}
+
+float AWeaponBase::GetEffectiveDamage() const
+{
+	return IsValid(WeaponData) ? WeaponData->BaseDamage * CombinedModifiers.DamageMult : 0.f;
+}
+
+bool AWeaponBase::IsSuppressedEffective() const
+{
+	return (IsValid(WeaponData) && WeaponData->bSuppressed) || bAttachmentSuppressed;
+}
+
+float AWeaponBase::GetEffectiveADSFOV() const
+{
+	if (!IsValid(WeaponData)) return 65.f;
+	if (CombinedModifiers.ADSFOVOverride > 0.f)
+		return FMath::Clamp(CombinedModifiers.ADSFOVOverride, 20.f, 120.f);
+	return FMath::Clamp(WeaponData->ADSFOV + CombinedModifiers.ADSFOVDelta, 20.f, 120.f);
+}
+
+float AWeaponBase::GetEffectiveADSTransitionTime() const
+{
+	return IsValid(WeaponData) ? WeaponData->ADSTransitionTime * CombinedModifiers.ADSTransitionMult : 0.15f;
+}
+
+float AWeaponBase::GetEffectiveADSMovementSpeed() const
+{
+	return IsValid(WeaponData) ? WeaponData->ADSMovementSpeed * CombinedModifiers.ADSMoveSpeedMult : 400.f;
+}
+
+float AWeaponBase::GetEffectiveHipFireSpreadDeg() const
+{
+	return IsValid(WeaponData) ? WeaponData->HipFireSpreadDeg * CombinedModifiers.HipSpreadMult : 0.f;
+}
+
+float AWeaponBase::GetEffectiveNoiseLoudness() const
+{
+	return IsValid(WeaponData) ? WeaponData->NoiseLoudness * CombinedModifiers.NoiseLoudnessMult : 0.f;
+}
+
+float AWeaponBase::GetEffectiveNoiseRange() const
+{
+	return IsValid(WeaponData) ? WeaponData->NoiseRange * CombinedModifiers.NoiseRangeMult : 0.f;
+}
+
+UNiagaraSystem* AWeaponBase::GetEffectiveMuzzleFlashFX() const
+{
+	if (IsValid(AttachmentMuzzleFlashOverride)) return AttachmentMuzzleFlashOverride;
+	return IsValid(WeaponData) ? WeaponData->MuzzleFlashFX : nullptr;
 }
 
 void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -337,6 +481,8 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		SpawnedVisualActor->Destroy();
 		SpawnedVisualActor = nullptr;
 	}
+
+	StopReloadAudio();
 
 	if (const UWorld* World = GetWorld())
 	{
@@ -703,6 +849,10 @@ void AWeaponBase::PerformHitscan()
 		PC->GetPlayerViewPoint(CameraLoc, CameraRot);
 		TraceStart = CameraLoc;
 		AimDirection = CameraRot.Vector();
+
+		// Player hip-fire cone — zero while ADS or when the DA leaves HipFireSpreadDeg at 0.
+		if (!bOwnerIsAiming)
+			AimDirection = ApplyConeSpread(AimDirection, GetEffectiveHipFireSpreadDeg());
 	}
 	else
 	{
@@ -824,7 +974,7 @@ void AWeaponBase::PerformHitscan()
 			VictimRecords.Add({ HitActor, VH, VH && VH->IsAlive(), true });
 		}
 
-		const float PelletDamage = WeaponData->BaseDamage * ComputeFalloffScale(PelletHit.Distance);
+		const float PelletDamage = GetEffectiveDamage() * ComputeFalloffScale(PelletHit.Distance);
 		PelletRecords.Add({ HitActor, PelletHit, PelletDir, PelletDamage });
 	}
 
@@ -927,18 +1077,19 @@ void AWeaponBase::PerformHitscan()
 	ReportNearMisses(TraceStart, CenterImpactOrEnd, CenterHitActor);
 	Multicast_PlayFireFX(GetMuzzleLocation(), CenterImpactOrEnd, bCenterHit);
 
-	if (WeaponData->NoiseRange > 0.f)
-		UAISense_Hearing::ReportNoiseEvent(World, GetMuzzleLocation(), WeaponData->NoiseLoudness, OwnerChar, WeaponData->NoiseRange, TEXT("WeaponFire"));
+	if (GetEffectiveNoiseRange() > 0.f)
+		UAISense_Hearing::ReportNoiseEvent(World, GetMuzzleLocation(), GetEffectiveNoiseLoudness(), OwnerChar, GetEffectiveNoiseRange(), TEXT("WeaponFire"));
 }
 
 float AWeaponBase::ComputeFalloffScale(float Distance) const
 {
 	if (!IsValid(WeaponData) || !WeaponData->bUseDamageFalloff) return 1.f;
-	if (WeaponData->DamageFalloffEndRange <= WeaponData->DamageFalloffStartRange) return 1.f;
-	if (Distance <= WeaponData->DamageFalloffStartRange) return 1.f;
+	const float FalloffStart = WeaponData->DamageFalloffStartRange * CombinedModifiers.FalloffStartMult;
+	if (WeaponData->DamageFalloffEndRange <= FalloffStart) return 1.f;
+	if (Distance <= FalloffStart) return 1.f;
 	if (Distance >= WeaponData->DamageFalloffEndRange) return WeaponData->MinDamageFraction;
 	return FMath::GetMappedRangeValueClamped(
-		FVector2D(WeaponData->DamageFalloffStartRange, WeaponData->DamageFalloffEndRange),
+		FVector2D(FalloffStart, WeaponData->DamageFalloffEndRange),
 		FVector2D(1.f, WeaponData->MinDamageFraction),
 		Distance);
 }
@@ -973,6 +1124,18 @@ void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocat
 		EnsureFirstPersonMuzzleFlashComponent();
 		if (IsValid(FirstPersonMuzzleFlashComponent))
 			FirstPersonMuzzleFlashComponent->Activate(true);
+	}
+
+	// Fire report. A mounted muzzle attachment (modding-screen suppressor) or effective
+	// suppression swaps to the suppressed report when one is assigned.
+	if (IsValid(WeaponData))
+	{
+		const bool bWantSuppressedReport = bMuzzleAttachmentEquipped || IsSuppressedEffective();
+		USoundBase* Report = (bWantSuppressedReport && IsValid(WeaponData->SuppressedFireSound))
+			? WeaponData->SuppressedFireSound.Get()
+			: WeaponData->FireSound.Get();
+		if (IsValid(Report))
+			UGameplayStatics::PlaySoundAtLocation(GetWorld(), Report, MuzzleLocation);
 	}
 
 	// Bullet tracer: one-shot pooled Niagara streak along the fire line.
@@ -1459,6 +1622,7 @@ void AWeaponBase::Reload()
 	}
 
 	TriggerKitVisualItemReload(GetOwner());
+	StartReloadAudio();
 
 	// Stop firing
 	bWantsToFire = false;
@@ -1587,6 +1751,7 @@ void AWeaponBase::CancelReload()
 
 	ReattachMagazine();
 	StopVisualWeaponReload();
+	StopReloadAudio();
 
 	// Shell-by-shell weapons prime their Loop to self-loop — force-stop the body montage
 	// so it doesn't keep looping after an interrupt.
@@ -1745,6 +1910,10 @@ void AWeaponBase::ApplyRecoil()
 	FVector2D RecoilOffset = Pattern.Points[PatternIndex];
 
 	RecoilOffset *= (bOwnerIsAiming ? Pattern.ADSMultiplier : 1.0f);
+
+	// Attachment recoil scaling (grips/handguards).
+	RecoilOffset.X *= CombinedModifiers.RecoilYawMult;
+	RecoilOffset.Y *= CombinedModifiers.RecoilPitchMult;
 
 	// Apply to camera
 	OwnerIface->DoAim(RecoilOffset.X, RecoilOffset.Y);
@@ -1934,6 +2103,15 @@ void AWeaponBase::KitFire_HitScan_Implementation()
 					*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, *GetNameSafe(WeaponData));
 			}
 		}
+		// Dry click once per trigger press — only when truly dry and idle (not mid-reload).
+		// Reuses the bDryFireLogged once-per-cycle latch (reset by KitBeginFire / reload finish).
+		if (!bDryFireLogged && CurrentAmmo <= 0 && CurrentState == EWeaponState::Idle
+			&& IsValid(WeaponData) && IsValid(WeaponData->DryFireSound))
+		{
+			bDryFireLogged = true;
+			UGameplayStatics::PlaySoundAtLocation(GetWorld(), WeaponData->DryFireSound.Get(), GetActorLocation());
+		}
+
 		// Dry dispatch on an empty mag — kick the reload instead of silently no-oping.
 		if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
 			Reload();
@@ -2112,7 +2290,7 @@ bool AWeaponBase::RollShotDamage(const UDamageMitigationSettings& S, AActor* Tar
 void AWeaponBase::EnsureMuzzleFlashComponent()
 {
 	if (IsValid(MuzzleFlashComponent)) return;
-	if (!IsValid(WeaponData) || !IsValid(WeaponData->MuzzleFlashFX)) return;
+	if (!IsValid(GetEffectiveMuzzleFlashFX())) return;
 
 	USkeletalMeshComponent* GripMesh = GetThirdPersonGripMesh();
 	if (!IsValid(GripMesh)) return;
@@ -2122,7 +2300,7 @@ void AWeaponBase::EnsureMuzzleFlashComponent()
 			*GetNameSafe(this), *GetNameSafe(GripMesh->GetSkeletalMeshAsset()), *WeaponConstants::MuzzleSocketName.ToString());
 
 	MuzzleFlashComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-		WeaponData->MuzzleFlashFX,
+		GetEffectiveMuzzleFlashFX(),
 		GripMesh,
 		WeaponConstants::MuzzleSocketName,
 		FVector::ZeroVector,
@@ -2154,7 +2332,7 @@ void AWeaponBase::EnsureFirstPersonMuzzleFlashComponent()
 {
 	if (IsValid(FirstPersonMuzzleFlashComponent)) return;
 	if (!IsValid(FirstPersonMuzzle)) return;
-	if (!IsValid(WeaponData) || !IsValid(WeaponData->MuzzleFlashFX)) return;
+	if (!IsValid(WeaponData) || !IsValid(GetEffectiveMuzzleFlashFX())) return;
 	if (GetNetMode() == NM_DedicatedServer) return;
 
 	// Only the owning player's screen shows the FP gun — gate on local control rather than
@@ -2165,7 +2343,7 @@ void AWeaponBase::EnsureFirstPersonMuzzleFlashComponent()
 	if (!IsValid(OwnerPawn) || !OwnerPawn->IsLocallyControlled()) return;
 
 	FirstPersonMuzzleFlashComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-		WeaponData->MuzzleFlashFX,
+		GetEffectiveMuzzleFlashFX(),
 		FirstPersonMuzzle,
 		NAME_None,
 		FVector::ZeroVector,
@@ -2216,4 +2394,29 @@ void AWeaponBase::SpawnTracer(const FVector& MuzzleLocation, const FVector& EndP
 	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector(TracerComp, TracerImpactsParam, { EndPoint });
 	TracerComp->SetVariableBool(TracerTriggerParam, true);
 	TracerComp->SetVariableInt(TracerTriggerParam, 1);
+}
+
+// ---- Reload audio ----
+
+void AWeaponBase::StartReloadAudio()
+{
+	if (!IsValid(WeaponData)) return;
+
+	// Empty-mag reload gets the bolt/slide-release variant; tactical (or no variant) uses the base sound.
+	USoundBase* Sound = (CurrentAmmo == 0 && IsValid(WeaponData->ReloadEmptySound))
+		? WeaponData->ReloadEmptySound.Get()
+		: WeaponData->ReloadSound.Get();
+	if (!IsValid(Sound)) return;
+
+	StopReloadAudio();
+	ReloadAudioComponent = UGameplayStatics::SpawnSoundAttached(Sound, GetRootComponent());
+}
+
+void AWeaponBase::StopReloadAudio()
+{
+	if (!IsValid(ReloadAudioComponent)) { ReloadAudioComponent = nullptr; return; }
+
+	// Short fade instead of a hard cut so an interrupted reload doesn't click.
+	ReloadAudioComponent->FadeOut(0.1f, 0.f);
+	ReloadAudioComponent = nullptr;
 }
