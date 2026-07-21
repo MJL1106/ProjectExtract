@@ -37,6 +37,8 @@
 #include "World/AmmoPickup.h"
 #include "World/LootPickup.h"
 #include "Companion/CompanionCharacter.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 
 static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
 	TEXT("enemy.PersistCorpses"), 1,
@@ -819,7 +821,26 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 	if (FinalDamage > 0.f && IsValid(HealthComponent) && !HealthComponent->IsDead())
 		OnHitReact.Broadcast(HitRegion);
 
+	SpawnBloodImpactFX(DamageEvent);
+
 	return FinalDamage;
+}
+
+void AEnemyCharacter::SpawnBloodImpactFX(const FDamageEvent& DamageEvent) const
+{
+	if (!IsValid(BloodImpactFX)) return;
+	if (!DamageEvent.IsOfType(FPointDamageEvent::ClassID)) return;
+
+	const FPointDamageEvent& PointDamage = static_cast<const FPointDamageEvent&>(DamageEvent);
+	const FHitResult& Hit = PointDamage.HitInfo;
+	if (Hit.ImpactPoint.IsNearlyZero()) return;
+
+	// Face the burst back along the surface normal; fall back to opposing the shot when the
+	// normal is unset (e.g. hand-built damage events).
+	const FVector BurstDir = Hit.ImpactNormal.IsNearlyZero() ? -PointDamage.ShotDirection : FVector(Hit.ImpactNormal);
+	UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		GetWorld(), BloodImpactFX, Hit.ImpactPoint, BurstDir.Rotation(),
+		FVector(1.f), /*bAutoDestroy=*/true, /*bAutoActivate=*/true, ENCPoolMethod::AutoRelease);
 }
 
 // --- Death ---

@@ -43,6 +43,7 @@ class UEnemyPostureComponent;
 class UEnemySquadSubsystem;
 class UEnemySquad;
 class UAmmoDropTableDataAsset;
+class UNiagaraSystem;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTakedownExecuted, AActor*, Instigator);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleePerformed);
@@ -425,6 +426,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Hitbox")
 	TMap<FName, EHitRegion> BoneToHitRegionMap;
 
+	/** Blood burst spawned at the bullet impact point on point-damage hits.
+	 *  Assign the kit's NS_Smoke_Blood_System in the enemy BP defaults. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|FX")
+	TObjectPtr<UNiagaraSystem> BloodImpactFX;
+
 private:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
@@ -435,6 +441,9 @@ private:
 
 	/** True when the weapon is currently attached to the patrol-hand socket (DA-driven hand-swap). */
 	bool bWeaponOnPatrolHand = false;
+
+	/** Spawns BloodImpactFX at the hit location for point-damage events (kit enemy-blood behaviour). */
+	void SpawnBloodImpactFX(const FDamageEvent& DamageEvent) const;
 
 	/** True while the combat service's eye-to-target trace is clear. AI-side only (not replicated). */
 	bool bHasTargetLOS = false;
