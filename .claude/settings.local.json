@@ -73,7 +73,8 @@
       "Bash(bash /tmp/vibe.sh C:/Users/matth/AppData/Local/Temp/nsloop/sockbone.py)",
       "Bash(pandoc -t markdown \"C:\\\\Users\\\\matth\\\\Downloads\\\\Bugs_implementation_.docx\")",
       "PowerShell(Add-Type -AssemblyName System.IO.Compression.FileSystem; $zip = [System.IO.Compression.ZipFile]::OpenRead\\(\"C:\\\\Users\\\\matth\\\\Downloads\\\\BODYCAM & PROCEDURAL FPS KIT DOCUMENTATION.docx\"\\); $entry = $zip.GetEntry\\(\"word/document.xml\"\\); $reader = New-Object System.IO.StreamReader\\($entry.Open\\(\\)\\); $xml = $reader.ReadToEnd\\(\\); $reader.Close\\(\\); $zip.Dispose\\(\\); $text = $xml -replace '</w:p>', \"`n\" -replace '<[^>]+>', ''; $text = [System.Net.WebUtility]::HtmlDecode\\($text\\); \"LENGTH: $\\($text.Length\\)\"; $text.Substring\\(0, [Math]::Min\\(12000, $text.Length\\)\\))",
-      "PowerShell(git *)"
+      "PowerShell(git *)",
+      "PowerShell(Get-CimInstance *)"
     ]
   },
   "enableAllProjectMcpServers": true,
