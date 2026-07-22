@@ -75,6 +75,15 @@ private:
 	 *  deliberate mid-fight override, so a held-over target must not break the search off. */
 	bool bHadCombatTargetAtStart = false;
 
+	/** World time this search (or its latest re-ping restart) began — reference stamp for the
+	 *  director's "has a fight started since?" check. */
+	float TaskStartWorldTime = 0.f;
+
+	/** True when a fight was already raging at ping time (director combat report within
+	 *  RecentFightWindowSeconds of the start stamp) — deliberate mid-fight override, so ongoing
+	 *  combat reports must not break the search off. */
+	bool bFightOngoingAtStart = false;
+
 	/** Door was already open at task start (or opened by something else on the way over) —
 	 *  no montage, no swing, just walk in and run the room check. */
 	bool bSkipMontage = false;

@@ -39,6 +39,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Stats", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float HeadshotMaxHealthFraction = 0.65f;
 
+	/** A bullet to the head kills outright, through shield and armour. Heavies set this false and
+	 *  keep the HeadshotMaxHealthFraction floor instead. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Stats")
+	bool bHeadshotOneTap = true;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Stats", meta = (ClampMin = "1.0"))
 	float PatrolSpeed = 200.f;
 

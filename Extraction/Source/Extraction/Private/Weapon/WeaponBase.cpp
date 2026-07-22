@@ -35,6 +35,9 @@
 #include "Extraction.h"
 #include "EnemyDebug.h"
 #include "DamageMitigationSettings.h"
+#include "World/ImpactDecalSubsystem.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 #include "NiagaraComponent.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "NiagaraFunctionLibrary.h"
@@ -805,6 +808,28 @@ void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& Tra
 			}
 		}
 	}
+
+	// Audible crack for enemy shots passing the player's head. Enemy shooters only — the player
+	// has no SuppressionComponent (so the loop above never sees them), and companion fire whizzing
+	// past would read as friendly fire. Skipped when the player was actually hit (flesh SFX owns that).
+	if (!GetOwner() || !GetOwner()->IsA<AEnemyCharacter>()) return;
+
+	const APlayerController* LocalPC = World->GetFirstPlayerController();
+	APawn* PlayerPawn = LocalPC ? LocalPC->GetPawn() : nullptr;
+	if (!IsValid(PlayerPawn) || PlayerPawn == HitActor) return;
+
+	// Ear height, not capsule centre — flybys sell the danger at head level.
+	const FVector HeadLocation = PlayerPawn->GetActorLocation() + FVector(0.f, 0.f, 60.f);
+	const float T = FMath::Clamp(FVector::DotProduct(HeadLocation - TraceStart, Segment) / SegmentLenSq, 0.f, 1.f);
+	const FVector ClosestPoint = TraceStart + Segment * T;
+
+	UGameAudioSubsystem* AudioSys = World->GetSubsystem<UGameAudioSubsystem>();
+	const USurfaceAudioBank* Bank = AudioSys ? AudioSys->GetBank() : nullptr;
+	const float FlybyRadius = Bank ? Bank->FlybyRadius : 0.f;
+	if (FlybyRadius <= 0.f) return;
+	if (FVector::DistSquared(ClosestPoint, HeadLocation) > FlybyRadius * FlybyRadius) return;
+
+	AudioSys->PlayFlyby(ClosestPoint);
 }
 
 void AWeaponBase::FireShot()
@@ -918,7 +943,7 @@ void AWeaponBase::PerformHitscan()
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 	QueryParams.AddIgnoredActor(OwnerChar);
-	QueryParams.bReturnPhysicalMaterial = false;
+	QueryParams.bReturnPhysicalMaterial = true; // surface-typed impact SFX off the hit phys material
 
 	// Friendly-fire prevention for ALL shooters: built once per burst, refreshed at most every 1s.
 	const bool bAIOwned = !IsValid(PC);
@@ -954,6 +979,7 @@ void AWeaponBase::PerformHitscan()
 		float AppliedDamage = 0.f;     // sum of TakeDamage returns this shot (post hitbox/armour)
 		float HeadshotDamage = 0.f;    // portion of AppliedDamage from head-region pellets
 		FVector LastImpact = FVector::ZeroVector; // impact point of the last damaging pellet
+		FVector FirstImpact = FVector::ZeroVector; // impact point of the first pellet — flesh SFX anchor
 	};
 	TArray<FVictimRecord, TInlineAllocator<4>> VictimRecords;
 
@@ -962,6 +988,14 @@ void AWeaponBase::PerformHitscan()
 	FVector CenterImpactOrEnd = TraceStart + AimDirection * WeaponData->MaxRange;
 	AActor* CenterHitActor = nullptr;
 
+	// World-geometry pellet hits — bullet hole + surface puff after the damage pass.
+	TArray<FHitResult, TInlineAllocator<8>> WorldImpacts;
+
+	// Player shots sweep a thin sphere for slight hit forgiveness (headshots especially);
+	// AI keeps exact line traces so enemies don't inherit it. Character capsules ignore
+	// ECC_Visibility, so the sweep still resolves against the mesh and returns the bone.
+	const float SweepRadius = bAIOwned ? 0.f : WeaponData->BulletSweepRadius;
+
 	// === TRACE PASS (no TakeDamage — avoids re-entrancy during traces) ===
 	for (int32 P = 0; P < NumPellets; ++P)
 	{
@@ -969,7 +1003,10 @@ void AWeaponBase::PerformHitscan()
 		const FVector PelletEnd = TraceStart + PelletDir * WeaponData->MaxRange;
 
 		FHitResult PelletHit;
-		const bool bHit = World->LineTraceSingleByChannel(PelletHit, TraceStart, PelletEnd, ECC_Visibility, QueryParams);
+		const bool bHit = (SweepRadius > 0.f)
+			? World->SweepSingleByChannel(PelletHit, TraceStart, PelletEnd, FQuat::Identity, ECC_Visibility,
+				FCollisionShape::MakeSphere(SweepRadius), QueryParams)
+			: World->LineTraceSingleByChannel(PelletHit, TraceStart, PelletEnd, ECC_Visibility, QueryParams);
 
 		if (P == 0)
 		{
@@ -979,6 +1016,10 @@ void AWeaponBase::PerformHitscan()
 		}
 
 		if (!bHit) continue;
+
+		// Non-character surfaces get a bullet hole; character hits get blood FX via TakeDamage.
+		if (!Cast<ACharacter>(PelletHit.GetActor()))
+			WorldImpacts.Add(PelletHit);
 
 		AActor* HitActor = PelletHit.GetActor();
 		if (!IsValid(HitActor)) continue;
@@ -993,6 +1034,7 @@ void AWeaponBase::PerformHitscan()
 		{
 			UHealthComponent* VH = HitActor->FindComponentByClass<UHealthComponent>();
 			VictimRecords.Add({ HitActor, VH, VH && VH->IsAlive(), true });
+			VictimRecords.Last().FirstImpact = PelletHit.ImpactPoint;
 		}
 
 		const float PelletDamage = GetEffectiveDamage() * ComputeFalloffScale(PelletHit.Distance);
@@ -1112,6 +1154,50 @@ void AWeaponBase::PerformHitscan()
 			UE_LOG(LogExtraction, Verbose, TEXT("PLAYER-FIRE hit %s but it has NO UHealthComponent — damage will be ignored"), *GetNameSafe(CenterHitActor));
 	}
 
+	// World impact FX — bullet hole (pooled decal ring) + surface puff (pooled Niagara) per pellet.
+	UGameAudioSubsystem* AudioSys = World->GetSubsystem<UGameAudioSubsystem>();
+	if (WorldImpacts.Num() > 0)
+	{
+		UImpactDecalSubsystem* DecalSys = World->GetSubsystem<UImpactDecalSubsystem>();
+		// A shotgun blast lands up to 8 pellets in one frame — two impact cues sell the surface
+		// hit without stacking into a single loud crack (concurrency caps the cross-shot spam).
+		constexpr int32 MaxImpactSoundsPerShot = 2;
+		int32 ImpactSoundsPlayed = 0;
+		for (const FHitResult& Impact : WorldImpacts)
+		{
+			if (DecalSys && IsValid(WeaponData->ImpactDecalMaterial))
+				DecalSys->SpawnBulletHole(WeaponData->ImpactDecalMaterial, Impact,
+					WeaponData->ImpactDecalSize, WeaponData->ImpactDecalLifetime);
+
+			if (IsValid(WeaponData->ImpactFX))
+				UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+					World, WeaponData->ImpactFX, Impact.ImpactPoint, Impact.ImpactNormal.Rotation(),
+					FVector(1.f), /*bAutoDestroy*/ true, /*bAutoActivate*/ true, ENCPoolMethod::AutoRelease);
+
+			if (AudioSys && ImpactSoundsPlayed < MaxImpactSoundsPerShot)
+			{
+				AudioSys->PlayWorldImpact(Impact);
+				++ImpactSoundsPlayed;
+			}
+		}
+	}
+
+	// Flesh impact SFX — once per victim per shot, for every shooter (player, enemy, companion).
+	// Keyed on the HealthComponent so world geometry never triggers it; plays even when the AI
+	// mitigation gate zeroed the damage — a bullet that visibly lands must still sound like a hit.
+	// Player shots get the 2D hit-confirm (feedback must read at any range); AI shots stay
+	// positional at the victim.
+	if (AudioSys)
+	{
+		for (const FVictimRecord& VR : VictimRecords)
+			if (VR.Health) AudioSys->PlayFleshImpact(VR.FirstImpact, /*bAsLocal2D*/ !bAIOwned, VR.HeadshotDamage > 0.f);
+	}
+
+	// Brass tinkle for player shots — scheduled with a short delay so it reads as the shell
+	// hitting the floor after the report.
+	if (!bAIOwned && AudioSys)
+		AudioSys->PlayShellDrop(OwnerChar->GetActorLocation());
+
 	// FX and noise — one per shot, using the center pellet.
 	ReportNearMisses(TraceStart, CenterImpactOrEnd, CenterHitActor);
 	Multicast_PlayFireFX(GetMuzzleLocation(), CenterImpactOrEnd, bCenterHit);
@@ -1174,7 +1260,17 @@ void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocat
 			? WeaponData->SuppressedFireSound.Get()
 			: WeaponData->FireSound.Get();
 		if (IsValid(Report))
-			UGameplayStatics::PlaySoundAtLocation(GetWorld(), Report, MuzzleLocation);
+		{
+			// Fire cues are authored 2D for the local player's own gun — AI shots must be forced
+			// through the bank's gunfire attenuation or every enemy reads as firing in your ear.
+			const ACharacter* ReportOwner = Cast<ACharacter>(GetOwner());
+			const bool bLocalPlayerShot = IsValid(ReportOwner) && IsValid(Cast<APlayerController>(ReportOwner->GetController()));
+			UGameAudioSubsystem* AudioSys = GetWorld() ? GetWorld()->GetSubsystem<UGameAudioSubsystem>() : nullptr;
+			if (!bLocalPlayerShot && AudioSys)
+				AudioSys->PlayAIFireReport(Report, MuzzleLocation);
+			else
+				UGameplayStatics::PlaySoundAtLocation(GetWorld(), Report, MuzzleLocation);
+		}
 	}
 
 	// Bullet tracer: one-shot pooled Niagara streak along the fire line.

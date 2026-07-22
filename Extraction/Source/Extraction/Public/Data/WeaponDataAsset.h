@@ -10,6 +10,7 @@
 #include "WeaponDataAsset.generated.h"
 
 class UExtractionDamageType;
+class UMaterialInterface;
 class UNiagaraSystem;
 class UDamageMitigationSettings;
 class UWeaponAttachmentDataAsset;
@@ -132,6 +133,12 @@ public:
 	 *  inaccuracy model via IAIShooterInterface. Attachments scale this via HipSpreadMult. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0"))
 	float HipFireSpreadDeg = 0.f;
+
+	/** Sphere-sweep radius (cm) for PLAYER hitscan traces — slight hit forgiveness so near-miss
+	 *  shots (especially headshots) connect. 0 = exact line trace. AI fire always line-traces so
+	 *  enemies don't inherit the forgiveness. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float BulletSweepRadius = 2.f;
 
 	// ---- Attachments ----
 
@@ -280,6 +287,25 @@ public:
 	 *  Keeps C++ agnostic to whichever tracer system pack is assigned. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
 	FName TracerEndParamName = TEXT("TracerEnd");
+
+	/** Decal material stamped on world geometry per pellet hit (bullet hole). Null = no decal.
+	 *  Rendered through the pooled UImpactDecalSubsystem ring buffer. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<UMaterialInterface> ImpactDecalMaterial;
+
+	/** Bullet-hole decal edge size (cm). Slight per-hit jitter is applied on top. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX", meta = (ClampMin = "1.0"))
+	float ImpactDecalSize = 8.f;
+
+	/** Seconds before a bullet-hole decal starts fading out. The pool cap recycles the oldest
+	 *  holes regardless, so this is a soft lifetime. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX", meta = (ClampMin = "1.0"))
+	float ImpactDecalLifetime = 60.f;
+
+	/** Niagara puff/sparks spawned at each world impact point, oriented to the surface normal.
+	 *  Null = no impact FX. Engine-pooled (AutoRelease), same as TracerFX. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<UNiagaraSystem> ImpactFX;
 
 	/** Fire report played at the muzzle per shot. Null = silent (enemy DAs stay null until assigned).
 	 *  Played from C++ (Multicast_PlayFireFX) — the kit BP fire-audio chain is dead code for the

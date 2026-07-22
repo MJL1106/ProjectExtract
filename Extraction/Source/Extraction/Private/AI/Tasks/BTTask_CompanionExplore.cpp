@@ -9,6 +9,7 @@
 #include "Companion/CompanionCharacter.h"
 #include "Components/HealthComponent.h"
 #include "Enemy/EnemyCharacter.h"
+#include "Enemy/EnemyDirectorSubsystem.h"
 #include "World/Breachable.h"
 #include "World/DoorBase.h"
 #include "World/Lootable.h"
@@ -173,6 +174,14 @@ EBTNodeResult::Type UBTTask_CompanionExplore::BeginSearch(UBehaviorTreeComponent
 	bHadCombatTargetAtStart = IsValid(BB)
 		&& IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
 
+	// A fight already raging at ping time is a deliberate override (same rule as the combat-target
+	// check above) — only a fight that STARTS after this stamp breaks the search off.
+	constexpr float RecentFightWindowSeconds = 5.f;
+	TaskStartWorldTime = Pawn->GetWorld()->GetTimeSeconds();
+	bFightOngoingAtStart = false;
+	if (const UEnemyDirectorSubsystem* Director = Pawn->GetWorld()->GetSubsystem<UEnemyDirectorSubsystem>())
+		bFightOngoingAtStart = (TaskStartWorldTime - Director->GetLastCombatReportTime()) < RecentFightWindowSeconds;
+
 	// Stand point: where the breach montage was authored to play from. Doors provide one; a
 	// door with none falls back to "in front of its origin, facing it".
 	bHasStandPoint = IBreachable::Execute_GetBreachStandPoint(Door, Pawn, StandLocation, StandFacing);
@@ -257,7 +266,16 @@ void UBTTask_CompanionExplore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 	const UBlackboardComponent* TickBB = OwnerComp.GetBlackboardComponent();
 	const bool bInCombat = IsValid(TickBB)
 		&& IsValid(Cast<AActor>(TickBB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
-	const bool bFreshCombat = bInCombat && !bHadCombatTargetAtStart;
+	bool bFreshCombat = bInCombat && !bHadCombatTargetAtStart;
+
+	// A fight anywhere breaks the search off, not just one the companion personally perceives —
+	// its combat target is perception-gated and never sets while it walks a corridor away from the
+	// shooting. The director stamps every enemy Combat entry; suppressed for mid-fight override pings.
+	if (!bFreshCombat && !bFightOngoingAtStart)
+	{
+		if (const UEnemyDirectorSubsystem* Director = Pawn->GetWorld()->GetSubsystem<UEnemyDirectorSubsystem>())
+			bFreshCombat = Director->GetLastCombatReportTime() > TaskStartWorldTime;
+	}
 
 	if (bFreshCombat && (Phase == ESearchPhase::MovingToDoor || Phase == ESearchPhase::Aligning))
 	{
@@ -462,9 +480,9 @@ void UBTTask_CompanionExplore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 	{
 		PhaseElapsed += DeltaSeconds;
 
-		// ANY live combat target ends the dwell — the search already succeeded, so even a
-		// held-over mid-fight target hands control back to the combat brain here.
-		if (!bInCombat && PhaseElapsed < DwellDuration) return;
+		// ANY live combat target (or a fight starting anywhere) ends the dwell — the search
+		// already succeeded, so even a held-over mid-fight target hands control back here.
+		if (!bInCombat && !bFreshCombat && PhaseElapsed < DwellDuration) return;
 
 		UE_LOG(LogCompanionExplore, Log, TEXT("TickTask: dwell over (%.1fs%s) — returning to follow"),
 			PhaseElapsed, bInCombat ? TEXT(", combat") : TEXT(""));

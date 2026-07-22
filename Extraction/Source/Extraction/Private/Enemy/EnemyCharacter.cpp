@@ -14,6 +14,7 @@
 #include "EnemyDirectorSubsystem.h"
 #include "PatrolRoute.h"
 #include "HealthComponent.h"
+#include "FootstepNoiseComponent.h"
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
 #include "ExtractionDamageType.h"
@@ -58,6 +59,8 @@ AEnemyCharacter::AEnemyCharacter()
 	SetMinNetUpdateFrequency(5.f);
 
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+	FootstepAudioComponent = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepAudioComponent"));
+	FootstepAudioComponent->SetEmitAINoise(false); // enemies must not feed the hearing sense with their own steps
 	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
 	MoraleComponent = CreateDefaultSubobject<UEnemyMoraleComponent>(TEXT("MoraleComponent"));
 	CoverPoseComponent = CreateDefaultSubobject<UCoverPoseComponent>(TEXT("CoverPoseComponent"));
@@ -98,8 +101,11 @@ AEnemyCharacter::AEnemyCharacter()
 	// Default mannequin bone-to-region map
 	BoneToHitRegionMap.Reserve(25);
 	BoneToHitRegionMap.Add(FName("head"),       EHitRegion::Head);
-	BoneToHitRegionMap.Add(FName("neck_01"),    EHitRegion::Torso);
-	BoneToHitRegionMap.Add(FName("neck_02"),    EHitRegion::Torso);
+	// Neck counts as head: grows the headshot region downward so near-miss-low shots still
+	// register. Incoming-damage regions only — the enemy PERCEPTION body ladder (AITargeting)
+	// keeps its own neck_01 entry and is untouched.
+	BoneToHitRegionMap.Add(FName("neck_01"),    EHitRegion::Head);
+	BoneToHitRegionMap.Add(FName("neck_02"),    EHitRegion::Head);
 	BoneToHitRegionMap.Add(FName("spine_01"),   EHitRegion::Torso);
 	BoneToHitRegionMap.Add(FName("spine_02"),   EHitRegion::Torso);
 	BoneToHitRegionMap.Add(FName("spine_03"),   EHitRegion::Torso);
@@ -817,6 +823,20 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 	UEnemyArmourComponent* Armour = ArmourComponent.Get();
 	if (IsValid(Armour))
 		FinalDamage = Armour->ModifyIncomingDamage(FinalDamage, DamageEvent, DamageCauser);
+
+	// One-tap headshot: PLAYER bullets to the head kill outright for every archetype that opts
+	// in (Heavy DA sets bHeadshotOneTap false and keeps the fraction floor above). Applied AFTER
+	// the armour step so shields and helmets can't save the target. Player-only — the companion's
+	// AI aim deliberately targets the head and would otherwise one-tap everything it shoots.
+	// Exactly shield+health (not a huge constant) so the damage-number HUD reports real damage.
+	if (HitRegion == EHitRegion::Head &&
+		DamageEvent.IsOfType(FPointDamageEvent::ClassID) &&
+		IsValid(EventInstigator) && EventInstigator->IsPlayerController() &&
+		IsValid(HealthComponent) &&
+		(!IsValid(ArchetypeData) || ArchetypeData->bHeadshotOneTap))
+	{
+		FinalDamage = HealthComponent->GetCurrentShield() + HealthComponent->GetCurrentHealth();
+	}
 
 	if (IsValid(HealthComponent))
 		HealthComponent->TakeDamage(FinalDamage);

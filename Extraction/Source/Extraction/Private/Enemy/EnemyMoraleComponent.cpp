@@ -5,6 +5,7 @@
 #include "EnemyArchetypeData.h"
 #include "EnemyDirectorSubsystem.h"
 #include "EnemyAIController.h"
+#include "EnemyAwarenessComponent.h"
 #include "HealthComponent.h"
 #include "BarkSubsystem.h"
 #include "BarkSetData.h"
@@ -374,6 +375,16 @@ void UEnemyMoraleComponent::RequestBark(EBarkType Type) const
 {
 	if (!OwnerEnemy.IsValid()) return;
 	if (!IsValid(CachedBarkSet)) return;
+
+	// A man-down call from an enemy that hasn't detected anything reveals knowledge it can't
+	// have (silent headshot = someone shouts "they got him" from the next room). Unaware
+	// witnesses stay quiet — the body-discovery path handles finding the corpse later.
+	if (Type == EBarkType::ManDown)
+	{
+		const AEnemyAIController* AIC = Cast<AEnemyAIController>(OwnerEnemy->GetController());
+		const UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
+		if (Awareness && Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware) return;
+	}
 
 	UWorld* World = GetWorld();
 	if (!World) return;
