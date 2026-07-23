@@ -15,6 +15,7 @@ class ACompanionAIController;
 class AEnemyCharacter;
 class UCameraComponent;
 class UInputMappingContext;
+class USoundBase;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPingChanged, ECompanionCommand, PendingCommand, AActor*, PingedTarget);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionModeChangedRelay, ECompanionMode, NewMode);
@@ -48,6 +49,14 @@ public:
 	/** Must exceed the gameplay contexts' priority (0) for the consume to block them. */
 	UPROPERTY(EditAnywhere, Category = "Companion|Command")
 	int32 TakedownPromptContextPriority = 10;
+
+	/** Played 2D when a ping lands on a commandable target (breach/search/loot/takedown). */
+	UPROPERTY(EditAnywhere, Category = "Companion|Command")
+	TObjectPtr<USoundBase> PingConfirmSound;
+
+	/** Played 2D when a ping press finds nothing commandable (miss, dead target, suppressed). */
+	UPROPERTY(EditAnywhere, Category = "Companion|Command")
+	TObjectPtr<USoundBase> PingFailSound;
 
 	/** Registered at ModeSelectContextPriority ONLY while the mode picker is open. Maps 1/2/3 to the
 	 *  three mode-select InputActions and consumes them, so number-key weapon switching can't fire
@@ -167,6 +176,10 @@ private:
 
 	void ConfirmTakedown(ETakedownMethod Method);
 	void ClearPending();
+
+	/** Audible ping feedback — confirm blip on an accepted ping, fail blip on a dead one.
+	 *  Only IssuePing calls this; ClearPending stays silent (it also runs on command completion). */
+	void PlayPingFeedback(bool bAccepted) const;
 
 	UFUNCTION()
 	void HandleCompanionModeChanged(ECompanionMode NewMode);

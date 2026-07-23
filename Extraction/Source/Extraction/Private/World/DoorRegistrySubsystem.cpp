@@ -15,6 +15,24 @@ void UDoorRegistrySubsystem::Unregister(ADoorBase* Door)
 		{ return !Entry.IsValid() || Entry.Get() == Door; });
 }
 
+bool UDoorRegistrySubsystem::ClaimOpenSoundPlay(const FVector& Location)
+{
+	const UWorld* World = GetWorld();
+	if (!World) return true;
+
+	const double Now = World->GetTimeSeconds();
+	if (LastOpenSoundTime >= 0.0
+		&& Now - LastOpenSoundTime <= OpenSoundDedupeWindow
+		&& FVector::DistSquared(Location, LastOpenSoundLocation) <= FMath::Square(OpenSoundDedupeRadius))
+	{
+		return false;
+	}
+
+	LastOpenSoundLocation = Location;
+	LastOpenSoundTime = Now;
+	return true;
+}
+
 void UDoorRegistrySubsystem::CollectPortalCandidates(const FVector& A, const FVector& B, int32 MaxCount, TArray<ADoorBase*>& OutDoors) const
 {
 	struct FScored

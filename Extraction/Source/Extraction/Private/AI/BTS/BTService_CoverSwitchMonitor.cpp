@@ -477,6 +477,11 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	const float MultiThreatPenalty = FMath::Clamp(Tuning->MultiThreatExposurePenalty, 0.f, 1.f);
 	const bool bScoreMultiThreat = ExtraThreatActors.Num() > 0 && MultiThreatPenalty < 1.f && Tuning->bCoverRequiresBodyProtection;
 
+	// Full known-threat set (focused target + extras) for the path-threat reject below — the
+	// relocate walk must route around the group, so the segment test needs every known enemy.
+	TArray<AActor*, TInlineAllocator<8>> PathThreatActors(ExtraThreatActors);
+	PathThreatActors.Add(CombatTarget);
+
 	// Hostile anchors gathered once per re-eval — enemy pawns + covers enemies have declared intent on.
 	FHostileAnchors HostileAnchors;
 	const bool bRejectHostileAdjacent = Tuning->MinHostileCoverDistance > 0.f || Tuning->MinHostilePawnDistance > 0.f;
@@ -518,6 +523,13 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		// or heading to. Pure 2D distance — runs before the trace-heavy peek gate.
 		if (bRejectHostileAdjacent && UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location,
 			HostileAnchors, Tuning->MinHostileCoverDistance, Tuning->MinHostilePawnDistance))
+			continue;
+
+		// Path-threat reject: the straight-line approach to this candidate passes through the known
+		// threat set — a compromised relocate must never charge the group to reach a scoring winner.
+		// Pure 2D segment math — also pre-trace.
+		if (CompanionCover::PathPassesNearThreat(Pawn->GetActorLocation(), Candidate.Data.Location,
+			PathThreatActors, Tuning->RelocatePathThreatClearance))
 			continue;
 
 		// Cover must offer a position with LoS to the target.

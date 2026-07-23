@@ -123,23 +123,28 @@ void UEnemyDirectorSubsystem::Escalate(EGlobalAlertLevel NewLevel)
 	UE_LOG(LogEnemyAI, Log, TEXT("Global alert: %d -> %d"), static_cast<int32>(OldLevel), static_cast<int32>(NewLevel));
 	OnGlobalAlertChanged.Broadcast(OldLevel, NewLevel);
 
-	if (NewLevel != EGlobalAlertLevel::Loud || DirectorTimerHandle.IsValid()) return;
-
-	UWorld* World = GetWorld();
-	if (!IsValid(World)) return;
+	// First (and only — the ladder is a ratchet) arrival at Loud: stealth kills before the
+	// fight went loud must not pre-charge the tension estimate.
+	if (NewLevel != EGlobalAlertLevel::Loud) return;
 
 	RecentKills = 0;
+	UE_LOG(LogEnemyAI, Log, TEXT("Director woke — tension estimate armed"));
+}
 
+void UEnemyDirectorSubsystem::OnWorldBeginPlay(UWorld& InWorld)
+{
+	Super::OnWorldBeginPlay(InWorld);
+
+	// The tick runs at every alert level (the awareness sweep feeds music/presentation
+	// during stealth); everything Loud-gated early-outs inside DirectorTick.
 	const float RandomOffset = FMath::FRandRange(0.f, 0.5f);
-	World->GetTimerManager().SetTimer(
+	InWorld.GetTimerManager().SetTimer(
 		DirectorTimerHandle,
 		this,
 		&UEnemyDirectorSubsystem::DirectorTick,
 		DirectorTickInterval,
 		true,
 		RandomOffset);
-
-	UE_LOG(LogEnemyAI, Log, TEXT("Director woke — starting tension timer (offset %.2f)"), RandomOffset);
 }
 
 // ============================================================
@@ -306,14 +311,18 @@ bool UEnemyDirectorSubsystem::IsPointInsideAnyScope(const FVector& Point) const
 
 void UEnemyDirectorSubsystem::DirectorTick()
 {
+	// Sweep runs at every alert level — the searching/combat counts feed presentation
+	// (music) during stealth, before the Loud-only spawn pipeline below is live.
+	const FEnemySweepResult Sweep = SweepEnemies();
+	LastSweepSearchingCount = Sweep.SearchingCount;
+	LastSweepCombatCount = Sweep.CombatCount;
+
 	if (AlertLevel != EGlobalAlertLevel::Loud) return;
 
 	PruneStaleZones();
 	PruneStaleScopeVolumes();
 	PruneStaleWaveMembers();
 	ReassertWaveMemberEngagement();
-
-	const FEnemySweepResult Sweep = SweepEnemies();
 
 	UpdateTension(DirectorTickInterval, Sweep.EngagedCount);
 	UpdateSawtooth(DirectorTickInterval);
@@ -403,14 +412,22 @@ UEnemyDirectorSubsystem::FEnemySweepResult UEnemyDirectorSubsystem::SweepEnemies
 
 		++Result.AliveCount;
 
-		if (!IsValid(PlayerPawn)) continue;
-		if (FVector::DistSquared(PlayerLoc, Enemy->GetActorLocation()) > EngageRadiusSq) continue;
-
 		AEnemyAIController* AIC = Cast<AEnemyAIController>(Enemy->GetController());
 		if (!IsValid(AIC)) continue;
 
 		UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
-		if (IsValid(Awareness) && Awareness->GetAwarenessState() == EEnemyAwarenessState::Combat)
+		if (!IsValid(Awareness)) continue;
+
+		const EEnemyAwarenessState AwareState = Awareness->GetAwarenessState();
+		if (AwareState == EEnemyAwarenessState::Searching) ++Result.SearchingCount;
+		if (AwareState == EEnemyAwarenessState::Combat) ++Result.CombatCount;
+
+		// EngagedCount stays distance-gated — it feeds the tension estimate, which only
+		// cares about enemies pressing the player, not a distant unresolved fight.
+		if (!IsValid(PlayerPawn)) continue;
+		if (FVector::DistSquared(PlayerLoc, Enemy->GetActorLocation()) > EngageRadiusSq) continue;
+
+		if (AwareState == EEnemyAwarenessState::Combat)
 		{
 			Result.EngagedCount += 1.f;
 		}

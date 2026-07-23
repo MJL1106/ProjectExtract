@@ -8,6 +8,7 @@
 #include "Engine/DeveloperSettings.h"
 #include "ExtractionAudioSettings.generated.h"
 
+class UMusicBankData;
 class USurfaceAudioBank;
 
 UCLASS(config = Game, defaultconfig, meta = (DisplayName = "Extraction Audio"))
@@ -18,4 +19,7 @@ class EXTRACTION_API UExtractionAudioSettings : public UDeveloperSettings
 public:
 	UPROPERTY(config, EditAnywhere, Category = "Audio")
 	TSoftObjectPtr<USurfaceAudioBank> AudioBank;
+
+	UPROPERTY(config, EditAnywhere, Category = "Audio")
+	TSoftObjectPtr<UMusicBankData> MusicBank;
 };

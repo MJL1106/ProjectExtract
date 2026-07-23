@@ -11,6 +11,7 @@
 #include "DoorBase.generated.h"
 
 class AEnemyCharacter;
+class APawn;
 class UBoxComponent;
 class UStaticMeshComponent;
 class USoundBase;
@@ -153,6 +154,14 @@ protected:
 
 	/** Auto-open filter + gate for one actor (the OnDoorwayOverlap body). */
 	void TryAutoOpenFor(AActor* OtherActor);
+
+	/** Play OpenSound at the acoustic portal, deduped through UDoorRegistrySubsystem so stacked
+	 *  doorway actors (entrance prefabs) and same-beat player+AI opens produce one audible open. */
+	void PlayOpenSoundDeduped();
+
+	/** True when the pawn's active nav path crosses this door's plane within the doorway span —
+	 *  i.e. it is actually going THROUGH, not merely brushing the trigger while walking past. */
+	bool IsPawnPathingThroughDoorway(const APawn* Pawn) const;
 
 	/** Re-run the auto-open filter for every pawn already inside the trigger. Call after the
 	 *  door becomes breachable again (a pack door re-closing) — no new BeginOverlap fires for

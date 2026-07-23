@@ -115,6 +115,7 @@ void UCompanionCommandComponent::IssuePing()
 	if (!bHit || !IsValid(Hit.GetActor()))
 	{
 		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] no hit -> clear"));
+		PlayPingFeedback(false);
 		ClearPending();
 		return;
 	}
@@ -135,6 +136,7 @@ void UCompanionCommandComponent::IssuePing()
 		if (IsCompanionRouteActive())
 		{
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] door %s suppressed — route active"), *GetNameSafe(HitActor));
+			PlayPingFeedback(false);
 			ClearPending();
 			return;
 		}
@@ -145,6 +147,7 @@ void UCompanionCommandComponent::IssuePing()
 			PendingTarget  = HitActor;
 			SetPromptContextRegistered(false); // breach prompt confirms on B — no G/V shield needed
 			OnPingChanged.Broadcast(PendingCommand, HitActor);
+			PlayPingFeedback(true);
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> BREACH %s (broadcast)"), *GetNameSafe(HitActor));
 			return;
 		}
@@ -164,11 +167,13 @@ void UCompanionCommandComponent::IssuePing()
 				PendingTarget  = HitActor; // marker rides the door
 				SetPromptContextRegistered(false); // explore confirms on the breach key — no G/V shield needed
 				OnPingChanged.Broadcast(PendingCommand, HitActor);
+				PlayPingFeedback(true);
 				UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> SEARCH door %s (broadcast)"), *GetNameSafe(HitActor));
 				return;
 			}
 		}
 
+		PlayPingFeedback(false);
 		ClearPending();
 		return;
 	}
@@ -179,6 +184,7 @@ void UCompanionCommandComponent::IssuePing()
 		if (IsCompanionRouteActive())
 		{
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] breachable %s suppressed — route active"), *GetNameSafe(HitActor));
+			PlayPingFeedback(false);
 			ClearPending();
 			return;
 		}
@@ -186,6 +192,7 @@ void UCompanionCommandComponent::IssuePing()
 		PendingTarget  = HitActor;
 		SetPromptContextRegistered(false);
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
+		PlayPingFeedback(true);
 		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> BREACH %s (broadcast)"), *GetNameSafe(HitActor));
 		return;
 	}
@@ -197,6 +204,7 @@ void UCompanionCommandComponent::IssuePing()
 		PendingTarget  = HitActor;
 		SetPromptContextRegistered(false); // loot confirms on the breach key — no G/V shield needed
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
+		PlayPingFeedback(true);
 		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> LOOT %s (broadcast)"), *GetNameSafe(HitActor));
 		return;
 	}
@@ -213,18 +221,28 @@ void UCompanionCommandComponent::IssuePing()
 			PendingTarget  = Enemy;
 			SetPromptContextRegistered(true);
 			OnPingChanged.Broadcast(PendingCommand, Enemy);
+			PlayPingFeedback(true);
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> TAKEDOWN %s (broadcast)"), *GetNameSafe(Enemy));
 			return;
 		}
 		// An ineligible enemy stays a dead ping — never downgrade a hostile under the crosshair
 		// to "search this spot".
+		PlayPingFeedback(false);
 		ClearPending();
 		return;
 	}
 
 	// No open-ground fallback: searches are door-targeted — pinging ground offers nothing.
 	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] hit %s matched no command -> clear"), *GetNameSafe(HitActor));
+	PlayPingFeedback(false);
 	ClearPending();
+}
+
+void UCompanionCommandComponent::PlayPingFeedback(bool bAccepted) const
+{
+	USoundBase* Sound = bAccepted ? PingConfirmSound : PingFailSound;
+	if (IsValid(Sound))
+		UGameplayStatics::PlaySound2D(GetWorld(), Sound);
 }
 
 // ---- Confirm helpers ----

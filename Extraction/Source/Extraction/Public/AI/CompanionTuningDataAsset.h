@@ -530,6 +530,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0"))
 	float MinHostilePawnDistance = 300.f;
 
+	// Hard reject for relocate candidates whose straight 2D line from the companion passes within
+	// this distance (cm) of a known threat — a compromised companion must route AROUND the enemy
+	// group, never charge through it to reach a scoring winner. Straight-line approximation of the
+	// nav path (cheap, per-candidate). 0 = off.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0"))
+	float RelocatePathThreatClearance = 350.f;
+
 	// When true, FindBestCoverFor rejects any slot whose hunkered body position is NOT shielded from
 	// the target by world geometry. Slots that are off to the side or behind the companion relative
 	// to the threat are discarded. Disable to revert to the old unfiltered pick.

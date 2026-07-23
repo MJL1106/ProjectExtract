@@ -12,6 +12,7 @@ class AAIController;
 class AController;
 class APawn;
 class ACompanionCharacter;
+class UBlackboardComponent;
 class UCompanionTuningDataAsset;
 class UWorld;
 struct FCoverData;
@@ -93,6 +94,45 @@ namespace CompanionCover
 	/** Location of the nearest available baked cover point within Radius of Point. False if none. */
 	bool NearestCoverLocation(UWorld* World, const FVector& Point, float Radius,
 		const AController* Querier, FVector& OutLocation);
+
+	/** True when the 2D segment PawnLoc -> Dest passes within Clearance (cm) of any threat actor.
+	 *  Pure point-to-segment math, no traces — cheap enough to run per candidate at re-eval cadence.
+	 *  Deliberate straight-line approximation of the nav path: the failure it guards against is the
+	 *  direct charge through an enemy group, not a nav detour that happens to skirt one enemy.
+	 *  Clearance <= 0 disables (returns false). */
+	bool PathPassesNearThreat(const FVector& PawnLoc, const FVector& Dest,
+		TArrayView<AActor* const> Threats, float Clearance);
+
+	/** Muzzle-gated approach-fire state shared by BTTask_MoveToCoverPoint's companion transit and
+	 *  BTTask_CompanionCombat's final-approach walk — one implementation of "fire at the visible
+	 *  combat target while walking to a committed cover point". */
+	struct FApproachFireState
+	{
+		bool bFiring = false;
+		float TickAccum = 0.f;
+		/** Target the aim/focus were issued for — a BB retarget mid-move must re-issue them or fire
+		 *  streams at the old target's position. */
+		TWeakObjectPtr<AActor> LatchedTarget;
+
+		void Reset()
+		{
+			bFiring = false;
+			TickAccum = 0.f;
+			LatchedTarget.Reset();
+		}
+	};
+
+	/** Ticks the approach-fire loop (10 Hz internal throttle): fires at the BB combat target while
+	 *  the companion has eye-line AND a clear muzzle line, holds otherwise. Honors the tuning's
+	 *  bCoverApproachFireWhileMoving toggle and the reload state. Focus is set once at first fire
+	 *  and held for the move (facing flicker on momentary LoS loss reads worse than a held torso). */
+	void TickCoverApproachFire(ACompanionCharacter* Companion, AAIController* Controller,
+		UBlackboardComponent* BB, FApproachFireState& State, float DeltaSeconds);
+
+	/** Approach-fire teardown: stop fire, clear aim, reset the state latch. bKeepFocus=true on
+	 *  arrival (keep facing the threat while entering cover); false on every failure/abort exit. */
+	void StopCoverApproachFire(ACompanionCharacter* Companion, AAIController* Controller,
+		FApproachFireState& State, bool bKeepFocus);
 
 	/** Edge-aligned hunker position using the companion tuning's CoverCornerGap — the same corner
 	 *  alignment enemies get from their archetype DA. Per GetEdgeAlignedHunkerPosition's contract,

@@ -2525,6 +2525,8 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	bFinalApproachRetried = false;
 	FinalApproachNoProgressTime = 0.f;
 	LastFinalApproachPawnLoc = FVector::ZeroVector;
+	// Fire itself already stopped above (StopWeaponFire); this clears the transit-fire latch.
+	FinalApproachFire.Reset();
 	bSmoothSnapping = false;
 	SmoothSnapElapsed = 0.f;
 	bPendingCrouchAfterSnap = false;
@@ -3042,7 +3044,15 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 
 		if (!bArrived && !bTimedOut && !bStalled && !bNoProgress)
+		{
+			// Approach-fire during the walk: the final approach used to be a silent, aimed-but-
+			// never-firing crouch-walk (the state service keeps the weapon up while no fire path
+			// runs) — reuse MoveToCoverPoint's muzzle-gated transit fire so a clear line produces
+			// shots on the way in.
+			if (AAIController* FireAIC = Cast<AAIController>(Ctx.Companion->GetController()))
+				CompanionCover::TickCoverApproachFire(Ctx.Companion, FireAIC, Ctx.Blackboard, FinalApproachFire, DeltaSeconds);
 			return;
+		}
 
 		// Far-out failsafe: never glide across the room in cover pose. Re-issue the move once
 		// (a crossing enemy can stall path-following well short of the slot), then release the
@@ -3095,6 +3105,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			AIC->StopMovement();
 		if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
 			CMC->StopMovementImmediately();
+
+		// Transit fire ends at the point — the cover FSM (peeks/bursts) owns fire from here on.
+		// Keep focus so the companion faces the threat while the snap/EnterCoverPose runs.
+		CompanionCover::StopCoverApproachFire(Ctx.Companion,
+			Cast<AAIController>(Ctx.Companion->GetController()), FinalApproachFire, /*bKeepFocus=*/true);
 
 		const FCover ApproachCover = Ctx.Blackboard->GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID());
 		if (ApproachCover.IsValid())

@@ -574,9 +574,17 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "50.0"))
 	float ReviveProximityRadius = 200.0f;
 
-	/** Radius (cm) around the downed player within which an alerted enemy counts as a revive threat. */
+	/** Radius (cm) around the downed player within which a Combat-state enemy WITH an eye-line to the
+	 *  body counts as a revive threat. Searching enemies in this band never hold the window shut —
+	 *  post-fight survivors wandering the area must not block the revive indefinitely. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "100.0"))
 	float ReviveThreatRadius = 1500.f;
+
+	/** Inner ring (cm) around the downed player where ANY alerted (Searching or Combat) enemy counts
+	 *  as a revive threat unconditionally — that close, it would see the revive start regardless of
+	 *  current eye-line. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveHardThreatRadius = 600.f;
 
 	/** Cap (cm, from the downed player) for the LoS-based revive-threat check. Beyond ReviveThreatRadius,
 	 *  an enemy only holds the window shut when it is actively IN COMBAT, within this range, AND has an
@@ -605,6 +613,11 @@ public:
 	 *  Desperation bleedout overrides the bail (last-ditch attempt beats a guaranteed bleedout). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float RescueBailHealthFraction = 0.25f;
+
+	/** The low-HP rescue bail additionally requires the companion to have been hit within this many
+	 *  seconds — low health with nobody actually shooting must not abort a committed rescue. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float RescueBailUnderFireWindow = 2.f;
 
 	/** Reviver actor offset in the patient actor frame: X is forward and Y is right, in centimetres. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive",

@@ -11,7 +11,9 @@
 #include "CoverGeometryStatics.h"
 #include "CoverReservationSubsystem.h"
 #include "ExtractionTypes.h"
+#include "WeaponBase.h"
 #include "AIController.h"
+#include "BehaviorTree/BlackboardComponent.h"
 #include "GameplayTagAssetInterface.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
@@ -283,6 +285,95 @@ FVector CompanionHunkerPosition(const ACompanionCharacter& Companion, const FCov
 			World, Data, Standoff, CapRadius, Tuning->CoverCornerGap, &Companion);
 	}
 	return UCoverGeometryStatics::GetHunkerPosition(Data, Standoff);
+}
+
+bool PathPassesNearThreat(const FVector& PawnLoc, const FVector& Dest,
+	TArrayView<AActor* const> Threats, float Clearance)
+{
+	if (Clearance <= 0.f) return false;
+
+	const float ClearanceSq = FMath::Square(Clearance);
+	const FVector Start(PawnLoc.X, PawnLoc.Y, 0.f);
+	const FVector End(Dest.X, Dest.Y, 0.f);
+	for (AActor* const Threat : Threats)
+	{
+		if (!IsValid(Threat)) continue;
+		const FVector ThreatLoc = Threat->GetActorLocation();
+		if (FMath::PointDistToSegmentSquared(FVector(ThreatLoc.X, ThreatLoc.Y, 0.f), Start, End) <= ClearanceSq)
+			return true;
+	}
+	return false;
+}
+
+/** Shared throttle for the approach-fire loop (matches the old BTTask_MoveToCoverPoint cadence). */
+static constexpr float ApproachFireTickInterval = 0.1f;
+
+void TickCoverApproachFire(ACompanionCharacter* Companion, AAIController* Controller,
+	UBlackboardComponent* BB, FApproachFireState& State, float DeltaSeconds)
+{
+	if (!IsValid(Companion) || !IsValid(Controller) || !BB) return;
+
+	State.TickAccum += DeltaSeconds;
+	if (State.TickAccum < ApproachFireTickInterval) return;
+	State.TickAccum = 0.f;
+
+	const ACompanionAIController* CompCtrl = Cast<ACompanionAIController>(Controller);
+	const UCompanionTuningDataAsset* Tuning = CompCtrl ? CompCtrl->GetTuning() : nullptr;
+	AActor* Target = (Tuning && Tuning->bCoverApproachFireWhileMoving)
+		? Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)) : nullptr;
+
+	bool bCanFire = false;
+	if (IsValid(Target) && !Companion->IsReloading() && Controller->LineOfSightTo(Target))
+	{
+		if (AWeaponBase* W = Companion->GetCurrentWeapon())
+		{
+			FHitResult MuzzleHit;
+			FCollisionQueryParams MuzzleParams;
+			MuzzleParams.AddIgnoredActor(Companion);
+			MuzzleParams.AddIgnoredActor(W);
+			const bool bBlocked = Companion->GetWorld()->LineTraceSingleByChannel(MuzzleHit,
+				W->GetMuzzleLocation(), Target->GetActorLocation() + FVector(0.f, 0.f, 50.f),
+				ECC_Visibility, MuzzleParams);
+			// A hit on the target or anything attached to it (held weapon) counts as clear.
+			bCanFire = !bBlocked || MuzzleHit.GetActor() == Target
+				|| (MuzzleHit.GetActor() && MuzzleHit.GetActor()->IsAttachedTo(Target));
+		}
+	}
+
+	// BB retarget mid-move: aim/focus are latched per target — re-issue or fire streams at the
+	// old target's position.
+	if (State.bFiring && State.LatchedTarget.Get() != Target)
+	{
+		Companion->StopWeaponFire();
+		State.bFiring = false;
+	}
+
+	if (bCanFire && !State.bFiring)
+	{
+		Companion->SetAimTarget(Target);
+		Controller->SetFocus(Target);
+		Companion->StartWeaponFire();
+		State.bFiring = true;
+		State.LatchedTarget = Target;
+	}
+	else if (!bCanFire && State.bFiring)
+	{
+		Companion->StopWeaponFire();
+		State.bFiring = false;
+	}
+}
+
+void StopCoverApproachFire(ACompanionCharacter* Companion, AAIController* Controller,
+	FApproachFireState& State, bool bKeepFocus)
+{
+	if (IsValid(Companion))
+	{
+		if (State.bFiring) Companion->StopWeaponFire();
+		Companion->SetAimTarget(nullptr);
+	}
+	if (!bKeepFocus && IsValid(Controller))
+		Controller->ClearFocus(EAIFocusPriority::Gameplay);
+	State.Reset();
 }
 
 } // namespace CompanionCover

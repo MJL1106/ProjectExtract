@@ -9,8 +9,11 @@
 #include "Components/StaticMeshComponent.h"
 #include "GameFramework/Character.h"
 #include "HAL/IConsoleManager.h"
+#include "Kismet/GameplayStatics.h"
 #include "NavigationSystem.h"
+#include "Navigation/PathFollowingComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "Sound/SoundBase.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogDoorBase, Log, All);
 
@@ -176,10 +179,72 @@ void ADoorBase::SetDoorwayIgnorePairs(AEnemyCharacter* Enemy, bool bIgnore)
 void ADoorBase::TryAutoOpenFor(AActor* OtherActor)
 {
 	if (!bAutoOpenForAI || bAutoOpenSuppressed) return;
-	if (!Cast<AEnemyCharacter>(OtherActor) && !Cast<ACompanionCharacter>(OtherActor)) return;
+
+	// Companion opens only doors it is actually pathing through — the trigger spans both sides
+	// of the doorway, so post-loot follow transit past a wall-adjacent door would otherwise pop
+	// it open with no intent to enter. Enemies keep the aggressive open (chase must not stall).
+	const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(OtherActor);
+	if (!Cast<AEnemyCharacter>(OtherActor) && !Companion) return;
+	if (Companion && !IsPawnPathingThroughDoorway(Companion)) return;
+
 	if (!Execute_CanBreach(this)) return;
 
 	Execute_Breach(this, OtherActor);
+}
+
+bool ADoorBase::IsPawnPathingThroughDoorway(const APawn* Pawn) const
+{
+	if (!IsValid(Pawn)) return false;
+
+	const AController* C = Pawn->GetController();
+	const UPathFollowingComponent* PFC = C ? C->FindComponentByClass<UPathFollowingComponent>() : nullptr;
+	if (!PFC || PFC->GetStatus() != EPathFollowingStatus::Moving) return false;
+
+	const FNavPathSharedPtr Path = PFC->GetPath();
+	if (!Path.IsValid()) return false;
+
+	FBox LocalBox(ForceInit);
+	if (!GetDoorLocalBounds(LocalBox)) return true; // no geometry to test against — keep the old behavior
+
+	const FVector Center = GetActorTransform().TransformPosition(LocalBox.GetCenter());
+	const FVector Extent = LocalBox.GetExtent();
+	const FVector Normal = (Extent.X <= Extent.Y) ? GetActorForwardVector() : GetActorRightVector();
+	const FVector Lateral = FVector::CrossProduct(FVector::UpVector, Normal).GetSafeNormal();
+
+	// Crossing must happen within the doorway's span (widest horizontal extent + capsule slack),
+	// and on this floor — a path through the doorway directly above must not count.
+	const float LateralSpan = FMath::Max(Extent.X, Extent.Y) + GetBreacherCapsuleRadius(Pawn);
+	const float FloorTolerance = 300.f;
+
+	const TArray<FNavPathPoint>& Points = Path->GetPathPoints();
+	for (int32 i = 0; i < Points.Num() - 1; ++i)
+	{
+		const FVector A = Points[i].Location;
+		const FVector B = Points[i + 1].Location;
+		const float SideA = FVector::DotProduct(A - Center, Normal);
+		const float SideB = FVector::DotProduct(B - Center, Normal);
+		if (SideA * SideB > 0.f) continue; // segment stays on one side of the door plane
+
+		const float Denom = SideA - SideB;
+		const FVector Crossing = FMath::IsNearlyZero(Denom) ? A : FMath::Lerp(A, B, SideA / Denom);
+		if (FMath::Abs(FVector::DotProduct(Crossing - Center, Lateral)) <= LateralSpan
+			&& FMath::Abs(Crossing.Z - Center.Z) <= FloorTolerance)
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void ADoorBase::PlayOpenSoundDeduped()
+{
+	if (!IsValid(OpenSound)) return;
+
+	const FVector Portal = GetAcousticPortalPoint();
+	if (UDoorRegistrySubsystem* Registry = GetWorld()->GetSubsystem<UDoorRegistrySubsystem>())
+		if (!Registry->ClaimOpenSoundPlay(Portal)) return;
+
+	UGameplayStatics::PlaySoundAtLocation(GetWorld(), OpenSound, Portal);
 }
 
 void ADoorBase::RescanDoorwayForAutoOpen()

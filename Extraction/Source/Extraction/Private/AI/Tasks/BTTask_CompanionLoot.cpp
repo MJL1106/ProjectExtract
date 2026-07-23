@@ -13,19 +13,30 @@ DEFINE_LOG_CATEGORY_STATIC(LogCompanionLoot, Log, All);
 // Same-room gate (mirrors ExploreViewerHasLoS in BTTask_CompanionExplore): the sweep radius alone
 // reaches through walls into neighbouring rooms — the companion chased crates behind closed doors,
 // auto-opening every door on the way. A candidate only counts when the companion can actually see
-// it from where it stands: eyes -> candidate bounds centre (crate pivots sit at a base corner).
-static bool LootViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor* Candidate)
+// it from where it stands. Two probe points (bounds centre + top centre) and every other lootable
+// ignored as a blocker: a shelf of crates must not occlude its own neighbours, or the sweep dies
+// after the first container while the wall/closed-door block stays intact.
+static bool LootViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor* Candidate,
+	const TArray<AActor*>& AllLootables)
 {
 	FVector EyeLoc; FRotator EyeRot;
 	Viewer->GetActorEyesViewPoint(EyeLoc, EyeRot);
 
-	FHitResult Hit;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionLootSweepLoS), false);
 	Params.AddIgnoredActor(Viewer);
-	Params.AddIgnoredActor(Candidate);
+	Params.AddIgnoredActors(AllLootables);
 
-	const FVector Target = Candidate->GetComponentsBoundingBox().GetCenter();
-	return !World->LineTraceSingleByChannel(Hit, EyeLoc, Target, ECC_Visibility, Params);
+	const FBox Bounds = Candidate->GetComponentsBoundingBox();
+	const FVector Center = Bounds.GetCenter();
+	const FVector Probes[] = { Center, FVector(Center.X, Center.Y, Bounds.Max.Z) };
+
+	for (const FVector& Target : Probes)
+	{
+		FHitResult Hit;
+		if (!World->LineTraceSingleByChannel(Hit, EyeLoc, Target, ECC_Visibility, Params))
+			return true;
+	}
+	return false;
 }
 
 // Distance from pawn to the nearest point on the container's collision bounds (not its origin) —
@@ -248,7 +259,7 @@ AActor* UBTTask_CompanionLoot::FindNextContainer(UBehaviorTreeComponent& OwnerCo
 		// Same-room gate — a crate it can't see is a crate in another room; never chain through
 		// walls/closed doors. The commanded (pinged) first target never routes through here, so
 		// an explicitly pinged far crate still works.
-		if (!LootViewerHasLoS(World, Pawn, Candidate)) continue;
+		if (!LootViewerHasLoS(World, Pawn, Candidate, Lootables)) continue;
 
 		const float DistSq = FVector::DistSquared(Candidate->GetActorLocation(), Pawn->GetActorLocation());
 		if (DistSq < BestDistSq)

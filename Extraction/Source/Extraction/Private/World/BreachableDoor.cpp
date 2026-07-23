@@ -7,7 +7,6 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Character.h"
-#include "Kismet/GameplayStatics.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogBreachableDoor, Log, All);
 
@@ -227,8 +226,8 @@ void ABreachableDoor::BeginSwing(bool bPlayOpenSound)
 	ClosedYaw = LeafPivot->GetComponentRotation().Yaw;
 	SetActorTickEnabled(true);
 
-	if (bPlayOpenSound && IsValid(OpenSound))
-		UGameplayStatics::PlaySoundAtLocation(GetWorld(), OpenSound, GetAcousticPortalPoint());
+	if (bPlayOpenSound)
+		PlayOpenSoundDeduped();
 
 	// The leaf stops blocking pawns for good once it starts moving: an arriving pawn walks
 	// through mid-swing without a path stall, and a leaf swinging toward the opener clips

@@ -236,6 +236,29 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 				Cover = Reranked;
 				BB->SetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID(), Cover);
 			}
+
+			// Path-threat gate on the FINAL pick (post re-rank): the straight-line approach must not
+			// pass through the known threat set. The EQS pick never sees the switch monitor's path
+			// reject, so without this gate a compromise relocate or fresh commit can charge the enemy
+			// group to reach its scoring winner. Decline routes to open-engage (ForceSuccess decorator),
+			// where the companion fights mobile instead of running the gauntlet.
+			AActor* PathGateTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+			TArray<AActor*, TInlineAllocator<8>> PathThreats;
+			CompanionCover::GatherExtraThreatActors(Controller, Pawn, PathGateTarget,
+				FMath::Max(0, Tuning->MaxThreatsForCoverScoring - 1), PathThreats);
+			if (IsValid(PathGateTarget)) PathThreats.Add(PathGateTarget);
+			if (CompanionCover::PathPassesNearThreat(Pawn->GetActorLocation(), Cover.Data.Location,
+				PathThreats, Tuning->RelocatePathThreatClearance))
+			{
+				UE_LOG(LogCompanionAI, Log,
+					TEXT("%s: cover-commit DECLINED reason=path-through-threats dist=%.0f clearance=%.0f — open-engage"),
+					*Pawn->GetName(), FVector::Dist2D(Pawn->GetActorLocation(), Cover.Data.Location),
+					Tuning->RelocatePathThreatClearance);
+				if (UCoverReservationSubsystem* DeclineResSub = OwnerComp.GetWorld() ? OwnerComp.GetWorld()->GetSubsystem<UCoverReservationSubsystem>() : nullptr)
+					DeclineResSub->ClearIntendedCover(Controller);
+				BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
+				return EBTNodeResult::Failed;
+			}
 		}
 	}
 
@@ -613,58 +636,12 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 
 	// Companion approach-fire: muzzle-gated fire at the visible combat target while walking to
 	// the committed point — the silent run-to-cover reads as broken when enemies have eyes on it.
-	// Focus is set once at first fire and held for the move (facing flicker on momentary LOS loss
-	// reads worse than a held torso); StopAdvanceFire clears it on every exit.
-	if (!IsValid(Enemy) && !bArrived && Mem->FireTickAccum >= FireTickInterval)
+	// Shared helper (BTTask_CompanionCombat's final-approach walk runs the same loop); it throttles
+	// itself to the old 10 Hz cadence and latches focus per target. StopAdvanceFire tears it down.
+	if (!IsValid(Enemy) && !bArrived)
 	{
 		if (ACompanionCharacter* FireCompanion = Cast<ACompanionCharacter>(Pawn))
-		{
-			Mem->FireTickAccum = 0.f;
-			const ACompanionAIController* FireCtrl = Cast<ACompanionAIController>(Controller);
-			const UCompanionTuningDataAsset* FireTuning = FireCtrl ? FireCtrl->GetTuning() : nullptr;
-			AActor* Target = (FireTuning && FireTuning->bCoverApproachFireWhileMoving)
-				? Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)) : nullptr;
-
-			bool bCanFire = false;
-			if (IsValid(Target) && !FireCompanion->IsReloading() && Controller->LineOfSightTo(Target))
-			{
-				if (AWeaponBase* W = FireCompanion->GetCurrentWeapon())
-				{
-					FHitResult MuzzleHit;
-					FCollisionQueryParams MuzzleParams;
-					MuzzleParams.AddIgnoredActor(FireCompanion);
-					MuzzleParams.AddIgnoredActor(W);
-					const bool bBlocked = Pawn->GetWorld()->LineTraceSingleByChannel(MuzzleHit,
-						W->GetMuzzleLocation(), Target->GetActorLocation() + FVector(0.f, 0.f, 50.f),
-						ECC_Visibility, MuzzleParams);
-					// A hit on the target or anything attached to it (held weapon) counts as clear.
-					bCanFire = !bBlocked || MuzzleHit.GetActor() == Target
-						|| (MuzzleHit.GetActor() && MuzzleHit.GetActor()->IsAttachedTo(Target));
-				}
-			}
-
-			// BB retarget mid-move: aim/focus are latched per target — re-issue or fire streams
-			// at the old target's position.
-			if (Mem->bFiring && Mem->ApproachFireTarget.Get() != Target)
-			{
-				FireCompanion->StopWeaponFire();
-				Mem->bFiring = false;
-			}
-
-			if (bCanFire && !Mem->bFiring)
-			{
-				FireCompanion->SetAimTarget(Target);
-				Controller->SetFocus(Target);
-				FireCompanion->StartWeaponFire();
-				Mem->bFiring = true;
-				Mem->ApproachFireTarget = Target;
-			}
-			else if (!bCanFire && Mem->bFiring)
-			{
-				FireCompanion->StopWeaponFire();
-				Mem->bFiring = false;
-			}
-		}
+			CompanionCover::TickCoverApproachFire(FireCompanion, Controller, BB, Mem->ApproachFire, DeltaSeconds);
 	}
 
 	// Wait while still moving and not stalled
@@ -750,14 +727,7 @@ void UBTTask_MoveToCoverPoint::StopAdvanceFire(UBehaviorTreeComponent& OwnerComp
 	// Companion approach-fire teardown (the enemy path below early-returns on a companion pawn).
 	if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn))
 	{
-		if (Mem->bFiring)
-		{
-			Companion->StopWeaponFire();
-			Mem->bFiring = false;
-		}
-		Companion->SetAimTarget(nullptr);
-		if (!bKeepFocus && Controller)
-			Controller->ClearFocus(EAIFocusPriority::Gameplay);
+		CompanionCover::StopCoverApproachFire(Companion, Controller, Mem->ApproachFire, bKeepFocus);
 		return;
 	}
 

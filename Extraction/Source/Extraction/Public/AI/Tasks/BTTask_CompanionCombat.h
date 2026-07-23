@@ -8,6 +8,7 @@
 #include "BehaviorTree/BehaviorTreeTypes.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Companion/CompanionTypes.h"
+#include "AI/CompanionCoverStatics.h"
 #include "AI/Cover/CoverPoseTypes.h"
 #include "CoverSystemPublicData.h"
 #include "BTTask_CompanionCombat.generated.h"
@@ -738,6 +739,8 @@ private:
 	FVector LastFinalApproachPawnLoc = FVector::ZeroVector;
 	/** Accumulated seconds of sub-threshold displacement during the final approach. */
 	float FinalApproachNoProgressTime = 0.f;
+	/** Muzzle-gated transit fire during the final-approach walk (shared with MoveToCoverPoint). */
+	CompanionCover::FApproachFireState FinalApproachFire;
 
 	// Smooth-snap tween state
 	bool bSmoothSnapping = false;

@@ -1278,6 +1278,12 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				ReviveOverlaps, PlayerLoc, FQuat::Identity,
 				RevObjParams, FCollisionShape::MakeSphere(ThreatRadius), RevParams);
 
+			// Two-ring threat test. Inner ring (ReviveHardThreatRadius): any alerted enemy is hot
+			// unconditionally — that close it would see the revive start. Outer ring (out to
+			// ReviveThreatRadius): only a Combat-state enemy WITH an eye-line to the body is hot.
+			// Searching enemies in the outer ring never hold the window shut — post-fight survivors
+			// wandering the area blocked every quiet-scene revive until desperation.
+			const float HardRadiusSq = FMath::Square(Companion->ReviveHardThreatRadius);
 			for (const FOverlapResult& Overlap : ReviveOverlaps)
 			{
 				const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Overlap.GetActor());
@@ -1286,8 +1292,27 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				const UHealthComponent* EHP = Enemy->GetHealthComponent();
 				if (EHP && EHP->IsDead()) continue;
 
-				bHot = true;
-				break;
+				if (FVector::DistSquared(Enemy->GetActorLocation(), PlayerLoc) <= HardRadiusSq)
+				{
+					bHot = true;
+					break;
+				}
+
+				const AEnemyAIController* RingAIC = Cast<AEnemyAIController>(Enemy->GetController());
+				const UEnemyAwarenessComponent* RingAwareness = RingAIC ? RingAIC->GetAwarenessComponent() : nullptr;
+				if (!RingAwareness || RingAwareness->GetAwarenessState() != EEnemyAwarenessState::Combat) continue;
+
+				FHitResult RingLosHit;
+				FCollisionQueryParams RingLosParams(SCENE_QUERY_STAT(ReviveWindowRingLoS), true);
+				RingLosParams.AddIgnoredActor(Enemy);
+				RingLosParams.AddIgnoredActor(PlayerPawn);
+				const bool bRingLosBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+					RingLosHit, Enemy->GetPawnViewLocation(), PlayerLoc, ECC_Visibility, RingLosParams);
+				if (!bRingLosBlocked || RingLosHit.GetActor() == PlayerPawn)
+				{
+					bHot = true;
+					break;
+				}
 			}
 
 			// Also check enemies beyond the radius with LoS to the downed player — but only ones
@@ -1342,7 +1367,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			// beats a guaranteed bleedout).
 			const UHealthComponent* CompanionHealth = Companion->GetHealthComponent();
 			const float CompanionHealthFrac = IsValid(CompanionHealth) ? CompanionHealth->GetHealthPercent() : 1.f;
-			const bool bBail = bLastReviveWindowOpen && bHot && !bDesperation
+			// Under-fire requirement: low HP alone must not abort a committed rescue — only bail while
+			// actually being shot (recent attacker inside the window). 0 disables the requirement.
+			const bool bUnderFire = Companion->RescueBailUnderFireWindow <= 0.f
+				|| IsValid(Companion->GetRecentAttacker(Companion->RescueBailUnderFireWindow));
+			const bool bBail = bLastReviveWindowOpen && bHot && !bDesperation && bUnderFire
 				&& CompanionHealthFrac < Companion->RescueBailHealthFraction;
 
 			if (bBail)

@@ -46,6 +46,7 @@ class EXTRACTION_API UEnemyDirectorSubsystem : public UWorldSubsystem
 
 public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 	virtual void Deinitialize() override;
 
 	// ---------- v1 API (preserved) ----------
@@ -61,6 +62,15 @@ public:
 	 *  Unlike the alert ladder (a ratchet that never de-escalates), this is a decaying event
 	 *  stamp — compare against a reference time to ask "has a fight started since X?". */
 	float GetLastCombatReportTime() const { return LastCombatReportTime; }
+
+	/** Enemies currently in Searching / Combat awareness state as of the last director sweep
+	 *  (1s cadence, scope-gated, distance-ungated). Unlike the alert ladder these fall back to
+	 *  0 when the hunt dies down — live signals for music/presentation. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director")
+	int32 GetSearchingEnemyCount() const { return LastSweepSearchingCount; }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director")
+	int32 GetCombatEnemyCount() const { return LastSweepCombatCount; }
 
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Director")
 	void TripAlarm();
@@ -201,12 +211,16 @@ private:
 	{
 		int32 AliveCount = 0;
 		float EngagedCount = 0.f;
+		int32 SearchingCount = 0;
+		int32 CombatCount = 0;
 	};
 
 	FEnemySweepResult SweepEnemies() const;
 
 	float Tension = 0.f;
 	int32 RecentKills = 0;
+	int32 LastSweepSearchingCount = 0;
+	int32 LastSweepCombatCount = 0;
 	float CachedPlayerHealthLastTick = -1.f;
 	TWeakObjectPtr<UHealthComponent> CachedPlayerHealth;
 

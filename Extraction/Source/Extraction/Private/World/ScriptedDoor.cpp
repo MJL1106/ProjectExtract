@@ -5,7 +5,6 @@
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
-#include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogScriptedDoor, Log, All);
@@ -70,8 +69,8 @@ void AScriptedDoor::Breach_Implementation(AActor* Breacher)
 	ApplyPawnPassThrough();
 	GetWorldTimerManager().SetTimer(NotifyTimeoutHandle, this, &AScriptedDoor::HandleNotifyTimeout, BreachNotifyTimeout, false);
 
-	if (!bSilentOpen && IsValid(OpenSound))
-		UGameplayStatics::PlaySoundAtLocation(GetWorld(), OpenSound, GetAcousticPortalPoint());
+	if (!bSilentOpen)
+		PlayOpenSoundDeduped();
 	bSilentOpen = false;
 
 	UE_LOG(LogScriptedDoor, Log, TEXT("%s: Breach by %s — firing OnBreachRequested"), *GetName(), *GetNameSafe(Breacher));
@@ -96,9 +95,8 @@ void AScriptedDoor::NotifySwingStarting()
 	ApplyPawnPassThrough();
 	GetWorldTimerManager().SetTimer(NotifyTimeoutHandle, this, &AScriptedDoor::HandleNotifyTimeout, BreachNotifyTimeout, false);
 
-	// Player E-press swing — a close creaks the same as an open, which is the desired read.
-	if (IsValid(OpenSound))
-		UGameplayStatics::PlaySoundAtLocation(GetWorld(), OpenSound, GetAcousticPortalPoint());
+	// Player interact swing — a close creaks the same as an open, which is the desired read.
+	PlayOpenSoundDeduped();
 }
 
 void AScriptedDoor::NotifyDoorStateChanged(bool bNowOpen)
