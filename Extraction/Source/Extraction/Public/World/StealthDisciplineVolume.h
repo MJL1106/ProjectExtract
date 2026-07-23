@@ -62,6 +62,9 @@ private:
 	int32 PendingNormalShots = 0;
 	bool bWarningSent = false;
 
+	/** Set once defend waves begin -- discipline never re-arms for the rest of the level. */
+	bool bPermanentlyDisabled = false;
+
 	FTimerHandle SamplingTimerHandle;
 
 	// ---- Overlap handlers ----
@@ -88,6 +91,13 @@ private:
 
 	UFUNCTION()
 	void OnPlayerShotFired(bool bStealthExempt);
+
+	// ---- Wave gate ----
+
+	UFUNCTION()
+	void OnWaveStarted(FName WaveId);
+
+	void DisableForWave();
 
 	// ---- Cleanup ----
 

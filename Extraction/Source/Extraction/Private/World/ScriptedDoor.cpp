@@ -5,6 +5,7 @@
 #include "Components/BoxComponent.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
+#include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogScriptedDoor, Log, All);
@@ -69,6 +70,10 @@ void AScriptedDoor::Breach_Implementation(AActor* Breacher)
 	ApplyPawnPassThrough();
 	GetWorldTimerManager().SetTimer(NotifyTimeoutHandle, this, &AScriptedDoor::HandleNotifyTimeout, BreachNotifyTimeout, false);
 
+	if (!bSilentOpen && IsValid(OpenSound))
+		UGameplayStatics::PlaySoundAtLocation(GetWorld(), OpenSound, GetAcousticPortalPoint());
+	bSilentOpen = false;
+
 	UE_LOG(LogScriptedDoor, Log, TEXT("%s: Breach by %s — firing OnBreachRequested"), *GetName(), *GetNameSafe(Breacher));
 	OnBreachRequested(Breacher);
 }
@@ -79,6 +84,7 @@ void AScriptedDoor::ForceOpenInstant()
 	// A checkpoint fast-forward outranks any level-script gate still holding the door
 	// (the flow also retires the gate actor itself so its trigger/objective can't reappear).
 	SetExternalGateLocked(false);
+	bSilentOpen = true;
 	Breach_Implementation(nullptr);
 }
 
@@ -89,6 +95,10 @@ void AScriptedDoor::NotifySwingStarting()
 	bOpenInFlight = true;
 	ApplyPawnPassThrough();
 	GetWorldTimerManager().SetTimer(NotifyTimeoutHandle, this, &AScriptedDoor::HandleNotifyTimeout, BreachNotifyTimeout, false);
+
+	// Player E-press swing — a close creaks the same as an open, which is the desired read.
+	if (IsValid(OpenSound))
+		UGameplayStatics::PlaySoundAtLocation(GetWorld(), OpenSound, GetAcousticPortalPoint());
 }
 
 void AScriptedDoor::NotifyDoorStateChanged(bool bNowOpen)

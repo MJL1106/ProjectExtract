@@ -6,6 +6,8 @@
 #include "Companion/CompanionCharacter.h"
 #include "World/Breachable.h"
 #include "World/DoorBase.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 #include "Perception/AISense_Hearing.h"
 
 FVector CompanionBreachStatics::ResolveInteriorAnchor(AActor* Door, APawn* Breacher)
@@ -37,16 +39,24 @@ bool CompanionBreachStatics::OpenBreachDoor(ACompanionAIController* AIC, AActor*
 
 	IBreachable::Execute_Breach(Door, AIC->GetPawn());
 
+	// Doorway centre, not actor location — the swing-door root is the hinge, which can sit
+	// inside the frame/wall and wrongly read as occluded to acoustic listener traces.
+	const ADoorBase* DoorBase = Cast<ADoorBase>(Door);
+	const FVector NoiseLocation = DoorBase ? DoorBase->GetAcousticPortalPoint() : Door->GetActorLocation();
+
 	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
 	const FBreachNoiseProfile* Profile = Tuning ? Tuning->BreachNoise.Find(BreachType) : nullptr;
 	if (Profile && Profile->Loudness > 0.f && Profile->MaxRange > 0.f)
 	{
-		// Doorway centre, not actor location — the swing-door root is the hinge, which can sit
-		// inside the frame/wall and wrongly read as occluded to acoustic listener traces.
-		const ADoorBase* DoorBase = Cast<ADoorBase>(Door);
-		const FVector NoiseLocation = DoorBase ? DoorBase->GetAcousticPortalPoint() : Door->GetActorLocation();
 		UAISense_Hearing::ReportNoiseEvent(AIC->GetWorld(), NoiseLocation,
 			Profile->Loudness, AIC->GetPawn(), Profile->MaxRange, TEXT("Breach"));
+	}
+
+	// Per-type breach accent (slam / latch / slow slide) layered over the door's own OpenSound.
+	if (UGameAudioSubsystem* AudioSys = AIC->GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+	{
+		if (const USurfaceAudioBank* Bank = AudioSys->GetBank())
+			AudioSys->PlayAt(Bank->BreachSounds.FindRef(BreachType), NoiseLocation);
 	}
 
 	return true;

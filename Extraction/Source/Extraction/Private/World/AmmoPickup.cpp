@@ -6,6 +6,8 @@
 #include "Components/StaticMeshComponent.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 
 AAmmoPickup::AAmmoPickup()
 {
@@ -41,6 +43,12 @@ bool AAmmoPickup::TryCollect(APawn* Collector)
 	Grant.AmmoCategory = Category;
 	Grant.AmmoAmount = Amount;
 	if (!Subsystem->GrantLoot(Grant, Collector)) return false;
+
+	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+	{
+		if (const USurfaceAudioBank* Bank = AudioSys->GetBank())
+			AudioSys->PlayAt(Bank->PickupAmmo, GetActorLocation());
+	}
 
 	Destroy();
 	return true;

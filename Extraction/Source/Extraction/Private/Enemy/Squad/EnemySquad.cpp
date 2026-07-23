@@ -316,6 +316,9 @@ void UEnemySquad::NotifyMemberDied(AEnemyCharacter* Dead, bool bWasOfficer)
 
 	if (!AnyMemberAwareAtOrAbove(EEnemyAwarenessState::Searching, Dead)) return;
 
+	// Corpses persist (body-detection system), so the dead member's location is reliable here.
+	const FVector DeathLocation = IsValid(Dead) ? Dead->GetActorLocation() : FVector::ZeroVector;
+
 	for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
 	{
 		if (!IsMemberAlive(M)) continue;
@@ -324,7 +327,7 @@ void UEnemySquad::NotifyMemberDied(AEnemyCharacter* Dead, bool bWasOfficer)
 		UEnemyMoraleComponent* Morale = M->GetMoraleComponent();
 		if (IsValid(Morale))
 		{
-			Morale->NotifySquadAllyDied(bWasOfficer);
+			Morale->NotifySquadAllyDied(bWasOfficer, DeathLocation);
 		}
 	}
 }

@@ -23,7 +23,9 @@ public class Extraction : ModuleRules
 			"GameplayTasks",
 			"NavigationSystem",
 			"AICoverSystem",
-			"Niagara"
+			"Niagara",
+			"DeveloperSettings",
+			"PhysicsCore"
 		});
 
 		if (Target.bBuildEditor)
@@ -60,7 +62,8 @@ public class Extraction : ModuleRules
 			"Extraction/Public/AI/Navigation",
 			"Extraction/Public/AI/Cover",
 			"Extraction/Public/World",
-			"Extraction/Public/Extractee"
+			"Extraction/Public/Extractee",
+			"Extraction/Public/Audio"
 		});
 
 		// Private subfolder include paths
@@ -88,7 +91,8 @@ public class Extraction : ModuleRules
 			"Extraction/Private/AI/Cover",
 			"Extraction/Private/World",
 			"Extraction/Private/Extractee",
-			"Extraction/Private/Tests"
+			"Extraction/Private/Tests",
+			"Extraction/Private/Audio"
 		});
 	}
 }

@@ -1,6 +1,8 @@
 // ALootContainer implementation.
 
 #include "World/LootContainer.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 #include "Game/MissionInventorySubsystem.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/World.h"
@@ -44,6 +46,12 @@ void ALootContainer::Loot_Implementation(AActor* Looter)
 	bLooted = true;
 	OnOpened(Looter);
 	GrantAllContents();
+
+	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+	{
+		if (const USurfaceAudioBank* Bank = AudioSys->GetBank())
+			AudioSys->PlayAt(Bank->PickupLoot, GetActorLocation());
+	}
 #if WITH_DEV_AUTOMATION_TESTS
 	++CompletionBroadcastCount;
 #endif

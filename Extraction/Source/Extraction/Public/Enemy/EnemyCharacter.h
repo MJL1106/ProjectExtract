@@ -15,6 +15,7 @@
 #include "EnemyCharacter.generated.h"
 
 class UHealthComponent;
+class UFootstepNoiseComponent;
 class UEnemyArchetypeData;
 class AWeaponBase;
 class APatrolRoute;
@@ -448,6 +449,10 @@ private:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
 	TObjectPtr<UHealthComponent> HealthComponent;
+
+	/** Audible surface-aware footsteps only — AI-noise emission is disabled at construction. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
+	TObjectPtr<UFootstepNoiseComponent> FootstepAudioComponent;
 
 	UPROPERTY()
 	TObjectPtr<AWeaponBase> CurrentWeapon;

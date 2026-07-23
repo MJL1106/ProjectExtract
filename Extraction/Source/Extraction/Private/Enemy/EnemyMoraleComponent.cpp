@@ -133,7 +133,7 @@ void UEnemyMoraleComponent::NotifyLowHealth()
 
 // --- Phase 5: squad-routed ingress ---
 
-void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer)
+void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer, const FVector& DeathLocation)
 {
 	if (bFearless) return;
 	if (!OwnerEnemy.IsValid()) return;
@@ -141,7 +141,8 @@ void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer)
 
 	const float Loss = bWasOfficer ? LossOfficerDied : LossAllyDied;
 	ApplyMoraleDelta(-Loss);
-	RequestBark(EBarkType::ManDown);
+	if (CanWitnessDeath(DeathLocation))
+		RequestBark(EBarkType::ManDown);
 }
 
 void UEnemyMoraleComponent::NotifyRally(float MoraleBoost, float FloorRaise)
@@ -208,14 +209,34 @@ void UEnemyMoraleComponent::HandleEnemyDied(AEnemyCharacter* DeadEnemy, FVector 
 		if (DistSq > OfficerRadius * OfficerRadius) return;
 
 		ApplyMoraleDelta(-LossOfficerDied);
-		RequestBark(EBarkType::ManDown);
+		if (CanWitnessDeath(Location))
+			RequestBark(EBarkType::ManDown);
 		return;
 	}
 
 	if (DistSq > AllyDeathRadius * AllyDeathRadius) return;
 
 	ApplyMoraleDelta(-LossAllyDied);
-	RequestBark(EBarkType::ManDown);
+	if (CanWitnessDeath(Location))
+		RequestBark(EBarkType::ManDown);
+}
+
+bool UEnemyMoraleComponent::CanWitnessDeath(const FVector& DeathLocation) const
+{
+	if (!OwnerEnemy.IsValid()) return false;
+
+	const FVector EyeLocation = OwnerEnemy->GetPawnViewLocation();
+	if (FVector::DistSquared(EyeLocation, DeathLocation) <= FMath::Square(DeathWitnessEarshot))
+		return true;
+
+	UWorld* World = GetWorld();
+	if (!World) return false;
+
+	// Aim above the corpse point so a floor-level location doesn't start inside the ground.
+	FHitResult Hit;
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(MoraleDeathWitness), /*bTraceComplex=*/false, OwnerEnemy.Get());
+	return !World->LineTraceSingleByChannel(Hit, EyeLocation,
+		DeathLocation + FVector(0.f, 0.f, 50.f), ECC_Visibility, Params);
 }
 
 // --- Suppression handler ---

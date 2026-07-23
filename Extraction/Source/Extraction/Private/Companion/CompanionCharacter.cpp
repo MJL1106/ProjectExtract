@@ -12,6 +12,7 @@
 #include "EnemyGrenadeProjectile.h"
 #include "EnemyGrenadierComponent.h"
 #include "HealthComponent.h"
+#include "FootstepNoiseComponent.h"
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
 #include "TraversalComponent.h"
@@ -125,6 +126,9 @@ ACompanionCharacter::ACompanionCharacter()
 	GetCapsuleComponent()->SetCapsuleSize(34.0f, 88.0f);
 
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+	FootstepAudioComponent = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepAudioComponent"));
+	FootstepAudioComponent->SetEmitAINoise(false); // companion steps are flavour, not stimuli
+	FootstepAudioComponent->SetAudioVolume(0.55f); // trails the player constantly — parity reads as doubled player steps
 	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
 	CoverPoseComponent = CreateDefaultSubobject<UCoverPoseComponent>(TEXT("CoverPoseComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
@@ -280,6 +284,7 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		World->GetTimerManager().ClearTimer(ModeWidgetLinkTimerHandle);
 		World->GetTimerManager().ClearTimer(KnifeKillTimerHandle);
 		World->GetTimerManager().ClearTimer(CallForHelpTimerHandle);
+		World->GetTimerManager().ClearTimer(CatchupBarkTimerHandle);
 	}
 
 	if (HealthComponent)
@@ -418,8 +423,15 @@ void ACompanionCharacter::SetFollowCatchupPace(bool bPace)
 	bFollowCatchupPace = bPace;
 	ApplyMovementSpeeds();
 
+	// Bark only when the gap is real: catch-up must hold for FallingBehindBarkDelay unbroken.
+	UWorld* World = GetWorld();
+	if (!World) return;
 	if (bPace)
-		Bark(ECompanionBarkType::FallingBehind);
+		World->GetTimerManager().SetTimer(CatchupBarkTimerHandle, FTimerDelegate::CreateWeakLambda(this,
+			[this] { if (bFollowCatchupPace) Bark(ECompanionBarkType::FallingBehind); }),
+			FallingBehindBarkDelay, false);
+	else
+		World->GetTimerManager().ClearTimer(CatchupBarkTimerHandle);
 }
 
 void ACompanionCharacter::SetCoverCommitGrant(bool bPending)

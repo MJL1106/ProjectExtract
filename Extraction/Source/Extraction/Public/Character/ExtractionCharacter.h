@@ -25,6 +25,7 @@ class UFootstepNoiseComponent;
 class UWeaponComponent;
 class UTraversalComponent;
 class UAnimMontage;
+class UAudioComponent;
 struct FInputActionValue;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnDBNOStateChanged, bool, bNewIsDBNO, float, BleedoutDuration);
@@ -176,6 +177,11 @@ protected:
 	/** Assign in BP child class — played on slide entry, stopped on slide exit */
 	UPROPERTY(EditDefaultsOnly, Category = "Movement|Slide")
 	TObjectPtr<UAnimMontage> SlideMontage;
+
+	/** Bank SlideFoley playback, spawned on slide entry and faded out on slide exit so the
+	 *  sound can never outlast the slide. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> SlideAudioComp;
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "Movement|Slide")
 	void OnSlideStarted();

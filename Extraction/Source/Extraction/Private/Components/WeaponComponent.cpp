@@ -11,6 +11,8 @@
 #include "Engine/World.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 #include "Extraction.h"
 
 namespace
@@ -133,6 +135,14 @@ AWeaponBase* UWeaponComponent::ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<
 	if (bSlotWasHeld)
 		SetActiveWeapon(Slot);
 
+	// Corpse-gun grab — layered under SetActiveWeapon's handling foley when the slot was held.
+	{
+		const UWorld* World = GetWorld();
+		UGameAudioSubsystem* AudioSys = World ? World->GetSubsystem<UGameAudioSubsystem>() : nullptr;
+		if (AudioSys && AudioSys->GetBank())
+			AudioSys->PlayFoleyFor(OwnerActor, AudioSys->GetBank()->PickupWeapon);
+	}
+
 	return Slot;
 }
 
@@ -200,12 +210,23 @@ void UWeaponComponent::SetActiveWeapon(AWeaponBase* NewWeapon)
 		CurrentWeapon->SetWeaponHidden(true);
 	}
 
+	// Genuine hand-swap (or gun restore after a throwable) — first equip at spawn stays silent.
+	const bool bAudibleSwap = IsValid(CurrentWeapon);
+
 	bNextShotStealthExempt = false;
 	bThrowableEquipped = false;
 	CurrentWeapon = NewWeapon;
 	CurrentWeapon->SetWeaponHidden(false);
 	CurrentWeapon->SetOwnerIsAiming(bIsAiming);
 	SeatWeaponGripSocket();
+
+	if (bAudibleSwap)
+	{
+		const UWorld* World = GetWorld();
+		UGameAudioSubsystem* AudioSys = World ? World->GetSubsystem<UGameAudioSubsystem>() : nullptr;
+		if (AudioSys && AudioSys->GetBank())
+			AudioSys->PlayFoleyFor(OwnerActor, AudioSys->GetBank()->WeaponSwitchFoley);
+	}
 
 	// Bind weapon fire delegate to multicast for 3P effects
 	if (!CurrentWeapon->OnWeaponFired.IsAlreadyBound(this, &UWeaponComponent::OnWeaponFiredCallback))

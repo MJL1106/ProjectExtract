@@ -85,6 +85,9 @@ private:
 	/** True from Breach until the BP reports back (or the timeout fires) — blocks re-breach. */
 	bool bOpenInFlight = false;
 
+	/** Set by ForceOpenInstant so the checkpoint fast-forward swing stays silent. */
+	bool bSilentOpen = false;
+
 	/** One-shot guard so a missing-wiring door doesn't spam the timeout warning per pawn entry. */
 	bool bNotifyWiringWarned = false;
 

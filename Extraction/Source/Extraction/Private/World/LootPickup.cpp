@@ -4,6 +4,8 @@
 #include "Game/MissionInventorySubsystem.h"
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogLootPickup, Log, All);
 
@@ -34,6 +36,12 @@ void ALootPickup::Loot_Implementation(AActor* Looter)
 	bLooted = true;
 	GrantAllContents();
 	OnLooted(Looter);
+
+	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+	{
+		if (const USurfaceAudioBank* Bank = AudioSys->GetBank())
+			AudioSys->PlayAt(Bank->PickupLoot, GetActorLocation());
+	}
 
 	UE_LOG(LogLootPickup, Log, TEXT("%s: looted by %s (%d grants)"),
 		*GetName(), *GetNameSafe(Looter), Contents.Num());

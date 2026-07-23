@@ -18,6 +18,7 @@
 enum class ECompanionBarkType : uint8;
 class UCompanionBarkSetData;
 class UHealthComponent;
+class UFootstepNoiseComponent;
 class USuppressionComponent;
 class UCoverPoseComponent;
 class AWeaponBase;
@@ -513,6 +514,10 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
 	TObjectPtr<UHealthComponent> HealthComponent;
 
+	/** Audible surface-aware footsteps only — AI-noise emission is disabled at construction. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
+	TObjectPtr<UFootstepNoiseComponent> FootstepAudioComponent;
+
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
 	TObjectPtr<USuppressionComponent> SuppressionComponent;
 
@@ -889,6 +894,14 @@ private:
 	/** True while the follow task's catch-up sprint should use the reduced FollowCatchupSprintSpeed
 	 *  tier instead of full SprintSpeed. Never set by rescue sprint-to-target or stealth catch-up. */
 	bool bFollowCatchupPace = false;
+
+	/** Delays the FallingBehind bark until catch-up pace has held continuously this long — pace
+	 *  toggles constantly during normal follow sprints and must not bark on every flip. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Barks", meta = (ClampMin = "0.0"))
+	float FallingBehindBarkDelay = 3.f;
+
+	/** Pending FallingBehind bark; armed on catch-up start, cleared when pace ends. */
+	FTimerHandle CatchupBarkTimerHandle;
 
 	/** World time the purposeful cover-commit grant was stamped; -1e9 = none. See SetCoverCommitGrant. */
 	float CoverCommitGrantStamp = -1e9f;

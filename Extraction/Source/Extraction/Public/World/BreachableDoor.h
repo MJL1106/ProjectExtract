@@ -112,7 +112,7 @@ private:
 	bool bPanelThinAxisX = true;
 
 	/** Begin the opening swing. Enables Tick for the duration. */
-	void BeginSwing();
+	void BeginSwing(bool bPlayOpenSound = true);
 
 	/** Finalise the open state. Disables Tick. */
 	void FinishSwing();

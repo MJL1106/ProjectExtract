@@ -13,6 +13,7 @@
 class AEnemyCharacter;
 class UBoxComponent;
 class UStaticMeshComponent;
+class USoundBase;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDoorOpened, AActor*, Door);
 
@@ -98,6 +99,11 @@ protected:
 	 *  companion follow all qualify; no awareness gating. The player never auto-opens. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|AutoOpen")
 	bool bAutoOpenForAI = true;
+
+	/** Played at the acoustic portal when the leaf starts swinging (any opener: AI auto-open,
+	 *  keycard unlock, breach). The checkpoint fast-forward ForceOpenInstant stays silent. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Audio")
+	TObjectPtr<USoundBase> OpenSound;
 
 	/** When true the companion pushes through into the room after breaching this door even in
 	 *  Normal/Stealth mode (Combat already does). Movement only — montage and noise stay

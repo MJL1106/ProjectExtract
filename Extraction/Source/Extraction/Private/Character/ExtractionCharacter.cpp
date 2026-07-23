@@ -1,6 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionCharacter.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
+#include "Components/AudioComponent.h"
+#include "Kismet/GameplayStatics.h"
 #include "ExtractionAnimInstance.h"
 #include "TraversalComponent.h"
 #include "Animation/AnimInstance.h"
@@ -676,6 +680,22 @@ void AExtractionCharacter::EnterSlide()
 		if (UAnimInstance* AnimInst = GetMesh()->GetAnimInstance())
 			AnimInst->Montage_Play(SlideMontage);
 	}
+
+	// Slide foley rides an attached component so EndSlide can cut it — a fire-and-forget
+	// one-shot kept outlasting short slides.
+	if (const UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+	{
+		USoundBase* SlideSound = AudioSys->GetBank() ? AudioSys->GetBank()->SlideFoley.Get() : nullptr;
+		UGameAudioSubsystem::DebugPlay(TEXT("SLIDE-START"), SlideSound,
+			FString::Printf(TEXT("owner=%s bankSound=%d"), *GetNameSafe(this), IsValid(SlideSound) ? 1 : 0));
+		if (IsValid(SlideSound))
+		{
+			SlideAudioComp = UGameplayStatics::SpawnSoundAttached(SlideSound, GetRootComponent());
+			if (IsValid(SlideAudioComp))
+				SlideAudioComp->FadeIn(0.08f);
+		}
+	}
+
 	OnSlideStarted();
 }
 
@@ -714,7 +734,6 @@ void AExtractionCharacter::EndSlide()
 {
 	if (!bIsSliding) return;
 
-	bIsSliding = false;
 	SlideElapsed = 0.f;
 
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
@@ -728,7 +747,22 @@ void AExtractionCharacter::EndSlide()
 		MoveComp->Velocity = SlideDirection * ExitSpeed + FVector(0.f, 0.f, MoveComp->Velocity.Z);
 	}
 
+	// Cut the slide foley the moment the slide ends — never let the tail outlast the move.
+	if (IsValid(SlideAudioComp))
+	{
+		SlideAudioComp->FadeOut(0.15f, 0.f);
+		SlideAudioComp = nullptr;
+	}
+	if (const UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+	{
+		if (AudioSys->GetBank())
+			AudioSys->PlayFoleyFor(this, AudioSys->GetBank()->SlideStopFoley);
+	}
+
+	// Cleared after UnCrouch — OnEndCrouch's foley guard reads the flag, and clearing first
+	// made every slide end play crouch cloth.
 	UnCrouch();
+	bIsSliding = false;
 
 	if (SlideMontage)
 	{

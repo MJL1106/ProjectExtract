@@ -281,6 +281,14 @@ public:
 
 protected:
 
+	// ---- Movement audio hooks ----
+	// (Jump foley lives in UFootstepNoiseComponent's movement-mode hook — the kit's jump flow
+	// never fires ACharacter::OnJumped.)
+
+	virtual void OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+	virtual void OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+	void PlayCrouchFoley() const;
+
 	// ---- Gameplay Components ----
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Components")

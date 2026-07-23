@@ -7,6 +7,7 @@
 #include "Components/StaticMeshComponent.h"
 #include "Engine/World.h"
 #include "GameFramework/Character.h"
+#include "Kismet/GameplayStatics.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogBreachableDoor, Log, All);
 
@@ -212,19 +213,22 @@ void ABreachableDoor::ForceOpenInstant()
 
 	bUnlocked = true;
 	if (DoorState == EDoorState::Closed)
-		BeginSwing(); // captures ClosedYaw + drops pawn blocking/nav
+		BeginSwing(/*bPlayOpenSound*/ false); // checkpoint fast-forward — captures ClosedYaw silently
 	FinishSwing();
 	UE_LOG(LogBreachableDoor, Log, TEXT("%s: ForceOpenInstant (checkpoint fast-forward)"), *GetName());
 }
 
 // --- Internal ---
 
-void ABreachableDoor::BeginSwing()
+void ABreachableDoor::BeginSwing(bool bPlayOpenSound)
 {
 	DoorState = EDoorState::Opening;
 	SwingElapsed = 0.f;
 	ClosedYaw = LeafPivot->GetComponentRotation().Yaw;
 	SetActorTickEnabled(true);
+
+	if (bPlayOpenSound && IsValid(OpenSound))
+		UGameplayStatics::PlaySoundAtLocation(GetWorld(), OpenSound, GetAcousticPortalPoint());
 
 	// The leaf stops blocking pawns for good once it starts moving: an arriving pawn walks
 	// through mid-swing without a path stall, and a leaf swinging toward the opener clips

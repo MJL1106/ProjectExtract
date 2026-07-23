@@ -42,6 +42,8 @@
 #include "EnemyDebug.h"
 #include "World/Lootable.h"
 #include "World/BreachableDoor.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 #include "World/WorldInteractable.h"
 #include "Game/ExtractionGameMode.h"
 
@@ -527,6 +529,8 @@ void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 	if (WeaponComponent->IsThrowableEquipped())
 	{
 		NotifyThrowableFirePressed();
+		if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+			AudioSys->PlayThrowFoley();
 		return;
 	}
 
@@ -1258,6 +1262,30 @@ void AExtractionPlayer::HandleDeath()
 	EnterDBNO();
 }
 
+void AExtractionPlayer::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	PlayCrouchFoley();
+}
+
+void AExtractionPlayer::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	PlayCrouchFoley();
+}
+
+void AExtractionPlayer::PlayCrouchFoley() const
+{
+	// Stance-change cloth only for deliberate crouch toggles — slides, prone shuffles and the
+	// DBNO capsule shrink all route through Crouch/UnCrouch too and must stay silent here.
+	if (GetIsDBNO() || GetIsProne() || GetIsSliding()) return;
+
+	const UWorld* World = GetWorld();
+	UGameAudioSubsystem* AudioSys = World ? World->GetSubsystem<UGameAudioSubsystem>() : nullptr;
+	if (AudioSys && AudioSys->GetBank())
+		AudioSys->Play2D(AudioSys->GetBank()->CrouchFoley);
+}
+
 void AExtractionPlayer::EnterDBNO()
 {
 	if (bIsDBNO) return;
@@ -1329,6 +1357,9 @@ void AExtractionPlayer::EnterDBNO()
 
 	SetDBNOCameraFreeLook(true);
 
+	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+		AudioSys->StartDBNOAudio();
+
 	OnDBNOStateChanged.Broadcast(true, BleedoutDuration);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' entered DBNO (%.0fs bleedout)"), *GetNameSafe(this), BleedoutDuration);
 }
@@ -1336,7 +1367,8 @@ void AExtractionPlayer::EnterDBNO()
 void AExtractionPlayer::ExitDBNO()
 {
 	if (!bIsDBNO) return;
-	bIsDBNO = false;
+	// bIsDBNO stays set until after UnCrouch() below — OnEndCrouch's foley guard reads it, and
+	// clearing first made every revive stand-up play crouch cloth.
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
@@ -1357,6 +1389,7 @@ void AExtractionPlayer::ExitDBNO()
 			MoveComp->MaxWalkSpeed = GetClass()->GetDefaultObject<AExtractionPlayer>()->GetCharacterMovement()->MaxWalkSpeed;
 	}
 	UnCrouch();
+	bIsDBNO = false;
 
 	SetBeingRevived(false);
 	SetDBNOCameraFreeLook(false);
@@ -1365,6 +1398,9 @@ void AExtractionPlayer::ExitDBNO()
 
 	if (const UWorld* World = GetWorld())
 		LastReviveWorldTime = World->GetTimeSeconds();
+
+	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+		AudioSys->StopDBNOAudio();
 
 	OnDBNOStateChanged.Broadcast(false, 0.f);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' revived at %.0f%% health"), *GetNameSafe(this), ReviveHealthPercent * 100.f);
@@ -1382,6 +1418,9 @@ void AExtractionPlayer::FullDeath()
 {
 	bIsDBNO = false;
 	BleedoutTimeRemaining = 0.f;
+
+	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+		AudioSys->StopDBNOAudio();
 
 	bAutoLeanActive = false;
 	AutoLeanTargetAlpha = 0.f;

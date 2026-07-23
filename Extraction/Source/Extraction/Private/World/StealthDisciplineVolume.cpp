@@ -32,6 +32,17 @@ void AStealthDisciplineVolume::BeginPlay()
 
 	if (!HasAuthority()) return;
 
+	// Defend waves supersede stealth discipline: once a wave is live this volume stays inert.
+	if (UEnemyDirectorSubsystem* Director = GetWorld()->GetSubsystem<UEnemyDirectorSubsystem>())
+	{
+		if (Director->IsWaveActive())
+		{
+			DisableForWave();
+			return;
+		}
+		Director->OnDirectorWaveStarted.AddDynamic(this, &AStealthDisciplineVolume::OnWaveStarted);
+	}
+
 	BoxComponent->OnComponentBeginOverlap.AddDynamic(this, &AStealthDisciplineVolume::OnBeginOverlap);
 	BoxComponent->OnComponentEndOverlap.AddDynamic(this, &AStealthDisciplineVolume::OnEndOverlap);
 
@@ -62,7 +73,12 @@ void AStealthDisciplineVolume::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	CleanupTrackedPlayer();
 
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(SamplingTimerHandle);
+
+		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+			Director->OnDirectorWaveStarted.RemoveDynamic(this, &AStealthDisciplineVolume::OnWaveStarted);
+	}
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -75,6 +91,7 @@ void AStealthDisciplineVolume::OnBeginOverlap(
 	bool /*bFromSweep*/, const FHitResult& /*SweepResult*/)
 {
 	if (!HasAuthority()) return;
+	if (bPermanentlyDisabled) return;
 
 	AExtractionPlayer* Player = Cast<AExtractionPlayer>(OtherActor);
 	if (!IsValid(Player)) return;
@@ -175,6 +192,15 @@ void AStealthDisciplineVolume::SampleTick()
 	// then activate punishment.
 	if (Result == EStealthPressureTransition::Escalated)
 	{
+		UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>();
+
+		// A wave can start inside the same sample window as the escalation crossing.
+		if (Director && Director->IsWaveActive())
+		{
+			DisableForWave();
+			return;
+		}
+
 		if (!bWarningSent)
 		{
 			bWarningSent = true;
@@ -187,7 +213,6 @@ void AStealthDisciplineVolume::SampleTick()
 			}
 		}
 
-		UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>();
 		if (Director)
 		{
 			const bool bActivated = Director->ActivatePunishmentProfile(this, PunishmentConfig, PunishmentPhase);
@@ -226,6 +251,31 @@ void AStealthDisciplineVolume::OnPlayerShotFired(bool bStealthExempt)
 {
 	if (bStealthExempt) return;
 	++PendingNormalShots;
+}
+
+// ---- Wave gate ----
+
+void AStealthDisciplineVolume::OnWaveStarted(FName WaveId)
+{
+	DisableForWave();
+
+	UE_LOG(LogExtraction, Log, TEXT("StealthDisciplineVolume '%s': wave '%s' started -- discipline disabled for the rest of the level"),
+		*GetNameSafe(this), *WaveId.ToString());
+}
+
+void AStealthDisciplineVolume::DisableForWave()
+{
+	if (bPermanentlyDisabled) return;
+	bPermanentlyDisabled = true;
+
+	// Also tears down an already-running punishment via DeactivatePunishmentProfile.
+	CleanupTrackedPlayer();
+
+	if (UWorld* World = GetWorld())
+	{
+		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+			Director->OnDirectorWaveStarted.RemoveDynamic(this, &AStealthDisciplineVolume::OnWaveStarted);
+	}
 }
 
 // ---- Cleanup ----
