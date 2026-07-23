@@ -642,9 +642,14 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 				}
 			}
 
+			// DBNO overwatch: a downed player generates no suspicion (reads as dead), so without
+			// this hold the search timer runs dry and the shooter stands down to Unaware mid-down.
+			if (bSearchHoldForDBNOPlayer && !FindDownedPlayerPawn(this))
+				bSearchHoldForDBNOPlayer = false;
+
 			// Hold the search timeout while actively investigating a body — the enemy must reach it
 			// or lose it (hard-cap destroy nulls the weak ref) before reverting to Unaware.
-			if (!CurrentInvestigateBody.IsValid())
+			if (!CurrentInvestigateBody.IsValid() && !bSearchHoldForDBNOPlayer)
 			{
 				TimeSpentSearching += UpdateInterval;
 				if (TimeSpentSearching >= ArchetypeData->SearchDuration)
@@ -821,10 +826,17 @@ void UEnemyAwarenessComponent::UpdateCombat()
 		if (bDroppedDBNOPlayer)
 			SeedCompanionSightTracks();
 
+		// Companion-DBNO mirror: a downed companion also reads as dead — hand the fight to the
+		// player when normal selection has no track on them (player in cover the whole fight).
+		const ACompanionCharacter* DroppedCompanion = Cast<ACompanionCharacter>(CombatTarget.Get());
+		const bool bDroppedDBNOCompanion = IsValid(DroppedCompanion) && DroppedCompanion->GetIsCompanionDBNO();
+
 		// Target died — try to immediately acquire a sighted candidate before dropping to Searching
 		AActor* NextTarget = ScoreAndSelectTarget();
 		if (!IsValid(NextTarget) && bDroppedDBNOPlayer)
 			NextTarget = FindDBNOHandoffCompanion();
+		if (!IsValid(NextTarget) && bDroppedDBNOCompanion)
+			NextTarget = FindDBNOHandoffPlayer();
 
 		if (IsValid(NextTarget))
 		{
@@ -833,6 +845,12 @@ void UEnemyAwarenessComponent::UpdateCombat()
 		}
 		else
 		{
+			// DBNO overwatch: the search timeout holds while the player stays down, so the
+			// shooter never decays to Unaware mid-revive-window. Set-only — a later non-player
+			// target drop (e.g. handoff companion killed) must not wipe the hold; the Searching
+			// tick clears it when the player revives or dies.
+			if (bDroppedDBNOPlayer)
+				bSearchHoldForDBNOPlayer = true;
 			TransitionToSearching(false);
 		}
 		return;
@@ -1532,6 +1550,31 @@ AActor* UEnemyAwarenessComponent::FindDBNOHandoffCompanion()
 		return Companion;
 	}
 	return nullptr;
+}
+
+AActor* UEnemyAwarenessComponent::FindDBNOHandoffPlayer()
+{
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	UWorld* World = GetWorld();
+	if (!IsValid(MyPawn) || !IsValid(ArchetypeData) || !World) return nullptr;
+
+	// IsActorAlive is false for a DBNO player too — both down = no handoff (the DBNO search
+	// hold keeps the enemy in overwatch instead).
+	APawn* Player = UGameplayStatics::GetPlayerPawn(World, 0);
+	if (!IsValid(Player) || !IsActorAlive(Player)) return nullptr;
+	if (!IsHostile(Player)) return nullptr;
+	if (FVector::DistSquared(MyPawn->GetActorLocation(), Player->GetActorLocation()) > FMath::Square(ArchetypeData->SightRadius)) return nullptr;
+
+	// Unsighted handoff, same as the companion mirror: stamp the track at the player's current
+	// position so the enemy hunts toward it (bSighted stays false until perception genuinely sees).
+	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Player);
+	StampTrack(Track, Player->GetActorLocation());
+
+	UE_LOG(LogEnemyAI, Log, TEXT("[AWARENESS] %s companion-DBNO handoff -> %s (dist=%.0f sighted=%d)"),
+		*MyPawn->GetName(), *Player->GetName(),
+		FVector::Dist(MyPawn->GetActorLocation(), Player->GetActorLocation()), (int32)Track.bSighted);
+	return Player;
 }
 
 bool UEnemyAwarenessComponent::ShouldIgnoreCompanionStimulus(const AActor* Actor) const

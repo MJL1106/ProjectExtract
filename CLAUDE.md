@@ -20,6 +20,17 @@ If you are Claude Code CLI (terminal / Desktop / VS Code), ignore this section a
 
 > Shared UE5 Hard Rules, Soft Rules, and Architectural Taste live in global `~/.claude/CLAUDE.md`. Only project-specific additions and overrides are listed below.
 
+## Memory discipline — default to NOT writing memory
+
+This project's auto-memory was bloating by ~30 files/week because every work round dropped a `project_<thing>_round.md`. Stop that. Overrides the base "save in-flight work" default.
+
+- **Before writing any memory file, ask:** is this a durable, reusable, non-obvious fact a future session couldn't get from git, `agent_docs/project_roadmap.md`, or the code? If not, **don't write it.**
+- **Never write a `project_*` "round summary"** (e.g. "X round: BUILT, PIE untested"). Round state + cross-chat continuity belongs in `agent_docs/project_roadmap.md` (flip `[ ]`/`[~]`/`[x]`) and the `session-handoff` skill. Git records what shipped.
+- **Write memory ONLY for:** hard-won gotchas/pitfalls (`pitfall_*`), user preferences/working feedback (`feedback_*`), reference pointers — URLs/IDs/endpoints/live-asset names (`reference_*`), and durable architecture/direction decisions (a few `project_*`).
+- **When merging a round's lasting takeaway into memory,** fold the one durable gotcha/lever into the relevant per-system or pitfall file — don't create a new round file for it.
+- **When a round ships** (committed + playtested), delete its in-flight memory instead of leaving a "SHIPPED @hash" tombstone.
+- **One consolidated file per system,** not one per round. Per-system memory (audio, companion, enemy, weapons, player) accumulates durable levers/gotchas; it does not grow a new file each session.
+
 ## Hard Rules (project-specific)
 - MUST never hardcode `/Game/...` asset paths via `ConstructorHelpers::FObjectFinder` — designer assigns assets in Blueprint subclasses (this project uses an in-editor MCP agent for asset wiring; C++ stays asset-agnostic)
 - MUST mark replicated UPROPERTY `Replicated` or `ReplicatedUsing=OnRep_*` AND add `DOREPLIFETIME[_CONDITION]` in `GetLifetimeReplicatedProps`

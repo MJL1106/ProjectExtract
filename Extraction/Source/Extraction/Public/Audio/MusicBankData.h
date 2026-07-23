@@ -94,6 +94,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.1"))
 	float CrossfadeSeconds = 2.f;
 
+	/** Fade-in when a track starts from silence (level entry, explore bed) rather than crossfading
+	 *  from another track — kept short so the stealth bed arrives immediately instead of ramping up
+	 *  under the full crossfade. 0 = instant. */
+	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.0"))
+	float EntryFadeSeconds = 0.25f;
+
 	/** Fade-out used when music stops entirely (entering Relief or an explore gap). */
 	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.1"))
 	float StopFadeSeconds = 4.f;

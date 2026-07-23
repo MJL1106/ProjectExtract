@@ -88,10 +88,5 @@ private:
 
 	static constexpr float PollInterval = 0.5f;
 
-	/** First ambient bed lands almost immediately at level start; the bank's silence
-	 *  cadence governs every gap after it. */
-	static constexpr float OpeningGapMinSeconds = 1.f;
-	static constexpr float OpeningGapMaxSeconds = 3.f;
-
 	FTimerHandle PollTimerHandle;
 };

@@ -63,4 +63,9 @@ public:
 	 *  (enemy voices fade to silent around the subsystem's earshot range). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Barks")
 	TObjectPtr<USoundAttenuation> Attenuation;
+
+	/** Linear volume multiplier applied to every VO line from this set at playback. >1 makes this
+	 *  faction's shouts louder; tune per-set in the editor without a rebuild. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Barks", meta = (ClampMin = "0.0"))
+	float VolumeMultiplier = 1.5f;
 };

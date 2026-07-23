@@ -207,6 +207,12 @@ private:
 	 *  so the position grant reads as mid-fight squad awareness, not a wallhack. */
 	AActor* FindDBNOHandoffCompanion();
 
+	/** Companion-DBNO combat handoff fallback — mirror of FindDBNOHandoffCompanion: the live
+	 *  player within SightRadius, with a suspicion track stamped at their current location — or
+	 *  nullptr. Only called at the moment a DBNO companion drops out of Combat and normal
+	 *  selection found nothing. */
+	AActor* FindDBNOHandoffPlayer();
+
 	void RefreshSearchRoomExposure();
 	void ApplySilentSearchRoomStartle(ACompanionCharacter* Companion, FSuspicionTrack& Track);
 
@@ -283,6 +289,10 @@ private:
 
 	// Searching timeout
 	float TimeSpentSearching = 0.f;
+
+	// DBNO overwatch: search timeout holds while the downed player that was our combat target
+	// stays DBNO — cleared the tick the player revives or dies
+	bool bSearchHoldForDBNOPlayer = false;
 
 	// Threat-scored targeting: track the actor that last damaged us and when
 	TWeakObjectPtr<AActor> RecentDamageInstigatorPawn;

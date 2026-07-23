@@ -83,4 +83,9 @@ public:
 	 *  almost always near the player). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Barks")
 	TObjectPtr<USoundAttenuation> Attenuation;
+
+	/** Linear volume multiplier applied to every companion VO line at playback. >1 makes the
+	 *  companion's shouts louder; tune in the editor without a rebuild. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Barks", meta = (ClampMin = "0.0"))
+	float VolumeMultiplier = 1.5f;
 };

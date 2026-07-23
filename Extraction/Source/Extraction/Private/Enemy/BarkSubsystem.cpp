@@ -25,7 +25,7 @@ void UBarkSubsystem::RequestBark(const AActor* Speaker, const UBarkSetData* Bark
 
 	// Enum-name stringification only matters for the debug channel — skip the per-request
 	// allocation otherwise (damage-driven attempts arrive at bullet-hit frequency).
-	RequestBarkInternal(Speaker, BarkSet->Barks.Find(Type), BarkSet->Attenuation,
+	RequestBarkInternal(Speaker, BarkSet->Barks.Find(Type), BarkSet->Attenuation, BarkSet->VolumeMultiplier,
 		EBarkChannel::Enemy, static_cast<uint8>(Type),
 		IsEnemyBarkDebugEnabled() ? UEnum::GetValueAsString(Type) : FString(), Context);
 }
@@ -34,13 +34,13 @@ void UBarkSubsystem::RequestCompanionBark(const AActor* Speaker, const UCompanio
 {
 	if (!IsValid(Speaker) || !IsValid(BarkSet)) return;
 
-	RequestBarkInternal(Speaker, BarkSet->Barks.Find(Type), BarkSet->Attenuation,
+	RequestBarkInternal(Speaker, BarkSet->Barks.Find(Type), BarkSet->Attenuation, BarkSet->VolumeMultiplier,
 		EBarkChannel::Companion, static_cast<uint8>(Type),
 		IsEnemyBarkDebugEnabled() ? UEnum::GetValueAsString(Type) : FString(), Context);
 }
 
 void UBarkSubsystem::RequestBarkInternal(const AActor* Speaker, const FBarkDefinition* Def, USoundAttenuation* Attenuation,
-	EBarkChannel Channel, uint8 RawType, const FString& TypeStr, FName Context)
+	float VolumeMultiplier, EBarkChannel Channel, uint8 RawType, const FString& TypeStr, FName Context)
 {
 	const bool bDebug = IsEnemyBarkDebugEnabled();
 	const uint16 TypeKey = MakeTypeKey(Channel, RawType);
@@ -167,7 +167,7 @@ void UBarkSubsystem::RequestBarkInternal(const AActor* Speaker, const FBarkDefin
 	{
 		USceneComponent* AttachTo = Speaker->GetRootComponent();
 		UAudioComponent* Voice = UGameplayStatics::SpawnSoundAttached(Picked.Sound, AttachTo, NAME_None,
-			FVector::ZeroVector, EAttachLocation::KeepRelativeOffset, false, 1.f, 1.f, 0.f, Attenuation);
+			FVector::ZeroVector, EAttachLocation::KeepRelativeOffset, false, VolumeMultiplier, 1.f, 0.f, Attenuation);
 		if (Voice)
 		{
 			Voice->OnAudioFinishedNative.AddUObject(this, &UBarkSubsystem::HandleVoiceFinished);

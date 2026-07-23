@@ -60,12 +60,15 @@ void UMusicSubsystem::OnWorldBeginPlay(UWorld& InWorld)
 			Director->OnDirectorWaveCompleted.AddDynamic(this, &UMusicSubsystem::HandleWaveCompleted);
 	}
 
-	// Short opening gap so the level greets the player with an ambient bed, then the full
-	// silence cadence takes over.
-	NextExploreTime = InWorld.GetTimeSeconds() + FMath::FRandRange(OpeningGapMinSeconds, OpeningGapMaxSeconds);
+	// Stealth bed starts at once — any opening gap read as "the music is late" on PIE entry, and the
+	// always-on design has no intro silence. The bank's silence cadence still governs later gaps.
+	NextExploreTime = InWorld.GetTimeSeconds();
 	StateEnterTime = InWorld.GetTimeSeconds();
 
 	InWorld.GetTimerManager().SetTimer(PollTimerHandle, this, &UMusicSubsystem::Poll, PollInterval, true);
+
+	// Kick the first poll now so the explore track starts this frame instead of up to PollInterval later.
+	Poll();
 }
 
 void UMusicSubsystem::Deinitialize()
@@ -276,12 +279,16 @@ void UMusicSubsystem::StartTrack(USoundBase* Sound, float FadeSeconds)
 	if (!IsValid(World)) return;
 	if (IsValid(CurrentTrack) && CurrentTrack->Sound == Sound && CurrentTrack->IsPlaying()) return;
 
+	// Coming in from silence snaps to level fast — a full crossfade-length fade-in on the quiet
+	// stealth bed reads as "the music is late." Track-to-track swaps keep the smooth crossfade.
+	const bool bFromSilence = !(IsValid(CurrentTrack) && CurrentTrack->IsPlaying());
+
 	StopTrack(FadeSeconds);
 	if (!IsValid(Sound)) return;
 
 	CurrentTrack = UGameplayStatics::CreateSound2D(World, Sound, Bank->MusicVolume, 1.f, 0.f, nullptr,
 		/*bPersistAcrossLevelTransition=*/false, /*bAutoDestroy=*/true);
-	if (IsValid(CurrentTrack)) CurrentTrack->FadeIn(FadeSeconds, Bank->MusicVolume);
+	if (IsValid(CurrentTrack)) CurrentTrack->FadeIn(bFromSilence ? Bank->EntryFadeSeconds : FadeSeconds, Bank->MusicVolume);
 
 	if (CVarMusicDebug.GetValueOnGameThread() != 0)
 	{

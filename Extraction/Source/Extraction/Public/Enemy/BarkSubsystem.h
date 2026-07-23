@@ -56,7 +56,7 @@ private:
 	enum class EBarkChannel : uint8 { Enemy, Companion };
 
 	void RequestBarkInternal(const AActor* Speaker, const FBarkDefinition* Def, USoundAttenuation* Attenuation,
-		EBarkChannel Channel, uint8 RawType, const FString& TypeStr, FName Context);
+		float VolumeMultiplier, EBarkChannel Channel, uint8 RawType, const FString& TypeStr, FName Context);
 
 	void HandleVoiceFinished(UAudioComponent* Voice);
 
