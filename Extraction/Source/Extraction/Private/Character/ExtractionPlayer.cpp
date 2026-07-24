@@ -159,9 +159,11 @@ void AExtractionPlayer::PostInitializeComponents()
 
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 	{
+		// Null on the shipped setup: the pristine kit ABP_Manny is a plain UAnimInstance.
+		// Montage playback (traversal, being-revived) goes through the generic instance.
 		CachedAnimInstance = Cast<UExtractionAnimInstance>(MeshComp->GetAnimInstance());
 		if (!IsValid(CachedAnimInstance))
-			UE_LOG(LogExtraction, Warning, TEXT("'%s': AnimInstance is not UExtractionAnimInstance — check ABP parent class."), *GetNameSafe(this));
+			UE_LOG(LogExtraction, Verbose, TEXT("'%s': AnimInstance is not UExtractionAnimInstance — montages play on the generic instance."), *GetNameSafe(this));
 	}
 }
 
@@ -641,6 +643,9 @@ bool AExtractionPlayer::TryStartTraversal()
 	// Mid-revive-hold: a vault would displace the kneeling reviver AND cross-clobber the shared
 	// yaw-follow save with the traversal component's own (leaves yaw-follow stuck off).
 	if (bIsReviving) return false;
+	// Traversal montages stop-all on the body instance — a vault input mid-takedown would
+	// interrupt the finisher montage mid-kill.
+	if (bTakedownMontageActive) return false;
 	if (IsInTraversal()) return false;
 	if (!IsValid(TraversalComponent)) return false;
 
@@ -658,38 +663,50 @@ bool AExtractionPlayer::TryStartTraversal()
 
 // ---- Traversal Callbacks ----
 
+UAnimMontage* AExtractionPlayer::GetTraversalMontage(ETraversalType Type) const
+{
+	switch (Type)
+	{
+	case ETraversalType::Vault:  return VaultMontage;
+	case ETraversalType::Climb:  return ClimbMontage;
+	case ETraversalType::Mantle: return MantleMontage;
+	default: return nullptr;
+	}
+}
+
+bool AExtractionPlayer::HasTraversalMontage(ETraversalType Type) const
+{
+	return GetTraversalMontage(Type) != nullptr;
+}
+
 void AExtractionPlayer::HandleTraversalStarted(ETraversalType Type, float PlayRate, FVector /*ObstacleLocation*/, FVector /*LandingLocation*/)
 {
 	if (bIsDBNO) return;
 
 	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] HandleTraversalStarted type=%d playRate=%.2f"), (int32)Type, PlayRate);
 
-	UExtractionAnimInstance* AnimInst = CachedAnimInstance;
-	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] CachedAnimInstance is %s"), *GetNameSafe(AnimInst));
-	if (!IsValid(AnimInst)) return;
+	// The body mesh runs the pristine kit ABP_Manny (plain UAnimInstance) — montages come from
+	// the designer-assigned properties, played on the generic instance's TraversalSlot.
+	UAnimMontage* Montage = GetTraversalMontage(Type);
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
 
-	switch (Type)
+	// StartTraversal already switched to MOVE_Flying/no-collision, and only the montage end
+	// delegate restores it promptly (the worst-case timer is seconds away) — if the montage
+	// can't play, end the traversal on the spot instead of stranding the player.
+	if (!IsValid(AnimInst) || !Montage || AnimInst->Montage_Play(Montage, PlayRate) <= 0.f)
 	{
-	case ETraversalType::Vault:
-		AnimInst->PlayVaultMontage(PlayRate);
-		UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] PlayVaultMontage called"));
-		break;
-	case ETraversalType::Climb:
-		AnimInst->PlayClimbMontage(PlayRate);
-		UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] PlayClimbMontage called"));
-		break;
-	case ETraversalType::Mantle:
-		AnimInst->PlayMantleMontage(PlayRate);
-		UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] PlayMantleMontage called"));
-		break;
-	default: break;
+		UE_LOG(LogExtraction, Warning, TEXT("[VAULT_DEBUG] traversal montage unavailable (type=%d montage=%s animinst=%s) — ending traversal"),
+			(int32)Type, *GetNameSafe(Montage), *GetNameSafe(AnimInst));
+		if (IsValid(TraversalComponent))
+			TraversalComponent->EndTraversal();
+		return;
 	}
 
 	FOnMontageEnded EndDelegate;
 	EndDelegate.BindUObject(this, &AExtractionPlayer::OnTraversalMontageEnded);
-	AnimInst->Montage_SetEndDelegate(EndDelegate, AnimInst->GetCurrentActiveMontage());
-	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] End delegate bound to active montage=%s"),
-		*GetNameSafe(AnimInst->GetCurrentActiveMontage()));
+	AnimInst->Montage_SetEndDelegate(EndDelegate, Montage);
+	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] End delegate bound to montage=%s"), *GetNameSafe(Montage));
 }
 
 void AExtractionPlayer::OnTraversalMontageEnded(UAnimMontage* Montage, bool bInterrupted)
@@ -702,6 +719,18 @@ void AExtractionPlayer::HandleTraversalEnded()
 {
 	// No sprint state to restore — kit BP owns sprint.
 	UE_LOG(LogExtraction, Verbose, TEXT("'%s' traversal ended"), *GetNameSafe(this));
+
+	// Abnormal end (DBNO cancel, worst-case timer): stop any still-playing traversal montage
+	// so its root motion can't drag the walking character, and so its end delegate can't fire
+	// late into a NEW traversal (it lands while ActiveTraversalType is None and no-ops).
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst)) return;
+	for (UAnimMontage* Montage : { VaultMontage.Get(), ClimbMontage.Get(), MantleMontage.Get() })
+	{
+		if (Montage && AnimInst->Montage_IsPlaying(Montage))
+			AnimInst->Montage_Stop(0.25f, Montage);
+	}
 }
 
 ETraversalType AExtractionPlayer::GetActiveTraversalType() const

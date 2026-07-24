@@ -260,6 +260,12 @@ void ACompanionAIController::OnPlayerTraversalStarted(ETraversalType Type, float
 
 	if (!T->bMirrorPlayerTraversalEnabled) return;
 
+	// The player's own handler runs first on this broadcast and aborts the traversal on the
+	// spot when its montage can't play — don't mirror a vault the player never performed.
+	APawn* PlayerPawn = UGameplayStatics::GetPlayerCharacter(this, 0);
+	const IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PlayerPawn);
+	if (PlayerIface && !PlayerIface->IsInTraversal()) return;
+
 	const float DistToObstacle = FVector::Dist(MyPawn->GetActorLocation(), ObstacleLocation);
 	if (DistToObstacle > T->MirrorTriggerRange)
 	{

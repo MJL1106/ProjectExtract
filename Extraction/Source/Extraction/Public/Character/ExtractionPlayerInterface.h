@@ -43,6 +43,12 @@ public:
 	virtual void ExitDBNO() = 0;
 	virtual ETraversalType GetActiveTraversalType() const = 0;
 	virtual bool IsInTraversal() const = 0;
+
+	/** True when this character can play a traversal montage of the given type from
+	 *  designer-assigned montage properties (kit-migrated player: the body mesh runs the
+	 *  pristine kit AnimBP, not UExtractionAnimInstance). Default false — callers fall
+	 *  back to the anim-instance montage lookup. */
+	virtual bool HasTraversalMontage(ETraversalType /*Type*/) const { return false; }
 	virtual bool GetIsVaulting() const = 0;
 	virtual FVector GetVaultTargetLocation() const = 0;
 	virtual float GetVaultSurfaceHeight() const = 0;

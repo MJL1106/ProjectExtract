@@ -197,6 +197,10 @@ public:
 	virtual ETraversalType GetActiveTraversalType() const override;
 	virtual bool IsInTraversal() const override;
 
+	/** Checks the designer-assigned traversal montage properties below — the body mesh runs
+	 *  the pristine kit AnimBP, so the UExtractionAnimInstance montage lookup never applies. */
+	virtual bool HasTraversalMontage(ETraversalType Type) const override;
+
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	virtual bool GetIsVaulting() const override;
 
@@ -500,6 +504,21 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
 	float ReviverKneelStartOffsetSeconds = 0.4f;
 
+	// ---- Traversal Montages ----
+	// Full-body montages played on the body mesh's generic anim instance. Assigned montages
+	// must target a slot that exists in ABP_Manny's AnimGraph (the kit graph has an inline
+	// DefaultSlot; a FullBody slot also exists after the arms linked-graph). Montages carry
+	// the root motion that moves the capsule while the traversal component holds MOVE_Flying.
+
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Traversal")
+	TObjectPtr<UAnimMontage> VaultMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Traversal")
+	TObjectPtr<UAnimMontage> ClimbMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Traversal")
+	TObjectPtr<UAnimMontage> MantleMontage;
+
 	// ---- Auto-Lean Config ----
 
 	/** Sideways distance (cm) from probe origin to test for a wall. */
@@ -648,6 +667,9 @@ private:
 
 	UFUNCTION()
 	void OnTraversalMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	/** Designer-assigned montage for a traversal type, or nullptr (see Movement|Traversal properties). */
+	UAnimMontage* GetTraversalMontage(ETraversalType Type) const;
 
 	// ---- Health / DBNO ----
 
