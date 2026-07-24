@@ -67,6 +67,7 @@ Extraction/Config/DefaultEditorPerProjectUserSettings.ini
 Extraction/Plugins/*
 !Extraction/Plugins/VibeUE
 !Extraction/Plugins/NeoStackAI
+!Extraction/Plugins/AICoverSystem
 Extraction/Plugins/NeoStackAI/Binaries/
 Extraction/Plugins/NeoStackAI/Intermediate/
 # Added by code-review-graph
