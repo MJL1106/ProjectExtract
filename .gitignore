@@ -58,7 +58,6 @@ Extraction/Config/DefaultEditorPerProjectUserSettings.ini
 .claude/worktrees/
 .claude/engine-session.lock.json
 .omc/
-Extraction/Config/DefaultAgentIntegrationKit.ini
 
 # ----------------------------------------------------------------------------
 # Third-party plugins
