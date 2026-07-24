@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProjectExtract — Fresh Level Setup Guide</title>
+<style>
+  :root{
+    --bg:#12151a; --panel:#1a1f27; --panel2:#20262f; --ink:#dfe6ee; --dim:#8b97a5;
+    --accent:#5cc8ff; --green:#68d391; --amber:#f6c65b; --red:#f08080;
+    --border:#2c3540; --code:#0e1116;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f5f7fa; --panel:#ffffff; --panel2:#eef2f6; --ink:#1d2530; --dim:#5c6b7a;
+      --accent:#0b7fc4; --green:#1f9d55; --amber:#b7791f; --red:#c53030; --border:#d7dee6; --code:#eef1f5; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 "Segoe UI",system-ui,sans-serif;}
+  .wrap{max-width:980px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:26px;margin:0 0 4px}
+  h2{font-size:20px;margin:42px 0 10px;color:var(--accent);border-bottom:1px solid var(--border);padding-bottom:6px}
+  h3{font-size:15px;margin:20px 0 6px}
+  p{margin:8px 0}
+  .sub{color:var(--dim);margin-bottom:24px}
+  code{background:var(--code);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font:13px Consolas,monospace;white-space:nowrap}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 20px;margin:14px 0}
+  .place{display:inline-block;background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:2px 8px;font:600 12px "Segoe UI";color:var(--green);margin:0 4px 4px 0}
+  .warn{border-left:4px solid var(--red);background:var(--panel2);padding:10px 14px;border-radius:6px;margin:10px 0}
+  .tip{border-left:4px solid var(--amber);background:var(--panel2);padding:10px 14px;border-radius:6px;margin:10px 0}
+  table{border-collapse:collapse;width:100%;margin:10px 0;font-size:14px}
+  th,td{border:1px solid var(--border);padding:6px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2)}
+  .overflow{overflow-x:auto}
+  ol.check{counter-reset:c;list-style:none;padding-left:0}
+  ol.check li{counter-increment:c;padding:7px 0 7px 40px;position:relative;border-bottom:1px dashed var(--border)}
+  ol.check li::before{content:counter(c);position:absolute;left:0;top:7px;width:26px;height:26px;border-radius:50%;background:var(--accent);color:var(--bg);font-weight:700;text-align:center;line-height:26px;font-size:13px}
+  .links{font-size:13px;color:var(--dim)}
+  .pill{font:600 11px "Segoe UI";border-radius:10px;padding:1px 8px;margin-left:6px;vertical-align:middle}
+  .pill.done{background:rgba(104,211,145,.15);color:var(--green);border:1px solid var(--green)}
+  .pill.partial{background:rgba(246,198,91,.15);color:var(--amber);border:1px solid var(--amber)}
+  .toc{columns:2;gap:32px;font-size:14px}
+  .toc a{color:var(--ink);text-decoration:none}
+  .toc a:hover{color:var(--accent)}
+  .flow{background:var(--code);border:1px solid var(--border);border-radius:8px;padding:12px 16px;font:13px Consolas,monospace;overflow-x:auto;white-space:pre}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Fresh Level Setup Guide</h1>
+<p class="sub">Every shipped gameplay system: what to place, what to set, and how the systems link. Property names are verbatim from the actor's Details panel.</p>
+
+<div class="card">
+<h3 style="margin-top:0">Contents</h3>
+<div class="toc">
+<a href="#checklist">Master checklist</a><br>
+<a href="#prereq">0 · Level prerequisites</a><br>
+<a href="#companion">1 · Companion + ping control</a><br>
+<a href="#routes">2 · Authored companion routes</a><br>
+<a href="#doors">3 · Doors + breaching</a><br>
+<a href="#loot">4 · Loot containers + keycards</a><br>
+<a href="#objectives">5 · Objectives + waypoint markers</a><br>
+<a href="#takedowns">6 · Takedown pockets</a><br>
+<a href="#enemies">7 · Enemies + patrols</a><br>
+<a href="#director">8 · Enemy director + spawn zones</a><br>
+<a href="#cover">9 · Cover system</a><br>
+<a href="#ammo">10 · Ammo drops</a><br>
+<a href="#dbno">11 · Down-but-not-out / revive</a><br>
+<a href="#numbers">12 · Reference numbers + debug</a>
+</div>
+</div>
+
+<h2 id="checklist">Master checklist — dressing a fresh level, in order</h2>
+<div class="card">
+<ol class="check">
+<li>World Settings → <b>GameMode Override</b> = the playable GameMode BP <span class="place">BP_ExtractionGameMode <span class="links">(/Game/Core/Blueprints/Game)</span></span></li>
+<li>Place a <span class="place">PlayerStart</span> in a neutral, enemy-free area</li>
+<li>Place <span class="place">BP_Companion <span class="links">(/Game/Core/Blueprints/AI/Companion)</span></span> near the PlayerStart</li>
+<li>Place a <span class="place">NavMeshBoundsVolume</span> covering <b>everything</b> playable (all floors), press <b>P</b> to confirm green coverage</li>
+<li>Block out geometry; make sure floors/ceilings block the <b>Visibility</b> collision channel</li>
+<li>Place enemies: drag <span class="place">BP_Enemy_Grunt / Rusher / Heavy / Sniper / Officer / Grenadier / Shotgun / Pistol <span class="links">(/Game/Core/Enemies/Blueprints)</span></span> onto navmesh; set <code>SquadId</code>, assign <code>PatrolRoute</code> or leave as static guard; keep <code>bIsolatedEncounter</code> = false; author <code>DeathLoot</code> on keycard-carrier enemies</li>
+<li>Place <span class="place">PatrolRoute</span> actors for moving guards (points on navmesh)</li>
+<li>Place ONE <span class="place">CoverSystem</span> actor (AICoverSystem plugin) — cover auto-generates from the navmesh for enemies AND the companion. Rebuild navmesh after geometry changes; add <span class="place">ManualCoverPoint</span>s only where the generator misses a spot</li>
+<li>Place <span class="place">EnemySpawnZone</span> boxes (3–5 per floor, hidden rooms/stairwells) and assign a <code>DirectorConfig</code>; optional building-wide <span class="place">EnemyDirectorScopeVolume</span></li>
+<li>Place <span class="place">TakedownVolume</span> boxes around intended stealth-takedown pockets</li>
+<li>Place <span class="place">BreachableDoor</span> BPs; set <code>OpenAngle</code>, and <code>bStartsLocked</code> + <code>RequiredKeycardId</code> for keycard doors</li>
+<li>Place <span class="place">LootContainer</span> BPs; author <code>Contents</code> (ammo / keycards — keycard ids must match doors)</li>
+<li>Place <span class="place">ObjectiveMarkerActor</span>s; set <code>Label</code> + completion (<code>CompletionRadius</code> or <code>RequiredKeycardId</code>)</li>
+<li>Optionally place <span class="place">CompanionRoute</span> + <span class="place">CompanionRouteTrigger</span> for authored lead-the-way sequences</li>
+<li>Place <span class="place">BP_PhaseTrigger</span> <span class="links">(/Game/Core/Enemies/AI)</span> boxes at story beats to advance the mission phase (Infiltration → Objective → Extraction)</li>
+<li>Rebuild navmesh + lighting, PIE from the PlayerStart, walk the level with the Gameplay Debugger (<b>'</b> key)</li>
+</ol>
+</div>
+
+<h2 id="prereq">0 · Level prerequisites</h2>
+<div class="card">
+<p><b>GameMode.</b> Set World Settings → GameMode Override to <span class="place">BP_ExtractionGameMode <span class="links">(/Game/Core/Blueprints/Game)</span></span>. Don't rely on the C++ default — the C++ class points at a legacy pawn; the BP override supplies the real player pawn (its Default Pawn Class is already set to <code>BP_ExtractionCharacter</code>, which despite the legacy name is the live player pawn).</p>
+<p><b>NavMesh.</b> One <span class="place">NavMeshBoundsVolume</span> scaled over the entire playable space, all floors. This is the single most common "AI does nothing" cause: the companion's follow/combat/revive, enemy patrols, cover moves, and director spawns ALL silently fail off-navmesh. Press <b>P</b> in the viewport — every walkable surface should be green.</p>
+<p><b>Visibility channel.</b> Floors and ceilings must block the <b>Visibility</b> trace channel, or enemies will detect the player through floors and the director will refuse/misjudge spawn points.</p>
+<div class="tip"><b>Placing the C++ actors.</b> <code>CompanionRoute</code>, <code>CompanionRouteTrigger</code>, <code>ObjectiveMarkerActor</code>, <code>TakedownVolume</code>, <code>PatrolRoute</code>, <code>EnemySpawnZone</code> and <code>EnemyDirectorScopeVolume</code> have no Blueprint wrappers — place them by typing the class name into the <b>Place Actors</b> panel search (Window → Place Actors) and dragging into the viewport.</div>
+<p><b>Companion.</b> Drag <span class="place">BP_Companion <span class="links">(/Game/Core/Blueprints/AI/Companion)</span></span> into the level near the PlayerStart. It is not auto-spawned by the GameMode. Its AI controller, behaviour tree and tuning are already wired on the BP — nothing to set per level.</p>
+</div>
+
+<h2 id="companion">1 · Companion + ping control <span class="pill done">works out of the box</span></h2>
+<div class="card">
+<p>The ping component lives on the player pawn; nothing to place. Pinging line-traces from the camera (60&nbsp;m) and picks, in priority order:</p>
+<div class="flow">Ping hit →  1. Breachable door   → companion breaches (style from current mode)
+            2. Lootable container → companion goes and loots it
+            3. Eligible enemy     → takedown prompt (knife / shoot)</div>
+<p><b>Modes</b> (cycled with <b>X</b>): Normal / Combat / Stealth. The active mode picks the breach style automatically: Combat → <b>Loud</b> kickdown, Normal → <b>Tactical</b>, Stealth → <b>Quiet</b>. Mode also drives the companion's movement stance and engagement rules — there is no per-level mode config; if a mission should start in Stealth, call <code>SetMode</code> from the Level Blueprint at BeginPlay.</p>
+</div>
+
+<h2 id="routes">2 · Authored companion routes <span class="pill done">works out of the box</span></h2>
+<div class="card">
+<p>For "companion takes the lead" set pieces (intro rooftop, cleared-room walkthroughs).</p>
+<h3>Place: <span class="place">CompanionRoute</span></h3>
+<p>Author its <code>Waypoints</code> array — each waypoint is a draggable 3D widget in the viewport. Per waypoint:</p>
+<div class="overflow"><table>
+<tr><th>Property</th><th>Default</th><th>What it does</th></tr>
+<tr><td><code>Location</code></td><td>—</td><td>Drag the widget in the viewport</td></tr>
+<tr><td><code>Stance</code></td><td>Relaxed</td><td>Relaxed / Alert / Crouch for the leg into this point</td></tr>
+<tr><td><code>bWaitForPlayer</code> + <code>WaitForPlayerRadius</code></td><td>off</td><td>Companion holds here until the player is within the radius</td></tr>
+<tr><td><code>DwellSeconds</code></td><td>0</td><td>Pause at the point</td></tr>
+<tr><td><code>SpeedOverride</code></td><td>0 (off)</td><td>Per-leg speed</td></tr>
+<tr><td><code>bOverrideAim</code> + <code>AimTargetLocal</code></td><td>off</td><td>Force a look direction at the point</td></tr>
+</table></div>
+<p>Route-level: <code>EndBehavior</code> (ReturnToFollow / HoldAtFinal), <code>bInterruptibleByCombat</code>, <code>DefaultStance</code>, <code>WaypointAcceptanceRadius</code> (60), <code>MaxWaitForPlayerSeconds</code> (15 — hang safety).</p>
+<h3>Trigger: <span class="place">CompanionRouteTrigger</span></h3>
+<p>A box volume. Assign its <code>Route</code> to your placed CompanionRoute (eyedropper), <code>bOneShot</code> = true by default. Player walks in → route starts. Alternatively call <code>StartRoute</code> on the companion's AI controller from the Level Blueprint or a Sequencer event.</p>
+</div>
+
+<h2 id="doors">3 · Doors + breaching <span class="pill done">Loud/Tactical/Quiet shipped</span></h2>
+<div class="card">
+<h3>Place: <span class="place">BP_BreachableDoor <span class="links">(/Game/Core/Blueprints/World)</span></span></h3>
+<div class="overflow"><table>
+<tr><th>Property</th><th>Default</th><th>What it does</th></tr>
+<tr><td><code>OpenAngle</code></td><td>-90</td><td>Swing angle in degrees (sign = direction). Set per door</td></tr>
+<tr><td><code>OpenDuration</code></td><td>0.8</td><td>Seconds to swing (quiet open; loud is montage-timed)</td></tr>
+<tr><td><code>bStartsLocked</code></td><td>false</td><td>Locked doors need a keycard and are NOT offered to companion breach</td></tr>
+<tr><td><code>RequiredKeycardId</code></td><td>None</td><td>FName; must exactly match a loot container's keycard id</td></tr>
+<tr><td><code>BreachReachGap</code> / <code>PostBreachEnterDepth</code> / <code>PostBreachLateralOffset</code></td><td>25 / 250 / 170</td><td>Companion stand-off and post-breach entry points — only touch if a doorway is unusually tight</td></tr>
+</table></div>
+<div class="warn"><b>Rotate the whole actor, never the leaf.</b> The swing is computed from the door leaf's world yaw at BeginPlay. Place/rotate the root actor freely; if you rotate or offset the internal LeafPivot the swing breaks.</div>
+<p><b>How the player uses it:</b> ping the door → companion breaches in the current mode's style (Loud kickdown / Tactical kick-then-fall-back / Quiet handle-open). Locked doors: player collects the keycard — from a loot container <b>or</b> off a killed enemy carrying it in its <code>DeathLoot</code> (see §4) — then Interact (<b>E</b>) on the door to unlock.</p>
+</div>
+
+<h2 id="loot">4 · Loot containers + keycards <span class="pill done">shipped</span></h2>
+<div class="card">
+<h3>Place: <span class="place">BP_LootContainer <span class="links">(/Game/Core/Blueprints/World)</span></span></h3>
+<p>Author the <code>Contents</code> array per placed container. Each entry (<code>FLootGrant</code>):</p>
+<div class="overflow"><table>
+<tr><th>Type</th><th>Fields</th><th>Result when looted</th></tr>
+<tr><td><b>Ammo</b></td><td><code>AmmoCategory</code> (weapon type), <code>AmmoAmount</code> (30)</td><td>Added to the player if it matches their weapon category — even when the companion loots it</td></tr>
+<tr><td><b>Keycard</b></td><td><code>KeycardId</code> (FName)</td><td>Recorded in the mission inventory for the rest of the level</td></tr>
+</table></div>
+<p><code>bLooted</code> = true makes a container pre-emptied set dressing.</p>
+<h3>Keycard flow — id matching is your whole job</h3>
+<div class="flow">LootContainer.Contents[KeycardId = "Keycard_Lab"]     ── or ──  Enemy.DeathLoot[KeycardId = "Keycard_Lab"]
+        │  (player interacts, or player pings → companion loots)      (kill → drops a pickup, loot it)
+        ▼
+Mission inventory records "Keycard_Lab"   (world-lifetime, no UI to place)
+        │                                        │
+        ▼                                        ▼
+BreachableDoor.RequiredKeycardId          ObjectiveMarkerActor.RequiredKeycardId
+   = "Keycard_Lab" → E unlocks               = "Keycard_Lab" → objective completes</div>
+<div class="tip">Keep keycard ids as a naming convention (<code>Keycard_&lt;Area&gt;</code>) and spell them identically in the container, the door, and any objective. A typo fails silently.</div>
+<h3>Enemy keycard carriers — "kill the officer with the keycard"</h3>
+<p>Instead of (or as well as) a container, any placed enemy can carry the keycard:</p>
+<ol style="margin:6px 0 8px 20px;padding:0">
+<li>Select the enemy → Details → <b>Enemy|Loot</b> → <code>DeathLoot</code> → add an entry: Type = <b>Keycard</b>, <code>KeycardId</code> = <code>Keycard_Lab</code> (ammo entries work too).</li>
+<li>On death it drops a guaranteed physical pickup (<span class="place">BP_LootPickup</span> <span class="links">(/Game/Core/Blueprints/World)</span>) beside the corpse — spawn logic picks a clear spot so the ragdoll can't bury it, and ground-snaps on stairs/ledges.</li>
+<li>Collect with <b>E</b> or ping it for the companion — same grant path as a container, so the matching locked door and any objective with that <code>RequiredKeycardId</code> react identically.</li>
+</ol>
+<p class="links">The pickup never despawns (mission-critical), and its mesh is currently a placeholder rifle mag on BP_LootPickup — swap when a proper keycard mesh is imported. <code>LootPickupClass</code> is already assigned on all 8 enemy BPs; nothing to set per level beyond the DeathLoot entry.</p>
+</div>
+
+<h2 id="objectives">5 · Objectives + waypoint markers <span class="pill done">shipped</span></h2>
+<div class="card">
+<h3>Place: <span class="place">ObjectiveMarkerActor</span></h3>
+<div class="overflow"><table>
+<tr><th>Property</th><th>Default</th><th>What it does</th></tr>
+<tr><td><code>ObjectiveId</code></td><td>actor name</td><td>Unique id (only matters if scripting against it)</td></tr>
+<tr><td><code>Label</code></td><td>—</td><td>Text shown on the HUD marker</td></tr>
+<tr><td><code>bActivateOnBeginPlay</code></td><td>true</td><td>Off = activate later from Level BP (for chained objectives)</td></tr>
+<tr><td><code>CompletionRadius</code></td><td>0 (off)</td><td>Completes when the player enters this radius ("go here" objectives)</td></tr>
+<tr><td><code>RequiredKeycardId</code></td><td>None</td><td>Completes when that keycard is looted ("find the keycard" objectives)</td></tr>
+<tr><td><code>bToastOnComplete</code></td><td>true</td><td>On-screen completion toast</td></tr>
+</table></div>
+<p>The HUD distance marker (edge-clamped icon + metres) renders automatically for every active objective — no per-objective UI work.</p>
+<p><b>Chaining:</b> place objective 2 with <code>bActivateOnBeginPlay</code> = false, then in the Level Blueprint bind objective 1's <code>OnObjectiveCompleted</code> → call <code>Activate</code> on objective 2. That gives you "reach the lab → find the keycard → extract" as three placed actors and two BP wires.</p>
+</div>
+
+<h2 id="takedowns">6 · Takedown pockets <span class="pill done">shipped</span></h2>
+<div class="card">
+<h3>Place: <span class="place">TakedownVolume</span></h3>
+<p>A plain box — scale it over each area where silent takedowns should be possible. No properties to configure. It does two things:</p>
+<p><b>1. Enables takedowns.</b> An enemy is ping-takedown-eligible only while <b>Unaware</b> AND standing inside a TakedownVolume. Enemies sharing one volume can be taken down as a synced pair (player takes one, companion the other). After pinging, confirm with the knife key (hand-to-hand) or shoot key (companion headshots; if you shoot and miss, the companion assist-headshots after ~1.5&nbsp;s). Suppressor logic is automatic from the equipped weapons — nothing level-side.</p>
+<p><b>2. Muffles awareness.</b> Enemies inside the volume ignore distant gunfire/footstep/squad stimuli (sprint footsteps and Loud events still wake them), so a takedown pocket stays quiet while a fight happens elsewhere.</p>
+<div class="tip">Place one volume per intended stealth pocket (a pair of guards at a doorway, a lone sentry on a balcony). Don't blanket the whole level — the muffle side-effect would deafen everyone.</div>
+</div>
+
+<h2 id="enemies">7 · Enemies + patrols <span class="pill done">shipped</span></h2>
+<div class="card">
+<h3>Place: archetype BPs</h3>
+<p>Drag the archetype Blueprint into the level — each already carries its DataAsset (stats, weapon, perception, behaviour subtree), mesh and animation setup: <span class="place">BP_Enemy_Grunt / Rusher / Heavy / Sniper / Officer / Grenadier / Shotgun / Pistol <span class="links">(/Game/Core/Enemies/Blueprints)</span></span></p>
+<h3>Per placed enemy (Details panel)</h3>
+<div class="overflow"><table>
+<tr><th>Property</th><th>Set it to</th></tr>
+<tr><td><code>SquadId</code></td><td>Same FName for enemies that should share sightings, flank together and focus-fire (e.g. <code>Squad_Lobby</code>). Leave None for loners</td></tr>
+<tr><td><code>PatrolRoute</code></td><td>A placed PatrolRoute actor for moving guards. Unset = static guard at spawn (or set <code>bOverrideGuardPost</code> + <code>GuardPostOverride</code> for an explicit post)</td></tr>
+<tr><td><code>bIsolatedEncounter</code></td><td><b>false</b> (the default) for real levels. True is a test-gym flag that stops the enemy waking the director</td></tr>
+<tr><td><code>DeathLoot</code></td><td>Optional loot this enemy is carrying (same entries as a container: ammo or keycard). On death it drops as a guaranteed physical pickup next to the corpse — player Interact or companion ping-loot collects it. Enables "kill the officer carrying the keycard" objectives: pair the <code>KeycardId</code> with a locked door and (optionally) an objective marker's <code>RequiredKeycardId</code></td></tr>
+</table></div>
+<p>Every enemy must stand on navmesh, not embedded in cover meshes or wall edges.</p>
+<h3>Place: <span class="place">PatrolRoute</span></h3>
+<p><code>Points</code> = an array of draggable 3D widgets (3+ points, all on navmesh). <code>bLoop</code> true = circuit, false = ping-pong. <code>WaitAtPointSeconds</code> (2) = pause at each point.</p>
+</div>
+
+<h2 id="director">8 · Enemy director + spawn zones <span class="pill done">shipped</span></h2>
+<div class="card">
+<p>The director (reinforcement pacing) is a world subsystem — always present, but it does <b>nothing</b> until the level feeds it spawn zones, and it only wakes once the fight goes Loud. Placed enemies handle stealth; the director handles sustained combat.</p>
+<h3>Place: <span class="place">EnemySpawnZone</span></h3>
+<p>Box volumes — the <b>only</b> source of reinforcement spawns. 3–5 per floor, in service rooms / stairwells / back corridors, 15–45&nbsp;m from expected fights, out of player sightlines, on navmesh. Spawns are rejected if visible to the player, outside the distance band, or off-navmesh.</p>
+<div class="overflow"><table>
+<tr><th>Property</th><th>What it does</th></tr>
+<tr><td><code>AreaTag</code></td><td>Organizational label</td></tr>
+<tr><td><code>ActivePhases</code></td><td>Restrict the zone to mission phases (empty = all)</td></tr>
+<tr><td><code>DirectorConfig</code></td><td>Assign the pacing DataAsset <span class="place">DA_DirectorConfig <span class="links">(/Game/Core/Enemies/AI/Data)</span></span> on at least one zone (first registered wins)</td></tr>
+</table></div>
+<div class="warn">A DirectorConfig phase with an empty <code>Compositions</code> list spawns <b>nothing</b> even with zones placed — and placed enemies count toward <code>MaxAlive</code>, so a floor dense with placed enemies can starve reinforcements. That's a tuning lever, not a bug.</div>
+<h3>Mission phases</h3>
+<p>Place <span class="place">BP_PhaseTrigger</span> <span class="links">(/Game/Core/Enemies/AI)</span> boxes at story beats — each advances the director to its configured phase when the player walks in (fire-once): <b>Infiltration</b> (approach) → <b>Objective</b> (the point of interest) → <b>Extraction</b> (the way out). Each phase has its own intensity ceiling / cadence / max-alive / composition in the DirectorConfig.</p>
+<h3>Optional: <span class="place">EnemyDirectorScopeVolume</span></h3>
+<p>One box around the whole playable building (full height, all floors). Without it the director considers the whole world — fine for a single-building level, needed once maps have out-of-play space.</p>
+</div>
+
+<h2 id="cover">9 · Cover system <span class="pill done">auto-generated</span></h2>
+<div class="card">
+<h3>Place: <span class="place">CoverSystem</span> <span class="links">(one per level — AICoverSystem plugin, via Place Actors search)</span></h3>
+<p>Cover is <b>generated automatically</b> from the navmesh and level geometry — every desk, crate, pillar, waist-wall and corner becomes usable cover for enemies AND the companion (crouch/stand height, peek sides and corner leans are derived from the geometry). One CoverSystem actor per level is the whole setup; generation runs when navigation builds and re-runs when it rebuilds.</p>
+<p><b>What this means for level design:</b> you don't author cover — you author geometry. Chest-high blockers, doorway frames and corners near expected fight spaces automatically become the AI's cover vocabulary. If a room feels like it has cover to you as a player, the AI sees it too.</p>
+<h3>Optional: <span class="place">ManualCoverPoint</span></h3>
+<p>Hand-placed single cover point, injected into the same generated pool — only for spots the generator misses or ignores (unusual meshes, props with odd collision). Not needed in normal dressing.</p>
+<div class="tip"><b>Checking coverage:</b> after building navmesh, the CoverSystem actor's debug drawing shows generated cover points. If a blocker isn't producing cover, check its collision blocks the navmesh (the object must carve/affect nav) and rebuild navigation.</div>
+<div class="warn"><b>Transitional:</b> two behaviours (sniper nesting, enemy fallback-to-cover) still read the old hand-placed cover-slot actors until the legacy system is deleted. If a level features snipers, drop a few <code>BP_CoverSlot_StandFire</code> <span class="links">(/Game/Core/Blueprints/AI/Companion/Cover)</span> at intended nest spots; otherwise ignore the old slot BPs entirely.</div>
+</div>
+
+<h2 id="ammo">10 · Ammo drops <span class="pill done">data-only</span></h2>
+<div class="card">
+<p>Nothing to place. Killed enemies roll a drop chance from the drop-table DataAsset <span class="place">DA_AmmoDropTable <span class="links">(/Game/Core/Data)</span></span> assigned once on the base enemy BP (default 40% chance, 15–45 rounds, per weapon category; pickups despawn after 60&nbsp;s). Pickups only grant if their category matches the player's weapon. Room ammo comes from LootContainers (§4). If drops don't appear in a new level, check the base enemy BP still has the drop table and per-category <code>PickupClass</code> assigned — it's shared config, not per-level.</p>
+</div>
+
+<h2 id="dbno">11 · Down-but-not-out / revive <span class="pill done">shipped</span></h2>
+<div class="card">
+<p>Nothing to place. When the player drops, the companion breaks off, paths in and revives (threat-gated: it clears nearby threats first, goes desperate as the bleed-out timer runs down). The only level requirement is the one you've already met: navmesh coverage so the companion can reach the player anywhere they can go — including crawl-reachable spots (the player can crawl while downed).</p>
+</div>
+
+<h2 id="numbers">12 · Reference numbers + debug</h2>
+<div class="card">
+<h3>Perception distance bands (default grunt — for spacing encounters)</h3>
+<div class="overflow"><table>
+<tr><th>Stimulus</th><th>Range</th></tr>
+<tr><td>Sight</td><td>25 m (loses sight at 30 m)</td></tr>
+<tr><td>Unsuppressed gunshot</td><td>30 m</td></tr>
+<tr><td>Hearing (general)</td><td>20 m</td></tr>
+<tr><td>Sprint footsteps</td><td>12 m (still heard inside takedown volumes)</td></tr>
+<tr><td>Suppressed gunshot</td><td>7 m</td></tr>
+<tr><td>Walk footsteps</td><td>4 m</td></tr>
+<tr><td>Auto-confirm (can't hide)</td><td>3.5 m</td></tr>
+<tr><td>Crouch movement</td><td>1.5 m</td></tr>
+<tr><td>Takedown reach</td><td>1.6 m, rear 120°</td></tr>
+<tr><td>Preferred engage band</td><td>6–18 m</td></tr>
+</table></div>
+<h3>Debug commands (PIE console)</h3>
+<div class="overflow"><table>
+<tr><th>Command</th><th>Shows</th></tr>
+<tr><td><b>'</b> (apostrophe)</td><td>Gameplay Debugger — AI state, perception, BT</td></tr>
+<tr><td><code>enemy.DetectionLog 1</code></td><td>Per-enemy detection reasoning ("why did it see me")</td></tr>
+<tr><td><code>weapon.PlayerTraceDebug 1</code></td><td>Player damage traces</td></tr>
+<tr><td><code>slomo 0.25</code> / <b>F8</b></td><td>Slow-mo / detach fly-cam</td></tr>
+<tr><td><b>P</b> (editor viewport)</td><td>Navmesh coverage overlay</td></tr>
+</table></div>
+<h3>Not in this guide (not built yet)</h3>
+<p class="links">Extraction person escort · weapon loadout/attachment system · minimap + main menu · final HUD art. These land later; the guide will grow with them.</p>
+</div>
+
+</div>
+</body>
+</html>

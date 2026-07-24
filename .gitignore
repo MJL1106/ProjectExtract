@@ -62,11 +62,14 @@ Extraction/Config/DefaultAgentIntegrationKit.ini
 
 # ----------------------------------------------------------------------------
 # Third-party plugins
-# NeoStackAI / AgentIntegrationKit_backup stay local (untracked).
-# VibeUE is vendored — its own nested .gitignore excludes Binaries/Intermediate.
+# NeoStackAI + VibeUE are vendored (source only — Binaries/Intermediate rebuild).
+# AgentIntegrationKit_backup stays local (untracked backup).
 # ----------------------------------------------------------------------------
 Extraction/Plugins/*
 !Extraction/Plugins/VibeUE
+!Extraction/Plugins/NeoStackAI
+Extraction/Plugins/NeoStackAI/Binaries/
+Extraction/Plugins/NeoStackAI/Intermediate/
 # Added by code-review-graph
 .code-review-graph/
 
@@ -80,10 +83,6 @@ build_*.log
 # ----------------------------------------------------------------------------
 Extraction/Content/ProceduralFPSKIT/Demo/Lyra_Content/Effects/Textures/Flipbooks/T_SmokeSwirl_3_Flipbook_CHANNELPACK.uasset
 /Extraction/SSs
-/agent_docs/*
-# Exceptions: the live roadmap checklist (auto-updated by the post-commit hook,
-# see .githooks/roadmap-update.sh) and the full brainstorm/timeline doc are
-# tracked so they live on the repo.
-!/agent_docs/project_roadmap.md
-!/agent_docs/project_brainstorm_timeline.md
+# agent_docs is tracked for cross-machine parity; only IDE junk stays local
+/agent_docs/.idea/
 Extraction/Content/CoverAnimsetPro/SourceFiles/
