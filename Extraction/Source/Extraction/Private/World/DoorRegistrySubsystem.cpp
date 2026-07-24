@@ -33,6 +33,24 @@ bool UDoorRegistrySubsystem::ClaimOpenSoundPlay(const FVector& Location)
 	return true;
 }
 
+bool UDoorRegistrySubsystem::AnyClosedDoorBlocksSegment(const FVector& From, const FVector& To) const
+{
+	// Prune radius: a door whose portal centre is farther from the segment midpoint than half the
+	// segment length + the widest plausible doorway half-span can't be crossed by it.
+	constexpr float DoorSpanSlack = 400.f;
+	const FVector Mid = (From + To) * 0.5f;
+	const float PruneRadiusSq = FMath::Square(FVector::Dist(From, To) * 0.5f + DoorSpanSlack);
+
+	for (const TWeakObjectPtr<ADoorBase>& Entry : Doors)
+	{
+		const ADoorBase* Door = Entry.Get();
+		if (!Door || Door->IsOpenForAcoustics()) continue;
+		if (FVector::DistSquared(Mid, Door->GetAcousticPortalPoint()) > PruneRadiusSq) continue;
+		if (Door->DoesSegmentCrossDoorway(From, To)) return true;
+	}
+	return false;
+}
+
 void UDoorRegistrySubsystem::CollectPortalCandidates(const FVector& A, const FVector& B, int32 MaxCount, TArray<ADoorBase*>& OutDoors) const
 {
 	struct FScored

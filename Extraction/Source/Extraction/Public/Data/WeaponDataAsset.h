@@ -161,6 +161,29 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
 	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> HandguardAttachments;
 
+	/** Per-slot attachment COMPATIBILITY: the kit enum bytes this weapon accepts in each slot.
+	 *  Curated per gun — world attachment pickups refuse any option not listed for the held
+	 *  weapon. Empty list = the weapon lacks that slot entirely. Separate from the *Attachments
+	 *  stat arrays above (those map byte -> gameplay modifiers; null there means cosmetic-only,
+	 *  not unsupported). Byte 0 (empty/ironsight) never needs listing — pickups never carry it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedSightOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedMuzzleOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedLaserOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedGripOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedHandguardOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedBarrelOptions;
+
 	// ---- Ammo ----
 
 	/** Shots per magazine */

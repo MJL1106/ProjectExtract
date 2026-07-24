@@ -72,6 +72,12 @@ public:
 	 *  on a door the companion cannot open would shove it against the closed leaf until timeout. */
 	bool CanAutoOpenForAI() const { return bAutoOpenForAI; }
 
+	/** True when the 2D segment A->B crosses this door's plane within the doorway span on this
+	 *  floor. Pure math on the closed-bounds snapshot — no traces. Used by the cover pickers'
+	 *  closed-door reject (a cover candidate behind a closed door is never a valid pick) and by
+	 *  IsPawnPathingThroughDoorway's per-path-segment loop. */
+	bool DoesSegmentCrossDoorway(const FVector& A, const FVector& B) const;
+
 protected:
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;

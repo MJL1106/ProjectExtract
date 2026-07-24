@@ -70,6 +70,15 @@ public:
 
 	const UCompanionTuningDataAsset* GetTuning() const { return Tuning; }
 
+	/** Live-fight signal, published by BTService_UpdateCompanionState each service tick while any
+	 *  alerted enemy is known near the party (no companion eye-line required — the player-threat
+	 *  channel sees through walls). Lets follow-path systems act fight-aware when the companion
+	 *  itself can't see the fight (trailing extractee behind a wall). */
+	void NoteAlertedThreat(const FVector& Location);
+
+	/** True when the alerted-threat signal is fresher than MaxAge; outputs its location. */
+	bool GetRecentAlertedThreat(float MaxAge, FVector& OutLocation) const;
+
 	/** Hearing stimulus MaxAge (seconds). Stealth-break gates its heard-enemy signal past this so
 	 *  stimuli from before a fresh Stealth order can't break it. */
 	float GetHearingSenseMaxAge() const;
@@ -110,6 +119,10 @@ private:
 	TObjectPtr<UAISenseConfig_Hearing> HearingConfig;
 
 	TWeakObjectPtr<APawn> CachedPlayerCharacter;
+
+	// Live-fight signal (see NoteAlertedThreat). Time is world seconds; negative = never.
+	FVector LastAlertedThreatLocation = FVector::ZeroVector;
+	float LastAlertedThreatTime = -1e9f;
 
 	// Traversal mirror coupling
 	TWeakObjectPtr<UTraversalComponent> PlayerTraversalComp;

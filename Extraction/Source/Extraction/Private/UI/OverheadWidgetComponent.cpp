@@ -1,6 +1,7 @@
 // Screen-space overhead widget component with wall occlusion and distance scaling.
 
 #include "UI/OverheadWidgetComponent.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Blueprint/UserWidget.h"
 #include "Kismet/GameplayStatics.h"
 #include "Engine/World.h"
@@ -29,6 +30,8 @@ UOverheadWidgetComponent::UOverheadWidgetComponent()
 
 void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_UI_OverheadWidgetTick);
+
 	Super::TickComponent(DeltaTime, TickType, ThisTickFunction);
 
 	UUserWidget* UserWidget = GetUserWidgetObject();
@@ -45,6 +48,8 @@ void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	TimeSinceOcclusionTrace += DeltaTime;
 	if (bOcclusionEnabled && TimeSinceOcclusionTrace >= OcclusionTraceInterval)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_UI_OverheadWidgetOcclusionTrace);
+
 		TimeSinceOcclusionTrace = 0.f;
 
 		FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(OverheadWidgetOcclusion), false);

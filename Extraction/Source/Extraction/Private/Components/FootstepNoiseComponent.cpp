@@ -1,6 +1,7 @@
 // UFootstepNoiseComponent — distance-accumulating AI-noise emitter + surface-aware footstep audio.
 
 #include "FootstepNoiseComponent.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Audio/GameAudioSubsystem.h"
 #include "Audio/SurfaceAudioBank.h"
 #include "Character/ExtractionPlayerInterface.h"
@@ -63,6 +64,8 @@ void UFootstepNoiseComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void UFootstepNoiseComponent::TickNoise()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Audio_FootstepPolling);
+
 	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
 	if (!IsValid(OwnerChar)) return;
 

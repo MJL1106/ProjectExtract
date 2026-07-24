@@ -1,6 +1,7 @@
 // BTService_EnemyCombat — validates target liveness; writes HasLineOfSight, TargetInRange.
 
 #include "BTService_EnemyCombat.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "AI/AITargetingStatics.h"
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
@@ -19,6 +20,8 @@ UBTService_EnemyCombat::UBTService_EnemyCombat()
 
 void UBTService_EnemyCombat::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_EnemyCombatService);
+
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	if (!BB) return;
 

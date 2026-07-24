@@ -3,6 +3,7 @@
 // P3 AICS migration: cover source changed from AAICoverSlot line-segment slots to FCoverHandle/FCoverData points.
 
 #include "BTService_CoverSwitchMonitor.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "AI/AITargetingStatics.h"
 #include "AI/BlackboardKeyType_Cover.h"
 #include "AI/CompanionCoverStatics.h"
@@ -99,6 +100,8 @@ void UBTService_CoverSwitchMonitor::InitializeFromAsset(UBehaviorTree& Asset)
 
 void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionCoverSwitchMonitor);
+
 	Super::TickNode(OwnerComp, NodeMemory, DeltaSeconds);
 
 	FCoverSwitchMonitorMemory& Mem = *reinterpret_cast<FCoverSwitchMonitorMemory*>(NodeMemory);

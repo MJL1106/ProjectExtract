@@ -8,6 +8,7 @@ class ACompanionCharacter;
 class ACompanionRoute;
 class ADoorBase;
 class AEnemyCharacter;
+class AExtracteeCompanion;
 class AExtractionTargetActor;
 class ALevelCompletionLiftGate;
 class ALootContainer;
@@ -119,6 +120,12 @@ protected:
 	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Objective Flow|Extraction")
 	TObjectPtr<ALevelCompletionLiftGate> LiftGate;
 
+	/** The armed extraction VIP. When set: the Reach step targets it, its rescue interact starts
+	 *  the wave (set bExternalTriggerOnly on the placed ExtractionTarget), and checkpoint
+	 *  fast-forwards past the rescue arm it directly. Null = legacy placeholder behavior. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Objective Flow|Extraction")
+	TObjectPtr<AExtracteeCompanion> Extractee;
+
 	/** Steps that count as checkpoints — advancing INTO one grants the companion a full heal,
 	 *  applied once it is out of combat (immediately if already calm), and records the step to
 	 *  the GameInstance so a level restart resumes here instead of at the start. */
@@ -205,6 +212,15 @@ private:
 	void HandleLootCompleted(ALootContainer* Container, AActor* Looter);
 	UFUNCTION()
 	void HandleSupplyDestroyed(AActor* DestroyedActor);
+	UFUNCTION()
+	void HandleExtracteeRescued();
+
+	/** Starts (or retries) the extraction wave after the one-shot rescue. StartWave can refuse
+	 *  (another wave active, bad config) and the rescue interact can't be repeated, so a refusal
+	 *  arms a short looping retry instead of soft-locking the flow. */
+	void TryStartExtractionWave();
+
+	FTimerHandle ExtractionWaveRetryHandle;
 	UFUNCTION()
 	void HandleExtractionStarted();
 	UFUNCTION()

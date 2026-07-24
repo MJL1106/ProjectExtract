@@ -902,8 +902,7 @@ void AEnemyCharacter::HandleDeath()
 		if (ACompanionCharacter* CompanionKiller = Cast<ACompanionCharacter>(Killer->GetPawn()))
 			CompanionKiller->Bark(ECompanionBarkType::TargetDown);
 		else if (Killer->IsPlayerController())
-			if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(
-					UGameplayStatics::GetActorOfClass(GetWorld(), ACompanionCharacter::StaticClass())))
+			if (ACompanionCharacter* Companion = ACompanionCharacter::GetPrimaryCompanion(GetWorld()))
 				Companion->Bark(ECompanionBarkType::ApprovePlayerKill);
 	}
 

@@ -1372,15 +1372,12 @@ void AExtractionPlayer::EnterDBNO()
 				BleedoutDuration, false);
 		}
 
-		// Both-DBNO check: if the companion is also downed, immediate mission fail
-		for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It)
+		// Squad-wipe check: fail only when NO companion can still pick the squad up (with the
+		// armed extractee in play, one downed ally plus a standing one is not a wipe).
+		if (!ACompanionCharacter::IsAnyCompanionReviveCapable(GetWorld(), nullptr))
 		{
-			if (It->GetIsDBNO())
-			{
-				if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
-					GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
-				break;
-			}
+			if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+				GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
 		}
 	}
 
@@ -2090,9 +2087,7 @@ ACompanionCharacter* AExtractionPlayer::ResolveDebugCompanion() const
 {
 	if (WiredCompanion.IsValid()) return WiredCompanion.Get();
 
-	for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It) return *It;
-
-	return nullptr;
+	return ACompanionCharacter::GetPrimaryCompanion(GetWorld());
 }
 
 void AExtractionPlayer::CompAim(bool bEnable)

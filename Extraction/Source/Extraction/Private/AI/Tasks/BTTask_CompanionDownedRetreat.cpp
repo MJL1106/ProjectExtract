@@ -7,6 +7,7 @@
 #include "CompanionTuningDataAsset.h"
 #include "CoverSystem.h"
 #include "CoverReservationSubsystem.h"
+#include "World/DoorRegistrySubsystem.h"
 #include "AIController.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -170,6 +171,7 @@ FVector UBTTask_CompanionDownedRetreat::PickRetreatDestination(ACompanionCharact
 
 	AAIController* Controller = Cast<AAIController>(Companion.GetController());
 	const UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
+	const UDoorRegistrySubsystem* DoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
 
 	TArray<AActor*, TInlineAllocator<8>> Threats;
 	CompanionCover::GatherExtraThreatActors(Controller, &Companion, /*FocusTarget*/ nullptr, MaxThreatsScored, Threats);
@@ -212,6 +214,10 @@ FVector UBTTask_CompanionDownedRetreat::PickRetreatDestination(ACompanionCharact
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
 		if (Occupant && Occupant != Controller) continue;
 		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller)) continue;
+
+		// Never crawl through a closed door — the downed companion can't hole up in another room
+		// (same rule as the EQS DoorCrossing filter).
+		if (IsValid(DoorRegistry) && DoorRegistry->AnyClosedDoorBlocksSegment(PawnLoc, Candidate.Data.Location)) continue;
 
 		// Shielding first (fewest threats with a clear body-shield line), distance-to-player second
 		// — an exposed near spot is worse than a shielded far one, but among equal shielding the

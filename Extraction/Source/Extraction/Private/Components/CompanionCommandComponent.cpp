@@ -52,8 +52,8 @@ ACompanionCharacter* UCompanionCommandComponent::ResolveCompanion()
 {
 	if (CachedCompanion.IsValid()) return CachedCompanion.Get();
 
-	AActor* Found = UGameplayStatics::GetActorOfClass(GetWorld(), ACompanionCharacter::StaticClass());
-	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Found);
+	// Primary only -- the armed extractee is a companion too, but takes no player commands.
+	ACompanionCharacter* Companion = ACompanionCharacter::GetPrimaryCompanion(GetWorld());
 	if (IsValid(Companion))
 	{
 		CachedCompanion = Companion;

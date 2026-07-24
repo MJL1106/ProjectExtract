@@ -345,13 +345,7 @@ void AExtracteeCharacter::RefreshPartyRefs()
 		PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
 
 	if (!Companion.IsValid())
-	{
-		for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It)
-		{
-			Companion = *It;
-			break;
-		}
-	}
+		Companion = ACompanionCharacter::GetPrimaryCompanion(GetWorld());
 }
 
 void AExtracteeCharacter::UpdateCombatSignal()

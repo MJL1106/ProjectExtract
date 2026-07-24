@@ -893,6 +893,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0"))
 	float WatchThreatLingerSeconds = 6.f;
 
+	// Fight-aware follow: max age (seconds) of the controller's alerted-threat signal for a
+	// no-eye-line companion to act on it — watch stance toward the fight bearing while following,
+	// and follow-slot picks biased to slots with eye-line toward the threat. Covers the trailing
+	// extractee behind a wall who otherwise strolls through a live firefight. 0 disables both.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0"))
+	float FightSignalMaxAge = 4.f;
+
 	// Master kill-switch for ambient facing (path look-ahead while moving, attention-yaw while idle,
 	// idle scan glances). Off = the companion holds whatever yaw it last had out of combat, and
 	// watch-threat facing is the only out-of-combat facing source. Defaults off: the 2026-07-11

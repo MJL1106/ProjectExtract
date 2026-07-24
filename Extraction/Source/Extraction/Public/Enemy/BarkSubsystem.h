@@ -14,6 +14,8 @@
 class UBarkSetData;
 class UCompanionBarkSetData;
 class UAudioComponent;
+class USoundBase;
+class USoundAttenuation;
 struct FBarkDefinition;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogEnemyBark, Log, All);
@@ -32,6 +34,15 @@ public:
 	 *  dedups against an enemy GrenadeOut. */
 	void RequestCompanionBark(const AActor* Speaker, const UCompanionBarkSetData* BarkSet, ECompanionBarkType Type, FName Context = NAME_None);
 
+	/** Scripted one-off line (dialogue trigger volumes): claims the voice channel at telegraph
+	 *  priority — interrupts live chatter, skips dedup/cooldown bookkeeping (the trigger owns its
+	 *  own once-only state). */
+	void RequestScriptedLine(const AActor* Speaker, USoundBase* Sound, USoundAttenuation* Attenuation, float VolumeMultiplier);
+
+	/** True while a scripted line is (estimated) still playing — trigger volumes check this so two
+	 *  boxes never interleave their exchanges. */
+	bool IsScriptedLineActive() const;
+
 private:
 	/** Same bark type from any speaker within this window is dropped (no five-voice "Contact!" stacks). */
 	static constexpr float GlobalTypeDedupWindow = 1.5f;
@@ -43,7 +54,7 @@ private:
 	static constexpr float PriorityPostVoiceGapSeconds = 0.25f;
 
 	/** Ambient/banter (priority 0) needs this much silence since the last line — lulls only. */
-	static constexpr float AmbientLullSeconds = 10.f;
+	static constexpr float AmbientLullSeconds = 6.f;
 
 	/** Fade applied to the active line when a priority telegraph interrupts it. */
 	static constexpr float InterruptFadeSeconds = 0.2f;
@@ -76,4 +87,11 @@ private:
 
 	/** World time the last voice line finished (or fired, for lines with no audio yet). */
 	float LastVoiceEndTime = -1000.f;
+
+	/** World time the active scripted line is expected to end; 0 = none. Estimated from the sound's
+	 *  duration at request time — durations beyond the cap (looping/procedural) use the fallback. */
+	float ScriptedBusyUntilTime = 0.f;
+
+	static constexpr float MaxTrustedScriptedDuration = 60.f;
+	static constexpr float FallbackScriptedDuration = 4.f;
 };

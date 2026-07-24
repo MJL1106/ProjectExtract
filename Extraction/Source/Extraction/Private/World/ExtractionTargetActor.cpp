@@ -55,6 +55,17 @@ void AExtractionTargetActor::BeginPlay()
 	if (!MeshAsset || !MeshAsset->GetPhysicsAsset())
 		InteractionBox->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 
+	// Pure wave controller behind an extractee rescue: invisible, untouchable, no prompt.
+	if (bExternalTriggerOnly)
+	{
+		if (IsValid(SkeletalMesh))
+		{
+			SkeletalMesh->SetHiddenInGame(true);
+			SkeletalMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+		InteractionBox->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
+
 
 #if WITH_EDITOR
 	ValidateConfig();
@@ -131,7 +142,13 @@ void AExtractionTargetActor::OnRep_bAvailable()
 
 bool AExtractionTargetActor::CanWorldInteract_Implementation(AActor* /*Interactor*/) const
 {
-	return bAvailable && !bActivated && !bCompleted;
+	return !bExternalTriggerOnly && bAvailable && !bActivated && !bCompleted;
+}
+
+bool AExtractionTargetActor::BeginExtractionExternal()
+{
+	WorldInteract_Implementation(nullptr);
+	return bActivated || bCompleted;
 }
 
 void AExtractionTargetActor::WorldInteract_Implementation(AActor* Interactor)
@@ -331,7 +348,7 @@ void AExtractionTargetActor::ValidateConfig() const
 	if (CompletionAction == EWaveCompletionAction::UnlockExit && !IsValid(LiftGateTarget))
 		UE_LOG(LogExtractionTarget, Warning, TEXT("%s: CompletionAction is UnlockExit but LiftGateTarget is null"), *GetName());
 
-	if (IsValid(InteractionBox) && !InteractionBox->GetCollisionEnabled())
+	if (!bExternalTriggerOnly && IsValid(InteractionBox) && !InteractionBox->GetCollisionEnabled())
 		UE_LOG(LogExtractionTarget, Warning, TEXT("%s: InteractionBox has no collision enabled"), *GetName());
 
 	if (IsValid(SkeletalMesh) && !SkeletalMesh->GetSkeletalMeshAsset())

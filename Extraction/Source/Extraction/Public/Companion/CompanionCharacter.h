@@ -17,6 +17,7 @@
 
 enum class ECompanionBarkType : uint8;
 class UCompanionBarkSetData;
+class USoundBase;
 class UHealthComponent;
 class UFootstepNoiseComponent;
 class USuppressionComponent;
@@ -70,6 +71,10 @@ public:
 	 *  anywhere, any frequency — the subsystem owns cooldowns and one-voice arbitration. Context
 	 *  filters tagged variants (e.g. an archetype or direction the line names). */
 	void Bark(ECompanionBarkType Type, FName Context = NAME_None) const;
+
+	/** Scripted one-off line (dialogue trigger volumes) — plays through the bark channel with this
+	 *  companion's voice attenuation/volume, interrupting live chatter. No type cooldowns. */
+	void SpeakScriptedLine(USoundBase* Sound) const;
 
 	// --- Weapon Interface ---
 
@@ -309,7 +314,23 @@ public:
 	ECompanionMode GetMode() const { return Mode; }
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Mode")
-	void SetMode(ECompanionMode NewMode);
+	virtual void SetMode(ECompanionMode NewMode);
+
+	// --- Second-companion support (armed extractee) ---
+
+	/** False on non-commandable allies (the armed extractee). Player command/story systems —
+	 *  pings, mode picker, routes, scripted trigger dialogue, kill-approval barks — must resolve
+	 *  the primary only; enemy perception and revive logic treat every companion alike. */
+	UFUNCTION(BlueprintPure, Category = "Companion")
+	bool IsPrimaryCompanion() const { return bIsPrimaryCompanion; }
+
+	/** The player's commandable companion, or null. */
+	static ACompanionCharacter* GetPrimaryCompanion(UWorld* World);
+
+	/** True when any companion other than Exclude could still pick the squad up: possessed
+	 *  (a captive extractee has no controller yet), not DBNO, not dead. Both squad-wipe fail
+	 *  checks key off this instead of "the other one is down". */
+	static bool IsAnyCompanionReviveCapable(UWorld* World, const ACompanionCharacter* Exclude);
 
 	/** Stealth-broken = the fight is on (player spotted); stealth rules are suspended until the
 	 *  BT service re-pins. Server-only transient state, set by BTService_UpdateCompanionState. */
@@ -480,6 +501,12 @@ protected:
 
 	UFUNCTION()
 	void OnRep_Mode();
+
+	/** See IsPrimaryCompanion. Cleared in the armed-extractee subclass constructor. */
+	bool bIsPrimaryCompanion = true;
+
+	/** Fail-screen reason when this companion bleeds out — the extractee overrides with its own text. */
+	virtual FText GetBleedoutFailReason() const;
 
 	/** Not replicated — server-side behaviour gate; clients only need Mode for UI. */
 	bool bStealthBroken = false;

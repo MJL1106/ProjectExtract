@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WeaponBase.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "AI/CompanionDiag.h"
 #include "WeaponDataAsset.h"
 #include "Character/ExtractionPlayerInterface.h"
@@ -756,6 +757,8 @@ void AWeaponBase::RebuildSuppressionTargets()
 
 void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& TraceEnd, AActor* HitActor)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Weapon_NearMissReporting);
+
 	if (NearMissRadius <= 0.f) return;
 
 	const UWorld* World = GetWorld();
@@ -875,6 +878,8 @@ void AWeaponBase::FireCosmetic(const FVector& AimEndPoint)
 
 void AWeaponBase::PerformHitscan()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Weapon_Hitscan);
+
 	if (!IsValid(WeaponData)) return;
 
 	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());

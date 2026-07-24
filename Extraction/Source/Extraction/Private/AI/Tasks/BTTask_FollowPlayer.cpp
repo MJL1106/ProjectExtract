@@ -9,8 +9,10 @@
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "EnvironmentQuery/EnvQueryTypes.h"
+#include "Components/CapsuleComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "WeaponBase.h"
 
 UBTTask_FollowPlayer::UBTTask_FollowPlayer()
 {
@@ -50,6 +52,8 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	bHasEqsTarget = false;
 	TimeSinceLastEqs = EqsQueryInterval; // allow an immediate query on first tick
 	EqsTarget = FVector::ZeroVector;
+	bFightBiasQuery = false;
+	FightBiasThreatLocation = FVector::ZeroVector;
 
 	// Reset the floor-transit detector — a re-entry mid-descent re-arms from the first sample.
 	bHasPlayerZSample = false;
@@ -314,8 +318,13 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	{
 		bEqsQueryInProgress = true;
 		TimeSinceLastEqs = 0.f;
+
+		// Fight-aware follow: with a fresh live-fight signal, request every passing slot and let
+		// the callback prefer one with eye-line toward the threat. SingleResult otherwise.
+		bFightBiasQuery = Controller->GetRecentAlertedThreat(T->FightSignalMaxAge, FightBiasThreatLocation);
+
 		FEnvQueryRequest QueryRequest(FollowSlotQuery, Companion);
-		QueryRequest.Execute(EEnvQueryRunMode::SingleResult,
+		QueryRequest.Execute(bFightBiasQuery ? EEnvQueryRunMode::AllMatching : EEnvQueryRunMode::SingleResult,
 			FQueryFinishedSignature::CreateUObject(this, &UBTTask_FollowPlayer::OnFollowQueryFinished));
 	}
 
@@ -458,6 +467,37 @@ void UBTTask_FollowPlayer::OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Res
 	{
 		EqsTarget = Result->GetItemAsLocation(0);
 		bHasEqsTarget = true;
+
+		// Fight-aware follow: prefer the best-scored slot with eye-line toward the live-fight
+		// bearing (items arrive best-first in AllMatching). A trace that reaches the threat — or
+		// stops on any pawn short of it (an enemy body IS the fight) — counts as eye-line. Falls
+		// back to the top-scored slot when every traced candidate is walled off.
+		if (bFightBiasQuery)
+		{
+			ACompanionCharacter* Companion = CachedCompanion.Get();
+			UWorld* World = Companion->GetWorld();
+			const UCapsuleComponent* Capsule = Companion->GetCapsuleComponent();
+			const float SlotEyeOffset = (Capsule ? Capsule->GetScaledCapsuleHalfHeight() : 90.f)
+				+ Companion->BaseEyeHeight;
+
+			const int32 TraceCount = FMath::Min(Result->Items.Num(), MaxFightBiasSlotTraces);
+			for (int32 i = 0; i < TraceCount; ++i)
+			{
+				const FVector Slot = Result->GetItemAsLocation(i);
+				FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionFollowFightBias), true);
+				Params.AddIgnoredActor(Companion);
+				Params.AddIgnoredActor(Companion->GetCurrentWeapon());
+				FHitResult Hit;
+				const bool bBlocked = World->LineTraceSingleByChannel(Hit,
+					Slot + FVector(0.f, 0.f, SlotEyeOffset), FightBiasThreatLocation,
+					ECC_Visibility, Params);
+				if (!bBlocked || Cast<APawn>(Hit.GetActor()))
+				{
+					EqsTarget = Slot;
+					break;
+				}
+			}
+		}
 	}
 	else
 	{
@@ -476,6 +516,8 @@ void UBTTask_FollowPlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uin
 	bEqsQueryInProgress = false;
 	bHasEqsTarget = false;
 	EqsTarget = FVector::ZeroVector;
+	bFightBiasQuery = false;
+	FightBiasThreatLocation = FVector::ZeroVector;
 	CachedOwnerComp = nullptr;
 	CachedController.Reset();
 	CachedCompanion.Reset();

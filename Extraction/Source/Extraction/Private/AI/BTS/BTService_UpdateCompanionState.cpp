@@ -1,6 +1,7 @@
 // BT service — ticks to update all companion blackboard keys (DBNO, combat target, etc).
 
 #include "BTService_UpdateCompanionState.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "AI/AITargetingStatics.h"
 #include "AI/CompanionDiag.h"
 #include "AI/CompanionSearchRoomPolicy.h"
@@ -120,6 +121,8 @@ void UBTService_UpdateCompanionState::InitializeFromAsset(UBehaviorTree& Asset)
 
 void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionStateService);
+
 	Super::TickNode(OwnerComp, NodeMemory, DeltaSeconds);
 
 	ACompanionAIController* Controller = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
@@ -227,7 +230,10 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 	// Find best target from perceived actors
 	TArray<AActor*> PerceivedActors;
-	Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), PerceivedActors);
+	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionPerceptionGather);
+		Perception->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), PerceivedActors);
+	}
 
 	// Two-tier selection: BestVisible = nearest candidate with a clear companion eye-line; BestAny =
 	// nearest candidate regardless of LoS. Choosing BestVisible when one exists stops the companion
@@ -344,6 +350,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		WatchCandidateEnemy = Enemy;
 	};
 
+	TRACE_CPUPROFILER_EVENT_MANUAL_START("Extraction_AI_CompanionPerceivedCandidateScan");
 	for (AActor* Actor : PerceivedActors)
 	{
 		if (!IsValid(Actor)) continue;
@@ -381,11 +388,14 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 		ConsiderCandidate(Actor, DistSq);
 	}
+	TRACE_CPUPROFILER_EVENT_MANUAL_END();
 
 	// --- Proximity 360° awareness: detect enemies in any direction at close range ---
 	// Supplements the sight cone (180° forward). Runs at the same 0.25s service cadence; one
 	// small-radius sphere overlap per tick is negligible cost.
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionProximityScan);
+
 		const float ProxRadius = RangeTuning ? RangeTuning->ProximityAwarenessRadius : 700.f;
 		if (ProxRadius > 0.f)
 		{
@@ -449,6 +459,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 	// Player-centered threat awareness: ready on enemies pressuring the player, but only target them with companion LoS.
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionPlayerThreatScan);
+
 		int32 PlayerFocusedCount = 0;
 		const float PlayerThreatRadius = RangeTuning ? RangeTuning->PlayerThreatAwarenessRadius : 3500.f;
 		if (IsValid(PlayerPawn) && PlayerThreatRadius > 0.f)
@@ -509,6 +521,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	// wall-occluded nearest E1 every hunker tick, then swapped back on the next peek window — the target
 	// oscillated at peek cadence, dragging aim / focus / arc gates / the switch monitor with it.
 	// Only fall back to BestAny when there is no valid existing target to preserve.
+	TRACE_CPUPROFILER_EVENT_MANUAL_START("Extraction_AI_CompanionTargetResolution");
 	AActor* BestTarget;
 	float BestDistSq;
 	bool bBodyChargerStealGranted = false;
@@ -617,6 +630,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	// flanker override above), so an overridden steal can't burn the window.
 	if (bBodyChargerStealGranted && BestTarget == BestVisible)
 		LastBodyChargerStealTime = Companion->GetWorld()->GetTimeSeconds();
+	TRACE_CPUPROFILER_EVENT_MANUAL_END();
 
 	// --- Stealth mode: event-driven break + auto-target suppression ---
 	// Break = a combat EVENT stamped after the stealth pin time (the moment this stealth stint
@@ -644,6 +658,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	bool bLiveFightSignal = false;     // re-pin hold: is a fight plausibly still on right now?
 	if (Mode == ECompanionMode::Stealth)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionStealthChecks);
+
 		const float StealthNow = Companion->GetWorld()->GetTimeSeconds();
 
 		float DirectorCombatTime = -1e9f;
@@ -720,6 +736,13 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		}
 	}
 
+	// Publish the live-fight signal: consumed by the watch-tier fallback below and the follow
+	// task's slot bias (fight-aware follow). Refreshed every service tick while any alerted enemy
+	// is known near the party, so consumers treat freshness as the hold. Deliberately after the
+	// stealth gate — unbroken stealth zeroes bHasAlertedThreat and must not go fight-postured.
+	if (bHasAlertedThreat)
+		Controller->NoteAlertedThreat(AlertedThreatLocation);
+
 	// Fix 4b: a fresh target identity gets a fresh grace window. Without this reset, an occluded new pick
 	// inherits OpenLosBlockedTime accrued against the previous target and can be cleared instantly (or far
 	// too early) on its first blocked tick. PrevCombatTarget holds last tick's committed pick.
@@ -732,6 +755,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	// Final LoS filter for the selected combat target.
 	if (BestTarget)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionFinalTargetLOS);
+
 		FCollisionQueryParams LosParams(SCENE_QUERY_STAT(CompanionServiceLoS), true);
 		LosParams.AddIgnoredActor(Companion);
 		LosParams.AddIgnoredActor(Companion->GetCurrentWeapon());
@@ -901,6 +926,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 		}
 	}
+
+	TRACE_CPUPROFILER_EVENT_MANUAL_START("Extraction_AI_CompanionPostureAndFacing");
 
 	// --- Posture transitions (server-side; SetPosture gates on HasAuthority) ---
 	const ECompanionPosture CurrentPosture = Companion->GetPosture();
@@ -1198,16 +1225,15 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	{
 		if (const UWorld* AmbientWorld = Companion->GetWorld())
 		{
-			constexpr float AmbientAttemptInterval = 45.f;
 			const float NowSeconds = AmbientWorld->GetTimeSeconds();
 			if (NextAmbientBarkTime < 0.f)
 			{
 				// First tick: push the first attempt out a full interval — no chatter on spawn.
-				NextAmbientBarkTime = NowSeconds + AmbientAttemptInterval;
+				NextAmbientBarkTime = NowSeconds + AmbientAttemptIntervalSeconds;
 			}
 			else if (NowSeconds >= NextAmbientBarkTime)
 			{
-				NextAmbientBarkTime = NowSeconds + AmbientAttemptInterval;
+				NextAmbientBarkTime = NowSeconds + AmbientAttemptIntervalSeconds;
 				const bool bPlayerMoving = IsValid(PlayerPawn)
 					&& PlayerPawn->GetVelocity().SizeSquared2D() > FMath::Square(150.f);
 				Companion->Bark(bPlayerMoving ? ECompanionBarkType::Following : ECompanionBarkType::IdleAmbient);
@@ -1242,6 +1268,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			(int32)Companion->IsTakedownMontagePlaying(), (int32)bLoweredOnTargetLoss,
 			*GetNameSafe(Controller->GetFocusActor()), *Controller->GetFocalPoint().ToCompactString());
 	}
+	TRACE_CPUPROFILER_EVENT_MANUAL_END();
 
 	// --- Revive window computation (threat-gated revive) ---
 	if (ReviveWindowOpenKey.SelectedKeyName.IsNone() && !bLoggedReviveKeyResolveFail)
@@ -1253,6 +1280,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	}
 	if (bPlayerDBNO && IsValid(PlayerPawn))
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionReviveWindow);
+
 		bool bReviveWindowOpen = false;
 
 		// Latch: once the companion is mid-revive, hold the key true so the BT hold is uninterruptible.
@@ -1408,6 +1437,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		bLastReviveWindowOpen = false;
 		Companion->SetRescueCommitted(false);
 	}
+
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionScoringWeights);
 
 	// --- Posture-driven scoring weights + posture mirror to BB ---
 	const ECompanionPosture SettledPosture = Companion->GetPosture();
@@ -1672,9 +1703,13 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 		// branches own facing inside the posture chain; the back-walk this hand-off exists for is
 		// the route/command/traversal approaches only.
 		const FVector CurrentFocal = Controller.GetFocalPointForPriority(EAIFocusPriority::Gameplay);
+		// bWatchStanceApplied covers the fight-signal fallback watch, which deliberately keeps no
+		// linger (freshness is its hold, so linger is always 0 on that path) — without it a
+		// fallback-watch focal survives into a route/command approach and back-walks it.
 		const bool bFocalIsOurs = !bHasTarget && !bReadyOnlyThreat
 			&& ((!LastAmbientFocalPoint.IsZero() && CurrentFocal.Equals(LastAmbientFocalPoint, 1.f))
-				|| (WatchThreatLingerRemaining > 0.f && CurrentFocal.Equals(WatchThreatLocation, 1.f)));
+				|| ((WatchThreatLingerRemaining > 0.f || bWatchStanceApplied)
+					&& CurrentFocal.Equals(WatchThreatLocation, 1.f)));
 		if (bFocalIsOurs)
 			Controller.ClearFocus(EAIFocusPriority::Gameplay);
 
@@ -1698,7 +1733,7 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 	}
 
 	// Tier 1 (F3): watch the nearest visible/lingering threat.
-	if (ComputeWatchThreat(Companion, WatchCandidateEnemy, Tuning, DeltaSeconds))
+	if (ComputeWatchThreat(Controller, Companion, WatchCandidateEnemy, Tuning, DeltaSeconds))
 	{
 		ApplyWatchFacing(Controller, Companion);
 		return;
@@ -1726,8 +1761,8 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 }
 
 bool UBTService_UpdateCompanionState::ComputeWatchThreat(
-	const ACompanionCharacter& Companion, const AEnemyCharacter* Candidate,
-	const UCompanionTuningDataAsset* Tuning, float DeltaSeconds)
+	const ACompanionAIController& Controller, const ACompanionCharacter& Companion,
+	const AEnemyCharacter* Candidate, const UCompanionTuningDataAsset* Tuning, float DeltaSeconds)
 {
 	const float LingerSeconds = Tuning ? Tuning->WatchThreatLingerSeconds : 6.f;
 
@@ -1762,11 +1797,27 @@ bool UBTService_UpdateCompanionState::ComputeWatchThreat(
 		if (!Watched || (WatchedHealth && WatchedHealth->IsDead()))
 		{
 			WatchThreatLingerRemaining = 0.f;
-			return false;
 		}
+		else
+		{
+			WatchThreatLingerRemaining = FMath::Max(0.f, WatchThreatLingerRemaining - DeltaSeconds);
+			if (WatchThreatLingerRemaining > 0.f)
+				return true;
+		}
+	}
 
-		WatchThreatLingerRemaining = FMath::Max(0.f, WatchThreatLingerRemaining - DeltaSeconds);
-		return WatchThreatLingerRemaining > 0.f;
+	// Fight-aware follow fallback: a live fight is on near the party but no enemy is in eye-line
+	// (and no linger memory holds) — watch the alerted-threat bearing published this service tick.
+	// The signal refreshes every tick while the fight is live, so freshness IS the hold; no linger
+	// bookkeeping. WatchedEnemy stays null: there is no actor to track, only a bearing. This is
+	// what stops a trailing companion (the extractee behind a wall) strolling through a firefight.
+	const float SignalMaxAge = Tuning ? Tuning->FightSignalMaxAge : 4.f;
+	FVector AlertedLocation;
+	if (Controller.GetRecentAlertedThreat(SignalMaxAge, AlertedLocation))
+	{
+		WatchedEnemy = nullptr;
+		WatchThreatLocation = AlertedLocation;
+		return true;
 	}
 
 	return false;
@@ -1787,8 +1838,9 @@ void UBTService_UpdateCompanionState::ApplyWatchFacing(ACompanionAIController& C
 	bWatchStanceStealth = bStealthNow;
 
 	// Fresh stealth watch = hostile spotted while sneaking — whisper it once per watch entry
-	// (a mode flip mid-watch re-applies stance but is not a new sighting).
-	if (bFreshWatch && bStealthNow)
+	// (a mode flip mid-watch re-applies stance but is not a new sighting). Fallback watches
+	// (WatchedEnemy null — fight-signal bearing only) never bark: nothing was actually spotted.
+	if (bFreshWatch && bStealthNow && WatchedEnemy.IsValid())
 		Companion.Bark(ECompanionBarkType::StealthSpotEnemy);
 
 	if (bStealthNow)

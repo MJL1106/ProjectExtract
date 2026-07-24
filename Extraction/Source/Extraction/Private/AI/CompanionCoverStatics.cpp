@@ -10,6 +10,7 @@
 #include "CoverSystem.h"
 #include "CoverGeometryStatics.h"
 #include "CoverReservationSubsystem.h"
+#include "World/DoorRegistrySubsystem.h"
 #include "ExtractionTypes.h"
 #include "WeaponBase.h"
 #include "AIController.h"
@@ -245,6 +246,7 @@ bool NearestCoverLocation(UWorld* World, const FVector& Point, float Radius,
 	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(World);
 	if (!CoverSys) return false;
 	const UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
+	const UDoorRegistrySubsystem* DoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
 
 	TArray<FCover> Nearby;
 	Nearby.Reserve(16);
@@ -262,6 +264,10 @@ bool NearestCoverLocation(UWorld* World, const FVector& Point, float Radius,
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
 		if (Occupant && Occupant != Querier) continue;
 		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Querier)) continue;
+
+		// A duck spot behind a closed door is no duck spot either (same rule as the EQS
+		// DoorCrossing filter) — it would inflate the low-HP dash gate's availability.
+		if (IsValid(DoorRegistry) && DoorRegistry->AnyClosedDoorBlocksSegment(Point, Candidate.Data.Location)) continue;
 
 		if (BestSq < 0.f || DistSq < BestSq)
 		{

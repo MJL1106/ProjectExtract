@@ -57,12 +57,21 @@ void ADoorBase::PostInitializeComponents()
 	// non-leaf trim never blocks pawns at all: frame sill bars span the walkway, so once
 	// unwalkable they'd wall the doorway off instead of being stepped over. Runs post-init so
 	// BP-added meshes (e.g. BreachableDoor's Frame) are covered.
-	if (CVarDoorUnwalkable.GetValueOnGameThread() != 0)
+	const bool bUnwalkable = CVarDoorUnwalkable.GetValueOnGameThread() != 0;
+	TInlineComponentArray<UStaticMeshComponent*> Meshes(this);
+	for (UStaticMeshComponent* Mesh : Meshes)
 	{
-		TInlineComponentArray<UStaticMeshComponent*> Meshes(this);
-		for (UStaticMeshComponent* Mesh : Meshes)
+		if (!Mesh) continue;
+
+		// No door surface ever generates AI cover: DemoMap generates cover at BeginPlay while
+		// doors are closed, so a leaf that blocks the CoverGen trace bakes cover points that
+		// later swing open with the door — the companion ends up "taking cover" behind a door
+		// leaf. Same opt-out the NoCoverGen preset gives chairs. Unconditional (not part of the
+		// DoorUnwalkable A/B).
+		Mesh->SetCollisionResponseToChannel(ECC_GameTraceChannel1 /* CoverGen — DefaultEngine.ini */, ECR_Ignore);
+
+		if (bUnwalkable)
 		{
-			if (!Mesh) continue;
 			Mesh->SetWalkableSlopeOverride(FWalkableSlopeOverride(WalkableSlope_Unwalkable, 0.f));
 			if (!IsDoorLeafMesh(*Mesh))
 				Mesh->SetCollisionResponseToChannel(ECC_Pawn, ECR_Ignore);
@@ -192,6 +201,31 @@ void ADoorBase::TryAutoOpenFor(AActor* OtherActor)
 	Execute_Breach(this, OtherActor);
 }
 
+bool ADoorBase::DoesSegmentCrossDoorway(const FVector& A, const FVector& B) const
+{
+	FBox LocalBox(ForceInit);
+	if (!GetDoorLocalBounds(LocalBox)) return false; // no geometry — nothing to cross
+
+	const FVector Center = GetActorTransform().TransformPosition(LocalBox.GetCenter());
+	const FVector Extent = LocalBox.GetExtent();
+	const FVector Normal = (Extent.X <= Extent.Y) ? GetActorForwardVector() : GetActorRightVector();
+	const FVector Lateral = FVector::CrossProduct(FVector::UpVector, Normal).GetSafeNormal();
+
+	// Crossing must happen within the doorway's span (widest horizontal extent + capsule slack),
+	// and on this floor — a segment through the doorway directly above must not count.
+	const float LateralSpan = FMath::Max(Extent.X, Extent.Y) + GetBreacherCapsuleRadius(nullptr);
+	const float FloorTolerance = 300.f;
+
+	const float SideA = FVector::DotProduct(A - Center, Normal);
+	const float SideB = FVector::DotProduct(B - Center, Normal);
+	if (SideA * SideB > 0.f) return false; // segment stays on one side of the door plane
+
+	const float Denom = SideA - SideB;
+	const FVector Crossing = FMath::IsNearlyZero(Denom) ? A : FMath::Lerp(A, B, SideA / Denom);
+	return FMath::Abs(FVector::DotProduct(Crossing - Center, Lateral)) <= LateralSpan
+		&& FMath::Abs(Crossing.Z - Center.Z) <= FloorTolerance;
+}
+
 bool ADoorBase::IsPawnPathingThroughDoorway(const APawn* Pawn) const
 {
 	if (!IsValid(Pawn)) return false;
@@ -206,32 +240,11 @@ bool ADoorBase::IsPawnPathingThroughDoorway(const APawn* Pawn) const
 	FBox LocalBox(ForceInit);
 	if (!GetDoorLocalBounds(LocalBox)) return true; // no geometry to test against — keep the old behavior
 
-	const FVector Center = GetActorTransform().TransformPosition(LocalBox.GetCenter());
-	const FVector Extent = LocalBox.GetExtent();
-	const FVector Normal = (Extent.X <= Extent.Y) ? GetActorForwardVector() : GetActorRightVector();
-	const FVector Lateral = FVector::CrossProduct(FVector::UpVector, Normal).GetSafeNormal();
-
-	// Crossing must happen within the doorway's span (widest horizontal extent + capsule slack),
-	// and on this floor — a path through the doorway directly above must not count.
-	const float LateralSpan = FMath::Max(Extent.X, Extent.Y) + GetBreacherCapsuleRadius(Pawn);
-	const float FloorTolerance = 300.f;
-
 	const TArray<FNavPathPoint>& Points = Path->GetPathPoints();
 	for (int32 i = 0; i < Points.Num() - 1; ++i)
 	{
-		const FVector A = Points[i].Location;
-		const FVector B = Points[i + 1].Location;
-		const float SideA = FVector::DotProduct(A - Center, Normal);
-		const float SideB = FVector::DotProduct(B - Center, Normal);
-		if (SideA * SideB > 0.f) continue; // segment stays on one side of the door plane
-
-		const float Denom = SideA - SideB;
-		const FVector Crossing = FMath::IsNearlyZero(Denom) ? A : FMath::Lerp(A, B, SideA / Denom);
-		if (FMath::Abs(FVector::DotProduct(Crossing - Center, Lateral)) <= LateralSpan
-			&& FMath::Abs(Crossing.Z - Center.Z) <= FloorTolerance)
-		{
+		if (DoesSegmentCrossDoorway(Points[i].Location, Points[i + 1].Location))
 			return true;
-		}
 	}
 	return false;
 }

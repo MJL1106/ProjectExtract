@@ -18,6 +18,7 @@
 #include "CoverScoringStatics.h"
 #include "CoverReservationSubsystem.h"
 #include "CoverPoseComponent.h"
+#include "World/DoorRegistrySubsystem.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
@@ -290,6 +291,8 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 	if (DA->MinHostileCoverDistance > 0.f || DA->MinHostilePawnDistance > 0.f)
 		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, Controller, HostileAnchors);
 
+	const UDoorRegistrySubsystem* DoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
+
 	TArray<FScoredCover> Scored;
 	Scored.Reserve(Candidates.Num());
 
@@ -310,6 +313,10 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 		// Skip covers next to a hostile or a hostile's declared destination (claim collision)
 		if (UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location, HostileAnchors,
 			DA->MinHostileCoverDistance, DA->MinHostilePawnDistance))
+			continue;
+		// Skip covers behind a closed door (same rule as the EQS DoorCrossing filter) — a pick
+		// through a closed door retreats out of the fight space, auto-opening the door en route.
+		if (IsValid(DoorRegistry) && DoorRegistry->AnyClosedDoorBlocksSegment(PawnLoc, Candidate.Data.Location))
 			continue;
 
 		const FCoverData& Data = Candidate.Data;
@@ -3432,6 +3439,8 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 	if (DA->MinHostileCoverDistance > 0.f || DA->MinHostilePawnDistance > 0.f)
 		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, Controller, ReseekHostileAnchors);
 
+	const UDoorRegistrySubsystem* ReseekDoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
+
 	TArray<FScoredCover> Scored;
 	Scored.Reserve(Candidates.Num());
 
@@ -3457,6 +3466,9 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 		// Skip covers next to a hostile or a hostile's declared destination (claim collision)
 		if (UCoverScoringStatics::IsNearHostileAnchor(Data.Location, ReseekHostileAnchors,
 			DA->MinHostileCoverDistance, DA->MinHostilePawnDistance))
+			continue;
+		// Skip covers behind a closed door (same rule as the EQS DoorCrossing filter).
+		if (IsValid(ReseekDoorRegistry) && ReseekDoorRegistry->AnyClosedDoorBlocksSegment(PawnLoc, Data.Location))
 			continue;
 
 		// CRITICAL #1: fire-arc gate — same as FindProtectiveCover

@@ -9,6 +9,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
+#include "EngineUtils.h"
 
 #include "Character/ExtractionPlayerInterface.h"
 #include "Components/HealthComponent.h"
@@ -106,26 +107,31 @@ void ATeleportVolume::TeleportAndHealPlayer(APawn* PlayerPawn, const FTransform&
 
 void ATeleportVolume::TeleportAndHealCompanion(const FTransform& SpawnTransform)
 {
-	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(
-		UGameplayStatics::GetActorOfClass(GetWorld(), ACompanionCharacter::StaticClass()));
-
-	if (!IsValid(Companion))
+	// Every ACTIVE companion rides along (the armed extractee included); a captive extractee has
+	// no controller yet and stays put -- teleporting the hostage would break its rescue staging.
+	bool bAnyMoved = false;
+	for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume: no companion found — skipping companion teleport"));
-		return;
+		ACompanionCharacter* Companion = *It;
+		if (!IsValid(Companion)) continue;
+
+		ACompanionAIController* CompanionController = Cast<ACompanionAIController>(Companion->GetController());
+		if (!IsValid(CompanionController)) continue;
+
+		CompanionController->TeleportToLocation(SpawnTransform.GetLocation(), SpawnTransform.GetRotation().Rotator());
+		bAnyMoved = true;
+
+		UHealthComponent* Health = Companion->FindComponentByClass<UHealthComponent>();
+		if (!IsValid(Health)) continue;
+
+		if (Health->IsDead())
+			Health->Revive(1.f);
+		else
+			Health->Heal(Health->GetMaxHealth());
 	}
 
-	ACompanionAIController* CompanionController = Cast<ACompanionAIController>(Companion->GetController());
-	if (IsValid(CompanionController))
-		CompanionController->TeleportToLocation(SpawnTransform.GetLocation(), SpawnTransform.GetRotation().Rotator());
-
-	UHealthComponent* Health = Companion->FindComponentByClass<UHealthComponent>();
-	if (!IsValid(Health)) return;
-
-	if (Health->IsDead())
-		Health->Revive(1.f);
-	else
-		Health->Heal(Health->GetMaxHealth());
+	if (!bAnyMoved)
+		UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume: no possessed companion found — skipping companion teleport"));
 }
 
 FTransform ATeleportVolume::GetPlayerSpawnTransform() const

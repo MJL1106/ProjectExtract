@@ -1,6 +1,7 @@
 // AITargetingStatics — shared sight-location helper for companion and enemy AI.
 
 #include "AI/AITargetingStatics.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Enemy/EnemyCharacter.h"
 #include "Enemy/EnemyArchetypeData.h"
 #include "Character/ExtractionPlayerInterface.h"
@@ -41,6 +42,8 @@ namespace AITargeting
 
 	bool GetVisibleBodyPoint(const AActor* Target, const FVector& ObserverEye, const AActor* IgnoreActor, FVector& OutPoint, bool bIncludeHead)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_VisibleBodyPoint);
+
 		if (!IsValid(Target)) return false;
 
 		UWorld* World = Target->GetWorld();

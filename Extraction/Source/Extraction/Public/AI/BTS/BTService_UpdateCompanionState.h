@@ -59,6 +59,11 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Posture", meta = (ClampMin = "0.5", ClampMax = "10.0"))
 	float ExploreReturnDelay = 3.f;
 
+	/** Seconds between downtime chatter attempts (Following/IdleAmbient). The bark subsystem's lull
+	 *  gate and per-type cooldowns still apply on top, so most attempts near activity are dropped. */
+	UPROPERTY(EditAnywhere, Category = "Barks", meta = (ClampMin = "5.0"))
+	float AmbientAttemptIntervalSeconds = 20.f;
+
 	/** Grace before clearing a no-cover combat target on sustained LoS block — lets the companion reposition to regain a shot instead of thrashing on brief occlusion. */
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
 	float CombatTargetLosGraceSeconds = 3.0f;
@@ -199,9 +204,10 @@ private:
 		float DeltaSeconds);
 
 	/** Updates WatchThreatLocation/linger from Candidate's LoS; returns true while the watch is
-	 *  live (visible this tick, or still within its linger window). */
-	bool ComputeWatchThreat(const ACompanionCharacter& Companion, const AEnemyCharacter* Candidate,
-		const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
+	 *  live (visible this tick, still within its linger window, or held by the controller's
+	 *  fresh alerted-threat signal — the fight-aware-follow no-eye-line fallback). */
+	bool ComputeWatchThreat(const ACompanionAIController& Controller, const ACompanionCharacter& Companion,
+		const AEnemyCharacter* Candidate, const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
 
 	/** Faces WatchThreatLocation every tick; applies the Normal (weapon-raise) or Stealth
 	 *  (low-profile rotate-only) stance once on the rising edge (bWatchStanceApplied). */

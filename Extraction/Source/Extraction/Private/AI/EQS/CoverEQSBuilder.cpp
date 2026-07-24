@@ -18,6 +18,7 @@
 // Project
 #include "EnvQueryTest_CoverPostVacate.h"
 #include "EnvQueryTest_CoverIntent.h"
+#include "EnvQueryTest_CoverDoorCrossing.h"
 #include "EnvQueryTest_CoverArc.h"
 #include "EnvQueryTest_CoverPeekable.h"
 #include "EnvQueryTest_CoverAllySpacing.h"
@@ -137,6 +138,13 @@ static UEnvQueryTest_CoverIntent* MakeCoverIntent(UEnvQueryOption* Opt, float Mi
 	return T;
 }
 
+static UEnvQueryTest_CoverDoorCrossing* MakeDoorCrossing(UEnvQueryOption* Opt)
+{
+	UEnvQueryTest_CoverDoorCrossing* T = NewObject<UEnvQueryTest_CoverDoorCrossing>(Opt);
+	T->TestPurpose = EEnvTestPurpose::Filter;
+	return T;
+}
+
 static UEnvQueryTest_CoverArc* MakeCoverArc(UEnvQueryOption* Opt, float HalfAngleDeg)
 {
 	UEnvQueryTest_CoverArc* T = NewObject<UEnvQueryTest_CoverArc>(Opt);
@@ -238,11 +246,12 @@ static bool BuildDefensive(FString& OutLine)
 	Opt->Tests.Add(MakePostVacate(Opt, 6.f));              // 2
 	Opt->Tests.Add(MakeCoverIntent(Opt, 250.f, 150.f));           // 3  (claim race + hostile proximity — cheap, before traces)
 	Opt->Tests.Add(MakeCoverArc(Opt, 60.f));               // 4  (cheap dot math — before traces)
-	Opt->Tests.Add(MakePeekable(Opt));                     // 5
-	Opt->Tests.Add(MakeParallel(Opt));                     // 6  (filter only)
-	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));      // 7
-	Opt->Tests.Add(MakeProvidesCover(Opt));                // 8
-	Opt->Tests.Add(MakeCoverScore(Opt));                   // 9  (shared formula — after filters)
+	Opt->Tests.Add(MakeDoorCrossing(Opt));                 // 5  (closed-door reject — cheap plane math)
+	Opt->Tests.Add(MakePeekable(Opt));                     // 6
+	Opt->Tests.Add(MakeParallel(Opt));                     // 7  (filter only)
+	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));      // 8
+	Opt->Tests.Add(MakeProvidesCover(Opt));                // 9
+	Opt->Tests.Add(MakeCoverScore(Opt));                   // 10 (shared formula — after filters)
 
 	Q->GetOptionsMutable().Add(Opt);
 
@@ -263,17 +272,18 @@ static bool BuildAdvance(FString& OutLine)
 	Opt->Tests.Add(MakeFreeCover(Opt, true));                                            // 1
 	Opt->Tests.Add(MakePostVacate(Opt, 6.f));                                            // 2
 	Opt->Tests.Add(MakeCoverIntent(Opt, 250.f, 150.f));                                         // 3  (claim race + hostile proximity)
-	Opt->Tests.Add(MakePeekable(Opt));                                                   // 4
-	Opt->Tests.Add(MakeProvidesCover(Opt));                                              // 5
-	Opt->Tests.Add(MakeParallel(Opt));                                                   // 6  (filter only)
+	Opt->Tests.Add(MakeDoorCrossing(Opt));                                               // 4  (closed-door reject — cheap plane math)
+	Opt->Tests.Add(MakePeekable(Opt));                                                   // 5
+	Opt->Tests.Add(MakeProvidesCover(Opt));                                              // 6
+	Opt->Tests.Add(MakeParallel(Opt));                                                   // 7  (filter only)
 	// Filter-only band gate: scoring distance here would double-count against CoverScore's band
 	// term and fight the Press-negated weight. The 500-1200 gate still bounds the advance pick.
-	Opt->Tests.Add(MakeDistanceBand(Opt,                                                 // 7
+	Opt->Tests.Add(MakeDistanceBand(Opt,                                                 // 8
 		UEnvQueryContext_CombatTarget::StaticClass(),
 		500.f, 1200.f,
 		EEnvTestPurpose::Filter, 0.15f, 1.f));
-	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));                                    // 8
-	Opt->Tests.Add(MakeCoverScore(Opt));                                                 // 9  (shared formula)
+	Opt->Tests.Add(MakeAllySpacing(Opt, 300.f, 1.f));                                    // 9
+	Opt->Tests.Add(MakeCoverScore(Opt));                                                 // 10 (shared formula)
 
 	Q->GetOptionsMutable().Add(Opt);
 
@@ -325,9 +335,10 @@ static bool BuildProtective(FString& OutLine)
 	Opt->Tests.Add(MakeFreeCover(Opt, true));              // 1
 	Opt->Tests.Add(MakePostVacate(Opt, 6.f));              // 2
 	Opt->Tests.Add(MakeCoverIntent(Opt, 250.f, 150.f));           // 3  (claim race + hostile proximity)
-	Opt->Tests.Add(MakeParallel(Opt));                     // 4  (filter only)
-	Opt->Tests.Add(MakeProvidesCover(Opt));                // 5
-	Opt->Tests.Add(MakeCoverScore(Opt));                   // 6  (shared formula)
+	Opt->Tests.Add(MakeDoorCrossing(Opt));                 // 4  (closed-door reject — cheap plane math)
+	Opt->Tests.Add(MakeParallel(Opt));                     // 5  (filter only)
+	Opt->Tests.Add(MakeProvidesCover(Opt));                // 6
+	Opt->Tests.Add(MakeCoverScore(Opt));                   // 7  (shared formula)
 
 	Q->GetOptionsMutable().Add(Opt);
 

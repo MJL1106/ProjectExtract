@@ -1,6 +1,7 @@
 // UEnemyDirectorSubsystem — v1 alert ladder + v2 tension director + spawn pipeline.
 
 #include "EnemyDirectorSubsystem.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "EnemyAIController.h"
 #include "EnemyCharacter.h"
 #include "EnemyArchetypeData.h"
@@ -311,6 +312,8 @@ bool UEnemyDirectorSubsystem::IsPointInsideAnyScope(const FVector& Point) const
 
 void UEnemyDirectorSubsystem::DirectorTick()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_Tick);
+
 	// Sweep runs at every alert level — the searching/combat counts feed presentation
 	// (music) during stealth, before the Loud-only spawn pipeline below is live.
 	const FEnemySweepResult Sweep = SweepEnemies();
@@ -391,6 +394,8 @@ void UEnemyDirectorSubsystem::HandleEnemyKilled(AEnemyCharacter* DeadEnemy, FVec
 
 UEnemyDirectorSubsystem::FEnemySweepResult UEnemyDirectorSubsystem::SweepEnemies() const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_SweepEnemies);
+
 	FEnemySweepResult Result;
 
 	UWorld* World = GetWorld();
@@ -467,6 +472,8 @@ float UEnemyDirectorSubsystem::PollPlayerHealthLost()
 
 void UEnemyDirectorSubsystem::UpdateTension(float DeltaSeconds, float EngagedCount)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_UpdateTension);
+
 	float DecayPerSec = DefaultTensionDecay;
 	float PerHealthLost = DefaultTensionPerHealthLost;
 	float PerKill = DefaultTensionPerKill;
@@ -497,6 +504,8 @@ void UEnemyDirectorSubsystem::UpdateTension(float DeltaSeconds, float EngagedCou
 
 void UEnemyDirectorSubsystem::UpdateSawtooth(float DeltaSeconds)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_UpdateSawtooth);
+
 	float PeakThreshold = DefaultPeakThreshold;
 	float ReliefEntry = DefaultReliefEntry;
 	float ReliefDur = DefaultReliefDuration;
@@ -546,6 +555,8 @@ void UEnemyDirectorSubsystem::UpdateSawtooth(float DeltaSeconds)
 
 bool UEnemyDirectorSubsystem::ShouldSpawn(int32 AliveCount) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_ShouldSpawn);
+
 	const FMissionPhaseConfig& PhaseConfig = GetCurrentPhaseConfig();
 
 	// A finite scripted wave OWNS the director while it lives. Two rules:
@@ -577,6 +588,8 @@ bool UEnemyDirectorSubsystem::ShouldSpawn(int32 AliveCount) const
 
 bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*>* OutSpawned)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_TrySpawn);
+
 	const FMissionPhaseConfig& PhaseConfig = GetCurrentPhaseConfig();
 
 	FSquadComposition Composition;
@@ -651,6 +664,8 @@ const FMissionPhaseConfig& UEnemyDirectorSubsystem::GetCurrentPhaseConfig() cons
 
 bool UEnemyDirectorSubsystem::PickComposition(const FMissionPhaseConfig& PhaseConfig, int32 AliveCount, FSquadComposition& OutComposition) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_PickComposition);
+
 	const TArray<FSquadComposition>& Compositions = PhaseConfig.Compositions;
 	if (Compositions.Num() == 0) return false;
 
@@ -764,6 +779,8 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 
 bool UEnemyDirectorSubsystem::IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_ZoneVisibility);
+
 	// Sample where spawned enemies will actually stand: floor-projected points raised to
 	// head height, one per squad member. Tracing to the raw box base (at/below the floor)
 	// hits the floor and reports "occluded" for zones sitting in plain view.
@@ -800,6 +817,8 @@ bool UEnemyDirectorSubsystem::IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone
 
 float UEnemyDirectorSubsystem::ScoreZone(const AEnemySpawnZone* Zone, const FVector& PlayerLoc, const FVector& CompanionLoc, bool bHasCompanion, float DistMin, float DistMax) const
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_ScoreZone);
+
 	// Jitter keeps repeated spawns from always electing the same room when scores tie.
 	float Score = FMath::FRandRange(0.f, ZoneScoreJitter);
 
@@ -826,6 +845,9 @@ const ACompanionCharacter* UEnemyDirectorSubsystem::FindCompanion() const
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return nullptr;
 
+	// Spawn-zone scoring anchors on the primary companion when it's alive (deterministic with a
+	// second companion in the level); any living companion is an acceptable fallback.
+	const ACompanionCharacter* Fallback = nullptr;
 	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
 	{
 		const ACompanionCharacter* Companion = *It;
@@ -834,10 +856,11 @@ const ACompanionCharacter* UEnemyDirectorSubsystem::FindCompanion() const
 		const UHealthComponent* HC = Companion->FindComponentByClass<UHealthComponent>();
 		if (IsValid(HC) && HC->IsDead()) continue;
 
-		return Companion;
+		if (Companion->IsPrimaryCompanion()) return Companion;
+		if (!Fallback) Fallback = Companion;
 	}
 
-	return nullptr;
+	return Fallback;
 }
 
 bool UEnemyDirectorSubsystem::IsPointInPlayerSightline(const FVector& Point, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams) const
@@ -919,6 +942,8 @@ AEnemyCharacter* UEnemyDirectorSubsystem::SpawnEntryAtZone(UWorld* World, TSubcl
 
 void UEnemyDirectorSubsystem::SpawnSquadAtZone(const FSquadComposition& Composition, AEnemySpawnZone* Zone, TArray<AEnemyCharacter*>& OutSpawned)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_SpawnSquad);
+
 	UWorld* World = GetWorld();
 	if (!IsValid(World) || !IsValid(Zone)) return;
 

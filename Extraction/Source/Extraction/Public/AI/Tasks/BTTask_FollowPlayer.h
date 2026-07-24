@@ -70,6 +70,16 @@ private:
 	float TimeSinceLastEqs = 0.f;
 	FVector EqsTarget = FVector::ZeroVector;
 
+	// Fight-aware follow (see ACompanionAIController::NoteAlertedThreat): stamped at query
+	// dispatch when the live-fight signal is fresh; the callback then prefers the best-scored
+	// slot with eye-line toward the threat, so a no-LoS companion drifts to where it can see
+	// the fight instead of cycling oblivious formation slots.
+	bool bFightBiasQuery = false;
+	FVector FightBiasThreatLocation = FVector::ZeroVector;
+
+	/** Cap on per-callback slot eye-line traces (best-scored slots first). */
+	static constexpr int32 MaxFightBiasSlotTraces = 8;
+
 	// Player floor-transit detector (see UpdatePlayerZTransit). Envelope follower over the
 	// player's grounded vertical rate; while hot, follow pursues the player directly instead
 	// of trusting the EQS slot / formation anchor.

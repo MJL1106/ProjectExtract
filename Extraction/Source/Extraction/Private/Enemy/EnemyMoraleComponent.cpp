@@ -10,6 +10,7 @@
 #include "BarkSubsystem.h"
 #include "BarkSetData.h"
 #include "SuppressionComponent.h"
+#include "AI/AIAcoustics.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
@@ -226,11 +227,17 @@ bool UEnemyMoraleComponent::CanWitnessDeath(const FVector& DeathLocation) const
 	if (!OwnerEnemy.IsValid()) return false;
 
 	const FVector EyeLocation = OwnerEnemy->GetPawnViewLocation();
-	if (FVector::DistSquared(EyeLocation, DeathLocation) <= FMath::Square(DeathWitnessEarshot))
-		return true;
 
 	UWorld* World = GetWorld();
 	if (!World) return false;
+
+	// Earshot only counts on an acoustically clear path — a raw radius check had enemies calling
+	// "man down" through walls. ThroughDoorMult 0 also rules out closed doors: a muffled thud isn't
+	// certainty that someone died.
+	if (FVector::DistSquared(EyeLocation, DeathLocation) <= FMath::Square(DeathWitnessEarshot)
+		&& AIAcoustics::ComputeMultiplier(World, EyeLocation, DeathLocation + FVector(0.f, 0.f, 50.f),
+			OwnerEnemy.Get(), nullptr, /*ThroughDoorMult=*/0.f) > 0.f)
+		return true;
 
 	// Aim above the corpse point so a floor-level location doesn't start inside the ground.
 	FHitResult Hit;

@@ -32,6 +32,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
+#include "EngineUtils.h"
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -192,6 +193,30 @@ void ACompanionCharacter::PossessedBy(AController* NewController)
 	ApplyMovementSpeeds();
 }
 
+ACompanionCharacter* ACompanionCharacter::GetPrimaryCompanion(UWorld* World)
+{
+	if (!World) return nullptr;
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
+		if (IsValid(*It) && It->bIsPrimaryCompanion) return *It;
+	return nullptr;
+}
+
+bool ACompanionCharacter::IsAnyCompanionReviveCapable(UWorld* World, const ACompanionCharacter* Exclude)
+{
+	if (!World) return false;
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
+	{
+		const ACompanionCharacter* Companion = *It;
+		if (!IsValid(Companion) || Companion == Exclude) continue;
+		if (Companion->GetIsCompanionDBNO()) continue;
+		if (!Companion->GetController()) continue; // captive extractee — can't help yet
+		const UHealthComponent* HC = Companion->GetHealthComponent();
+		if (IsValid(HC) && HC->IsDead()) continue;
+		return true;
+	}
+	return false;
+}
+
 void ACompanionCharacter::PostInitializeComponents()
 {
 	Super::PostInitializeComponents();
@@ -315,6 +340,22 @@ void ACompanionCharacter::Bark(ECompanionBarkType Type, FName Context) const
 	UBarkSubsystem* Barks = IsValid(World) ? World->GetSubsystem<UBarkSubsystem>() : nullptr;
 	if (Barks)
 		Barks->RequestCompanionBark(this, BarkSet, Type, Context);
+}
+
+void ACompanionCharacter::SpeakScriptedLine(USoundBase* Sound) const
+{
+	const UWorld* World = GetWorld();
+	UBarkSubsystem* Barks = IsValid(World) ? World->GetSubsystem<UBarkSubsystem>() : nullptr;
+	if (!Barks) return;
+
+	// BarkSet only supplies attenuation/volume here — a missing set must not silently drop an
+	// explicitly assigned scripted line.
+	if (!IsValid(BarkSet))
+		UE_LOG(LogCompanion, Warning, TEXT("%s: SpeakScriptedLine with no BarkSet — playing unattenuated"), *GetName());
+
+	USoundAttenuation* Attenuation = IsValid(BarkSet) ? BarkSet->Attenuation.Get() : nullptr;
+	const float Volume = IsValid(BarkSet) ? BarkSet->VolumeMultiplier : 1.f;
+	Barks->RequestScriptedLine(this, Sound, Attenuation, Volume);
 }
 
 float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -1162,11 +1203,12 @@ void ACompanionCharacter::EnterDBNO()
 			&ACompanionCharacter::OnBleedoutExpired,
 			BleedoutDuration, false);
 
-		// Both-DBNO check: if the player is also downed, immediate mission fail
+		// Squad-wipe check: fail only when the player is down AND no other companion can still
+		// pick anyone up (with a second companion in the level, one downed ally isn't a wipe).
 		APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
 		if (IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PlayerPawn))
 		{
-			if (PlayerIface->GetIsDBNO())
+			if (PlayerIface->GetIsDBNO() && !IsAnyCompanionReviveCapable(GetWorld(), this))
 			{
 				if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
 					GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
@@ -1218,8 +1260,13 @@ void ACompanionCharacter::OnBleedoutExpired()
 	if (HasAuthority())
 	{
 		if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
-			GM->FailLevel(NSLOCTEXT("Extraction", "CompanionBledOut", "Your companion bled out."));
+			GM->FailLevel(GetBleedoutFailReason());
 	}
+}
+
+FText ACompanionCharacter::GetBleedoutFailReason() const
+{
+	return NSLOCTEXT("Extraction", "CompanionBledOut", "Your companion bled out.");
 }
 
 void ACompanionCharacter::OnRep_IsDBNO()

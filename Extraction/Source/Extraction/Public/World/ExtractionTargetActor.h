@@ -57,6 +57,14 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ExtractionTarget|Objectives")
 	void SetObjectiveManagedExternally(bool bManagedExternally);
 
+	/** Starts the extraction wave through the same guarded path as the player interact.
+	 *  Used when another actor owns the trigger beat (the extractee rescue). Authority-only,
+	 *  idempotent -- requires ActivateTarget to have run (flow step entry does). Returns true
+	 *  once the wave is running (this call or an earlier one) -- false means StartWave refused
+	 *  and the caller must retry, because the rescue interact is one-shot. */
+	UFUNCTION(BlueprintCallable, Category = "ExtractionTarget|Objectives")
+	bool BeginExtractionExternal();
+
 protected:
 	// --- Components ---
 
@@ -105,6 +113,12 @@ protected:
 	/** HUD prompt shown when the player looks at this actor. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ExtractionTarget|Interaction")
 	FText InteractionPrompt = NSLOCTEXT("ExtractionTarget", "PromptDefault", "Begin Extraction");
+
+	/** Pure wave controller mode: mesh hidden, no interaction -- the wave starts only via
+	 *  BeginExtractionExternal (extractee-rescue flow). Set on the placed actor when an
+	 *  AExtracteeCompanion owns the trigger beat. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "ExtractionTarget|Interaction")
+	bool bExternalTriggerOnly = false;
 
 private:
 	// --- Replicated state ---

@@ -66,15 +66,10 @@ void ACompanionRouteTrigger::OnTriggerOverlap(
 	const UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 
+	// Routes are player-story choreography -- primary companion only.
 	ACompanionAIController* CompanionController = nullptr;
-	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
-	{
-		ACompanionCharacter* Companion = *It;
-		if (!IsValid(Companion)) continue;
-
+	if (ACompanionCharacter* Companion = ACompanionCharacter::GetPrimaryCompanion(GetWorld()))
 		CompanionController = Companion->GetController<ACompanionAIController>();
-		break;
-	}
 
 	if (!IsValid(CompanionController))
 	{

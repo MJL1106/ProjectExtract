@@ -7,6 +7,7 @@
 #include "Components/HealthComponent.h"
 #include "Enemy/EnemyCharacter.h"
 #include "EngineUtils.h"
+#include "Extractee/ExtracteeCompanion.h"
 #include "Game/ExtractionGameInstance.h"
 #include "Game/MissionInventorySubsystem.h"
 #include "Game/ObjectiveSubsystem.h"
@@ -133,6 +134,7 @@ void ALevelObjectiveFlow::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		World->GetTimerManager().ClearTimer(CheckpointHealPollHandle);
 		World->GetTimerManager().ClearTimer(CheckpointSpawnRetryHandle);
+		World->GetTimerManager().ClearTimer(ExtractionWaveRetryHandle);
 	}
 	if (HasAuthority()) UnbindDelegates();
 	if (UObjectiveSubsystem* Objectives = GetWorld() ? GetWorld()->GetSubsystem<UObjectiveSubsystem>() : nullptr)
@@ -162,6 +164,10 @@ bool ALevelObjectiveFlow::ActivateFlow()
 		if (ValidCount > 0)
 			Room1AreaLocation = Sum / ValidCount;
 	}
+
+	// The VIP is not rescuable until the Reach step is current (no out-of-order path to catch up).
+	if (IsValid(Extractee))
+		Extractee->SetRescueEnabled(false);
 
 	CurrentStep = ELevelObjectiveStep::BreachRoofDoor;
 	ForceNetUpdate();
@@ -259,6 +265,9 @@ void ALevelObjectiveFlow::BindDelegates()
 		ExtractionTarget->OnExtractionTargetWaveStarted.AddUniqueDynamic(this, &ALevelObjectiveFlow::HandleExtractionStarted);
 		ExtractionTarget->OnExtractionTargetCompleted.AddUniqueDynamic(this, &ALevelObjectiveFlow::HandleExtractionCompleted);
 	}
+
+	if (IsValid(Extractee))
+		Extractee->OnRescued.AddUniqueDynamic(this, &ALevelObjectiveFlow::HandleExtracteeRescued);
 }
 
 void ALevelObjectiveFlow::UnbindDelegates()
@@ -303,6 +312,9 @@ void ALevelObjectiveFlow::UnbindDelegates()
 		ExtractionTarget->OnExtractionTargetWaveStarted.RemoveDynamic(this, &ALevelObjectiveFlow::HandleExtractionStarted);
 		ExtractionTarget->OnExtractionTargetCompleted.RemoveDynamic(this, &ALevelObjectiveFlow::HandleExtractionCompleted);
 	}
+
+	if (IsValid(Extractee))
+		Extractee->OnRescued.RemoveDynamic(this, &ALevelObjectiveFlow::HandleExtracteeRescued);
 }
 
 void ALevelObjectiveFlow::Advance(ELevelObjectiveEvent Event)
@@ -314,8 +326,13 @@ void ALevelObjectiveFlow::Advance(ELevelObjectiveEvent Event)
 	CurrentStep = NextStep;
 	if (CurrentStep == ELevelObjectiveStep::FirstDoubleTakedown)
 		ActivateOptionalSupplies();
-	if (CurrentStep == ELevelObjectiveStep::ReachExtractionTarget && IsValid(ExtractionTarget))
-		ExtractionTarget->ActivateTarget();
+	if (CurrentStep == ELevelObjectiveStep::ReachExtractionTarget)
+	{
+		if (IsValid(ExtractionTarget))
+			ExtractionTarget->ActivateTarget();
+		if (IsValid(Extractee))
+			Extractee->SetRescueEnabled(true);
+	}
 	if (CheckpointSteps.Contains(CurrentStep))
 	{
 		TryApplyCompanionCheckpointHeal();
@@ -354,7 +371,8 @@ void ALevelObjectiveFlow::TryApplyCompanionCheckpointHeal()
 	ACompanionCharacter* Companion = CachedCompanion.Get();
 	if (!IsValid(Companion))
 	{
-		for (TActorIterator<ACompanionCharacter> It(World); It; ++It) { Companion = *It; break; }
+		// Primary only — the extractee joins fully healed at rescue and owns its own recovery.
+		Companion = ACompanionCharacter::GetPrimaryCompanion(World);
 		CachedCompanion = Companion;
 	}
 	if (!IsValid(Companion))
@@ -470,6 +488,16 @@ void ALevelObjectiveFlow::FastForwardToStep(ELevelObjectiveStep TargetStep)
 		ActivateOptionalSupplies();
 	if (TargetStep >= ELevelObjectiveStep::ReachExtractionTarget && IsValid(ExtractionTarget))
 		ExtractionTarget->ActivateTarget();
+	if (TargetStep == ELevelObjectiveStep::ReachExtractionTarget && IsValid(Extractee))
+		Extractee->SetRescueEnabled(true);
+	if (TargetStep >= ELevelObjectiveStep::DefendPosition && IsValid(Extractee))
+	{
+		// Past the rescue: the VIP resumes armed at the player's side, and — since its interact
+		// is gone — the defence wave must start here rather than wait for one.
+		Extractee->ForceRescue();
+		if (TargetStep == ELevelObjectiveStep::DefendPosition)
+			TryStartExtractionWave();
+	}
 
 	ForceNetUpdate();
 	RefreshRecordedEnemyDeaths();
@@ -522,21 +550,23 @@ void ALevelObjectiveFlow::TryApplyCheckpointSpawn()
 	if (AController* PlayerController = PlayerPawn->GetController())
 		PlayerController->SetControlRotation(SpawnRot);
 
-	ACompanionCharacter* Companion = CachedCompanion.Get();
-	if (!IsValid(Companion))
+	// Every possessed companion lands beside the player (alternating sides); a captive
+	// extractee has no controller and stays at its staged spot.
+	int32 CompanionsMoved = 0;
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
 	{
-		for (TActorIterator<ACompanionCharacter> It(World); It; ++It) { Companion = *It; break; }
-		CachedCompanion = Companion;
-	}
-	if (IsValid(Companion))
-	{
-		const FVector CompanionLoc = SpawnLoc + SpawnPoint->GetActorRightVector() * 150.f;
+		ACompanionCharacter* Companion = *It;
+		if (!IsValid(Companion) || !Companion->GetController()) continue;
+
+		const float Side = (CompanionsMoved % 2 == 0) ? 150.f : -150.f;
+		const FVector CompanionLoc = SpawnLoc + SpawnPoint->GetActorRightVector() * Side;
 		if (!Companion->TeleportTo(CompanionLoc, SpawnRot))
 			Companion->TeleportTo(SpawnLoc, SpawnRot, /*bIsATest*/ false, /*bNoCheck*/ true);
+		++CompanionsMoved;
 	}
 
-	UE_LOG(LogLevelObjectiveFlow, Log, TEXT("%s: checkpoint resume — player%s teleported to step-%d spawn"),
-		*GetName(), IsValid(Companion) ? TEXT(" + companion") : TEXT(""), static_cast<int32>(CurrentStep));
+	UE_LOG(LogLevelObjectiveFlow, Log, TEXT("%s: checkpoint resume — player + %d companion(s) teleported to step-%d spawn"),
+		*GetName(), CompanionsMoved, static_cast<int32>(CurrentStep));
 }
 
 void ALevelObjectiveFlow::UpdatePrimaryObjective()
@@ -567,7 +597,15 @@ void ALevelObjectiveFlow::UpdatePrimaryObjective()
 	case ELevelObjectiveStep::SecondDoubleTakedown:
 		Label = NSLOCTEXT("LevelFlow", "SecondTakedown", "Perform the second double takedown"); Target = FindFirstLivingEnemy(SecondTakedownPair); break;
 	case ELevelObjectiveStep::ReachExtractionTarget:
-		Label = NSLOCTEXT("LevelFlow", "ReachTarget", "Reach and interact with the extraction target"); Target = ExtractionTarget; break;
+		if (IsValid(Extractee))
+		{
+			Label = NSLOCTEXT("LevelFlow", "ReachExtractee", "Reach and rescue the target"); Target = Extractee;
+		}
+		else
+		{
+			Label = NSLOCTEXT("LevelFlow", "ReachTarget", "Reach and interact with the extraction target"); Target = ExtractionTarget;
+		}
+		break;
 	case ELevelObjectiveStep::DefendPosition:
 		Label = NSLOCTEXT("LevelFlow", "Defend", "Defend the position"); Target = ExtractionTarget; break;
 	case ELevelObjectiveStep::UseLift:
@@ -824,6 +862,37 @@ void ALevelObjectiveFlow::HandleSupplyDestroyed(AActor* DestroyedActor)
 	if (ALootContainer* Container = Cast<ALootContainer>(DestroyedActor))
 		CompletedSupplyCrates.Add(TWeakObjectPtr<ALootContainer>(Container));
 	if (bOptionalSuppliesActive) UpdateOptionalSupplies();
+}
+
+void ALevelObjectiveFlow::HandleExtracteeRescued()
+{
+	if (!HasAuthority()) return;
+
+	// The rescue IS the extraction trigger: start the wave through the target actor's guarded
+	// path. Its OnExtractionTargetWaveStarted then advances the flow to DefendPosition.
+	TryStartExtractionWave();
+}
+
+void ALevelObjectiveFlow::TryStartExtractionWave()
+{
+	UWorld* World = GetWorld();
+	if (!World || !HasAuthority() || !IsValid(ExtractionTarget)) return;
+
+	if (ExtractionTarget->BeginExtractionExternal())
+	{
+		World->GetTimerManager().ClearTimer(ExtractionWaveRetryHandle);
+		return;
+	}
+
+	// StartWave refused (another wave still active, Director not ready). The rescue can't be
+	// re-interacted, so keep knocking until the Director accepts.
+	if (!World->GetTimerManager().IsTimerActive(ExtractionWaveRetryHandle))
+	{
+		UE_LOG(LogLevelObjectiveFlow, Warning,
+			TEXT("%s: extraction wave refused to start — retrying every 2s"), *GetName());
+		World->GetTimerManager().SetTimer(ExtractionWaveRetryHandle, this,
+			&ALevelObjectiveFlow::TryStartExtractionWave, 2.f, /*bLoop=*/true);
+	}
 }
 
 void ALevelObjectiveFlow::HandleExtractionStarted()

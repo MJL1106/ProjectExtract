@@ -14,6 +14,7 @@
 #include "CoverScoringStatics.h"
 #include "CoverReservationSubsystem.h"
 #include "CoverPoseComponent.h"
+#include "World/DoorRegistrySubsystem.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "CompanionAIController.h"
@@ -1831,6 +1832,7 @@ bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& Ow
 	const UCapsuleComponent* Cap = Companion->GetCapsuleComponent();
 	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : 34.f) + 10.f;
 	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(Tuning.CoverFlankArcHalfAngleDeg));
+	const UDoorRegistrySubsystem* DoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
 	// Line tests run per real attacker (a virtual-centroid trace reads a clustered attacker's own
 	// body as a blocker and rejects exactly the covers this feature wants). Bounded per candidate.
 	const int32 MaxLineTests = FMath::Min(Attackers.Num(), 3);
@@ -1847,6 +1849,8 @@ bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& Ow
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, Tuning.CoverSwitchPostVacateCooldown))
 			continue;
 		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller)) continue;
+		// A candidate behind a closed door is never a valid pick (same rule as the EQS DoorCrossing filter).
+		if (IsValid(DoorRegistry) && DoorRegistry->AnyClosedDoorBlocksSegment(MyLocation, Candidate.Data.Location)) continue;
 
 		// The line must be on the ATTACKERS, not the companion's own current target: arc toward
 		// their centroid, then a verified peek-shot on at least one real attacker.
@@ -1922,6 +1926,7 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(Tuning->CoverFlankArcHalfAngleDeg));
 	const FVector TargetLoc = Target->GetActorLocation();
 	const FVector TargetSight = AITargeting::GetSightLocation(Target);
+	const UDoorRegistrySubsystem* HopDoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
 
 	// Nearest qualifying bound — short purposeful dashes, not the biggest land-grab available.
 	FCover Best;
@@ -1945,6 +1950,9 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, Tuning->CoverSwitchPostVacateCooldown))
 			continue;
 		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller)) continue;
+		// A hop target behind a closed door is never valid (same rule as the EQS DoorCrossing filter).
+		if (IsValid(HopDoorRegistry) && HopDoorRegistry->AnyClosedDoorBlocksSegment(MyLocation, Candidate.Data.Location))
+			continue;
 
 		const FVector ToThreat2D = (TargetLoc - Candidate.Data.Location).GetSafeNormal2D();
 		if (FVector::DotProduct(UCoverGeometryStatics::GetFireArcForward(Candidate.Data), ToThreat2D) < ArcCos)
@@ -4796,6 +4804,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				const UCapsuleComponent* OpenCap = Ctx.Companion->GetCapsuleComponent();
 				const float OpenStandoff = (OpenCap ? OpenCap->GetScaledCapsuleRadius() : 34.f) + 10.f;
 				const float ReseekArcCos = FMath::Cos(FMath::DegreesToRadians(CoverTuning->CoverFlankArcHalfAngleDeg));
+				const UDoorRegistrySubsystem* OpenDoorRegistry = CoverWorld->GetSubsystem<UDoorRegistrySubsystem>();
 
 				bool bFoundReachable = false;
 				for (const FCover& Candidate : OpenEngageCandidates)
@@ -4809,6 +4818,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
 					if (Occupant && Occupant != CoverController) continue;
 					if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, CoverController, CoverTuning->CoverSwitchPostVacateCooldown))
+						continue;
+					// Behind a closed door = not reachable for this probe (same rule as the EQS
+					// DoorCrossing filter) — else the task exits to MoveToCoverPoint for a cover
+					// the EQS re-pick will then reject.
+					if (IsValid(OpenDoorRegistry) && OpenDoorRegistry->AnyClosedDoorBlocksSegment(MyLocation, Candidate.Data.Location))
 						continue;
 
 					// Fire-arc gate: target must be within the cover's engagement arc.

@@ -89,8 +89,10 @@ float ComputeMultiplier(UWorld* World, const FVector& ListenerEye, const FVector
 
 	for (ADoorBase* Door : Portals)
 	{
+		// Zero-multiplier candidates (Blocking always; Openable too when ThroughDoorMult is 0) must
+		// be skipped, not returned — returning would mask a clear open-door portal later in the list.
 		const EDoorClass DoorClass = ClassifyDoor(Door);
-		if (DoorClass == EDoorClass::Blocking) continue;
+		if (DoorMultiplier(DoorClass, ThroughDoorMult) <= 0.f) continue;
 
 		PortalIgnore.Last() = Door;
 
