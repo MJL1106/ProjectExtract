@@ -61,7 +61,9 @@ Extraction/Config/DefaultEditorPerProjectUserSettings.ini
 
 # ----------------------------------------------------------------------------
 # Third-party plugins
-# NeoStackAI + VibeUE are vendored (source only — Binaries/Intermediate rebuild).
+# NeoStackAI + VibeUE + AICoverSystem are vendored (source only — a fresh clone
+# rebuilds Binaries/Intermediate on its first compile, and a committed DLL from a
+# different engine patch / VS toolchain fails to load on another machine).
 # AgentIntegrationKit_backup stays local (untracked backup).
 # ----------------------------------------------------------------------------
 Extraction/Plugins/*
@@ -70,6 +72,11 @@ Extraction/Plugins/*
 !Extraction/Plugins/AICoverSystem
 Extraction/Plugins/NeoStackAI/Binaries/
 Extraction/Plugins/NeoStackAI/Intermediate/
+Extraction/Plugins/AICoverSystem/Binaries/
+Extraction/Plugins/AICoverSystem/Intermediate/
+
+# Merge/rebase leftovers
+*.orig
 # Added by code-review-graph
 .code-review-graph/
 
