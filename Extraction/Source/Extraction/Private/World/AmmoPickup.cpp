@@ -58,6 +58,11 @@ void AAmmoPickup::BeginPlay()
 {
 	Super::BeginPlay();
 
+	// Seated in a weapon case (or any other holder): the drop rules don't apply. A ground settle
+	// would drag it through the foam onto the floor, and the despawn timer would empty the case
+	// while the player walked over. Enemy death drops are unattached and keep both.
+	if (GetAttachParentActor()) return;
+
 	// Settle onto static ground so the box never hovers. WorldStatic only — a Visibility trace
 	// can land the pickup on a corpse or pawn that then moves away.
 	FHitResult Hit;

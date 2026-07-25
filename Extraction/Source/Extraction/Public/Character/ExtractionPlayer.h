@@ -120,9 +120,20 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Takedown|Events")
 	void OnTakedownFinished();
 
-	/** Animation hook fired locally only after the server successfully consumes a stim. */
+	/** Animation hook fired locally only after the server successfully consumes a stim.
+	 *  BP shows the injector prop and starts the injection montage here. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory|Consumables")
 	void OnStimUsed();
+
+	/** Fired locally when the injection window ends — completed OR cancelled (DBNO, death).
+	 *  BP hides the injector prop and stops the montage here, so neither can strand. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory|Consumables")
+	void OnStimUseEnded();
+
+	/** True for the whole committed injection window. Fire, ADS and reload refuse while set;
+	 *  movement stays free. The kit BP can gate its own actions on this too. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Consumables")
+	bool IsUsingStim() const;
 
 	// ---- Input handlers (BlueprintCallable so kit BP can delegate if needed) ----
 
@@ -387,7 +398,7 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> TakedownAction;
 
-	/** Slot 3 health-stim action. Assigned in the BP child class. */
+	/** Health-stim action, bound to the 4 key in IMC_Default. Assigned in the BP child class. */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> UseStimAction;
 
@@ -784,6 +795,11 @@ private:
 	void DebugApplyDamage();
 
 	void HandleStimUsed();
+	void HandleStimUseEnded();
+
+	/** Ends any injection in progress (DBNO entry, death) so the lockout and the BP-side injector
+	 *  prop can't strand. Idempotent. */
+	void CancelStimUse();
 
 	/** Pre-DBNO crouched speed, restored on ExitDBNO. */
 	float SavedMaxWalkSpeedCrouched = 0.f;

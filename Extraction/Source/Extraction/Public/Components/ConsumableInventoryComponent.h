@@ -1,4 +1,7 @@
 // Player-owned, server-authoritative consumable inventory.
+// A stim use is a committed window, not an instant: the count is spent immediately, the heal
+// lands partway through on the needle hit, and the owning player locks fire/ADS/reload for the
+// duration (AExtractionPlayer gates on IsUsingStim).
 
 #pragma once
 
@@ -8,6 +11,16 @@
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStimCountChanged, int32, NewStimCount);
 DECLARE_MULTICAST_DELEGATE(FOnStimUsedNative);
+DECLARE_MULTICAST_DELEGATE(FOnStimUseEndedNative);
+
+/** Why a stim press was refused. Only the reasons the player can act on are surfaced —
+ *  a press during an injection already in progress is a double-tap and stays silent. */
+UENUM(BlueprintType)
+enum class EStimUseRefusal : uint8
+{
+	NoStims,
+	FullHealth
+};
 
 UCLASS(ClassGroup = "Inventory", meta = (BlueprintSpawnableComponent))
 class EXTRACTION_API UConsumableInventoryComponent : public UActorComponent
@@ -27,25 +40,92 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Inventory|Consumables")
 	bool TryUseStim();
 
+	/** Ends an injection early (DBNO, death). The stim itself is already spent, so a cancel
+	 *  forfeits the heal. Idempotent. AUTHORITY ONLY — the count, the heal and both timers live on
+	 *  the server, so a client-side cancel would reopen the local fire/ADS gate while the server
+	 *  ran the injection to completion anyway. Logs and no-ops off authority. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory|Consumables")
+	void CancelStimUse();
+
+	/** Local teardown ONLY, for mirroring a cancel the authority has ALREADY made — the owning
+	 *  client's DBNO OnRep lands ahead of the server's ClientCancelStimUse. Deliberately not
+	 *  BlueprintCallable: using this to cancel a live injection desyncs the lockout from the
+	 *  server's timers, which is what CancelStimUse is for. */
+	void CancelStimUseLocally();
+
+	/** Re-broadcasts the current count on demand. The starting stims are granted from BeginPlay,
+	 *  long before any HUD widget exists, so the widget's construct has to pull the value —
+	 *  OnStimCountChanged fired into an empty delegate and nothing re-broadcasts. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory|Consumables")
+	void BroadcastStimCountNow();
+
+	/** True for the whole committed injection window. Drives the player's fire/ADS/reload gate. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Consumables")
+	bool IsUsingStim() const { return bStimUseActive; }
+
 	UFUNCTION(BlueprintPure, Category = "Inventory|Consumables")
 	int32 GetStimCount() const { return StimCount; }
 
 	UPROPERTY(BlueprintAssignable, Category = "Inventory|Consumables")
 	FOnStimCountChanged OnStimCountChanged;
 
-	/** Local-only success signal used by the owning player for animation/UI feedback. */
+	/** Local-only. Fires at the START of a use so the montage opens with the animation. */
 	FOnStimUsedNative OnStimUsedNative;
 
+	/** Local-only. Fires when a use finishes or is cancelled — the injector prop hides here. */
+	FOnStimUseEndedNative OnStimUseEndedNative;
+
+#if WITH_DEV_AUTOMATION_TESTS
+	void TestSetStimCount(int32 Count) { StimCount = FMath::Clamp(Count, 0, MaxStims); }
+#endif
+
 protected:
+	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables", meta = (ClampMin = "1", ClampMax = "3"))
 	int32 MaxStims = 3;
+
+	/** Granted on BeginPlay through AddStims (authority, player pawn only). 0 = start empty. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables", meta = (ClampMin = "0", ClampMax = "3"))
+	int32 StartingStims = 1;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables", meta = (ClampMin = "0.0"))
 	float HealAmount = 50.f;
 
+	/** Length of the committed injection window — matches the injection montage. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables", meta = (ClampMin = "0.0"))
+	float StimUseDurationSeconds = 3.4f;
+
+	/** When the needle lands. Clamped to StimUseDurationSeconds at use time so a mis-authored
+	 *  value can't strand the heal past the lockout. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables", meta = (ClampMin = "0.0"))
+	float StimHealDelaySeconds = 1.8f;
+
+	/** Toast raised on the owning client when the key is pressed with an empty pouch. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables")
+	FText NoStimsMessage = NSLOCTEXT("Loot", "StimNone", "No stims");
+
+	/** Toast raised on the owning client when a stim would heal nothing. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables")
+	FText FullHealthMessage = NSLOCTEXT("Loot", "StimFullHealth", "Already at full health");
+
 private:
+	/** SetTimer never fires on a rate of zero — clamp both clocks above it. */
+	static constexpr float MinStimUseDuration = 0.01f;
+
 	UPROPERTY(ReplicatedUsing = OnRep_StimCount)
 	int32 StimCount = 0;
+
+	/** Not replicated: set on authority when the use starts, and on the owning client from the
+	 *  same confirm RPC that fires OnStimUsedNative, so both sides gate off one flag. */
+	bool bStimUseActive = false;
+
+	/** Authority-only: the heal is still owed. Cleared once applied, or dropped on cancel. */
+	bool bStimHealPending = false;
+
+	FTimerHandle StimUseTimerHandle;
+	FTimerHandle StimHealTimerHandle;
 
 	UFUNCTION()
 	void OnRep_StimCount();
@@ -56,7 +136,29 @@ private:
 	UFUNCTION(Client, Reliable)
 	void ClientConfirmStimUsed();
 
+	UFUNCTION(Client, Reliable)
+	void ClientCancelStimUse();
+
+	UFUNCTION(Client, Reliable)
+	void ClientStimUseRefused(EStimUseRefusal Reason);
+
 	bool TryUseStimAuthority();
+	void GrantStartingStims();
 	void BroadcastStimCount();
+
 	void NotifyOwningPlayerStimUsed();
+	void NotifyOwningPlayerRefused(EStimUseRefusal Reason);
+	void HandleStimUseStartedLocally();
+	void ShowRefusalToast(EStimUseRefusal Reason) const;
+
+	/** Shared lockout clock (flag + end timer), run on whichever side calls it. */
+	void StartStimUseClock();
+
+	/** Authority-only companion to StartStimUseClock: schedules the mid-animation heal. */
+	void StartStimHealTimer();
+
+	void ApplyStimHeal();
+	void FinishStimUse();
+	void EndStimUse();
+	void ClearStimTimers();
 };

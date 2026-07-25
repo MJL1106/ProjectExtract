@@ -5,6 +5,7 @@
 #include "World/DoorBase.h"
 #include "World/BreachableDoor.h"
 #include "World/Lootable.h"
+#include "World/WorldInteractable.h"
 #include "Enemy/EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
 #include "AI/CompanionAIController.h"
@@ -105,10 +106,23 @@ void UCompanionCommandComponent::IssuePing()
 	const FVector TraceDir   = Cam ? Cam->GetForwardVector() : EyesRot.Vector();
 	const FVector TraceEnd   = TraceStart + TraceDir * PingTraceRange;
 
-	FHitResult Hit;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionPing), false, Owner);
 	Params.AddIgnoredActor(Owner);
-	const bool bHit = World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params);
+
+	// Second pass on the dedicated Interact channel so a loot volume (which ignores Visibility so
+	// it can't block AI sight or cover generation) can still be pinged for the companion to search.
+	// Nearer hit wins.
+	FHitResult VisibilityHit;
+	const bool bHitVisibility = World->LineTraceSingleByChannel(VisibilityHit, TraceStart, TraceEnd, ECC_Visibility, Params);
+
+	FHitResult InteractHit;
+	const bool bHitInteract = World->LineTraceSingleByChannel(
+		InteractHit, TraceStart, TraceEnd, ExtractionInteraction::InteractTraceChannel, Params);
+
+	const bool bPreferInteract = bHitInteract && (!bHitVisibility || InteractHit.Distance <= VisibilityHit.Distance);
+	const bool bHit = bHitVisibility || bHitInteract;
+	const FHitResult Hit = bPreferInteract ? InteractHit : VisibilityHit;
+
 	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] trace hit=%d actor=%s class=%s"), bHit,
 		*GetNameSafe(Hit.GetActor()), Hit.GetActor() ? *Hit.GetActor()->GetClass()->GetName() : TEXT("None"));
 

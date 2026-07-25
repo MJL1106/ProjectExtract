@@ -5,8 +5,19 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Engine/EngineTypes.h"
 #include "UObject/Interface.h"
 #include "WorldInteractable.generated.h"
+
+namespace ExtractionInteraction
+{
+	/** Dedicated interact trace channel — ECC_GameTraceChannel2, declared as "Interact" in
+	 *  DefaultEngine.ini with DefaultResponse=Ignore so nothing blocks it by accident.
+	 *  Invisible interact volumes block THIS and ignore ECC_Visibility: enemy line-of-sight,
+	 *  companion muzzle clearance and cover generation all trace Visibility, and a box draped
+	 *  over a table must never answer those. Interact traces run a second pass here. */
+	inline constexpr ECollisionChannel InteractTraceChannel = ECC_GameTraceChannel2;
+}
 
 UINTERFACE(MinimalAPI, BlueprintType)
 class UWorldInteractable : public UInterface

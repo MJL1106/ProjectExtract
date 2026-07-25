@@ -4,8 +4,10 @@
 #include "Audio/GameAudioSubsystem.h"
 #include "Audio/SurfaceAudioBank.h"
 #include "Game/MissionInventorySubsystem.h"
-#include "Components/SkeletalMeshComponent.h"
+#include "Components/BillboardComponent.h"
+#include "Components/BoxComponent.h"
 #include "Engine/World.h"
+#include "Net/UnrealNetwork.h"
 #include "UObject/Class.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogLootContainer, Log, All);
@@ -13,17 +15,67 @@ DEFINE_LOG_CATEGORY_STATIC(LogLootContainer, Log, All);
 ALootContainer::ALootContainer()
 {
 	PrimaryActorTick.bCanEverTick = false;
+	// Only bLooted crosses the wire, but the client's prompt scan reads it every frame it looks
+	// at this volume — without it the "Search" prompt never clears on a dedicated server.
+	bReplicates = true;
 
-	ContainerMesh = CreateDefaultSubobject<USkeletalMeshComponent>(TEXT("ContainerMesh"));
-	SetRootComponent(ContainerMesh);
-	// Visible to the ping camera trace (same as ABreachableDoor's panel).
-	ContainerMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-	ContainerMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+	InteractVolume = CreateDefaultSubobject<UBoxComponent>(TEXT("InteractVolume"));
+	SetRootComponent(InteractVolume);
+	InteractVolume->SetBoxExtent(FVector(50.f, 50.f, 50.f));
+	InteractVolume->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
+	InteractVolume->SetCollisionObjectType(ECC_WorldStatic);
+	// Interact channel ONLY. Blocking ECC_Visibility here would also block enemy line-of-sight,
+	// companion muzzle clearance and cover generation — every one of those traces Visibility, and
+	// an invisible box over a table would silently break all three.
+	InteractVolume->SetCollisionResponseToAllChannels(ECR_Ignore);
+	InteractVolume->SetCollisionResponseToChannel(ExtractionInteraction::InteractTraceChannel, ECR_Block);
+	InteractVolume->SetGenerateOverlapEvents(false);
+	InteractVolume->SetCanEverAffectNavigation(false);
+	InteractVolume->ShapeColor = FColor::Yellow;
+
+#if WITH_EDITORONLY_DATA
+	Billboard = CreateDefaultSubobject<UBillboardComponent>(TEXT("Billboard"));
+	Billboard->SetupAttachment(InteractVolume);
+	Billboard->bIsEditorOnly = true;
+	Billboard->bIsScreenSizeScaled = true;
+	Billboard->SetHiddenInGame(true);
+#endif
+}
+
+void ALootContainer::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
+{
+	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
+
+	DOREPLIFETIME(ALootContainer, bLooted);
 }
 
 bool ALootContainer::CanLoot_Implementation() const
 {
 	return !bLooted && Contents.Num() > 0;
+}
+
+// --- IWorldInteractable ---
+
+bool ALootContainer::CanWorldInteract_Implementation(AActor* /*Interactor*/) const
+{
+	return CanLootRespectingScriptOverride();
+}
+
+void ALootContainer::WorldInteract_Implementation(AActor* Interactor)
+{
+	// Execute_ rather than the _Implementation directly: a BP subclass that overrides Loot must
+	// still win here, exactly as it did on the legacy ILootable branch.
+	ILootable::Execute_Loot(this, Interactor);
+}
+
+FText ALootContainer::GetWorldInteractionPrompt_Implementation(AActor* /*Interactor*/) const
+{
+	return InteractPrompt;
+}
+
+float ALootContainer::GetWorldInteractHoldSeconds_Implementation(AActor* /*Interactor*/) const
+{
+	return 0.f;
 }
 
 bool ALootContainer::CanLootRespectingScriptOverride() const
@@ -44,6 +96,8 @@ void ALootContainer::Loot_Implementation(AActor* Looter)
 	}
 
 	bLooted = true;
+	// Push it now: the looting client is standing in the volume with the prompt on screen.
+	ForceNetUpdate();
 	OnOpened(Looter);
 	GrantAllContents();
 

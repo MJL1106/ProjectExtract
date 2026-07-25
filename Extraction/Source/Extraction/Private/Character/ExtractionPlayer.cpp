@@ -176,7 +176,10 @@ void AExtractionPlayer::BeginPlay()
 		HealthComponent->OnDeath.AddDynamic(this, &AExtractionPlayer::HandleDeath);
 
 	if (IsValid(ConsumableInventoryComponent))
+	{
 		ConsumableInventoryComponent->OnStimUsedNative.AddUObject(this, &AExtractionPlayer::HandleStimUsed);
+		ConsumableInventoryComponent->OnStimUseEndedNative.AddUObject(this, &AExtractionPlayer::HandleStimUseEnded);
+	}
 
 	// Late-join / standalone catch-up: re-fire OnWeaponEquipped if weapon already equipped
 	if (IsLocallyControlled() && !GetIsDBNO() && IsValid(WeaponComponent))
@@ -203,7 +206,10 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		HealthComponent->OnDeath.RemoveDynamic(this, &AExtractionPlayer::HandleDeath);
 
 	if (IsValid(ConsumableInventoryComponent))
+	{
 		ConsumableInventoryComponent->OnStimUsedNative.RemoveAll(this);
+		ConsumableInventoryComponent->OnStimUseEndedNative.RemoveAll(this);
+	}
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
@@ -532,6 +538,7 @@ void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 	if (bIsDBNO) return;
 	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
+	if (IsUsingStim()) return;
 	if (!IsValid(WeaponComponent)) return;
 
 	// Kit throwable equipped: route the press to the kit grenade item and skip the hitscan path —
@@ -573,6 +580,7 @@ void AExtractionPlayer::ReloadStart(const FInputActionValue& Value)
 	if (bIsDBNO) return;
 	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
+	if (IsUsingStim()) return;
 	if (!IsValid(WeaponComponent)) return;
 
 	WeaponComponent->StartReload();
@@ -583,6 +591,10 @@ void AExtractionPlayer::EquipPrimaryInput(const FInputActionValue& Value)
 	if (bIsDBNO) return;
 	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
+	// Weapon switch is the fourth hand-owning action after fire/ADS/reload: the injector pen is
+	// attached to the same right-hand item socket the new weapon would spawn into, and the equip
+	// montage would fight the injection montage.
+	if (IsUsingStim()) return;
 	if (!IsValid(WeaponComponent)) return;
 
 	WeaponComponent->SwitchToPrimary();
@@ -593,6 +605,7 @@ void AExtractionPlayer::EquipSecondaryInput(const FInputActionValue& Value)
 	if (bIsDBNO) return;
 	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
+	if (IsUsingStim()) return;
 	if (!IsValid(WeaponComponent)) return;
 
 	WeaponComponent->SwitchToSecondary();
@@ -603,6 +616,7 @@ void AExtractionPlayer::ADSStart(const FInputActionValue& Value)
 	if (bIsDBNO) return;
 	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
+	if (IsUsingStim()) return;
 	if (!IsValid(WeaponComponent)) return;
 
 	// TODO: notify kit BP to cancel sprint on ADS entry via BIE
@@ -1040,7 +1054,23 @@ bool AExtractionPlayer::TraceInteractHit(FHitResult& OutHit) const
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(PlayerInteract), false, this);
 	const FVector TraceEnd = ViewLoc + ViewRot.Vector() * InteractTraceRange;
-	return World->LineTraceSingleByChannel(OutHit, ViewLoc, TraceEnd, ECC_Visibility, Params);
+
+	// Two passes over the same ray: solid world interactables on Visibility, plus the dedicated
+	// Interact channel that invisible loot volumes block (they must stay out of the Visibility
+	// channel — AI sight and cover generation live there). Nearer hit wins; either one counts.
+	FHitResult VisibilityHit;
+	const bool bHitVisibility = World->LineTraceSingleByChannel(VisibilityHit, ViewLoc, TraceEnd, ECC_Visibility, Params);
+
+	FHitResult InteractHit;
+	const bool bHitInteract = World->LineTraceSingleByChannel(
+		InteractHit, ViewLoc, TraceEnd, ExtractionInteraction::InteractTraceChannel, Params);
+
+	if (!bHitVisibility && !bHitInteract) return false;
+	if (!bHitInteract) { OutHit = VisibilityHit; return true; }
+	if (!bHitVisibility) { OutHit = InteractHit; return true; }
+
+	OutHit = InteractHit.Distance <= VisibilityHit.Distance ? InteractHit : VisibilityHit;
+	return true;
 }
 
 AActor* AExtractionPlayer::TraceInteractableUnderCrosshair() const
@@ -1426,13 +1456,56 @@ void AExtractionPlayer::CompanionModeSelectCombatInput(const FInputActionValue& 
 
 void AExtractionPlayer::UseStimInput(const FInputActionValue& /*Value*/)
 {
-	if (IsValid(ConsumableInventoryComponent))
-		ConsumableInventoryComponent->TryUseStim();
+	// Same gate as fire/ADS/reload: an injection montage owns the upper body, so it must not start
+	// on top of a revive hold or a traversal montage that already does.
+	if (bIsDBNO) return;
+	if (bIsReviving || bBeingRevivedAnimActive) return;
+	if (IsInTraversal()) return;
+	if (!IsValid(ConsumableInventoryComponent)) return;
+
+	ConsumableInventoryComponent->TryUseStim();
+}
+
+bool AExtractionPlayer::IsUsingStim() const
+{
+	return IsValid(ConsumableInventoryComponent) && ConsumableInventoryComponent->IsUsingStim();
 }
 
 void AExtractionPlayer::HandleStimUsed()
 {
+	// The injection owns the hands from here: drop the trigger and come out of ADS before the
+	// montage starts, so an already-held aim can't survive the lockout.
+	if (IsValid(WeaponComponent))
+	{
+		WeaponComponent->StopFire();
+		if (WeaponComponent->IsAiming())
+		{
+			WeaponComponent->SetAiming(false);
+			OnADSChanged(false);
+		}
+	}
+	bAutoLeanActive = false;
+	AutoLeanTargetAlpha = 0.f;
+
 	OnStimUsed();
+}
+
+void AExtractionPlayer::HandleStimUseEnded()
+{
+	OnStimUseEnded();
+}
+
+void AExtractionPlayer::CancelStimUse()
+{
+	if (!IsValid(ConsumableInventoryComponent)) return;
+
+	// Off authority the only caller is OnRep_IsDBNO, which is mirroring a cancel the server has
+	// ALREADY made (EnterDBNO ran there first) — so it takes the local teardown. The component's
+	// public cancel is authority-only and would refuse it.
+	if (HasAuthority())
+		ConsumableInventoryComponent->CancelStimUse();
+	else
+		ConsumableInventoryComponent->CancelStimUseLocally();
 }
 
 void AExtractionPlayer::FinishPendingTakedown()
@@ -1559,6 +1632,7 @@ void AExtractionPlayer::EnterDBNO()
 	// Cancel active revive (downed player can't finish reviving someone)
 	if (bIsReviving) CancelRevive();
 	CancelInteractHold();
+	CancelStimUse();
 
 	// Fresh down, fresh arbitration — a claim left over from a previous DBNO would lock the wrong
 	// ally out until its capability test happened to fail.
@@ -1691,6 +1765,7 @@ void AExtractionPlayer::FullDeath()
 
 	bAutoLeanActive = false;
 	AutoLeanTargetAlpha = 0.f;
+	CancelStimUse();
 	SetBeingRevived(false);
 	SetDBNOCameraFreeLook(false);
 	// Weapon stays hidden — the level-fail flow owns the screen from here.
@@ -2152,7 +2227,11 @@ void AExtractionPlayer::OnRep_IsDBNO()
 	}
 
 	if (bIsDBNO)
+	{
 		BleedoutTimeRemaining = BleedoutDuration;
+		// EnterDBNO never runs on a simulated proxy — this is the remote client's cancel.
+		CancelStimUse();
+	}
 
 	if (!bIsDBNO)
 	{
