@@ -16,7 +16,12 @@ struct FBarkVariant
 {
 	GENERATED_BODY()
 
-	/** Subtitle/debug text for this take. */
+	/** RETIRED as a player-facing subtitle — nothing renders this. Its only live consumer is the
+	 *  bark debug display (log line + on-screen/DrawDebugString in UBarkSubsystem), so it is
+	 *  deliberately kept: it is the written record of what each take actually says, and the hook
+	 *  a real subtitle system would read from if one is added later. Keep it populated when
+	 *  authoring new takes — an empty Line means that take's script is lost. The companion set is
+	 *  fully populated; DA_Barks_Extractee's pre-existing takes are not (see agent_docs/bark_script.md). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Bark")
 	FText Line;
 
