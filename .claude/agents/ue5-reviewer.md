@@ -1,6 +1,6 @@
 ---
 name: ue5-reviewer
-description: UE5 C++ reviewer covering crash/correctness safety, performance, and edge-case/functional-correctness in one pass. Read-only -- flags issues but does not edit code. Replaces the old ue5-safety-reviewer / ue5-performance-reviewer / ue5-edge-case-reviewer split.
+description: UE5 C++ reviewer covering crash/correctness safety, performance, and edge-case/functional-correctness in one pass. The single reviewer for every C++ change in this project. Read-only -- flags issues but does not edit code.
 model: inherit
 tools:
   - Glob

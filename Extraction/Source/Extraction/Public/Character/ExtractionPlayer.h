@@ -158,6 +158,12 @@ public:
 
 	virtual const UAnimMontage* GetBeingRevivedMontage() const override { return BeingRevivedMontage; }
 
+	// ---- Single-reviver claim (see IExtractionPlayerInterface) ----
+
+	virtual bool TryClaimRevive(AActor* Claimant) override;
+	virtual void ReleaseReviveClaim(AActor* Claimant) override;
+	virtual AActor* GetReviveClaimant() const override { return ReviveClaimant.Get(); }
+
 	// ---- IExtractionPlayerInterface ----
 
 	UFUNCTION(BlueprintPure, Category = "Components")
@@ -845,6 +851,17 @@ private:
 	UFUNCTION(Exec)
 	void CompDown();
 
+	/** Resolve the armed extraction VIP from console. Deliberately NOT ResolveDebugCompanion: both
+	 *  of that function's branches are primary-only (the wired ref comes from the command component,
+	 *  which filters on primary, and the fallback requires bIsPrimaryCompanion) while the VIP clears
+	 *  that flag — so every existing Comp* exec structurally excludes it. Returns the base type so
+	 *  this header stays free of the extractee include. */
+	ACompanionCharacter* ResolveDebugExtractee() const;
+
+	/** console: VipReload — trigger a reload on the armed extraction VIP. */
+	UFUNCTION(Exec)
+	void VipReload();
+
 	// ---- Takedown state ----
 
 	/** Victim held during a montage-deferred takedown. Cleared after kill or montage abort. */
@@ -870,6 +887,12 @@ private:
 
 	float ReviveElapsed = 0.f;
 	bool bIsReviving = false;
+
+	/** Ally that holds the exclusive right to revive THIS player (see TryClaimRevive). Weak so a
+	 *  destroyed claimant frees the hold on its own; the capability test additionally frees it for a
+	 *  claimant that is merely down or dead rather than gone. Server-only — the AI that reads it
+	 *  never runs on clients. Cleared on both DBNO edges so a claim can't survive into the next down. */
+	TWeakObjectPtr<AActor> ReviveClaimant;
 
 	/** Low-rate crosshair scan feeding the revive prompt (local player only). */
 	void UpdateReviveCandidateScan(float DeltaTime);

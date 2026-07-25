@@ -38,6 +38,9 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ToolTip = "Allow the director's finite WAVES to use this zone. Turn off for zones the player can watch from the fight room (e.g. behind glass — the hidden-check trace treats glass as an occluder). Ambient/tension spawns are unaffected."))
 	bool bWaveEligible = true;
 
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ToolTip = "Additive score bias for finite director waves only; ambient/tension spawns are unaffected. Positive = this zone is preferred; pairs with the repeat cap so one zone can be the majority spawner without becoming the only one."))
+	float WaveScoreBias = 0.f;
+
 	// --- API for the director ---
 
 	/** True if this zone should produce spawns during the given phase. Empty ActivePhases = all phases. */

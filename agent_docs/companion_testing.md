@@ -106,10 +106,33 @@ Test scenarios for the AI Companion Prototype on the `AI-Companion-Prototype` br
 | Ping (MMB) a **lone** unaware enemy + press U (shoot) | Companion turns to face → aims in ~1s → fires 2 shots → enemy **drops promptly** → companion lowers. Fires solo after a 2–4s beat |
 | Ping the companion's target with a **2nd** eligible enemy in the same takedown volume + U | Companion holds aim; kills the marked enemy the instant **you fire your own gun** |
 | Watch the marked enemy during the kill | Must **not** spin 180 / return fire before dying — clean execution, no firefight |
-| Knife takedown (Y) | Unchanged — still triggers off your own melee takedown (T) |
+| Knife takedown (Y) | Triggers off your melee takedown (T) **or** your gunshot — either counts as the commit |
 | Let an enemy headshot the player | Flat body damage, **no** headshot spike (player is immune) |
 
-Tuning (no rebuild): `BP_Companion` → `ShootAimInDuration` / `ShootShotInterval` / `ShootShotCount` / `ShootLowerDelay`; enemy archetype → `HeadshotMaxHealthFraction` (0.65), `RangedTakedownRagdollDelay` (fall speed). The aim-in/lower *pose blend* lives in the companion AnimBP.
+**Player misses (the commitment case).** Paired takedown volume, companion marked on one enemy, you take the other:
+
+| Scenario | Expected |
+|----------|----------|
+| Ping + U, then deliberately **miss** your own shot | Companion still kills its marked enemy. The miss escalates the global alert and wakes the victim to Searching, but a reserved victim stays takedown-eligible below Combat |
+| Same, but the victim fully wakes to **Combat** first | Companion does **not** abandon it — it finishes the victim with normal gunfire, *then* joins your fight |
+| Same, with the companion's line to the victim blocked | Companion holds the victim as its combat target and kills it once it has a shot; never silently drops it |
+| Watch what it targets after the victim dies | Reverts to normal selection immediately — no lingering fixation |
+| Go DBNO while the companion is mid-commitment | Revive still outranks it; the companion breaks off to revive you |
+
+**Neighbour notices the body (delayed, must NOT be instant).** Sight discovery needs the corpse inside the head-bone view cone; a body ragdolled at an enemy's feet sits below it, so the enemy standing next to a fresh kill used to ignore it entirely. A short-range out-of-cone notice covers that, deliberately on a delay:
+
+| Scenario | Expected |
+|----------|----------|
+| Takedown one of two enemies stood together, watch the survivor | Ignores it for ~1s, then barks "body", turns, and sweeps the area. **Never** snaps round into a firefight — Searching only |
+| Time the reaction | The pause is load-bearing; an instant reaction is the old bug where the neighbour 180-spun and broke shoot takedowns |
+| Ping the survivor for a companion takedown, then kill its mate next to it | Survivor stays **asleep** — a reserved victim is exempt, so the companion's pending kill still lands |
+| Watch the corpse after the survivor walks onto it | Takedown corpses persist (exempt from reach-removal), so the body does not evaporate under it |
+| Kill one from across the room instead | Unchanged — normal cone-based sight discovery handles distant bodies |
+| Break line of sight (corpse behind a crate) | No notice; the check needs a clear line, and partial progress resets rather than banking |
+
+Tuning: enemy archetype → `bEnableProximityBodyNotice`, `BodyNoticeDelaySeconds` (1.0 — raise if takedown chains feel rushed), `BodyNoticeRadius` (400).
+
+Tuning (no rebuild): `BP_Companion` → `ShootAimInDuration` / `ShootShotInterval` / `ShootShotCount` / `ShootLowerDelay`; enemy archetype → `HeadshotMaxHealthFraction` (0.65), `RangedTakedownRagdollDelay` (fall speed). Commitment hold: `BT_Companion` → the Companion Takedown node's `TakedownCommitHoldSeconds` (8s safety valve; the lock releases on the victim's death regardless). The aim-in/lower *pose blend* lives in the companion AnimBP.
 
 ---
 

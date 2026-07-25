@@ -176,6 +176,20 @@ void UEnemyMoraleComponent::NotifyRally(float MoraleBoost, float FloorRaise)
 	EvaluateState();
 }
 
+void UEnemyMoraleComponent::RallyToConfident()
+{
+	if (bFearless) return;
+	if (!OwnerEnemy.IsValid()) return;
+	if (CachedHealthComp.IsValid() && CachedHealthComp->IsDead()) return;
+	if (CurrentState == EMoraleState::Confident) return;
+
+	// Push morale above ShakenThreshold AND the Broken-exit hysteresis band so EvaluateState
+	// flips to Confident regardless of current state. Without Max3 a Broken enemy with
+	// BrokenThreshold + BrokenExitMargin > ShakenThreshold + 1 would stay Broken.
+	CurrentMorale = FMath::Max3(CurrentMorale, ShakenThreshold + 1.f, BrokenThreshold + BrokenExitMargin);
+	EvaluateState();
+}
+
 void UEnemyMoraleComponent::ClearRallyFloor()
 {
 	RallyFloorRaise = 0.f;

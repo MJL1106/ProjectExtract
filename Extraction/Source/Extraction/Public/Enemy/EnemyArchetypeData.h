@@ -1008,6 +1008,43 @@ public:
 		ToolTip = "Extra standoff padding behind the cover wall surface, in cm, added on top of capsule radius."))
 	float CoverStandoffPadding = 25.f;
 
+	// --- Proximity body notice ---
+
+	/** Notice an ally's corpse lying close by even when it is outside the view cone.
+	 *  Sight-based body discovery needs a perception hit, and the cone rides the head bone with a
+	 *  limited vertical span — a corpse ragdolled at the enemy's feet sits BELOW it, so the enemy
+	 *  standing right next to a fresh kill never reacted at all. This is the short-range backstop.
+	 *  Routes into the same discovery path as a sighted body (bark, report, investigate, Searching) —
+	 *  never straight to Combat. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Awareness",
+		meta = (ToolTip = "Notice a nearby ally corpse even when it is outside the view cone (a body at the enemy's feet)."))
+	bool bEnableProximityBodyNotice = true;
+
+	/** Radius (cm) within which a corpse can be noticed without being in the view cone. Deliberately
+	 *  short — this is for "it is lying at my feet", not for spotting bodies across the room, which
+	 *  normal cone-based sight discovery already handles. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Awareness", meta = (ClampMin = "0.0",
+		EditCondition = "bEnableProximityBodyNotice",
+		ToolTip = "Radius in cm for out-of-cone corpse notice. Short by design; distant bodies use normal sight discovery."))
+	float BodyNoticeRadius = 400.f;
+
+	/** Seconds a corpse must stay close and unobstructed before the enemy reacts to it. The delay is
+	 *  load-bearing: it stops a takedown kill from instantly alerting the victim's neighbour, which
+	 *  is what breaks a synced double-takedown. Progress resets if the corpse stops qualifying. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Awareness", meta = (ClampMin = "0.0",
+		EditCondition = "bEnableProximityBodyNotice",
+		ToolTip = "Seconds a nearby corpse must persist before the enemy reacts. Keeps takedown kills from instantly alerting neighbours."))
+	float BodyNoticeDelaySeconds = 1.f;
+
+	/** Max vertical gap (cm) between the enemy and a cover point for that point to be committable.
+	 *  Cover only shields on the floor you stand on, and the baked cover set plus the EQS bounds span
+	 *  storeys — a slot one floor up can score well and send the enemy jogging into the open toward a
+	 *  hunker that protects nothing. Mirrors the companion tuning field of the same name; 250
+	 *  tolerates ramps and half-landings. 0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
+		ToolTip = "Max vertical gap in cm between the enemy and a cover point for it to be committable. 0 disables."))
+	float CoverPickMaxZDelta = 250.f;
+
 	/** Lateral gap (cm) between the capsule's edge and the wall's actual end at endpoint covers.
 	 *  Arrival positions are corner-snapped so the shoulder sits this far inside the edge regardless
 	 *  of how far from the corner the bake left the point (fixes too-deep / past-the-edge covers). */

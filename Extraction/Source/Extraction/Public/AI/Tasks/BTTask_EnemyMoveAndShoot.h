@@ -64,6 +64,9 @@ private:
 		bool bPursuing = false;
 		float PursueRePathTimer = 0.f;
 
+		// --- LOS fire gate (Pattern B) ---
+		/** Seconds since LOS was last true; fires while <= FireLosLostGrace. */
+		float LosLostTimer = 0.f;
 	};
 
 	/** Acceptance radius for strafe MoveToLocation commands. */

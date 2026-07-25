@@ -243,6 +243,30 @@ public:
 	 *  Searching and Combat count; Suspicious does not. */
 	bool IsAlertedForCompanionReadiness() const;
 
+	/** Instigator-aware eligibility. Same as IsTakedownEligible(), except a victim RESERVED by this
+	 *  instigator also passes while it has only drifted to Searching.
+	 *
+	 *  Why: the global alert ladder is a ratchet. One missed player shot escalates to Loud, which
+	 *  wakes every Unaware enemy to Searching — including the pocket victim the companion is already
+	 *  lined up on — and the strict Unaware rule then fails the in-flight takedown permanently. An
+	 *  already-committed kill must survive that; a victim that reaches Combat genuinely has not. */
+	bool IsTakedownEligibleFor(const AActor* TakedownInstigator) const;
+
+	/** Claim this enemy as an in-flight takedown victim. Grandfathers it against the alert-ratchet
+	 *  wake-up (see IsTakedownEligibleFor). One reservation at a time — last claim wins. */
+	void ReserveForTakedown(AActor* TakedownInstigator);
+
+	/** Release a reservation. No-op unless TakedownInstigator currently holds it. */
+	void ClearTakedownReservation(const AActor* TakedownInstigator);
+
+	/** True when TakedownInstigator currently holds this enemy's takedown reservation. */
+	bool IsTakedownReservedBy(const AActor* TakedownInstigator) const;
+
+	/** True when ANYONE holds a takedown reservation on this enemy. Used to keep an in-flight
+	 *  takedown victim asleep — e.g. the proximity body notice must not wake the very enemy the
+	 *  companion is lined up on, or the takedown it is about to land turns into a whiff. */
+	bool IsReservedForTakedown() const { return TakedownReservedBy.IsValid(); }
+
 	/** Called by ATakedownVolume on overlap begin/end. Increments/decrements an internal
 	 *  counter so overlapping more than one volume is handled correctly. */
 	void SetInTakedownVolume(bool bInVolume);
@@ -552,6 +576,10 @@ private:
 
 	/** Number of ATakedownVolumes currently containing this enemy. Positive = in at least one volume. */
 	int32 TakedownVolumeRefCount = 0;
+
+	/** Who has claimed this enemy as an in-flight takedown victim (weak — the instigator can die
+	 *  mid-approach). Drives the grandfather exemption in IsTakedownEligibleFor / CanBeTakenDown. */
+	TWeakObjectPtr<AActor> TakedownReservedBy;
 
 	/** Generic damage amount guaranteed to kill through any shield (takedown path). */
 	static constexpr float TakedownDamage = 1.e6f;

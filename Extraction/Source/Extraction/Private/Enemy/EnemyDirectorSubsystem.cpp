@@ -19,6 +19,7 @@
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "EngineUtils.h"
+#include "EnemyMoraleComponent.h"
 
 // ============================================================
 // Lifecycle
@@ -112,6 +113,30 @@ void UEnemyDirectorSubsystem::RegisterCorpse(AEnemyCharacter* Corpse)
 			Evicted->Destroy();
 		Corpses.RemoveAt(EvictIndex);
 	}
+}
+
+bool UEnemyDirectorSubsystem::GetWaveThreatReference(FVector& OutLocation) const
+{
+	if (!WaveProgress.IsActive()) return false;
+
+	// Prefer the last-picked zone (the direction the most recent squad came from).
+	if (AEnemySpawnZone* Zone = LastPickedZone.Get())
+	{
+		OutLocation = Zone->GetActorLocation();
+		return true;
+	}
+
+	// Fallback: any registered wave-eligible zone that is active for the current phase.
+	for (const TWeakObjectPtr<AEnemySpawnZone>& ZonePtr : SpawnZones)
+	{
+		AEnemySpawnZone* Zone = ZonePtr.Get();
+		if (!IsValid(Zone)) continue;
+		if (!Zone->bWaveEligible) continue;
+		OutLocation = Zone->GetActorLocation();
+		return true;
+	}
+
+	return false;
 }
 
 void UEnemyDirectorSubsystem::Escalate(EGlobalAlertLevel NewLevel)
@@ -577,11 +602,21 @@ bool UEnemyDirectorSubsystem::ShouldSpawn(int32 AliveCount) const
 		if (Tension >= PhaseConfig.IntensityCeiling) return false;
 	}
 
-	const float Cadence = (bWaveCanSpawn && ActiveWaveRequest.SpawnCadenceOverride > 0.f)
-		? ActiveWaveRequest.SpawnCadenceOverride
-		: PhaseConfig.SpawnCadenceSeconds;
+	// The wave's FIRST squad gets its own delay. StartWave zeroes TimeSinceLastSpawn, so the cadence
+	// gate below applied to squad one too and the wave opened with a full cadence of silence — the
+	// player triggers the defence and nothing happens for 25s.
+	const bool bFirstWaveSquad = bWaveCanSpawn && WaveProgress.SpawnedSquads == 0;
+	const float Cadence = bFirstWaveSquad
+		? ActiveWaveRequest.FirstSquadDelaySeconds
+		: ((bWaveCanSpawn && ActiveWaveRequest.SpawnCadenceOverride > 0.f)
+			? ActiveWaveRequest.SpawnCadenceOverride
+			: PhaseConfig.SpawnCadenceSeconds);
 	if (TimeSinceLastSpawn < Cadence) return false;
-	if (AliveCount >= PhaseConfig.MaxAlive) return false;
+
+	// A guaranteed squad waives the alive cap — otherwise the set-piece it exists to deliver is
+	// silently dropped exactly when the fight is busiest, which is when it matters most. One squad,
+	// once per wave slot; PickComposition applies the same waiver to the fit filter.
+	if (AliveCount >= PhaseConfig.MaxAlive && !FindGuaranteedSquadForNext()) return false;
 
 	return true;
 }
@@ -631,6 +666,9 @@ bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*
 		return false;
 	}
 
+	ConsecutiveZonePicks = (Zone == LastPickedZone.Get()) ? ConsecutiveZonePicks + 1 : 1;
+	LastPickedZone = Zone;
+
 	TArray<AEnemyCharacter*> Spawned;
 	SpawnSquadAtZone(Composition, Zone, Spawned);
 
@@ -664,12 +702,46 @@ const FMissionPhaseConfig& UEnemyDirectorSubsystem::GetCurrentPhaseConfig() cons
 	return DefaultConfig;
 }
 
+const FDirectorGuaranteedSquad* UEnemyDirectorSubsystem::FindGuaranteedSquadForNext() const
+{
+	if (!WaveProgress.CanSpawnMore()) return nullptr;
+
+	const int32 NextSquadNumber = WaveProgress.SpawnedSquads + 1;
+	for (const FDirectorGuaranteedSquad& Entry : ActiveWaveRequest.GuaranteedSquads)
+	{
+		if (Entry.SquadNumber == NextSquadNumber && !Entry.CompositionName.IsNone())
+			return &Entry;
+	}
+	return nullptr;
+}
+
 bool UEnemyDirectorSubsystem::PickComposition(const FMissionPhaseConfig& PhaseConfig, int32 AliveCount, FSquadComposition& OutComposition) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_PickComposition);
 
 	const TArray<FSquadComposition>& Compositions = PhaseConfig.Compositions;
 	if (Compositions.Num() == 0) return false;
+
+	// Guaranteed slot: return the pinned composition outright, skipping both the weighted roll and
+	// the MaxAlive fit filter. An unresolvable name falls through to the normal roll below with a
+	// warning — a typo must not stall the wave, but it must be visible.
+	if (const FDirectorGuaranteedSquad* Guaranteed = FindGuaranteedSquadForNext())
+	{
+		const FSquadComposition* Pinned = Compositions.FindByPredicate(
+			[Guaranteed](const FSquadComposition& Comp) { return Comp.Name == Guaranteed->CompositionName; });
+
+		if (Pinned && GetCompositionSize(*Pinned) > 0)
+		{
+			OutComposition = *Pinned;
+			UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: squad %d is guaranteed '%s' (size %d, alive %d/%d)"),
+				*ActiveWaveRequest.WaveId.ToString(), Guaranteed->SquadNumber,
+				*Guaranteed->CompositionName.ToString(), GetCompositionSize(*Pinned), AliveCount, PhaseConfig.MaxAlive);
+			return true;
+		}
+
+		UE_LOG(LogEnemyAI, Warning, TEXT("Director wave %s: guaranteed composition '%s' for squad %d not found (or empty) in the phase config — falling back to the weighted roll"),
+			*ActiveWaveRequest.WaveId.ToString(), *Guaranteed->CompositionName.ToString(), Guaranteed->SquadNumber);
+	}
 
 	float TotalWeight = 0.f;
 	for (const FSquadComposition& Comp : Compositions)
@@ -748,6 +820,8 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 	// exist latches after its first fire. The counts name the culprit in one line.
 	LastZoneRejects = FZoneRejectCounts();
 
+	// First pass: collect candidates that survive all gates.
+	TArray<AEnemySpawnZone*, TInlineAllocator<8>> Candidates;
 	for (const TWeakObjectPtr<AEnemySpawnZone>& WeakZone : SpawnZones)
 	{
 		AEnemySpawnZone* Zone = WeakZone.Get();
@@ -759,13 +833,10 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 		const FVector ZoneLoc = Zone->GetZoneOrigin();
 		if (bUseScopeVolumes && !IsPointInsideAnyScope(ZoneLoc)) { ++LastZoneRejects.OutsideScope; continue; }
 
-		// Min distance against the closest point of the box (a wide zone can put spawn
-		// points far nearer than its origin); max distance against the origin so large
-		// zones don't starve availability.
 		if (FVector::DistSquared(PlayerLoc, Zone->GetClosestPointInZone(PlayerLoc)) < DistMin * DistMin) { ++LastZoneRejects.TooClose; continue; }
 		if (FVector::DistSquared(PlayerLoc, ZoneLoc) > DistMax * DistMax) { ++LastZoneRejects.TooFar; continue; }
 
-		if (!IsZoneHiddenFromPlayer(Zone, FMath::Max(MinSightlineSamples, SquadSize), ViewLoc, ViewDir, QueryParams, NavSys)) { ++LastZoneRejects.Visible; continue; }
+		if (!bWaveSightlineWaived && !IsZoneHiddenFromPlayer(Zone, FMath::Max(MinSightlineSamples, SquadSize), ViewLoc, ViewDir, QueryParams, NavSys)) { ++LastZoneRejects.Visible; continue; }
 
 		if (IsValid(NavSys))
 		{
@@ -774,7 +845,20 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 			if (!NavSys->ProjectPointToNavigation(ZoneLoc, NavLoc, Extent)) { ++LastZoneRejects.OffNavMesh; continue; }
 		}
 
-		const float Score = ScoreZone(Zone, PlayerLoc, CompanionLoc, bHasCompanion, DistMin, DistMax);
+		Candidates.Add(Zone);
+	}
+
+	// Second pass: score candidates, applying a repeat-zone penalty when alternatives exist.
+	// The penalty only bites after a zone has taken MaxConsecutiveZonePicks in a row, so a zone
+	// whose WaveScoreBias out-scores its distance disadvantage wins every pick until it has spawned
+	// twice running, then yields one pick to the runner-up — a ~2:1 majority, never 3+ in a row.
+	for (AEnemySpawnZone* Zone : Candidates)
+	{
+		float Score = ScoreZone(Zone, PlayerLoc, CompanionLoc, bHasCompanion, DistMin, DistMax);
+		if (bWaveActive)
+			Score += Zone->WaveScoreBias;
+		if (Candidates.Num() > 1 && Zone == LastPickedZone.Get() && ConsecutiveZonePicks >= MaxConsecutiveZonePicks)
+			Score -= RepeatZonePenalty;
 		if (Score > BestScore)
 		{
 			BestScore = Score;
@@ -1100,6 +1184,10 @@ void UEnemyDirectorSubsystem::ClearWaveState()
 	WaveMembers.Empty();
 	WaveBlockedTime = 0.f;
 	bWaveBlockedBroadcast = false;
+	bWaveSightlineWaived = false;
+	LastRallyWorldTime = 0.0;
+	LastPickedZone = nullptr;
+	ConsecutiveZonePicks = 0;
 }
 
 void UEnemyDirectorSubsystem::PruneStaleWaveMembers()
@@ -1124,6 +1212,17 @@ void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
 	APawn* PlayerPawn = IsValid(World) ? UGameplayStatics::GetPlayerPawn(World, 0) : nullptr;
 	if (!IsValid(PlayerPawn)) return;
 
+	// Last-man rally: when every squad has spawned and no combat has been reported for a while,
+	// ForceEngage + rally morale so stuck survivors push out of hiding toward the player.
+	// Throttled by LastRallyWorldTime so it fires at most once per StaleCombatRallySeconds
+	// (ForceEngage early-outs on already-Combat enemies without refreshing LastCombatReportTime).
+	constexpr float StaleCombatRallySeconds = 12.f;
+	const double Now = World->GetTimeSeconds();
+	const bool bAllSquadsSpawned = WaveProgress.SpawnedSquads >= WaveProgress.TargetSquads;
+	const bool bCombatStale = bAllSquadsSpawned
+		&& (Now - LastCombatReportTime) >= StaleCombatRallySeconds
+		&& (Now - LastRallyWorldTime) >= StaleCombatRallySeconds;
+
 	for (const TWeakObjectPtr<AEnemyCharacter>& WeakMember : WaveMembers)
 	{
 		AEnemyCharacter* Member = WeakMember.Get();
@@ -1135,14 +1234,26 @@ void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
 		UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
 		if (!Awareness) continue;
 
-		// Searching still hunts. Only a member that fully gave up (Unaware — decayed out of the
-		// fight and walked back to a guard post, e.g. parked behind a door) gets re-seeded; the
-		// kill-all wave can never complete around a passive holdout the player can't find.
-		if (Awareness->GetAwarenessState() != EEnemyAwarenessState::Unaware) continue;
-		Awareness->ForceEngage(PlayerPawn);
-		UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: re-engaging idle member %s"),
-			*ActiveWaveRequest.WaveId.ToString(), *Member->GetName());
+		// Original logic: re-seed Combat on any member that fully gave up (decayed to Unaware).
+		if (Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware)
+		{
+			Awareness->ForceEngage(PlayerPawn);
+			UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: re-engaging idle member %s"),
+				*ActiveWaveRequest.WaveId.ToString(), *Member->GetName());
+		}
+
+		// Last-man rally: refresh position + restore morale so Shaken/Broken survivors push out.
+		if (bCombatStale)
+		{
+			Awareness->ForceEngage(PlayerPawn);
+			if (UEnemyMoraleComponent* Morale = Member->GetMoraleComponent())
+				Morale->RallyToConfident();
+			UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: rallying stale member %s"),
+				*ActiveWaveRequest.WaveId.ToString(), *Member->GetName());
+		}
 	}
+
+	if (bCombatStale) LastRallyWorldTime = Now;
 }
 
 void UEnemyDirectorSubsystem::AccrueWaveBlockedTime()
@@ -1151,15 +1262,24 @@ void UEnemyDirectorSubsystem::AccrueWaveBlockedTime()
 
 	WaveBlockedTime += DirectorTickInterval;
 
-	if (bWaveBlockedBroadcast) return;
-	if (WaveBlockedTime < ActiveWaveRequest.BlockedWarningSeconds) return;
+	if (!bWaveBlockedBroadcast && WaveBlockedTime >= ActiveWaveRequest.BlockedWarningSeconds)
+	{
+		bWaveBlockedBroadcast = true;
+		OnDirectorWaveBlocked.Broadcast(ActiveWaveRequest.WaveId,
+			FText::FromString(TEXT("Wave spawn blocked: no valid zone or composition")));
+		UE_LOG(LogEnemyAI, Warning, TEXT("Director wave %s blocked for %.0fs"),
+			*ActiveWaveRequest.WaveId.ToString(), WaveBlockedTime);
+	}
 
-	bWaveBlockedBroadcast = true;
-	OnDirectorWaveBlocked.Broadcast(ActiveWaveRequest.WaveId,
-		FText::FromString(TEXT("Wave spawn blocked: no valid zone or composition")));
-
-	UE_LOG(LogEnemyAI, Warning, TEXT("Director wave %s blocked for %.0fs"),
-		*ActiveWaveRequest.WaveId.ToString(), WaveBlockedTime);
+	// Sightline relief: once blocked for twice the warning period, waive the IsZoneHiddenFromPlayer
+	// gate so the wave can make progress via a visible spawn zone. All other filters (distance,
+	// scope, nav, phase, wave-eligible) remain enforced.
+	if (!bWaveSightlineWaived && WaveBlockedTime >= ActiveWaveRequest.BlockedWarningSeconds * 2.f)
+	{
+		bWaveSightlineWaived = true;
+		UE_LOG(LogEnemyAI, Warning, TEXT("Director wave %s: sightline gate waived after %.0fs blocked"),
+			*ActiveWaveRequest.WaveId.ToString(), WaveBlockedTime);
+	}
 }
 
 // ============================================================

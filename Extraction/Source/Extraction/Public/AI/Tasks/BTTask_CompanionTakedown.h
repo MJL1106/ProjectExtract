@@ -62,6 +62,12 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Takedown|Shoot", meta = (ClampMin = "0.5"))
 	float AutonomousShootDelayMax = 4.f;
 
+	/** Seconds the companion stays locked onto a victim it failed to take down silently, killing it
+	 *  with normal gunfire before it may pick any other combat target. Safety valve only — the lock
+	 *  releases the moment the victim dies. 0 disables the commitment entirely. */
+	UPROPERTY(EditAnywhere, Category = "Takedown", meta = (ClampMin = "0.0"))
+	float TakedownCommitHoldSeconds = 8.f;
+
 private:
 	enum class EPhase : uint8
 	{

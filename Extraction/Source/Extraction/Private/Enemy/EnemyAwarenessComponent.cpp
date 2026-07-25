@@ -187,6 +187,83 @@ void UEnemyAwarenessComponent::HandleBodySighted(AEnemyCharacter* Body)
 	SetState(EEnemyAwarenessState::Searching);
 }
 
+void UEnemyAwarenessComponent::UpdateProximityBodyNotice()
+{
+	if (!IsValid(ArchetypeData) || !ArchetypeData->bEnableProximityBodyNotice) return;
+	if (CurrentState == EEnemyAwarenessState::Combat) return;
+
+	// Already walking to a body — nothing to notice.
+	if (CurrentInvestigateBody.IsValid()) return;
+
+	const AAIController* MyController = Cast<AAIController>(GetOwner());
+	APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+	if (!IsValid(MyPawn)) return;
+
+	// An enemy the companion has armed a takedown on must stay asleep until that takedown resolves.
+	// Waking it here would re-create the exact bug this delay exists to avoid: the second pocket
+	// enemy alerting off its mate's corpse and turning the pending kill into a visible whiff.
+	if (const AEnemyCharacter* MyChar = Cast<AEnemyCharacter>(MyPawn))
+		if (MyChar->IsReservedForTakedown()) return;
+
+	const UEnemyDirectorSubsystem* Dir = Director.Get();
+	UWorld* World = GetWorld();
+	if (!Dir || !IsValid(World)) return;
+
+	const float RadiusSq = FMath::Square(ArchetypeData->BodyNoticeRadius);
+	const FVector EyeLocation = MyPawn->GetPawnViewLocation();
+
+	// Nearest undiscovered corpse in radius. The director's list is capped (MaxCorpses), so this is
+	// a bounded scan; the LOS trace only runs for the single winner.
+	AEnemyCharacter* Best = nullptr;
+	float BestDistSq = RadiusSq;
+	for (const TWeakObjectPtr<AEnemyCharacter>& WeakCorpse : Dir->GetCorpses())
+	{
+		AEnemyCharacter* Corpse = WeakCorpse.Get();
+		if (!IsValid(Corpse) || Corpse == MyPawn) continue;
+		if (DiscoveredBodies.Contains(Corpse)) continue;
+
+		const float DistSq = FVector::DistSquared(MyPawn->GetActorLocation(), Corpse->GetCorpseLocation());
+		if (DistSq > BestDistSq) continue;
+
+		BestDistSq = DistSq;
+		Best = Corpse;
+	}
+
+	if (!Best)
+	{
+		BodyNoticeCandidate.Reset();
+		BodyNoticeElapsed = 0.f;
+		return;
+	}
+
+	FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(EnemyBodyNoticeLoS), false);
+	QueryParams.AddIgnoredActor(MyPawn);
+	QueryParams.AddIgnoredActor(Best);
+	if (World->LineTraceTestByChannel(EyeLocation, Best->GetCorpseLocation(), ECC_Visibility, QueryParams))
+	{
+		BodyNoticeCandidate.Reset();
+		BodyNoticeElapsed = 0.f;
+		return;
+	}
+
+	// Switching candidate restarts the clock — the delay must be per-body, not cumulative.
+	if (BodyNoticeCandidate.Get() != Best)
+	{
+		BodyNoticeCandidate = Best;
+		BodyNoticeElapsed = 0.f;
+	}
+
+	BodyNoticeElapsed += UpdateInterval;
+	if (BodyNoticeElapsed < ArchetypeData->BodyNoticeDelaySeconds) return;
+
+	UE_LOG(LogEnemyAI, Log, TEXT("[BODY] %s noticed %s at its feet after %.1fs (dist=%.0f, out of view cone)"),
+		*MyPawn->GetName(), *Best->GetName(), BodyNoticeElapsed, FMath::Sqrt(BestDistSq));
+
+	BodyNoticeCandidate.Reset();
+	BodyNoticeElapsed = 0.f;
+	HandleBodySighted(Best);
+}
+
 void UEnemyAwarenessComponent::HandleSightStimulus(AActor* Actor, const FAIStimulus& Stimulus)
 {
 	if (Stimulus.WasSuccessfullySensed() && !IsActorAlive(Actor)) return;
@@ -500,6 +577,28 @@ void UEnemyAwarenessComponent::ForceEngage(AActor* Target)
 	if (bStopped) return;
 	if (!IsValid(Target)) return;
 
+	// The director force-engages every wave squad onto the player pawn the moment it spawns, and
+	// re-issues it each tick for members that decayed to Unaware. With the player down, EnterCombat's
+	// guard would refuse and the squad would idle at its spawn zone. Take the fight to the companion
+	// instead; failing that, hunt toward the body (SetInvestigateLocation clamps to the DBNO standoff
+	// ring, so they close in without crowding the downed player) and be in position on revive.
+	if (Target == FindDownedPlayerPawn(this))
+	{
+		if (AActor* Handoff = FindDBNOHandoffCompanion())
+		{
+			EnterCombat(Handoff, /*bConfirmedVisual*/ false);
+			return;
+		}
+
+		if (CurrentState < EEnemyAwarenessState::Searching)
+		{
+			SetInvestigateLocation(Target->GetActorLocation());
+			TimeSpentSearching = 0.f;
+			SetState(EEnemyAwarenessState::Searching);
+		}
+		return;
+	}
+
 	EnterCombat(Target, /*bConfirmedVisual*/ false);
 }
 
@@ -621,6 +720,10 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 	else
 	{
 		UpdateSuspicion();
+
+		// Runs below Combat only: a corpse at this enemy's feet is outside the head-bone view cone,
+		// so sight discovery never fires for the one standing right next to a fresh kill.
+		UpdateProximityBodyNotice();
 
 		if (CurrentState == EEnemyAwarenessState::Searching)
 		{
@@ -1115,6 +1218,15 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 			TargetCompanion->SetStealthBroken(true);
 		}
 	}
+
+	// A downed player is never a valid combat target. UpdateCombat already releases the lock (DBNO
+	// reads as not-alive), but EVERY acquisition funnels through here and re-locks faster than that
+	// release runs — the director force-engages each new wave squad onto the player pawn, so the
+	// player gets shot where they lie for as long as the wave keeps spawning. Refusing here is the
+	// single choke point that covers NotifyDamaged / NotifyShotAt / sight fast-track alike.
+	// FindDownedPlayerPawn, not a bare interface cast — the companion implements the same interface
+	// and a DBNO COMPANION must keep flowing through (UpdateCombat's mirror owns that case).
+	if (IsValid(Target) && Target == FindDownedPlayerPawn(this)) return;
 
 	if (CurrentState != EEnemyAwarenessState::Combat && GetDetectionLogLevel() > 0)
 	{

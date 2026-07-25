@@ -25,16 +25,32 @@ void UEnvQueryContext_CombatTarget::ProvideContext(FEnvQueryInstance& QueryInsta
 
 	// Single source of truth: AEnemyAIController::BB_CombatTarget (both enemy and companion use the same literal)
 	AActor* CombatTarget = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
-	if (!IsValid(CombatTarget)) return;
 
-	if (const AEnemyAIController* EnemyController = Cast<AEnemyAIController>(Controller))
+	const AEnemyAIController* EnemyController = Cast<AEnemyAIController>(Controller);
+	const UEnemyAwarenessComponent* Awareness = EnemyController ? EnemyController->GetAwarenessComponent() : nullptr;
+
+	if (!IsValid(CombatTarget))
 	{
-		const UEnemyAwarenessComponent* Awareness = EnemyController->GetAwarenessComponent();
-		if (IsValid(Awareness) && Awareness->GetCombatTarget() == CombatTarget && !Awareness->HasLOSToTarget())
+		// Providing NO context is not neutral — every consumer (ProvidesCover's occlusion proof,
+		// CoverArc, ParallelToCover, the distance band) bails out having filtered nothing, which
+		// degrades the cover query to "any unoccupied peekable point" and walks the enemy into open
+		// ground behind nothing. The null-target window opens every time a target dies, goes DBNO, or
+		// is dropped between awareness ticks — i.e. exactly when enemies are re-seeking cover.
+		// Fall back to the remembered threat point so the geometry tests still have something to
+		// filter against. Only a genuinely threat-less enemy (Unaware) gets an empty context.
+		if (IsValid(Awareness) && Awareness->GetAwarenessState() >= EEnemyAwarenessState::Searching)
 		{
-			UEnvQueryItemType_Point::SetContextHelper(ContextData, Awareness->GetLastKnownLocation());
-			return;
+			const FVector LastKnown = Awareness->GetLastKnownLocation();
+			if (!LastKnown.IsNearlyZero())
+				UEnvQueryItemType_Point::SetContextHelper(ContextData, LastKnown);
 		}
+		return;
+	}
+
+	if (IsValid(Awareness) && Awareness->GetCombatTarget() == CombatTarget && !Awareness->HasLOSToTarget())
+	{
+		UEnvQueryItemType_Point::SetContextHelper(ContextData, Awareness->GetLastKnownLocation());
+		return;
 	}
 
 	UEnvQueryItemType_Actor::SetContextHelper(ContextData, CombatTarget);

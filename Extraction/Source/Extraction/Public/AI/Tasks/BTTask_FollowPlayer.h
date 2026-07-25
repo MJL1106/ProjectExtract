@@ -48,6 +48,10 @@ private:
 	FVector LastMoveTarget = FVector::ZeroVector;
 	bool bIsIdling = false;
 
+	/** Edge guard for the wave hold's one-shot StopMovement — see ACompanionCharacter::IsWaveHoldActive.
+	 *  Without it the hold would re-issue StopMovement every tick for the length of the wave. */
+	bool bHoldingForWave = false;
+
 	/** ~1Hz throttle for the sprint-mode rescue-approach diagnostic log. */
 	float SprintLogAccumulator = 0.f;
 

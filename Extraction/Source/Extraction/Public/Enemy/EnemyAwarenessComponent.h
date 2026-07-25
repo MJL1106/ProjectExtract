@@ -123,6 +123,11 @@ public:
 	 *  standoff override and the search-converge clamp. */
 	static APawn* FindDownedPlayerPawn(const UObject* WorldContext);
 
+	/** False when the actor is dead OR downed — a DBNO pawn's health component reports dead for the
+	 *  whole bleedout window. Stateless helper; also consumed by BTService_EnemyCombat so a target
+	 *  that goes down stops being shot without waiting on the awareness tick. */
+	static bool IsActorAlive(const AActor* Actor);
+
 private:
 
 	/** Per-stimulus-source suspicion bookkeeping. */
@@ -231,7 +236,6 @@ private:
 	bool IsOwnerTakedownMuffled() const;
 
 	bool IsHostile(AActor* Actor) const;
-	static bool IsActorAlive(const AActor* Actor);
 
 	UPROPERTY()
 	TWeakObjectPtr<UBlackboardComponent> BlackboardComp;
@@ -265,6 +269,16 @@ private:
 
 	/** Clears the investigate-body reference and the target flag on the corpse. */
 	void ClearInvestigateBody();
+
+	/** Out-of-cone backstop for corpses lying close by: after BodyNoticeDelaySeconds of continuous
+	 *  proximity + clear line, routes into HandleBodySighted. The delay is what keeps a takedown kill
+	 *  from instantly alerting the victim's neighbour and wrecking a synced double-takedown. */
+	void UpdateProximityBodyNotice();
+
+	/** Corpse currently accruing notice time, and how long it has qualified for. Reset together the
+	 *  moment it stops qualifying, so a glance past a body banks no progress. */
+	TWeakObjectPtr<AEnemyCharacter> BodyNoticeCandidate;
+	float BodyNoticeElapsed = 0.f;
 
 	TArray<FAcousticCacheEntry> AcousticCache;
 

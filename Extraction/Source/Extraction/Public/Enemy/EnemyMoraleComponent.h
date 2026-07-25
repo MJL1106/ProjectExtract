@@ -61,6 +61,10 @@ public:
 	/** Officer rally: boosts morale, temporarily raises morale floor, un-pins Broken/Shaken. */
 	void NotifyRally(float MoraleBoost, float FloorRaise);
 
+	/** Director wave watchdog: restore morale above ShakenThreshold so the enemy regains bAggressive
+	 *  pursuit in the combat fire task. Lighter than NotifyRally — no floor raise, no timer. */
+	void RallyToConfident();
+
 	/** Delegate broadcast on state transitions. Slice C's controller subscribes to write BB. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Morale")
 	FOnMoraleStateChanged OnMoraleStateChanged;

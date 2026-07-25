@@ -91,6 +91,11 @@ bool AExtracteeCompanion::CanFire() const
 	return bArmed && Super::CanFire();
 }
 
+bool AExtracteeCompanion::IsCombatReady() const
+{
+	return bArmed && Super::IsCombatReady();
+}
+
 // ------------------------------------------------------------------
 // Rescue
 // ------------------------------------------------------------------

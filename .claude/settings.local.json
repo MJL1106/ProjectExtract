@@ -90,5 +90,15 @@
   ],
   "enabledPlugins": {
     "superpowers@claude-plugins-official": false
+  },
+  "skillOverrides": {
+    "ue5-multiplayer-helper": "off",
+    "ue-game-features": "off",
+    "ue-gameplay-abilities": "off",
+    "ue-gameplay-framework": "off",
+    "ue-module-build-system": "off",
+    "ue-networking-replication": "off",
+    "ue-state-trees": "off",
+    "neostack-hello": "off"
   }
 }

@@ -55,6 +55,10 @@ public:
 	virtual void StartWeaponFire() override;
 	virtual bool CanFire() const override;
 
+	// Unarmed through the handoff window: no wave hold either, or the VIP would plant itself at
+	// cover holding a pistol it has not been given yet.
+	virtual bool IsCombatReady() const override;
+
 	// --- IWorldInteractable (rescue) ---
 	virtual bool CanWorldInteract_Implementation(AActor* Interactor) const override;
 	virtual void WorldInteract_Implementation(AActor* Interactor) override;

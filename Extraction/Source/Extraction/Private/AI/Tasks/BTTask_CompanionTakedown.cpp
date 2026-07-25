@@ -127,8 +127,11 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 	if ((Phase == EPhase::Approaching || Phase == EPhase::Armed)
 		&& !Companion->IsCommandedTakedownExecuting())
 	{
+		// Instigator-aware: the victim is reserved to us from ArmCommandedTakedown, so a drift to
+		// Searching (the alert ratchet waking the level off the player's missed shot) no longer
+		// invalidates a takedown already lined up. Only the victim reaching Combat does.
 		AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Victim);
-		if (!IsValid(Enemy) || !Enemy->IsTakedownEligible())
+		if (!IsValid(Enemy) || !Enemy->IsTakedownEligibleFor(Companion))
 		{
 			UE_LOG(LogCompanion, Log, TEXT("CompanionTakedown: victim no longer eligible (phase=%d)"), (int32)Phase);
 			CleanupTask(Companion);
@@ -284,6 +287,23 @@ EBTNodeResult::Type UBTTask_CompanionTakedown::AbortTask(UBehaviorTreeComponent&
 
 void UBTTask_CompanionTakedown::CleanupTask(ACompanionCharacter* Companion)
 {
+	// Commit to the victim. Tearing down with it still alive used to simply drop it — the companion
+	// fell through to the combat branch, picked whatever was nearest, and the enemy it had been
+	// lined up on never died. Latch it instead so the companion finishes it with normal gunfire,
+	// then resumes normal targeting. Covers both loss routes: the ratchet waking the victim past
+	// the grandfather window, and the shoot path aborting on a blocked line. A victim already held
+	// in a finisher is excluded — that kill is landing, it just hasn't registered yet.
+	if (IsValid(Companion) && TakedownCommitHoldSeconds > 0.f)
+	{
+		AEnemyCharacter* Unfinished = Cast<AEnemyCharacter>(CachedVictim.Get());
+		if (IsValid(Unfinished) && !Unfinished->IsTakedownPending())
+		{
+			const UHealthComponent* UnfinishedHealth = Unfinished->GetHealthComponent();
+			if (!IsValid(UnfinishedHealth) || !UnfinishedHealth->IsDead())
+				Companion->LatchForcedCombatTarget(Unfinished, TakedownCommitHoldSeconds);
+		}
+	}
+
 	if (IsValid(Companion))
 	{
 		Companion->DisarmCommandedTakedown();

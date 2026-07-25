@@ -100,12 +100,17 @@ EBTNodeResult::Type UBTTask_EnemyBoundingAdvance::ExecuteTask(UBehaviorTreeCompo
 	}
 	Mem->bMoveIssued = true;
 
-	// Fire while moving
-	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
-	if (IsValid(Weapon))
+	// Fire while moving -- only if we have line of sight (Pattern B LOS gate)
+	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
+	if (bHasLOS)
 	{
-		Weapon->StartFiring();
-		Mem->bFiring = true;
+		AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
+		if (IsValid(Weapon))
+		{
+			Weapon->StartFiring();
+			Mem->bFiring = true;
+		}
+		Mem->LosLostTimer = 0.f;
 	}
 
 	return EBTNodeResult::InProgress;
@@ -173,6 +178,36 @@ void UBTTask_EnemyBoundingAdvance::TickTask(UBehaviorTreeComponent& OwnerComp, u
 
 	// Keep aim on target
 	Enemy->SetAimTarget(Target);
+
+	// LOS fire gate: stop firing when LOS lost past grace, re-start when regained
+	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
+	{
+		const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+		const float LosGrace = IsValid(DA) ? DA->FireLosLostGrace : 0.35f;
+		if (bHasLOS)
+		{
+			Mem->LosLostTimer = 0.f;
+			if (!Mem->bFiring)
+			{
+				AWeaponBase* W = Enemy->GetCurrentWeapon();
+				if (IsValid(W) && W->CanFire() && !W->IsFiring())
+				{
+					W->StartFiring();
+					Mem->bFiring = true;
+				}
+			}
+		}
+		else
+		{
+			Mem->LosLostTimer += DeltaSeconds;
+			if (Mem->LosLostTimer > LosGrace && Mem->bFiring)
+			{
+				AWeaponBase* W = Enemy->GetCurrentWeapon();
+				if (IsValid(W)) W->StopFiring();
+				Mem->bFiring = false;
+			}
+		}
+	}
 
 	// Check arrival
 	if (!Mem->bMoveIssued) return;

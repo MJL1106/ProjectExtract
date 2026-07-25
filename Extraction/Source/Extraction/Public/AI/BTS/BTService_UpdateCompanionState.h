@@ -162,6 +162,37 @@ private:
 	 *  stealth re-pin), the next acquisition starts a new fight. */
 	void ResetFightThreatMemory();
 
+	// --- Wave hold (stay combat-ready at cover for the length of a finite Director wave) ---
+
+	/** True once this ally has engaged during the CURRENT wave. Latched for the wave's duration
+	 *  rather than read straight off bHasFightFirstContact, because the Exploration flip wipes fight
+	 *  memory and that flip is exactly what runs while the ally is outside the leash — keying off it
+	 *  directly would stop the ally ever re-holding after it had caught back up. */
+	bool bEngagedThisWave = false;
+
+	/** Edge-log guard for the wave-hold transition, and the edge that triggers the stand-up. */
+	bool bLastWaveHold = false;
+
+	/** Seconds with no combat target AND no alerted threat while a wave is live. Past the tuning's
+	 *  WaveHoldQuietReleaseSeconds the hold drops so the ally stops standing in an emptied room. */
+	float WaveHoldQuietTimer = 0.f;
+
+	/** Edge-log guard for the revive-claim refusal. The refused state persists for as long as the
+	 *  other ally holds the claim, so an un-edged log would spam at service cadence for the whole
+	 *  revive. */
+	bool bLastReviveClaimRefused = false;
+
+	/** True when the wave-hold overwatch extension owned aim last tick. Used to detect the release
+	 *  edge so we can restore low-ready and clear focus (the decay-branch lower can't run in
+	 *  Exploration posture). */
+	bool bWaveOverwatchOwnedAimLastTick = false;
+
+	/** Recomputes the wave hold and mirrors it onto the companion for the combat teardown and the
+	 *  follow task to read. Deliberately a live state, not a latch: a wave ending or being cancelled
+	 *  releases it on the next tick with no extra plumbing. Returns true while held. */
+	bool UpdateWaveHold(ACompanionCharacter& Companion, const APawn* PlayerPawn,
+		const UCompanionTuningDataAsset* Tuning, bool bHasTarget, bool bThreatKnown, float DeltaSeconds);
+
 	// --- F3 watch-threat state (nearest visible-or-lingering enemy the companion watches without
 	// engaging; see ComputeWatchThreat/ApplyWatchFacing) ---
 

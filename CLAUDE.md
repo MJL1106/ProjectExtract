@@ -22,14 +22,13 @@ If you are Claude Code CLI (terminal / Desktop / VS Code), ignore this section a
 
 ## Memory discipline — default to NOT writing memory
 
-This project's auto-memory was bloating by ~30 files/week because every work round dropped a `project_<thing>_round.md`. Stop that. Overrides the base "save in-flight work" default.
+Memory writing is opt-in, not a reflex. Do not write memory on starting a plan, finishing a plan, completing a round, building green, or handing off — none of those are memory events.
 
-- **Before writing any memory file, ask:** is this a durable, reusable, non-obvious fact a future session couldn't get from git, `agent_docs/project_roadmap.md`, or the code? If not, **don't write it.**
-- **Never write a `project_*` "round summary"** (e.g. "X round: BUILT, PIE untested"). Round state + cross-chat continuity belongs in `agent_docs/project_roadmap.md` (flip `[ ]`/`[~]`/`[x]`) and the `session-handoff` skill. Git records what shipped.
-- **Write memory ONLY for:** hard-won gotchas/pitfalls (`pitfall_*`), user preferences/working feedback (`feedback_*`), reference pointers — URLs/IDs/endpoints/live-asset names (`reference_*`), and durable architecture/direction decisions (a few `project_*`).
-- **When merging a round's lasting takeaway into memory,** fold the one durable gotcha/lever into the relevant per-system or pitfall file — don't create a new round file for it.
-- **When a round ships** (committed + playtested), delete its in-flight memory instead of leaving a "SHIPPED @hash" tombstone.
-- **One consolidated file per system,** not one per round. Per-system memory (audio, companion, enemy, weapons, player) accumulates durable levers/gotchas; it does not grow a new file each session.
+- **The gate, before every write:** is this a durable, reusable, non-obvious fact a future session could NOT get from git, `agent_docs/project_roadmap.md`, or the code? If not, **don't write it.** Uncertain counts as no.
+- **Write memory ONLY for:** hard-won gotchas (`pitfall_*`), user preferences and working feedback (`feedback_*`), reference pointers — URLs, IDs, endpoints, live asset names (`reference_*`), and durable architecture or direction decisions (a few `project_*`).
+- **Never record round or plan STATE — in any file, new or existing.** No "round summary", no "started/finished the plan", no `SHIPPED @hash` tombstone, no "awaiting PIE", no "NEXT for new chats", no dated round narrative appended to a per-system file. Round state and cross-chat continuity belong in `agent_docs/project_roadmap.md` (flip `[ ]`/`[~]`/`[x]`) plus the `session-handoff` skill. Git records what shipped. Consolidating round logs into fewer files is NOT the fix — the logs should not exist.
+- **One consolidated file per system, not one per round.** Per-system memory (audio, companion, enemy, weapons, player, cover) accumulates durable levers and gotchas only. Fold a round's one lasting takeaway into the matching file; if a round produced no durable gotcha, write nothing.
+- **A per-system file that has grown past ~6k chars is a signal it is logging, not remembering** — re-read it and cut the narrative rather than appending.
 
 ## Hard Rules (project-specific)
 - MUST never hardcode `/Game/...` asset paths via `ConstructorHelpers::FObjectFinder` — designer assigns assets in Blueprint subclasses (this project uses an in-editor MCP agent for asset wiring; C++ stays asset-agnostic)
@@ -102,7 +101,7 @@ Current agent model assignments live in `.claude/agents/*.md` frontmatter.
 
 ### Subagent preference
 
-Prefer custom subagents wherever the task matches an agent description. Main chat should rarely be the one writing code — its role is orchestration and review.
+**Subagent-driven development is the user's stated preference (confirmed 2026-07-25) — this section is authoritative.** Earlier "do everything inline / no subagents" guidance is withdrawn; if a recalled memory or an older note says otherwise, it is stale and this wins. Prefer custom subagents wherever the task matches an agent description. Main chat should rarely be the one writing code — its role is orchestration and review.
 
 - Solo C++ work → dispatch `ue5-cpp-implementer`. Never freelance edits from main chat for anything beyond trivial typos / renames / single-line tweaks.
 - For parallelisable dispatches (reviewer + multiple plan agents), issue them in a single message, not sequentially.
@@ -127,36 +126,8 @@ When planning, investigating a bug, or forming a picture of "what does this actu
    - `ue5-ui-specialist` — if UMG / Slate / widget code touched
    - `ue5-build-specialist` — if `Build.cs` / `Target.cs` / `.uproject` / plugin config / include paths touched
 3. **Fix review findings:** any `CRITICAL` or `WARNING` → re-dispatch `ue5-cpp-implementer` with the consolidated findings. **Do NOT fix in main chat.** Loop back to step 2 if the fix is non-trivial.
-4. **Own the close→build→reboot loop yourself — never make the user the build/editor operator.** **Build only AFTER the review round is clean — never start (or run in parallel with) the reviewer.** The reviewer reads source, not binaries; a finding means edits and a second build, so a pre-review build is wasted compile time and a wasted editor close. Sequence is strictly: review → fix findings → re-review if non-trivial → THEN close/build/reboot once. For any C++ change that needs testing:
-   - **(a) ALWAYS confirm before closing — no exceptions, every time.** Before touching the process, call `AskUserQuestion` with question "Close the Unreal Editor to build?" and options **"Yes, close now"** / **"No, hold off — another chat is still working"**. Never force-close autonomously on the assumption a prior approval still applies — ask fresh each time a close is about to happen. If the user picks hold off, wait and re-ask later instead of proceeding. Only on an explicit "yes, close now" do you proceed. Then close ONLY this project's editor, scoped by the `.uproject` in the process command line. ⚠️ **NEVER `Stop-Process -Name UnrealEditor`** — the user keeps other projects' editors open at the same time, and blanket-kill terminates all of them (lost unsaved work). Use:
-     ```
-     Get-CimInstance Win32_Process -Filter "Name='UnrealEditor.exe'" | Where-Object { $_.CommandLine -like '*Extraction.uproject*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
-     ```
-   - **(b) Build with the editor closed and confirm `Result: Succeeded` in the log** — exit 0 from the `Build.bat` wrapper is NOT proof (a Live Coding lock exits fast without compiling). If it fails, dispatch `ue5-build-specialist` (linker/IWYU/Build.cs) or `ue5-cpp-implementer` (semantic/template/API), then re-build. Standard command:
-     ```
-     "/c/Program Files/Epic Games/UE_5.7/Engine/Build/BatchFiles/Build.bat" ExtractionEditor Win64 Development -Project="C:/Users/matth/Documents/Github/ProjectExtract/Extraction/Extraction.uproject" -WaitMutex
-     ```
-     Run with `run_in_background: true` (UE builds take 30-300s), redirect to a temp file, grep for `Result:` / `error`.
-   - **(c) On green, re-boot this project's editor** via the `boot-engine` skill (+ VibeUE proxy); wait for `vibeue_status` / `unreal_status`. Reviewers read; they don't compile.
-5. **"Ready" / "done" = the user can literally press Play.** Build-green is a mid-step, not a stopping point — never report ready while the editor is closed. Only surface the result + reviewer summaries once ALL hold: no outstanding `CRITICAL`/`WARNING` findings, the build hit `Result: Succeeded`, AND this project's editor is re-booted and sitting where pressing Play works.
-
-### Other agents (dispatch on match)
-
-| Task | Agent |
-|---|---|
-| In-engine asset/BP/material/UMG/Niagara/DataAsset/level wiring, asset import, **Behavior Trees/Blackboards/EQS** — via MCP, no C++ | `ue5-inengine-agent` (or invoke the `inengine-agent` skill) |
-| Read-only in-engine recon — "what's wired", "what does X currently look like", pre-flight brief before an edit, planning/bug-investigation lookups. Cheap, parallelizable (up to 5 at once) | `ue5-inengine-scout` |
-| Unresolved externals, IWYU warnings, missing API macros, Build.cs edits, linker errors | `ue5-build-specialist` |
-| Writing automation tests, scaffolding a test module | `ue5-qa-tester` |
-| UE5 API behaviour unclear / new engine feature / want to confirm best practice | `ue5-doc-researcher` |
-
-### Team-spawning shortcuts (when `ue5-team` returns TEAM)
-
-- Feature work → `agent-teams:team-spawn` preset `feature` (or compose custom from `ue5-team`'s recommendation)
-- Branch/PR review → `agent-teams:team-spawn` preset `review`
-- Multi-hypothesis bug → `agent-teams:team-spawn` preset `debug`
-- API research / feasibility study → `agent-teams:team-spawn` preset `research`
-- Always shut down the team with `agent-teams:team-shutdown` when the task completes
+4. **Build + reboot — you own it, never the user.** Invoke the **`build-and-reboot`** skill. It carries the ordering rule (review must be clean first, never build in parallel with the reviewer), the project-scoped editor kill, the `Build.bat` command, `Result: Succeeded` verification, and the failure-dispatch split. Two rules apply always, skill loaded or not: **always `AskUserQuestion` before closing the editor** ("Close the Unreal Editor to build?" → "Yes, close now" / "No, hold off — another chat is still working"), asked fresh every single time; and ⚠️ **NEVER `Stop-Process -Name UnrealEditor`** — scope the kill by `Extraction.uproject` or you kill the user's other projects' editors and their unsaved work.
+5. **"Ready" / "done" = the user can literally press Play.** Build-green is a mid-step, not a stopping point — never report ready while the editor is closed.
 
 ---
 
@@ -164,36 +135,9 @@ When planning, investigating a bug, or forming a picture of "what does this actu
 
 Local skills under `.claude/skills/` are loaded on demand and cheap. **Invoke a skill the moment its subsystem is mentioned**, not just when writing code.
 
-| Topic | Skill |
-|---|---|
-| Replication / RPC / net roles / authority | `ue-networking-replication`, `ue5-multiplayer-helper` |
-| GameplayAbilities / GAS / AttributeSet / GameplayEffect | `ue-gameplay-abilities` |
-| CharacterMovementComponent / custom movement / vault / climb | `ue-character-movement` |
-| DataAsset / DataTable / async loading / soft refs | `ue-data-assets-tables` |
-| AnimInstance / montage / state machine / IK / blendspace | `ue-animation-system` |
-| Enemy held weapon looks wrong AT REST (hands off grip, gun floats/clips, robot wrist) | `enemy-weapon-grip-blend` |
-| Enemy gun cants/pops WHILE FIRING (fire montage from a different pack than the grip) | `enemy-weapon-fire-align` |
-| Enemy weapon magazine should drop out + reseat on reload | `enemy-weapon-reload` |
-| AI / Behavior Tree / EQS / Blackboard / perception | `ue-ai-navigation`, `ue5-ai-systems` |
-| State Tree | `ue-state-trees` |
-| Enhanced Input / InputAction / IMC | `ue-input-system` |
-| Build.cs / module / plugin setup / linker errors | `ue-module-build-system` |
-| UMG / Slate / widget / HUD | `ue-ui-umg-slate` |
-| Editor tooling / Blutility / detail customisation | `ue-editor-tools` |
-| Game Features / modular gameplay / Lyra-style | `ue-game-features` |
-| Physics / collision / traces / overlaps | `ue-physics-collision` |
-| Automation tests / logging / Insights / profiling | `ue-testing-debugging` |
-| Actor lifecycle / component composition | `ue-actor-component-architecture` |
-| UObject macros / UPROPERTY / containers / delegates | `ue-cpp-foundations` |
-| New UE5 class from scratch | `ue5-class-scaffold` |
-| Any UE5 C++ review request | `ue5-code-review` |
-| Crash, freeze, compile error | `ue5-crash-debug` |
-| In-engine editor work via MCP (BP/material/UMG/Niagara/DataAsset/level/asset import) **and in-engine AI systems** (Behavior Trees / Blackboards / EQS → NeoStack) — done autonomously | **`inengine-agent`** (dispatches the `ue5-inengine-agent` subagent) |
-| Drive the editor from the CLI yourself — tooling map, screenshots, the code→build→boot→wire→close loop, gotchas | **read `agent_docs/UnrealWorkflow.md`** (VibeUE :8088 + NeoStack :9315) |
-| End of session — summarising for handoff | `session-handoff` |
-| **Start of any non-trivial task — decide solo vs team** | **`ue5-team` (mandatory Step 0)** |
+Each skill's own description carries its trigger conditions, and those descriptions are already in context every session — match against them directly rather than a duplicate table here. Two that need the extra pointer: `agent_docs/UnrealWorkflow.md` for driving the editor from the CLI yourself (VibeUE :8088 + NeoStack :9315), and `ue5-team` as mandatory Step 0 on any non-trivial task.
 
-If unsure whether to invoke, **bias toward invoking the skill** (cheap — just loads reference) and **against dispatching a subagent** (costly — spawns a full session).
+If unsure whether to invoke, **bias toward invoking the skill** — it just loads reference. Skills and subagents are not a trade-off here: load the skill *and* dispatch the agent when both fit.
 
 ---
 
@@ -221,7 +165,7 @@ Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a c
 
 ## Project-Specific Notes
 
-- **In-engine asset/BP/montage/Blueprint/material/UMG work** is driven from the CLI via **VibeUE** (primary, MCP :8088 — `execute_python_code`, `manage_skills`, `manage_asset`). **Read `agent_docs/UnrealWorkflow.md` before any in-engine work** — it is the tooling map, the mandatory VibeUE skill-loading rule (load the matching skill before the first edit in a domain), and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey, etc.). To get it done autonomously, **dispatch `ue5-inengine-agent`** (via the `inengine-agent` skill) — it drives the editor MCP itself with all the tooling/skill/doc pointers pre-loaded. Alternatively hand off to a human via `inengine-checklist` (small) / `inengine-prompt` (large) in plain English. Either way, C++ stays code-only — no `/Game/` paths in C++, and never write or compile C++ through the editor MCP. **NeoStack (:9315) is the fallback when VibeUE lacks the capability — especially in-engine AI systems: Behavior Trees, Blackboards, EQS, and AI Blueprint wiring (VibeUE has no BT/Blackboard skill).** Drive it via the `neostack-loop` / `neostack-blueprint` skills.
+- **In-engine work: read `agent_docs/UnrealWorkflow.md` before the first edit in any domain** — tooling map, the mandatory VibeUE skill-loading rule, and the hard-won gotchas (PIE locks BP edits, runtime spawn/world-lifecycle calls crash the editor, FBX import must defer to a tick callback, sampler-type↔compression mismatch renders grey). C++ stays code-only — no `/Game/` paths in C++, and **never write or compile C++ through the editor MCP**.
 - **Companion manual QA scenarios** live in `agent_docs/companion_testing.md` — refer there before claiming an AI feature works. When automation tests land, mirror the scenarios.
 - **Roadmap / feature checklist:** `agent_docs/project_roadmap.md` is the live build checklist — every remaining feature broken down by system with status (`[ ]` to-do / `[~]` in progress / `[x]` done) and *soft* week tags toward the 19 Aug deadline. Consult it for current state, and **tick items off as you complete them**. It also auto-reconciles from each commit via a git `post-commit` hook (`.githooks/roadmap-update.sh`); if hooks ever get reset, re-run `sh .githooks/install.sh`. Week tags/ordering are soft — don't treat the sequence as fixed. It carries the full week-by-week with enough per-item detail to act on cold.
 - **Branching:** feature-by-feature on user-managed branches. User handles PRs to `main`. No CI/CD assumptions. Don't auto-merge or push without explicit instruction.

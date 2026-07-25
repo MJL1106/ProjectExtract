@@ -27,11 +27,14 @@ private:
 
 	struct FCircleMemory
 	{
-		// +1 / -1 — current orbit direction around the target; flips when a pick fails.
+		// +1 / -1 -- current orbit direction around the target; flips when a pick fails.
 		float OrbitSign = 1.f;
 
 		// World time of the next orbit-point repick.
 		float NextRepickTime = 0.f;
+
+		/** Seconds since LOS was last true; fires while <= FireLosLostGrace. */
+		float LosLostTimer = 0.f;
 	};
 
 	/** Picks the next nav-valid, LoS-valid point on the standoff ring. Flips Mem->OrbitSign when the

@@ -154,6 +154,10 @@ private:
 
 		// --- Blind-fire state (Feature A) ---
 
+		/** True once effective LOS has been confirmed at least once this task run. A never-sighted
+		 *  ForceEngage'd enemy must not blind-fire at a wall. */
+		bool bEverHadEffectiveLOS = false;
+
 		/** True once the per-suppression-episode roll has been made. Reset when suppression clears. */
 		bool bBlindFireDecided = false;
 		/** Result of the per-episode roll: true = blind-fire, false = hide. */

@@ -32,6 +32,17 @@ EBTNodeResult::Type UBTTask_RevivePlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	if (!IsValid(PlayerActor) || !Player || !Player->GetIsDBNO() || !Companion)
 		return EBTNodeResult::Failed;
 
+	// Backstop to the service-side window gate: if the claim moved to another ally between the
+	// window opening and this task starting, never seat a second reviver on the same body. Read-only
+	// on purpose — BTService_UpdateCompanionState owns the claim's lifecycle, so a refusal here must
+	// not release a hold this companion does not own.
+	if (const AActor* Claimant = Player->GetReviveClaimant(); Claimant && Claimant != Companion)
+	{
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: revive refused — %s already holds the claim"),
+			*Companion->GetName(), *GetNameSafe(Claimant));
+		return EBTNodeResult::Failed;
+	}
+
 	Companion->StopWeaponFire();
 	Companion->SetIsRevivingPlayer(true);
 	CachedCompanion = Companion;

@@ -1279,15 +1279,22 @@ bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator, bool bIgn
 		return false;
 	}
 
-	if (Awareness->GetAwarenessState() != EEnemyAwarenessState::Unaware)
+	// Unaware is the rule — but a victim this instigator already reserved is grandfathered through
+	// anything short of Combat. The global alert ladder is a ratchet: one missed player shot
+	// escalates it to Loud, which wakes every Unaware enemy in the level, and the strict rule then
+	// whiffs an in-flight takedown that was already lined up. Combat stays a hard reject.
+	const EEnemyAwarenessState AwarenessState = Awareness->GetAwarenessState();
+	const bool bGrandfathered = AwarenessState < EEnemyAwarenessState::Combat
+		&& IsTakedownReservedBy(TakedownInstigator);
+	if (AwarenessState != EEnemyAwarenessState::Unaware && !bGrandfathered)
 	{
 #if !UE_BUILD_SHIPPING
 		if (bLogTakedown)
 		{
 			const FString AwarenessStr = StaticEnum<EEnemyAwarenessState>()
-				? StaticEnum<EEnemyAwarenessState>()->GetNameStringByValue((int64)Awareness->GetAwarenessState())
+				? StaticEnum<EEnemyAwarenessState>()->GetNameStringByValue((int64)AwarenessState)
 				: TEXT("Unknown");
-			UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: awareness=%s (need Unaware)"),
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: awareness=%s (need Unaware, or reserved and below Combat)"),
 				*GetNameSafe(this), *AwarenessStr);
 		}
 #endif
@@ -1341,6 +1348,39 @@ bool AEnemyCharacter::IsTakedownEligible() const
 	const UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
 	return (TakedownVolumeRefCount > 0) && IsValid(Awareness)
 		&& (Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware);
+}
+
+bool AEnemyCharacter::IsTakedownEligibleFor(const AActor* TakedownInstigator) const
+{
+	if (IsTakedownEligible()) return true;
+
+	// Grandfather path: only for the holder of the reservation, only inside a volume, only while
+	// alive, and only below Combat. Everything else falls back to the strict rule above so a
+	// Searching enemy never becomes newly pingable (the offer path uses IsTakedownEligible()).
+	if (!IsTakedownReservedBy(TakedownInstigator)) return false;
+	if (TakedownVolumeRefCount <= 0) return false;
+	if (IsValid(HealthComponent) && HealthComponent->IsDead()) return false;
+
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	const UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
+	return IsValid(Awareness) && Awareness->GetAwarenessState() < EEnemyAwarenessState::Combat;
+}
+
+void AEnemyCharacter::ReserveForTakedown(AActor* TakedownInstigator)
+{
+	if (!IsValid(TakedownInstigator)) return;
+	TakedownReservedBy = TakedownInstigator;
+}
+
+void AEnemyCharacter::ClearTakedownReservation(const AActor* TakedownInstigator)
+{
+	if (TakedownReservedBy.Get() != TakedownInstigator) return;
+	TakedownReservedBy.Reset();
+}
+
+bool AEnemyCharacter::IsTakedownReservedBy(const AActor* TakedownInstigator) const
+{
+	return IsValid(TakedownInstigator) && TakedownReservedBy.Get() == TakedownInstigator;
 }
 
 bool AEnemyCharacter::HasDetectedPlayer() const

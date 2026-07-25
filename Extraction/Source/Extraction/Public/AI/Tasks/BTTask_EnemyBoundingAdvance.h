@@ -30,6 +30,8 @@ private:
 		bool bFiring = false;
 		FVector BoundPoint = FVector::ZeroVector;
 		TWeakObjectPtr<UEnemySquad> CachedSquad;
+		/** Seconds since LOS was last true; fires while <= FireLosLostGrace. */
+		float LosLostTimer = 0.f;
 	};
 
 	UPROPERTY(EditDefaultsOnly, Category = "Combat|Bounding", meta = (ClampMin = "200.0"))

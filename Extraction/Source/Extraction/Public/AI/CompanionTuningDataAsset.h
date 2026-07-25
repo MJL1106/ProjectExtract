@@ -837,6 +837,33 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "300.0", EditCondition = "bEnablePostCombatOverwatch"))
 	float OverwatchBearingDistance = 1200.f;
 
+	// --- Wave hold (stay combat-ready at cover through a finite Director wave) ---
+
+	// Master switch. Off = legacy behavior: allies return to formation in the gaps between squad
+	// spawns, which reads as them wandering off mid-defence.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|WaveHold")
+	bool bEnableWaveHold = true;
+
+	// Player distance (cm) beyond which the wave hold breaks so the ally catches up and re-settles
+	// at fresh cover. Deliberately far more generous than OverwatchBreakDistance: the whole point of
+	// the hold is to stay put while the player repositions inside the defence area. Without a leash
+	// at all an ally is stranded a room behind the moment the player pushes on.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "500.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldLeashDistance = 2500.f;
+
+	// Seconds with NOTHING known (no combat target, no alerted threat) before the hold drops mid-wave.
+	// Without it an ally that cleared its corner stands facing the last fight until the next squad
+	// physically walks into its perception, which reads as frozen. 0 disables the release.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldQuietReleaseSeconds = 6.f;
+
+	// Stale-combat backstop: release the wave hold when no combat has been reported to the director
+	// for this long, regardless of whether the wave is still technically active. Covers both stuck
+	// enemies and blocked-spawn soft-locks. Must exceed the squad spawn cadence (8s default) so a
+	// healthy wave never trips it. 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldStaleCombatReleaseSeconds = 20.f;
+
 	// --- Mode (player-commanded Normal / Combat / Stealth) ---
 
 	// Combat mode: how far AHEAD of the player (along their facing / move direction) the companion

@@ -195,6 +195,28 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		return;
 	}
 
+	// --- Wave hold: stand fast instead of pathing back to formation ---
+	// A finite Director wave stays active across the gaps BETWEEN squad spawns. Without this the
+	// last kill of a squad clears the combat target, the BB observer aborts the combat branch and
+	// this task immediately walks the ally home mid-defence. The service owns the flag (including
+	// the leash that breaks the hold when the player pushes on), so this is purely "don't move".
+	// The rescue-approach branch above has already returned, so a downed player still outranks it.
+	if (Companion->IsWaveHoldActive())
+	{
+		if (!bHoldingForWave)
+		{
+			bHoldingForWave = true;
+			Controller->StopMovement();
+			Companion->SetSprinting(false);
+			// Clear both move latches so the first post-hold formation move re-issues instead of
+			// deduping against a destination stamped before the hold began.
+			LastMoveTarget = FVector::ZeroVector;
+			bIsIdling = false;
+		}
+		return;
+	}
+	bHoldingForWave = false;
+
 	// --- Formation (non-sprint) mode: stay near the player indefinitely ---
 
 	// Clamp the three follow distances to a sensible ordering at read time so mistuning can't

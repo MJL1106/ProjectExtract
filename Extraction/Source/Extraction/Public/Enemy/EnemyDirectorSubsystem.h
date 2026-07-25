@@ -153,6 +153,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Director|Wave")
 	int32 GetWaveRemainingMembers() const { return WaveProgress.RemainingMembers; }
 
+	/** Registered corpses (capped at MaxCorpses). Read by the awareness component's proximity body
+	 *  notice -- a bounded list beats iterating every enemy in the level per awareness tick. */
+	const TArray<TWeakObjectPtr<AEnemyCharacter>>& GetCorpses() const { return Corpses; }
+
+	/** Wave threat reference for the companion overwatch system: returns the location of the last-picked
+	 *  spawn zone (the direction waves come from). Falls back to any registered wave-eligible zone if
+	 *  LastPickedZone is stale. Returns false when no usable zone exists. */
+	bool GetWaveThreatReference(FVector& OutLocation) const;
+
 private:
 
 	// ---------- v1 internals ----------
@@ -192,6 +201,11 @@ private:
 	static constexpr float DistanceBandBonus = 25.f;
 	static constexpr float CompanionProximityPenalty = 60.f;
 	static constexpr float ZoneScoreJitter = 10.f;
+	/** Caps a zone at MaxConsecutiveZonePicks consecutive picks — applied only once a zone has
+	 *  already taken the last MaxConsecutiveZonePicks in a row, so a biased zone stays the majority
+	 *  spawner but never runs the whole wave. */
+	static constexpr float RepeatZonePenalty = 30.f;
+	static constexpr int32 MaxConsecutiveZonePicks = 2;
 
 	// ---------- v2: tension ----------
 
@@ -259,6 +273,10 @@ private:
 	const FMissionPhaseConfig& GetCurrentPhaseConfig() const;
 	int32 GetCompositionSize(const FSquadComposition& Comp) const;
 	bool PickComposition(const FMissionPhaseConfig& PhaseConfig, int32 AliveCount, FSquadComposition& OutComposition) const;
+
+	/** The guaranteed-squad entry pinned to the wave's NEXT squad slot, or nullptr. Shared by
+	 *  ShouldSpawn (which must waive the alive cap for it) and PickComposition (which resolves it). */
+	const FDirectorGuaranteedSquad* FindGuaranteedSquadForNext() const;
 	AEnemySpawnZone* PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize) const;
 	bool IsPointInPlayerSightline(const FVector& Point, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams) const;
 	bool IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const;
@@ -269,6 +287,13 @@ private:
 	void SeedSquadWithFight(UEnemySquad* Squad) const;
 
 	TWeakObjectPtr<UEnemySquadSubsystem> CachedSquadSubsystem;
+
+	/** Last zone returned by PickSpawnZone — scored down once it has taken MaxConsecutiveZonePicks
+	 *  in a row, so squads can't keep stacking in one room. Reset on wave state clear. */
+	TWeakObjectPtr<AEnemySpawnZone> LastPickedZone;
+
+	/** How many picks in a row LastPickedZone has won. Drives the repeat penalty's threshold. */
+	int32 ConsecutiveZonePicks = 0;
 
 	bool bLoggedNoComposition = false;
 	bool bLoggedNoZone = false;
@@ -314,6 +339,14 @@ private:
 
 	float WaveBlockedTime = 0.f;
 	bool bWaveBlockedBroadcast = false;
+
+	/** Wall-clock stamp of the last rally burst in ReassertWaveMemberEngagement. Prevents the rally
+	 *  block from re-firing every director tick when ForceEngage early-outs on an already-Combat enemy
+	 *  and never refreshes LastCombatReportTime. Reset in ClearWaveState. */
+	double LastRallyWorldTime = 0.0;
+	/** Set once WaveBlockedTime passes 2x BlockedWarningSeconds — waives the IsZoneHiddenFromPlayer
+	 *  gate in PickSpawnZone so a wave blocked on sightline can make progress. Reset on wave clear. */
+	bool bWaveSightlineWaived = false;
 
 	// ---------- v2: punishment profile ----------
 

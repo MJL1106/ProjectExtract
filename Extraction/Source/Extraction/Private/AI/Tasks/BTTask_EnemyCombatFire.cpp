@@ -1532,6 +1532,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		bWithinAimYaw = (YawDelta <= DA->MaxAimYawDeg);
 	}
 	const bool bEffectiveLOS = bHasLOS && bTargetInPeekCone && bWithinAimYaw;
+	if (bEffectiveLOS) Mem->bEverHadEffectiveLOS = true;
 
 	// Feature 1c: pending-relocate timeout — a flanked enemy continuously firing can never reach
 	// bNotFiring, so bRelocatePending defers forever. After CoverRelocatePendingTimeout, force it.
@@ -1882,13 +1883,21 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
-		// Continue moving toward cover. Fire while moving (move-and-shoot).
+		// Continue moving toward cover. Fire while moving (move-and-shoot), LOS-gated.
 		Enemy->SetAimTarget(Target);
 		// Re-assert firing if the weapon auto-stopped mid-transit (e.g. suppression spike).
 		if (bHasLOS && bInRange)
 		{
 			AWeaponBase* W = Enemy->GetCurrentWeapon();
 			if (IsValid(W) && W->CanFire() && !W->IsFiring()) W->StartFiring();
+		}
+		else if (!bHasLOS)
+		{
+			// Stop transit fire when LOS is lost -- mirrors the Fire-phase hysteresis.
+			// The BB LOS refresh cadence (0.25s) provides a natural sub-grace; no separate timer needed
+			// since this is transit fire, not a sustained burst loop.
+			AWeaponBase* W = Enemy->GetCurrentWeapon();
+			if (IsValid(W) && W->IsFiring()) W->StopFiring();
 		}
 		return;
 	}
@@ -2244,8 +2253,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 				// Blind-fire path: stay hunkered, aim at last-known, fire with extra spread.
 				// Never start a blind burst mid grenade wind-up (one-handed spray over a throw).
+				// A never-sighted ForceEngage'd enemy must not pot-shot a wall.
 				if (Mem->bBlindFireDecided && Mem->bBlindFireChosen && bHasCoverAcq && !Mem->bBlindFiringNow
-					&& !IsGrenadeTelegraphing(Enemy))
+					&& Mem->bEverHadEffectiveLOS && !IsGrenadeTelegraphing(Enemy))
 				{
 					// Fix 1: gate on non-zero last-known — a zero last-known must fall back to hide.
 					const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);

@@ -80,6 +80,12 @@ public:
 	void Reload();
 	bool CanReload() const;
 
+	/** Debug-only: drop the magazine to LeaveRounds so a reload can be forced from the console while
+	 *  the weapon is still full. CanReload() requires CurrentAmmo < MagazineSize, so without draining
+	 *  first a full-mag debug reload silently no-ops and the animation can never be inspected on
+	 *  demand. Broadcasts OnAmmoChanged like any other ammo change so HUD/UI stay in sync. */
+	void DebugDrainMagazine(int32 LeaveRounds = 0);
+
 	/**
 	 * Called by the AnimNotify_EnemyShellInserted notify once per shell seat.
 	 * Authority-only. Ticks CurrentAmmo +1, decides whether another loop follows,

@@ -210,6 +210,17 @@ ACompanionCharacter* ACompanionCharacter::GetPrimaryCompanion(UWorld* World)
 	return nullptr;
 }
 
+bool ACompanionCharacter::IsReviveClaimantCapable(const AActor* Claimant)
+{
+	const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Claimant);
+	if (!IsValid(Companion)) return false;
+	if (Companion->GetIsCompanionDBNO()) return false;
+	if (!Companion->GetController()) return false; // captive extractee — can't help yet
+	const UHealthComponent* HC = Companion->GetHealthComponent();
+	if (IsValid(HC) && HC->IsDead()) return false;
+	return true;
+}
+
 bool ACompanionCharacter::IsAnyCompanionReviveCapable(UWorld* World, const ACompanionCharacter* Exclude)
 {
 	if (!World) return false;
@@ -217,10 +228,7 @@ bool ACompanionCharacter::IsAnyCompanionReviveCapable(UWorld* World, const AComp
 	{
 		const ACompanionCharacter* Companion = *It;
 		if (!IsValid(Companion) || Companion == Exclude) continue;
-		if (Companion->GetIsCompanionDBNO()) continue;
-		if (!Companion->GetController()) continue; // captive extractee — can't help yet
-		const UHealthComponent* HC = Companion->GetHealthComponent();
-		if (IsValid(HC) && HC->IsDead()) continue;
+		if (!IsReviveClaimantCapable(Companion)) continue;
 		return true;
 	}
 	return false;
@@ -1159,6 +1167,11 @@ bool ACompanionCharacter::CanFire() const
 	return IsValid(CurrentWeapon) && CurrentWeapon->CanFire();
 }
 
+bool ACompanionCharacter::IsCombatReady() const
+{
+	return IsValid(CurrentWeapon);
+}
+
 bool ACompanionCharacter::NeedsReload() const
 {
 	if (!IsValid(CurrentWeapon)) return false;
@@ -1639,6 +1652,12 @@ void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod M
 	bTakedownExecuting = false;
 	bTakedownMontagePlaying = false;
 
+	// Grandfather the victim against the global alert ratchet for as long as we stay armed on it —
+	// one missed player shot escalates the level to Loud, which wakes every Unaware enemy and would
+	// otherwise invalidate a takedown we are already lined up on.
+	if (AEnemyCharacter* ReservedVictim = Cast<AEnemyCharacter>(Victim))
+		ReservedVictim->ReserveForTakedown(this);
+
 	// Aim at the victim
 	SetAimTarget(Victim);
 
@@ -1651,17 +1670,20 @@ void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod M
 			AIC->SetFocus(Victim, EAIFocusPriority::Gameplay);
 	}
 
-	// Bind to the player's commit delegate — method-specific
+	// Bind BOTH commit signals regardless of method. Binding was method-exclusive, so a KNIFE-armed
+	// companion listened only for the player's melee input — the player taking their own SHOT was
+	// invisible to it and it sat Armed until the alert ratchet woke its victim and the takedown
+	// whiffed. Either signal is the player committing. OnPlayerFiredWeapon broadcasts BEFORE the
+	// hitscan, so the commit lands on the trigger-pull frame whether or not the shot connects, and
+	// both handlers guard on bTakedownExecuting so a double signal cannot double-commit.
 	ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController());
 	APawn* PlayerPawn = IsValid(CompAIC) ? CompAIC->GetPlayerCharacter() : nullptr;
 	AExtractionPlayer* Player = Cast<AExtractionPlayer>(PlayerPawn);
 	if (IsValid(Player))
 	{
 		TakedownPlayerRef = Player;
-		if (Method == ETakedownMethod::Shoot)
-			Player->OnPlayerFiredWeapon.AddDynamic(this, &ACompanionCharacter::OnPlayerFiredWeaponHandler);
-		else
-			Player->OnPlayerTakedownCommitted.AddDynamic(this, &ACompanionCharacter::OnPlayerTakedownCommittedHandler);
+		Player->OnPlayerFiredWeapon.AddDynamic(this, &ACompanionCharacter::OnPlayerFiredWeaponHandler);
+		Player->OnPlayerTakedownCommitted.AddDynamic(this, &ACompanionCharacter::OnPlayerTakedownCommittedHandler);
 	}
 
 	UE_LOG(LogCompanion, Log, TEXT("Takedown armed: victim=%s method=%s"),
@@ -1705,6 +1727,10 @@ void ACompanionCharacter::DisarmCommandedTakedown()
 		if (AEnemyCharacter* DyingVictim = Cast<AEnemyCharacter>(TakedownVictim.Get()))
 			DyingVictim->FinishTakedownKill(this);
 
+	// Release the alert-ratchet grandfather — we no longer have a claim on this victim.
+	if (AEnemyCharacter* ReservedVictim = Cast<AEnemyCharacter>(TakedownVictim.Get()))
+		ReservedVictim->ClearTakedownReservation(this);
+
 	TakedownVictim.Reset();
 	TakedownPlayerRef.Reset();
 	bTakedownArmed = false;
@@ -1724,6 +1750,40 @@ void ACompanionCharacter::DisarmCommandedTakedown()
 
 	UE_LOG(LogCompanion, Log, TEXT("Takedown disarmed — broadcasting finished"));
 	OnCommandedTakedownFinished.Broadcast();
+}
+
+void ACompanionCharacter::LatchForcedCombatTarget(AActor* Target, float HoldSeconds)
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(Target) || !World || HoldSeconds <= 0.f) return;
+
+	ForcedCombatTarget = Target;
+	ForcedCombatTargetExpiry = World->GetTimeSeconds() + HoldSeconds;
+
+	UE_LOG(LogCompanion, Log, TEXT("Takedown commitment latched on %s for %.1fs"),
+		*GetNameSafe(Target), HoldSeconds);
+}
+
+AActor* ACompanionCharacter::GetForcedCombatTarget() const
+{
+	AActor* Target = ForcedCombatTarget.Get();
+	if (!IsValid(Target)) return nullptr;
+
+	const UWorld* World = GetWorld();
+	if (!World || World->GetTimeSeconds() > ForcedCombatTargetExpiry) return nullptr;
+
+	// Dead victim = commitment discharged. Evaluated here rather than latched so the override
+	// releases on the kill frame with no teardown plumbing.
+	const UHealthComponent* TargetHealth = Target->FindComponentByClass<UHealthComponent>();
+	if (IsValid(TargetHealth) && TargetHealth->IsDead()) return nullptr;
+
+	return Target;
+}
+
+void ACompanionCharacter::ClearForcedCombatTarget()
+{
+	ForcedCombatTarget.Reset();
+	ForcedCombatTargetExpiry = 0.f;
 }
 
 void ACompanionCharacter::OnPlayerTakedownCommittedHandler()

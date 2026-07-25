@@ -15,6 +15,7 @@
 #include "CompanionTuningDataAsset.h"
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
+#include "EnemyAwarenessComponent.h"
 #include "EnemyCharacter.h"
 #include "SuppressionComponent.h"
 #include "WeaponBase.h"
@@ -35,6 +36,9 @@ static constexpr float CoverArrivalIdleRadius   = 45.f;
 // Prefixed (vs the plain DefaultCapsuleRadius in BTTask_EnemyCombatFire.cpp) — unity builds can
 // merge the two TUs into one chunk, where file-scope statics with the same name collide.
 static constexpr float MoveToCoverDefaultCapsuleRadius = 34.f;
+/** Chest height (cm) for the arrival body-protection trace. Same prefix rule as the capsule radius
+ *  above — mirrors BodyProtectChestHeight in BTTask_EnemyCombatFire.cpp without colliding under unity. */
+static constexpr float MoveToCoverBodyProtectChestHeight = 60.f;
 static constexpr float FireTickInterval         = 0.1f;
 /** Seconds between mid-move destination-claim rechecks (occupied/intended by someone else). */
 static constexpr float ClaimCheckInterval       = 0.25f;
@@ -259,6 +263,32 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 				BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
 				return EBTNodeResult::Failed;
 			}
+		}
+	}
+
+	// Enemy wrong-floor gate — the enemy counterpart of the companion off-level decline above.
+	// Enemies skipped every commit sanity check and took whatever the EQS returned, so a slot one
+	// storey up sent them jogging into open ground toward a hunker that shields nothing. Failing
+	// here routes the BT back through its own re-pick, same as the occupancy decline.
+	if (const AEnemyCharacter* ZEnemy = Cast<AEnemyCharacter>(Pawn))
+	{
+		const UEnemyArchetypeData* ZDA = ZEnemy->GetArchetypeData();
+		if (IsValid(ZDA) && ZDA->CoverPickMaxZDelta > 0.f
+			&& FMath::Abs(Pawn->GetActorLocation().Z - Cover.Data.Location.Z) > ZDA->CoverPickMaxZDelta)
+		{
+			UE_LOG(LogEnemyAI, Log, TEXT("[COVER-AICS] %s declined off-level cover (dZ=%.0f > %.0f) — re-picking"),
+				*Pawn->GetName(), FMath::Abs(Pawn->GetActorLocation().Z - Cover.Data.Location.Z),
+				ZDA->CoverPickMaxZDelta);
+			if (UCoverReservationSubsystem* ZResSub = OwnerComp.GetWorld() ? OwnerComp.GetWorld()->GetSubsystem<UCoverReservationSubsystem>() : nullptr)
+			{
+				// Stamp post-vacate as well as clearing intent. This decline costs no travel time, so
+				// without the stamp the EQS would hand back the same off-level point next run and the
+				// task would spin on it every frame. The post-vacate test filters it out for a beat.
+				ZResSub->MarkVacated(Cover.Handle, Controller);
+				ZResSub->ClearIntendedCover(Controller);
+			}
+			BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
+			return EBTNodeResult::Failed;
 		}
 	}
 
@@ -667,6 +697,42 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 				StopAdvanceFire(OwnerComp, Mem, false);
 				HandleFailure(OwnerComp, Mem, BB, Controller);
 				return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+			}
+		}
+
+		// Arrival re-validation (enemy only — the companion's commit gates all ran at pick time).
+		// The EQS pick can be seconds stale by the time the pawn is standing here, and nothing in
+		// between re-checks that the wall is still between it and the threat. Posing in-cover anyway
+		// IS the "hunkered in the open behind nothing" bug: the fire task's compromise loop only
+		// catches it after MinDwell + EvalInterval + two consecutive evals — ~1.8s stood exposed.
+		// Re-pick instead. Skipped under enemy.ForceCover, which pins cover for anim inspection.
+		if (AEnemyCharacter* ArriveEnemy = Cast<AEnemyCharacter>(Pawn))
+		{
+			const UEnemyArchetypeData* ArriveDA = ArriveEnemy->GetArchetypeData();
+			AActor* ArriveThreat = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
+			if (IsValid(ArriveDA) && ArriveDA->bRelocateRequiresBodyProtection
+				&& IsValid(ArriveThreat) && GetForceCoverLevel() == 0)
+			{
+				const AEnemyAIController* ArriveAIC = Cast<AEnemyAIController>(Controller);
+				const UEnemyAwarenessComponent* ArriveAwareness = ArriveAIC ? ArriveAIC->GetAwarenessComponent() : nullptr;
+				bool bArriveSighted = true;
+				const FVector ArriveThreatLoc = UCoverScoringStatics::GetPerceivedThreatLocation(
+					ArriveThreat, ArriveAwareness, bArriveSighted);
+
+				const UCapsuleComponent* ArriveCap = ArriveEnemy->GetCapsuleComponent();
+				const float ArriveStandoff =
+					(ArriveCap ? ArriveCap->GetScaledCapsuleRadius() : MoveToCoverDefaultCapsuleRadius)
+					+ ArriveDA->CoverStandoffPadding;
+
+				if (!UCoverGeometryStatics::IsThreatCovered(Pawn->GetWorld(), Data, ArriveThreatLoc,
+					ArriveStandoff, MoveToCoverBodyProtectChestHeight, ArriveThreat, Pawn))
+				{
+					UE_LOG(LogEnemyAI, Log, TEXT("[COVER-AICS] %s arrived at cover that no longer shields vs %s — re-picking"),
+						*Pawn->GetName(), *GetNameSafe(ArriveThreat));
+					StopAdvanceFire(OwnerComp, Mem, false);
+					HandleFailure(OwnerComp, Mem, BB, Controller);
+					return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+				}
 			}
 		}
 

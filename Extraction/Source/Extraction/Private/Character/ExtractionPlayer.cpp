@@ -25,6 +25,7 @@
 #include "FootstepNoiseComponent.h"
 #include "EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
+#include "Extractee/ExtracteeCompanion.h"
 #include "EngineUtils.h"
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
@@ -1559,6 +1560,10 @@ void AExtractionPlayer::EnterDBNO()
 	if (bIsReviving) CancelRevive();
 	CancelInteractHold();
 
+	// Fresh down, fresh arbitration — a claim left over from a previous DBNO would lock the wrong
+	// ally out until its capability test happened to fail.
+	ReviveClaimant.Reset();
+
 	// IsBusy covers approach phase + mid-vault
 	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy())
 		TraversalComponent->CancelTraversal();
@@ -1632,6 +1637,10 @@ void AExtractionPlayer::ExitDBNO()
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
 
 	BleedoutTimeRemaining = 0.f;
+
+	// The revive is done — drop the hold unconditionally (not holder-scoped: whoever finished it,
+	// nobody should still own a claim on a player who is back up).
+	ReviveClaimant.Reset();
 
 	if (IsValid(HealthComponent))
 		HealthComponent->Revive(ReviveHealthPercent);
@@ -2400,4 +2409,59 @@ void AExtractionPlayer::CompDown()
 
 	UE_LOG(LogCompanion, Log, TEXT("CompDown: forcing companion DBNO via console"));
 	CompHealth->Die();
+}
+
+ACompanionCharacter* AExtractionPlayer::ResolveDebugExtractee() const
+{
+	const UWorld* World = GetWorld();
+	if (!World) return nullptr;
+
+	for (TActorIterator<AExtracteeCompanion> It(World); It; ++It)
+		if (IsValid(*It)) return *It;
+
+	return nullptr;
+}
+
+void AExtractionPlayer::VipReload()
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipReload: no extraction VIP found")); return; }
+
+	// Force it even on a full magazine. CanReload() requires CurrentAmmo < MagazineSize, so on a
+	// freshly-spawned VIP that has not fired a shot the command would otherwise silently no-op —
+	// which is exactly the case you want to inspect the animation in.
+	if (AWeaponBase* Weapon = Vip->GetCurrentWeapon())
+	{
+		if (!Weapon->IsReloading() && !Weapon->CanReload())
+			Weapon->DebugDrainMagazine(0);
+	}
+
+	// Reload is inherited straight from ACompanionCharacter — the VIP overrides only the fire gate —
+	// so this is the exact call the BT combat task makes, not a debug-only shortcut.
+	Vip->ReloadWeapon();
+	UE_LOG(LogCompanion, Log, TEXT("VipReload triggered on %s"), *Vip->GetName());
+}
+
+// --- Single-reviver claim ---
+
+bool AExtractionPlayer::TryClaimRevive(AActor* Claimant)
+{
+	if (!IsValid(Claimant)) return false;
+
+	AActor* Holder = ReviveClaimant.Get();
+	if (Holder == Claimant) return true; // idempotent re-claim by the current holder
+
+	// A hold whose owner has gone down, died or lost its controller is stale — steal it, or the
+	// surviving ally could never take over a revive the first one can no longer finish.
+	if (IsValid(Holder) && ACompanionCharacter::IsReviveClaimantCapable(Holder)) return false;
+
+	ReviveClaimant = Claimant;
+	return true;
+}
+
+void AExtractionPlayer::ReleaseReviveClaim(AActor* Claimant)
+{
+	// Holder-only: a losing bidder releasing must never free the winner's hold.
+	if (ReviveClaimant.Get() != Claimant) return;
+	ReviveClaimant.Reset();
 }

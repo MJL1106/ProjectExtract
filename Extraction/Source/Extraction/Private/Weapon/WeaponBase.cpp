@@ -1720,6 +1720,17 @@ bool AWeaponBase::CanReload() const
 		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
 }
 
+void AWeaponBase::DebugDrainMagazine(int32 LeaveRounds)
+{
+	if (!IsValid(WeaponData)) return;
+
+	const int32 NewAmmo = FMath::Clamp(LeaveRounds, 0, WeaponData->MagazineSize);
+	if (NewAmmo == CurrentAmmo) return;
+
+	CurrentAmmo = NewAmmo;
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+}
+
 void AWeaponBase::Reload()
 {
 	if (!CanReload()) return;

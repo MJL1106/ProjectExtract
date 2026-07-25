@@ -32,6 +32,7 @@
 #include "CoverReservationSubsystem.h"  // intended-cover check for the approach-window cover-active branch (Fix 4)
 #include "Engine/OverlapResult.h" // FOverlapResult full definition for the proximity overlap scan
 #include "EnemyDirectorSubsystem.h" // last combat report stamp as an out-of-envelope stealth-break event
+#include "EngineUtils.h"            // TActorIterator for combat-enemy proximity scan
 #include "TraversalComponent.h"     // stealth-pin enforcement must not crouch mid-traversal
 #include "Navigation/PathFollowingComponent.h" // ready-only threat stance yields facing to an active move
 #include "World/DoorBase.h"              // post-combat overwatch aims at the chokepoint door
@@ -876,6 +877,24 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		}
 	}
 
+	// Takedown commitment override — outranks stickiness, the flanker steal and the body-charger
+	// steal. A commanded takedown that tore down with its victim still alive latches that victim on
+	// the companion; without this the companion dropped the enemy it was already lined up on the
+	// instant the player's missed shot woke the level, joined the player's fight, and never went
+	// back. Self-discharges the moment the victim dies (or on the task's hold timeout), so "finish
+	// yours, then help me" falls out for free. Placed last so nothing downstream can re-steal it.
+	if (AActor* ForcedTarget = Companion->GetForcedCombatTarget())
+	{
+		if (ForcedTarget != BestTarget)
+		{
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: takedown commitment holds %s (over %s)"),
+					*Companion->GetName(), *ForcedTarget->GetName(), *GetNameSafe(BestTarget));
+			BestTarget = ForcedTarget;
+			BestDistSq = FVector::DistSquared(MyLocation, ForcedTarget->GetActorLocation());
+		}
+	}
+
 	if (BestTarget)
 	{
 		// Target-change no longer clears HasCoverPosition: CoverSwitchMonitor already re-scores against
@@ -952,6 +971,12 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		if (bReadyLosBlocked && ReadyLosHit.GetActor() != AlertedThreatEnemy)
 			bReadyOnlyThreat = false;
 	}
+
+	// Recomputed unconditionally (not inside the decay branch) so the hold clears the tick a wave
+	// ends no matter which posture branch the companion is sitting in. Placed after the threat
+	// resolution above because the quiet-release timer keys off "nothing known", not just "no target".
+	const bool bWaveHold = UpdateWaveHold(
+		*Companion, PlayerPawn, RangeTuning, bHasTarget, bHasAlertedThreat, DeltaSeconds);
 
 	// --- Fight threat memory (feeds the post-combat overwatch aim pick) ---
 	// First-contact records once per fight (flag survives mid-fight target churn and LoS gaps —
@@ -1180,7 +1205,15 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			// whenever a target/threat is live) so the lower still fires after a branch switch
 			// mid-accrual (e.g. stealth re-pin -> mode change). Yields to a commanded takedown,
 			// which owns aim/focus while armed.
-			if (!bLoweredOnTargetLoss && !bTakedownOwnsAim)
+			if (bWaveHold && !bTakedownOwnsAim)
+			{
+				// Wave hold keeps the gun up through the gaps between squad spawns: the fight is
+				// demonstrably not over, so the usual "last target died, lower it" edge must not fire.
+				// Overwatch normally owns this, but its anchor radius can legitimately be exceeded
+				// while the far wider wave leash still holds, leaving nobody to raise the weapon.
+				Companion->SetLowReadyAim(false);
+			}
+			else if (!bLoweredOnTargetLoss && !bTakedownOwnsAim)
 			{
 				Companion->SetLowReadyAim(true);
 				// Same stale-aim-target backstop as the stealth re-pin branch above.
@@ -1189,33 +1222,85 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				bLoweredOnTargetLoss = true;
 			}
 
-			OutOfCombatTimer += DeltaSeconds;
-			if (OutOfCombatTimer >= ExploreReturnDelay)
+			// Posture stays Combat for the whole wave. Zeroed rather than merely left un-accrued: a
+			// banked accrual would fire the instant the wave ended and drop the ally to Exploration
+			// on the same tick the final kill landed. Falls through to the rest of the tick (facing
+			// arbitration, scoring weights, the profiler scope END) — no early return here.
+			if (bWaveHold)
 			{
-				if (bDebugLogging)
-					UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
-						*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Exploration));
-				Companion->SetPosture(ECompanionPosture::Exploration);
-				// Only after a real fight (first-contact memory set) — an alert blip that never
-				// engaged doesn't earn an "all clear".
-				if (bHasFightFirstContact)
-					Companion->Bark(ECompanionBarkType::AreaClear);
-				// Expiry mirrors the edge-lower's takedown yield — see the re-pin branch.
-				if (!bTakedownOwnsAim)
-				{
-					Companion->SetLowReadyAim(true);
-					Controller->ClearFocus(EAIFocusPriority::Gameplay);
-				}
 				OutOfCombatTimer = 0.f;
-				ResetFightThreatMemory();
+			}
+			else
+			{
+				OutOfCombatTimer += DeltaSeconds;
+				if (OutOfCombatTimer >= ExploreReturnDelay)
+				{
+					if (bDebugLogging)
+						UE_LOG(LogCompanionAI, Log, TEXT("%s: posture %s -> %s"),
+							*Companion->GetName(), PostureName(CurrentPosture), PostureName(ECompanionPosture::Exploration));
+					Companion->SetPosture(ECompanionPosture::Exploration);
+					// Only after a real fight (first-contact memory set) — an alert blip that never
+					// engaged doesn't earn an "all clear".
+					if (bHasFightFirstContact)
+						Companion->Bark(ECompanionBarkType::AreaClear);
+					// Expiry mirrors the edge-lower's takedown yield — see the re-pin branch.
+					if (!bTakedownOwnsAim)
+					{
+						Companion->SetLowReadyAim(true);
+						Controller->ClearFocus(EAIFocusPriority::Gameplay);
+					}
+					OutOfCombatTimer = 0.f;
+					ResetFightThreatMemory();
+				}
 			}
 		}
 	}
 
-	// Overwatch safety end: the hold only ever lives inside the combat-decay branch. If any other
-	// branch ran this tick (new target, ready threat, stealth re-pin, stealth pin), that owner has
-	// aim/focus — drop just our scripted-aim raise and state, leave their aim/focus untouched.
-	if (bOverwatchActive && !bCombatDecayRanThisTick)
+	// Overwatch safety end: the hold only ever lives inside the combat-decay branch (or the
+	// wave-hold extension below). If any other branch ran this tick (new target, ready threat,
+	// stealth re-pin, stealth pin) AND the wave-hold extension didn't claim the tick, that owner
+	// has aim/focus -- drop just our scripted-aim raise and state, leave their aim/focus untouched.
+	//
+	// Wave-hold overwatch extension: when the wave hold is active, no target, and the combat-decay
+	// branch did NOT run this tick (posture decayed to Exploration or similar), still run overwatch
+	// so the ally covers the door between squads instead of standing lifeless. The overwatch's own
+	// entry conditions (player anchored, not moving, aim point computable) keep it sane.
+	bool bWaveOverwatchRanThisTick = false;
+	if (bWaveHold && !bHasTarget && !bCombatDecayRanThisTick)
+	{
+		const bool bTakedownOwnsAim = Companion->IsCommandedTakedownArmed()
+			|| Companion->IsCommandedTakedownExecuting()
+			|| Companion->IsTakedownMontagePlaying();
+
+		const bool bOwnsAim = UpdatePostCombatOverwatch(
+			*Controller, *Companion, PlayerPawn, RangeTuning, bTakedownOwnsAim, bPlayerDBNO, DeltaSeconds);
+		if (bOwnsAim)
+		{
+			bWaveOverwatchRanThisTick = true;
+			Companion->SetLowReadyAim(false); // assert combat presentation
+		}
+	}
+
+	// Wave-hold overwatch release edge: the extension stopped owning aim (wave ended, leash break,
+	// player DBNO, moving-break) while posture is NOT Combat -- the decay-branch lower can't run
+	// in Exploration, so we must restore low-ready and clear focus ourselves.
+	if (bWaveOverwatchOwnedAimLastTick && !bWaveOverwatchRanThisTick && !bCombatDecayRanThisTick)
+	{
+		const ECompanionPosture CurrentPostureCheck = Companion->GetPosture();
+		const bool bTakedownOwnsAimNow = Companion->IsCommandedTakedownArmed()
+			|| Companion->IsCommandedTakedownExecuting()
+			|| Companion->IsTakedownMontagePlaying();
+		if (!bHasTarget && CurrentPostureCheck != ECompanionPosture::Combat && !bTakedownOwnsAimNow)
+		{
+			Companion->SetLowReadyAim(true);
+			Companion->SetAimTarget(nullptr);
+			Controller->ClearFocus(EAIFocusPriority::Gameplay);
+			bLoweredOnTargetLoss = true;
+		}
+	}
+	bWaveOverwatchOwnedAimLastTick = bWaveOverwatchRanThisTick;
+
+	if (bOverwatchActive && !bCombatDecayRanThisTick && !bWaveOverwatchRanThisTick)
 		EndPostCombatOverwatch(*Companion);
 
 	// --- Downtime chatter (priority-0 ambient; the subsystem's lull gate drops anything that
@@ -1419,6 +1504,35 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				bReviveWindowOpen = true;
 		}
 
+		// Single-reviver arbitration. The primary companion and the armed VIP run THIS service against
+		// the same body with independent commit flags neither reads from the other, so without a shared
+		// claim both windows open, both snap to the identical authored pair offset and both kneel.
+		// Gated here rather than in BTTask_RevivePlayer on purpose: claiming at the task would let both
+		// allies sprint in and one bail on arrival, which still reads as two allies converging.
+		if (bReviveWindowOpen)
+		{
+			const bool bClaimed = PlayerIface->TryClaimRevive(Companion);
+
+			// A companion already mid-hold never yields the window: the task is seated and playing the
+			// paired anims, and pulling the key there would abort a revive seconds from finishing.
+			const bool bRefused = !bClaimed && !Companion->IsRevivingPlayer();
+			if (bRefused)
+			{
+				bReviveWindowOpen = false;
+				if (bDebugLogging && !bLastReviveClaimRefused)
+					UE_LOG(LogCompanionAI, Log, TEXT("%s: revive claim REFUSED (held by %s) — staying in the fight"),
+						*Companion->GetName(), *GetNameSafe(PlayerIface->GetReviveClaimant()));
+			}
+			bLastReviveClaimRefused = bRefused;
+		}
+		else
+		{
+			bLastReviveClaimRefused = false;
+			// Bail, threats hot, or never opened — drop the hold so a still-capable ally can commit.
+			// Holder-scoped inside, so a companion that never held it can't free the winner's claim.
+			PlayerIface->ReleaseReviveClaim(Companion);
+		}
+
 		if (bDebugLogging && bReviveWindowOpen != bLastReviveWindowOpen)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: REVIVE WINDOW %s (latched=%d bleedout=%.1fs safeAccum=%.2fs)"),
 				*Companion->GetName(), bReviveWindowOpen ? TEXT("OPEN") : TEXT("SHUT"),
@@ -1435,7 +1549,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		BB->SetValueAsBool(ReviveWindowOpenKey.SelectedKeyName, false);
 		ReviveSafeAccumulator = 0.f;
 		bLastReviveWindowOpen = false;
+		bLastReviveClaimRefused = false;
 		Companion->SetRescueCommitted(false);
+		// Player back up (or the pawn swapped out) — ExitDBNO already wipes the claim, but a
+		// possession change would otherwise strand this companion's hold on the old body.
+		if (PlayerIface) PlayerIface->ReleaseReviveClaim(Companion);
 	}
 
 	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionScoringWeights);
@@ -1526,6 +1644,99 @@ namespace
 	constexpr float OverwatchDoorTowardThreatMinDot = 0.1f; // door must lie roughly toward the threat, not behind us
 }
 
+bool UBTService_UpdateCompanionState::UpdateWaveHold(
+	ACompanionCharacter& Companion, const APawn* PlayerPawn, const UCompanionTuningDataAsset* Tuning,
+	bool bHasTarget, bool bThreatKnown, float DeltaSeconds)
+{
+	const UWorld* World = Companion.GetWorld();
+	const UEnemyDirectorSubsystem* Director = World ? World->GetSubsystem<UEnemyDirectorSubsystem>() : nullptr;
+
+	// IsWaveActive stays true across the gaps BETWEEN squad spawns — that is the entire point of
+	// reading it. It only drops once every squad has spawned AND the last member is dead, or the
+	// wave is cancelled, so a cancelled wave releases the hold for free.
+	const bool bWaveActive = Director && Director->IsWaveActive();
+
+	if (!bWaveActive)
+	{
+		bEngagedThisWave = false;
+		WaveHoldQuietTimer = 0.f;
+	}
+	else if (bHasFightFirstContact) bEngagedThisWave = true;
+
+	// Quiet release. Holding at cover is only right while the fight is genuinely paused mid-wave.
+	// Once nothing at all is known for this long the ally is just standing in an emptied room facing
+	// the last fight while the player pushes on — which reads as frozen and unresponsive. Drop the
+	// hold, let Follow bring it forward, and re-hold on the next contact.
+	if (bHasTarget || bThreatKnown) WaveHoldQuietTimer = 0.f;
+	else WaveHoldQuietTimer += DeltaSeconds;
+
+	const bool bQuietTooLong = Tuning && Tuning->WaveHoldQuietReleaseSeconds > 0.f
+		&& WaveHoldQuietTimer >= Tuning->WaveHoldQuietReleaseSeconds;
+
+	// Stale-combat backstop: if no fight has been reported to the director for
+	// WaveHoldStaleCombatReleaseSeconds the hold drops regardless of IsWaveActive(). Covers stuck
+	// enemies (a member alive but never fighting) and blocked-spawn soft-locks alike. The default
+	// 20s exceeds the 8s squad cadence so a healthy wave never trips it.
+	//
+	// Suppressed when a Combat-awareness enemy is within WaveHoldLeashDistance of the companion
+	// (mirrors ExtracteeCharacter::FindNearestCombatEnemy pattern). A distant stuck holdout must
+	// NOT pin the signal -- that's the exact case the 20s release exists for.
+	bool bCombatStale = Tuning && Tuning->WaveHoldStaleCombatReleaseSeconds > 0.f
+		&& Director && World
+		&& (World->GetTimeSeconds() - Director->GetLastCombatReportTime())
+			>= Tuning->WaveHoldStaleCombatReleaseSeconds;
+
+	if (bCombatStale && Tuning && World)
+	{
+		// Range-gated proximity scan: any live enemy in Combat awareness within the leash
+		// distance means the fight is still hot -- suppress the stale release.
+		const float RelevanceRadiusSq = FMath::Square(Tuning->WaveHoldLeashDistance);
+		const FVector CompanionLoc = Companion.GetActorLocation();
+		for (TActorIterator<AEnemyCharacter> It(World); It; ++It)
+		{
+			AEnemyCharacter* Enemy = *It;
+			if (!IsValid(Enemy)) continue;
+			const UHealthComponent* HP = Enemy->GetHealthComponent();
+			if (HP && HP->IsDead()) continue;
+			if (!Enemy->HasDetectedPlayer()) continue;
+			if (FVector::DistSquared(CompanionLoc, Enemy->GetActorLocation()) <= RelevanceRadiusSq)
+			{
+				bCombatStale = false;
+				break;
+			}
+		}
+	}
+
+	const bool bHold = bWaveActive
+		&& bEngagedThisWave
+		&& !bQuietTooLong
+		&& !bCombatStale
+		&& Tuning && Tuning->bEnableWaveHold
+		// Not CanFire(): that goes false on an empty magazine, and an ally must keep its hold
+		// through a reload rather than stroll home mid-mag-swap.
+		&& Companion.IsCombatReady()
+		// Stealth's whole point is not holding a firing line.
+		&& Companion.GetMode() != ECompanionMode::Stealth
+		&& IsValid(PlayerPawn)
+		&& FVector::DistSquared(Companion.GetActorLocation(), PlayerPawn->GetActorLocation())
+			<= FMath::Square(Tuning->WaveHoldLeashDistance);
+
+	if (bDebugLogging && bHold != bLastWaveHold)
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: WAVE HOLD %s (waveActive=%d engaged=%d quiet=%.1fs)"),
+			*Companion.GetName(), bHold ? TEXT("ON") : TEXT("OFF"),
+			(int32)bWaveActive, (int32)bEngagedThisWave, WaveHoldQuietTimer);
+
+	// Stand up on release. The hold parks the ally wherever the combat teardown left it, which after
+	// a cover engagement is crouched. Nothing downstream un-crouches a companion that is merely
+	// following, so without this it walks the rest of the level in a permanent crouch.
+	if (!bHold && bLastWaveHold) Companion.UnCrouch();
+
+	bLastWaveHold = bHold;
+
+	Companion.SetWaveHoldActive(bHold);
+	return bHold;
+}
+
 bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 	ACompanionAIController& Controller, ACompanionCharacter& Companion, const APawn* PlayerPawn,
 	const UCompanionTuningDataAsset* Tuning, bool bTakedownOwnsAim, bool bPlayerDBNO, float DeltaSeconds)
@@ -1536,9 +1747,15 @@ bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 		return false;
 	}
 
+	// Wave hold widens the anchor to its own leash: during a defence the ally is meant to stay
+	// planted well beyond the normal overwatch radius, and without this overwatch would drop out at
+	// OverwatchBreakDistance while the hold kept the ally standing there with nothing aiming it.
+	const bool bWaveHold = Companion.IsWaveHoldActive();
+	const float AnchorRadius = bWaveHold ? Tuning->WaveHoldLeashDistance : Tuning->OverwatchBreakDistance;
+
 	const bool bPlayerAnchored = IsValid(PlayerPawn) && !bPlayerDBNO
 		&& FVector::DistSquared(Companion.GetActorLocation(), PlayerPawn->GetActorLocation())
-			<= FMath::Square(Tuning->OverwatchBreakDistance);
+			<= FMath::Square(AnchorRadius);
 	const bool bOwnerElsewhere = bTakedownOwnsAim || Companion.IsRevivingPlayer()
 		|| Companion.GetIsCompanionDBNO();
 
@@ -1546,7 +1763,9 @@ bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 	{
 		// Enter only on the fresh target-loss edge (a branch switch that already lowered must not
 		// re-raise the gun), standing still, player nearby, with threat memory to aim from.
-		if (bLoweredOnTargetLoss || bOwnerElsewhere || !bPlayerAnchored) return false;
+		// The lowered-edge veto is waived under a wave hold: there the gun SHOULD come back up
+		// between squads, so a lower from an earlier lull must not lock overwatch out for the wave.
+		if ((bLoweredOnTargetLoss && !bWaveHold) || bOwnerElsewhere || !bPlayerAnchored) return false;
 		if (Companion.GetVelocity().Size2D() > OverwatchBreakSpeed) return false;
 		if (!ComputeOverwatchAimPoint(Companion, Tuning, OverwatchAimPoint)) return false;
 		bOverwatchActive = true;
@@ -1563,9 +1782,16 @@ bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 	OverwatchElapsed += DeltaSeconds;
 	OverwatchMovingTime = Companion.GetVelocity().Size2D() > OverwatchBreakSpeed
 		? OverwatchMovingTime + DeltaSeconds : 0.f;
+	// During a wave hold the max-time cap is waived: the chokepoint aim persists for the whole hold
+	// so the ally looks like it is covering the door. Without the waiver overwatch expired at 6s and
+	// ambient facing (F1/F3) took over, leaving the ally weapon-up aimed at nothing. The waiver is
+	// safe now that bWaveHold is in the Tier-0 yield set — new targets still break overwatch via the
+	// safety end (bCombatDecayRanThisTick), and the waived lowered-edge veto lets it re-enter with a
+	// fresh aim point once the next squad dies. On hold release the normal 6s cap resumes.
+	const bool bTimedOut = !bWaveHold && OverwatchElapsed >= Tuning->PostCombatOverwatchMaxTime;
 	if (bOwnerElsewhere || !bPlayerAnchored
 		|| OverwatchMovingTime > OverwatchMovingBreakTime
-		|| OverwatchElapsed >= Tuning->PostCombatOverwatchMaxTime)
+		|| bTimedOut)
 	{
 		if (bDebugLogging)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: post-combat overwatch END t=%.1f (anchored=%d moveT=%.1f)"),
@@ -1581,23 +1807,43 @@ bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 bool UBTService_UpdateCompanionState::ComputeOverwatchAimPoint(
 	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning, FVector& OutAimPoint) const
 {
-	if (!bHasLastThreatLocation && !bHasFightFirstContact) return false;
-
 	// Threat reference: freshest threat point that isn't at our feet; else first contact; else a
 	// point pushed out along the bearing of whatever memory we do have.
 	const FVector CompLoc = Companion.GetActorLocation();
 	const float MinDistSq = FMath::Square(Tuning->OverwatchMinThreatDist);
 	FVector ThreatRef;
+
 	if (bHasLastThreatLocation && FVector::DistSquared2D(LastThreatLocation, CompLoc) > MinDistSq)
+	{
 		ThreatRef = LastThreatLocation;
+	}
 	else if (bHasFightFirstContact && FVector::DistSquared2D(FightFirstContactLocation, CompLoc) > MinDistSq)
+	{
 		ThreatRef = FightFirstContactLocation;
-	else
+	}
+	else if (bHasLastThreatLocation || bHasFightFirstContact)
 	{
 		const FVector Src = bHasLastThreatLocation ? LastThreatLocation : FightFirstContactLocation;
 		const FVector Dir = (Src - CompLoc).GetSafeNormal2D();
 		if (Dir.IsNearlyZero()) return false;
 		ThreatRef = CompLoc + Dir * Tuning->OverwatchBearingDistance;
+	}
+	else
+	{
+		// No fight memory at all -- wave fallback: derive from the director's spawn zone so the
+		// ally covers the door the waves come through even when its own fight memory was reset.
+		const UWorld* World = Companion.GetWorld();
+		const UEnemyDirectorSubsystem* Director = World ? World->GetSubsystem<UEnemyDirectorSubsystem>() : nullptr;
+		FVector WaveThreat;
+		if (Director && Director->IsWaveActive() && Director->GetWaveThreatReference(WaveThreat)
+			&& FVector::DistSquared2D(WaveThreat, CompLoc) > MinDistSq)
+		{
+			ThreatRef = WaveThreat;
+		}
+		else
+		{
+			return false;
+		}
 	}
 
 	const FVector Eye = Companion.GetPawnViewLocation();
@@ -1682,6 +1928,7 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 		Companion.IsSearchRoomExposureActive());
 	const bool bTierZeroYield = bHasTarget || (bReadyOnlyThreat && bReadyThreatOwnsFacing)
 		|| bOverwatchActive // post-fight hold owns aim/focus for its whole window
+		|| Companion.IsWaveHoldActive() // wave hold owns weapon-up; ambient facing must not compete
 		|| Companion.IsRevivingPlayer()
 		|| Companion.IsCommandedTakedownArmed() || Companion.IsCommandedTakedownExecuting()
 		|| Companion.IsTakedownMontagePlaying()

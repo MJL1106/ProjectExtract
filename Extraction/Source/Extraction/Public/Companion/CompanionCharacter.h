@@ -95,6 +95,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	virtual bool CanFire() const;
 
+	/** Able to hold a firing line at all: has a weapon it is allowed to use. Deliberately NOT
+	 *  CanFire(), which also goes false on an empty magazine — a reloading ally must keep its wave
+	 *  hold rather than stroll back to formation mid-reload. The extractee narrows this to armed
+	 *  only, so the wave hold cannot latch onto it during the unarmed rescue handoff window. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
+	virtual bool IsCombatReady() const;
+
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	bool NeedsReload() const;
 
@@ -211,6 +218,18 @@ public:
 
 	void SetRescueCommitted(bool bCommitted) { bRescueCommitted = bCommitted; }
 	bool IsRescueCommitted() const { return bRescueCommitted; }
+
+	// --- Wave Hold (Director wave is live and this ally has been in the fight) ---
+
+	void SetWaveHoldActive(bool bActive) { bWaveHoldActive = bActive; }
+
+	/** True while a finite Director wave is running and this ally has already engaged in it.
+	 *  A wave stays active across the gaps BETWEEN squad spawns, so without this the last kill of a
+	 *  squad clears the combat target, the BB observer aborts the combat branch, the cover slot is
+	 *  released and the tree falls through to Follow — allies stroll back to formation mid-defence.
+	 *  While set: the combat teardown keeps its cover seat and pose, Follow holds position instead
+	 *  of pathing home, and the posture decay to Exploration is suspended. */
+	bool IsWaveHoldActive() const { return bWaveHoldActive; }
 
 	// --- Low Ready Aim ---
 
@@ -349,6 +368,11 @@ public:
 	 *  checks key off this instead of "the other one is down". */
 	static bool IsAnyCompanionReviveCapable(UWorld* World, const ACompanionCharacter* Exclude);
 
+	/** Same per-actor test as IsAnyCompanionReviveCapable's loop body, exposed for the downed
+	 *  player's revive claim: a hold whose owner has died, gone DBNO or lost its controller is
+	 *  stale and must be steal-able, or the surviving ally could never take the revive over. */
+	static bool IsReviveClaimantCapable(const AActor* Claimant);
+
 	/** Stealth-broken = the fight is on (player spotted); stealth rules are suspended until the
 	 *  BT service re-pins. Server-only transient state, set by BTService_UpdateCompanionState. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Mode")
@@ -421,6 +445,18 @@ public:
 	/** True while a takedown montage is actively playing. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
 	bool IsTakedownMontagePlaying() const { return bTakedownMontagePlaying; }
+
+	/** Latch a victim the companion must finish before it may pick any other combat target.
+	 *  Set when a commanded takedown tears down with the victim still alive — the companion switches
+	 *  to normal gunfire on it instead of abandoning it for whatever the combat selector prefers.
+	 *  HoldSeconds is a safety valve so an unreachable victim can never freeze it out of the fight. */
+	void LatchForcedCombatTarget(AActor* Target, float HoldSeconds);
+
+	/** The latched must-finish victim, or nullptr when there is none, it died, or the hold expired.
+	 *  Consumed by BTService_UpdateCompanionState as a top-priority target override. */
+	AActor* GetForcedCombatTarget() const;
+
+	void ClearForcedCombatTarget();
 
 	/** True from ExecuteCommandedTakedown entry until FinishCommandedTakedown/Disarm.
 	 *  BT task uses this to transition Armed -> Executing and stop the hold timeout. */
@@ -851,6 +887,9 @@ private:
 	 *  approach damage reduction. Written by BTService_UpdateCompanionState. Transient. */
 	bool bRescueCommitted = false;
 
+	/** See IsWaveHoldActive. Written by BTService_UpdateCompanionState. Transient, not replicated. */
+	bool bWaveHoldActive = false;
+
 	/** Mirror of the combat service's eye→target LOS trace (enemy bHasTargetLOS parity). Transient, not replicated. */
 	bool bHasTargetLOS = false;
 
@@ -1042,6 +1081,10 @@ private:
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);
 
 	TWeakObjectPtr<AActor> TakedownVictim;
+	/** Unfinished takedown victim the combat selector must keep targeting until it dies. */
+	TWeakObjectPtr<AActor> ForcedCombatTarget;
+	/** World time the forced-target commitment lapses. */
+	float ForcedCombatTargetExpiry = 0.f;
 	TWeakObjectPtr<AExtractionPlayer> TakedownPlayerRef;
 	ETakedownMethod TakedownActiveMethod = ETakedownMethod::Knife;
 	FTimerHandle ShootDelayTimerHandle;
