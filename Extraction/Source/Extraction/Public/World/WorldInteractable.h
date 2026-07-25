@@ -30,4 +30,15 @@ public:
 	/** Short prompt text shown on the player HUD while looking at this actor. */
 	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
 	FText GetWorldInteractionPrompt(AActor* Interactor) const;
+
+	/** Seconds the player must hold Interact before WorldInteract fires. 0 (the default, and what
+	 *  every legacy implementor returns) keeps the press instant. */
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
+	float GetWorldInteractHoldSeconds(AActor* Interactor) const;
+
+	/** Fired on authority when a hold interaction begins — the beat that runs UNDER the hold
+	 *  (scripted VO, an approach animation). Never called for instant interactables, and a
+	 *  cancelled hold does not un-fire it, so implementors own their own once-only state. */
+	UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category = "Interaction")
+	void OnWorldInteractHoldStarted(AActor* Interactor);
 };

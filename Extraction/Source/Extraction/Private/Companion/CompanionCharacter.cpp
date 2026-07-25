@@ -50,6 +50,15 @@ namespace
 		return ExpectedDuration > 0.f && PlayableLength > 0.f
 			? PlayableLength / ExpectedDuration : 1.f;
 	}
+
+	// A companion can appear after the last scan (the VIP is placed, but a respawn is a spawn), so
+	// the list can't be built once. TActorIterator walks the whole level, so it can't run per frame
+	// either — this is the compromise cadence.
+	constexpr float AllyRescanInterval = 2.f;
+
+	// Primary + armed VIP, minus ourselves. Sized once on the first build; Reset() then keeps the
+	// slack, so the Reserve is a deliberate no-op on every rebuild after that and none reallocate.
+	constexpr int32 ExpectedAllyCount = 1;
 }
 
 #if WITH_DEV_AUTOMATION_TESTS
@@ -330,6 +339,7 @@ void ACompanionCharacter::Tick(float DeltaTime)
 		TimeAimingAtCurrentTarget += DeltaTime;
 
 	TickPlayerSoftSeparation();
+	TickAllySoftSeparation();
 }
 
 void ACompanionCharacter::Bark(ECompanionBarkType Type, FName Context) const
@@ -342,11 +352,11 @@ void ACompanionCharacter::Bark(ECompanionBarkType Type, FName Context) const
 		Barks->RequestCompanionBark(this, BarkSet, Type, Context);
 }
 
-void ACompanionCharacter::SpeakScriptedLine(USoundBase* Sound) const
+float ACompanionCharacter::SpeakScriptedLine(USoundBase* Sound) const
 {
 	const UWorld* World = GetWorld();
 	UBarkSubsystem* Barks = IsValid(World) ? World->GetSubsystem<UBarkSubsystem>() : nullptr;
-	if (!Barks) return;
+	if (!Barks) return 0.f;
 
 	// BarkSet only supplies attenuation/volume here — a missing set must not silently drop an
 	// explicitly assigned scripted line.
@@ -355,7 +365,7 @@ void ACompanionCharacter::SpeakScriptedLine(USoundBase* Sound) const
 
 	USoundAttenuation* Attenuation = IsValid(BarkSet) ? BarkSet->Attenuation.Get() : nullptr;
 	const float Volume = IsValid(BarkSet) ? BarkSet->VolumeMultiplier : 1.f;
-	Barks->RequestScriptedLine(this, Sound, Attenuation, Volume);
+	return Barks->RequestScriptedLine(this, Sound, Attenuation, Volume);
 }
 
 float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& DamageEvent, AController* EventInstigator, AActor* DamageCauser)
@@ -948,12 +958,22 @@ void ACompanionCharacter::ApplyMovementSpeeds()
 
 // --- Soft Collision (F2 asymmetric blocking — companion self-push) ---
 
+bool ACompanionCharacter::CanApplySoftSeparation() const
+{
+	if (bIsDBNO || bIsRevivingPlayer || bBeingRevived) return false;
+	if (bTakedownMontagePlaying) return false;
+	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy()) return false;
+
+	// Unpossessed = the captive VIP before rescue. CMC skips ControlledCharacterMove without a
+	// controller (bRunPhysicsWithNoController is off), so the input would only accrue and then fire
+	// the moment he is possessed — walking him off the placed kneeling spot on his first frame.
+	return GetController() != nullptr;
+}
+
 void ACompanionCharacter::TickPlayerSoftSeparation()
 {
 	if (!HasAuthority()) return;
-	if (bIsDBNO || bIsRevivingPlayer || bBeingRevived) return;
-	if (bTakedownMontagePlaying) return;
-	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy()) return;
+	if (!CanApplySoftSeparation()) return;
 
 	const ACompanionAIController* AIC = Cast<ACompanionAIController>(GetController());
 	const APawn* PlayerPawn = AIC ? AIC->GetPlayerCharacter() : nullptr;
@@ -967,14 +987,101 @@ void ACompanionCharacter::TickPlayerSoftSeparation()
 	const ACharacter* PlayerCharacter = Cast<ACharacter>(PlayerPawn);
 	if (!IsValid(PlayerCharacter)) return;
 
-	const UCapsuleComponent* PlayerCapsule = PlayerCharacter->GetCapsuleComponent();
-	if (!IsValid(PlayerCapsule)) return;
+	SoftPushAwayFrom(*PlayerCharacter);
+}
 
-	FVector Delta = GetActorLocation() - PlayerPawn->GetActorLocation();
+void ACompanionCharacter::TickAllySoftSeparation()
+{
+	// Wiring runs on clients too — IgnoreActorWhenMoving is a local movement-filter flag with no
+	// authority semantics, and simulated proxies still sweep through MoveSmooth, so a server-only
+	// assert leaves the two capsules hard-blocking each other on clients until the next correction.
+	RefreshAllyCompanions();
+
+	// Wiring first, push second, and deliberately not under the same gate: the ignore assert has to
+	// keep running for a pair we won't push this frame, or a DBNO ally's crawl retreat hard-blocks
+	// on whoever is standing over it waiting to revive.
+	const bool bCanPush = HasAuthority() && CanApplySoftSeparation();
+
+	for (const TWeakObjectPtr<ACompanionCharacter>& Entry : AllyCompanions)
+	{
+		ACompanionCharacter* Ally = Entry.Get();
+		if (!IsValid(Ally)) continue;
+
+		// Unpossessed = the captive VIP at his placed kneeling spot. He never steers, so his half of
+		// the mutual ignore is a dead no-op and only ours stays live — we would clip straight through
+		// a scripted body the player stares at for the whole rescue hold. One static obstacle is what
+		// CMC wall-slide already handles; the jam this pass fixes needs two steering bodies.
+		if (!Ally->GetController()) continue;
+
+		EnsureAllySoftCollisionIgnores(*Ally);
+		if (!bCanPush) continue;
+
+		// A downed ally is a revive destination, not an obstacle — pushing off it would fight the
+		// approach exactly the way the DBNO-player guard above stops it fighting a player rescue.
+		if (Ally->GetIsCompanionDBNO()) continue;
+		SoftPushAwayFrom(*Ally);
+	}
+}
+
+void ACompanionCharacter::RefreshAllyCompanions()
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	// Rebuild on the interval, plus immediately when an entry goes stale. Interval-gated rather
+	// than empty-gated: with no other companion in the level an empty-list trigger would re-walk
+	// every actor every frame.
+	const float Now = World->GetTimeSeconds();
+	bool bRebuild = (Now - LastAllyScanTime) >= AllyRescanInterval;
+	if (!bRebuild)
+	{
+		for (const TWeakObjectPtr<ACompanionCharacter>& Entry : AllyCompanions)
+		{
+			if (Entry.IsValid()) continue;
+			bRebuild = true;
+			break;
+		}
+	}
+	if (!bRebuild) return;
+
+	LastAllyScanTime = Now;
+	AllyCompanions.Reset();
+	AllyCompanions.Reserve(ExpectedAllyCount);
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
+	{
+		ACompanionCharacter* Other = *It;
+		if (IsValid(Other) && Other != this) AllyCompanions.Add(Other);
+	}
+}
+
+void ACompanionCharacter::EnsureAllySoftCollisionIgnores(ACompanionCharacter& Ally)
+{
+	UCapsuleComponent* MyCapsule = GetCapsuleComponent();
+	UCapsuleComponent* AllyCapsule = Ally.GetCapsuleComponent();
+	if (!IsValid(MyCapsule) || !IsValid(AllyCapsule)) return;
+
+	// Idempotent per-tick assert, matching the extractee's: any external MoveIgnoreActorRemove (a
+	// revive/takedown teardown clearing an actor off either capsule, a respawned ally re-registering)
+	// self-heals next tick, where a latch-gated one-time wire would leave the pair hard-blocking for
+	// the rest of the level.
+	MyCapsule->IgnoreActorWhenMoving(&Ally, true);
+	AllyCapsule->IgnoreActorWhenMoving(this, true);
+}
+
+void ACompanionCharacter::SoftPushAwayFrom(const ACharacter& Other)
+{
+	const UCapsuleComponent* OtherCapsule = Other.GetCapsuleComponent();
+	if (!IsValid(OtherCapsule)) return;
+
+	// A ragdolled/dead body disables its capsule — without this it keeps emitting a push nothing can
+	// collide with. Matches the player's ally pass (AExtractionPlayer::UpdateAllyCompanionSoftCollision).
+	if (OtherCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) return;
+
+	FVector Delta = GetActorLocation() - Other.GetActorLocation();
 	Delta.Z = 0.f;
 
 	const float CombinedRadius = GetCapsuleComponent()->GetScaledCapsuleRadius()
-		+ PlayerCapsule->GetScaledCapsuleRadius()
+		+ OtherCapsule->GetScaledCapsuleRadius()
 		+ CompanionSelfPushPadding;
 
 	const float Dist = Delta.Size();

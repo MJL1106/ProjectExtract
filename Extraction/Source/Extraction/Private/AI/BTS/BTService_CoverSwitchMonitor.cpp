@@ -418,13 +418,27 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	// so cover-to-cover switches gain ground instead of hanging back at the follow formation.
 	const ACompanionCharacter* CompanionPawn = Cast<ACompanionCharacter>(Pawn);
 	const bool bCombatLead = CompanionPawn && CompanionPawn->GetMode() == ECompanionMode::Combat;
+
+	// Mirror the follow task's per-companion side/stagger so a secondary companion (the armed
+	// extractee) scores cover on the side it actually follows on, not the primary's. Enemies have no
+	// CompanionPawn and the primary is sign +1 / bias 0 — both keep the original anchor exactly.
+	const float SideSign = CompanionPawn ? CompanionPawn->GetFormationSideSign() : 1.f;
+	const float BackBias = CompanionPawn ? CompanionPawn->GetFormationBackBias(Tuning->SecondaryFormationBackBias) : 0.f;
+
+	// Combat lead applies the stagger too (see the §5.7 TODO above — same duplicated maths): the bias
+	// shortens the lead, floored the same way BTTask_FollowPlayer does, or a secondary's cover anchor
+	// and follow anchor sit a full SecondaryFormationBackBias apart and it switches cover backwards.
+	constexpr float LeadFloorMargin = 30.f;
+	const float LeadDistance = FMath::Max(Tuning->CombatModeLeadDistance - BackBias,
+		Tuning->AcceptableRadius + LeadFloorMargin);
+
 	const FVector FormationPoint = bCombatLead
 		? Player->GetActorLocation()
-			+ Player->GetActorForwardVector() * Tuning->CombatModeLeadDistance
-			+ Player->GetActorRightVector()   * Tuning->CombatModeLeadOffsetRight
+			+ Player->GetActorForwardVector() * LeadDistance
+			+ Player->GetActorRightVector()   * (Tuning->CombatModeLeadOffsetRight * SideSign)
 		: Player->GetActorLocation()
-			+ Player->GetActorRightVector()      * Tuning->FormationOffsetRight
-			+ (-Player->GetActorForwardVector()) * Tuning->FormationOffsetBack;
+			+ Player->GetActorRightVector()      * (Tuning->FormationOffsetRight * SideSign)
+			+ (-Player->GetActorForwardVector()) * (Tuning->FormationOffsetBack + BackBias);
 
 	// Shared scorer params: neutral defaults reproduce the old local formula exactly for enemies
 	// and for Normal/Stealth companions; a Combat-mode companion gets the advance shift (band floor

@@ -25,6 +25,26 @@ namespace
 {
 	// State machine cadence -- reaction logic, not movement, so slow is fine.
 	constexpr float StateEvalInterval = 0.25f;
+
+	// Player 2D speed above which the follow anchor tracks their travel direction instead of
+	// holding the bearing we already trail on. Mirrors the companion follow task's threshold.
+	constexpr float PlayerMovingSpeed2DSq = 100.f * 100.f;
+
+	// Follow anchor acceptance ring, as a fraction of FollowDistance. The stop gate uses the same
+	// value so the gate and path-following arrival agree instead of fighting each other.
+	constexpr float FollowAnchorAcceptFraction = 0.25f;
+
+	// The anchor slides with the player, so a re-issue for anything smaller than this just restarts
+	// the path and stutter-steps the extractee (same 200cm the companion follow task settled on).
+	constexpr float FollowAnchorReissueDeadband = 200.f;
+
+	// A companion can appear after the last scan (spawned, not placed), but TActorIterator is not
+	// cheap enough to run on the 0.25s state tick -- rescan on this slower cadence instead.
+	constexpr float CompanionRescanInterval = 2.f;
+
+	// Primary + armed extractee VIP. Sized once on the first build; Reset() then keeps the slack, so
+	// the Reserve is a deliberate no-op on every rebuild after that and none of them reallocate.
+	constexpr int32 ExpectedCompanionCount = 2;
 }
 
 AExtracteeCharacter::AExtracteeCharacter()
@@ -142,26 +162,31 @@ void AExtracteeCharacter::EvaluateState()
 void AExtracteeCharacter::HandleFollow()
 {
 	const UExtracteeTuningDataAsset* T = GetTuning();
-	const float Dist = DistToPlayer2D();
 
-	if (Dist > T->CatchUpStartDistance) { EnterCatchUp(); return; }
+	// Catch-up and the combat break stay keyed on the PLAYER: they measure how far the party has
+	// left us behind, not where our formation slot sits.
+	const float DistToPlayer = DistToPlayer2D();
+	if (DistToPlayer > T->CatchUpStartDistance) { EnterCatchUp(); return; }
 	if (IsCombatActive(T->CombatActiveWindow)) { EnterSeekCoverOrCower(); return; }
 
 	AExtracteeAIController* AIC = GetExtracteeController();
 	if (!AIC) return;
 
-	if (Dist > T->FollowDistance + T->FollowResumeSlack)
+	// The follow/stop gate keys on the ANCHOR, not the player. The anchor already sits
+	// FollowDistance astern, so a player-distance gate would compare the resting distance against
+	// itself and stutter-step on the boundary forever.
+	const FVector Anchor = ComputeFollowAnchor();
+	const float DistToAnchor = FVector::Dist2D(GetActorLocation(), Anchor);
+	const float AcceptRadius = T->FollowDistance * FollowAnchorAcceptFraction;
+
+	if (DistToAnchor > AcceptRadius + T->FollowResumeSlack)
 	{
-		if (!IsMoveActive())
-		{
-			SetMovementFacing(/*bMoving=*/true);
-			AIC->MoveToActor(PlayerPawn.Get(), T->FollowDistance, /*bStopOnOverlap=*/true,
-				/*bUsePathfinding=*/true, /*bCanStrafe=*/false);
-		}
+		IssueFollowMove(Anchor, AcceptRadius);
 		return;
 	}
 
-	if (Dist <= T->FollowDistance && IsMoveActive())
+	// Between the ring and the slack is the hysteresis band -- a live move runs on undisturbed.
+	if (DistToAnchor <= AcceptRadius && IsMoveActive())
 	{
 		AIC->StopMovement();
 		SetMovementFacing(/*bMoving=*/false);
@@ -170,6 +195,72 @@ void AExtracteeCharacter::HandleFollow()
 	{
 		SetMovementFacing(/*bMoving=*/false);
 	}
+}
+
+FVector AExtracteeCharacter::ComputeFollowAnchor() const
+{
+	const APawn* Player = PlayerPawn.Get();
+	if (!Player) return GetActorLocation();
+
+	const FVector PlayerLoc = Player->GetActorLocation();
+	const float FollowDistance = GetTuning()->FollowDistance;
+
+	// Player moving -- straight back down their travel direction, no lateral offset.
+	if (Player->GetVelocity().SizeSquared2D() > PlayerMovingSpeed2DSq)
+	{
+		const FVector MoveDir = Player->GetVelocity().GetSafeNormal2D();
+		return PlayerLoc - MoveDir * FollowDistance;
+	}
+
+	// Player stationary -- hold the bearing we already sit on, or a settled extractee orbits them.
+	FVector ToExtractee = (GetActorLocation() - PlayerLoc).GetSafeNormal2D();
+	if (ToExtractee.IsNearlyZero())
+		ToExtractee = (-Player->GetActorForwardVector()).GetSafeNormal2D();
+	if (ToExtractee.IsNearlyZero())
+		ToExtractee = FVector(1.f, 0.f, 0.f);
+
+	return PlayerLoc + ToExtractee * FollowDistance;
+}
+
+void AExtracteeCharacter::IssueFollowMove(const FVector& Anchor, float AcceptRadius)
+{
+	AExtracteeAIController* AIC = GetExtracteeController();
+	if (!AIC) return;
+
+	// Deadband: the anchor slides with the player, so a live move is re-targeted rather than left
+	// to finish -- but only once the anchor actually shifted, or every state tick restarts the path.
+	// A finished or failed move always re-issues, so a path that ended short can never park us.
+	// Deliberately 3D where the gate in HandleFollow is 2D: an anchor that changed storey without
+	// moving in plan is exactly the case that MUST force a fresh path.
+	if (bHasFollowAnchor && IsMoveActive()
+		&& FVector::Dist(Anchor, LastFollowAnchor) < FollowAnchorReissueDeadband)
+		return;
+
+	LastFollowAnchor = Anchor;
+	bHasFollowAnchor = true;
+
+	// Projection OFF: the anchor is built at the player's Z, so on a staircase it sits metres above
+	// the stair surface and on a corner it sits through a wall. Projection would snap those onto the
+	// wrong poly (floor below, adjacent room), report success, and walk the civilian somewhere the
+	// player never went -- silently skipping the fallback. Unprojected, that geometry fails instead.
+	EPathFollowingRequestResult::Type MoveRes = AIC->MoveToLocation(Anchor, AcceptRadius,
+		/*bStopOnOverlap=*/true, /*bUsePathfinding=*/true, /*bProjectDestinationToNavigation=*/false,
+		/*bCanStrafe=*/false);
+
+	// Failed (off-mesh/blocked anchor) and AlreadyAtGoal (nothing started) both mean no path is
+	// running, and neither may park the civilian: the player's own location is always nav-adjacent
+	// and the acceptance ring still holds follow distance. LastFollowAnchor stays on the anchor so
+	// the deadband suppresses the doomed re-issue while the fallback runs.
+	if (MoveRes != EPathFollowingRequestResult::RequestSuccessful)
+	{
+		MoveRes = AIC->MoveToActor(PlayerPawn.Get(), GetTuning()->FollowDistance, /*bStopOnOverlap=*/true,
+			/*bUsePathfinding=*/true, /*bCanStrafe=*/false);
+	}
+
+	// Facing tracks what actually happened, not what we asked for: orient-to-path only while a path
+	// is really running, otherwise face the player. Setting it up-front left the civilian stood
+	// still with focus cleared whenever both requests came back AlreadyAtGoal.
+	SetMovementFacing(/*bMoving=*/MoveRes == EPathFollowingRequestResult::RequestSuccessful);
 }
 
 void AExtracteeCharacter::EnterSeekCoverOrCower()
@@ -193,6 +284,9 @@ void AExtracteeCharacter::EnterSeekCoverOrCower()
 	if (!AIC) { EnterCower(); return; }
 
 	SetMovementFacing(/*bMoving=*/true);
+	// Projection ON here and OFF for the follow anchor, deliberately: this destination is a small
+	// standoff off a designer-placed cover slot, so the nearest poly is always the right one. The
+	// follow anchor is a raw offset at the player's Z and can project onto a different storey.
 	AIC->MoveToLocation(CoverDestination, /*AcceptanceRadius=*/T->CoverArriveTolerance * 0.5f,
 		/*bStopOnOverlap=*/true, /*bUsePathfinding=*/true, /*bProjectDestinationToNavigation=*/true);
 	State = EExtracteeState::SeekCover;
@@ -243,6 +337,9 @@ void AExtracteeCharacter::EnterFollow()
 {
 	SetMovementFacing(/*bMoving=*/false);
 	ApplyMoveSpeed(/*bSprint=*/false);
+	// Every re-entry (rescue, post-Cower, post-CatchUp, post-Hold) re-issues from scratch -- an
+	// anchor cached before the detour would sit inside the deadband and suppress the first move.
+	bHasFollowAnchor = false;
 	State = EExtracteeState::Follow;
 }
 
@@ -344,8 +441,33 @@ void AExtracteeCharacter::RefreshPartyRefs()
 	if (!PlayerPawn.IsValid())
 		PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
 
-	if (!Companion.IsValid())
-		Companion = ACompanionCharacter::GetPrimaryCompanion(GetWorld());
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// Rebuild when an entry goes stale, plus a slow rescan so a companion that appears after the
+	// last scan still gets tracked (and so an empty list doesn't re-walk every state tick).
+	// Deliberately not every tick -- TActorIterator walks the whole level.
+	const float Now = World->GetTimeSeconds();
+	bool bRebuild = (Now - LastCompanionScanTime) >= CompanionRescanInterval;
+	if (!bRebuild)
+	{
+		for (const TWeakObjectPtr<ACompanionCharacter>& Entry : Companions)
+		{
+			if (Entry.IsValid()) continue;
+			bRebuild = true;
+			break;
+		}
+	}
+	if (!bRebuild) return;
+
+	LastCompanionScanTime = Now;
+	Companions.Reset();
+	Companions.Reserve(ExpectedCompanionCount);
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
+	{
+		ACompanionCharacter* Comp = *It;
+		if (IsValid(Comp)) Companions.Add(Comp);
+	}
 }
 
 void AExtracteeCharacter::UpdateCombatSignal()
@@ -371,9 +493,11 @@ bool AExtracteeCharacter::IsCombatActive(float MaxAge) const
 
 bool AExtracteeCharacter::IsPartyMemberDown() const
 {
-	if (const ACompanionCharacter* Comp = Companion.Get())
+	// ANY companion down holds us, not just whichever one an iterator happened to grab first.
+	for (const TWeakObjectPtr<ACompanionCharacter>& Entry : Companions)
 	{
-		if (Comp->GetIsCompanionDBNO()) return true;
+		const ACompanionCharacter* Comp = Entry.Get();
+		if (IsValid(Comp) && Comp->GetIsCompanionDBNO()) return true;
 	}
 	if (const IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PlayerPawn.Get()))
 	{
@@ -511,8 +635,12 @@ void AExtracteeCharacter::TickSoftSeparation()
 		EnsureSoftCollisionIgnores(Player);
 		SoftPushAwayFrom(Player);
 	}
-	if (ACharacter* Comp = Companion.Get())
+	// Every companion: EnsureSoftCollisionIgnores is what clears the mutual hard block, so missing
+	// one leaves its capsule solid against ours -- the civilian/armed-VIP collision this fixes.
+	for (const TWeakObjectPtr<ACompanionCharacter>& Entry : Companions)
 	{
+		ACharacter* Comp = Entry.Get();
+		if (!IsValid(Comp)) continue;
 		EnsureSoftCollisionIgnores(Comp);
 		SoftPushAwayFrom(Comp);
 	}

@@ -273,6 +273,22 @@ private:
 	bool bLoggedNoComposition = false;
 	bool bLoggedNoZone = false;
 
+	/** Per-filter tally from the last PickSpawnZone sweep — turns "no eligible spawn zone" from a
+	 *  dead end into a named cause. Diagnostic only; rewritten every sweep. */
+	struct FZoneRejectCounts
+	{
+		int32 Considered = 0;
+		int32 Phase = 0;
+		int32 WaveIneligible = 0;
+		int32 OutsideScope = 0;
+		int32 TooClose = 0;
+		int32 TooFar = 0;
+		int32 Visible = 0;
+		int32 OffNavMesh = 0;
+		FString ToString() const;
+	};
+	mutable FZoneRejectCounts LastZoneRejects;
+
 	// ---------- v2: kill tracking ----------
 
 	UFUNCTION()

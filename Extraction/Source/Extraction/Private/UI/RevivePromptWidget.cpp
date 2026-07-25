@@ -22,16 +22,45 @@ void URevivePromptWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaT
 
 	const APlayerController* PC = GetOwningPlayer();
 	const AExtractionPlayer* Player = PC ? Cast<AExtractionPlayer>(PC->GetPawn()) : nullptr;
-	const bool bShow = Player && IsValid(Player->GetReviveCandidate());
-	PromptContainer->SetVisibility(bShow ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
-	if (!bShow) return;
+	if (!Player)
+	{
+		PromptContainer->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
 
-	const bool bHolding = Player->IsRevivingTarget();
+	// Revive outranks a world interactable when both are under the crosshair.
+	const bool bRevive = IsValid(Player->GetReviveCandidate());
+	const bool bInteract = !bRevive && IsValid(Player->GetInteractCandidate());
+	if (!bRevive && !bInteract)
+	{
+		PromptContainer->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+	PromptContainer->SetVisibility(ESlateVisibility::HitTestInvisible);
+
+	bool bHolding;
+	float Progress;
+	FText Text;
+	if (bRevive)
+	{
+		bHolding = Player->IsRevivingTarget();
+		Progress = Player->GetReviveProgress();
+		Text = bHolding ? RevivingHint : ReviveHint;
+	}
+	else
+	{
+		bHolding = Player->IsInteractHolding();
+		Progress = Player->GetInteractHoldProgress();
+		Text = (bHolding && !InteractHoldingHint.IsEmpty())
+			? InteractHoldingHint
+			: FText::Format(InteractHintFormat, Player->GetInteractPrompt());
+	}
+
 	if (PromptText)
-		PromptText->SetText(bHolding ? RevivingHint : ReviveHint);
+		PromptText->SetText(Text);
 	if (HoldProgressBar)
 	{
 		HoldProgressBar->SetVisibility(bHolding ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
-		HoldProgressBar->SetPercent(Player->GetReviveProgress());
+		HoldProgressBar->SetPercent(Progress);
 	}
 }

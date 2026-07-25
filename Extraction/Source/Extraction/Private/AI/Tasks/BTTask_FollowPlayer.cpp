@@ -53,6 +53,10 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	TimeSinceLastEqs = EqsQueryInterval; // allow an immediate query on first tick
 	EqsTarget = FVector::ZeroVector;
 	bFightBiasQuery = false;
+	bAllySpacingQuery = false;
+	bAllySpacingRejectedAll = false;
+	AllySlotSideSign = 0.f;
+	LastMovingSideRight = FVector::ZeroVector;
 	FightBiasThreatLocation = FVector::ZeroVector;
 
 	// Reset the floor-transit detector — a re-entry mid-descent re-arms from the first sample.
@@ -217,15 +221,23 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	const ECompanionMode Mode = Companion->GetMode();
 	const bool bCombatLead = Mode == ECompanionMode::Combat;
 
+	// Front-to-back stagger for a non-primary companion (the armed extractee) — the lateral mirror
+	// alone leaves the pair a symmetric wall across the player's rear. Primary = 0: every use is a no-op.
+	const float BackBias = Companion->GetFormationBackBias(T->SecondaryFormationBackBias);
+
 	// Floor at read time: a lead inside AcceptableRadius would idle the companion at the player's
-	// side and never take point (mirrors the EffMinSep/EffStandoff read-time clamps above).
-	const float LeadDistance = FMath::Max(T->CombatModeLeadDistance, T->AcceptableRadius + FollowDistMargin);
+	// side and never take point (mirrors the EffMinSep/EffStandoff read-time clamps above). The bias
+	// shortens the lead, so it belongs INSIDE the Max — flooring the raw tunable let any
+	// CombatModeLeadDistance under AcceptableRadius + bias + margin (e.g. 300, which still satisfies
+	// the tunable's documented "must exceed AcceptableRadius" rule) push a secondary's lead point
+	// back inside AcceptableRadius and resurrect the idles-at-the-player's-side bug.
+	const float LeadDistance = FMath::Max(T->CombatModeLeadDistance - BackBias, T->AcceptableRadius + FollowDistMargin);
 
 	float OffsetBack = T->FormationOffsetBack;
 	float OffsetRight = T->FormationOffsetRight;
 	if (bCombatLead)
 	{
-		OffsetBack = -LeadDistance; // negative back = in front
+		OffsetBack = -LeadDistance; // negative back = in front; the bias is already inside LeadDistance
 		OffsetRight = T->CombatModeLeadOffsetRight;
 	}
 	else if (Companion->IsStealthActive())
@@ -233,6 +245,13 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		OffsetBack = T->StealthFormationOffsetBack;
 		OffsetRight = T->StealthFormationOffsetRight;
 	}
+
+	// Applied after the mode branch so all three formations mirror with one edit. A second companion
+	// (the armed extractee) runs this same task against this same tuning asset, so it would otherwise
+	// compute a bit-identical anchor and pile into the primary. Primary = sign +1 / bias 0: no-op.
+	OffsetRight *= Companion->GetFormationSideSign();
+	if (!bCombatLead)
+		OffsetBack += BackBias; // combat folded the bias into LeadDistance — adding it here double-counts
 
 	FVector FormationDir;
 	if (PlayerChar && PlayerChar->GetVelocity().SizeSquared() > 100.0f * 100.0f)
@@ -244,10 +263,12 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	}
 	else if (bCombatLead)
 	{
-		// Player stationary in Combat mode — take point along their facing.
+		// Player stationary in Combat mode — take point along their facing at -OffsetBack, which the
+		// combat branch set to exactly LeadDistance (bias and floor both already inside it), so the
+		// moving and stationary lead points can't drift apart.
 		const FVector Facing = Player->GetActorForwardVector().GetSafeNormal2D();
 		const FVector FacingRight = FVector::CrossProduct(FVector::UpVector, Facing);
-		FormationDir = PlayerLocation + Facing * LeadDistance + FacingRight * OffsetRight;
+		FormationDir = PlayerLocation + Facing * -OffsetBack + FacingRight * OffsetRight;
 	}
 	else
 	{
@@ -323,8 +344,18 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		// the callback prefer one with eye-line toward the threat. SingleResult otherwise.
 		bFightBiasQuery = Controller->GetRecentAlertedThreat(T->FightSignalMaxAge, FightBiasThreatLocation);
 
+		// A secondary companion needs the full set for the same reason: the single best slot is the
+		// one the primary is already heading for, and the callback has to be able to pick another.
+		bAllySpacingQuery = !Companion->IsPrimaryCompanion();
+
+		// Side comes from the MIRRORED offset the anchor above actually uses, never a hardcoded "+1 is
+		// the primary": FormationOffsetRight is a live serialised override, so a designer flipping it
+		// negative swaps which side each companion anchors to, and a fixed assumption would leave the
+		// filter rejecting the exact side the anchor is steering toward. Sign(0) = no side, no test.
+		AllySlotSideSign = bAllySpacingQuery ? FMath::Sign(OffsetRight) : 0.f;
+
 		FEnvQueryRequest QueryRequest(FollowSlotQuery, Companion);
-		QueryRequest.Execute(bFightBiasQuery ? EEnvQueryRunMode::AllMatching : EEnvQueryRunMode::SingleResult,
+		QueryRequest.Execute((bFightBiasQuery || bAllySpacingQuery) ? EEnvQueryRunMode::AllMatching : EEnvQueryRunMode::SingleResult,
 			FQueryFinishedSignature::CreateUObject(this, &UBTTask_FollowPlayer::OnFollowQueryFinished));
 	}
 
@@ -463,45 +494,134 @@ void UBTTask_FollowPlayer::OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Res
 	// CachedOwnerComp is cleared in OnTaskFinished, so its absence means a stale fire.
 	if (!CachedOwnerComp || !CachedCompanion.IsValid()) return;
 
-	if (Result.IsValid() && Result->IsSuccessful() && Result->Items.Num() > 0)
-	{
-		EqsTarget = Result->GetItemAsLocation(0);
-		bHasEqsTarget = true;
-
-		// Fight-aware follow: prefer the best-scored slot with eye-line toward the live-fight
-		// bearing (items arrive best-first in AllMatching). A trace that reaches the threat — or
-		// stops on any pawn short of it (an enemy body IS the fight) — counts as eye-line. Falls
-		// back to the top-scored slot when every traced candidate is walled off.
-		if (bFightBiasQuery)
-		{
-			ACompanionCharacter* Companion = CachedCompanion.Get();
-			UWorld* World = Companion->GetWorld();
-			const UCapsuleComponent* Capsule = Companion->GetCapsuleComponent();
-			const float SlotEyeOffset = (Capsule ? Capsule->GetScaledCapsuleHalfHeight() : 90.f)
-				+ Companion->BaseEyeHeight;
-
-			const int32 TraceCount = FMath::Min(Result->Items.Num(), MaxFightBiasSlotTraces);
-			for (int32 i = 0; i < TraceCount; ++i)
-			{
-				const FVector Slot = Result->GetItemAsLocation(i);
-				FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionFollowFightBias), true);
-				Params.AddIgnoredActor(Companion);
-				Params.AddIgnoredActor(Companion->GetCurrentWeapon());
-				FHitResult Hit;
-				const bool bBlocked = World->LineTraceSingleByChannel(Hit,
-					Slot + FVector(0.f, 0.f, SlotEyeOffset), FightBiasThreatLocation,
-					ECC_Visibility, Params);
-				if (!bBlocked || Cast<APawn>(Hit.GetActor()))
-				{
-					EqsTarget = Slot;
-					break;
-				}
-			}
-		}
-	}
-	else
+	if (!Result.IsValid() || !Result->IsSuccessful() || Result->Items.Num() == 0)
 	{
 		bHasEqsTarget = false;
+		return;
+	}
+
+	ACompanionCharacter* Companion = CachedCompanion.Get();
+	UWorld* World = Companion->GetWorld();
+
+	// --- Ally filter inputs (non-primary companion only) ---
+	// The follow query is player-anchored and identical for both companions, so its top slots are
+	// the primary's. Resolve everything the filter needs once; each input gates only the test it
+	// feeds, never the whole fill — a missing primary leaves nothing to space against, an
+	// unresolvable player leaves no side frame, and either alone must not reject every slot.
+	const ACompanionAIController* Controller = CachedController.Get();
+	const UCompanionTuningDataAsset* T = Controller ? Controller->GetTuning() : nullptr;
+
+	// TActorIterator, but at EqsQueryInterval and only for a secondary companion — the controller
+	// caches no primary, and a registry for this one caller isn't worth the lifetime handling.
+	const ACompanionCharacter* Primary = bAllySpacingQuery ? ACompanionCharacter::GetPrimaryCompanion(World) : nullptr;
+	const bool bSpacingTest = bAllySpacingQuery && T && IsValid(Primary);
+	const FVector PrimaryLocation = bSpacingTest ? Primary->GetActorLocation() : FVector::ZeroVector;
+	const float MinSpacingSq = bSpacingTest ? FMath::Square(T->AllyFollowSlotMinSpacing) : 0.f;
+
+	// Side frame for the half-plane test. While the player MOVES it mirrors TickTask's moving-player
+	// formation branch exactly — same ACharacter cast, same speed gate, so the two can't diverge on a
+	// non-ACharacter pawn — and latches that travel basis. While they STAND STILL the latch is reused
+	// rather than the test being dropped: spacing alone only proves a slot is AllyFollowSlotMinSpacing
+	// from the primary, never that it is mirrored, so with no side test the secondary took the slot
+	// beside the primary and walked across the player's back (at rest the formation branch keeps
+	// running — IdleGateDist is player distance, well outside AcceptableRadius — and a cross-body slot
+	// clears the 200cm re-issue dedup, so it's a real traversal, not a blip). The latch is travel, not
+	// actor-forward: it doesn't rotate when the player turns on the spot, so the accepted half-plane
+	// can't swing out from under the stationary bearing-hold anchor and invert the wedge.
+	FVector PlayerLocation = FVector::ZeroVector;
+	FVector SideRight = FVector::ZeroVector;
+	if (bAllySpacingQuery)
+	{
+		const UBlackboardComponent* BB = CachedOwnerComp->GetBlackboardComponent();
+		const AActor* Player = BB ? Cast<AActor>(BB->GetValueAsObject(PlayerActorKey.SelectedKeyName)) : nullptr;
+		const ACharacter* PlayerChar = IsValid(Player) ? Cast<ACharacter>(Player) : nullptr;
+		const bool bPlayerMoving = PlayerChar && PlayerChar->GetVelocity().SizeSquared() > 100.f * 100.f;
+		if (bPlayerMoving)
+		{
+			PlayerLocation = PlayerChar->GetActorLocation();
+			SideRight = FVector::CrossProduct(FVector::UpVector, PlayerChar->GetVelocity().GetSafeNormal2D());
+			LastMovingSideRight = SideRight;
+		}
+		else if (IsValid(Player) && !LastMovingSideRight.IsNearlyZero())
+		{
+			PlayerLocation = Player->GetActorLocation();
+			SideRight = LastMovingSideRight;
+		}
+	}
+	// Spacing stays unconditional — the pile-up it prevents is just as real standing still. The side
+	// test needs both a basis and a signed offset; either missing degrades to spacing-only, which is
+	// the pre-latch behaviour rather than a reject-everything stall.
+	const bool bSideTest = !SideRight.IsNearlyZero() && !FMath::IsNearlyZero(AllySlotSideSign);
+
+	// Filter during the fill, never after: MaxFightBiasSlotTraces is the fight-bias TRACE budget, and
+	// pre-truncating the window to it made "rejected everything" a steady state rather than an
+	// anomaly (EQS sorts best-first and the top slots cluster where the primary stands), throwing a
+	// whole query away twice a second. Walking until the window is FULL means an empty window really
+	// does mean the entire result set was unusable. Both tests are skipped for a primary companion,
+	// which therefore still takes the first MaxFightBiasSlotTraces items in score order, unchanged.
+	TArray<FVector, TInlineAllocator<MaxFightBiasSlotTraces>> Candidates;
+	Candidates.Reserve(FMath::Min(Result->Items.Num(), MaxFightBiasSlotTraces));
+	for (int32 i = 0; i < Result->Items.Num() && Candidates.Num() < MaxFightBiasSlotTraces; ++i)
+	{
+		const FVector Slot = Result->GetItemAsLocation(i);
+
+		// Sitting on the primary's slot — the pile-up this filter exists to prevent.
+		if (bSpacingTest && FVector::DistSquared2D(Slot, PrimaryLocation) < MinSpacingSq) continue;
+
+		// On the primary's side of the player. The dead zone passes near-centreline slots so a
+		// corridor with no clearly-sided geometry degrades to the anchor instead of to nothing.
+		if (bSideTest && FVector::DotProduct(Slot - PlayerLocation, SideRight) * AllySlotSideSign < -AllySlotSideDeadZone) continue;
+
+		Candidates.Add(Slot);
+	}
+
+	// Nothing usable — forget the slot and let TickTask fall through to FormationDir, which already
+	// IS the correct mirrored anchor. Unreachable for a primary: with both tests off, a non-empty
+	// result set always fills at least one candidate.
+	if (Candidates.Num() == 0)
+	{
+		bHasEqsTarget = false;
+		// Transition-only, at Log: sustained rejection means AllyFollowSlotMinSpacing is tuned wider
+		// than the query's donut and the secondary is permanently pinned to the anchor — worth one
+		// line, not one every EqsQueryInterval for the rest of the level.
+		if (!bAllySpacingRejectedAll)
+		{
+			bAllySpacingRejectedAll = true;
+			UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] Ally filter rejected all %d slots — falling back to the mirrored formation anchor"),
+				Result->Items.Num());
+		}
+		return;
+	}
+	bAllySpacingRejectedAll = false;
+
+	EqsTarget = Candidates[0];
+	bHasEqsTarget = true;
+
+	// Fight-aware follow: prefer the best-scored surviving slot with eye-line toward the live-fight
+	// bearing. A trace that reaches the threat — or stops on any pawn short of it (an enemy body IS
+	// the fight) — counts as eye-line. Falls back to the top-scored slot when every candidate is
+	// walled off.
+	if (bFightBiasQuery && IsValid(World))
+	{
+		const UCapsuleComponent* Capsule = Companion->GetCapsuleComponent();
+		const float SlotEyeOffset = (Capsule ? Capsule->GetScaledCapsuleHalfHeight() : 90.f)
+			+ Companion->BaseEyeHeight;
+
+		for (const FVector& Slot : Candidates)
+		{
+			FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionFollowFightBias), true);
+			Params.AddIgnoredActor(Companion);
+			Params.AddIgnoredActor(Companion->GetCurrentWeapon());
+			FHitResult Hit;
+			const bool bBlocked = World->LineTraceSingleByChannel(Hit,
+				Slot + FVector(0.f, 0.f, SlotEyeOffset), FightBiasThreatLocation,
+				ECC_Visibility, Params);
+			if (!bBlocked || Cast<APawn>(Hit.GetActor()))
+			{
+				EqsTarget = Slot;
+				break;
+			}
+		}
 	}
 }
 
@@ -517,6 +637,10 @@ void UBTTask_FollowPlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uin
 	bHasEqsTarget = false;
 	EqsTarget = FVector::ZeroVector;
 	bFightBiasQuery = false;
+	bAllySpacingQuery = false;
+	bAllySpacingRejectedAll = false;
+	AllySlotSideSign = 0.f;
+	LastMovingSideRight = FVector::ZeroVector;
 	FightBiasThreatLocation = FVector::ZeroVector;
 	CachedOwnerComp = nullptr;
 	CachedController.Reset();

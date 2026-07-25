@@ -9,13 +9,9 @@
 
 namespace
 {
-	/** Durations beyond this are treated as a looping/procedural sound misreporting length —
-	 *  the chain advances after the fallback beat instead of stalling for minutes. */
-	constexpr float MaxTrustedLineDuration = 60.f;
-	constexpr float FallbackLineDuration = 4.f;
-
 	/** Beat between a line with no (or unimported) VO and the next, so text-only sequencing
-	 *  still paces like speech. */
+	 *  still paces like speech. Clamping a real line's length is the bark channel's job — this is
+	 *  only the floor for lines it never played. */
 	constexpr float NoSoundLineDuration = 0.5f;
 }
 
@@ -97,15 +93,12 @@ void ABarkTriggerVolume::PlayLine(int32 LineIndex)
 	// a priority combat telegraph (RequestScriptedLine unconditionally interrupts the live voice).
 	if (Companion->GetPosture() == ECompanionPosture::Combat) return;
 
+	// The bark channel owns the duration policy (real length, clamped, with its own fallback) —
+	// take its answer so the chain waits exactly as long as the channel stays reserved.
 	const FScriptedDialogueLine& Line = Lines[LineIndex];
-	float Duration = NoSoundLineDuration;
-	if (IsValid(Line.Sound))
-	{
-		Companion->SpeakScriptedLine(Line.Sound);
-		const float SoundDuration = Line.Sound->GetDuration();
-		Duration = (SoundDuration > 0.f && SoundDuration < MaxTrustedLineDuration)
-			? SoundDuration : FallbackLineDuration;
-	}
+	const float Duration = IsValid(Line.Sound)
+		? FMath::Max(Companion->SpeakScriptedLine(Line.Sound), NoSoundLineDuration)
+		: NoSoundLineDuration;
 
 	if (!Lines.IsValidIndex(LineIndex + 1)) return;
 

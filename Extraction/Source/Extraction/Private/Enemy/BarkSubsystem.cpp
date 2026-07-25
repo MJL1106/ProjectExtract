@@ -39,12 +39,12 @@ void UBarkSubsystem::RequestCompanionBark(const AActor* Speaker, const UCompanio
 		IsEnemyBarkDebugEnabled() ? UEnum::GetValueAsString(Type) : FString(), Context);
 }
 
-void UBarkSubsystem::RequestScriptedLine(const AActor* Speaker, USoundBase* Sound, USoundAttenuation* Attenuation, float VolumeMultiplier)
+float UBarkSubsystem::RequestScriptedLine(const AActor* Speaker, USoundBase* Sound, USoundAttenuation* Attenuation, float VolumeMultiplier)
 {
-	if (!IsValid(Speaker) || !IsValid(Sound)) return;
+	if (!IsValid(Speaker) || !IsValid(Sound)) return 0.f;
 
 	const UWorld* World = GetWorld();
-	if (!IsValid(World)) return;
+	if (!IsValid(World)) return 0.f;
 
 	// Telegraph-style interrupt: scripted dialogue always wins the channel.
 	UAudioComponent* CurrentVoice = ActiveVoice.Get();
@@ -55,8 +55,9 @@ void UBarkSubsystem::RequestScriptedLine(const AActor* Speaker, USoundBase* Soun
 	LastVoiceEndTime = Now;
 
 	const float SoundDuration = Sound->GetDuration();
-	ScriptedBusyUntilTime = Now + ((SoundDuration > 0.f && SoundDuration < MaxTrustedScriptedDuration)
-		? SoundDuration : FallbackScriptedDuration);
+	const float ReservedDuration = (SoundDuration > 0.f && SoundDuration < MaxTrustedScriptedDuration)
+		? SoundDuration : FallbackScriptedDuration;
+	ScriptedBusyUntilTime = Now + ReservedDuration;
 
 	UAudioComponent* Voice = UGameplayStatics::SpawnSoundAttached(Sound, Speaker->GetRootComponent(), NAME_None,
 		FVector::ZeroVector, EAttachLocation::KeepRelativeOffset, false, VolumeMultiplier, 1.f, 0.f, Attenuation);
@@ -65,6 +66,8 @@ void UBarkSubsystem::RequestScriptedLine(const AActor* Speaker, USoundBase* Soun
 		Voice->OnAudioFinishedNative.AddUObject(this, &UBarkSubsystem::HandleVoiceFinished);
 		ActiveVoice = Voice;
 	}
+
+	return ReservedDuration;
 }
 
 bool UBarkSubsystem::IsScriptedLineActive() const

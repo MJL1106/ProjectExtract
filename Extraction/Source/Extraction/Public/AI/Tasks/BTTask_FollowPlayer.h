@@ -77,7 +77,42 @@ private:
 	bool bFightBiasQuery = false;
 	FVector FightBiasThreatLocation = FVector::ZeroVector;
 
-	/** Cap on per-callback slot eye-line traces (best-scored slots first). */
+	// Ally spacing: stamped at query dispatch for a non-primary companion (the armed extractee).
+	// The follow query is player-anchored and identical for both companions, so the callback must
+	// drop slots sitting on the primary's — AND slots on the primary's side of the player — before
+	// either pass picks one. Without the side test a surviving slot is merely far from the primary,
+	// not mirrored, so the wedge only existed on the reject-everything fallback path.
+	bool bAllySpacingQuery = false;
+
+	/** Half-plane the secondary's slots must sit in — stamped at dispatch as sign(mirrored OffsetRight)
+	 *  rather than assumed +1. FormationOffsetRight is a live serialised override in the tuning asset;
+	 *  flipping it negative flips the anchor's side, and a hardcoded assumption would leave the filter
+	 *  rejecting exactly the side the anchor now wants. Zero offset means no side, so no test. */
+	float AllySlotSideSign = 0.f;
+
+	/** Side basis latched from the player's last TRAVEL direction, reused by the side test while they
+	 *  stand still. Dropping the test at rest dropped the wedge at rest: spacing alone only proves a
+	 *  slot is AllyFollowSlotMinSpacing from the primary, never that it is mirrored, so the secondary
+	 *  took the slot beside the primary and physically walked across the player's back (the formation
+	 *  branch keeps running at rest, and a cross-body slot clears the 200cm re-issue dedup). Latched
+	 *  travel is not actor-forward — it doesn't rotate when the player turns on the spot, so the
+	 *  accepted side can't swing underneath the stationary bearing-hold anchor. */
+	FVector LastMovingSideRight = FVector::ZeroVector;
+
+	/** Latches while the ally filter is rejecting every slot, so OnFollowQueryFinished logs that state
+	 *  on entry only — geometry that stays unusable would otherwise log twice a second all level. */
+	bool bAllySpacingRejectedAll = false;
+
+	/** Wrong-side tolerance (cm) for the ally side test. Slots within this band of the player's
+	 *  centreline pass either way: a corridor narrower than the formation offset has no clearly-sided
+	 *  slots at all, and rejecting them there would pin the secondary to the formation anchor. */
+	static constexpr float AllySlotSideDeadZone = 100.f;
+
+	/** Cap on per-callback slot eye-line traces (best-scored slots first). Also sizes the accepted
+	 *  candidate window — the ally filter runs during the fill, so this bounds slots KEPT, never
+	 *  slots examined. A trace budget must not double as a distance-check budget: pre-truncating to
+	 *  it made "all 8 rejected" a steady state, since EQS sorts best-first and the top slots cluster
+	 *  exactly where the primary is standing. */
 	static constexpr int32 MaxFightBiasSlotTraces = 8;
 
 	// Player floor-transit detector (see UpdatePlayerZTransit). Envelope follower over the

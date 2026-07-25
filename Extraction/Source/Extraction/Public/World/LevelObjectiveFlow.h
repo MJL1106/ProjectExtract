@@ -2,6 +2,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Enemy/Director/DirectorWaveTypes.h"
+#include "World/ExtractionTargetActor.h"
 #include "LevelObjectiveFlow.generated.h"
 
 class ACompanionCharacter;
@@ -120,11 +122,23 @@ protected:
 	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Objective Flow|Extraction")
 	TObjectPtr<ALevelCompletionLiftGate> LiftGate;
 
-	/** The armed extraction VIP. When set: the Reach step targets it, its rescue interact starts
-	 *  the wave (set bExternalTriggerOnly on the placed ExtractionTarget), and checkpoint
-	 *  fast-forwards past the rescue arm it directly. Null = legacy placeholder behavior. */
+	/** The armed extraction VIP. When set: the Reach step targets it, its rescue starts the wave,
+	 *  and checkpoint fast-forwards past the rescue arm it directly.
+	 *  Either this or ExtractionTarget must be set — the VIP is the modern owner of the beat, the
+	 *  target actor the legacy placeholder. With no ExtractionTarget the flow runs the wave itself
+	 *  from ExtractionWave/ExtractionCompletionAction below. */
 	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Objective Flow|Extraction")
 	TObjectPtr<AExtracteeCompanion> Extractee;
+
+	/** Defence wave started by the rescue. Used ONLY when there is no ExtractionTarget actor to
+	 *  own it — with one present its own WaveRequest wins, so the config never lives in two places. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Flow|Extraction")
+	FDirectorWaveRequest ExtractionWave;
+
+	/** What finishing ExtractionWave does. UnlockExit unlocks LiftGate above. Ignored when an
+	 *  ExtractionTarget actor owns the wave. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Flow|Extraction")
+	EWaveCompletionAction ExtractionCompletionAction = EWaveCompletionAction::UnlockExit;
 
 	/** Steps that count as checkpoints — advancing INTO one grants the companion a full heal,
 	 *  applied once it is out of combat (immediately if already calm), and records the step to
@@ -158,6 +172,12 @@ private:
 	UPROPERTY(EditAnywhere, Replicated, Category = "Objective Flow|Room 1")
 	FVector Room1AreaLocation = FVector::ZeroVector;
 
+	/** Where the rescue happened — the ground the player is told to hold. Captured when the wave
+	 *  starts, because the VIP walks away from it the moment he can follow, and a "Defend the
+	 *  position" marker that trails your own squadmate around the room points at nothing. */
+	UPROPERTY(Replicated)
+	FVector DefendAreaLocation = FVector::ZeroVector;
+
 	TSet<TWeakObjectPtr<ALootContainer>> CompletedSupplyCrates;
 	TSet<int32> Room1DeadIndices;
 	TSet<int32> FirstPairDeadIndices;
@@ -188,6 +208,14 @@ private:
 	int32 CheckpointSpawnRetries = 0;
 
 	bool ValidateReferences() const;
+
+	/** Non-fatal wiring audit run at activation: the flow still starts, but a mis-wired level
+	 *  instance (EditInstanceOnly refs left null) fails silently in play, so name it in the log. */
+	void WarnOnSuspectWiring() const;
+
+	/** Stable actor to hang the primary marker on when a step's own target resolves to null.
+	 *  Null = the step genuinely has nothing to point at and the marker is dropped. */
+	const AActor* ResolveMarkerFallbackAnchor() const;
 	void BindDelegates();
 	void UnbindDelegates();
 	void Advance(ELevelObjectiveEvent Event);
@@ -214,6 +242,19 @@ private:
 	void HandleSupplyDestroyed(AActor* DestroyedActor);
 	UFUNCTION()
 	void HandleExtracteeRescued();
+
+	// Direct Director hookup, used only on the no-ExtractionTarget path (the VIP owns the beat and
+	// there is no target actor listening for the Director's completion).
+	UFUNCTION()
+	void HandleDirectorWaveCompleted(FName WaveId);
+	UFUNCTION()
+	void HandleDirectorWaveBlocked(FName WaveId, FText Reason);
+
+	/** True when this flow, not an ExtractionTarget actor, owns the defence wave. */
+	bool OwnsExtractionWave() const { return !IsValid(ExtractionTarget); }
+
+	/** ExtractionCompletionAction, applied when the flow owns the wave. */
+	void PerformExtractionCompletionAction();
 
 	/** Starts (or retries) the extraction wave after the one-shot rescue. StartWave can refuse
 	 *  (another wave active, bad config) and the rescue interact can't be repeated, so a refusal

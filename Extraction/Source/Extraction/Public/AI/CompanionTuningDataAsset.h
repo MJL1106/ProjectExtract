@@ -148,7 +148,15 @@ public:
 	bool bStealthAllowSprintCatchup = true;
 
 	// Player 2D speed (cm/s) above which the follow task treats the player as sprinting and mirrors
-	// sprint. The kit BP owns player sprint state, so it is inferred from velocity (walk 600 / sprint 900).
+	// sprint. The kit BP owns player sprint state, so it is inferred from velocity, and it must sit
+	// above the kit's jog base (410) and below its hold-sprint (550 since the sprint/slide rework).
+	// KNOWN INERT at 700: the player can never reach it, so bPlayerSprinting never goes true and the
+	// companion sprints on the raw distance threshold alone. Left as-is deliberately — the current
+	// follow read is the shipped feel; changing it is tracked as its own task, not a drive-by.
+	// FootstepNoiseComponent::SprintSpeedThreshold infers sprint from owner speed the same way and
+	// sits at 480; that is the value to match if this is ever switched on. Do NOT re-derive from
+	// AExtractionCharacter's 600/900 defaults — the live pawn is the kit player, and those stale
+	// figures are where 700 came from.
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
 	float PlayerSprintSpeedThreshold = 700.f;
 
@@ -174,6 +182,20 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation")
 	float FormationOffsetRight = 200.f;
+
+	// Extra back-offset applied to a non-primary companion (the armed extractee). The lateral offset
+	// is already mirrored, so this only staggers the pair front-to-back — without it they sit as a
+	// symmetric wall across the player's rear.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0.0"))
+	float SecondaryFormationBackBias = 100.f;
+
+	// An EQS follow slot within this distance of the primary companion is rejected for a secondary
+	// one. The follow query is player-anchored and identical for both, so its top slot IS the
+	// primary's — without the filter the EQS result overwrites the mirror and re-converges them.
+	// Keep it well inside the query's donut width or every slot is rejected and the secondary is
+	// permanently pinned to the formation anchor.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0.0"))
+	float AllyFollowSlotMinSpacing = 250.f;
 
 	// Floored at 50 so the derived follow min-separation can't collapse and silently disable the back-out.
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "50"))

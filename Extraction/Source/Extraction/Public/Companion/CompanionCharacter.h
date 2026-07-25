@@ -72,14 +72,18 @@ public:
 	 *  filters tagged variants (e.g. an archetype or direction the line names). */
 	void Bark(ECompanionBarkType Type, FName Context = NAME_None) const;
 
-	/** Scripted one-off line (dialogue trigger volumes) — plays through the bark channel with this
-	 *  companion's voice attenuation/volume, interrupting live chatter. No type cooldowns. */
-	void SpeakScriptedLine(USoundBase* Sound) const;
+	/** Scripted one-off line (dialogue trigger volumes, the VIP rescue exchange) — plays through
+	 *  the bark channel with this companion's voice attenuation/volume, interrupting live chatter.
+	 *  No type cooldowns. Returns the line's duration so callers can chain the next beat off it
+	 *  ending; 0 when nothing played. */
+	float SpeakScriptedLine(USoundBase* Sound) const;
 
 	// --- Weapon Interface ---
 
+	/** Virtual so the armed extractee can refuse to fire while its pistol is still hidden
+	 *  (the unarmed window between being freed and the handoff landing). */
 	UFUNCTION(BlueprintCallable, Category = "Companion|Combat")
-	void StartWeaponFire();
+	virtual void StartWeaponFire();
 
 	UFUNCTION(BlueprintCallable, Category = "Companion|Combat")
 	void StopWeaponFire();
@@ -87,8 +91,9 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Companion|Combat")
 	void ReloadWeapon();
 
+	/** Virtual for the same reason as StartWeaponFire — BT decorators gate on this. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
-	bool CanFire() const;
+	virtual bool CanFire() const;
 
 	UFUNCTION(BlueprintPure, Category = "Companion|Combat")
 	bool NeedsReload() const;
@@ -323,6 +328,18 @@ public:
 	 *  the primary only; enemy perception and revive logic treat every companion alike. */
 	UFUNCTION(BlueprintPure, Category = "Companion")
 	bool IsPrimaryCompanion() const { return bIsPrimaryCompanion; }
+
+	/** Which side of the player this companion forms up on: +1 primary, -1 anyone else. Both
+	 *  companions run the same follow task against the same tuning asset, so without the mirror
+	 *  they compute a bit-identical anchor behind the player and physically collide. */
+	UFUNCTION(BlueprintPure, Category = "Companion")
+	float GetFormationSideSign() const { return bIsPrimaryCompanion ? 1.f : -1.f; }
+
+	/** Extra back-offset for a non-primary companion — staggers the pair instead of forming a
+	 *  symmetric wall. Takes the tuned value (UCompanionTuningDataAsset::SecondaryFormationBackBias)
+	 *  rather than the asset so this header stays free of the tuning include. */
+	UFUNCTION(BlueprintPure, Category = "Companion")
+	float GetFormationBackBias(float SecondaryBias) const { return bIsPrimaryCompanion ? 0.f : SecondaryBias; }
 
 	/** The player's commandable companion, or null. */
 	static ACompanionCharacter* GetPrimaryCompanion(UWorld* World);
@@ -715,14 +732,19 @@ protected:
 
 	// --- Soft Collision (companion-side self-push — F2 asymmetric blocking) ---
 
-	/** AddMovementInput scale applied when the companion overlaps the player capsule. The player's
-	 *  own push (which lets it pass through) lives on AExtractionPlayer::CompanionPushStrength. */
+	/** AddMovementInput scale applied when the companion overlaps the player capsule OR another
+	 *  companion's. The player's own push (which lets it pass through) lives on
+	 *  AExtractionPlayer::CompanionPushStrength. */
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|SoftCollision", meta = (ClampMin = "0.0"))
 	float CompanionSelfPushStrength = 1.0f;
 
 	/** Extra personal-space padding (cm) added on top of the combined capsule radii before the
-	 *  self-push kicks in. */
-	UPROPERTY(EditDefaultsOnly, Category = "Companion|SoftCollision", meta = (ClampMin = "0.0"))
+	 *  self-push kicks in. Capped so total reach stays under the two distances that would turn the
+	 *  push into an oscillation: the follow task's 200cm move re-issue deadband (a push that carries
+	 *  past it re-paths every frame) and the ~412cm mirrored-wedge separation at live formation
+	 *  offsets (FormationOffsetRight 200 mirrored + SecondaryFormationBackBias 100) — beyond that the
+	 *  pair would push apart, walk back into formation, and push again forever. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|SoftCollision", meta = (ClampMin = "0.0", ClampMax = "100.0"))
 	float CompanionSelfPushPadding = 0.f;
 
 	// --- Takedown ---
@@ -962,6 +984,34 @@ private:
 	 *  popping — the companion side of the F2 asymmetric blocking (the player's own push is
 	 *  AExtractionPlayer::UpdateCompanionSoftCollision). Mirrors that push math with roles swapped. */
 	void TickPlayerSoftSeparation();
+
+	/** The same treatment against every OTHER companion. Both companions run the same follow task,
+	 *  so in a corridor narrower than the formation their capsules meet and each hard-blocks the
+	 *  other's movement sweep — neither can slide past and the pair jams. The ignore wiring runs
+	 *  everywhere (local movement filter, no authority semantics); only the push is server-side. */
+	void TickAllySoftSeparation();
+
+	/** Every other companion in the world (primary <-> armed VIP). Rebuilt on a slow rescan —
+	 *  TActorIterator walks the whole level and can't run on a per-frame pass. */
+	TArray<TWeakObjectPtr<ACompanionCharacter>> AllyCompanions;
+
+	/** World seconds of the last ally rescan. Sentinel-low so the first tick always scans — the
+	 *  interval alone then gates the empty-list case too. */
+	float LastAllyScanTime = -1e9f;
+
+	void RefreshAllyCompanions();
+
+	/** Shared gate for both separation passes: false while we are downed, mid-revive, mid-takedown,
+	 *  traversing, or unpossessed (the captive VIP — CMC never consumes an input vector without a
+	 *  controller, and a push must never walk him off his placed kneeling spot). */
+	bool CanApplySoftSeparation() const;
+
+	/** Idempotent MUTUAL ignore assert against one ally. Mutual, unlike the asymmetric player
+	 *  wiring: both bodies steer, so a one-sided ignore still leaves the other sweep blocking. */
+	void EnsureAllySoftCollisionIgnores(ACompanionCharacter& Ally);
+
+	/** Converts capsule overlap depth with Other into an AddMovementInput push away from it. */
+	void SoftPushAwayFrom(const ACharacter& Other);
 
 	FTimerHandle ModeWidgetLinkTimerHandle;
 

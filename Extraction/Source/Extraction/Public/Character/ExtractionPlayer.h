@@ -30,6 +30,7 @@ class UConsumableInventoryComponent;
 class UAnimMontage;
 class USpringArmComponent;
 class USceneComponent;
+class UCapsuleComponent;
 struct FInputActionValue;
 
 // Distinct name from the legacy AExtractionCharacter declaration to avoid linker conflicts during the migration period.
@@ -190,6 +191,28 @@ public:
 	/** Normalized 0-1 progress of the local revive hold. */
 	UFUNCTION(BlueprintPure, Category = "Revive")
 	float GetReviveProgress() const { return ReviveDuration > 0.f ? FMath::Clamp(ReviveElapsed / ReviveDuration, 0.f, 1.f) : 0.f; }
+
+	// ---- World-interact prompt (local-only; URevivePromptWidget polls these) ----
+
+	/** IWorldInteractable under the crosshair and currently interactable (low-rate local scan),
+	 *  or nullptr. During a hold this stays pinned to the held target. */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	AActor* GetInteractCandidate() const { return InteractCandidate.Get(); }
+
+	/** The candidate's own prompt text (IWorldInteractable::GetWorldInteractionPrompt). */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	FText GetInteractPrompt() const { return InteractCandidatePrompt; }
+
+	/** True while a hold-to-interact is running (hold-duration interactables only). */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	bool IsInteractHolding() const { return bIsInteractHolding; }
+
+	/** Normalized 0-1 progress of the local interact hold. */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	float GetInteractHoldProgress() const
+	{
+		return InteractHoldDuration > 0.f ? FMath::Clamp(InteractHoldElapsed / InteractHoldDuration, 0.f, 1.f) : 0.f;
+	}
 
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const override { return CachedAnimInstance; }
@@ -587,7 +610,32 @@ private:
 	/** Tracks which companion instance has its IgnoreActorWhenMoving wired, so respawns re-wire correctly. */
 	TWeakObjectPtr<ACompanionCharacter> WiredCompanion;
 
+	/** Every companion in the world. The armed VIP is a second ACompanionCharacter the command
+	 *  component will never resolve (primary only, by design), so without this its capsule
+	 *  hard-blocks the player. Rebuilt on a slow rescan — TActorIterator can't run per frame. */
+	TArray<TWeakObjectPtr<ACompanionCharacter>> SoftCollisionCompanions;
+
+	/** World seconds of the last companion rescan. Sentinel-low so the first tick always scans —
+	 *  the interval alone then gates the empty-list case too. */
+	float LastCompanionScanTime = -1e9f;
+
+	/** Sums both passes' pushes into a single clamped AddMovementInput — see the cpp for why they
+	 *  must not be applied independently. */
 	void UpdateCompanionSoftCollision();
+
+	/** The primary only, resolved through the command component. Owns the respawn re-wire.
+	 *  Returns its push contribution; does not apply it. */
+	FVector UpdatePrimaryCompanionSoftCollision();
+
+	/** Every non-primary companion (the armed VIP), same wiring and same push as the primary.
+	 *  Returns the summed push contribution; does not apply it. */
+	FVector UpdateAllyCompanionSoftCollision();
+
+	void RefreshSoftCollisionCompanions();
+
+	/** Shared tail of both passes: idempotent ignore assert, then the overlap-depth push RETURNED
+	 *  to the caller (zero when out of range) so the two passes can be clamped as one input. */
+	FVector ApplyCompanionSoftCollision(ACompanionCharacter& Companion, UCapsuleComponent& CompanionCapsule);
 
 	// ---- Auto-Lean State ----
 
@@ -629,12 +677,34 @@ private:
 
 	/** Camera-forward interact trace: IWorldInteractable first, then ILootable containers,
 	 *  then keycard-unlock locked doors.
-	 *  Returns true when the press was consumed by a world interaction (revive check is skipped). */
+	 *  Returns true when the press was consumed by a world interaction (revive check is skipped).
+	 *  A hold-duration interactable opens the hold here and still consumes the press. */
 	bool TryWorldInteract();
+
+	/** The one camera-forward interact trace. Every interact path goes through it so the press,
+	 *  the hold and the prompt scan can never disagree about what the crosshair is on. */
+	bool TraceInteractHit(FHitResult& OutHit) const;
+
+	/** Currently-interactable IWorldInteractable under the crosshair, or null. */
+	AActor* TraceInteractableUnderCrosshair() const;
+
+	/** Runs the hold clock, cancels on the same guards that block a start, and fires the
+	 *  interaction once InteractHoldDuration elapses. */
+	void UpdateInteractHold(float DeltaTime);
+
+	/** Single teardown for every exit (release, completion, target lost, DBNO). Idempotent. */
+	void CancelInteractHold();
+
+	/** Low-rate crosshair scan feeding the interact prompt (local player only). */
+	void UpdateInteractCandidateScan(float DeltaTime);
 
 	/** Server RPC for IWorldInteractable interactions initiated by a client. */
 	UFUNCTION(Server, Reliable)
 	void Server_WorldInteract(AActor* Target);
+
+	/** Server RPC for the hold-started beat (scripted VO under the hold) on a client press. */
+	UFUNCTION(Server, Reliable)
+	void Server_BeginWorldInteractHold(AActor* Target);
 
 	/** Max distance (cm) for the Interact world trace. */
 	UPROPERTY(EditAnywhere, Category = "Interaction", meta = (ClampMin = "0.0"))
@@ -806,6 +876,21 @@ private:
 
 	TWeakObjectPtr<AActor> ReviveCandidate;
 	float ReviveCandidateScanAccumulator = 0.f;
+
+	// ---- World-interact hold ----
+
+	UPROPERTY()
+	TObjectPtr<AActor> InteractHoldTarget;
+
+	/** Copied from the target at hold start, so a target that later changes its answer can't
+	 *  stretch or shrink a hold already in progress. */
+	float InteractHoldDuration = 0.f;
+	float InteractHoldElapsed = 0.f;
+	bool bIsInteractHolding = false;
+
+	TWeakObjectPtr<AActor> InteractCandidate;
+	FText InteractCandidatePrompt;
+	float InteractCandidateScanAccumulator = 0.f;
 
 	/** Mirror of BTTask_RevivePlayer's first-tick gate: guards, patient montage + AI-stop via
 	 *  SetBeingRevived, rotation-only AlignForRevive on the target, reviver MESH seat at the

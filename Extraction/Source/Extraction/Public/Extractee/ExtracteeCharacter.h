@@ -1,9 +1,10 @@
 // AExtracteeCharacter -- rescue-and-follow civilian NPC. Idles at a placed spot until the player
-// interacts (IWorldInteractable), then trails behind the player/companion. Under fire it runs to
-// nearby registered cover (or cowers in place when none is close), loops a scared montage, holds
-// position while the player or companion is DBNO, and sprint-catches-up when left behind.
-// Enum state machine on a slow timer -- no behavior tree. Takes no damage; post-rescue, bullets
-// pass straight through it.
+// interacts (IWorldInteractable), then trails DEAD ASTERN of the player on a zero-lateral-offset
+// anchor further back than either companion, so it never comes to rest on a companion's formation
+// slot. Under fire it runs to nearby registered cover (or cowers in place when none is close),
+// loops a scared montage, holds position while the player or ANY companion is DBNO, and
+// sprint-catches-up when left behind. Enum state machine on a slow timer -- no behavior tree.
+// Takes no damage; post-rescue, bullets pass straight through it.
 
 #pragma once
 
@@ -72,10 +73,23 @@ private:
 	FTimerHandle StateTimerHandle;
 
 	TWeakObjectPtr<APawn> PlayerPawn;
-	TWeakObjectPtr<ACompanionCharacter> Companion;
 	TWeakObjectPtr<AAICoverSlot> ClaimedSlot;
 
+	/** EVERY companion, not just the primary -- the armed extractee VIP is a second
+	 *  ACompanionCharacter and is usually the first one an actor iterator hits. Caching one meant
+	 *  the soft-collision ignores never ran against the other, so our capsule hard-blocked it. */
+	TArray<TWeakObjectPtr<ACompanionCharacter>> Companions;
+
+	/** World seconds of the last companion rescan (see CompanionRescanInterval). Sentinel-low so
+	 *  the first refresh always scans -- the interval alone then gates the empty-list case too. */
+	float LastCompanionScanTime = -1e9f;
+
 	FVector CoverDestination = FVector::ZeroVector;
+
+	// Follow anchor re-issue deadband state -- bHasFollowAnchor rather than a sentinel location,
+	// so a legitimately-at-origin anchor can't read as "never issued".
+	FVector LastFollowAnchor = FVector::ZeroVector;
+	bool bHasFollowAnchor = false;
 
 	/** World seconds of the freshest "a fight is on" evidence (director combat report, or a live
 	 *  enemy currently in Combat awareness). Compared against tuning windows for enter/exit. */
@@ -107,6 +121,13 @@ private:
 	bool IsPartyMemberDown() const;
 	AEnemyCharacter* FindNearestCombatEnemy(float MaxRange) const;
 	float DistToPlayer2D() const;
+	/** Dead-astern follow slot: FollowDistance back along the player's travel direction while they
+	 *  move, along our current bearing off them while they stand. Zero lateral offset -- the
+	 *  companions own the flanks, the civilian owns the centre line. */
+	FVector ComputeFollowAnchor() const;
+	/** Deadbanded unprojected MoveToLocation onto the follow anchor, falling back to MoveToActor on
+	 *  the player when the anchor move reports anything other than RequestSuccessful. */
+	void IssueFollowMove(const FVector& Anchor, float AcceptRadius);
 	bool IsMoveActive() const;
 	/** bMoving: orient to path, no focus. Stationary: focus the player so we face the party. */
 	void SetMovementFacing(bool bMoving);

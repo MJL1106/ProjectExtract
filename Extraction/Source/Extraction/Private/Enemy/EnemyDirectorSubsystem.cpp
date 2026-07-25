@@ -622,8 +622,10 @@ bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*
 	{
 		if (!bLoggedNoZone)
 		{
-			UE_LOG(LogEnemyAI, Warning, TEXT("Director: no eligible spawn zone (phase %d, %d zones registered)"),
-				static_cast<int32>(GetEffectivePhase()), SpawnZones.Num());
+			UE_LOG(LogEnemyAI, Warning, TEXT("Director: no eligible spawn zone (phase %d, %d zones registered, wave=%s) — %s"),
+				static_cast<int32>(GetEffectivePhase()), SpawnZones.Num(),
+				WaveProgress.IsActive() ? *ActiveWaveRequest.WaveId.ToString() : TEXT("none"),
+				*LastZoneRejects.ToString());
 			bLoggedNoZone = true;
 		}
 		return false;
@@ -741,29 +743,35 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 	// silences the ambient trickle for the wave's whole lifetime).
 	const bool bWaveActive = WaveProgress.IsActive();
 
+	// Per-filter reject tally. "No eligible zone" is otherwise a dead end for anyone debugging a
+	// wave that spawns nothing: six independent filters, all silent, and the one warning that does
+	// exist latches after its first fire. The counts name the culprit in one line.
+	LastZoneRejects = FZoneRejectCounts();
+
 	for (const TWeakObjectPtr<AEnemySpawnZone>& WeakZone : SpawnZones)
 	{
 		AEnemySpawnZone* Zone = WeakZone.Get();
 		if (!IsValid(Zone)) continue;
-		if (!Zone->IsActiveForPhase(GetEffectivePhase())) continue;
-		if (bWaveActive && !Zone->bWaveEligible) continue;
+		++LastZoneRejects.Considered;
+		if (!Zone->IsActiveForPhase(GetEffectivePhase())) { ++LastZoneRejects.Phase; continue; }
+		if (bWaveActive && !Zone->bWaveEligible) { ++LastZoneRejects.WaveIneligible; continue; }
 
 		const FVector ZoneLoc = Zone->GetZoneOrigin();
-		if (bUseScopeVolumes && !IsPointInsideAnyScope(ZoneLoc)) continue;
+		if (bUseScopeVolumes && !IsPointInsideAnyScope(ZoneLoc)) { ++LastZoneRejects.OutsideScope; continue; }
 
 		// Min distance against the closest point of the box (a wide zone can put spawn
 		// points far nearer than its origin); max distance against the origin so large
 		// zones don't starve availability.
-		if (FVector::DistSquared(PlayerLoc, Zone->GetClosestPointInZone(PlayerLoc)) < DistMin * DistMin) continue;
-		if (FVector::DistSquared(PlayerLoc, ZoneLoc) > DistMax * DistMax) continue;
+		if (FVector::DistSquared(PlayerLoc, Zone->GetClosestPointInZone(PlayerLoc)) < DistMin * DistMin) { ++LastZoneRejects.TooClose; continue; }
+		if (FVector::DistSquared(PlayerLoc, ZoneLoc) > DistMax * DistMax) { ++LastZoneRejects.TooFar; continue; }
 
-		if (!IsZoneHiddenFromPlayer(Zone, FMath::Max(MinSightlineSamples, SquadSize), ViewLoc, ViewDir, QueryParams, NavSys)) continue;
+		if (!IsZoneHiddenFromPlayer(Zone, FMath::Max(MinSightlineSamples, SquadSize), ViewLoc, ViewDir, QueryParams, NavSys)) { ++LastZoneRejects.Visible; continue; }
 
 		if (IsValid(NavSys))
 		{
 			FNavLocation NavLoc;
 			const FVector Extent(NavProjectExtentXY, NavProjectExtentXY, NavProjectExtentZ);
-			if (!NavSys->ProjectPointToNavigation(ZoneLoc, NavLoc, Extent)) continue;
+			if (!NavSys->ProjectPointToNavigation(ZoneLoc, NavLoc, Extent)) { ++LastZoneRejects.OffNavMesh; continue; }
 		}
 
 		const float Score = ScoreZone(Zone, PlayerLoc, CompanionLoc, bHasCompanion, DistMin, DistMax);
@@ -775,6 +783,13 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 	}
 
 	return BestZone;
+}
+
+FString UEnemyDirectorSubsystem::FZoneRejectCounts::ToString() const
+{
+	return FString::Printf(
+		TEXT("considered=%d rejected: phase=%d wave-ineligible=%d outside-scope=%d too-close=%d too-far=%d visible=%d off-navmesh=%d"),
+		Considered, Phase, WaveIneligible, OutsideScope, TooClose, TooFar, Visible, OffNavMesh);
 }
 
 bool UEnemyDirectorSubsystem::IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const
@@ -1032,6 +1047,12 @@ bool UEnemyDirectorSubsystem::StartWave(const FDirectorWaveRequest& Request)
 	WaveProgress.Begin(Request.TargetSquads);
 	WaveBlockedTime = 0.f;
 	bWaveBlockedBroadcast = false;
+
+	// Clear the once-only diagnostic latches. They only reset after a SUCCESSFUL spawn, so an
+	// ambient failure earlier in the level would otherwise silence every failure this wave makes —
+	// a wave that spawns nothing for its whole life with not one line in the log.
+	bLoggedNoComposition = false;
+	bLoggedNoZone = false;
 
 	TripAlarm();
 

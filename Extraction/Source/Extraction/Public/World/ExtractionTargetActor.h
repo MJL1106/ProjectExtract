@@ -65,6 +65,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "ExtractionTarget|Objectives")
 	bool BeginExtractionExternal();
 
+	/** See bExternalTriggerOnly. Read by the objective flow's wiring audit. */
+	UFUNCTION(BlueprintPure, Category = "ExtractionTarget|Interaction")
+	bool IsExternalTriggerOnly() const { return bExternalTriggerOnly; }
+
 protected:
 	// --- Components ---
 

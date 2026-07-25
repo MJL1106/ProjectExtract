@@ -34,10 +34,13 @@ public:
 	 *  dedups against an enemy GrenadeOut. */
 	void RequestCompanionBark(const AActor* Speaker, const UCompanionBarkSetData* BarkSet, ECompanionBarkType Type, FName Context = NAME_None);
 
-	/** Scripted one-off line (dialogue trigger volumes): claims the voice channel at telegraph
-	 *  priority — interrupts live chatter, skips dedup/cooldown bookkeeping (the trigger owns its
-	 *  own once-only state). */
-	void RequestScriptedLine(const AActor* Speaker, USoundBase* Sound, USoundAttenuation* Attenuation, float VolumeMultiplier);
+	/** Scripted one-off line (dialogue trigger volumes, the VIP rescue exchange): claims the voice
+	 *  channel at telegraph priority — interrupts live chatter, skips dedup/cooldown bookkeeping
+	 *  (the caller owns its own once-only state).
+	 *  Returns the duration the channel is reserved for, so callers can chain the next beat off
+	 *  the line ending; 0 when nothing played. Clamped/substituted the same way the busy window is,
+	 *  so a streaming or looping asset can't hand back a nonsense wait. */
+	float RequestScriptedLine(const AActor* Speaker, USoundBase* Sound, USoundAttenuation* Attenuation, float VolumeMultiplier);
 
 	/** True while a scripted line is (estimated) still playing — trigger volumes check this so two
 	 *  boxes never interleave their exchanges. */

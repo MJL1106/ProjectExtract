@@ -214,6 +214,7 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	bTakedownMontageActive = false;
 
 	CancelRevive();          // reviver-side teardown (idempotent no-op when not reviving)
+	CancelInteractHold();    // idempotent no-op when no hold is running
 	SetBeingRevived(false);  // patient-side teardown (companion-revives-player direction)
 
 	Super::EndPlay(EndPlayReason);
@@ -275,8 +276,14 @@ void AExtractionPlayer::Tick(float DeltaTime)
 	if (IsLocallyControlled() && bIsReviving)
 		UpdateRevive(DeltaTime);
 
+	if (IsLocallyControlled() && bIsInteractHolding)
+		UpdateInteractHold(DeltaTime);
+
 	if (IsLocallyControlled())
+	{
 		UpdateReviveCandidateScan(DeltaTime);
+		UpdateInteractCandidateScan(DeltaTime);
+	}
 
 	if (IsLocallyControlled() && IsValid(WeaponComponent))
 	{
@@ -776,6 +783,16 @@ namespace
 		const float Opposing = FVector::DotProduct(Push, InputDir);
 		return (Opposing < 0.f) ? (Push - InputDir * Opposing) : Push;
 	}
+
+	// A companion can appear after the last scan (the VIP is placed, but a respawn is a spawn), and
+	// TActorIterator walks the whole level — far too heavy for the player's per-frame tick.
+	// File-distinct names: anonymous namespaces merge inside a unity blob, and ExtracteeCharacter.cpp
+	// declares its own CompanionRescanInterval/ExpectedCompanionCount pair.
+	constexpr float SoftCollisionRescanInterval = 2.f;
+
+	// Primary + armed VIP. Sized once on the first build; Reset() then keeps the slack, so the
+	// Reserve is a deliberate no-op on every rebuild after that and none of them reallocate.
+	constexpr int32 ExpectedSoftCollisionCompanionCount = 2;
 }
 
 void AExtractionPlayer::UpdateCompanionSoftCollision()
@@ -783,18 +800,35 @@ void AExtractionPlayer::UpdateCompanionSoftCollision()
 	if (GetIsDBNO() || bIsReviving) return;
 	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy()) return;
 
-	if (!IsValid(CompanionCommandComponent)) return;
+	// Two passes rather than one loop: only the primary carries the respawn re-wire, and a bail-out
+	// on the primary (no command component, capsule gone) must not take the VIP's wiring with it.
+	// Both return their push instead of applying it so they sum into ONE AddMovementInput: two
+	// saturated pushes at CompanionPushStrength each swamp the player's own unit input vector, and
+	// CMC's ScaleInputAcceleration clamps the total — the player would keep a fraction of their
+	// intended direction and get shoved sideways at full walk speed in exactly the corridor this
+	// separation work targets.
+	FVector Push = UpdatePrimaryCompanionSoftCollision();
+	Push += UpdateAllyCompanionSoftCollision();
+	if (Push.IsNearlyZero()) return;
+
+	AddMovementInput(Push.GetClampedToMaxSize(CompanionPushStrength), 1.f);
+}
+
+FVector AExtractionPlayer::UpdatePrimaryCompanionSoftCollision()
+{
+	if (!IsValid(CompanionCommandComponent)) return FVector::ZeroVector;
 	ACompanionCharacter* Companion = CompanionCommandComponent->GetCompanion();
-	if (!IsValid(Companion)) return;
+	if (!IsValid(Companion)) return FVector::ZeroVector;
 
 	UCapsuleComponent* CompCapsule = Companion->GetCapsuleComponent();
-	if (!IsValid(CompCapsule) || CompCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) return;
+	if (!IsValid(CompCapsule) || CompCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) return FVector::ZeroVector;
 
-	// Old-companion-instance cleanup only (respawn swap) — the live pair's ignore flags are
-	// asserted unconditionally below, every tick, instead of latch-gated on this. A latch-gated
-	// one-time wire never noticed BTTask_RevivePlayer's SetReviveAnimsActive(false) stripping the
-	// player's ignore of the companion at hold teardown (MoveIgnoreActorRemove on both capsules) —
-	// pass-through stayed broken for the rest of the level after the first companion-revives-player.
+	// Old-companion-instance cleanup only (respawn swap) — the live pair's ignore flags are asserted
+	// unconditionally by ApplyCompanionSoftCollision, every tick, instead of latch-gated on this. A
+	// latch-gated one-time wire never noticed BTTask_RevivePlayer's SetReviveAnimsActive(false)
+	// stripping the player's ignore of the companion at hold teardown (MoveIgnoreActorRemove on both
+	// capsules) — pass-through stayed broken for the rest of the level after the first
+	// companion-revives-player.
 	if (WiredCompanion.Get() != Companion)
 	{
 		if (ACompanionCharacter* Old = WiredCompanion.Get())
@@ -806,30 +840,90 @@ void AExtractionPlayer::UpdateCompanionSoftCollision()
 		WiredCompanion = Companion;
 	}
 
-	// Idempotent per-tick assert (self-heals any external clear, e.g. the revive teardown above):
-	// the player still ignores the companion (existing pass-through feel); the companion no longer
-	// ignores the player, so ITS movement sweeps block against the player's capsule — CMC
-	// wall-slide walks it around instead of shoving through (asymmetric blocking, F2).
-	GetCapsuleComponent()->IgnoreActorWhenMoving(Companion, true);
-	CompCapsule->IgnoreActorWhenMoving(this, false);
+	return ApplyCompanionSoftCollision(*Companion, *CompCapsule);
+}
 
-	FVector Delta = GetActorLocation() - Companion->GetActorLocation();
+FVector AExtractionPlayer::UpdateAllyCompanionSoftCollision()
+{
+	RefreshSoftCollisionCompanions();
+
+	FVector Push = FVector::ZeroVector;
+	for (const TWeakObjectPtr<ACompanionCharacter>& Entry : SoftCollisionCompanions)
+	{
+		ACompanionCharacter* Ally = Entry.Get();
+		if (!IsValid(Ally)) continue;
+		if (Ally->IsPrimaryCompanion()) continue; // the pass above owns it, via the command component
+
+		// Unpossessed = the VIP still captive at his placed spot. He is set dressing until rescued,
+		// so leave him solid: pass-through would let the player stand inside a kneeling hostage for
+		// the whole rescue hold. He starts blocking-free the frame the rescue possesses him.
+		if (!Ally->GetController()) continue;
+
+		UCapsuleComponent* AllyCapsule = Ally->GetCapsuleComponent();
+		if (!IsValid(AllyCapsule) || AllyCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) continue;
+
+		Push += ApplyCompanionSoftCollision(*Ally, *AllyCapsule);
+	}
+
+	return Push;
+}
+
+void AExtractionPlayer::RefreshSoftCollisionCompanions()
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	// Rebuild on the interval, plus immediately when an entry goes stale. Interval-gated rather
+	// than empty-gated: before any companion exists an empty-list trigger would re-walk every actor
+	// in the level on every frame of the player's tick.
+	const float Now = World->GetTimeSeconds();
+	bool bRebuild = (Now - LastCompanionScanTime) >= SoftCollisionRescanInterval;
+	if (!bRebuild)
+	{
+		for (const TWeakObjectPtr<ACompanionCharacter>& Entry : SoftCollisionCompanions)
+		{
+			if (Entry.IsValid()) continue;
+			bRebuild = true;
+			break;
+		}
+	}
+	if (!bRebuild) return;
+
+	LastCompanionScanTime = Now;
+	SoftCollisionCompanions.Reset();
+	SoftCollisionCompanions.Reserve(ExpectedSoftCollisionCompanionCount);
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
+	{
+		ACompanionCharacter* Companion = *It;
+		if (IsValid(Companion)) SoftCollisionCompanions.Add(Companion);
+	}
+}
+
+FVector AExtractionPlayer::ApplyCompanionSoftCollision(ACompanionCharacter& Companion, UCapsuleComponent& CompanionCapsule)
+{
+	// Idempotent per-tick assert (self-heals any external clear, e.g. BTTask_RevivePlayer's hold
+	// teardown): the player still ignores the companion (existing pass-through feel); the companion
+	// no longer ignores the player, so ITS movement sweeps block against the player's capsule — CMC
+	// wall-slide walks it around instead of shoving through (asymmetric blocking, F2).
+	GetCapsuleComponent()->IgnoreActorWhenMoving(&Companion, true);
+	CompanionCapsule.IgnoreActorWhenMoving(this, false);
+
+	FVector Delta = GetActorLocation() - Companion.GetActorLocation();
 	Delta.Z = 0.f;
 
 	const float CombinedRadius = GetCapsuleComponent()->GetScaledCapsuleRadius()
-		+ CompCapsule->GetScaledCapsuleRadius()
+		+ CompanionCapsule.GetScaledCapsuleRadius()
 		+ CompanionPushPadding;
 
 	const float Dist = Delta.Size();
-	if (Dist >= CombinedRadius) return;
+	if (Dist >= CombinedRadius) return FVector::ZeroVector;
 
 	FVector PushDir = (Dist > KINDA_SMALL_NUMBER) ? (Delta / Dist) : GetActorRightVector();
 	PushDir.Z = 0.f;
 	PushDir = PushDir.GetSafeNormal();
 
 	const float DepthFraction = 1.f - (Dist / CombinedRadius);
-	const FVector Push = StripOpposingPush(PushDir * (CompanionPushStrength * DepthFraction), GetLastMovementInputVector());
-	AddMovementInput(Push, 1.f);
+	return StripOpposingPush(PushDir * (CompanionPushStrength * DepthFraction), GetLastMovementInputVector());
 }
 
 // ---- Auto-Lean ----
@@ -902,6 +996,8 @@ void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 	if (!IsLocallyControlled()) return;
 
 	if (bIsReviving) return;
+	// Repeat-fire on a held key must not restart the clock from zero.
+	if (bIsInteractHolding) return;
 
 	// World interactions (loot container / keycard door) win over the revive hold.
 	if (TryWorldInteract()) return;
@@ -915,15 +1011,24 @@ void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 {
 	if (!IsLocallyControlled()) return;
+
+	if (bIsInteractHolding)
+	{
+		UE_LOG(LogExtraction, Log, TEXT("Interact hold cancel: E released at %.2fs / %.2fs on '%s'"),
+			InteractHoldElapsed, InteractHoldDuration, *GetNameSafe(InteractHoldTarget));
+		CancelInteractHold();
+		return;
+	}
+
 	if (!bIsReviving) return;
 
 	UE_LOG(LogExtraction, Log, TEXT("Revive cancel: E released at %.2fs / %.2fs"), ReviveElapsed, ReviveDuration);
 	CancelRevive();
 }
 
-bool AExtractionPlayer::TryWorldInteract()
+bool AExtractionPlayer::TraceInteractHit(FHitResult& OutHit) const
 {
-	UWorld* World = GetWorld();
+	const UWorld* World = GetWorld();
 	if (!World) return false;
 
 	// Controller view point tracks CalcCamera (kit-driven FP camera) — more accurate than eyes.
@@ -932,17 +1037,56 @@ bool AExtractionPlayer::TryWorldInteract()
 	if (const AController* C = GetController())
 		C->GetPlayerViewPoint(ViewLoc, ViewRot);
 
-	FHitResult Hit;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(PlayerInteract), false, this);
 	const FVector TraceEnd = ViewLoc + ViewRot.Vector() * InteractTraceRange;
-	if (!World->LineTraceSingleByChannel(Hit, ViewLoc, TraceEnd, ECC_Visibility, Params)) return false;
+	return World->LineTraceSingleByChannel(OutHit, ViewLoc, TraceEnd, ECC_Visibility, Params);
+}
+
+AActor* AExtractionPlayer::TraceInteractableUnderCrosshair() const
+{
+	FHitResult Hit;
+	if (!TraceInteractHit(Hit)) return nullptr;
+
+	AActor* HitActor = Hit.GetActor();
+	if (!IsValid(HitActor) || !HitActor->Implements<UWorldInteractable>()) return nullptr;
+
+	// const_cast: the interface Execute_ wrappers take a non-const interactor, and the scan path
+	// that needs this helper is itself const. The call is a pure query.
+	return IWorldInteractable::Execute_CanWorldInteract(HitActor, const_cast<AExtractionPlayer*>(this))
+		? HitActor : nullptr;
+}
+
+bool AExtractionPlayer::TryWorldInteract()
+{
+	FHitResult Hit;
+	if (!TraceInteractHit(Hit)) return false;
 
 	AActor* HitActor = Hit.GetActor();
 	if (!IsValid(HitActor)) return false;
 
-	// Generic world interactable — extraction targets, terminals, etc.
+	// Generic world interactable — extraction targets, the captive VIP, terminals, etc.
 	if (HitActor->Implements<UWorldInteractable>() && IWorldInteractable::Execute_CanWorldInteract(HitActor, this))
 	{
+		// Hold-gated interactables open the hold instead of firing; the press is consumed either way.
+		const float HoldSeconds = IWorldInteractable::Execute_GetWorldInteractHoldSeconds(HitActor, this);
+		if (HoldSeconds > 0.f)
+		{
+			InteractHoldTarget = HitActor;
+			InteractHoldDuration = HoldSeconds;
+			InteractHoldElapsed = 0.f;
+			bIsInteractHolding = true;
+
+			// The under-the-hold beat (scripted VO) is authority-side, like the interaction itself.
+			if (HasAuthority())
+				IWorldInteractable::Execute_OnWorldInteractHoldStarted(HitActor, this);
+			else
+				Server_BeginWorldInteractHold(HitActor);
+
+			UE_LOG(LogExtraction, Log, TEXT("Interact hold start: '%s' (%.2fs)"),
+				*GetNameSafe(HitActor), HoldSeconds);
+			return true;
+		}
+
 		if (HasAuthority())
 		{
 			IWorldInteractable::Execute_WorldInteract(HitActor, this);
@@ -990,6 +1134,93 @@ void AExtractionPlayer::Server_WorldInteract_Implementation(AActor* Target)
 	}
 
 	IWorldInteractable::Execute_WorldInteract(Target, this);
+}
+
+void AExtractionPlayer::Server_BeginWorldInteractHold_Implementation(AActor* Target)
+{
+	if (!IsValid(Target)) return;
+	if (!Target->Implements<UWorldInteractable>()) return;
+	if (!IWorldInteractable::Execute_CanWorldInteract(Target, this)) return;
+	if (IWorldInteractable::Execute_GetWorldInteractHoldSeconds(Target, this) <= 0.f) return;
+
+	const float MaxDistSq = FMath::Square(InteractTraceRange + WorldInteractDistanceSlack);
+	if (Target->GetComponentsBoundingBox().ComputeSquaredDistanceToPoint(GetActorLocation()) > MaxDistSq)
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("Server_BeginWorldInteractHold: '%s' too far from '%s'"),
+			*GetNameSafe(this), *GetNameSafe(Target));
+		return;
+	}
+
+	IWorldInteractable::Execute_OnWorldInteractHoldStarted(Target, this);
+}
+
+void AExtractionPlayer::UpdateInteractHold(float DeltaTime)
+{
+	// Same guards that block a start, re-checked every frame — a hold that outlives its
+	// preconditions must not commit the interaction when the clock runs out.
+	auto AbortIf = [this](bool bCondition, const TCHAR* Reason)
+	{
+		if (!bCondition) return false;
+		UE_LOG(LogExtraction, Log, TEXT("Interact hold cancel: %s at %.2fs / %.2fs on '%s'"),
+			Reason, InteractHoldElapsed, InteractHoldDuration, *GetNameSafe(InteractHoldTarget));
+		CancelInteractHold();
+		return true;
+	};
+
+	if (AbortIf(bIsDBNO, TEXT("player went DBNO"))) return;
+	if (AbortIf(bTakedownMontageActive, TEXT("takedown started"))) return;
+	if (AbortIf(IsInTraversal(), TEXT("traversal started"))) return;
+	if (AbortIf(!IsValid(InteractHoldTarget), TEXT("target destroyed"))) return;
+	if (AbortIf(!IWorldInteractable::Execute_CanWorldInteract(InteractHoldTarget, this),
+		TEXT("target refused interaction"))) return;
+
+	// Walking away cancels; looking away does not — a five-second hold that breaks on every
+	// stray mouse twitch is unusable.
+	const float MaxDistSq = FMath::Square(InteractTraceRange + WorldInteractDistanceSlack);
+	if (AbortIf(InteractHoldTarget->GetComponentsBoundingBox().ComputeSquaredDistanceToPoint(GetActorLocation()) > MaxDistSq,
+		TEXT("walked out of range"))) return;
+
+	InteractHoldElapsed += DeltaTime;
+	if (InteractHoldElapsed < InteractHoldDuration) return;
+
+	AActor* Target = InteractHoldTarget;
+	UE_LOG(LogExtraction, Log, TEXT("Interact hold complete: '%s' (%.2fs)"), *GetNameSafe(Target), InteractHoldDuration);
+
+	// State resets BEFORE the commit — WorldInteract can destroy or re-configure the target.
+	CancelInteractHold();
+
+	if (HasAuthority())
+		IWorldInteractable::Execute_WorldInteract(Target, this);
+	else
+		Server_WorldInteract(Target);
+}
+
+void AExtractionPlayer::CancelInteractHold()
+{
+	if (!bIsInteractHolding) return;
+
+	bIsInteractHolding = false;
+	InteractHoldElapsed = 0.f;
+	InteractHoldDuration = 0.f;
+	InteractHoldTarget = nullptr;
+}
+
+void AExtractionPlayer::UpdateInteractCandidateScan(float DeltaTime)
+{
+	InteractCandidateScanAccumulator += DeltaTime;
+	if (InteractCandidateScanAccumulator < 0.1f) return;
+	InteractCandidateScanAccumulator = 0.f;
+
+	// While the hold runs the prompt stays pinned to the held target (progress bar); a downed
+	// player interacts with nothing.
+	AActor* Candidate = nullptr;
+	if (bIsInteractHolding) Candidate = InteractHoldTarget;
+	else if (!bIsDBNO && !bIsReviving) Candidate = TraceInteractableUnderCrosshair();
+
+	InteractCandidate = Candidate;
+	InteractCandidatePrompt = IsValid(Candidate)
+		? IWorldInteractable::Execute_GetWorldInteractionPrompt(Candidate, this)
+		: FText::GetEmpty();
 }
 
 void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
@@ -1326,6 +1557,7 @@ void AExtractionPlayer::EnterDBNO()
 
 	// Cancel active revive (downed player can't finish reviving someone)
 	if (bIsReviving) CancelRevive();
+	CancelInteractHold();
 
 	// IsBusy covers approach phase + mid-vault
 	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy())
