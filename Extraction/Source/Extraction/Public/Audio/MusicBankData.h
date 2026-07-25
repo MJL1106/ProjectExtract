@@ -100,17 +100,37 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.0"))
 	float EntryFadeSeconds = 0.25f;
 
-	/** Fade-out used when music stops entirely (entering Relief or an explore gap). */
+	/** Fade-out used when music stops entirely (an explore gap, or a wind-down with no live
+	 *  fight bed left to duck). */
 	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.1"))
 	float StopFadeSeconds = 4.f;
 
-	/** Combat music holds this long past the last combat signal before winding down. */
+	/** Combat music holds this long past the last moment any enemy was still in combat — the
+	 *  reference is the live count, not the fight's opening shot, so a long engagement's back half
+	 *  isn't treated as already stale. This hold covers short breaks in contact; the relief duck
+	 *  handles the longer lulls, riding the same bed back up if the fight re-ignites. */
 	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.0"))
-	float CombatHoldSeconds = 8.f;
+	float CombatHoldSeconds = 10.f;
 
 	/** Quiet wind-down after a fight before explore ambience may resume. */
 	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.0"))
-	float ReliefSeconds = 15.f;
+	float ReliefSeconds = 20.f;
+
+	/** Fraction of the fight bed's playing level it rides down to during relief — it keeps playing so
+	 *  a re-ignited fight resumes seamlessly instead of restarting the track. MusicVolume is applied
+	 *  both at spawn and as the fader target, so the audible result is MusicVolume^2 * this.
+	 *  Must stay above zero: a zero fade target is read as a fade-out and kills the bed outright. */
+	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float ReliefDuckVolume = 0.3f;
+
+	/** How long the duck-down takes. Slow enough to read as the fight receding, not a cut. */
+	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.1"))
+	float ReliefDuckFadeSeconds = 6.f;
+
+	/** Crossfade from the ducked fight bed into the stealth bed when relief ends — deliberately
+	 *  long so the palette change is felt rather than heard. */
+	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.1"))
+	float ReliefHandoffFadeSeconds = 10.f;
 
 	/** Suspicion music holds this long after the last searcher gives up (anti-flap). */
 	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.0"))
