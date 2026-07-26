@@ -668,6 +668,10 @@ bool AExtractionPlayer::TryStartTraversal()
 	// Traversal montages stop-all on the body instance — a vault input mid-takedown would
 	// interrupt the finisher montage mid-kill.
 	if (bTakedownMontageActive) return false;
+	// Gate rather than cancel: the traversal montage's stop-all would kill the injection montage
+	// while the window (and its weapon hide) keeps running, leaving empty hands until it expires —
+	// and cancelling the stim instead would forfeit the heal.
+	if (IsUsingStim()) return false;
 	if (IsInTraversal()) return false;
 	if (!IsValid(TraversalComponent)) return false;
 
@@ -1008,6 +1012,10 @@ void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 	// its restore then leaves yaw-follow stuck off — the body stops tracking the camera and the
 	// kit's turn/aim layers contort the pose (the "player floats at doors" latch).
 	if (IsInTraversal()) return;
+	// The last hand-owning action after fire/ADS/reload/equip: looting a weapon runs
+	// ReplaceSlotWeapon -> SetActiveWeapon, which shows the gun the injection just hid, and
+	// nothing re-asserts the hide for the rest of the window.
+	if (IsUsingStim()) return;
 	if (!IsLocallyControlled()) return;
 
 	if (bIsReviving) return;
@@ -1487,11 +1495,20 @@ void AExtractionPlayer::HandleStimUsed()
 	bAutoLeanActive = false;
 	AutoLeanTargetAlpha = 0.f;
 
+	// Hide after the ADS/pose drop: OnADSChanged drives the kit's NewHandPose, which can re-show
+	// the hand-socket item a hide-first ordering just hid.
+	SetHeldWeaponHidden(true);
+
 	OnStimUsed();
 }
 
 void AExtractionPlayer::HandleStimUseEnded()
 {
+	// Only undo the injection's own hide. A stim cancelled INTO a down or a revive hold would
+	// otherwise un-hide the gun those states just hid, and nothing re-hides it afterwards.
+	if (!bIsDBNO && !bBeingRevivedAnimActive && !bIsReviving)
+		SetHeldWeaponHidden(false);
+
 	OnStimUseEnded();
 }
 

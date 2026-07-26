@@ -1,6 +1,6 @@
 # CLAUDE.md — ProjectExtract
 
-Multiplayer first-person shooter on Unreal Engine 5.7 with an AI companion system. Single C++ module: `Extraction`.
+Single-player first-person shooter on Unreal Engine 5.7 with an AI companion system. Single C++ module: `Extraction`.
 
 ## Stack
 - **Engine:** Unreal Engine 5.7
@@ -32,7 +32,7 @@ Memory writing is opt-in, not a reflex. Do not write memory on starting a plan, 
 
 ## Hard Rules (project-specific)
 - MUST never hardcode `/Game/...` asset paths via `ConstructorHelpers::FObjectFinder` — designer assigns assets in Blueprint subclasses (this project uses an in-editor MCP agent for asset wiring; C++ stays asset-agnostic)
-- MUST mark replicated UPROPERTY `Replicated` or `ReplicatedUsing=OnRep_*` AND add `DOREPLIFETIME[_CONDITION]` in `GetLifetimeReplicatedProps`
+- MUST NOT add new replication — no new `Replicated`/`ReplicatedUsing` UPROPERTYs, RPCs or `DOREPLIFETIME` entries, and never review or reason about server/client split. This is single-player. Existing replication code is legacy; leave it alone unless asked to strip it.
 - MUST register new `Public/<Subfolder>/` and `Private/<Subfolder>/` paths in `Extraction.Build.cs`'s include arrays — the project uses explicit subfolder paths
 
 ## Architectural Taste (project-specific overrides)
@@ -180,7 +180,7 @@ Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a c
 At session start, on a fresh task, do this in order before responding:
 1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + NeoStack tooling map + gotchas); `companion_testing.md` for companion QA; **`project_roadmap.md` for the live feature checklist (what's done / in progress / to-do)**
 2. Confirm the active branch matches the feature being worked on (`git status`)
-3. If the task touches AI / movement / animation / replication / UI, **invoke the matching skill from the table above before any tool calls**
+3. If the task touches AI / movement / animation / UI, **invoke the matching skill from the table above before any tool calls**
 4. **Invoke `ue5-team`** to decide solo vs team for the task — this is Step 0 of the workflow
 
 ## Required environment
