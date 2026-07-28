@@ -30,7 +30,7 @@ void UObjectiveSubsystem::Deinitialize()
 }
 
 void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocation,
-	AActor* TargetActor, FVector Offset, bool bShowWorldMarker)
+	AActor* TargetActor, FVector Offset, bool bShowWorldMarker, float HeightAboveBase)
 {
 	if (Id == NAME_None) return;
 
@@ -44,6 +44,7 @@ void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocat
 		Existing->TargetActor = TargetActor;
 		Existing->Offset = Offset;
 		Existing->bShowWorldMarker = bShowWorldMarker;
+		Existing->HeightAboveBase = HeightAboveBase;
 
 		if (bShowWorldMarker)
 		{
@@ -79,6 +80,7 @@ void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocat
 	Marker.TargetActor = TargetActor;
 	Marker.Offset = Offset;
 	Marker.bShowWorldMarker = bShowWorldMarker;
+	Marker.HeightAboveBase = HeightAboveBase;
 
 	OnObjectivesChanged.Broadcast();
 	RebuildDisplayActors();

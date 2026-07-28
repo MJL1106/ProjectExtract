@@ -8,7 +8,9 @@
 #include "Components/BoxComponent.h"
 #include "Engine/World.h"
 #include "Net/UnrealNetwork.h"
+#include "TimerManager.h"
 #include "UObject/Class.h"
+#include "World/InteractionEventSubsystem.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogLootContainer, Log, All);
 
@@ -111,8 +113,63 @@ void ALootContainer::Loot_Implementation(AActor* Looter)
 #endif
 	OnLootCompleted.Broadcast(this, Looter);
 
+	// Raised HERE, on the success branch, rather than blanket from the player's interact commit:
+	// a listener watching "the player used THAT actor" must not hear about a refused interaction.
+	if (UInteractionEventSubsystem* Events = GetWorld() ? GetWorld()->GetSubsystem<UInteractionEventSubsystem>() : nullptr)
+		Events->NotifyWorldInteract(this, Looter);
+
 	UE_LOG(LogLootContainer, Log, TEXT("%s: looted by %s (%d grants)"),
 		*GetName(), *GetNameSafe(Looter), Contents.Num());
+}
+
+void ALootContainer::MarkLootedForCheckpoint()
+{
+	if (!HasAuthority()) return;
+	if (bLooted) return;
+
+	// No ForceNetUpdate here, unlike the live loot path: this runs at level load with nobody
+	// standing in the volume looking at a prompt, so there is nothing to push early to.
+	bLooted = true;
+
+	UWorld* World = GetWorld();
+
+	// Visual state only — the drawer the player already pulled open stays open through the restart.
+	// Deliberately NOT OnOpened: that one carries the slide, the SFX and the pickup theatre for a
+	// search the player is doing right now, none of which belongs to a level load.
+	//
+	// Deferred one tick rather than called inline: this runs from the objective entry step's
+	// BeginPlay, and actor BeginPlay order is unspecified. A container Blueprint that caches its
+	// closed pose, or grabs a timeline or mesh reference, in its OWN BeginPlay would run AFTER the
+	// hook and overwrite the restored pose — the emptied drawer reads as untouched, which is the
+	// exact bug this hook exists to fix. Weakly captured: the container can be destroyed in the gap.
+	if (World)
+	{
+		TWeakObjectPtr<ALootContainer> WeakSelf(this);
+		World->GetTimerManager().SetTimerForNextTick(FTimerDelegate::CreateLambda([WeakSelf]()
+		{
+			ALootContainer* Container = WeakSelf.Get();
+			if (!IsValid(Container)) return;
+#if WITH_DEV_AUTOMATION_TESTS
+			++Container->RestoredLootedCount;
+#endif
+			Container->OnRestoredLooted();
+		}));
+	}
+
+	UMissionInventorySubsystem* Inventory = World ? World->GetSubsystem<UMissionInventorySubsystem>() : nullptr;
+	if (!Inventory) return;
+
+	// Keycards only. They are kept rather than consumed, so a later beat's locked door still needs the
+	// card back; ammo and stims were spent by the run that earned them. Granted NOW rather than with
+	// the pose: the beat resuming on this card re-reads the inventory the moment it activates, which
+	// is a tick before the deferred hook lands.
+	for (const FLootGrant& Grant : Contents)
+	{
+		if (Grant.Type != ELootType::Keycard) continue;
+		Inventory->RecordKeycard(Grant.KeycardId, /*bSilent=*/true);
+	}
+
+	UE_LOG(LogLootContainer, Log, TEXT("%s: marked looted by checkpoint resume (keycards re-granted)"), *GetName());
 }
 
 void ALootContainer::GrantAllContents()

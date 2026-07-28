@@ -29,8 +29,22 @@ ELevelObjectiveStep UExtractionGameInstance::GetCheckpointForLevel(FName LevelNa
 		? LastCheckpointStep : ELevelObjectiveStep::Inactive;
 }
 
+void UExtractionGameInstance::SetStepCheckpoint(FName LevelName, FName StepId)
+{
+	StepCheckpointLevelName = LevelName;
+	LastCheckpointStepId = StepId;
+}
+
+FName UExtractionGameInstance::GetStepCheckpointForLevel(FName LevelName) const
+{
+	return (LevelName != NAME_None && LevelName == StepCheckpointLevelName)
+		? LastCheckpointStepId : NAME_None;
+}
+
 void UExtractionGameInstance::ClearCheckpoint()
 {
 	CheckpointLevelName = NAME_None;
 	LastCheckpointStep = ELevelObjectiveStep::Inactive;
+	StepCheckpointLevelName = NAME_None;
+	LastCheckpointStepId = NAME_None;
 }

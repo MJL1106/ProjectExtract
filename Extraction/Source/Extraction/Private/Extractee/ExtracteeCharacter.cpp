@@ -16,6 +16,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
+#include "World/InteractionEventSubsystem.h"
 #include "EngineUtils.h"
 #include "TimerManager.h"
 
@@ -124,6 +125,11 @@ void AExtracteeCharacter::WorldInteract_Implementation(AActor* Interactor)
 	SetActorTickEnabled(true);
 	RefreshPartyRefs();
 	EnterFollow();
+
+	// Success branch only — the state guard above is a refusal, and the player no longer raises
+	// this blanket after every interact attempt.
+	if (UInteractionEventSubsystem* Events = GetWorld() ? GetWorld()->GetSubsystem<UInteractionEventSubsystem>() : nullptr)
+		Events->NotifyWorldInteract(this, Interactor);
 }
 
 FText AExtracteeCharacter::GetWorldInteractionPrompt_Implementation(AActor* Interactor) const

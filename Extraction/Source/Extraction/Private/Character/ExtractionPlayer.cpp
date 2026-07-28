@@ -1128,7 +1128,7 @@ bool AExtractionPlayer::TryWorldInteract()
 
 		if (HasAuthority())
 		{
-			IWorldInteractable::Execute_WorldInteract(HitActor, this);
+			CommitWorldInteract(HitActor);
 		}
 		else
 		{
@@ -1172,7 +1172,7 @@ void AExtractionPlayer::Server_WorldInteract_Implementation(AActor* Target)
 		return;
 	}
 
-	IWorldInteractable::Execute_WorldInteract(Target, this);
+	CommitWorldInteract(Target);
 }
 
 void AExtractionPlayer::Server_BeginWorldInteractHold_Implementation(AActor* Target)
@@ -1229,9 +1229,20 @@ void AExtractionPlayer::UpdateInteractHold(float DeltaTime)
 	CancelInteractHold();
 
 	if (HasAuthority())
-		IWorldInteractable::Execute_WorldInteract(Target, this);
+		CommitWorldInteract(Target);
 	else
 		Server_WorldInteract(Target);
+}
+
+void AExtractionPlayer::CommitWorldInteract(AActor* Target)
+{
+	if (!IsValid(Target)) return;
+
+	// Deliberately does NOT raise the world-interact notify. IWorldInteractable returns no success
+	// signal, and several implementers accept the call and refuse the action (a locked lift toasts
+	// "eliminate remaining enemies" and returns). Each interactable raises the notify from its own
+	// success branch instead, so a beat can never be ticked off by a refused press.
+	IWorldInteractable::Execute_WorldInteract(Target, this);
 }
 
 void AExtractionPlayer::CancelInteractHold()

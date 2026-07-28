@@ -8,6 +8,7 @@
 #include "Game/ExtractionGameMode.h"
 #include "Game/ObjectiveSubsystem.h"
 #include "Game/MissionInventorySubsystem.h"
+#include "World/InteractionEventSubsystem.h"
 #include "Core/Extraction.h"
 
 DEFINE_LOG_CATEGORY(LogLiftGate);
@@ -104,17 +105,25 @@ void ALevelCompletionLiftGate::WorldInteract_Implementation(AActor* Interactor)
 		return;
 	}
 
-	// Unlocked: complete the level.
 	AExtractionGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AExtractionGameMode>() : nullptr;
-	if (IsValid(GM))
-	{
-		UE_LOG(LogLiftGate, Log, TEXT("%s: completing level via %s"), *GetName(), *GetNameSafe(Interactor));
-		GM->CompleteLevel();
-	}
-	else
+	if (!IsValid(GM))
 	{
 		UE_LOG(LogLiftGate, Warning, TEXT("%s: could not resolve AExtractionGameMode for CompleteLevel"), *GetName());
+		return;
 	}
+
+	// Raised AFTER the game mode resolves and only once. It signals "the lift was used", so a press
+	// that could not complete the level must not raise it, and mashing the key through the completion
+	// fade must not raise it a second time — an objective beat watching this gate ticks off the raise.
+	if (!bCompletionRaised)
+	{
+		bCompletionRaised = true;
+		if (UInteractionEventSubsystem* Events = GetWorld()->GetSubsystem<UInteractionEventSubsystem>())
+			Events->NotifyWorldInteract(this, Interactor);
+	}
+
+	UE_LOG(LogLiftGate, Log, TEXT("%s: completing level via %s"), *GetName(), *GetNameSafe(Interactor));
+	GM->CompleteLevel();
 }
 
 // ------------------------------------------------------------------

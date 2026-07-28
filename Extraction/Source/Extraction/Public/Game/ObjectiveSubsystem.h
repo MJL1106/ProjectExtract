@@ -62,10 +62,11 @@ public:
 
 	/** Adds (or replaces, by id) an objective marker. Target optional — set to follow a moving actor.
 	 *  Offset is additive on the resolved location (default zero). bShowWorldMarker=false makes the
-	 *  objective text-only (no billboard, no edge indicator) — used for optional objectives. */
+	 *  objective text-only (no billboard, no edge indicator) — used for optional objectives.
+	 *  HeightAboveBase applies to target-based markers only (see FObjectiveMarker). */
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void AddObjective(FName Id, FText Label, FVector WorldLocation, AActor* TargetActor = nullptr,
-		FVector Offset = FVector::ZeroVector, bool bShowWorldMarker = true);
+		FVector Offset = FVector::ZeroVector, bool bShowWorldMarker = true, float HeightAboveBase = 170.f);
 
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void RemoveObjective(FName Id);

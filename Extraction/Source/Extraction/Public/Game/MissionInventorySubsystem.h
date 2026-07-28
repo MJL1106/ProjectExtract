@@ -29,8 +29,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Loot")
 	bool GrantLoot(const FLootGrant& Grant, APawn* Recipient = nullptr);
 
+	/** bSilent suppresses the acquisition toast only — OnKeycardRecorded still fires, so anything
+	 *  gating on the card stays correct. Used by the checkpoint fast-forward, which re-grants cards
+	 *  the player already earned and must not re-announce them at level start. */
 	UFUNCTION(BlueprintCallable, Category = "Loot|Keycard")
-	void RecordKeycard(FName KeycardId);
+	void RecordKeycard(FName KeycardId, bool bSilent = false);
 
 	UFUNCTION(BlueprintPure, Category = "Loot|Keycard")
 	bool HasKeycard(FName KeycardId) const { return KeycardId != NAME_None && HeldKeycards.Contains(KeycardId); }

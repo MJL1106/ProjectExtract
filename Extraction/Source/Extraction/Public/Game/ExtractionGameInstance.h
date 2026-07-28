@@ -29,10 +29,20 @@ public:
 	/** The recorded checkpoint for LevelName, or Inactive when none exists for that level. */
 	ELevelObjectiveStep GetCheckpointForLevel(FName LevelName) const;
 
-	/** Drops the record — call on level completion so the next run starts clean. */
+	/** Records the AObjectiveStep chain's resume point by StepId. Kept apart from the legacy enum
+	 *  checkpoint above so a level can be migrated one chain at a time. */
+	void SetStepCheckpoint(FName LevelName, FName StepId);
+
+	/** The recorded step checkpoint for LevelName, or None when that level has none. */
+	FName GetStepCheckpointForLevel(FName LevelName) const;
+
+	/** Drops both records — call on level completion so the next run starts clean. */
 	void ClearCheckpoint();
 
 private:
 	FName CheckpointLevelName;
 	ELevelObjectiveStep LastCheckpointStep = ELevelObjectiveStep::Inactive;
+
+	FName StepCheckpointLevelName;
+	FName LastCheckpointStepId;
 };

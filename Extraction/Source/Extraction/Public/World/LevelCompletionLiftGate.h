@@ -82,6 +82,10 @@ private:
 	/** Set once the objective has been registered, to guard EndPlay cleanup. */
 	bool bObjectiveRegistered = false;
 
+	/** Once-only guard on the world-interact raise. CompleteLevel runs a fade the player can keep
+	 *  pressing through, and each press would otherwise re-raise "the lift was used". */
+	bool bCompletionRaised = false;
+
 	UFUNCTION()
 	void OnRep_bUnlocked();
 

@@ -712,6 +712,10 @@ private:
 	/** Single teardown for every exit (release, completion, target lost, DBNO). Idempotent. */
 	void CancelInteractHold();
 
+	/** The one authority-side commit for a world interaction, shared by the press, the hold and the
+	 *  server RPC. Raises no completion event of its own — see the note on the implementation. */
+	void CommitWorldInteract(AActor* Target);
+
 	/** Low-rate crosshair scan feeding the interact prompt (local player only). */
 	void UpdateInteractCandidateScan(float DeltaTime);
 

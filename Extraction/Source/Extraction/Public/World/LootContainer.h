@@ -2,7 +2,8 @@
 // One container = one Loot() call: contents are granted to the PLAYER through
 // UMissionInventorySubsystem regardless of who looted (companion loot still feeds the player).
 // The volume carries no mesh of its own — the world geometry it sits on IS the visual. Any
-// reaction (drawer slide, SFX) is BP-driven via OnOpened; C++ stays asset-agnostic.
+// reaction (drawer slide, SFX) is BP-driven via OnOpened, with OnRestoredLooted as its silent
+// checkpoint-resume twin; C++ stays asset-agnostic.
 
 #pragma once
 
@@ -34,8 +35,19 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Loot")
 	bool IsLooted() const { return bLooted; }
+
+	/** Checkpoint fast-forward only: flip bLooted, restore the opened pose through OnRestoredLooted,
+	 *  and put any keycard back in the mission inventory. Deliberately NOT Loot() — that path resolves
+	 *  ammo and stims against the player pawn, which does not exist yet at level-start resume, so they
+	 *  would be marked consumed and silently lost. No OnOpened, no pickup SFX, no toast, and no
+	 *  OnLootCompleted (the legacy objective flow still listens on that for these containers and would
+	 *  advance its own state). */
+	void MarkLootedForCheckpoint();
 #if WITH_DEV_AUTOMATION_TESTS
 	int32 TestGetCompletionBroadcastCount() const { return CompletionBroadcastCount; }
+	/** Counts the deferred restore hook, so a test can prove it lands exactly once and not before the
+	 *  tick that owns it. */
+	int32 TestGetRestoredLootedCount() const { return RestoredLootedCount; }
 #endif
 
 	// --- ILootable ---
@@ -81,9 +93,22 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Loot")
 	void OnOpened(AActor* Looter);
 
+	/** BP hook: snap the drawer/lid to its already-open pose on a checkpoint resume. Same end state
+	 *  as OnOpened, none of the theatre — no slide, no SFX, no toast. Without it every container the
+	 *  player emptied before the restart reads as untouched geometry that then refuses the prompt.
+	 *
+	 *  GUARANTEED to fire ONE TICK AFTER the checkpoint fast-forward marks the container looted, never
+	 *  inside it. The fast-forward runs from an objective step's BeginPlay and actor BeginPlay order is
+	 *  unspecified, so an inline call could land BEFORE this container's own BeginPlay and be
+	 *  overwritten by it. Cache poses and component references in BeginPlay as normal — they are ready
+	 *  by the time this fires. It fires at most once per container per level load. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Loot")
+	void OnRestoredLooted();
+
 private:
 #if WITH_DEV_AUTOMATION_TESTS
 	int32 CompletionBroadcastCount = 0;
+	int32 RestoredLootedCount = 0;
 #endif
 	bool CanLootRespectingScriptOverride() const;
 	void GrantAllContents();

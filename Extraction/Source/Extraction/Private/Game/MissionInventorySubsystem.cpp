@@ -75,7 +75,7 @@ bool UMissionInventorySubsystem::GrantAmmo(const FLootGrant& Grant, APawn* Recip
 	return true;
 }
 
-void UMissionInventorySubsystem::RecordKeycard(FName KeycardId)
+void UMissionInventorySubsystem::RecordKeycard(FName KeycardId, bool bSilent)
 {
 	if (KeycardId == NAME_None) return;
 
@@ -83,8 +83,9 @@ void UMissionInventorySubsystem::RecordKeycard(FName KeycardId)
 	HeldKeycards.Add(KeycardId, &bAlreadyHeld);
 	if (bAlreadyHeld) return; // no duplicate toast for a card already held
 
-	OnLootNotify.Broadcast(FText::Format(
-		NSLOCTEXT("Loot", "KeycardAcquired", "Keycard acquired: {0}"), FText::FromName(KeycardId)));
+	if (!bSilent)
+		OnLootNotify.Broadcast(FText::Format(
+			NSLOCTEXT("Loot", "KeycardAcquired", "Keycard acquired: {0}"), FText::FromName(KeycardId)));
 	OnKeycardRecorded.Broadcast(KeycardId);
 	UE_LOG(LogMissionInventory, Log, TEXT("RecordKeycard: %s"), *KeycardId.ToString());
 }

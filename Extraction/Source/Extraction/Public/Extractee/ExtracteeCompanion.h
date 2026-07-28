@@ -149,8 +149,10 @@ private:
 	FTimerHandle WaveTimerHandle;
 
 	/** Stage 2: captive off, AI on, still unarmed. bCeremony runs the handoff beat and the
-	 *  delayed OnRescued; the checkpoint fast-forward skips straight to armed. */
-	void CompleteRescue(bool bCeremony);
+	 *  delayed OnRescued; the checkpoint fast-forward skips straight to armed. Interactor is the
+	 *  player on a real rescue and null on a fast-forward — only the former raises the
+	 *  world-interact notify, because a resume is not an interaction. */
+	void CompleteRescue(bool bCeremony, AActor* Interactor = nullptr);
 
 	/** Stage 3: pistol visible, ABP swaps to the armed pose, reply line, then the wave timer. */
 	void ArmWithPistol(bool bCeremony);

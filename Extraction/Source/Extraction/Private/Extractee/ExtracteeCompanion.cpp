@@ -6,6 +6,7 @@
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
 #include "WeaponBase.h"
+#include "World/InteractionEventSubsystem.h"
 
 AExtracteeCompanion::AExtracteeCompanion()
 {
@@ -105,10 +106,10 @@ bool AExtracteeCompanion::CanWorldInteract_Implementation(AActor* /*Interactor*/
 	return bCaptive && bRescueEnabled;
 }
 
-void AExtracteeCompanion::WorldInteract_Implementation(AActor* /*Interactor*/)
+void AExtracteeCompanion::WorldInteract_Implementation(AActor* Interactor)
 {
 	if (!HasAuthority() || !bCaptive || !bRescueEnabled) return;
-	CompleteRescue(/*bCeremony=*/true);
+	CompleteRescue(/*bCeremony=*/true, Interactor);
 }
 
 FText AExtracteeCompanion::GetWorldInteractionPrompt_Implementation(AActor* /*Interactor*/) const
@@ -141,10 +142,16 @@ void AExtracteeCompanion::ForceRescue()
 	CompleteRescue(/*bCeremony=*/false);
 }
 
-void AExtracteeCompanion::CompleteRescue(bool bCeremony)
+void AExtracteeCompanion::CompleteRescue(bool bCeremony, AActor* Interactor)
 {
 	if (!bCaptive) return;
 	bCaptive = false;
+
+	// Only a real rescue is an interaction. Raised from this success branch rather than blanket
+	// from the player's commit, so a refused hold (rescue gated off) ticks nothing off.
+	if (bCeremony)
+		if (UInteractionEventSubsystem* Events = GetWorld() ? GetWorld()->GetSubsystem<UInteractionEventSubsystem>() : nullptr)
+			Events->NotifyWorldInteract(this, Interactor);
 
 	// AI on -- the companion controller possesses and starts the shared behaviour tree. He stands
 	// and follows from here, but UNARMED: the weapon stays hidden and the ABP's unarmed branch

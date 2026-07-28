@@ -11,6 +11,7 @@
 #include "ObjectiveSubsystem.h"
 #include "MissionInventorySubsystem.h"
 #include "LevelCompletionLiftGate.h"
+#include "InteractionEventSubsystem.h"
 #include "Extraction.h"
 
 DEFINE_LOG_CATEGORY(LogExtractionTarget);
@@ -190,6 +191,12 @@ void AExtractionTargetActor::WorldInteract_Implementation(AActor* Interactor)
 	}
 
 	bActivated = true;
+
+	// Success branch only — every earlier return above is a refusal, and a refusal must not tick
+	// off an objective beat watching this actor.
+	if (UInteractionEventSubsystem* Events = GetWorld() ? GetWorld()->GetSubsystem<UInteractionEventSubsystem>() : nullptr)
+		Events->NotifyWorldInteract(this, Interactor);
+
 	OnExtractionTargetWaveStarted.Broadcast();
 	UE_LOG(LogExtractionTarget, Log, TEXT("%s: activated by %s, wave '%s' started"),
 		*GetName(), *GetNameSafe(Interactor), *WaveRequest.WaveId.ToString());
