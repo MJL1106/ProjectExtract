@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ProjectExtract — Objective Steps</title>
+<title>DemoMap — Objectives</title>
 <style>
   :root{
     --bg:#12151a; --panel:#1a1f27; --panel2:#20262f; --ink:#dfe6ee; --dim:#8b97a5;
@@ -36,135 +36,145 @@
   ol.check li::before{content:counter(c);position:absolute;left:0;top:7px;width:26px;height:26px;border-radius:50%;background:var(--accent);color:var(--bg);font-weight:700;text-align:center;line-height:26px;font-size:13px}
   .links{font-size:12.5px;color:var(--dim);white-space:normal}
   .flow{background:var(--code);border:1px solid var(--border);border-radius:8px;padding:12px 16px;font:13px Consolas,monospace;overflow-x:auto;white-space:pre}
+  .chk{color:var(--amber);font-weight:600}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<h1>Objective Steps</h1>
-<p class="sub">One placed actor per objective beat, chained together. Adding an objective is placing an actor and wiring two things — there is no C++ step any more. Property names are verbatim from the Details panel.</p>
+<h1>DemoMap — Objectives</h1>
+<p class="sub">What's in your level right now, and how to add the next beat. Everything below was read out of the live map, not written from memory.</p>
 
 <div class="card">
-<h3 style="margin-top:0">The whole idea</h3>
-<p>Each <span class="place">ObjectiveStep</span> is one beat. It has a <b>condition</b> (what finishes it), optional <b>side effects</b> (what it does when it starts or finishes), and a <b>NextStep</b> pointer to the beat that follows. Drop actors, chain them, done.</p>
-<p style="margin-bottom:0">The old <code>ALevelObjectiveFlow</code> is gone — DemoMap now runs on 13 of these.</p>
+<h3 style="margin-top:0">Where to find it</h3>
+<p style="margin-bottom:0">Map <code>/Game/UWC_Modular_Skyscraper/Maps/DemoMap</code> · World Outliner folder <code>Objectives/</code> · 13 actors, <code>OS_01_…</code> to <code>OS_12_…</code> plus <code>OS_S1_GatherSupplies</code>. The old <code>LevelObjectiveFlow_DemoMap</code> is gone — nothing about the objective chain lives in C++ any more.</p>
 </div>
 
-<h2>Adding an objective</h2>
-<ol class="check">
-<li><code>Place Actors → search "ObjectiveStep" → drag into the level</code>, near the thing it's about</li>
-<li><code>Details → Objective Step → Label</code> → the HUD line, e.g. <code>"Reach the server room"</code></li>
-<li><code>Details → Objective Step → Condition</code> → pick from the dropdown, then fill the one payload field that appears</li>
-<li><code>Details → Objective Step → NextStep</code> → the actor for the following beat</li>
-<li>On the <b>first</b> beat only: tick <code>bIsEntryStep</code></li>
-<li><code>File → Save Current Level</code></li>
-</ol>
-<p><code>StepId</code> can be left <code>None</code> — it falls back to the actor's name. Only set it if you want a stable id for checkpoints or logs.</p>
-
-<h2>Conditions</h2>
-<p>The condition decides what completes the beat. Only the relevant payload field is shown in the Details panel.</p>
+<h2>Your current chain</h2>
+<p>Each actor's <code>NextStep</code> points at the row below it. <span class="chk">Amber</span> = checkpoint.</p>
 <div class="overflow">
 <table>
-<tr><th>Condition</th><th>Completes when</th><th>Payload to wire</th></tr>
-<tr><td><code>ReachLocation</code></td><td>Player enters a radius around the actor</td><td><code>CompletionRadius</code> (cm)</td></tr>
-<tr><td><code>AcquireKeycard</code></td><td>That keycard hits the mission inventory</td><td><code>RequiredKeycardId</code></td></tr>
-<tr><td><code>EnemiesDead</code></td><td>Every listed enemy is dead or destroyed</td><td><code>TrackedEnemies</code></td></tr>
-<tr><td><code>DoorOpened</code></td><td>That door opens</td><td><code>TrackedDoor</code></td></tr>
-<tr><td><code>ContainerLooted</code></td><td>The crates are searched</td><td><code>TrackedContainers</code> + <code>bRequiresAllContainers</code></td></tr>
-<tr><td><code>RouteCompleted</code></td><td>The companion finishes an authored route</td><td><code>TrackedRoute</code></td></tr>
-<tr><td><code>Interacted</code></td><td>Player interacts with something</td><td><code>TrackedInteractable</code></td></tr>
-<tr><td><code>ExtracteeRescued</code></td><td>The VIP is freed <em>and armed</em></td><td><code>TrackedExtractee</code></td></tr>
-<tr><td><code>WaveCompleted</code></td><td>A director wave finishes</td><td><code>WatchedWaveId</code></td></tr>
-<tr><td><code>Manual</code></td><td>Blueprint calls <code>CompleteStep()</code></td><td>—</td></tr>
+<tr><th>#</th><th>Actor</th><th>Completes when</th><th>Watches</th><th>Also does</th></tr>
+<tr><td>1</td><td><code>OS_01_BreachRoofDoor</code></td><td>door opens</td><td><code>BP_BreachableDoor</code></td><td>locks the VIP so he can't be freed early</td></tr>
+<tr><td>2</td><td><code>OS_02_FollowCompanionDownstairs</code></td><td>route finishes</td><td><code>CompanionRoute</code></td><td>commands the companion down it</td></tr>
+<tr><td>3</td><td><code>OS_03_BreachStairwellDoor</code></td><td>door opens</td><td><code>BP_Door27</code></td><td>—</td></tr>
+<tr><td>4</td><td><code>OS_04_ClearRoom1</code></td><td>all 7 dead</td><td>the <code>PE_R1_Grunt_*</code> group</td><td>—</td></tr>
+<tr><td class="chk">5</td><td><code>OS_05_FindOfficeKeycard</code> <span class="chk">◆</span></td><td>crate looted</td><td><code>PE_R1_LootCache_B</code></td><td>starts the supplies side objective</td></tr>
+<tr><td>6</td><td><code>OS_06_UnlockStairwellDoor</code></td><td>door opens</td><td><code>BP_Door17</code></td><td>—</td></tr>
+<tr><td>7</td><td><code>OS_07_SwitchCompanionToStealth</code></td><td>door opens</td><td><code>BP_Double_Door7</code></td><td>companion → Stealth</td></tr>
+<tr><td>8</td><td><code>OS_08_FirstDoubleTakedown</code></td><td>both dead</td><td><code>BP_Enemy_Grunt</code>, <code>_Grunt2</code></td><td>—</td></tr>
+<tr><td>9</td><td><code>OS_09_SecondDoubleTakedown</code></td><td>both dead</td><td><code>BP_Enemy_Grunt3</code>, <code>_Grunt4</code></td><td>—</td></tr>
+<tr><td class="chk">10</td><td><code>OS_10_ReachExtractionTarget</code> <span class="chk">◆</span></td><td>VIP freed + armed</td><td><code>ExtracteeCompanion_Room2</code></td><td>unlocks the VIP for rescue</td></tr>
+<tr><td>11</td><td><code>OS_11_DefendPosition</code></td><td>wave <code>Room2Defence</code> ends</td><td>the director</td><td>starts that wave · unlocks the lift on finish</td></tr>
+<tr><td>12</td><td><code>OS_12_UseLift</code></td><td>player uses the lift</td><td><code>LevelCompletionLiftGate_Room2</code></td><td>— <b>chain ends here</b></td></tr>
+<tr><td>S1</td><td><code>OS_S1_GatherSupplies</code></td><td>all 7 crates looted</td><td><code>PE_R2_Supply_01–07</code></td><td>optional, text-only, runs parallel from step 5</td></tr>
 </table>
 </div>
 
-<div class="tip"><b>Two flags worth knowing.</b> <code>bRequiresAllContainers</code> off means any one crate finishes the beat. <code>bAnyInteractorCounts</code> (on <code>Interacted</code>) is off by default, so only the <em>player</em> counts — turn it on if a companion looting the thing should also tick it off.</div>
-
-<div class="warn"><b>An unwired payload stalls the beat, loudly.</b> An empty <code>TrackedEnemies</code> or <code>TrackedContainers</code> never completes — that's deliberate, so a mis-wire shouts in the log instead of silently skipping. Check the Output Log for <code>LogObjectiveStep</code> warnings after any wiring change.</div>
-
-<h2>Side effects</h2>
-<p><code>SideEffects</code> is a list. Each entry has a <code>When</code> (<code>OnActivate</code> or <code>OnComplete</code>) and a <code>Type</code>, and shows only the payload that type needs.</p>
+<h3>Checkpoints</h3>
 <table>
-<tr><th>Type</th><th>Does</th><th>Payload</th></tr>
-<tr><td><code>SetMissionPhase</code></td><td>Moves the director to a phase</td><td>the phase</td></tr>
-<tr><td><code>StartDirectorWave</code></td><td>Fires a finite wave</td><td>the full wave request</td></tr>
-<tr><td><code>UnlockGate</code></td><td>Unlocks a lift/exit gate</td><td><code>GateTarget</code></td></tr>
-<tr><td><code>SetCompanionMode</code></td><td>Stealth / Normal / Combat</td><td>the mode</td></tr>
-<tr><td><code>SetExtracteeRescuable</code></td><td>Gates whether the VIP can be freed yet</td><td><code>ExtracteeTarget</code> + bool</td></tr>
-<tr><td><code>CommandCompanionRoute</code></td><td>Sends the companion down an authored route</td><td><code>RouteTarget</code></td></tr>
-<tr><td><code>ActivateActor</code></td><td>Starts another step (or an extraction target)</td><td><code>ActivateTarget</code></td></tr>
-<tr><td><code>CompleteLevel</code></td><td>Ends the level</td><td>—</td></tr>
+<tr><td><code>OS_05_FindOfficeKeycard</code></td><td>respawn at <code>TP_Checkpoint_FIND_OFFICE_KEYCARD</code></td></tr>
+<tr><td><code>OS_10_ReachExtractionTarget</code></td><td>respawn at <code>TP_Checkpoint_REACH_EXTRACTION_TARGET</code></td></tr>
 </table>
 
-<div class="tip"><b>Start a wave and wait for it on the same beat.</b> Put <code>StartDirectorWave</code> on <code>OnActivate</code> and set the condition to <code>WaveCompleted</code> with the same <code>WaveId</code>. One actor, not three — and it's the shape that survives a checkpoint restart.</div>
-
-<h2>Markers — usually nothing to wire</h2>
-<p>Leave <code>MarkerTarget</code> empty. The marker location resolves in this order:</p>
-<div class="flow">explicit MarkerTarget
-  → derived anchor   (EnemiesDead: the group's centroid at activation
-                      ContainerLooted: the nearest unlooted crate)
-  → condition payload (the door / interactable / extractee it watches)
-  → the step actor's own location</div>
-<p>So a <code>DoorOpened</code> beat points at its door for free, and a <code>ClearRoom</code> beat holds the room instead of chasing the last surviving grunt.</p>
+<h3>The defence wave on step 11</h3>
 <table>
-<tr><td><code>bShowWorldMarker</code></td><td>Off = HUD text only, no world billboard, no off-screen arrow. Use for optional objectives.</td></tr>
-<tr><td><code>bFreezeMarkerAtActivation</code></td><td>Pins the marker where it resolved at activation and ignores later movement. This is how "defend this ground" works — do <b>not</b> point it at the VIP, he walks off the spot you're telling the player to hold.</td></tr>
-<tr><td><code>AreaAnchorOverride</code></td><td>Force the <code>EnemiesDead</code> anchor if the auto-centroid reads wrong. Leave zero otherwise.</td></tr>
+<tr><td>Id / squads</td><td><code>Room2Defence</code> · 6</td></tr>
+<tr><td>Phase / config</td><td><code>Objective</code> · <code>DA_DirectorConfig</code></td></tr>
+<tr><td>Pacing</td><td>first squad after 2s, then one every 8s</td></tr>
+<tr><td>Guaranteed</td><td>squad 3 and squad 6 are both <code>HeavyPush</code></td></tr>
+<tr><td>Spawns from</td><td><code>EnemySpawnZone_Room2_North</code> and <code>_East</code> (East is heavily favoured, bias 20). <code>_West</code> is excluded from waves — the player can see it from the hold.</td></tr>
 </table>
 
-<h2>Checkpoints</h2>
+<h2>Adding the next beat</h2>
+<p>The chain currently ends at <code>OS_12_UseLift</code>. Two ways in:</p>
+
+<h3>A · Continue past the lift</h3>
 <ol class="check">
-<li>Tick <code>bIsCheckpoint</code> on the beat you want to resume at</li>
+<li>Place a new <span class="place">ObjectiveStep</span> where the beat happens</li>
+<li><code>Details → Label</code> → the HUD line</li>
+<li><code>Details → Condition</code> → pick, then fill the one payload field that appears</li>
+<li>Select <code>OS_12_UseLift</code> → set its <code>NextStep</code> to your new actor</li>
+<li><code>File → Save Current Level</code></li>
+</ol>
+
+<h3>B · Insert into the middle</h3>
+<ol class="check">
+<li>Place the new step</li>
+<li>Set the <b>previous</b> step's <code>NextStep</code> to your new actor</li>
+<li>Set your new actor's <code>NextStep</code> to the step that used to follow</li>
+</ol>
+<div class="tip">Nothing renumbers itself — the <code>OS_07</code> style names are just labels for your benefit. If you insert between 7 and 8, name it <code>OS_07b_…</code> rather than renaming everything.</div>
+
+<h2>Conditions you can pick</h2>
+<div class="overflow">
+<table>
+<tr><th>Condition</th><th>Payload</th><th>Already used in DemoMap by</th></tr>
+<tr><td><code>DoorOpened</code></td><td><code>TrackedDoor</code></td><td>steps 1, 3, 6, 7</td></tr>
+<tr><td><code>EnemiesDead</code></td><td><code>TrackedEnemies</code></td><td>steps 4, 8, 9</td></tr>
+<tr><td><code>ContainerLooted</code></td><td><code>TrackedContainers</code> + <code>bRequiresAllContainers</code></td><td>step 5, supplies chain</td></tr>
+<tr><td><code>RouteCompleted</code></td><td><code>TrackedRoute</code></td><td>step 2</td></tr>
+<tr><td><code>ExtracteeRescued</code></td><td><code>TrackedExtractee</code></td><td>step 10</td></tr>
+<tr><td><code>WaveCompleted</code></td><td><code>WatchedWaveId</code></td><td>step 11</td></tr>
+<tr><td><code>Interacted</code></td><td><code>TrackedInteractable</code></td><td>step 12</td></tr>
+<tr><td><code>ReachLocation</code></td><td><code>CompletionRadius</code> (cm)</td><td><i>unused — walk-to-a-place beats</i></td></tr>
+<tr><td><code>AcquireKeycard</code></td><td><code>RequiredKeycardId</code></td><td><i>unused — DemoMap's only card is <code>OfficeFloor_BP_Door17</code></i></td></tr>
+<tr><td><code>Manual</code></td><td>—</td><td><i>unused — Blueprint calls <code>CompleteStep()</code></i></td></tr>
+</table>
+</div>
+
+<h2>Side effects you can hang on a beat</h2>
+<p><code>SideEffects</code> is a list; each entry fires <code>OnActivate</code> or <code>OnComplete</code>.</p>
+<table>
+<tr><th>Type</th><th>Payload</th></tr>
+<tr><td><code>StartDirectorWave</code></td><td>a full wave request</td></tr>
+<tr><td><code>UnlockGate</code></td><td><code>GateTarget</code> — DemoMap's is <code>LevelCompletionLiftGate_Room2</code></td></tr>
+<tr><td><code>SetCompanionMode</code></td><td>Stealth / Normal / Combat</td></tr>
+<tr><td><code>SetMissionPhase</code></td><td>Infiltration / Objective / Extraction</td></tr>
+<tr><td><code>SetExtracteeRescuable</code></td><td><code>ExtracteeTarget</code> + bool</td></tr>
+<tr><td><code>CommandCompanionRoute</code></td><td><code>RouteTarget</code></td></tr>
+<tr><td><code>ActivateActor</code></td><td><code>ActivateTarget</code> — starts a parallel chain, like step 5 does</td></tr>
+<tr><td><code>CompleteLevel</code></td><td>—</td></tr>
+</table>
+
+<div class="tip"><b>Copy step 11 for any holdout.</b> <code>StartDirectorWave</code> on <code>OnActivate</code>, condition <code>WaveCompleted</code> with the same id, reward on <code>OnComplete</code>. One actor. Putting the wave on the <em>previous</em> beat's completion instead will strand a checkpoint restart waiting on a wave that never starts.</div>
+
+<h2>Markers — leave them alone</h2>
+<p><code>MarkerTarget</code> is empty on all 13 actors and should stay that way. It resolves automatically:</p>
+<div class="flow">derived anchor    → EnemiesDead: the group's centroid, captured when the beat starts
+                    ContainerLooted: the nearest crate you haven't emptied
+condition payload → the door / lift / VIP the beat watches
+own location      → for ReachLocation, AcquireKeycard, WaveCompleted, Manual</div>
+<p>That's why step 4's marker holds the room instead of chasing the last grunt, and why the supplies marker walks you crate to crate.</p>
+<table>
+<tr><td><code>bShowWorldMarker</code></td><td>Off on the supplies chain — text-only, no billboard, no off-screen arrow. That's the optional-objective look.</td></tr>
+<tr><td><code>bFreezeMarkerAtActivation</code></td><td>On for step 11 only. Pins "defend this ground" where the rescue happened. <b>Never point this at the VIP</b> — he walks off the spot you're telling the player to hold.</td></tr>
+</table>
+
+<h2>Adding a checkpoint</h2>
+<ol class="check">
+<li>Tick <code>bIsCheckpoint</code> on the beat</li>
 <li>Place a <span class="place">TargetPoint</span> where the player should reappear</li>
 <li>Wire it to <code>CheckpointSpawn</code></li>
 </ol>
-<p>Entering a checkpoint beat records it and heals the companion once it's out of combat. On a restart the chain replays every earlier beat's end state, then activates the recorded beat and teleports the player and companion in.</p>
-<p>What replaying an earlier beat restores is derived from its condition, so there's nothing extra to author:</p>
-<table>
-<tr><td><code>DoorOpened</code></td><td>door opens</td></tr>
-<tr><td><code>EnemiesDead</code></td><td>tracked enemies removed</td></tr>
-<tr><td><code>ContainerLooted</code></td><td>crates marked searched, keycards re-granted (silently — no toast, no pickup SFX)</td></tr>
-<tr><td><code>AcquireKeycard</code></td><td>keycard granted</td></tr>
-<tr><td><code>ExtracteeRescued</code></td><td>VIP freed and armed</td></tr>
-<tr><td>everything else</td><td>nothing — the beat just counts as done</td></tr>
-</table>
-<div class="warn"><b>Waves, level completions and route commands never replay.</b> A restart can't re-fire a wave you already beat, end the level on load, or march the companion off from wherever it just teleported. This is enforced in code, not a flag you can tick.</div>
+<p>A restart replays every earlier beat's end state — doors open, tracked enemies removed, crates marked searched with keycards re-granted silently, the VIP freed. Derived from each beat's own condition, so there's nothing extra to author.</p>
+<div class="warn"><b>Waves, level completions and route commands never replay.</b> A restart can't re-fire the <code>Room2Defence</code> wave you already beat, end the level on load, or march the companion off from where it just teleported. Enforced in code — not a flag you can tick.</div>
 
-<h2>The shipped chain — copy the patterns from it</h2>
-<p>DemoMap's 13 actors live in the <code>Objectives/</code> level folder, named <code>OS_01_…</code> through <code>OS_12_…</code> plus <code>OS_S1_GatherSupplies</code>.</p>
-<div class="overflow">
-<table>
-<tr><th>Actor</th><th>Condition</th><th>Side effects</th><th>Pattern to steal</th></tr>
-<tr><td><code>OS_01_BreachRoofDoor</code></td><td>DoorOpened</td><td>OnActivate: lock the VIP</td><td>entry step; gate something far ahead from the very first beat</td></tr>
-<tr><td><code>OS_02_FollowCompanionDownstairs</code></td><td>RouteCompleted</td><td>OnActivate: command the route</td><td>issue and await a route on one actor</td></tr>
-<tr><td><code>OS_04_ClearRoom1</code></td><td>EnemiesDead ×7</td><td>—</td><td>marker holds the room, not the last enemy</td></tr>
-<tr><td><code>OS_05_FindOfficeKeycard</code></td><td>ContainerLooted</td><td>OnActivate: start the supplies chain</td><td>checkpoint + kick off a parallel objective</td></tr>
-<tr><td><code>OS_07_SwitchCompanionToStealth</code></td><td>DoorOpened</td><td>OnActivate: companion → Stealth</td><td>change companion behaviour on a beat</td></tr>
-<tr><td><code>OS_11_DefendPosition</code></td><td>WaveCompleted</td><td>OnActivate: wave · OnComplete: unlock gate</td><td>the holdout: start + await + reward, one actor, frozen marker</td></tr>
-<tr><td><code>OS_S1_GatherSupplies</code></td><td>ContainerLooted ×7</td><td>—</td><td>optional objective: text-only, retargets to the nearest crate</td></tr>
-</table>
-</div>
+<h2>Before you playtest</h2>
+<ol class="check">
+<li>Exactly one actor has <code>bIsEntryStep</code> ticked (currently <code>OS_01</code>)</li>
+<li>Every new step's payload is wired — an empty <code>TrackedEnemies</code> or <code>TrackedContainers</code> never completes, on purpose</li>
+<li>Every new step has a <code>NextStep</code>, unless it genuinely ends a chain</li>
+<li>Any new keycard id matches its door's <code>RequiredKeycardId</code> character for character</li>
+<li>Output Log filtered to <code>LogObjectiveStep</code> shows one activation line and no warnings</li>
+</ol>
+<p>The audit also catches: a <code>NextStep</code> pointing at itself, loops, duplicate <code>StepId</code>s, a checkpoint with no spawn point, and a <code>WaveCompleted</code> beat after a checkpoint whose wave only an earlier beat starts.</p>
 
-<h2>Blueprint hooks</h2>
-<table>
-<tr><td><code>Activate()</code> / <code>Deactivate()</code> / <code>CompleteStep()</code></td><td>All idempotent. <code>CompleteStep</code> on a beat that was never activated warns and refuses rather than firing out of order.</td></tr>
-<tr><td><code>OnStepActivated</code> / <code>OnStepCompleted</code></td><td>Bind for bespoke scripting — VO, sequences, anything the side-effect list doesn't cover.</td></tr>
-</table>
+<h2>Two things about DemoMap worth fixing</h2>
+<div class="warn"><b>There are no phase triggers in this level.</b> The director never leaves its default mission phase, so the Infiltration and Extraction composition lists in <code>DA_DirectorConfig</code> never fire — only <code>Objective</code> ones do, plus step 11's wave which sets its own. If you want the level to ramp, place <span class="place">BP_PhaseTrigger</span> boxes at the beats where it should, or add <code>SetMissionPhase</code> side effects to the steps you already have.</div>
+<div class="warn"><code>DA_DirectorConfig</code> has two authoring slips: <code>Flush</code> is listed <b>twice</b> in <code>ObjectiveConfig</code> so its real odds are double what the weight says, and <code>ShotgunPush</code> in <code>ExtractionConfig</code> contains three Grunts and no Shotgun — the second entry's class was left as Grunt.</div>
 
-<h2>What the audit will tell you</h2>
-<p>At level load, in the Output Log under <code>LogObjectiveStep</code>:</p>
-<ul>
-<li>a condition payload left unset, named per step and per array index</li>
-<li>a <code>NextStep</code> pointing at itself, or a loop in the chain</li>
-<li>zero entry steps, or two entry steps feeding one chain</li>
-<li>duplicate <code>StepId</code>s in the level</li>
-<li>a checkpoint beat with no <code>CheckpointSpawn</code></li>
-<li>a <code>WaveCompleted</code> beat after a checkpoint whose wave only an <em>earlier</em> beat starts — that combination would resume waiting on a wave that never runs</li>
-</ul>
-<p>A clean level load prints one activation line and nothing else.</p>
-
-<p class="links" style="margin-top:32px">Related: <code>agent_docs/objectives_director_loot_guide.html</code> (director, waves, loot crates, attachment cases) · <code>agent_docs/objective_step_migration_plan.md</code> (the full DemoMap authoring table) · <code>agent_docs/level_setup_guide.html</code> (everything else in a fresh level).</p>
+<p class="links" style="margin-top:32px">Related: <code>agent_docs/objectives_director_loot_guide.html</code> (director tuning, spawn zones, waves, loot crates, attachment cases) · <code>agent_docs/objective_step_migration_plan.md</code> (every field of all 13 actors) · <code>agent_docs/level_setup_guide.html</code> (everything else in a fresh level).</p>
 
 </div>
 </body>
