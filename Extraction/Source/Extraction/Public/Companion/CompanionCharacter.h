@@ -195,6 +195,14 @@ public:
 	void StampCoverCommit();
 	float GetLastCoverCommitTime() const { return LastCoverCommitTime; }
 
+	// --- Confirmed-kill stamp (written by AEnemyCharacter::HandleDeath's companion-killer branch) ---
+	// Combat mode's advance hop reads this to let ONE bound skip its cooldown after a kill. The hop
+	// consumes the stamp rather than testing a window every frame, so a single kill can never chain
+	// bounds and the hop timer keeps working as the back-off for failed candidate scans.
+
+	void StampConfirmedKill();
+	float GetLastConfirmedKillTime() const { return LastConfirmedKillTime; }
+
 	// --- Follow catch-up pace (reduced sprint tier for formation catch-up only) ---
 
 	void SetFollowCatchupPace(bool bPace);
@@ -991,6 +999,9 @@ private:
 
 	/** World time of the last combat-task cover commit (ExecuteTask cover entry). */
 	float LastCoverCommitTime = -1e9f;
+
+	/** World time of this companion's last confirmed kill. Backs the Combat-mode post-kill advance. */
+	float LastConfirmedKillTime = -1e9f;
 
 	/** True while the follow task's catch-up sprint should use the reduced FollowCatchupSprintSpeed
 	 *  tier instead of full SprintSpeed. Never set by rescue sprint-to-target or stealth catch-up. */

@@ -112,6 +112,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	float GetTimeSinceDamagedBy(const AActor* Pawn) const;
 
+	/** True while this enemy holds usable knowledge of Actor: a live sighted track, or a stimulus
+	 *  stamped within MemorySeconds. Single-track lookup, no allocation and no sort — the cheap
+	 *  per-candidate answer GetExtraKnownThreats is the wrong tool for. Cloak-aware, so a companion
+	 *  this enemy is not allowed to perceive yet reads as unknown. MemorySeconds <= 0 = sighted only.
+	 *  Plain C++ rather than a UFUNCTION so a Live Coding patch can reach the body. */
+	bool HasLiveKnowledgeOf(const AActor* Actor, float MemorySeconds) const;
+
 	/** Living hostiles beyond ExcludeTarget this enemy either sees now (live location) or has
 	 *  perceived within MemorySeconds (frozen last-stimulus location — honest knowledge), closest
 	 *  first, capped at MaxCount. MemorySeconds <= 0 = currently-sighted only. Cloaked companions

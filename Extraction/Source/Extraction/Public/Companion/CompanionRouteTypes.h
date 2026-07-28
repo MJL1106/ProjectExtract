@@ -21,6 +21,22 @@ enum class ECompanionRouteEndBehavior : uint8
 	HoldAtFinal    UMETA(DisplayName = "Hold At Final"),
 };
 
+/** What crossing an ACompanionRouteTrigger does. */
+UENUM(BlueprintType)
+enum class ECompanionRouteTriggerMode : uint8
+{
+	/** Walk the route — the original behaviour. Deliberately the zero value: every trigger placed
+	 *  before this property existed deserializes to 0 and must keep doing exactly what it did. */
+	ExecuteRoute         UMETA(DisplayName = "Execute Route"),
+
+	/** Install the route as the companion's facing reference. The route is never walked — the
+	 *  companion follows the player as usual but faces the way the route runs. */
+	SetFacingReference   UMETA(DisplayName = "Set Facing Reference"),
+
+	/** Uninstall the facing reference. Needs no route — for sections with no meaningful direction. */
+	ClearFacingReference UMETA(DisplayName = "Clear Facing Reference"),
+};
+
 USTRUCT(BlueprintType)
 struct FCompanionRouteWaypoint
 {

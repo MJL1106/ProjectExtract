@@ -372,22 +372,33 @@ namespace
 		}
 	}
 
-	/** Combat-mode in-cover confidence: scale for the between-peek wait (bBurstClock=false, <1 =
+	/** Per-mode in-cover confidence: scale for the between-peek wait (bBurstClock=false, <1 =
 	 *  peek sooner) or the burst countdown (bBurstClock=true, >1 = expose longer, applied as a
-	 *  slower decrement). 1 outside Combat mode or with no tuning.
+	 *  slower decrement). Combat is the boldest; Defensive (the ECompanionMode::Normal enumerator)
+	 *  sits between it and Stealth, which is deliberately left at 1 in both channels — it is the one
+	 *  mode the personality pass does not touch. 1 with no tuning.
 	 *  Pressure01 composes on top when bPressureResponsiveCover is enabled. */
-	static float CombatPeekConfidenceScale(const ACompanionCharacter* Companion, bool bBurstClock, float Pressure01 = 0.f)
+	static float ModePeekConfidenceScale(const ACompanionCharacter* Companion,
+		const UCompanionTuningDataAsset* Tuning, bool bBurstClock, float Pressure01 = 0.f)
 	{
-		const ACompanionAIController* AIC = IsValid(Companion)
-			? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
-		const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
-
 		float Scale = 1.f;
-		if (Tuning && IsValid(Companion) && Companion->GetMode() == ECompanionMode::Combat)
+		if (Tuning && IsValid(Companion))
 		{
-			Scale = bBurstClock
-				? FMath::Max(1.f, Tuning->CombatBurstDurationMultiplier)
-				: FMath::Max(0.01f, Tuning->CombatPeekCooldownMultiplier);
+			switch (Companion->GetMode())
+			{
+			case ECompanionMode::Combat:
+				Scale = bBurstClock
+					? FMath::Max(1.f, Tuning->CombatBurstDurationMultiplier)
+					: FMath::Max(0.01f, Tuning->CombatPeekCooldownMultiplier);
+				break;
+			case ECompanionMode::Normal:
+				Scale = bBurstClock
+					? FMath::Max(1.f, Tuning->DefensiveBurstDurationMultiplier)
+					: FMath::Max(0.01f, Tuning->DefensivePeekCooldownMultiplier);
+				break;
+			default:
+				break; // Stealth: unchanged, both channels stay at 1
+			}
 		}
 
 		if (Tuning && Tuning->bPressureResponsiveCover && Pressure01 > 0.f)
@@ -404,6 +415,31 @@ namespace
 			}
 		}
 		return Scale;
+	}
+
+	/** Convenience overload for the handful of sites that do not already hold the tuning asset.
+	 *  Costs a controller cast plus a tuning fetch — never reach for it on a per-frame path. */
+	static float ModePeekConfidenceScale(const ACompanionCharacter* Companion, bool bBurstClock, float Pressure01 = 0.f)
+	{
+		const ACompanionAIController* AIC = IsValid(Companion)
+			? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
+		return ModePeekConfidenceScale(Companion, AIC ? AIC->GetTuning() : nullptr, bBurstClock, Pressure01);
+	}
+
+	/** Extra shortening of the wait before the FIRST peek at a freshly taken cover point. Ducking
+	 *  into cover under fire and then standing behind it through a whole rolled cooldown is the
+	 *  loudest "the companion is doing nothing" tell there is; the first answer wants to land about
+	 *  a second in. 1 once any peek cycle has completed at this point.
+	 *  Stealth is excluded for the same reason ModePeekConfidenceScale leaves it at 1 in both
+	 *  channels: the mode is ring-fenced from the personality pass, and the combat task IS reachable
+	 *  in Stealth once stealth breaks — without this test a broken-stealth firefight would peek
+	 *  twice as fast on its first cycle at every fresh cover point. */
+	static float FirstPeekWaitMultiplier(const ACompanionCharacter* Companion,
+		const UCompanionTuningDataAsset* Tuning, int32 PeekCyclesAtCover)
+	{
+		if (!Tuning || PeekCyclesAtCover > 0) return 1.f;
+		if (IsValid(Companion) && Companion->GetMode() == ECompanionMode::Stealth) return 1.f;
+		return FMath::Clamp(Tuning->FirstPeekWaitScale, 0.25f, 1.f);
 	}
 
 	// Resolves the player pawn + keep-out radius (AcceptableRadius) from the companion's controller.
@@ -1206,9 +1242,9 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 		const bool bAtApex = FVector::Dist(Next, ApexTarget) <= RepositionArrivalTolerance;
 		if (bAtApex)
 		{
-			// At apex — burst timer now counts down "time firing at the corner". Combat-mode
-			// confidence + pressure: slower countdown = longer corner exposure.
-			BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Companion, true, Pressure01);
+			// At apex — burst timer now counts down "time firing at the corner". Mode confidence
+			// + pressure: slower countdown = longer corner exposure.
+			BurstTimer -= DeltaSeconds / ModePeekConfidenceScale(Companion, true, Pressure01);
 			if (BurstTimer <= 0.f)
 				bCornerPeekReturning = true;
 		}
@@ -1888,6 +1924,27 @@ bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& Ow
 	return true;
 }
 
+void UBTTask_CompanionCombat::TryConsumePostKillHopBypass(const ACompanionCharacter* Companion,
+	const UCompanionTuningDataAsset& Tuning)
+{
+	if (Tuning.CombatPostKillAdvanceWindow <= 0.f) return;
+
+	const float KillTime = Companion->GetLastConfirmedKillTime();
+	if (KillTime <= LastHopBypassKillTime) return; // this kill's bound is already spent
+
+	const UWorld* World = Companion->GetWorld();
+	if (!World) return;
+	if ((World->GetTimeSeconds() - KillTime) > Tuning.CombatPostKillAdvanceWindow) return;
+
+	// Spent on BOTH exits below. The caller runs the scan on every tick this returns to, so when the
+	// cooldown has already expired the bound about to commit IS this kill's bound — and leaving the
+	// stamp unspent there let the interval re-arm at that commit hand the same kill a second bound
+	// on the next re-entry, still inside the window.
+	LastHopBypassKillTime = KillTime;
+	if (CombatAdvanceHopTimer <= 0.f) return; // already free to hop — no cooldown to clear
+	CombatAdvanceHopTimer = 0.f;
+}
+
 bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion,
 	AActor* Target, const FVector& MyLocation, bool bPlayerTooFar, float DeltaSeconds)
 {
@@ -1897,11 +1954,19 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 	const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
 	if (!Tuning || !Tuning->bCombatAdvanceHops) return false;
 	if (Companion->GetMode() != ECompanionMode::Combat) return false;
-	if (bAngleSeekActive || bPlayerTooFar || CombatAdvanceHopTimer > 0.f) return false;
+	if (bAngleSeekActive || bPlayerTooFar) return false;
 
 	// Room to gain: only hop while a bound would still land outside the move-shoot ideal minimum.
 	const float DistToTarget = FVector::Dist2D(MyLocation, Target->GetActorLocation());
 	if (DistToTarget <= MoveShootIdealRangeMin + Tuning->CombatAdvanceHopMinGain) return false;
+
+	// One free bound per confirmed kill, placed below EVERY guard that returns without running the
+	// scan. Consuming the stamp on a tick that then bails leaves the cooldown at zero with nothing
+	// to re-arm it, so a hop primed for CombatPostKillAdvanceWindow would stay primed for the rest
+	// of the fight — and killing the enemy you were closest to, the common case, trips the
+	// room-to-gain guard directly above. The remaining early-out below re-arms the timer itself.
+	TryConsumePostKillHopBypass(Companion, *Tuning);
+	if (CombatAdvanceHopTimer > 0.f) return false;
 
 	UWorld* World = Companion->GetWorld();
 	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(World);
@@ -1916,6 +1981,10 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
 
 	const float SearchRadius = FMath::Min(Tuning->CoverSearchRadius, Tuning->CombatAdvanceHopMaxDistance);
+	// The hop's own player leash can only ever TIGHTEN the combat leash — a designer raising
+	// CombatAdvanceHopMaxPlayerDistance above CombatLeashDistance must not let a bound out past the
+	// leash the rest of combat positioning respects.
+	const float HopPlayerLeash = FMath::Min(Tuning->CombatLeashDistance, Tuning->CombatAdvanceHopMaxPlayerDistance);
 	TArray<FCover> Candidates;
 	Candidates.Reserve(32);
 	const FBoxSphereBounds SearchBounds(MyLocation, FVector(SearchRadius), SearchRadius);
@@ -1942,7 +2011,7 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 		if (CandToThreat > DistToTarget - Tuning->CombatAdvanceHopMinGain) continue;
 		if (CandToThreat < MoveShootIdealRangeMin) continue;
 		if (IsValid(PlayerPawn)
-			&& FVector::Dist2D(Candidate.Data.Location, PlayerPawn->GetActorLocation()) > Tuning->CombatLeashDistance)
+			&& FVector::Dist2D(Candidate.Data.Location, PlayerPawn->GetActorLocation()) > HopPlayerLeash)
 			continue;
 
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
@@ -2963,6 +3032,12 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	return EBTNodeResult::InProgress;
 }
 
+uint8 UBTTask_CompanionCombat::GetEffectiveMaxHolds(const ACompanionCharacter* Companion) const
+{
+	const bool bStealth = IsValid(Companion) && Companion->GetMode() == ECompanionMode::Stealth;
+	return bStealth ? StealthMaxConsecutiveHolds : MaxConsecutiveHolds;
+}
+
 // --- TickTask ---
 
 void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
@@ -3635,7 +3710,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					&& NearestDist <= TickTuning->PeekImpulseDistance)
 				{
 					const float WaitGateThreshold = (MinCoverIdleDwell + PeekCooldown)
-						* CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01);
+						* ModePeekConfidenceScale(Ctx.Companion, TickTuning, false, Pressure01)
+						* FirstPeekWaitMultiplier(Ctx.Companion, TickTuning, PeekCyclesAtCover);
 					if (TimeInCoverIdle < WaitGateThreshold)
 					{
 						TimeInCoverIdle = WaitGateThreshold;
@@ -3649,7 +3725,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					UE_LOG(LogCompanionAI, Log,
 						TEXT("[COVDBG] %s PRESSURE p01=%.2f nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
 						*Ctx.Companion->GetName(), Pressure01, NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
-						CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01),
+						ModePeekConfidenceScale(Ctx.Companion, TickTuning, false, Pressure01),
 						(int32)bImpulseFired);
 				}
 			}
@@ -3657,8 +3733,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (!bPressureOn)
 			Pressure01 = 0.f;
 
-		// Combat-mode + pressure confidence: the whole wait shrinks.
-		if (TimeInCoverIdle < (MinCoverIdleDwell + PeekCooldown) * CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01)) return;
+		// Mode + pressure confidence shrink the whole wait; the first peek at a fresh point shrinks
+		// it again on top, so taking cover under fire is answered rather than waited out.
+		if (TimeInCoverIdle < (MinCoverIdleDwell + PeekCooldown)
+			* ModePeekConfidenceScale(Ctx.Companion, TickTuning, false, Pressure01)
+			* FirstPeekWaitMultiplier(Ctx.Companion, TickTuning, PeekCyclesAtCover)) return;
 
 		UWorld* const TickWorld = Ctx.Companion ? Ctx.Companion->GetWorld() : nullptr;
 		if (!TickWorld) return;
@@ -3695,7 +3774,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				Ctx.Companion->GetSuppression01(),
 				Ctx.Companion->GetRecentDamageCount(TickTuning ? TickTuning->CoverCommitUnderFireWindow : 4.f),
 				Ctx.Companion->GetPlayerFocusedEnemyCount(),
-				PeekCyclesAtCover, NoPeekLosStrikes, ConsecutiveHolds, MaxConsecutiveHolds,
+				PeekCyclesAtCover, NoPeekLosStrikes, ConsecutiveHolds, GetEffectiveMaxHolds(Ctx.Companion),
 				TimeAtCurrentCover, TimeInCoverIdle, (int32)bJustRepositioned,
 				(int32)CurrentLean, Ctx.Companion->GetCurrentAmmo(), Ctx.Companion->GetHealthFraction());
 		}
@@ -4141,13 +4220,14 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		if (Action == EPeekAction::Hold)
 		{
-			if (ConsecutiveHolds < MaxConsecutiveHolds)
+			const uint8 EffectiveMaxHolds = GetEffectiveMaxHolds(Ctx.Companion);
+			if (ConsecutiveHolds < EffectiveMaxHolds)
 			{
 				++ConsecutiveHolds;
 				PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 				TimeInCoverIdle = 0.f;
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=Hold ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
-				if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: HOLD this cycle (%d/%d)"), *Ctx.Companion->GetName(), ConsecutiveHolds, MaxConsecutiveHolds);
+				if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: HOLD this cycle (%d/%d)"), *Ctx.Companion->GetName(), ConsecutiveHolds, EffectiveMaxHolds);
 				return;
 			}
 			// Hold cap promotion: scorer-viable best option at crouch cover (wallhack), else legacy.
@@ -4471,7 +4551,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// Part C burst-clock fix: BurstTimer must NOT decrement while the peek-out animation
 		// is still winding up, otherwise quick peeks expire before a single round fires.
 		if (PeekFireDelayRemaining <= 0.f)
-			BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Ctx.Companion, true, Pressure01);
+			BurstTimer -= DeltaSeconds / ModePeekConfidenceScale(Ctx.Companion, TickTuning, true, Pressure01);
 
 		if (bDebugLogging)
 		{
@@ -5038,9 +5118,19 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 	}
 
+	// Mode burst personality for the open-engage branch — Combat fires longer and pauses shorter,
+	// Defensive and Stealth both collapse to exactly 1. Hoisted out of the block below because this
+	// path runs EVERY FRAME; it takes TickTuning directly so the resolve costs nothing at all here.
+	// The pause scale is the reciprocal, so one lever moves both halves of the cadence in opposite
+	// directions. Pressure is deliberately not passed: it is a cover concept, the open-engage
+	// decrement has never been pressure-scaled, and Pressure01 can hold a stale value from an
+	// earlier cover stint.
+	const float ModeBurstScale = ModePeekConfidenceScale(Ctx.Companion, TickTuning, true);
+	const float ModePauseScale = 1.f / FMath::Max(ModeBurstScale, KINDA_SMALL_NUMBER);
+
 	if (!bReloadingNow)
 	{
-		BurstTimer -= DeltaSeconds;
+		BurstTimer -= bIsFiringBurst ? DeltaSeconds / ModeBurstScale : DeltaSeconds;
 
 		if (bIsFiringBurst && BurstTimer <= 0.0f)
 		{
@@ -5048,7 +5138,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=burst-end-open"), *Ctx.Companion->GetName());
 			Ctx.Companion->StopWeaponFire();
 			bIsFiringBurst = false;
-			BurstTimer = FirePauseDuration;
+			BurstTimer = FirePauseDuration * ModePauseScale;
 		}
 		else if (!bIsFiringBurst && BurstTimer <= 0.0f)
 		{

@@ -62,8 +62,9 @@ protected:
 
 	// --- Designer-tunable per-mode display ---
 
+	/** Label for ECompanionMode::Normal — presented as "Defensive"; the enumerator keeps its name. */
 	UPROPERTY(EditAnywhere, Category = "Companion|Mode")
-	FText NormalLabel = NSLOCTEXT("CompanionMode", "Normal", "NORMAL");
+	FText NormalLabel = NSLOCTEXT("CompanionMode", "Defensive", "DEFENSIVE");
 
 	UPROPERTY(EditAnywhere, Category = "Companion|Mode")
 	FText CombatLabel = NSLOCTEXT("CompanionMode", "Combat", "COMBAT");

@@ -94,6 +94,25 @@ public:
 	void StopRoute(bool bAborted);
 
 	/**
+	 * Installs Route as the companion's facing reference: while following the player it faces the way
+	 * that route runs. The route is never walked, and movement, formation and follow distance are all
+	 * untouched. One reference is live at a time — installing another replaces it.
+	 * Rejects a route that is null, not flagged bUseAsFacingReference, or shorter than 2 waypoints,
+	 * and clears the existing reference when it does, so a mis-set trigger can't leave the previous
+	 * section's direction quietly running.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Route")
+	void SetFacingReferenceRoute(ACompanionRoute* Route);
+
+	/** The live facing reference, or null when the companion has none. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Route")
+	ACompanionRoute* GetFacingReferenceRoute() const;
+
+	/** Uninstalls the facing reference — the companion reverts to its default facing behaviour. */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Route")
+	void ClearFacingReferenceRoute();
+
+	/**
 	 * AI-safe teleport. Always projects the destination onto the NavMesh first, then cancels any
 	 * active traversal, stops the current move order and teleports -- so the pawn never lands
 	 * off-navmesh and no stale AI order survives the move. Returns the real move result; false means
@@ -129,6 +148,13 @@ private:
 	TObjectPtr<UAISenseConfig_Hearing> HearingConfig;
 
 	TWeakObjectPtr<APawn> CachedPlayerCharacter;
+
+	/** Live facing reference (see SetFacingReferenceRoute). Weak because the route actor belongs to the
+	 *  level, not to us, and level streaming can pull it out from under an installed reference.
+	 *  Deliberately survives player death, revive and ExecuteWarpBehindPlayer: it describes which way
+	 *  the level section runs, not anything about the companion's own state. Only a later trigger, a
+	 *  Clear Facing Reference trigger, or unpossession takes it away. */
+	TWeakObjectPtr<ACompanionRoute> FacingReferenceRoute;
 
 	// Live-fight signal (see NoteAlertedThreat). Time is world seconds; negative = never.
 	FVector LastAlertedThreatLocation = FVector::ZeroVector;

@@ -122,6 +122,42 @@ private:
 	void UpdateStealthCrouchMirror(ACompanionCharacter& Companion, const APawn* PlayerPawn,
 		const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
 
+	// --- Post-fight weapon-up hold (the gun stays up for a mode-scaled beat after the last target
+	// dies, WITHOUT holding the dead enemy's bearing; see the combat-decay branch in TickNode) ---
+
+	/** World time the current hold started. Stamped on the same target-loss edge that latches
+	 *  bLoweredOnTargetLoss. Deliberately a stamp and not a countdown: two other paths latch that
+	 *  flag without arming a hold (stealth re-pin, wave-overwatch release edge), and a stale stamp
+	 *  reads as "long expired" where a stale countdown would read as "raise the weapon again". */
+	float WeaponUpHoldStartTime = -1e9f;
+
+	/** True while the hold owns posture AND its own forward focal. Gates the per-tick low-ready
+	 *  assert to the hold's own window: once it falls the branch goes quiet for the rest of the decay
+	 *  window, so it cannot fight ApplyWatchFacing's stance at service cadence (that flip-flop fired
+	 *  the BlueprintAssignable OnLowReadyAimChanged eight times a second). */
+	bool bWeaponUpHoldAsserted = false;
+
+	/** The forward focal the hold wrote, kept so its release can be compare-guarded like every other
+	 *  focal release in this file. */
+	FVector WeaponUpHoldFocalPoint = FVector::ZeroVector;
+
+	/** Seconds the weapon stays up after the last target is lost, by mode: Combat holds longest,
+	 *  Defensive (ECompanionMode::Normal) briefly, Stealth never raises at all. */
+	float GetWeaponUpHoldSeconds(const ACompanionCharacter& Companion,
+		const UCompanionTuningDataAsset* Tuning) const;
+
+	/** Gives the hold a facing of its own: a focal pushed straight out along the pawn's CURRENT
+	 *  forward, at view height. Load-bearing, not cosmetic — the anim raises the weapon only on
+	 *  IsScriptedAiming() or (Combat && !IsLowReadyAim() && bFocusLive), and bFocusLive is just
+	 *  "is the Gameplay focal a valid location". Clearing the focal on the arm edge (the obvious
+	 *  reading of "stop staring at the corpse") therefore destroys the hold's own precondition and
+	 *  the weapon never comes up. Anchoring on the pawn's own forward keeps the gun up without
+	 *  re-pointing it at the dead enemy's bearing, which is the stare being removed. */
+	void ArmWeaponUpHoldFocal(ACompanionAIController& Controller, const ACompanionCharacter& Companion);
+
+	/** Drops the hold's forward focal if it is still the one we wrote. */
+	void ReleaseWeaponUpHoldFocal(ACompanionAIController& Controller);
+
 	// --- Post-combat overwatch state (weapon held ready on the chokepoint/bearing the threat came
 	// from after the last kill; see UpdatePostCombatOverwatch/ComputeOverwatchAimPoint) ---
 
@@ -153,9 +189,17 @@ private:
 	 *  the firing line cycle overwatch END/START. Reset by any successful refresh and by the end. */
 	int32 OverwatchRefreshFailures = 0;
 
+	/** True while the Director has a wave live. Gates overwatch ENTRY (see bOverwatchWaveOnly): the
+	 *  same hold reads as covering the door between squads during a wave and as staring at a corpse
+	 *  after an ordinary room clear. */
+	bool IsDirectorWaveActive(const ACompanionCharacter& Companion) const;
+
 	/** Runs the post-fight hold inside the combat-decay branch: enters on the fresh target-loss
 	 *  edge, faces the computed aim point weapon-up each tick, breaks on player-left / new owner /
-	 *  self-movement / timer cap. Returns true while it owns aim/focus this tick. */
+	 *  self-movement / timer cap. Returns true while it owns aim/focus this tick.
+	 *  Entry is REFUSED outside a Director wave while the tuning's bOverwatchWaveOnly is set — an
+	 *  already-running hold is never cut short by that gate, so a wave ending mid-hold can't snap the
+	 *  weapon down on the frame of its own last kill. */
 	bool UpdatePostCombatOverwatch(ACompanionAIController& Controller, ACompanionCharacter& Companion,
 		const APawn* PlayerPawn, const UCompanionTuningDataAsset* Tuning,
 		bool bTakedownOwnsAim, bool bPlayerDBNO, float DeltaSeconds);
@@ -287,21 +331,37 @@ private:
 	 *  leaking the old one for the rest of the watch. */
 	bool bWatchStanceStealth = false;
 
-	// --- F1 ambient facing state (idle scan-glance roll + focal dedup; see
-	// ComputeAttentionYaw/ApplyAmbientFacing/SetAmbientFocalDeduped) ---
+	// --- F1 ambient facing state (idle scan-glance roll) + the focal dedup cache shared by every
+	// non-combat facing tier (see ComputeAttentionYaw/ApplyAmbientFacing/SetNonCombatFocalDeduped) ---
 
 	float AmbientScanTimer = 0.f;
 	float AmbientScanNextInterval = 0.f;
 	float AmbientScanOffsetDeg = 0.f;
-	FVector LastAmbientFocalPoint = FVector::ZeroVector;
+	/** Last focal written by ANY non-combat tier (route facing or ambient). Doubles as the "is this
+	 *  focal still ours" reference for the Tier-0 hand-off and the route-facing release. */
+	FVector LastNonCombatFocalPoint = FVector::ZeroVector;
+
+	// --- Route facing reference state (face the way the level section runs while following; see
+	// ApplyRouteFacingReference) ---
+
+	/** True while the route facing tier owns the Gameplay focal, so a release only ever drops a
+	 *  focal we actually wrote. */
+	bool bRouteFacingOwnsFocal = false;
+
+	/** Latched while the companion is travelling AGAINST the reference route (sprinting back to
+	 *  catch the player up) — it then faces its own direction of travel instead of the route line.
+	 *  Hysteretic (separate enter/exit dots) because a single threshold flapped every time a
+	 *  formation adjustment swung the velocity across it. */
+	bool bRouteFacingBacktracking = false;
 
 	/**
 	 * Arbitrates non-combat facing/stance every tick, after the posture chain settles. Priority
 	 * ladder: Tier 0 yields to any system that already owns aim/focus/stance this tick (combat
-	 * target, ready-threat, revive, takedown, traversal, route, moving/non-Loot command, DBNO); Tier 1
-	 * (F3) watches the nearest visible/lingering threat; Tier 2 (F1) is ambient path-look-ahead or
-	 * idle attention-yaw facing. Never writes the combat-target key, never fires, never flips
-	 * posture to Combat.
+	 * target, ready-threat, overwatch, wave hold, revive, takedown, traversal, route, moving/non-Loot
+	 * command, DBNO); Tier 1 (F3) watches the nearest visible/lingering threat; Tier 2 faces along
+	 * the installed route facing reference; Tier 3 (F1) is ambient path-look-ahead or idle
+	 * attention-yaw facing. Never writes the combat-target key, never fires, never flips posture to
+	 * Combat.
 	 */
 	void UpdateNonCombatFacing(ACompanionAIController& Controller, ACompanionCharacter& Companion,
 		UBlackboardComponent& BB, APawn* PlayerPawn, const UCompanionTuningDataAsset* Tuning,
@@ -322,11 +382,38 @@ private:
 	 *  scan-glance offset — re-rolls the offset/interval when the scan timer expires. */
 	float ComputeAttentionYaw(const APawn& PlayerPawn, const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
 
-	/** Path look-ahead while moving; idle attention-yaw (with don't-turn-away guard + dead zone)
-	 *  otherwise. No-ops when bAmbientFacingEnabled is off. */
+	/** Tier 2: faces along the route the controller has installed as this section's facing reference.
+	 *  The focal is anchored at the PAWN and pushed along the route heading — never at the route's
+	 *  own look-ahead point, which would rotate facing by the companion's lateral offset from the
+	 *  line (68 degrees at the default 2000 cm range gate) and reverse past the final waypoint.
+	 *  Returns true while it owns facing this tick; releases its focal on every refusal path. */
+	bool ApplyRouteFacingReference(ACompanionAIController& Controller,
+		const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning);
+
+	/** True while the companion is close enough to the reference route for that route's direction to
+	 *  still describe the space it is standing in. 2D distance PLUS a separate storey gate: DemoMap
+	 *  is a stacked skyscraper, and a 3D-only test keeps a floor-2 reference live on floor 1 (the
+	 *  lesson already baked into OverwatchDoorMaxZDelta and FollowMaxZDelta). 0 = unlimited, on both. */
+	bool IsRouteFacingInRange(const FVector& PawnLocation, const FVector& RoutePoint,
+		const UCompanionTuningDataAsset* Tuning) const;
+
+	/** Advances the backtrack hysteresis against this tick's travel direction and returns true while
+	 *  the companion should face its own heading rather than the route's. Below the minimum heading
+	 *  speed the latch is left exactly where it is — a pause mid-catch-up must not flick facing back
+	 *  to the route line for one tick and then away again. */
+	bool UpdateRouteBacktrackLatch(const ACompanionCharacter& Companion, const FVector& RouteHeading,
+		const UCompanionTuningDataAsset* Tuning);
+
+	/** Drops the route facing focal if it is still the one we wrote (compare-guarded like every other
+	 *  focal release here) and clears both route facing latches. */
+	void ReleaseRouteFacingFocal(ACompanionAIController& Controller);
+
+	/** Tier 3: path look-ahead while moving; idle attention-yaw (with don't-turn-away guard + dead
+	 *  zone) otherwise. No-ops when bAmbientFacingEnabled is off. */
 	void ApplyAmbientFacing(ACompanionAIController& Controller, const ACompanionCharacter& Companion,
 		const APawn* PlayerPawn, const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
 
-	/** Skips a redundant SetFocalPoint when Point hasn't meaningfully moved since the last call. */
-	void SetAmbientFocalDeduped(ACompanionAIController& Controller, const FVector& Point);
+	/** Shared focal setter for every non-combat tier. Skips the write only when the point hasn't
+	 *  meaningfully moved AND the controller's live Gameplay focal is still the one we cached. */
+	void SetNonCombatFocalDeduped(ACompanionAIController& Controller, const FVector& Point);
 };

@@ -203,6 +203,11 @@ void ACompanionAIController::OnUnPossess()
 	TimeOnDifferentLevel = 0.f;
 	bWarpRefusalWarned = false;
 
+	// The reference is scoped to the pawn this controller drives. Death and revive don't unpossess,
+	// so this doesn't cost the player their section direction — it only stops a recycled controller
+	// inheriting the last pawn's facing.
+	FacingReferenceRoute.Reset();
+
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearAllTimersForObject(this);
 
@@ -643,4 +648,47 @@ void ACompanionAIController::StopRoute(bool bAborted)
 
 	UE_LOG(LogCompanionAI, Log, TEXT("%s: StopRoute (aborted=%d)"),
 		*GetName(), bAborted ? 1 : 0);
+}
+
+// ---------------------------------------------------------------------
+// Facing reference — which way the current level section runs. Read by the companion state service
+// while following; deliberately holds no blackboard key, since nothing in the BT branches on it.
+// ---------------------------------------------------------------------
+
+void ACompanionAIController::SetFacingReferenceRoute(ACompanionRoute* Route)
+{
+	// Name the check that failed. A facing reference that quietly does nothing is invisible in PIE,
+	// and the ways to get it wrong — untick the flag, point the trigger at a one-waypoint marker —
+	// all look identical from the level.
+	const TCHAR* Rejection = nullptr;
+	if (!IsValid(Route))                    Rejection = TEXT("route is null or being destroyed");
+	else if (!Route->bUseAsFacingReference) Rejection = TEXT("bUseAsFacingReference is not ticked on the route");
+	else if (Route->NumPoints() < 2)        Rejection = TEXT("route has fewer than 2 waypoints, so it has no direction");
+
+	if (Rejection)
+	{
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("%s: SetFacingReferenceRoute(%s) rejected — %s. Any existing reference has been cleared."),
+			*GetName(), *GetNameSafe(Route), Rejection);
+		FacingReferenceRoute.Reset();
+		return;
+	}
+
+	FacingReferenceRoute = Route;
+
+	UE_LOG(LogCompanionAI, Log, TEXT("%s: facing reference set to %s (%d pts)"),
+		*GetName(), *Route->GetName(), Route->NumPoints());
+}
+
+ACompanionRoute* ACompanionAIController::GetFacingReferenceRoute() const
+{
+	return FacingReferenceRoute.Get();
+}
+
+void ACompanionAIController::ClearFacingReferenceRoute()
+{
+	if (const ACompanionRoute* Previous = FacingReferenceRoute.Get())
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: facing reference cleared (was %s)"), *GetName(), *Previous->GetName());
+
+	FacingReferenceRoute.Reset();
 }

@@ -1439,6 +1439,29 @@ float UEnemyAwarenessComponent::GetTimeSinceDamagedBy(const AActor* Pawn) const
 	return World->GetTimeSeconds() - *Stamp;
 }
 
+bool UEnemyAwarenessComponent::HasLiveKnowledgeOf(const AActor* Actor, float MemorySeconds) const
+{
+	if (!IsValid(Actor)) return false;
+
+	// SuspicionTracks keys on TWeakObjectPtr<AActor> while DamageTimesByAttacker keys on
+	// TWeakObjectPtr<const AActor> — the two maps disagree, and TWeakObjectPtr's pointer constructor
+	// is constrained to convertible pointers, so a const AActor* simply will not form the key here.
+	// The cast is for the lookup only; the track is read through a const pointer. Do not "fix" the
+	// key type instead — 14 sites write these tracks through non-const actors.
+	const FSuspicionTrack* Track = SuspicionTracks.Find(const_cast<AActor*>(Actor));
+	if (!Track) return false;
+
+	// A cloaked companion's track is stale by definition (GetExtraKnownThreats drops it the same way).
+	if (IsCompanionSightCloaked(Actor)) return false;
+
+	if (Track->bSighted) return true;
+	if (MemorySeconds <= 0.f) return false;
+
+	const UWorld* World = GetWorld();
+	if (!World) return false;
+	return (World->GetTimeSeconds() - Track->LastStimulusTime) <= MemorySeconds;
+}
+
 void UEnemyAwarenessComponent::StampTrack(FSuspicionTrack& Track, const FVector& Location) const
 {
 	Track.LastStimulusLocation = Location;

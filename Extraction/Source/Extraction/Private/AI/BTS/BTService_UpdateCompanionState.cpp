@@ -17,6 +17,7 @@
 #include "AI/CompanionTuningDataAsset.h"
 #include "Companion/CompanionTypes.h"
 #include "Companion/CompanionCommandTypes.h" // ECompanionCommand — non-combat facing Tier-0 yield check
+#include "Companion/CompanionRoute.h"        // route facing reference geometry (Tier 2 non-combat facing)
 #include "Character/ExtractionPlayerInterface.h"
 #include "GameFramework/Pawn.h"      // APawn::GetVelocity/GetBaseAimRotation for ambient facing
 #include "GameFramework/Character.h" // ACharacter::bIsCrouched for the stealth crouch-mirror
@@ -38,6 +39,7 @@
 #include "World/DoorBase.h"              // post-combat overwatch aims at the chokepoint door
 #include "World/DoorRegistrySubsystem.h" // portal-path door lookup toward the threat memory
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics CVar
+#include "DrawDebugHelpers.h"    // companion.RouteFacingDebug heading arrow
 
 // companion.AimLog 1 — per-service-tick dump of everything that drives the companion's aim/facing
 // (target pick + provenance, ready-only threat, takedown/route yields, focal point, low-ready).
@@ -45,6 +47,17 @@
 static TAutoConsoleVariable<int32> CVarCompanionAimLog(
 	TEXT("companion.AimLog"), 0,
 	TEXT("1 = log companion aim/stance state each UpdateCompanionState tick."));
+
+// companion.RouteFacingDebug 1 — draws the heading the route facing tier is actually applying (cyan
+// along the route line, magenta while the backtrack latch holds). Its own CVar rather than a re-use
+// of companion.RouteDebug, which CompanionRoute.cpp already registers — registering the same name
+// twice asserts. Read via GetValueOnGameThread() AT THE POINT OF USE, never through a cached
+// IConsoleVariable*: a Live Coding patch left exactly that cached pointer dangling and crashed
+// ACompanionRoute::BeginPlay on 2026-06-26 (see CompanionRoute.cpp:53-57).
+static TAutoConsoleVariable<int32> CVarCompanionRouteFacingDebug(
+	TEXT("companion.RouteFacingDebug"), 0,
+	TEXT("1 = draw the companion's applied route-facing heading (cyan = route, magenta = backtracking)."),
+	ECVF_Cheat);
 
 // companion.FireDebug is registered once in WeaponBase.cpp — re-query by name here to avoid a
 // duplicate CVar registration across translation units.
@@ -269,6 +282,24 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	const float StealthPinTime = Companion->GetStealthPinTime();
 	bool bFreshEnvelopeCombatEntry = false;
 
+	// Widened acquisition: an enemy that has engaged, damaged, or is actively hunting the COMPANION
+	// counts as a valid target even when it has never detected the player. Without this the companion
+	// ignored a Searching enemy that had just shot it — "don't start fights the player is avoiding"
+	// was being applied to a fight the enemy had already started.
+	//
+	// bWidenGate is Stealth's SECOND structural layer, not a convenience: the absolute veto further
+	// down (BestTarget = nullptr while stealth is unbroken) is the first. Both stay — Stealth must be
+	// byte-for-byte unchanged, and forcing the widened clause false here means an enemy that damaged
+	// the companion in a previous mode can never even enter selection while sneaking.
+	const bool bWidenGate = (Mode != ECompanionMode::Stealth);
+	const float EngagedCompanionMemory = RangeTuning ? RangeTuning->EngagedCompanionMemorySeconds : 4.f;
+
+	// Combat mode is weapons-free, so the widened clause can never change its answer there. Hoisted
+	// so both scan loops can short-circuit the whole permission test in that mode: HasEngagedCompanion
+	// is a controller cast, two TMap::Finds and a cloak check that may reach the Director subsystem,
+	// and running it per unaware candidate only to discard the result is pure waste.
+	const bool bWeaponsFree = CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Mode);
+
 	// Shared ignore list for per-candidate eye-line traces (self + weapon + attached actors) — matches
 	// the final LoS filter and the combat task's trace so acquisition and firing agree on visibility.
 	TArray<AActor*, TInlineAllocator<4>> SelectIgnoredAttached;
@@ -370,7 +401,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 		const float DistSq = FVector::DistSquared(MyLocation, Actor->GetActorLocation());
 
-		// Normal/Stealth: don't engage enemies that haven't detected the player (no first shot).
+		// Defensive/Stealth: don't engage enemies that haven't detected the player (no first shot) —
+		// unless they have already engaged the COMPANION, which is a fight the player is not avoiding.
 		// Combat mode is weapons-free — unaware enemies are valid targets.
 		// Non-AEnemyCharacter actors with the enemy tag keep current behavior (treat as engageable).
 		if (const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Actor))
@@ -382,8 +414,12 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				bAnyEnemyDetectedPlayer = true;
 				bFreshEnvelopeCombatEntry |= Enemy->GetTimeEnteredCombat() > StealthPinTime;
 			}
-			// Exposure changes enemy sight, not permission to acquire an unaware target.
-			else if (!CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Mode))
+			// Exposure changes enemy sight, not permission to acquire an unaware target. Two
+			// short-circuits keep the widened clause cheap: this else already restricts it to
+			// candidates that fail today, and !bWeaponsFree drops it entirely in Combat mode, where
+			// CanAcquireTarget would return true on its own clause regardless.
+			else if (!bWeaponsFree && !CompanionSearchRoomPolicy::CanAcquireTarget(Mode, false,
+				bWidenGate && Enemy->HasEngagedCompanion(Companion, EngagedCompanionMemory)))
 				continue;
 		}
 
@@ -445,8 +481,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 						bAnyEnemyDetectedPlayer = true;
 						bFreshEnvelopeCombatEntry |= ProxEnemy->GetTimeEnteredCombat() > StealthPinTime;
 					}
-					// Same no-first-shot policy as the sight pass.
-					else if (!CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Mode))
+					// Same no-first-shot policy — and the same companion-aware widening, with the
+					// same Combat-mode short-circuit — as the sight pass. This is the channel that
+					// catches an enemy that shot the companion from outside its 180-degree sight cone.
+					else if (!bWeaponsFree && !CompanionSearchRoomPolicy::CanAcquireTarget(Mode, false,
+						bWidenGate && ProxEnemy->HasEngagedCompanion(Companion, EngagedCompanionMemory)))
 						continue;
 				}
 
@@ -1082,6 +1121,20 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				Companion->Bark(ECompanionBarkType::ContactCombat);
 		}
 		bLoweredOnTargetLoss = false;
+		// A live target/threat ends any post-fight hold outright, and the focal has to be released
+		// HERE rather than assumed gone: of the three arms below only the revive one clears it
+		// unconditionally — the ready-threat arm writes a focal only when !bAimOwnedElsewhere, and
+		// the plain combat arm touches posture alone. Released before those arms run so an owner that
+		// does write its own focal overwrites a cleared channel, and compare-guarded so this is a
+		// no-op on the arms that already claimed it. Dropped here rather than left to expire because
+		// the flag must never outlive the arm edge that set it: posture can flip to Exploration on
+		// the same tick a longer hold is still nominally running, after which the decay branch that
+		// owns the falling edge stops evaluating entirely.
+		if (bWeaponUpHoldAsserted)
+		{
+			bWeaponUpHoldAsserted = false;
+			ReleaseWeaponUpHoldFocal(*Controller);
+		}
 		// Revive hold owns aim/stance: the kneeling revive must not fight a per-tick ADS re-assert
 		// (the aim layer also overrides the montage slot pose — weapon-up while kneeling).
 		if (Companion->IsRevivingPlayer())
@@ -1210,12 +1263,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 		if (!bOverwatchOwnsAim)
 		{
-			// Lower the weapon the moment the hold releases (or never engaged) — the
-			// ExploreReturnDelay below is BT posture stability, not a reason to hold a stale ADS
-			// pose aimed at a dead enemy's bearing. Edge-guarded by bLoweredOnTargetLoss (reset
-			// whenever a target/threat is live) so the lower still fires after a branch switch
-			// mid-accrual (e.g. stealth re-pin -> mode change). Yields to a commanded takedown,
-			// which owns aim/focus while armed.
+			// Drop the STARE the moment the hold releases (or never engaged) — the ExploreReturnDelay
+			// below is BT posture stability, not a reason to keep pointing at a dead enemy's bearing.
+			// Edge-guarded by bLoweredOnTargetLoss (reset whenever a target/threat is live) so the
+			// edge still fires after a branch switch mid-accrual (e.g. stealth re-pin -> mode change).
+			// Yields to a commanded takedown, which owns aim/focus while armed.
 			if (bWaveHold && !bTakedownOwnsAim)
 			{
 				// Wave hold keeps the gun up through the gaps between squad spawns: the fight is
@@ -1224,13 +1276,73 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				// while the far wider wave leash still holds, leaving nobody to raise the weapon.
 				Companion->SetLowReadyAim(false);
 			}
-			else if (!bLoweredOnTargetLoss && !bTakedownOwnsAim)
+			else if (!bTakedownOwnsAim)
 			{
-				Companion->SetLowReadyAim(true);
-				// Same stale-aim-target backstop as the stealth re-pin branch above.
-				Companion->SetAimTarget(nullptr);
-				Controller->ClearFocus(EAIFocusPriority::Gameplay);
-				bLoweredOnTargetLoss = true;
+				const UWorld* HoldWorld = Companion->GetWorld();
+				const float HoldNow = IsValid(HoldWorld) ? HoldWorld->GetTimeSeconds() : 0.f;
+				// No world means no clock, so no hold — fall back to the plain edge-lower rather than
+				// start a timer that can never expire.
+				const float HoldSeconds = IsValid(HoldWorld)
+					? GetWeaponUpHoldSeconds(*Companion, RangeTuning) : 0.f;
+
+				// Post-fight weapon-up hold. The aim-target clear and the bLoweredOnTargetLoss latch
+				// still fire on the FIRST no-target tick, exactly as the plain lower this replaces
+				// did. Both are load-bearing:
+				//   - UpdatePostCombatOverwatch's entry veto reads the latch, so moving it later
+				//     would silently re-open overwatch entry for the whole decay window;
+				//   - a stale aim target forces the ADS pose regardless of low-ready (the anim's
+				//     actor-target branch bypasses it — see the stealth re-pin branch above), so
+				//     keeping the target IS the "stares at where the body dropped" complaint.
+				// What does NOT happen on that edge any more is a bare ClearFocus: the anim raises
+				// the weapon only on IsScriptedAiming() or (Combat && !IsLowReadyAim() && bFocusLive),
+				// and bFocusLive is simply "the Gameplay focal is a valid location". Clearing it here
+				// destroyed the hold's own precondition, so with ambient facing shipped disabled and
+				// no route reference installed the gun never actually came up. ArmWeaponUpHoldFocal
+				// gives the hold a facing of its own instead — straight out along the pawn's forward,
+				// which keeps the weapon up WITHOUT re-pointing it at the dead enemy's bearing.
+				if (!bLoweredOnTargetLoss)
+				{
+					bLoweredOnTargetLoss = true;
+					WeaponUpHoldStartTime = HoldNow;
+					Companion->SetAimTarget(nullptr);
+
+					bWeaponUpHoldAsserted = HoldSeconds > 0.f;
+					if (bWeaponUpHoldAsserted)
+					{
+						ArmWeaponUpHoldFocal(*Controller, *Companion);
+					}
+					else
+					{
+						// No hold configured (Stealth, or a designer zeroing the lever): the
+						// original single-edge lower, unchanged.
+						Controller->ClearFocus(EAIFocusPriority::Gameplay);
+						Companion->SetLowReadyAim(true);
+					}
+				}
+
+				// Posture is written only while the hold is live, plus exactly one write on the
+				// falling edge — after which this branch goes silent for the rest of the decay
+				// window. Asserting it every tick regardless fought ApplyWatchFacing, which sets
+				// low-ready false for a Defensive watch and is itself edge-guarded: the pair produced
+				// two transitions per service tick, i.e. eight OnLowReadyAimChanged broadcasts a
+				// second into whatever Blueprint graphs bind that delegate.
+				if (bWeaponUpHoldAsserted)
+				{
+					// HoldSeconds > 0 is re-tested, not assumed from the arm edge: if the world goes
+					// null on a LATER tick both HoldNow and HoldSeconds collapse to 0, and the elapsed
+					// compare alone reads (0 - StartTime) < 0 as TRUE against any real stamp — the hold
+					// would then assert weapon-up forever and never reach its own release.
+					if (HoldSeconds > 0.f && (HoldNow - WeaponUpHoldStartTime) < HoldSeconds)
+					{
+						Companion->SetLowReadyAim(false);
+					}
+					else
+					{
+						bWeaponUpHoldAsserted = false;
+						Companion->SetLowReadyAim(true);
+						ReleaseWeaponUpHoldFocal(*Controller);
+					}
+				}
 			}
 
 			// Posture stays Combat for the whole wave. Zeroed rather than merely left un-accrued: a
@@ -1662,8 +1774,24 @@ namespace
 	constexpr float OverwatchMinAimStandoff = 200.f;
 
 	// Tolerance (cm) for every "is this focal point still the one WE wrote" compare in the file:
-	// overwatch end, Tier-0-yield hand-off, and watch-drop clean-up.
+	// overwatch end, Tier-0-yield hand-off, route-facing release, and watch-drop clean-up.
 	constexpr float OverwatchFocalMatchTolerance = 1.f;
+
+	// Route facing reference fallbacks — used only when the controller has no tuning asset. Each one
+	// mirrors the shipped default on UCompanionTuningDataAsset (Companion|Facing), so a missing asset
+	// behaves like an unedited one instead of silently changing the feel.
+	constexpr float RouteFacingLookAheadFallback = 800.f;      // cm along the route line; this IS the corner sweep
+	constexpr float RouteFacingMaxDistanceFallback = 2000.f;   // 2D range gate to the route (0 = unlimited)
+	constexpr float RouteFacingMaxZDeltaFallback = 250.f;      // storey gate, separate from the 2D one (0 = unlimited)
+	constexpr float RouteFacingMinHeadingSpeedFallback = 120.f; // cm/s below which travel direction is not honest
+	constexpr float RouteFacingBacktrackEnterDotFallback = -0.15f; // travel vs route alignment that latches backtracking
+	constexpr float RouteFacingBacktrackExitDotFallback = 0.35f;   // and the wider one that releases it
+
+	// companion.RouteFacingDebug arrow geometry. The lifetime spans one service tick (Interval 0.25 +
+	// RandomDeviation 0.05) so the arrow reads as continuous rather than strobing.
+	constexpr float RouteFacingDebugArrowSize = 24.f;
+	constexpr float RouteFacingDebugThickness = 3.f;
+	constexpr float RouteFacingDebugLifetime = 0.35f;
 
 	// Consecutive failed aim-point refreshes before the hold is dropped. A refusal is one trace
 	// sample on a ~1s cadence, so ending on the first one had no debounce at all: anything transient
@@ -1698,6 +1826,65 @@ namespace
 		// Out of skips: treat the last hit as geometry rather than claim a clear line.
 		return true;
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Post-fight weapon-up hold
+// ---------------------------------------------------------------------------
+// Placed below the anonymous namespace above rather than beside UpdateStealthCrouchMirror so the
+// release can share OverwatchFocalMatchTolerance with every other focal compare in the file.
+
+float UBTService_UpdateCompanionState::GetWeaponUpHoldSeconds(
+	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning) const
+{
+	// Fallbacks mirror the tuning asset's own defaults, so a missing asset behaves like an unedited
+	// one rather than silently disabling the hold.
+	constexpr float CombatHoldFallback = 3.f;
+	constexpr float DefensiveHoldFallback = 1.f;
+
+	switch (Companion.GetMode())
+	{
+	case ECompanionMode::Combat:
+		return Tuning ? Tuning->CombatWeaponUpHoldSeconds : CombatHoldFallback;
+	case ECompanionMode::Normal: // "Defensive" on screen; the enumerator name is unchanged
+		return Tuning ? Tuning->DefensiveWeaponUpHoldSeconds : DefensiveHoldFallback;
+	default:
+		// Stealth never raises on a target loss — holding a firing line is the one thing it must not
+		// do. (The combat-decay branch is not even reachable while stealth is pinned; this is the
+		// structural statement of intent, and zero collapses the caller to a plain single-edge lower.)
+		return 0.f;
+	}
+}
+
+void UBTService_UpdateCompanionState::ArmWeaponUpHoldFocal(
+	ACompanionAIController& Controller, const ACompanionCharacter& Companion)
+{
+	// Distance is not a feel lever: the Z override below forces the gaze level, so this only has to
+	// be far enough out that ordinary formation shuffling can't swing the yaw. Deliberately NOT a
+	// tuning field — there is nothing here a designer would want to tune.
+	constexpr float WeaponUpHoldFocalDistance = 800.f;
+
+	// The pawn's CURRENT forward, sampled once on the arm edge. Not the threat bearing (that is the
+	// stare being removed) and not a running re-sample (that would chase the body yaw it is itself
+	// driving, since the companion runs bUseControllerDesiredRotation).
+	WeaponUpHoldFocalPoint = Companion.GetActorLocation()
+		+ Companion.GetActorForwardVector() * WeaponUpHoldFocalDistance;
+	WeaponUpHoldFocalPoint.Z = Companion.GetPawnViewLocation().Z;
+	Controller.SetFocalPoint(WeaponUpHoldFocalPoint, EAIFocusPriority::Gameplay);
+}
+
+void UBTService_UpdateCompanionState::ReleaseWeaponUpHoldFocal(ACompanionAIController& Controller)
+{
+	// Compare-guarded like every other focal release here. The route facing tier overwrites this
+	// point later in the same tick whenever a reference is installed, so on that path the compare
+	// fails and the tier's own focal is left alone — the two compose without either clearing the
+	// other, and the hardened dedup in SetNonCombatFocalDeduped re-asserts if this clear does land.
+	if (Controller.GetFocalPointForPriority(EAIFocusPriority::Gameplay)
+		.Equals(WeaponUpHoldFocalPoint, OverwatchFocalMatchTolerance))
+	{
+		Controller.ClearFocus(EAIFocusPriority::Gameplay);
+	}
+	WeaponUpHoldFocalPoint = FVector::ZeroVector;
 }
 
 bool UBTService_UpdateCompanionState::UpdateWaveHold(
@@ -1874,6 +2061,16 @@ bool UBTService_UpdateCompanionState::IsWaveCombatStale(
 	return true;
 }
 
+bool UBTService_UpdateCompanionState::IsDirectorWaveActive(const ACompanionCharacter& Companion) const
+{
+	// Queried live rather than cached on a member: the same call chain already resolves this
+	// subsystem for the wave threat fallback, the tick is 0.25s, and a cached per-tick copy would
+	// create a silent "must be refreshed before overwatch runs" ordering invariant for no gain.
+	const UWorld* World = Companion.GetWorld();
+	const UEnemyDirectorSubsystem* Director = World ? World->GetSubsystem<UEnemyDirectorSubsystem>() : nullptr;
+	return Director && Director->IsWaveActive();
+}
+
 bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 	ACompanionAIController& Controller, ACompanionCharacter& Companion, const APawn* PlayerPawn,
 	const UCompanionTuningDataAsset* Tuning, bool bTakedownOwnsAim, bool bPlayerDBNO, float DeltaSeconds)
@@ -1898,6 +2095,24 @@ bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 
 	if (!bOverwatchActive)
 	{
+		// Wave-only ENTRY gate. The same held bearing reads completely differently either side of it:
+		// between squads of a Director wave it is covering the door, after an ordinary room clear it
+		// is staring at a corpse. Deliberately placed here and not in the bEnablePostCombatOverwatch
+		// early-out above — that path calls EndPostCombatOverwatch, which would snap the weapon down
+		// on the frame of a wave's own last kill. An already-running hold therefore always finishes
+		// on its normal terms (cap, break distance, movement) even if the wave ends underneath it.
+		// A wave hold cannot outlive an inactive wave (UpdateWaveHold requires IsWaveActive), so the
+		// hold path needs no separate waiver here.
+		if (Tuning->bOverwatchWaveOnly && !IsDirectorWaveActive(Companion))
+		{
+			// Clear the retry throttle on the refusal. Left alone, a failed entry late in wave N
+			// leaves OverwatchRefreshFailures > 0, and the FIRST entry attempt of wave N+1 then eats
+			// a full OverwatchAimRefreshInterval of throttle before it is even allowed to try.
+			OverwatchRefreshFailures = 0;
+			OverwatchAimRefreshTimer = 0.f;
+			return false;
+		}
+
 		// Enter only on the fresh target-loss edge (a branch switch that already lowered must not
 		// re-raise the gun), standing still, player nearby, with threat memory to aim from.
 		// The lowered-edge veto is waived under a wave hold: there the gun SHOULD come back up
@@ -2194,10 +2409,20 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 		// bWatchStanceApplied covers the fight-signal fallback watch, which deliberately keeps no
 		// linger (freshness is its hold, so linger is always 0 on that path) — without it a
 		// fallback-watch focal survives into a route/command approach and back-walks it.
+		// The post-fight hold's forward focal joins the compare set for the same reason: it is sampled
+		// ONCE from the pawn's forward at the arm edge, so it is a FIXED world point. It reads as
+		// "straight ahead" only on that tick — a command or route move starting mid-hold walks the
+		// companion past it within a second or two, and bUseControllerDesiredRotation then turns the
+		// body to face a point behind it. That is exactly the back-walk this hand-off exists to stop.
+		// Note the route task's own focal setter is a pure distance dedup with no live-focal check, so
+		// at a stationary waypoint dwell it would skip re-asserting and our stale point would override
+		// the designer's authored waypoint aim for the rest of the hold.
 		const bool bFocalIsOurs = !bHasTarget && !bReadyOnlyThreat
-			&& ((!LastAmbientFocalPoint.IsZero() && CurrentFocal.Equals(LastAmbientFocalPoint, OverwatchFocalMatchTolerance))
+			&& ((!LastNonCombatFocalPoint.IsZero() && CurrentFocal.Equals(LastNonCombatFocalPoint, OverwatchFocalMatchTolerance))
 				|| ((WatchThreatLingerRemaining > 0.f || bWatchStanceApplied)
-					&& CurrentFocal.Equals(WatchThreatLocation, OverwatchFocalMatchTolerance)));
+					&& CurrentFocal.Equals(WatchThreatLocation, OverwatchFocalMatchTolerance))
+				|| (bWeaponUpHoldAsserted
+					&& CurrentFocal.Equals(WeaponUpHoldFocalPoint, OverwatchFocalMatchTolerance)));
 		if (bFocalIsOurs)
 			Controller.ClearFocus(EAIFocusPriority::Gameplay);
 
@@ -2214,15 +2439,30 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 		}
 		WatchThreatLingerRemaining = 0.f;
 		// A one-shot ClearFocus elsewhere in the posture chain (revive/ready-decay/re-pin/explore)
-		// can land in the same tick as this yield — without resetting the cache, the next ambient
+		// can land in the same tick as this yield — without resetting the cache, the next non-combat
 		// tick's dedup could skip re-setting the focal point that was just cleared.
-		LastAmbientFocalPoint = FVector::ZeroVector;
+		LastNonCombatFocalPoint = FVector::ZeroVector;
+		// The route tier no longer owns anything: the hand-off above already released our focal if it
+		// was still ours, and the backtrack latch must not survive an owner's move (a route/command
+		// approach is exactly the case that drives velocity against the reference line).
+		bRouteFacingOwnsFocal = false;
+		bRouteFacingBacktracking = false;
+		// Same for the post-fight hold — it has yielded its facing to a real aim owner, which is the
+		// correct outcome. Only the facing is surrendered; posture and the bLoweredOnTargetLoss latch
+		// stay exactly where the decay branch left them, since this block owns neither.
+		bWeaponUpHoldAsserted = false;
+		WeaponUpHoldFocalPoint = FVector::ZeroVector;
 		return;
 	}
 
 	// Tier 1 (F3): watch the nearest visible/lingering threat.
 	if (ComputeWatchThreat(Controller, Companion, WatchCandidateEnemy, Tuning, DeltaSeconds))
 	{
+		// The watch tier writes its focal directly rather than through the shared dedup, so the cache
+		// must be invalidated here: left stale, a later route-facing release would compare-match the
+		// watch focal and clear it, and the route tier's own dedup could skip re-asserting on resume.
+		LastNonCombatFocalPoint = FVector::ZeroVector;
+		bRouteFacingOwnsFocal = false;
 		ApplyWatchFacing(Controller, Companion);
 		return;
 	}
@@ -2244,7 +2484,13 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 		WatchedEnemy = nullptr;
 	}
 
-	// Tier 2 (F1): ambient path look-ahead / idle attention-yaw facing.
+	// Tier 2: face the way this level section runs, when a route has been installed as its facing
+	// reference. Below Tier 0 by construction — it is the quietest thing the companion can be doing,
+	// and every system that owns aim outranks it.
+	if (ApplyRouteFacingReference(Controller, Companion, Tuning)) return;
+
+	// Tier 3 (F1): ambient path look-ahead / idle attention-yaw facing. Ships disabled
+	// (bAmbientFacingEnabled) and stays present — it is the no-reference fallback, not dead code.
 	ApplyAmbientFacing(Controller, Companion, PlayerPawn, Tuning, DeltaSeconds);
 }
 
@@ -2347,6 +2593,139 @@ void UBTService_UpdateCompanionState::ApplyWatchFacing(ACompanionAIController& C
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Tier 2 — route facing reference
+// ---------------------------------------------------------------------------
+
+bool UBTService_UpdateCompanionState::ApplyRouteFacingReference(
+	ACompanionAIController& Controller, const ACompanionCharacter& Companion,
+	const UCompanionTuningDataAsset* Tuning)
+{
+	// Master switch first, and it must RELEASE rather than simply return: a designer switching the
+	// feature off mid-section otherwise freezes the companion on the last heading it applied.
+	if (Tuning && !Tuning->bRouteFacingReferenceEnabled)
+	{
+		ReleaseRouteFacingFocal(Controller);
+		return false;
+	}
+
+	// One reference is live at a time; the controller owns install/replace/clear. A section with no
+	// reference falls straight through to today's behaviour.
+	const ACompanionRoute* Route = Controller.GetFacingReferenceRoute();
+	if (!IsValid(Route))
+	{
+		ReleaseRouteFacingFocal(Controller);
+		return false;
+	}
+
+	const FVector PawnLoc = Companion.GetActorLocation();
+	const float LookAhead = Route->GetFacingReferenceLookAhead(
+		Tuning ? Tuning->RouteFacingLookAheadDistance : RouteFacingLookAheadFallback);
+
+	// RouteHeading is the only output we face by. The look-ahead point and the projection are inputs
+	// to the range gate and the debug arrow — never to the focal; see the anchor note below.
+	FVector RouteHeading, LookAheadPoint, Projection;
+	if (!Route->GetFacingReferenceAim(PawnLoc, LookAhead, RouteHeading, LookAheadPoint, Projection)
+		|| !IsRouteFacingInRange(PawnLoc, Projection, Tuning))
+	{
+		ReleaseRouteFacingFocal(Controller);
+		return false;
+	}
+
+	// Running back against the route to catch the player up: face the way we are actually going.
+	const bool bBacktracking = UpdateRouteBacktrackLatch(Companion, RouteHeading, Tuning);
+	const FVector FacingDir = bBacktracking
+		? Companion.GetVelocity().GetSafeNormal2D()
+		: RouteHeading.GetSafeNormal2D();
+	if (FacingDir.IsNearlyZero())
+	{
+		// No honest direction this tick — a degenerate heading, or the backtrack latch still held
+		// while the companion has stopped. Release rather than invent one: it then holds its current
+		// yaw, which is precisely what it does today with no reference installed.
+		ReleaseRouteFacingFocal(Controller);
+		return false;
+	}
+
+	// ANCHORED AT THE PAWN, not at the route's look-ahead point. Facing that point instead rotates
+	// the heading by the companion's own lateral offset from the line — 68 degrees at the default
+	// 2000 cm range gate, i.e. the wall beside the corridor rather than down it, which is the exact
+	// bug this feature exists to fix — and it reverses once the companion walks past the final
+	// waypoint. The route tells us WHICH WAY the section runs; where we happen to be standing must
+	// not change that.
+	FVector Focal = PawnLoc + FacingDir * LookAhead;
+	Focal.Z = Companion.GetPawnViewLocation().Z; // level gaze — the controller preserves focal pitch
+	SetNonCombatFocalDeduped(Controller, Focal);
+	bRouteFacingOwnsFocal = true;
+
+#if ENABLE_DRAW_DEBUG
+	if (CVarCompanionRouteFacingDebug.GetValueOnGameThread() != 0)
+	{
+		if (const UWorld* DebugWorld = Companion.GetWorld())
+			DrawDebugDirectionalArrow(DebugWorld, Companion.GetPawnViewLocation(), Focal,
+				RouteFacingDebugArrowSize, bBacktracking ? FColor::Magenta : FColor::Cyan,
+				false, RouteFacingDebugLifetime, 0, RouteFacingDebugThickness);
+	}
+#endif
+
+	return true;
+}
+
+bool UBTService_UpdateCompanionState::IsRouteFacingInRange(
+	const FVector& PawnLocation, const FVector& RoutePoint, const UCompanionTuningDataAsset* Tuning) const
+{
+	const float MaxDist = Tuning ? Tuning->RouteFacingMaxDistance : RouteFacingMaxDistanceFallback;
+	if (MaxDist > 0.f && FVector::Dist2D(PawnLocation, RoutePoint) > MaxDist) return false;
+
+	// A separate storey gate, not a 3D distance test. DemoMap is a stacked skyscraper: a plain 3D
+	// radius keeps a floor-2 reference live while the companion walks floor 1 and points it down a
+	// corridor over its head. Same lesson already baked into OverwatchDoorMaxZDelta and FollowMaxZDelta.
+	const float MaxZDelta = Tuning ? Tuning->RouteFacingMaxZDelta : RouteFacingMaxZDeltaFallback;
+	return MaxZDelta <= 0.f || FMath::Abs(PawnLocation.Z - RoutePoint.Z) <= MaxZDelta;
+}
+
+bool UBTService_UpdateCompanionState::UpdateRouteBacktrackLatch(
+	const ACompanionCharacter& Companion, const FVector& RouteHeading, const UCompanionTuningDataAsset* Tuning)
+{
+	const FVector Velocity = Companion.GetVelocity();
+	const float MinSpeed = Tuning ? Tuning->RouteFacingMinHeadingSpeed : RouteFacingMinHeadingSpeedFallback;
+
+	// Below the gate there is no honest travel direction to compare against, so the latch is left
+	// exactly where it is. Resetting it on a momentary stop would swing facing back to the route line
+	// for one tick and away again the instant the companion re-accelerated — the very flap the
+	// hysteresis below exists to prevent.
+	if (Velocity.Size2D() < MinSpeed) return bRouteFacingBacktracking;
+
+	const float Alignment = FVector::DotProduct(Velocity.GetSafeNormal2D(), RouteHeading.GetSafeNormal2D());
+	const float EnterDot = Tuning ? Tuning->RouteFacingBacktrackEnterDot : RouteFacingBacktrackEnterDotFallback;
+	const float ExitDot = Tuning ? Tuning->RouteFacingBacktrackExitDot : RouteFacingBacktrackExitDotFallback;
+
+	// Asymmetric by design: entering needs travel clearly OPPOSED to the route, leaving needs it
+	// clearly WITH it. A single threshold flapped every time a lateral formation adjustment swung the
+	// velocity across it, and every flip is a visible yaw swing — body yaw follows the Gameplay focal
+	// because the companion runs bUseControllerDesiredRotation.
+	bRouteFacingBacktracking = bRouteFacingBacktracking ? (Alignment < ExitDot) : (Alignment <= EnterDot);
+	return bRouteFacingBacktracking;
+}
+
+void UBTService_UpdateCompanionState::ReleaseRouteFacingFocal(ACompanionAIController& Controller)
+{
+	// Drop the latch on every release path: whatever ended the reference (out of range, another
+	// storey, a cleared trigger) also ends the catch-up read, and a stale latch would face the next
+	// reference backwards for a tick on resume.
+	bRouteFacingBacktracking = false;
+	if (!bRouteFacingOwnsFocal) return;
+	bRouteFacingOwnsFocal = false;
+
+	// Compare-guarded like every other focal release in this file: only clear a focal that is still
+	// the one we wrote, so an owner that already claimed it this tick is left untouched.
+	if (Controller.GetFocalPointForPriority(EAIFocusPriority::Gameplay)
+		.Equals(LastNonCombatFocalPoint, OverwatchFocalMatchTolerance))
+	{
+		Controller.ClearFocus(EAIFocusPriority::Gameplay);
+	}
+	LastNonCombatFocalPoint = FVector::ZeroVector;
+}
+
 float UBTService_UpdateCompanionState::ComputeAttentionYaw(
 	const APawn& PlayerPawn, const UCompanionTuningDataAsset* Tuning, float DeltaSeconds)
 {
@@ -2391,7 +2770,7 @@ void UBTService_UpdateCompanionState::ApplyAmbientFacing(
 			// point this close would aim the weapon visibly downward the whole move.
 			FVector LookAhead = PawnLoc + ToTarget * LookAheadDist;
 			LookAhead.Z = Companion.GetPawnViewLocation().Z;
-			SetAmbientFocalDeduped(Controller, LookAhead);
+			SetNonCombatFocalDeduped(Controller, LookAhead);
 		}
 		return;
 	}
@@ -2413,14 +2792,26 @@ void UBTService_UpdateCompanionState::ApplyAmbientFacing(
 	const FVector FacingDir = FRotator(0.f, AttentionYaw, 0.f).Vector();
 	FVector IdleFocal = PawnLoc + FacingDir * 1000.f;
 	IdleFocal.Z = Companion.GetPawnViewLocation().Z; // level gaze — see the look-ahead note above
-	SetAmbientFocalDeduped(Controller, IdleFocal);
+	SetNonCombatFocalDeduped(Controller, IdleFocal);
 }
 
-void UBTService_UpdateCompanionState::SetAmbientFocalDeduped(ACompanionAIController& Controller, const FVector& Point)
+void UBTService_UpdateCompanionState::SetNonCombatFocalDeduped(
+	ACompanionAIController& Controller, const FVector& Point)
 {
 	constexpr float DedupDistSq = 25.f * 25.f;
-	if (FVector::DistSquared(LastAmbientFocalPoint, Point) < DedupDistSq) return;
 
-	LastAmbientFocalPoint = Point;
+	// Distance alone is not a sufficient dedup. Five bare ClearFocus(Gameplay) calls live outside
+	// this arbitration (the combat task's teardown and its per-tick clear, the cover statics, the
+	// explore task, the follow-route task), and any of them can land on a tick this function does NOT
+	// Tier-0-yield on. After one of those the focal is gone while the cache still holds the point we
+	// last wrote, so a pure distance test never re-asserts and a companion standing still keeps a
+	// dead yaw for as long as it stays put. Re-assert unless the controller's LIVE focal is still
+	// the one we cached.
+	const bool bPointUnchanged = FVector::DistSquared(LastNonCombatFocalPoint, Point) < DedupDistSq;
+	const bool bFocalStillOurs = Controller.GetFocalPointForPriority(EAIFocusPriority::Gameplay)
+		.Equals(LastNonCombatFocalPoint, OverwatchFocalMatchTolerance);
+	if (bPointUnchanged && bFocalStillOurs) return;
+
+	LastNonCombatFocalPoint = Point;
 	Controller.SetFocalPoint(Point, EAIFocusPriority::Gameplay);
 }

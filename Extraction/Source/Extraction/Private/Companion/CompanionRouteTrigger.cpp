@@ -56,12 +56,6 @@ void ACompanionRouteTrigger::OnTriggerOverlap(
 	APawn* OtherPawn = Cast<APawn>(OtherActor);
 	if (!IsValid(OtherPawn) || !OtherPawn->IsPlayerControlled()) return;
 
-	if (!IsValid(Route))
-	{
-		UE_LOG(LogCompanionRouteTrigger, Warning, TEXT("%s: Route is not set — trigger ignored."), *GetName());
-		return;
-	}
-
 	// Find the single companion in the world.
 	const UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
@@ -77,7 +71,29 @@ void ACompanionRouteTrigger::OnTriggerOverlap(
 		return;
 	}
 
-	CompanionController->StartRoute(Route);
+	// Checked below the controller resolve, not above it: Clear Facing Reference is an uninstall and
+	// is meant to be placed with Route deliberately left unset.
+	const bool bNeedsRoute = (Mode != ECompanionRouteTriggerMode::ClearFacingReference);
+	if (bNeedsRoute && !IsValid(Route))
+	{
+		UE_LOG(LogCompanionRouteTrigger, Warning, TEXT("%s: Route is not set — trigger ignored."), *GetName());
+		return;
+	}
+
+	switch (Mode)
+	{
+	case ECompanionRouteTriggerMode::ExecuteRoute:
+		CompanionController->StartRoute(Route);
+		break;
+
+	case ECompanionRouteTriggerMode::SetFacingReference:
+		CompanionController->SetFacingReferenceRoute(Route);
+		break;
+
+	case ECompanionRouteTriggerMode::ClearFacingReference:
+		CompanionController->ClearFacingReferenceRoute();
+		break;
+	}
 
 	if (bOneShot)
 	{

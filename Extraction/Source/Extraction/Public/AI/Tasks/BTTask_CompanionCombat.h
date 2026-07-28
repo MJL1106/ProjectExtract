@@ -109,9 +109,16 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights|LowHealth", meta = (ClampMin = "1.0"))
 	float LowHealthCooldownMultiplier = 2.0f;
 
-	/** How many consecutive Hold cycles before the companion is forced to Stand. */
+	/** How many consecutive Hold cycles before the companion is forced to Stand. Applies to Defensive
+	 *  and Combat; Stealth uses StealthMaxConsecutiveHolds instead. Dropped from 2 to 1 so a companion
+	 *  in a fight answers on the second cycle at the latest rather than sitting out two full cooldowns. */
 	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0", ClampMax = "5"))
-	uint8 MaxConsecutiveHolds = 2;
+	uint8 MaxConsecutiveHolds = 1;
+
+	/** Stealth's own hold cap, kept at the historic 2 so the mode's peek cadence is byte-for-byte
+	 *  what it was before the hold cap tightened. Stealth stays out of the mode-personality pass. */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0", ClampMax = "5"))
+	uint8 StealthMaxConsecutiveHolds = 2;
 
 	// --- Suppression ---
 
@@ -622,6 +629,29 @@ private:
 	/** Counts down between hops (and hop retries). Deliberately NOT reset by ResetTaskState — task
 	 *  restarts (target churn, the hop's own Succeeded) must not re-arm an instant hop. */
 	float CombatAdvanceHopTimer = 0.f;
+
+	/** The companion kill stamp whose free bound has already been spent. Also NOT reset by
+	 *  ResetTaskState: a task restart must not hand the same kill a second bound. */
+	float LastHopBypassKillTime = -1e9f;
+
+	/** Post-kill free bound: if the companion's last confirmed kill is inside
+	 *  CombatPostKillAdvanceWindow and has not been spent yet, clears the hop cooldown and marks the
+	 *  stamp consumed. Self-consuming on purpose — the cooldown also serves as the back-off for a
+	 *  failed candidate scan, so a bypass that merely ignored it would re-run the octree query and
+	 *  its traces every frame of the window, and one kill would chain bound after bound.
+	 *  The stamp is consumed on BOTH exits, including the one where the cooldown had already expired
+	 *  and there was nothing to clear: the caller runs the scan on any tick this returns to, so the
+	 *  bound about to commit is that kill's bound either way. Leaving it unspent on that path let the
+	 *  commit's own interval re-arm hand the same kill a second bound on the next re-entry.
+	 *  Must only be called from a point where every remaining path either runs the scan or re-arms
+	 *  the timer itself — otherwise a cleared cooldown never gets re-armed and the bound outlives
+	 *  its window. */
+	void TryConsumePostKillHopBypass(const ACompanionCharacter* Companion,
+		const UCompanionTuningDataAsset& Tuning);
+
+	/** Hold cap for the companion's current mode — StealthMaxConsecutiveHolds in Stealth, else
+	 *  MaxConsecutiveHolds. Shared by the cap test and both logs that print it. */
+	uint8 GetEffectiveMaxHolds(const ACompanionCharacter* Companion) const;
 
 	/** Combat-mode cover-to-cover bound: every CombatAdvanceHopInterval, pick the nearest cover
 	 *  that gains CombatAdvanceHopMinGain toward the threat (within leash + hop max dash, with a

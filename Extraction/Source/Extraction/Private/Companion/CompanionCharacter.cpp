@@ -476,6 +476,12 @@ void ACompanionCharacter::StampCoverCommit()
 	Bark(ECompanionBarkType::TakingCover);
 }
 
+void ACompanionCharacter::StampConfirmedKill()
+{
+	if (GetWorld())
+		LastConfirmedKillTime = GetWorld()->GetTimeSeconds();
+}
+
 void ACompanionCharacter::SetFollowCatchupPace(bool bPace)
 {
 	if (bFollowCatchupPace == bPace) return;

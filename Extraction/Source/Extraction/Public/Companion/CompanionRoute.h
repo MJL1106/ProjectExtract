@@ -63,6 +63,24 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Route|Speed", meta = (ClampMin = "0.0"))
 	float PlayerSpeedLock = 0.f;
 
+	// --- Facing reference ---
+
+	/** Lets this route be installed as the companion's facing reference by a route trigger set to
+	 *  "Set Facing Reference": while following the player normally the companion faces the way this
+	 *  route runs. It never walks the route, and formation and follow distance are untouched.
+	 *  Needs at least 2 waypoints — the direction is read off the polyline, not the actor rotation.
+	 *  Do NOT tick this on a route whose End Behavior is "Hold At Final": that route holds RouteActive
+	 *  true forever and an active route outranks facing, so it can never face along itself. Author the
+	 *  facing line as its own route actor. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Route|Facing Reference")
+	bool bUseAsFacingReference = false;
+
+	/** Per-route look-ahead along the polyline (cm) used to derive the facing direction.
+	 *  0 = use the companion tuning default. Larger values start the corner sweep earlier and turn
+	 *  more gently; the override exists for sections whose legs are short relative to that default. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Route|Facing Reference", meta = (ClampMin = "0.0", EditCondition = "bUseAsFacingReference"))
+	float FacingReferenceLookAheadOverride = 0.f;
+
 	// --- Delegates ---
 
 	UPROPERTY(BlueprintAssignable, Category = "Route|Events")
@@ -93,6 +111,29 @@ public:
 	/** Plain C++ accessor — returns the waypoint struct at the clamped index. */
 	const FCompanionRouteWaypoint& GetWaypoint(int32 Index) const;
 
+	/** Look-ahead to use for facing: this route's override when authored (> 0), else TuningDefault.
+	 *  The default arrives as a parameter so the route actor stays free of any tuning-asset coupling. */
+	float GetFacingReferenceLookAhead(float TuningDefault) const;
+
+	/**
+	 * The direction this route runs past QueryLocation, for facing only — nothing here moves the
+	 * companion. QueryLocation is projected onto the nearest non-degenerate segment, then LookAhead cm
+	 * are walked forward along the polyline; OutHeading is the normalised projection -> look-ahead
+	 * chord. Because that chord tracks the route line rather than the pawn, the heading is independent
+	 * of how far off the line the companion happens to be standing, and it keeps pointing the way the
+	 * section ran once the companion is past the final waypoint.
+	 *
+	 * OutHeading is the output that matters. OutLookAheadPoint and OutProjection are for the caller's
+	 * range gates and debug draw ONLY — never anchor a focal point at either. A focal at the look-ahead
+	 * point rotates facing by the companion's own lateral offset from the route (tens of degrees at
+	 * realistic follow distances, i.e. facing the wall beside the corridor) and reverses past the end.
+	 *
+	 * False when the route isn't flagged for facing, has fewer than 2 waypoints, has no non-degenerate
+	 * segment, or the chord came out zero (LookAhead <= 0).
+	 */
+	bool GetFacingReferenceAim(const FVector& QueryLocation, float LookAhead,
+		FVector& OutHeading, FVector& OutLookAheadPoint, FVector& OutProjection) const;
+
 	/** Called by the BT task when the companion arrives at a waypoint. */
 	void NotifyWaypointReached(int32 Index);
 
@@ -108,6 +149,10 @@ public:
 	/** Editor-only authoring UX: new/duplicated waypoints inherit the previous entry's settings and
 	 *  are offset along the last leg's direction so they don't spawn stacked on top of it. */
 	virtual void PostEditChangeChainProperty(FPropertyChangedChainEvent& PropertyChangedEvent) override;
+
+	/** Editor-only authoring guard: warns on the Hold At Final + facing-reference combination, which
+	 *  looks reasonable in the details panel but can never work. */
+	virtual void PostEditChangeProperty(FPropertyChangedEvent& PropertyChangedEvent) override;
 #endif
 
 protected:

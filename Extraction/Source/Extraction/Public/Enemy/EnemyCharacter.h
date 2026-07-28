@@ -234,6 +234,14 @@ public:
 	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it; only the companion BT service calls it. */
 	bool HasDetectedPlayer() const;
 
+	/** True when this enemy has engaged the COMPANION itself: it is targeting the companion now, has
+	 *  damaged it within MemorySeconds, or holds live suspicion/search knowledge of it. The companion
+	 *  side of HasDetectedPlayer — together they answer "is this enemy part of a fight we are in".
+	 *  The damage clause deliberately bypasses the sight cloak: an enemy that has landed hits on the
+	 *  companion has demonstrated it can see it, whatever the cloak says it is permitted to perceive.
+	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it, matching HasDetectedPlayer. */
+	bool HasEngagedCompanion(const AActor* Companion, float MemorySeconds) const;
+
 	/** World seconds of this enemy's most recent transition into Combat awareness, or a large
 	 *  negative sentinel if never / component missing. Companion stealth-break compares this
 	 *  against the stealth pin time to distinguish a NEW fight from a stale Combat-state tail. */

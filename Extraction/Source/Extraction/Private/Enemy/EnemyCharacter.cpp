@@ -897,10 +897,15 @@ void AEnemyCharacter::HandleDeath()
 {
 	// Kill attribution for the companion's voice — its own confirm, or approval of the player's
 	// kill. Takedown deaths skip this (no instigator stamp); TakedownConfirm covers those.
+	// The confirmed-kill stamp rides the same attribution: it is what earns Combat mode its one
+	// free advance bound, so it must only ever fire on a kill the companion actually made.
 	if (AController* Killer = LastDamageInstigator.Get())
 	{
 		if (ACompanionCharacter* CompanionKiller = Cast<ACompanionCharacter>(Killer->GetPawn()))
+		{
 			CompanionKiller->Bark(ECompanionBarkType::TargetDown);
+			CompanionKiller->StampConfirmedKill();
+		}
 		else if (Killer->IsPlayerController())
 			if (ACompanionCharacter* Companion = ACompanionCharacter::GetPrimaryCompanion(GetWorld()))
 				Companion->Bark(ECompanionBarkType::ApprovePlayerKill);
@@ -1392,6 +1397,29 @@ bool AEnemyCharacter::HasDetectedPlayer() const
 	if (!IsValid(Awareness)) return false;
 
 	return Awareness->GetAwarenessState() == EEnemyAwarenessState::Combat;
+}
+
+bool AEnemyCharacter::HasEngagedCompanion(const AActor* Companion, float MemorySeconds) const
+{
+	if (!IsValid(Companion)) return false;
+
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return false;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return false;
+
+	if (Awareness->GetCombatTarget() == Companion) return true;
+
+	// Cloak-bypassing on purpose, and the only clause that is: landing hits on the companion proves
+	// this enemy can see it regardless of what the mode cloak says it is allowed to perceive.
+	if (MemorySeconds > 0.f && Awareness->GetTimeSinceDamagedBy(Companion) <= MemorySeconds)
+		return true;
+
+	// Nothing below can hold for an enemy that has perceived nothing at all — skip the map lookup.
+	if (Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware) return false;
+
+	return Awareness->HasLiveKnowledgeOf(Companion, MemorySeconds);
 }
 
 float AEnemyCharacter::GetTimeEnteredCombat() const
