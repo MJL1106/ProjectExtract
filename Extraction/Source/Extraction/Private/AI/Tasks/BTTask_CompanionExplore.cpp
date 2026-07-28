@@ -23,10 +23,13 @@ DEFINE_LOG_CATEGORY_STATIC(LogCompanionExplore, Log, All);
 
 DEFINE_LOG_CATEGORY_STATIC(LogCompanionExploreLoS, Log, All);
 
-// Same-room gate: the radius alone reaches through walls into neighbouring rooms, which sent the
-// companion chasing a crate behind a second door. A candidate only counts when the companion
-// standing in the room can actually see it: eyes -> candidate bounds centre, ignoring the swung
-// door leaf (it sits right beside the interior anchor and shadows crates near the doorway wall).
+// Same-room gate, STRICT variant — the enemy scan's gate. The radius alone reaches through walls
+// into neighbouring rooms, which sent the companion chasing a container behind a second door. A
+// candidate only counts when the companion standing in the room can actually see it: eyes ->
+// candidate bounds centre, ignoring the swung door leaf (it sits right beside the interior anchor
+// and shadows candidates near the doorway wall). Any blocking hit rejects, with no tolerance:
+// lootables use ExploreLootableHasLoS below, and that leniency must never reach here or an enemy
+// pressed against a wall would read as visible and wrongly flip the room hot.
 static bool ExploreViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor* Candidate, const AActor* IgnoreDoor)
 {
 	FVector EyeLoc; FRotator EyeRot;
@@ -38,8 +41,8 @@ static bool ExploreViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor
 	Params.AddIgnoredActor(Candidate);
 	if (IgnoreDoor) Params.AddIgnoredActor(IgnoreDoor);
 
-	// Bounds centre, not actor location — crate pivots sit at a base corner and can bury the
-	// trace end inside the shelf/table the crate stands on.
+	// Bounds centre, not actor location — a pivot sitting at the actor's base can bury the trace
+	// end inside the floor or the prop it stands on.
 	const FVector Target = Candidate->GetComponentsBoundingBox().GetCenter();
 	if (!World->LineTraceSingleByChannel(Hit, EyeLoc, Target, ECC_Visibility, Params)) return true;
 
@@ -68,10 +71,65 @@ static bool ExploreAnyLiveEnemyWithin(UWorld* World, const FVector& Center, floa
 	return false;
 }
 
+// Same-room gate, LOOTABLE-ONLY variant. Deliberately separate from ExploreViewerHasLoS rather than
+// a loosening of it: the enemy scan shares that helper and must keep rejecting on any blocking hit.
+//
+// A loot volume carries no mesh — it is draped over an existing drawer/table/shelf and that world
+// geometry IS the visual, so the probe point sits INSIDE the furniture, which cannot be ignored (it
+// is not the candidate). Under the strict gate every draped container reads as occluded by the very
+// prop it represents. A hit within OcclusionTolerance of the volume's SURFACE (zero for anything
+// inside it) is therefore that prop and counts as seen; a hit further out is a wall or a doorframe —
+// a different room — and still rejects. Surface distance, NOT distance from the probe point: a
+// centre metric inherits the box diagonal as an omnidirectional floor, so a volume flattened onto a
+// table top would accept the floor and the ceiling as readily as the table.
+//
+// Two probe points (centre + top centre), the same shape as LootViewerHasLoS. They share one
+// acceptance envelope but are different RAYS, so the top one can clear an occluder the centre ray
+// runs into — and this gate is the one that STARTS the chain: reject here and the room reads empty,
+// the companion dwells, and the more forgiving two-probe sweep downstream never runs at all. The
+// second trace only ever costs anything on a candidate the first one already found blocked.
+static bool ExploreLootableHasLoS(UWorld* World, const APawn* Viewer, const AActor* Candidate,
+	const AActor* IgnoreDoor, float OcclusionTolerance)
+{
+	// Collision-only bounds — already the default, stated explicitly so the choice is visible.
+	const FBox Bounds = Candidate->GetComponentsBoundingBox(false);
+	if (!Bounds.IsValid)
+	{
+		// No colliding components — the box would ForceInit and the probe would trace to the world
+		// origin. Reject loudly; a Blueprint subclass with a NoCollision volume must not fail silently.
+		UE_LOG(LogCompanionExploreLoS, Warning, TEXT("lootable %s has no colliding bounds — cannot LoS-probe it"),
+			*GetNameSafe(Candidate));
+		return false;
+	}
+
+	FVector EyeLoc; FRotator EyeRot;
+	Viewer->GetActorEyesViewPoint(EyeLoc, EyeRot);
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionSearchLootLoS), false);
+	Params.AddIgnoredActor(Viewer);
+	Params.AddIgnoredActor(Candidate);
+	if (IgnoreDoor) Params.AddIgnoredActor(IgnoreDoor);
+
+	const FVector Center = Bounds.GetCenter();
+	const FVector Probes[] = { Center, FVector(Center.X, Center.Y, Bounds.Max.Z) };
+	const float ToleranceSq = FMath::Square(OcclusionTolerance);
+
+	FHitResult Hit;
+	for (const FVector& Target : Probes)
+	{
+		if (!World->LineTraceSingleByChannel(Hit, EyeLoc, Target, ECC_Visibility, Params)) return true;
+		if (Bounds.ComputeSquaredDistanceToPoint(Hit.ImpactPoint) <= ToleranceSq) return true;
+	}
+
+	UE_LOG(LogCompanionExploreLoS, Log, TEXT("lootable %s rejected — LoS blocked by %s"),
+		*GetNameSafe(Candidate), *GetNameSafe(Hit.GetActor()));
+	return false;
+}
+
 // Nearest still-lootable container within the radius (mirrors BTTask_CompanionLoot's sweep filter),
 // LoS-gated to the pinged room so the chain can't drag the companion through another door.
 static AActor* ExploreFindNearestLootable(UWorld* World, const FVector& Center, float Radius,
-	const APawn* Viewer, const AActor* IgnoreDoor)
+	const APawn* Viewer, const AActor* IgnoreDoor, float OcclusionTolerance)
 {
 	if (!World || !IsValid(Viewer)) return nullptr;
 
@@ -85,7 +143,7 @@ static AActor* ExploreFindNearestLootable(UWorld* World, const FVector& Center, 
 		if (!IsValid(Candidate) || !ILootable::Execute_CanLoot(Candidate)) continue;
 		const float DistSq = FVector::DistSquared(Candidate->GetActorLocation(), Center);
 		if (DistSq > BestDistSq) continue;
-		if (!ExploreViewerHasLoS(World, Viewer, Candidate, IgnoreDoor)) continue;
+		if (!ExploreLootableHasLoS(World, Viewer, Candidate, IgnoreDoor, OcclusionTolerance)) continue;
 		BestDistSq = DistSq;
 		Best = Candidate;
 	}
@@ -582,7 +640,8 @@ void UBTTask_CompanionExplore::EvaluateRoom(UBehaviorTreeComponent& OwnerComp, A
 			return;
 		}
 
-		if (AActor* Container = ExploreFindNearestLootable(Companion->GetWorld(), RoomAnchor, LootRadius, Companion, SearchedDoor))
+		if (AActor* Container = ExploreFindNearestLootable(Companion->GetWorld(), RoomAnchor, LootRadius,
+			Companion, SearchedDoor, LootOcclusionTolerance))
 		{
 			UE_LOG(LogCompanionExplore, Log, TEXT("EvaluateRoom: room quiet — chaining loot sweep to %s"),
 				*GetNameSafe(Container));

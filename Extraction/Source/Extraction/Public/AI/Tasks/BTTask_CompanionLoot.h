@@ -46,6 +46,28 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Loot", meta = (ClampMin = "0.0"))
 	float SweepRadius = 1200.f;
 
+	/** How far past a container's collision SURFACE a line-of-sight blocker may sit and still count
+	 *  as that container rather than a wall (cm). A loot volume carries no mesh — it is draped over
+	 *  an existing drawer/table/shelf and that world geometry IS the visual, so the probe point sits
+	 *  inside the furniture and the furniture occludes the volume on every trace. A blocker within
+	 *  this distance of the surface is the prop being looted; one further out is a wall, i.e. another
+	 *  room, and rejects.
+	 *
+	 *  40 is measured, not guessed, and is bounded ABOVE — do not raise it casually. Across DemoMap
+	 *  the farthest draped-furniture hit sits 53.9 cm off the surface while the TIGHTEST structural
+	 *  wall sits 43.1 cm off it (BP_Floor_One_Walls1), so the two ranges overlap and no single value
+	 *  clears both. 40 is the largest round number under that 43.1 cm ceiling: zero wall false-accepts
+	 *  anywhere in the level, and 96.5% of draped-prop hits accepted. 50 makes two structural walls
+	 *  passable and the sweep starts reaching into the next room again.
+	 *
+	 *  ROTATING a container eats that 3.1 cm of headroom: the test measures against the world-space
+	 *  AABB, and rotation inflates it (a yaw-rotated 100-cube reads a 70.7 cm half-extent at 45
+	 *  degrees instead of 50, so its AABB surface sits up to 20.7 cm nearer the walls than its real
+	 *  one). Turning a container to match a diagonal desk can therefore pull a wall inside tolerance
+	 *  — re-measure that container's surroundings if you do. */
+	UPROPERTY(EditAnywhere, Category = "Loot", meta = (ClampMin = "0.0"))
+	float LootOcclusionTolerance = 40.f;
+
 	/** Safety cap on containers looted per sweep. 0 = unlimited (radius is the real bound). */
 	UPROPERTY(EditAnywhere, Category = "Loot", meta = (ClampMin = "0"))
 	int32 MaxContainersPerSweep = 0;

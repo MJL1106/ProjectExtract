@@ -10,15 +10,35 @@
 
 DEFINE_LOG_CATEGORY_STATIC(LogCompanionLoot, Log, All);
 
-// Same-room gate (mirrors ExploreViewerHasLoS in BTTask_CompanionExplore): the sweep radius alone
-// reaches through walls into neighbouring rooms — the companion chased crates behind closed doors,
-// auto-opening every door on the way. A candidate only counts when the companion can actually see
-// it from where it stands. Two probe points (bounds centre + top centre) and every other lootable
-// ignored as a blocker: a shelf of crates must not occlude its own neighbours, or the sweep dies
+// Same-room gate (mirrors ExploreLootableHasLoS in BTTask_CompanionExplore): the sweep radius alone
+// reaches through walls into neighbouring rooms — the companion chased containers behind closed
+// doors, auto-opening every door on the way. A candidate only counts when the companion can actually
+// see it from where it stands. Two probe points (bounds centre + top centre) and every other lootable
+// ignored as a blocker: a shelf of containers must not occlude its own neighbours, or the sweep dies
 // after the first container while the wall/closed-door block stays intact.
+//
+// A blocked probe is not automatically a rejection. A loot volume carries no mesh — it is draped
+// over an existing drawer/table/shelf and that world geometry IS the visual, so the probe point sits
+// INSIDE the furniture, which cannot be ignored (it is not the candidate). A hit within
+// OcclusionTolerance of the volume's SURFACE (zero for anything inside it) is therefore the prop the
+// volume wraps and counts as seen; a hit further out is a wall or a doorframe — a different room —
+// and still rejects. Surface distance, NOT distance from the probe point: a centre metric inherits
+// the box diagonal as an omnidirectional floor, so a volume flattened onto a table top would accept
+// the floor and the ceiling as readily as the table.
 static bool LootViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor* Candidate,
-	const TArray<AActor*>& AllLootables)
+	const TArray<AActor*>& AllLootables, float OcclusionTolerance)
 {
+	// Collision-only bounds — already the default, stated explicitly so the choice is visible.
+	const FBox Bounds = Candidate->GetComponentsBoundingBox(false);
+	if (!Bounds.IsValid)
+	{
+		// No colliding components — the box would ForceInit and the probe would trace to the world
+		// origin. Reject loudly; a Blueprint subclass with a NoCollision volume must not fail silently.
+		UE_LOG(LogCompanionLoot, Warning, TEXT("%s has no colliding bounds — cannot LoS-probe it"),
+			*GetNameSafe(Candidate));
+		return false;
+	}
+
 	FVector EyeLoc; FRotator EyeRot;
 	Viewer->GetActorEyesViewPoint(EyeLoc, EyeRot);
 
@@ -26,14 +46,16 @@ static bool LootViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor* C
 	Params.AddIgnoredActor(Viewer);
 	Params.AddIgnoredActors(AllLootables);
 
-	const FBox Bounds = Candidate->GetComponentsBoundingBox();
 	const FVector Center = Bounds.GetCenter();
 	const FVector Probes[] = { Center, FVector(Center.X, Center.Y, Bounds.Max.Z) };
+	const float ToleranceSq = FMath::Square(OcclusionTolerance);
 
 	for (const FVector& Target : Probes)
 	{
 		FHitResult Hit;
 		if (!World->LineTraceSingleByChannel(Hit, EyeLoc, Target, ECC_Visibility, Params))
+			return true;
+		if (Bounds.ComputeSquaredDistanceToPoint(Hit.ImpactPoint) <= ToleranceSq)
 			return true;
 	}
 	return false;
@@ -256,10 +278,10 @@ AActor* UBTTask_CompanionLoot::FindNextContainer(UBehaviorTreeComponent& OwnerCo
 		if (!IsValid(Candidate) || !ILootable::Execute_CanLoot(Candidate)) continue;
 		if (SkippedThisSweep.Contains(Candidate)) continue;
 		if (FVector::DistSquared(Candidate->GetActorLocation(), SweepAnchor) > SweepRadiusSq) continue;
-		// Same-room gate — a crate it can't see is a crate in another room; never chain through
-		// walls/closed doors. The commanded (pinged) first target never routes through here, so
-		// an explicitly pinged far crate still works.
-		if (!LootViewerHasLoS(World, Pawn, Candidate, Lootables)) continue;
+		// Same-room gate — a container it can't see is a container in another room; never chain
+		// through walls/closed doors. The commanded (pinged) first target never routes through here,
+		// so an explicitly pinged far container still works.
+		if (!LootViewerHasLoS(World, Pawn, Candidate, Lootables, LootOcclusionTolerance)) continue;
 
 		const float DistSq = FVector::DistSquared(Candidate->GetActorLocation(), Pawn->GetActorLocation());
 		if (DistSq < BestDistSq)
