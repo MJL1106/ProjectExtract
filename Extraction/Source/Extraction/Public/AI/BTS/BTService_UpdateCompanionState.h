@@ -14,6 +14,8 @@ class AEnemyCharacter;
 class APawn;
 class UBlackboardComponent;
 class UCompanionTuningDataAsset;
+class UEnemyDirectorSubsystem;
+struct FCollisionQueryParams;
 
 UCLASS()
 class EXTRACTION_API UBTService_UpdateCompanionState : public UBTService
@@ -141,6 +143,16 @@ private:
 	 *  breaks the hold rather than back-walking the companion while it aims. */
 	float OverwatchMovingTime = 0.f;
 
+	/** Seconds since the aim point was last re-resolved. The point used to be computed once on entry
+	 *  and re-asserted verbatim for the whole window, so it went stale the moment the ally or the
+	 *  fight moved — and under a wave hold (max-time cap waived) it never expired to correct itself. */
+	float OverwatchAimRefreshTimer = 0.f;
+
+	/** Consecutive refreshes that failed to resolve an aim point. Debounce: a refusal is a single
+	 *  trace sample on a ~1s cadence, so ending the hold on the first one let anything transient in
+	 *  the firing line cycle overwatch END/START. Reset by any successful refresh and by the end. */
+	int32 OverwatchRefreshFailures = 0;
+
 	/** Runs the post-fight hold inside the combat-decay branch: enters on the fresh target-loss
 	 *  edge, faces the computed aim point weapon-up each tick, breaks on player-left / new owner /
 	 *  self-movement / timer cap. Returns true while it owns aim/focus this tick. */
@@ -154,9 +166,31 @@ private:
 	bool ComputeOverwatchAimPoint(const ACompanionCharacter& Companion,
 		const UCompanionTuningDataAsset* Tuning, FVector& OutAimPoint) const;
 
-	/** Drops the scripted-aim raise and resets the hold state. Lowering/focus-clear is left to the
-	 *  branch that runs next (the decay lower, or a new combat/ready owner). */
-	void EndPostCombatOverwatch(ACompanionCharacter& Companion);
+	/** Threat point the aim pick is measured against: freshest threat memory, else first contact,
+	 *  else a bearing push-out, else the director's wave spawn reference. False = no memory at all. */
+	bool ResolveOverwatchThreatRef(const ACompanionCharacter& Companion,
+		const UCompanionTuningDataAsset* Tuning, FVector& OutThreatRef) const;
+
+	/** Chokepoint pick: nearest same-storey door on the portal path toward ThreatRef with an
+	 *  unobstructed eye-line. False = no usable door, caller falls through to the direct aim. */
+	bool PickOverwatchDoorAim(const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning,
+		const FVector& ThreatRef, const FCollisionQueryParams& LosParams, FVector& OutAim) const;
+
+	/** Re-resolves OverwatchAimPoint on the tuning's refresh cadence while the hold is active.
+	 *  Returns false only after OverwatchRefreshFailuresToEnd CONSECUTIVE failures — the caller then
+	 *  ends the hold rather than keep asserting a world point the ally can no longer justify. */
+	bool RefreshOverwatchAimPoint(const ACompanionCharacter& Companion,
+		const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
+
+	/** Drops the scripted-aim raise, releases the Gameplay focal if it is still the one we wrote, and
+	 *  resets the hold state. The focal clear is ours to do: under a wave hold nothing downstream does
+	 *  it (the decay branch only restores low-ready and UpdateNonCombatFacing Tier-0-yields on the
+	 *  hold), so the anim's focal-driven aim kept pointing the ally at the dead overwatch point.
+	 *  bAnotherOwnerHasFocus: when true the compare-clear is skipped — a SetFocus(Actor) resolves to
+	 *  that actor's world location, so a near-stationary enemy can Equals-match the overwatch point
+	 *  and wrongly clear the new owner's focus on the safety-end path. */
+	void EndPostCombatOverwatch(ACompanionAIController& Controller, ACompanionCharacter& Companion,
+		bool bAnotherOwnerHasFocus);
 
 	/** Clears first-contact/last-threat memory — the fight is fully over (Exploration flip or
 	 *  stealth re-pin), the next acquisition starts a new fight. */
@@ -173,9 +207,31 @@ private:
 	/** Edge-log guard for the wave-hold transition, and the edge that triggers the stand-up. */
 	bool bLastWaveHold = false;
 
-	/** Seconds with no combat target AND no alerted threat while a wave is live. Past the tuning's
-	 *  WaveHoldQuietReleaseSeconds the hold drops so the ally stops standing in an emptied room. */
+	/** Seconds with no combat target AND no LoS-verified alerted threat while a wave is live. Past
+	 *  the tuning's WaveHoldQuietReleaseSeconds the hold drops so the ally stops standing in an
+	 *  emptied room. Verified knowledge only: fed the raw radius-only flag it never accrued at all
+	 *  for an ally behind a wall, and the release could never fire.
+	 *  Unwinds in real time rather than snapping to zero, and saturates at release + the tuning's
+	 *  WaveHoldQuietRearmSeconds — see UpdateWaveHoldQuietTimer for why the hysteresis is load-bearing. */
 	float WaveHoldQuietTimer = 0.f;
+
+	/** Seconds the hold has been active AND blind (no target, no verified threat) during the current
+	 *  wave. Feeds the hard ceiling. Gated on blindness, not on hold time: a healthy defence is held
+	 *  for nearly its whole 40-90s run, so a plain total tripped the ceiling mid-wave and disabled the
+	 *  hold for the rest of it. Zeroed the moment knowledge goes live, like the quiet timer. */
+	float WaveHoldBlindHeldTime = 0.f;
+
+	/** Latched once the ceiling trips: the hold stays released for the REST of the wave. Without the
+	 *  latch the first knowing tick zeroes the blind timer and the hold re-arms immediately, flickering
+	 *  the ally between hold and follow instead of letting it walk back to the player. An ally that has
+	 *  spent that long blind-holding has demonstrably lost the fight. Cleared with the per-wave block. */
+	bool bWaveHoldCeilingReleased = false;
+
+	/** Director wave id the per-wave block above belongs to. The reset cannot key on "wave inactive"
+	 *  alone: TickNode returns early for a DBNO companion, so an ally downed during the defence and
+	 *  revived after the next wave started never observes an inactive tick, and the ceiling latch
+	 *  survived into the new wave — which then ran hold-less from its first tick, silently. */
+	FName WaveHoldWaveId = NAME_None;
 
 	/** Edge-log guard for the revive-claim refusal. The refused state persists for as long as the
 	 *  other ally holds the claim, so an un-edged log would spam at service cadence for the whole
@@ -189,9 +245,27 @@ private:
 
 	/** Recomputes the wave hold and mirrors it onto the companion for the combat teardown and the
 	 *  follow task to read. Deliberately a live state, not a latch: a wave ending or being cancelled
-	 *  releases it on the next tick with no extra plumbing. Returns true while held. */
+	 *  releases it on the next tick with no extra plumbing. Returns true while held.
+	 *  bThreatKnown MUST be line-of-sight verified (bReadyOnlyThreat, not the raw radius-only
+	 *  bHasAlertedThreat) — a through-wall signal resets the quiet timer every tick and pins the hold
+	 *  on forever for any ally without an eye-line to the fight. */
 	bool UpdateWaveHold(ACompanionCharacter& Companion, const APawn* PlayerPawn,
 		const UCompanionTuningDataAsset* Tuning, bool bHasTarget, bool bThreatKnown, float DeltaSeconds);
+
+	/** Advances WaveHoldQuietTimer for this tick and returns true while the quiet release is tripped.
+	 *  Decay-with-saturation rather than a snap to zero, so re-arming the hold costs a sustained
+	 *  knowledge window: re-arming calls StopMovement() on the follow task, and a single knowing tick
+	 *  re-arming it turned a flickering eye-line into a stop-go stutter across the whole defence.
+	 *  bWaveEngaged gates accrual: the pre-engagement window (spawn delay + travel) is blind by
+	 *  definition, and accruing there banks enough time to trip the release before first contact. */
+	bool UpdateWaveHoldQuietTimer(bool bKnowledgeLive, bool bWaveEngaged,
+		const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
+
+	/** Stale-combat backstop: true when no fight has been reported to the director for the tuning's
+	 *  window AND no live detected enemy sits inside the leash. Covers stuck enemies and blocked-spawn
+	 *  soft-locks; the proximity gate stops a distant holdout pinning the signal forever. */
+	bool IsWaveCombatStale(const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning,
+		const UEnemyDirectorSubsystem* Director) const;
 
 	// --- F3 watch-threat state (nearest visible-or-lingering enemy the companion watches without
 	// engaging; see ComputeWatchThreat/ApplyWatchFacing) ---

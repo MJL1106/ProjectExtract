@@ -150,9 +150,11 @@ public:
 	// Player 2D speed (cm/s) above which the follow task treats the player as sprinting and mirrors
 	// sprint. The kit BP owns player sprint state, so it is inferred from velocity, and it must sit
 	// above the kit's jog base (410) and below its hold-sprint (550 since the sprint/slide rework).
-	// KNOWN INERT at 700: the player can never reach it, so bPlayerSprinting never goes true and the
-	// companion sprints on the raw distance threshold alone. Left as-is deliberately — the current
-	// follow read is the shipped feel; changing it is tracked as its own task, not a drive-by.
+	// KNOWN INERT at 700: the player can never reach it, so the player-side sprint mirror never goes
+	// true and the companion sprints on the raw distance threshold alone. Left as-is deliberately —
+	// the current follow read is the shipped feel; changing it is tracked as its own task, not a
+	// drive-by. Only consulted when the follow leader IS the player: a companion trailing the primary
+	// companion reads its leader's sprint flag directly instead of inferring it from velocity.
 	// FootstepNoiseComponent::SprintSpeedThreshold infers sprint from owner speed the same way and
 	// sits at 480; that is the value to match if this is ever switched on. Do NOT re-derive from
 	// AExtractionCharacter's 600/900 defaults — the live pawn is the kit player, and those stale
@@ -189,13 +191,23 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0.0"))
 	float SecondaryFormationBackBias = 100.f;
 
-	// An EQS follow slot within this distance of the primary companion is rejected for a secondary
-	// one. The follow query is player-anchored and identical for both, so its top slot IS the
-	// primary's — without the filter the EQS result overwrites the mirror and re-converges them.
-	// Keep it well inside the query's donut width or every slot is rejected and the secondary is
-	// permanently pinned to the formation anchor.
+	// Master switch for the follow CHAIN: a non-primary companion (the armed extractee VIP) trails
+	// the PRIMARY companion using the same formation logic the primary runs against the player —
+	// player <- companion <- VIP. Off restores the mirrored player-follow, where both companions
+	// anchor on one shared player-keyed target (same input, same maths, same timing) and converge
+	// into each other. No effect whatsoever on the primary, which always anchors on the player.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation")
+	bool bSecondaryFollowsPrimaryCompanion = true;
+
+	// Leader-to-player 2D distance (cm) past which a secondary stops trailing the primary and follows
+	// the player directly. Latched: re-acquired only once back inside this by
+	// UBTTask_FollowPlayer::LeaderLeashReleaseHysteresis, or by half this distance when that band
+	// would not fit. Must sit ABOVE SprintDistanceThreshold so ordinary stretchy following never
+	// trips the handover, and BELOW WarpMinDistance so a primary commanded across the level hands the
+	// secondary back to the player before the warp net teleports it. 0 disables the leash: the
+	// secondary then trails the primary at any separation.
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0.0"))
-	float AllyFollowSlotMinSpacing = 250.f;
+	float SecondaryLeaderLeashDistance = 2000.f;
 
 	// Floored at 50 so the derived follow min-separation can't collapse and silently disable the back-out.
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "50"))
@@ -837,6 +849,15 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "300.0", EditCondition = "bEnablePostCombatOverwatch"))
 	float OverwatchBearingDistance = 1200.f;
 
+	// Seconds between re-resolutions of the held aim point. The point was previously computed once on
+	// entry and re-asserted verbatim, so it went stale as soon as the ally or the fight moved — and
+	// under a wave hold, where the max-time cap is waived, it never expired to correct itself. A
+	// refresh that repeatedly fails to resolve a point ends the hold outright. 0 disables the refresh.
+	// ClampMin stays 0 so the disable still works, but the slider floors at 0.25 (the service's own
+	// tick interval): anything finer just re-runs the door sort and its traces every single tick.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "0.0", UIMin = "0.25", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchAimRefreshInterval = 1.f;
+
 	// --- Wave hold (stay combat-ready at cover through a finite Director wave) ---
 
 	// Master switch. Off = legacy behavior: allies return to formation in the gaps between squad
@@ -857,12 +878,34 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
 	float WaveHoldQuietReleaseSeconds = 6.f;
 
+	// Seconds of SUSTAINED knowledge needed to re-arm the hold after the quiet release above fired.
+	// The quiet timer unwinds in real time rather than snapping to zero on the first knowing tick, and
+	// saturates at WaveHoldQuietReleaseSeconds + this the moment the release trips. Without the
+	// hysteresis a single tick of eye-line re-armed the hold, and re-arming fires StopMovement()
+	// wherever the ally happens to be standing — an enemy flickering in and out of sight (an alerted
+	// Searching enemy is accepted as a threat but skipped for acquisition in Normal mode) produced a
+	// stop-go stutter across the whole defence, with an UnCrouch() on every release edge.
+	// 0 = no hysteresis: the release re-arms on the first knowing tick.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldQuietRearmSeconds = 3.f;
+
 	// Stale-combat backstop: release the wave hold when no combat has been reported to the director
 	// for this long, regardless of whether the wave is still technically active. Covers both stuck
 	// enemies and blocked-spawn soft-locks. Must exceed the squad spawn cadence (8s default) so a
 	// healthy wave never trips it. 0 disables.
 	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
 	float WaveHoldStaleCombatReleaseSeconds = 20.f;
+
+	// Hard ceiling (s) on time held BLIND during a single wave -- held with no combat target and no
+	// LoS-verified threat. Counts only that: a healthy 4-squad defence runs 40-90s wall clock and is
+	// held for nearly all of it, so a ceiling on total held time tripped mid-wave and disabled the hold
+	// for the rest of the defence (allies abandoning cover in every squad gap). The blind gate makes
+	// this an unreachable backstop when the quiet release above is active (WaveHoldQuietReleaseSeconds
+	// > 0 trips first), and the sole blind-time release when a designer zeroes the quiet release.
+	// Once tripped the hold stays released until the wave changes. Must comfortably exceed the quiet
+	// release (6s) so it only fires on a genuine soft-lock. 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldMaxBlindHoldSeconds = 45.f;
 
 	// --- Mode (player-commanded Normal / Combat / Stealth) ---
 

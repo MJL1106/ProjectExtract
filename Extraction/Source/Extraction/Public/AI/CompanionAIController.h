@@ -94,11 +94,21 @@ public:
 	void StopRoute(bool bAborted);
 
 	/**
-	 * AI-safe teleport: cancels any active traversal, stops movement, projects the
-	 * destination onto the NavMesh, then TeleportTo's the possessed pawn.
-	 * Returns false if the pawn is missing or NavMesh projection fails.
+	 * AI-safe teleport. Always projects the destination onto the NavMesh first, then cancels any
+	 * active traversal, stops the current move order and teleports -- so the pawn never lands
+	 * off-navmesh and no stale AI order survives the move. Returns the real move result; false means
+	 * the pawn is missing, NavMesh projection failed, or the destination was encroached/blocked.
+	 *
+	 * bForce == false (default): the three early-out refusal paths (missing pawn, nav-project fail,
+	 * traversal busy) must disturb nothing, because callers retry. Probes with
+	 * UWorld::FindTeleportSpot -- the only genuinely non-mutating query -- and bails before touching
+	 * pawn state if the spot is blocked.
+	 *
+	 * bForce == true: don't pre-refuse (skip the traversal-busy gate and the FindTeleportSpot
+	 * probe), cancel whatever the pawn is doing, and attempt the move anyway. The move can still
+	 * legitimately fail (NavMesh projection or encroachment at the destination).
 	 */
-	bool TeleportToLocation(const FVector& Location, const FRotator& Rotation);
+	bool TeleportToLocation(const FVector& Location, const FRotator& Rotation, bool bForce = false);
 
 protected:
 	virtual void OnPossess(APawn* InPawn) override;
@@ -135,6 +145,9 @@ private:
 	float TimeSinceClosedToPlayer = 0.f;
 	float TimeOnDifferentLevel = 0.f;
 	int32 BindAttempts = 0;
+
+	/** True once the current refusal streak has been warned about. Suppresses the per-tick repeat. */
+	bool bWarpRefusalWarned = false;
 
 	void TryBindToPlayerTraversal();
 	void OnPlayerTraversalStarted(ETraversalType Type, float PlayRate, FVector ObstacleLocation, FVector LandingLocation);

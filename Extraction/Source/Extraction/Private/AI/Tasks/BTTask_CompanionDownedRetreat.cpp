@@ -81,7 +81,7 @@ void UBTTask_CompanionDownedRetreat::TickTask(UBehaviorTreeComponent& OwnerComp,
 		Movement->MaxWalkSpeedCrouched = Companion->GetDownedCrawlSpeed();
 	}
 
-	// Hold: an active revive hold always wins; a player standing close is about to press E, so
+	// Hold: an active revive hold always wins; a player standing close is about to press F, so
 	// the crawl pauses for them too (bHeldForRevive doubles as the hold latch for both).
 	bool bShouldHold = Companion->IsBeingRevived();
 	if (!bShouldHold)

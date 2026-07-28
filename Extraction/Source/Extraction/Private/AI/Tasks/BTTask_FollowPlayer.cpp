@@ -1,4 +1,5 @@
-// BT task — companion follows player in formation or sprints to reach them.
+// BT task — companion follows its leader in formation or sprints to reach the player.
+// Leader == player for the primary companion; leader == primary companion for the armed extractee.
 
 #include "BTTask_FollowPlayer.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -6,6 +7,7 @@
 #include "AI/CompanionAIController.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
+#include "HealthComponent.h"
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "EnvironmentQuery/EnvQueryTypes.h"
@@ -53,16 +55,20 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	TimeSinceLastEqs = EqsQueryInterval; // allow an immediate query on first tick
 	EqsTarget = FVector::ZeroVector;
 	bFightBiasQuery = false;
-	bAllySpacingQuery = false;
-	bAllySpacingRejectedAll = false;
-	AllySlotSideSign = 0.f;
-	LastMovingSideRight = FVector::ZeroVector;
 	FightBiasThreatLocation = FVector::ZeroVector;
 
+	// Reset the leader chain — a re-entry must re-resolve rather than trust a cache from a run that
+	// may have ended with the primary down or leashed away.
+	CachedLeader.Reset();
+	LastFollowLeader.Reset();
+	TimeSinceLeaderScan = LeaderRescanInterval; // allow an immediate scan on first tick
+	bLeaderLeashBroken = false;
+	bLeaderMoving = false;
+
 	// Reset the floor-transit detector — a re-entry mid-descent re-arms from the first sample.
-	bHasPlayerZSample = false;
-	PlayerZTransitEnvelope = 0.f;
-	bWasPursuingPlayer = false;
+	bHasLeaderZSample = false;
+	LeaderZTransitEnvelope = 0.f;
+	bWasPursuingLeader = false;
 
 	// Clear any stale sprint flag from a prior abort (e.g. combat or revive re-entry).
 	// Skip for sprint-to-target so the revive branch keeps sprint speed on entry.
@@ -93,6 +99,29 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	const FVector CompanionLocation = Companion->GetActorLocation();
 	const float DistToPlayer = FVector::Dist(CompanionLocation, PlayerLocation);
 
+	// Leader resolution runs once per tick, before anything reads a formation frame. For a primary
+	// companion it returns the player, so every leader-keyed line below is the pre-chain behaviour.
+	AActor* Leader = ResolveFollowLeader(*Companion, *Player, *T, DeltaSeconds);
+	const bool bLeaderAnchored = Leader != Player; // secondary trailing the primary companion
+	const FVector LeaderLocation = Leader->GetActorLocation();
+	const float DistToLeader = bLeaderAnchored ? FVector::Dist(CompanionLocation, LeaderLocation) : DistToPlayer;
+
+	// Leader handover clears every latch keyed to the old frame. The floor-transit reset is mandatory,
+	// not tidiness, and both halves of it matter: without the sample drop, swapping to a leader
+	// standing on another floor reads as one enormous dZ/dt sample and trips seconds of pursuit; and
+	// without the envelope drop, a leash break taken mid-stairwell carries the OLD leader's hot
+	// envelope onto the new one and pursues it for the envelope's remaining drain time. Same reset
+	// ExecuteTask performs on entry.
+	if (LastFollowLeader.Get() != Leader)
+	{
+		LastFollowLeader = Leader;
+		LastMoveTarget = FVector::ZeroVector;
+		bIsIdling = false;
+		bLeaderMoving = false;
+		bHasLeaderZSample = false;
+		LeaderZTransitEnvelope = 0.f;
+	}
+
 	// Mode change drops the idle latch and forces a move re-issue so the new formation applies now.
 	if (Companion->GetMode() != LastSeenMode)
 	{
@@ -103,8 +132,8 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	// Floor-transit detector samples every tick — the idle/back-out branches below early-return,
 	// and the envelope must already be live the moment formation logic resumes.
-	const ACharacter* PlayerChar = Cast<ACharacter>(Player);
-	UpdatePlayerZTransit(PlayerChar, PlayerLocation.Z, DeltaSeconds);
+	const ACharacter* LeaderChar = Cast<ACharacter>(Leader);
+	UpdateLeaderZTransit(LeaderChar, LeaderLocation.Z, DeltaSeconds);
 
 	// Stealth catch-up staging — evaluated before the idle/back-out early-returns so the stage
 	// releases as soon as the companion closes the gap. One-way ladder with wide bands: each stage
@@ -226,26 +255,29 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	const float EffMinSep   = FMath::Min(T->FollowMinSeparation,  T->AcceptableRadius - FollowDistMargin);
 	const float EffStandoff = FMath::Max(T->FollowIdleStandoff,   EffMinSep + FollowDistMargin);
 
-	// Level-alignment gate: DistToPlayer is straight-line and lies through floors — a stairwell
-	// player one floor down reads as ~400cm "close". Off-level the companion must never settle.
-	// Read-time floor (mirrors EffMinSep/EffStandoff): a max-Z inside the idle radius would make
-	// idle unreachable on any slope and sprint the companion in place at the player's side.
-	const float ZDelta = FMath::Abs(CompanionLocation.Z - PlayerLocation.Z);
+	// Level-alignment gate: the follow distance is straight-line and lies through floors — a leader
+	// one floor down in a stairwell reads as ~400cm "close". Off-level the companion must never
+	// settle. Read-time floor (mirrors EffMinSep/EffStandoff): a max-Z inside the idle radius would
+	// make idle unreachable on any slope and sprint the companion in place at the leader's side.
+	const float ZDelta = FMath::Abs(CompanionLocation.Z - LeaderLocation.Z);
 	const float EffMaxZDelta = T->FollowMaxZDelta <= 0.f
 		? 0.f : FMath::Max(T->FollowMaxZDelta, T->AcceptableRadius + FollowDistMargin);
 	const bool bZAligned = EffMaxZDelta <= 0.f || ZDelta <= EffMaxZDelta;
 
 	// Formation point is computed up front — Combat mode keys its idle/hysteresis gates on the
-	// distance to the LEAD point, not to the player (a player squeezing past a leading companion
+	// distance to the LEAD point, not to the leader (a leader squeezing past a leading companion
 	// would otherwise latch it idle at their side until the gap exceeded 1.5x AcceptableRadius).
-	// Mode shapes the formation: Combat leads AHEAD of the player (capped at the lead distance by
+	// Mode shapes the formation: Combat leads AHEAD of the leader (capped at the lead distance by
 	// construction), Stealth tucks in tight behind, Normal keeps the standard offsets.
 	const ECompanionMode Mode = Companion->GetMode();
 	const bool bCombatLead = Mode == ECompanionMode::Combat;
 
 	// Front-to-back stagger for a non-primary companion (the armed extractee) — the lateral mirror
-	// alone leaves the pair a symmetric wall across the player's rear. Primary = 0: every use is a no-op.
-	const float BackBias = Companion->GetFormationBackBias(T->SecondaryFormationBackBias);
+	// alone leaves the pair a symmetric wall across the player's rear. Primary = 0: every use is a
+	// no-op. Zeroed on the leader-anchored path: the chain already staggers the pair by a full
+	// FormationOffsetBack, and the bias on top only drags the VIP further off the player's track.
+	// It still applies on the player-anchored fallback, where the mirror IS the only separation.
+	const float BackBias = bLeaderAnchored ? 0.f : Companion->GetFormationBackBias(T->SecondaryFormationBackBias);
 
 	// Floor at read time: a lead inside AcceptableRadius would idle the companion at the player's
 	// side and never take point (mirrors the EffMinSep/EffStandoff read-time clamps above). The bias
@@ -268,39 +300,79 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		OffsetRight = T->StealthFormationOffsetRight;
 	}
 
-	// Applied after the mode branch so all three formations mirror with one edit. A second companion
-	// (the armed extractee) runs this same task against this same tuning asset, so it would otherwise
-	// compute a bit-identical anchor and pile into the primary. Primary = sign +1 / bias 0: no-op.
+	// Applied after the mode branch so all three formations mirror with one edit. On the leader-
+	// anchored path the mirror is what centres the VIP back on the player's own track (it anchors
+	// behind-left of a companion that is itself behind-right of the player), so it stays applied
+	// there too. Primary = sign +1 / bias 0: no-op.
 	OffsetRight *= Companion->GetFormationSideSign();
 	if (!bCombatLead)
 		OffsetBack += BackBias; // combat folded the bias into LeadDistance — adding it here double-counts
 
-	FVector FormationDir;
-	if (PlayerChar && PlayerChar->GetVelocity().SizeSquared() > 100.0f * 100.0f)
+	// Travel gate. The player-anchored path keeps its original raw speed comparison bit-for-bit; a
+	// COMPANION leader gets a latched 2D gate instead, because ally soft-separation shoves it back
+	// and forth across a single threshold and the two anchor formulas below would swap every few
+	// ticks (travel-offset behind a walking leader vs bearing-hold around a standing one).
+	bool bLeaderTravelling;
+	if (bLeaderAnchored)
 	{
-		// Player is moving — formation relative to their movement direction
-		const FVector MoveDir = PlayerChar->GetVelocity().GetSafeNormal2D();
-		const FVector MoveRight = FVector::CrossProduct(FVector::UpVector, MoveDir);
-		FormationDir = PlayerLocation - MoveDir * OffsetBack + MoveRight * OffsetRight;
-	}
-	else if (bCombatLead)
-	{
-		// Player stationary in Combat mode — take point along their facing at -OffsetBack, which the
-		// combat branch set to exactly LeadDistance (bias and floor both already inside it), so the
-		// moving and stationary lead points can't drift apart.
-		const FVector Facing = Player->GetActorForwardVector().GetSafeNormal2D();
-		const FVector FacingRight = FVector::CrossProduct(FVector::UpVector, Facing);
-		FormationDir = PlayerLocation + Facing * -OffsetBack + FacingRight * OffsetRight;
+		const float LeaderSpeed2D = LeaderChar ? LeaderChar->GetVelocity().Size2D() : 0.f;
+		bLeaderMoving = bLeaderMoving ? LeaderSpeed2D > LeaderMovingSpeedExit : LeaderSpeed2D > LeaderMovingSpeedEnter;
+		bLeaderTravelling = bLeaderMoving;
 	}
 	else
 	{
-		// Player stationary — just maintain distance, stay where we are relative to player
-		const FVector ToCompanion = (CompanionLocation - PlayerLocation).GetSafeNormal2D();
-		FormationDir = PlayerLocation + ToCompanion * OffsetBack;
+		bLeaderTravelling = LeaderChar && LeaderChar->GetVelocity().SizeSquared() > 100.0f * 100.0f;
 	}
 
-	// Combat lead idles against the lead point; everything else against the player.
-	const float IdleGateDist = bCombatLead ? FVector::Dist(CompanionLocation, FormationDir) : DistToPlayer;
+	FVector FormationDir;
+	if (bLeaderTravelling)
+	{
+		// Leader is moving — formation relative to their movement direction
+		const FVector MoveDir = LeaderChar->GetVelocity().GetSafeNormal2D();
+		const FVector MoveRight = FVector::CrossProduct(FVector::UpVector, MoveDir);
+		FormationDir = LeaderLocation - MoveDir * OffsetBack + MoveRight * OffsetRight;
+	}
+	else if (bCombatLead)
+	{
+		// Leader stationary in Combat mode — take point along their facing at -OffsetBack, which the
+		// combat branch set to exactly LeadDistance (bias and floor both already inside it), so the
+		// moving and stationary lead points can't drift apart.
+		const FVector Facing = Leader->GetActorForwardVector().GetSafeNormal2D();
+		const FVector FacingRight = FVector::CrossProduct(FVector::UpVector, Facing);
+		FormationDir = LeaderLocation + Facing * -OffsetBack + FacingRight * OffsetRight;
+	}
+	else
+	{
+		// Leader stationary — just maintain distance, stay where we are relative to the leader
+		const FVector ToCompanion = (CompanionLocation - LeaderLocation).GetSafeNormal2D();
+		FormationDir = LeaderLocation + ToCompanion * OffsetBack;
+	}
+
+	// Standoff clamp against the PLAYER, leader-anchored only. The leader is a companion that can
+	// stand anywhere relative to the player — a Combat-mode primary takes point AHEAD of them, which
+	// drops the trailing anchor straight into the player's lap, and the stealth tuck does the same at
+	// short range. Mode-agnostic by design: it is the player-relative geometry that is unacceptable,
+	// not the mode that produced it. Pushing out to exactly EffStandoff (the same ring the
+	// min-separation back-out targets) means the clamp and the back-out can never fight each other.
+	if (bLeaderAnchored && FVector::Dist2D(FormationDir, PlayerLocation) < EffStandoff)
+	{
+		FVector FromPlayer = (FormationDir - PlayerLocation).GetSafeNormal2D();
+		if (FromPlayer.IsNearlyZero())
+			FromPlayer = (CompanionLocation - PlayerLocation).GetSafeNormal2D();
+		if (FromPlayer.IsNearlyZero())
+			FromPlayer = (-Player->GetActorForwardVector()).GetSafeNormal2D();
+		if (!FromPlayer.IsNearlyZero())
+		{
+			const float AnchorZ = FormationDir.Z; // the anchor's floor, never the player's
+			FormationDir = PlayerLocation + FromPlayer * EffStandoff;
+			FormationDir.Z = AnchorZ;
+		}
+	}
+
+	// Combat lead idles against the lead point; everything else against whatever it forms up on.
+	const float IdleGateDist = bCombatLead
+		? FVector::Dist(CompanionLocation, FormationDir)
+		: (bLeaderAnchored ? DistToLeader : DistToPlayer);
 
 	// Min-separation back-out: inside the hard floor → walk back to standoff rather than freezing in place.
 	// Deadband on entry prevents the branch from thrashing when the player loiters right at the floor boundary.
@@ -356,8 +428,12 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	// FormationDir when valid; otherwise we fall through to the formation target unchanged.
 	// Combat mode skips the EQS slot entirely — the query anchors slots around/behind the player,
 	// which would fight the lead point; MoveToLocation's nav projection handles off-mesh leads.
+	// PRIMARY ONLY: the query is player-anchored, so every slot it returns is a point in the player's
+	// formation ring — meaningless to a secondary that forms up on the primary, and on the leashed
+	// player-anchored fallback it would just steer it back onto the primary's own slot. A secondary
+	// therefore rides FormationDir in every state, which already IS its correct anchor.
 	TimeSinceLastEqs += DeltaSeconds;
-	if (FollowSlotQuery && !bCombatLead && !bEqsQueryInProgress && TimeSinceLastEqs >= EqsQueryInterval)
+	if (FollowSlotQuery && Companion->IsPrimaryCompanion() && !bCombatLead && !bEqsQueryInProgress && TimeSinceLastEqs >= EqsQueryInterval)
 	{
 		bEqsQueryInProgress = true;
 		TimeSinceLastEqs = 0.f;
@@ -366,18 +442,8 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		// the callback prefer one with eye-line toward the threat. SingleResult otherwise.
 		bFightBiasQuery = Controller->GetRecentAlertedThreat(T->FightSignalMaxAge, FightBiasThreatLocation);
 
-		// A secondary companion needs the full set for the same reason: the single best slot is the
-		// one the primary is already heading for, and the callback has to be able to pick another.
-		bAllySpacingQuery = !Companion->IsPrimaryCompanion();
-
-		// Side comes from the MIRRORED offset the anchor above actually uses, never a hardcoded "+1 is
-		// the primary": FormationOffsetRight is a live serialised override, so a designer flipping it
-		// negative swaps which side each companion anchors to, and a fixed assumption would leave the
-		// filter rejecting the exact side the anchor is steering toward. Sign(0) = no side, no test.
-		AllySlotSideSign = bAllySpacingQuery ? FMath::Sign(OffsetRight) : 0.f;
-
 		FEnvQueryRequest QueryRequest(FollowSlotQuery, Companion);
-		QueryRequest.Execute((bFightBiasQuery || bAllySpacingQuery) ? EEnvQueryRunMode::AllMatching : EEnvQueryRunMode::SingleResult,
+		QueryRequest.Execute(bFightBiasQuery ? EEnvQueryRunMode::AllMatching : EEnvQueryRunMode::SingleResult,
 			FQueryFinishedSignature::CreateUObject(this, &UBTTask_FollowPlayer::OnFollowQueryFinished));
 	}
 
@@ -388,22 +454,22 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	if (bHasEqsTarget && EffMaxZDelta > 0.f && FMath::Abs(EqsTarget.Z - PlayerLocation.Z) > EffMaxZDelta)
 		bHasEqsTarget = false;
 
-	// Floor transit = pursue the player's location directly. Mid-flight the player's Z sits within
+	// Floor transit = pursue the leader's location directly. Mid-flight the leader's Z sits within
 	// FollowMaxZDelta of the floor ABOVE, so upper-landing slots legitimately pass the wrong-floor
-	// gate and yo-yo the companion on the stairs; the formation anchor (player Z, offset into the
+	// gate and yo-yo the companion on the stairs; the formation anchor (leader Z, offset into the
 	// stair slab) is off-mesh and only churns Failed->fallback. Off-level pursues unconditionally
 	// for the same reason.
-	const bool bPlayerZTransit = T->FollowPursuitZRate > 0.f
-		&& PlayerZTransitEnvelope > T->FollowPursuitZRate;
-	const bool bPursuePlayer = bPlayerZTransit || !bZAligned;
-	if (bPursuePlayer != bWasPursuingPlayer)
+	const bool bLeaderZTransit = T->FollowPursuitZRate > 0.f
+		&& LeaderZTransitEnvelope > T->FollowPursuitZRate;
+	const bool bPursueLeader = bLeaderZTransit || !bZAligned;
+	if (bPursueLeader != bWasPursuingLeader)
 	{
-		bWasPursuingPlayer = bPursuePlayer;
-		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] PURSUIT %s (ZRate=%.0f zAligned=%d)"),
-			bPursuePlayer ? TEXT("ENTER") : TEXT("EXIT"), PlayerZTransitEnvelope, (int32)bZAligned);
+		bWasPursuingLeader = bPursueLeader;
+		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] PURSUIT %s (ZRate=%.0f zAligned=%d leaderAnchored=%d)"),
+			bPursueLeader ? TEXT("ENTER") : TEXT("EXIT"), LeaderZTransitEnvelope, (int32)bZAligned, (int32)bLeaderAnchored);
 	}
 
-	const FVector MoveTarget = bPursuePlayer ? PlayerLocation
+	const FVector MoveTarget = bPursueLeader ? LeaderLocation
 		: (bHasEqsTarget && !bCombatLead) ? EqsTarget : FormationDir;
 
 	// Blocked-move re-issue: MoveToLocation can silently fail to path (e.g. the player is standing
@@ -429,25 +495,40 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		BlockedMoveReissueAccumulator = 0.f;
 	}
 
-	// Sprint catch-up + idle hysteresis still keyed on DistToPlayer (not the slot).
+	// Sprint catch-up + idle hysteresis keyed on raw distances (not the slot).
 	// SetSprinting MUST stay before any early-return — preserves the c62bdbf sprint-latch fix.
-	// Mirror the player's sprint too: kit BP owns player sprint state, so it's inferred from 2D
-	// speed against the tuning threshold (kit walk 410; threshold sits between walk and sprint).
+	// Mirror the leader's sprint too. Against the PLAYER that has to be inferred from 2D speed
+	// against the tuning threshold (kit BP owns player sprint state; kit walk 410, threshold sits
+	// between walk and sprint); a COMPANION leader publishes the flag itself, so read it directly
+	// rather than re-deriving it from a velocity that soft-separation and pathing both perturb.
 	// The mirror needs a distance floor — without it the companion sprints 2m to a formation
-	// point because the player happened to be sprinting somewhere.
-	const bool bPlayerSprinting = Player->GetVelocity().Size2D() > T->PlayerSprintSpeedThreshold;
+	// point because its leader happened to be sprinting somewhere.
+	// Non-null exactly while leader-anchored: ResolveFollowLeader returns the cached primary or the
+	// player and nothing else, so this is the same actor Leader points at.
+	const ACompanionCharacter* LeaderCompanion = bLeaderAnchored ? CachedLeader.Get() : nullptr;
+	const bool bLeaderSprinting = LeaderCompanion
+		? LeaderCompanion->IsSprinting()
+		: Player->GetVelocity().Size2D() > T->PlayerSprintSpeedThreshold;
 	// Off-level counts as far regardless of 3D distance — the real path runs the stairwell.
 	// Stealth is exempt: its catch-up ladder owns pace there (sprint break deliberately unreachable).
-	const bool bWantSprint = DistToPlayer > T->SprintDistanceThreshold
-		|| (bPlayerSprinting && DistToPlayer > T->SprintDistanceThreshold * 0.5f)
+	// Both distances arm it: the leader gap is what this companion is actually closing, and the
+	// player gap bounds total convoy stretch (identical values unless leader-anchored).
+	const bool bWantSprint = DistToLeader > T->SprintDistanceThreshold
+		|| DistToPlayer > T->SprintDistanceThreshold
+		|| (bLeaderSprinting && DistToLeader > T->SprintDistanceThreshold * 0.5f)
 		|| (!bZAligned && !Companion->IsStealthActive());
-	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f Thresh=%.0f EqsSlot=%d Pursue=%d -> SetSprinting(%d)"),
-		DistToPlayer, T->SprintDistanceThreshold, bHasEqsTarget ? 1 : 0, bPursuePlayer ? 1 : 0, bWantSprint ? 1 : 0);
+	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f LeaderDist=%.0f Thresh=%.0f EqsSlot=%d Pursue=%d -> SetSprinting(%d)"),
+		DistToPlayer, DistToLeader, T->SprintDistanceThreshold, bHasEqsTarget ? 1 : 0, bPursueLeader ? 1 : 0, bWantSprint ? 1 : 0);
 
-	// Catch-up rides the reduced sprint tier (FollowCatchupSprintSpeed) — full SprintSpeed read as
-	// too fast for closing formation gaps. Pace set before the sprint flag so the speed applies on
-	// the same ApplyMovementSpeeds pass.
-	Companion->SetFollowCatchupPace(bWantSprint);
+	// Catch-up rides the reduced sprint tier (FollowCatchupSprintSpeed 650) — full SprintSpeed read
+	// as too fast for closing formation gaps. A leader-anchored secondary drops that tier once either
+	// gap is genuinely open: its leader sprints at the full SprintSpeed (850), so a 650 chase never
+	// closes and the convoy stretches until the warp net fires. The tier still applies to the small
+	// gaps it was tuned for. Pace set before the sprint flag so the speed applies on the same
+	// ApplyMovementSpeeds pass.
+	const bool bNeedsFullSprint = bLeaderAnchored
+		&& (DistToLeader > T->SprintDistanceThreshold || DistToPlayer > T->SprintDistanceThreshold);
+	Companion->SetFollowCatchupPace(bWantSprint && !bNeedsFullSprint);
 	Companion->SetSprinting(bWantSprint);
 
 	// Only re-issue move if target shifted significantly
@@ -456,56 +537,117 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	LastMoveTarget = MoveTarget;
 
-	// Pursuit targets the player's own location — always nav-adjacent, so projection is safe ON.
-	// The anchor path keeps it OFF: a projected in-wall anchor lands on the wrong side of the wall.
-	// Pursuit accepts at the standoff ring, not AcceptableRadius: reach the player's AREA — the
-	// live radius (30cm) is unreachable through two capsules and would shove the companion into
-	// the player's back until the transit envelope decays.
-	const EPathFollowingRequestResult::Type MoveRes = bPursuePlayer
+	// Pursuit targets the leader's own location — a player or a nav agent, so always nav-adjacent and
+	// projection is safe ON. The anchor path keeps it OFF: a projected in-wall anchor lands on the
+	// wrong side of the wall. Pursuit accepts at the standoff ring, not AcceptableRadius: reach the
+	// leader's AREA — the live radius (30cm) is unreachable through two capsules and would shove the
+	// companion into the leader's back until the transit envelope decays.
+	const EPathFollowingRequestResult::Type MoveRes = bPursueLeader
 		? Controller->MoveToLocation(MoveTarget, EffStandoff, false, true, true, true)
 		: Controller->MoveToLocation(MoveTarget, T->AcceptableRadius * 0.5f, false, true, false, true);
 
-	// Off-mesh formation anchor fallback: with the companion on another floor, the stationary-player
-	// anchor (player + 2D bearing toward the companion) can land inside the stairwell wall/void —
+	// Off-mesh formation anchor fallback: with the companion on another floor, the stationary-leader
+	// anchor (leader + 2D bearing toward the companion) can land inside the stairwell wall/void —
 	// and with destination projection off, that move FAILS outright. The Idle-debounce above then
-	// re-issued the same doomed move forever: companion parked one floor up while the player stood
-	// still. Path to the player instead (always nav-adjacent; projection on; the acceptance ring
+	// re-issued the same doomed move forever: companion parked one floor up while the leader stood
+	// still. Path to the leader instead (always nav-adjacent; projection on; the acceptance ring
 	// keeps follow distance) so the stairwell route actually runs.
 	// LastMoveTarget stays keyed on the ANCHOR (set above): the dedup then suppresses re-issuing
 	// the doomed anchor while the fallback move runs, and the Idle-debounce re-opens the gate if
 	// the fallback itself ends short.
 	// A failed PURSUIT move has no better target to fall back to — the Idle-debounce above retries
 	// it once the path-following component settles.
-	if (MoveRes == EPathFollowingRequestResult::Failed && !bPursuePlayer)
+	if (MoveRes == EPathFollowingRequestResult::Failed && !bPursueLeader)
 	{
-		Controller->MoveToLocation(PlayerLocation, T->AcceptableRadius, false, true, true, true);
-		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] FORMATION anchor off-mesh (zAligned=%d) — falling back to player-location move"),
+		Controller->MoveToLocation(LeaderLocation, T->AcceptableRadius, false, true, true, true);
+		UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] FORMATION anchor off-mesh (zAligned=%d) — falling back to leader-location move"),
 			(int32)bZAligned);
 	}
 }
 
-void UBTTask_FollowPlayer::UpdatePlayerZTransit(const ACharacter* PlayerChar, float PlayerZ, float DeltaSeconds)
+AActor* UBTTask_FollowPlayer::ResolveFollowLeader(ACompanionCharacter& Companion, AActor& Player,
+	const UCompanionTuningDataAsset& Tuning, float DeltaSeconds)
 {
-	// Envelope follower over the player's grounded vertical rate. Position-delta based: CMC keeps
+	// Zero-change gate for the primary: its leader IS the player, so every leader-keyed line in
+	// TickTask resolves exactly as it did before the chain existed. Same for the master switch off.
+	if (Companion.IsPrimaryCompanion()) return &Player;
+	if (!Tuning.bSecondaryFollowsPrimaryCompanion) return &Player;
+
+	// Rescan only on a cache MISS, and then at most every LeaderRescanInterval: GetPrimaryCompanion
+	// is a TActorIterator over the whole level and must never run per tick. Pinned at the interval
+	// while the cache is hot so the first miss scans on that same tick (TimeSinceLastEqs idiom).
+	if (CachedLeader.IsValid())
+	{
+		TimeSinceLeaderScan = LeaderRescanInterval;
+	}
+	else
+	{
+		TimeSinceLeaderScan += DeltaSeconds;
+		if (TimeSinceLeaderScan >= LeaderRescanInterval)
+		{
+			TimeSinceLeaderScan = 0.f;
+			CachedLeader = ACompanionCharacter::GetPrimaryCompanion(Companion.GetWorld());
+		}
+	}
+
+	// Capability is re-tested EVERY tick against the cached pointer, never only at scan time: a
+	// leader that goes DBNO, dies or loses its controller mid-follow has to hand back to the player
+	// on the next tick, not at the end of the rescan interval.
+	ACompanionCharacter* Leader = CachedLeader.Get();
+	if (!IsValid(Leader) || Leader == &Companion) return &Player;
+	if (!Leader->GetController()) return &Player; // a still-captive extractee has no brain to trail
+	if (Leader->GetIsCompanionDBNO()) return &Player;
+	const UHealthComponent* LeaderHealth = Leader->GetHealthComponent();
+	if (IsValid(LeaderHealth) && LeaderHealth->IsDead()) return &Player;
+
+	// Leash: a leader commanded away (ping / route / breach) stops being a sane anchor long before
+	// the warp net would fire, and trailing it would drag the VIP off the player entirely. Latched
+	// with a release band — a leader loitering on the boundary would otherwise swap the whole follow
+	// frame (anchor, pursuit target, sprint mirror) every tick. 0 disables the leash.
+	if (Tuning.SecondaryLeaderLeashDistance <= 0.f)
+	{
+		bLeaderLeashBroken = false;
+		return Leader;
+	}
+
+	// Read-time floor on the release band (mirrors EffMinSep/EffStandoff/EffSprintBreak in TickTask):
+	// at any leash inside LeaderLeashReleaseHysteresis the flat band collapses the release distance to
+	// zero, and a leash that has already latched broken could then NEVER re-acquire — a silent,
+	// permanent fallback to player-follow. Half the leash keeps the band non-zero and strictly inside
+	// the break distance at every tuning, and only ever narrows the band: the authored break distance
+	// itself is never overridden.
+	const float ReleaseDistance = FMath::Max(Tuning.SecondaryLeaderLeashDistance - LeaderLeashReleaseHysteresis,
+		Tuning.SecondaryLeaderLeashDistance * 0.5f);
+	const float LeaderToPlayer = FVector::Dist2D(Leader->GetActorLocation(), Player.GetActorLocation());
+	bLeaderLeashBroken = bLeaderLeashBroken
+		? LeaderToPlayer > ReleaseDistance
+		: LeaderToPlayer > Tuning.SecondaryLeaderLeashDistance;
+
+	return bLeaderLeashBroken ? &Player : Leader;
+}
+
+void UBTTask_FollowPlayer::UpdateLeaderZTransit(const ACharacter* LeaderChar, float LeaderZ, float DeltaSeconds)
+{
+	// Envelope follower over the leader's grounded vertical rate. Position-delta based: CMC keeps
 	// reported velocity horizontal in walking mode, so GetVelocity().Z reads ~0 on stairs. Airborne
 	// frames don't sample — a jump apex must not read as floor transit.
-	const UCharacterMovementComponent* Move = PlayerChar ? PlayerChar->GetCharacterMovement() : nullptr;
+	const UCharacterMovementComponent* Move = LeaderChar ? LeaderChar->GetCharacterMovement() : nullptr;
 	const bool bOnGround = !Move || Move->IsMovingOnGround();
 
 	float Rate = 0.f;
 	if (bOnGround)
 	{
-		if (bHasPlayerZSample)
-			Rate = FMath::Min(FMath::Abs(PlayerZ - LastPlayerZ) / FMath::Max(DeltaSeconds, KINDA_SMALL_NUMBER), ZTransitRateClamp);
-		LastPlayerZ = PlayerZ;
-		bHasPlayerZSample = true;
+		if (bHasLeaderZSample)
+			Rate = FMath::Min(FMath::Abs(LeaderZ - LastLeaderZ) / FMath::Max(DeltaSeconds, KINDA_SMALL_NUMBER), ZTransitRateClamp);
+		LastLeaderZ = LeaderZ;
+		bHasLeaderZSample = true;
 	}
 
 	// Slew both directions: the attack slope rejects single-tick blips (only a sustained rate can
-	// climb to the threshold), the decay sets how long pursuit holds after the player settles.
-	PlayerZTransitEnvelope = FMath::Clamp(Rate,
-		FMath::Max(PlayerZTransitEnvelope - ZTransitEnvelopeDecay * DeltaSeconds, 0.f),
-		PlayerZTransitEnvelope + ZTransitEnvelopeAttack * DeltaSeconds);
+	// climb to the threshold), the decay sets how long pursuit holds after the leader settles.
+	LeaderZTransitEnvelope = FMath::Clamp(Rate,
+		FMath::Max(LeaderZTransitEnvelope - ZTransitEnvelopeDecay * DeltaSeconds, 0.f),
+		LeaderZTransitEnvelope + ZTransitEnvelopeAttack * DeltaSeconds);
 }
 
 void UBTTask_FollowPlayer::OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Result)
@@ -525,96 +667,13 @@ void UBTTask_FollowPlayer::OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Res
 	ACompanionCharacter* Companion = CachedCompanion.Get();
 	UWorld* World = Companion->GetWorld();
 
-	// --- Ally filter inputs (non-primary companion only) ---
-	// The follow query is player-anchored and identical for both companions, so its top slots are
-	// the primary's. Resolve everything the filter needs once; each input gates only the test it
-	// feeds, never the whole fill — a missing primary leaves nothing to space against, an
-	// unresolvable player leaves no side frame, and either alone must not reject every slot.
-	const ACompanionAIController* Controller = CachedController.Get();
-	const UCompanionTuningDataAsset* T = Controller ? Controller->GetTuning() : nullptr;
-
-	// TActorIterator, but at EqsQueryInterval and only for a secondary companion — the controller
-	// caches no primary, and a registry for this one caller isn't worth the lifetime handling.
-	const ACompanionCharacter* Primary = bAllySpacingQuery ? ACompanionCharacter::GetPrimaryCompanion(World) : nullptr;
-	const bool bSpacingTest = bAllySpacingQuery && T && IsValid(Primary);
-	const FVector PrimaryLocation = bSpacingTest ? Primary->GetActorLocation() : FVector::ZeroVector;
-	const float MinSpacingSq = bSpacingTest ? FMath::Square(T->AllyFollowSlotMinSpacing) : 0.f;
-
-	// Side frame for the half-plane test. While the player MOVES it mirrors TickTask's moving-player
-	// formation branch exactly — same ACharacter cast, same speed gate, so the two can't diverge on a
-	// non-ACharacter pawn — and latches that travel basis. While they STAND STILL the latch is reused
-	// rather than the test being dropped: spacing alone only proves a slot is AllyFollowSlotMinSpacing
-	// from the primary, never that it is mirrored, so with no side test the secondary took the slot
-	// beside the primary and walked across the player's back (at rest the formation branch keeps
-	// running — IdleGateDist is player distance, well outside AcceptableRadius — and a cross-body slot
-	// clears the 200cm re-issue dedup, so it's a real traversal, not a blip). The latch is travel, not
-	// actor-forward: it doesn't rotate when the player turns on the spot, so the accepted half-plane
-	// can't swing out from under the stationary bearing-hold anchor and invert the wedge.
-	FVector PlayerLocation = FVector::ZeroVector;
-	FVector SideRight = FVector::ZeroVector;
-	if (bAllySpacingQuery)
-	{
-		const UBlackboardComponent* BB = CachedOwnerComp->GetBlackboardComponent();
-		const AActor* Player = BB ? Cast<AActor>(BB->GetValueAsObject(PlayerActorKey.SelectedKeyName)) : nullptr;
-		const ACharacter* PlayerChar = IsValid(Player) ? Cast<ACharacter>(Player) : nullptr;
-		const bool bPlayerMoving = PlayerChar && PlayerChar->GetVelocity().SizeSquared() > 100.f * 100.f;
-		if (bPlayerMoving)
-		{
-			PlayerLocation = PlayerChar->GetActorLocation();
-			SideRight = FVector::CrossProduct(FVector::UpVector, PlayerChar->GetVelocity().GetSafeNormal2D());
-			LastMovingSideRight = SideRight;
-		}
-		else if (IsValid(Player) && !LastMovingSideRight.IsNearlyZero())
-		{
-			PlayerLocation = Player->GetActorLocation();
-			SideRight = LastMovingSideRight;
-		}
-	}
-	// Spacing stays unconditional — the pile-up it prevents is just as real standing still. The side
-	// test needs both a basis and a signed offset; either missing degrades to spacing-only, which is
-	// the pre-latch behaviour rather than a reject-everything stall.
-	const bool bSideTest = !SideRight.IsNearlyZero() && !FMath::IsNearlyZero(AllySlotSideSign);
-
-	// Filter during the fill, never after: MaxFightBiasSlotTraces is the fight-bias TRACE budget, and
-	// pre-truncating the window to it made "rejected everything" a steady state rather than an
-	// anomaly (EQS sorts best-first and the top slots cluster where the primary stands), throwing a
-	// whole query away twice a second. Walking until the window is FULL means an empty window really
-	// does mean the entire result set was unusable. Both tests are skipped for a primary companion,
-	// which therefore still takes the first MaxFightBiasSlotTraces items in score order, unchanged.
+	// Best-first window over the result set. Only a PRIMARY companion dispatches the query (see the
+	// gate in TickTask), so there is nothing to filter here — the window is the fight-bias TRACE
+	// budget and nothing else, and a non-empty result set always fills at least one candidate.
 	TArray<FVector, TInlineAllocator<MaxFightBiasSlotTraces>> Candidates;
 	Candidates.Reserve(FMath::Min(Result->Items.Num(), MaxFightBiasSlotTraces));
 	for (int32 i = 0; i < Result->Items.Num() && Candidates.Num() < MaxFightBiasSlotTraces; ++i)
-	{
-		const FVector Slot = Result->GetItemAsLocation(i);
-
-		// Sitting on the primary's slot — the pile-up this filter exists to prevent.
-		if (bSpacingTest && FVector::DistSquared2D(Slot, PrimaryLocation) < MinSpacingSq) continue;
-
-		// On the primary's side of the player. The dead zone passes near-centreline slots so a
-		// corridor with no clearly-sided geometry degrades to the anchor instead of to nothing.
-		if (bSideTest && FVector::DotProduct(Slot - PlayerLocation, SideRight) * AllySlotSideSign < -AllySlotSideDeadZone) continue;
-
-		Candidates.Add(Slot);
-	}
-
-	// Nothing usable — forget the slot and let TickTask fall through to FormationDir, which already
-	// IS the correct mirrored anchor. Unreachable for a primary: with both tests off, a non-empty
-	// result set always fills at least one candidate.
-	if (Candidates.Num() == 0)
-	{
-		bHasEqsTarget = false;
-		// Transition-only, at Log: sustained rejection means AllyFollowSlotMinSpacing is tuned wider
-		// than the query's donut and the secondary is permanently pinned to the anchor — worth one
-		// line, not one every EqsQueryInterval for the rest of the level.
-		if (!bAllySpacingRejectedAll)
-		{
-			bAllySpacingRejectedAll = true;
-			UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] Ally filter rejected all %d slots — falling back to the mirrored formation anchor"),
-				Result->Items.Num());
-		}
-		return;
-	}
-	bAllySpacingRejectedAll = false;
+		Candidates.Add(Result->GetItemAsLocation(i));
 
 	EqsTarget = Candidates[0];
 	bHasEqsTarget = true;
@@ -659,11 +718,15 @@ void UBTTask_FollowPlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uin
 	bHasEqsTarget = false;
 	EqsTarget = FVector::ZeroVector;
 	bFightBiasQuery = false;
-	bAllySpacingQuery = false;
-	bAllySpacingRejectedAll = false;
-	AllySlotSideSign = 0.f;
-	LastMovingSideRight = FVector::ZeroVector;
 	FightBiasThreatLocation = FVector::ZeroVector;
+
+	// Leader chain — same reason as the EQS resets: nothing from this run may bleed into the next.
+	CachedLeader.Reset();
+	LastFollowLeader.Reset();
+	TimeSinceLeaderScan = LeaderRescanInterval;
+	bLeaderLeashBroken = false;
+	bLeaderMoving = false;
+
 	CachedOwnerComp = nullptr;
 	CachedController.Reset();
 	CachedCompanion.Reset();

@@ -201,6 +201,7 @@ void ACompanionAIController::OnUnPossess()
 	PlayerTraversalComp.Reset();
 	TimeSinceClosedToPlayer = 0.f;
 	TimeOnDifferentLevel = 0.f;
+	bWarpRefusalWarned = false;
 
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearAllTimersForObject(this);
@@ -222,6 +223,7 @@ void ACompanionAIController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	PlayerTraversalComp.Reset();
 	TimeSinceClosedToPlayer = 0.f;
 	TimeOnDifferentLevel = 0.f;
+	bWarpRefusalWarned = false;
 
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearAllTimersForObject(this);
@@ -308,10 +310,13 @@ void ACompanionAIController::TickWarpFallback()
 	const UCompanionTuningDataAsset* T = Tuning;
 	if (!MyPawn || !Player || !T) return;
 
+	// The refusal latch tracks one streak of "stranded and un-warpable". Whenever the stranded timer
+	// resets the streak is over, so a later refusal is new and deserves its own Warning.
 	if (!T->bWarpToPlayerEnabled)
 	{
 		TimeSinceClosedToPlayer = 0.f;
 		TimeOnDifferentLevel = 0.f;
+		bWarpRefusalWarned = false;
 		return;
 	}
 
@@ -319,6 +324,7 @@ void ACompanionAIController::TickWarpFallback()
 	if (DistToPlayer < T->WarpMinDistance)
 	{
 		TimeSinceClosedToPlayer = 0.f;
+		bWarpRefusalWarned = false;
 		return;
 	}
 
@@ -333,11 +339,15 @@ void ACompanionAIController::TickWarpFallback()
 		TimeOnDifferentLevel += WarpTickInterval;
 		if (TimeOnDifferentLevel > ZMismatchTimeBudget)
 		{
-			UE_LOG(LogCompanionAI, Log,
+			UE_LOG(LogCompanionAI, Verbose,
 				TEXT("Z-mismatch warp triggered (ZDiff=%.0f, time=%.1fs)"),
 				ZDiff, TimeOnDifferentLevel);
 			ExecuteWarpBehindPlayer();
-			TimeOnDifferentLevel = 0.f;
+
+			// One warp attempt per tick, maximum. A refused warp no longer resets either timer, so
+			// without this the ShouldWarp() block below would fire a second attempt on the same tick —
+			// two nav projections and two teleport probes for one decision.
+			return;
 		}
 	}
 	else
@@ -345,6 +355,7 @@ void ACompanionAIController::TickWarpFallback()
 		TimeOnDifferentLevel = 0.f;
 	}
 
+	// Fallthrough for the non-Z case: same-floor stranding, judged on time and camera visibility.
 	if (ShouldWarp())
 		ExecuteWarpBehindPlayer();
 }
@@ -381,7 +392,7 @@ bool ACompanionAIController::ShouldWarp() const
 	return !IsCompanionRecentlyRendered();
 }
 
-bool ACompanionAIController::TeleportToLocation(const FVector& Location, const FRotator& Rotation)
+bool ACompanionAIController::TeleportToLocation(const FVector& Location, const FRotator& Rotation, bool bForce)
 {
 	static constexpr float DefaultNavProjectExtent = 500.f;
 
@@ -389,16 +400,22 @@ bool ACompanionAIController::TeleportToLocation(const FVector& Location, const F
 	UWorld* World = GetWorld();
 	if (!MyPawn || !World) return false;
 
-	if (UTraversalComponent* OwnTrav = MyPawn->FindComponentByClass<UTraversalComponent>())
-	{
-		if (OwnTrav->IsBusy())
-			OwnTrav->CancelTraversal();
-	}
-
-	StopMovement();
-
 	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(World);
 	if (!NavSys) return false;
+
+	UTraversalComponent* OwnTrav = MyPawn->FindComponentByClass<UTraversalComponent>();
+
+	// A traversing pawn cannot be probed truthfully: StartTraversal drops the capsule to NoCollision,
+	// so the overlap test finds nothing and reports success vacuously — and CancelTraversal then moves
+	// the pawn itself (depenetration + floor snap), invalidating the answer before the real teleport
+	// runs. Refuse instead; traversals are short and every caller of the unforced path retries.
+	if (!bForce && IsValid(OwnTrav) && OwnTrav->IsBusy())
+	{
+		UE_LOG(LogCompanionAI, Verbose,
+			TEXT("TeleportToLocation: refused — traversal in progress, cannot probe %s; retrying once it ends"),
+			*Location.ToString());
+		return false;
+	}
 
 	const float ProjectExtent = IsValid(Tuning) ? Tuning->WarpNavProjectExtent : DefaultNavProjectExtent;
 	FNavLocation OutLoc;
@@ -408,8 +425,29 @@ bool ACompanionAIController::TeleportToLocation(const FVector& Location, const F
 		return false;
 	}
 
-	MyPawn->TeleportTo(OutLoc.Location, Rotation);
-	return true;
+	// Probe first. Everything below this point is destructive to the companion's current state, and
+	// callers retry on failure — a refused destination must cost nothing so the retry is free.
+	// FindTeleportSpot is the non-mutating query: TeleportTo(bIsATest) still relocates the component,
+	// it only suppresses the OnTeleported notification. The scratch vector absorbs the adjusted spot;
+	// the real TeleportTo below stays the authoritative result.
+	if (!bForce)
+	{
+		FVector ProbeLocation = OutLoc.Location;
+		if (!World->FindTeleportSpot(MyPawn, ProbeLocation, Rotation))
+		{
+			UE_LOG(LogCompanionAI, Verbose,
+				TEXT("TeleportToLocation: destination %s refused (encroachment / blocked) — pawn state untouched"),
+				*OutLoc.Location.ToString());
+			return false;
+		}
+	}
+
+	if (IsValid(OwnTrav) && OwnTrav->IsBusy())
+		OwnTrav->CancelTraversal();
+
+	StopMovement();
+
+	return MyPawn->TeleportTo(OutLoc.Location, Rotation, /*bIsATest*/ false, /*bNoCheck*/ false);
 }
 
 void ACompanionAIController::ExecuteWarpBehindPlayer()
@@ -431,7 +469,30 @@ void ACompanionAIController::ExecuteWarpBehindPlayer()
 			*Goal.ToString(), bHardWarp ? TEXT("HARD") : TEXT("SOFT"), TimeSinceClosedToPlayer);
 		TimeSinceClosedToPlayer = 0.f;
 		TimeOnDifferentLevel = 0.f;
+		bWarpRefusalWarned = false;
+		return;
 	}
+
+	// Timers deliberately left running — the companion is still stranded, so the next warp tick
+	// retries. A refused teleport is side-effect free, so the retry cadence costs nothing.
+
+	// Past the hard threshold the companion is stranded beyond what the design tolerates AND cannot be
+	// recovered — worth shouting about, but exactly once. bHardWarp latches true and this path runs
+	// twice a second, so an unreachable goal would otherwise log a Warning for the rest of the session.
+	// Everything else (soft-threshold retries, repeats of the same refusal) stays Verbose, formatted
+	// lazily by UE_LOG so the suppressed path allocates nothing.
+	if (bHardWarp && !bWarpRefusalWarned)
+	{
+		bWarpRefusalWarned = true;
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("Warp REFUSED at %s (HARD threshold, stuck=%.1fs) — companion stranded, retrying every %.1fs (further refusals logged at Verbose)"),
+			*Goal.ToString(), TimeSinceClosedToPlayer, WarpTickInterval);
+		return;
+	}
+
+	UE_LOG(LogCompanionAI, Verbose,
+		TEXT("Warp REFUSED at %s (%s threshold, stuck=%.1fs) — companion still stranded, retrying next tick"),
+		*Goal.ToString(), bHardWarp ? TEXT("HARD") : TEXT("SOFT"), TimeSinceClosedToPlayer);
 }
 
 void ACompanionAIController::ReleaseNextCoverSlotIfClaimed()
