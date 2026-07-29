@@ -96,7 +96,13 @@ void UFootstepNoiseComponent::TickNoise()
 	UpdateGearRattle(DesiredRattle);
 
 	AccumulatedDistance += Delta.Size2D();
-	AudioAccumulatedDistance += Delta.Size2D();
+
+	// Delta is an absolute magnitude, so an in-place shuffle (the companion nudging to hold its
+	// formation slot) sums up instead of cancelling and eventually pays out a step from a character
+	// that never went anywhere. The floor sits far below FootPlantMinOwnerSpeed on purpose — this
+	// path is what keeps a sub-50 crouch creep audible once the plant gates start rejecting.
+	if (Speed >= AudioDistanceMinSpeed)
+		AudioAccumulatedDistance += Delta.Size2D();
 
 	if (AccumulatedDistance >= StepDistance)
 	{
@@ -111,17 +117,32 @@ void UFootstepNoiseComponent::TickNoise()
 	if (TickFootPlants(*OwnerChar, Tier))
 		AudioAccumulatedDistance = 0.f;
 
+	TickDistanceBackstop(Tier);
+}
+
+void UFootstepNoiseComponent::TickDistanceBackstop(EStepTier Tier)
+{
 	const UWorld* World = GetWorld();
-	const bool bFootTrackingLive = World && (World->GetTimeSeconds() - LastFootPlantTime) < 2.f;
+	if (!IsValid(World)) return;
+
+	const float Now = World->GetTimeSeconds();
+	const bool bFootTrackingLive = (Now - LastFootPlantTime) < 2.f;
 
 	// Crouch/prone strides are shorter — the shared distance leaves visual steps silent.
 	float StepAudioDistance = (Tier == EStepTier::Quiet) ? QuietAudioStepDistance : AudioStepDistance;
 	if (bFootTrackingLive) StepAudioDistance *= BackstopDistanceMult;
-	if (AudioAccumulatedDistance >= StepAudioDistance)
-	{
-		AudioAccumulatedDistance = FMath::Fmod(AudioAccumulatedDistance, StepAudioDistance);
-		PlayFootstepAudio(Tier);
-	}
+	if (AudioAccumulatedDistance < StepAudioDistance) return;
+
+	// The backstop is the second step producer, so it answers to the cross-foot guard too: without
+	// this a backstop step and a foot plant on the following poll land 0.05s apart and read as the
+	// same doubled step. Returning before the Fmod defers the step rather than dropping it.
+	if (Now - LastAnyFootStepTime < CrossFootStepSeconds) return;
+
+	AudioAccumulatedDistance = FMath::Fmod(AudioAccumulatedDistance, StepAudioDistance);
+	// Deliberately not LastFootPlantTime — that stays exclusive to real plants, or the backstop
+	// would widen its own threshold and start throttling itself.
+	LastAnyFootStepTime = Now;
+	PlayFootstepAudio(Tier);
 }
 
 bool UFootstepNoiseComponent::TickFootPlants(const ACharacter& OwnerChar, EStepTier Tier)
@@ -132,6 +153,7 @@ bool UFootstepNoiseComponent::TickFootPlants(const ACharacter& OwnerChar, EStepT
 	if (!Mesh->DoesSocketExist(LeftFootBone) || !Mesh->DoesSocketExist(RightFootBone)) return false;
 
 	const float Now = World->GetTimeSeconds();
+	const float OwnerSpeed = OwnerChar.GetVelocity().Size2D();
 	const FName Bones[2] = { LeftFootBone, RightFootBone };
 	bool bStepped = false;
 
@@ -154,14 +176,17 @@ bool UFootstepNoiseComponent::TickFootPlants(const ACharacter& OwnerChar, EStepT
 
 			if (FootSpeed <= FootPlantSpeedMax)
 			{
+				// The plant itself always registers — a step the gates reject must not leave the
+				// foot stuck mid-swing.
 				bFootPlanted[Foot] = true;
 
-				// Only a real stride sounds: the foot must have genuinely swung since its last plant,
-				// and the same foot can't retrigger inside half a fast cadence.
-				if (FootPeakSwingSpeed[Foot] >= FootSwingSpeedMin
-					&& Now - LastFootStepTime[Foot] >= FootRetriggerSeconds)
+				if (CanFootStepSound(Foot, FootPeakSwingSpeed[Foot], OwnerSpeed, Now))
 				{
+					// Only a step that actually sounds stamps these: a rejected plant must not block
+					// this foot's next genuine step, nor stamp LastFootPlantTime, which would widen
+					// the distance backstop and silence movement that never fires a valid plant.
 					LastFootStepTime[Foot] = Now;
+					LastAnyFootStepTime = Now;
 					LastFootPlantTime = Now;
 					PlayFootstepAudio(Tier);
 					bStepped = true;
@@ -179,6 +204,24 @@ bool UFootstepNoiseComponent::TickFootPlants(const ACharacter& OwnerChar, EStepT
 
 	bFootLocationsValid = true;
 	return bStepped;
+}
+
+bool UFootstepNoiseComponent::CanFootStepSound(int32 Foot, float PeakSwingSpeed, float OwnerSpeed, float Now) const
+{
+	// Only a real stride sounds: the foot must have genuinely swung since its last plant, and the
+	// same foot can't retrigger inside half a fast cadence.
+	if (PeakSwingSpeed < FootSwingSpeedMin) return false;
+	if (Now - LastFootStepTime[Foot] < FootRetriggerSeconds) return false;
+
+	// Both feet settle together as the owner decelerates to a stop, and the per-foot guard above is
+	// blind to that — without this they sound on the same poll and the step reads as doubled.
+	if (Now - LastAnyFootStepTime < CrossFootStepSeconds) return false;
+
+	// Idle animation swings the foot socket while the actor stays put (turn-in-place, aim sway, IK
+	// settle), so the owner must be travelling as well as animating. AudioAccumulatedDistance is
+	// already the travel since the last audible step, so it serves as the "went somewhere" test.
+	if (OwnerSpeed < FootPlantMinOwnerSpeed) return false;
+	return AudioAccumulatedDistance >= FootPlantMinTravelDistance;
 }
 
 UFootstepNoiseComponent::EStepTier UFootstepNoiseComponent::PickTier() const

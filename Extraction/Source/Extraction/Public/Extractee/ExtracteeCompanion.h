@@ -59,6 +59,11 @@ public:
 	// cover holding a pistol it has not been given yet.
 	virtual bool IsCombatReady() const override;
 
+	// Invisible to enemy perception and target selection over exactly TakeDamage's immunity window
+	// -- captive through the unarmed handoff -- so no enemy ever locks onto a man who cannot fight
+	// back. Zeroed damage alone still left the squad aiming and firing at the hostage.
+	virtual bool IsAlwaysSightCloaked() const override;
+
 	// --- IWorldInteractable (rescue) ---
 	virtual bool CanWorldInteract_Implementation(AActor* Interactor) const override;
 	virtual void WorldInteract_Implementation(AActor* Interactor) override;

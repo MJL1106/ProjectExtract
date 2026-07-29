@@ -52,11 +52,18 @@ bool CompanionBreachStatics::OpenBreachDoor(ACompanionAIController* AIC, AActor*
 			Profile->Loudness, AIC->GetPawn(), Profile->MaxRange, TEXT("Breach"));
 	}
 
-	// Per-type breach accent (slam / latch / slow slide) layered over the door's own OpenSound.
+	// Per-type breach accent (slam / latch / slow slide) layered over the door's own OpenSound,
+	// plus the body-into-door thump — only the forced open path gets it, never a passive auto-open.
 	if (UGameAudioSubsystem* AudioSys = AIC->GetWorld()->GetSubsystem<UGameAudioSubsystem>())
 	{
 		if (const USurfaceAudioBank* Bank = AudioSys->GetBank())
+		{
 			AudioSys->PlayAt(Bank->BreachSounds.FindRef(BreachType), NoiseLocation);
+
+			const float* ImpactVolume = Bank->BreachImpactVolumes.Find(BreachType);
+			AudioSys->PlayAt(Bank->BreachImpact, NoiseLocation,
+				ImpactVolume ? *ImpactVolume : Bank->BreachImpactVolume);
+		}
 	}
 
 	return true;

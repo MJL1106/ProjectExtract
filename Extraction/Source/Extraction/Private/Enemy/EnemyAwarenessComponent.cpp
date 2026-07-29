@@ -104,7 +104,17 @@ void UEnemyAwarenessComponent::OnTargetPerceptionUpdated(AActor* Actor, FAIStimu
 	if (!IsValid(Actor)) return;
 
 	if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Actor))
-		CachedPerceivedCompanion = Companion;
+	{
+		// CachedPerceivedCompanion feeds search-room exposure, and only the primary can ever own an
+		// exposure generation, so the VIP must not evict it.
+		if (Companion->IsPrimaryCompanion())
+			CachedPerceivedCompanion = Companion;
+
+		// Dedicated slot: the stimulus below is about to be dropped, so remember who it came from.
+		// Only a cloaked companion writes here, so the primary can never evict the VIP.
+		if (Companion->IsAlwaysSightCloaked())
+			AlwaysCloakedCompanion = Companion;
+	}
 
 	if (GetDetectionLogLevel() > 0 && Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>())
 		if (const AEnemyCharacter* EC = Cast<AEnemyCharacter>(Actor))
@@ -767,6 +777,7 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 	if (!IsValid(ArchetypeData)) return;
 
 	RefreshSearchRoomExposure();
+	RefreshAlwaysCloakedCompanion();
 
 	// Debug auto-engage: force Combat with the player pawn every tick while the flag is set.
 	// Runs before the normal Combat/Suspicion branch so it re-asserts target and state even if
@@ -1366,6 +1377,9 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 	// for this enemy, so the fight is coherent from this point on.
 	if (ACompanionCharacter* TargetCompanion = Cast<ACompanionCharacter>(Target))
 	{
+		// A captive/unarmed VIP can never become a combat target, however the acquisition was raised.
+		if (TargetCompanion->IsAlwaysSightCloaked()) return;
+
 		if (TargetCompanion->IsStealthActive())
 		{
 			const AAIController* MyController = Cast<AAIController>(GetOwner());
@@ -1845,6 +1859,19 @@ void UEnemyAwarenessComponent::RefreshSearchRoomExposure()
 	SeedCompanionSightTracks();
 }
 
+void UEnemyAwarenessComponent::RefreshAlwaysCloakedCompanion()
+{
+	const ACompanionCharacter* Companion = AlwaysCloakedCompanion.Get();
+	if (!IsValid(Companion)) return;
+	if (Companion->IsAlwaysSightCloaked()) return;
+
+	// The cloak has lifted — the VIP just armed. Every sight stimulus he emitted while cloaked was
+	// dropped and perception won't fire again without a fresh LOS edge, so an enemy already in
+	// Combat holds no track for him. Clearing the slot means this seeds exactly once per lift.
+	AlwaysCloakedCompanion.Reset();
+	SeedCompanionSightTracks();
+}
+
 void UEnemyAwarenessComponent::ApplySilentSearchRoomStartle(ACompanionCharacter* Companion,
 	FSuspicionTrack& Track)
 {
@@ -1959,6 +1986,10 @@ bool UEnemyAwarenessComponent::IsCompanionSightCloaked(const AActor* Actor) cons
 {
 	const ACompanionCharacter* Companion = Cast<const ACompanionCharacter>(Actor);
 	if (!Companion) return false;
+
+	// The captive/unarmed extraction VIP is never perceivable — no room exposure, alert level or
+	// in-Combat state lifts this, so it sits above every rule below.
+	if (Companion->IsAlwaysSightCloaked()) return true;
 
 	const AAIController* MyController = Cast<AAIController>(GetOwner());
 	const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;

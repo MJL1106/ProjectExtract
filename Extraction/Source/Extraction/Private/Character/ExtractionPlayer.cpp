@@ -921,11 +921,13 @@ void AExtractionPlayer::RefreshSoftCollisionCompanions()
 FVector AExtractionPlayer::ApplyCompanionSoftCollision(ACompanionCharacter& Companion, UCapsuleComponent& CompanionCapsule)
 {
 	// Idempotent per-tick assert (self-heals any external clear, e.g. BTTask_RevivePlayer's hold
-	// teardown): the player still ignores the companion (existing pass-through feel); the companion
-	// no longer ignores the player, so ITS movement sweeps block against the player's capsule — CMC
-	// wall-slide walks it around instead of shoving through (asymmetric blocking, F2).
+	// teardown): MUTUAL ignores, as the original soft pass-through shipped them. Neither body's
+	// movement sweeps see the other, so neither can shove the other around — the separation is the
+	// soft push below and nothing else. The asymmetric variant (companion blocking against the
+	// player, so CMC wall-slide would walk it around) is what shoved the companion whenever the
+	// player stood inside them, and parked its capsule on the crouched player. Don't reintroduce it.
 	GetCapsuleComponent()->IgnoreActorWhenMoving(&Companion, true);
-	CompanionCapsule.IgnoreActorWhenMoving(this, false);
+	CompanionCapsule.IgnoreActorWhenMoving(this, true);
 
 	FVector Delta = GetActorLocation() - Companion.GetActorLocation();
 	Delta.Z = 0.f;

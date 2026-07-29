@@ -465,6 +465,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Mode")
 	bool IsStealthActive() const { return Mode == ECompanionMode::Stealth && !bStealthBroken; }
 
+	/** Unconditionally unperceivable to enemies (not a mode-driven cloak). Base companion is never this. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Mode")
+	virtual bool IsAlwaysSightCloaked() const { return false; }
+
 	/** World seconds of the moment unbroken stealth last became active (fresh Stealth order or
 	 *  re-pin). The BT service breaks stealth on any combat EVENT stamped after this — a stale
 	 *  Combat-awareness/alert tail from before the order can never re-break it. */

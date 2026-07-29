@@ -2,10 +2,13 @@
 #include "Audio/ExtractionAudioSettings.h"
 #include "Audio/MusicBankData.h"
 #include "Components/AudioComponent.h"
+#include "Components/HealthComponent.h"
 #include "Core/Extraction.h"
 #include "Enemy/EnemyDirectorSubsystem.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "GameFramework/Pawn.h"
+#include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 
@@ -120,6 +123,10 @@ void UMusicSubsystem::Poll()
 	if (bReliefDucked && !(IsValid(CurrentTrack) && CurrentTrack->IsPlaying())) bReliefDucked = false;
 	if (bOutgoingFightBed && !(IsValid(OutgoingTrack) && OutgoingTrack->IsPlaying())) bOutgoingFightBed = false;
 
+	// Before the counts are read: this is a combat-activity source in its own right and the gate
+	// below consumes it the same poll.
+	PollPlayerDamage(*World, Now);
+
 	// Both holds are count-based off the director's 1s sweep; stamp them here so the windows
 	// survive the counts flickering to zero between sweeps.
 	if (const UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
@@ -130,7 +137,10 @@ void UMusicSubsystem::Poll()
 		// The director's LastCombatReportTime fires on combat ENTRY only. Through the back half of a
 		// long engagement nobody new enters, so gating on it alone would leave the hold already
 		// expired by the time the counts drop — the wind-down would start the instant LOS broke.
-		if (Director->GetCombatEnemyCount() > 0)
+		// The activity gate is what stops the opposite failure: the count outlives the fight by the
+		// archetype's LostContactGrace, and an ungated stamp here would keep refreshing the hold off
+		// that stale awareness so combat music never wound down at all.
+		if (Director->GetCombatEnemyCount() > 0 && HasRecentCombatActivity(Now))
 			LastCombatSignalTime = Now;
 	}
 
@@ -181,7 +191,9 @@ EMusicState UMusicSubsystem::ComputeDesiredState(double Now) const
 		// count stays in front so a designer's zero hold still plays combat music during combat.
 		const double EntryStamp = static_cast<double>(Director->GetLastCombatReportTime());
 		const double LastCombat = FMath::Max(LastCombatSignalTime, EntryStamp);
-		const bool bCombat = Director->GetCombatEnemyCount() > 0
+		// The live count only counts while something is actually happening — on its own it stays true
+		// for the whole LostContactGrace window and pins the music in Combat for up to 45s of silence.
+		const bool bCombat = (Director->GetCombatEnemyCount() > 0 && HasRecentCombatActivity(Now))
 			|| (Now - LastCombat) < Bank->CombatHoldSeconds;
 		if (bCombat) return EMusicState::Combat;
 	}
@@ -189,6 +201,42 @@ EMusicState UMusicSubsystem::ComputeDesiredState(double Now) const
 	if ((Now - LastSuspicionSignalTime) < Bank->SuspicionHoldSeconds) return EMusicState::Suspicion;
 
 	return EMusicState::Explore;
+}
+
+void UMusicSubsystem::NotifyCombatActivity()
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+	LastCombatActivityTime = World->GetTimeSeconds();
+}
+
+void UMusicSubsystem::PollPlayerDamage(const UWorld& World, double Now)
+{
+	if (!PlayerHealth.IsValid())
+	{
+		const APlayerController* PC = World.GetFirstPlayerController();
+		const APawn* PlayerPawn = PC ? PC->GetPawn() : nullptr;
+		PlayerHealth = IsValid(PlayerPawn) ? PlayerPawn->FindComponentByClass<UHealthComponent>() : nullptr;
+		if (!PlayerHealth.IsValid()) return;
+	}
+
+	// Damage taken is the combat signal the world-audio hub can't see: melee lands with no impact
+	// cue and a grenade exchange fires no bullet report, so a fight the player is losing would wind
+	// the music down while they're being hit. Any source stamps it — TakeDamage records the time
+	// before the shield/health split, so a shield-only hit counts too.
+	const float LastDamage = PlayerHealth->GetLastDamageWorldTime();
+	if (LastDamage <= LastSeenPlayerDamageTime) return;
+
+	LastSeenPlayerDamageTime = LastDamage;
+	LastCombatActivityTime = Now;
+}
+
+bool UMusicSubsystem::HasRecentCombatActivity(double Now) const
+{
+	// 0 = gate off, matching x.AudioCombatCullRange's "0 = never cull". Without this a designer
+	// zeroing the window would silently kill combat music outright instead of the new gate.
+	if (Bank->CombatActivityWindowSeconds <= 0.f) return true;
+	return (Now - LastCombatActivityTime) < Bank->CombatActivityWindowSeconds;
 }
 
 void UMusicSubsystem::TransitionTo(EMusicState NewState, double Now)
@@ -219,12 +267,18 @@ void UMusicSubsystem::TransitionTo(EMusicState NewState, double Now)
 		break;
 
 	case EMusicState::Relief:
+	{
 		ReliefUntilTime = Now + Bank->ReliefSeconds;
 		// Wave completion plays its victory stinger from the delegate; a combat wind-down queues the
-		// all-clear for once the bed has ducked away.
-		if (OldState == EMusicState::Combat) PendingAllClearTime = Now + Bank->ReliefDuckFadeSeconds;
+		// all-clear for once the bed has ducked away. The fight has to be OVER, not merely quiet:
+		// the activity gate de-escalates the bed through any lull, and a "you're safe now" resolve
+		// over a cautious flank reads far worse than the long tail it replaced.
+		const UEnemyDirectorSubsystem* Director = GetWorld() ? GetWorld()->GetSubsystem<UEnemyDirectorSubsystem>() : nullptr;
+		const bool bNoneEngaged = !IsValid(Director) || Director->GetCombatEnemyCount() == 0;
+		if (OldState == EMusicState::Combat && bNoneEngaged) PendingAllClearTime = Now + Bank->ReliefDuckFadeSeconds;
 		DuckOrStopForRelief(OldState);
 		break;
+	}
 
 	case EMusicState::Explore:
 	default:

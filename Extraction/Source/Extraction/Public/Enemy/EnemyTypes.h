@@ -149,7 +149,6 @@ enum class EBarkType : uint8
 	LostTarget		UMETA(DisplayName = "Lost Target"),
 	BodyFound		UMETA(DisplayName = "Body Found"),
 	GrenadeOut		UMETA(DisplayName = "Grenade Out"),
-	ManDown			UMETA(DisplayName = "Man Down"),
 	Pinned			UMETA(DisplayName = "Pinned"),
 	FallingBack		UMETA(DisplayName = "Falling Back"),
 	Flanking		UMETA(DisplayName = "Flanking"),

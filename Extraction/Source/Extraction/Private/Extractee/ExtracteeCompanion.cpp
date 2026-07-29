@@ -4,6 +4,8 @@
 
 #include "Components/WidgetComponent.h"
 #include "Net/UnrealNetwork.h"
+#include "Perception/AISense_Sight.h"
+#include "Perception/AIPerceptionSystem.h"
 #include "TimerManager.h"
 #include "WeaponBase.h"
 #include "World/InteractionEventSubsystem.h"
@@ -69,8 +71,10 @@ float AExtracteeCompanion::TakeDamage(float DamageAmount, const FDamageEvent& Da
 {
 	// Story prop until rescued, and still untouchable through the unarmed handoff window: the
 	// team flips to player-side the instant he is freed, so without this the whole squad gets to
-	// shoot an unarmed man who can't fight back for the length of the handoff line.
-	if (bCaptive || !bArmed) return 0.f;
+	// shoot an unarmed man who can't fight back for the length of the handoff line. Expressed as
+	// the same predicate the enemy perception cloak reads, so immunity and cloak are one window by
+	// construction and cannot silently split.
+	if (IsAlwaysSightCloaked()) return 0.f;
 	return Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 }
 
@@ -95,6 +99,14 @@ bool AExtracteeCompanion::CanFire() const
 bool AExtracteeCompanion::IsCombatReady() const
 {
 	return bArmed && Super::IsCombatReady();
+}
+
+bool AExtracteeCompanion::IsAlwaysSightCloaked() const
+{
+	// Matches TakeDamage's immunity window exactly -- captive through the unarmed handoff. Enemies
+	// must never lock onto a man who cannot fight back: zeroing the damage stopped him dying, but
+	// the squad still picked the hostage as a target and emptied magazines into him.
+	return !bArmed;
 }
 
 // ------------------------------------------------------------------
@@ -146,6 +158,16 @@ void AExtracteeCompanion::CompleteRescue(bool bCeremony, AActor* Interactor)
 {
 	if (!bCaptive) return;
 	bCaptive = false;
+
+	// Sight perception bakes listener-target affiliation at registration and never re-evaluates a
+	// runtime team change. This pawn just flipped from NoTeam (captive) to team 0 (player side) —
+	// evict and re-register so perceivers re-pair with the new affiliation.
+	if (UWorld* World = GetWorld())
+		if (UAIPerceptionSystem* PerceptionSys = UAIPerceptionSystem::GetCurrent(World))
+		{
+			PerceptionSys->UnregisterSource(*this, UAISense_Sight::StaticClass());
+			PerceptionSys->RegisterSourceForSenseClass(UAISense_Sight::StaticClass(), *this);
+		}
 
 	// Only a real rescue is an interaction. Raised from this success branch rather than blanket
 	// from the player's commit, so a refused hold (rescue gated off) ticks nothing off.

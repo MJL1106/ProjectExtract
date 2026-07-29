@@ -47,8 +47,9 @@ public:
 	/** Non-positional one-shot (hit confirms, UI-adjacent feedback). */
 	void Play2D(USoundBase* Sound, float Volume = 1.f) const;
 
-	/** Owner-aware foley: 2D for the local player's own body (a positional one-shot at the capsule
-	 *  sits off-centre from the camera ear and pans oddly), positional at the owner for NPCs. */
+	/** Owner-aware foley: genuinely 2D for the local player's own body, positional at the owner for
+	 *  NPCs. The foley wavs are stereo, so spatializing one near the listener spreads it into two
+	 *  virtual sources around the head instead of collapsing it — Volume still scales the 2D play. */
 	void PlayFoleyFor(const AActor* Owner, USoundBase* Sound, float Volume = 1.f) const;
 
 	/** Near-miss crack at the shot's closest approach to the player's head. */
@@ -70,10 +71,20 @@ public:
 	/** audio.WorldDebug 1 — every world-audio play prints on screen + log. */
 	static bool IsAudioDebugEnabled();
 
+	/** x.AudioCombatCullRange — past this distance (cm) from the listener a bullet impact or flyby is
+	 *  skipped rather than taking a voice a near-field cue needs. Fails open: no listener, no cull. */
+	bool IsBeyondCombatCullRange(const FVector& Location) const;
+
 	/** On-screen + log line for a play event (no-op unless audio.WorldDebug). */
 	static void DebugPlay(const TCHAR* Tag, const USoundBase* Sound, const FString& Context = FString());
 
 private:
+	/** Tell the music system a fight is live. Distance-culled cues stamp this too — a firefight
+	 *  across the street is still a firefight even when its impacts aren't worth a voice. Damage
+	 *  taken is NOT stamped here: melee and explosions never reach this hub, so the music subsystem
+	 *  watches the player's damage stamp directly. */
+	void StampCombatActivity() const;
+
 	UPROPERTY(Transient)
 	TObjectPtr<const USurfaceAudioBank> Bank;
 

@@ -226,6 +226,11 @@ private:
 	AActor* FindDBNOHandoffPlayer();
 
 	void RefreshSearchRoomExposure();
+
+	/** Cloak-lift edge for AlwaysCloakedCompanion (the extraction VIP arming), mirroring
+	 *  RefreshSearchRoomExposure: re-seeds sight tracks once, the tick the cloak drops. */
+	void RefreshAlwaysCloakedCompanion();
+
 	void ApplySilentSearchRoomStartle(ACompanionCharacter* Companion, FSuspicionTrack& Track);
 
 	/** Egress: report our current combat target + last-known to the squad (rate-limited by the squad). */
@@ -261,6 +266,14 @@ private:
 	TMap<TWeakObjectPtr<AActor>, FSuspicionTrack> SuspicionTracks;
 
 	TWeakObjectPtr<ACompanionCharacter> CachedPerceivedCompanion;
+
+	/** The companion we last swallowed a stimulus from while it was unconditionally cloaked, held so
+	 *  we can re-seed sight tracks the moment that cloak lifts. Perception only fires on edges: an
+	 *  enemy already in Combat with the VIP standing in its sight cone had its one sight stimulus
+	 *  dropped while he was cloaked, so no track exists for him and none will arrive without a fresh
+	 *  LOS edge. Only ever written by a cloaked companion, so the primary cannot evict the VIP. */
+	TWeakObjectPtr<ACompanionCharacter> AlwaysCloakedCompanion;
+
 	uint32 LastSeededSearchRoomExposureGeneration = 0;
 	uint32 LastStartledSearchRoomExposureGeneration = 0;
 

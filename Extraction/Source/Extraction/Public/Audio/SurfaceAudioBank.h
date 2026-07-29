@@ -163,6 +163,21 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Doors")
 	TMap<EBreachType, TObjectPtr<USoundBase>> BreachSounds;
 
+	/** Body/boot hitting the door, layered under the BreachSounds accent at the same portal point.
+	 *  One cue for every type — the impact is the same physical event and only its force changes,
+	 *  so the per-type difference is volume rather than three near-identical assets. */
+	UPROPERTY(EditDefaultsOnly, Category = "Doors")
+	TObjectPtr<USoundBase> BreachImpact;
+
+	/** Per-type force of BreachImpact (a Quiet shove lands far softer than a Loud kick).
+	 *  A type missing here uses BreachImpactVolume. */
+	UPROPERTY(EditDefaultsOnly, Category = "Doors", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	TMap<EBreachType, float> BreachImpactVolumes;
+
+	/** Fallback volume for breach types absent from BreachImpactVolumes. */
+	UPROPERTY(EditDefaultsOnly, Category = "Doors", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float BreachImpactVolume = 1.f;
+
 	// --- Reverb ---
 
 	/** Always-on world reverb activated by the subsystem for every map (sounds opt in via their

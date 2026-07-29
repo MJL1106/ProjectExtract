@@ -51,19 +51,26 @@ struct FWeaponDropEntry
 	TSubclassOf<AActor> PickupClass;
 
 	/** Rounds left in the dropped gun's magazine — enemies never truly run dry, so this fakes a
-	 *  believable partial mag. */
+	 *  believable partial mag. Clamped to the weapon's magazine size when rolled. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Drop", meta = (ClampMin = "0"))
-	int32 MinMag = 5;
+	int32 MinMag = 10;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Drop", meta = (ClampMin = "0"))
-	int32 MaxMag = 25;
+	int32 MaxMag = 30;
 
-	/** Spare reserve ammo that comes with the dropped gun. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Drop", meta = (ClampMin = "0"))
-	int32 MinReserve = 0;
+	/** Spare reserve that comes with the dropped gun, counted in WHOLE magazines — a looted gun
+	 *  never carries a part-mag remainder, so reserve is always RoundsPerMag * this roll. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Drop", meta = (ClampMin = "1"))
+	int32 MinReserveMags = 1;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Drop", meta = (ClampMin = "1"))
+	int32 MaxReserveMags = 4;
+
+	/** Rounds per magazine used to size the reserve. 0 = read it off the dropped weapon's data
+	 *  asset. Set explicitly when the enemy gun and the player gun the pickup grants disagree
+	 *  (e.g. the 32-round enemy SMG hands over a 30-round player SMG). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Drop", meta = (ClampMin = "0"))
-	int32 MaxReserve = 30;
+	int32 RoundsPerMag = 0;
 };
 
 UCLASS(BlueprintType)

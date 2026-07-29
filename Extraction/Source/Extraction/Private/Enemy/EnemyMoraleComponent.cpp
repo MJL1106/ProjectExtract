@@ -5,12 +5,10 @@
 #include "EnemyArchetypeData.h"
 #include "EnemyDirectorSubsystem.h"
 #include "EnemyAIController.h"
-#include "EnemyAwarenessComponent.h"
 #include "HealthComponent.h"
 #include "BarkSubsystem.h"
 #include "BarkSetData.h"
 #include "SuppressionComponent.h"
-#include "AI/AIAcoustics.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
@@ -134,7 +132,7 @@ void UEnemyMoraleComponent::NotifyLowHealth()
 
 // --- Phase 5: squad-routed ingress ---
 
-void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer, const FVector& DeathLocation)
+void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer, const FVector& /*DeathLocation*/)
 {
 	if (bFearless) return;
 	if (!OwnerEnemy.IsValid()) return;
@@ -142,8 +140,6 @@ void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer, const FVector&
 
 	const float Loss = bWasOfficer ? LossOfficerDied : LossAllyDied;
 	ApplyMoraleDelta(-Loss);
-	if (CanWitnessDeath(DeathLocation))
-		RequestBark(EBarkType::ManDown);
 }
 
 void UEnemyMoraleComponent::NotifyRally(float MoraleBoost, float FloorRaise)
@@ -224,40 +220,12 @@ void UEnemyMoraleComponent::HandleEnemyDied(AEnemyCharacter* DeadEnemy, FVector 
 		if (DistSq > OfficerRadius * OfficerRadius) return;
 
 		ApplyMoraleDelta(-LossOfficerDied);
-		if (CanWitnessDeath(Location))
-			RequestBark(EBarkType::ManDown);
 		return;
 	}
 
 	if (DistSq > AllyDeathRadius * AllyDeathRadius) return;
 
 	ApplyMoraleDelta(-LossAllyDied);
-	if (CanWitnessDeath(Location))
-		RequestBark(EBarkType::ManDown);
-}
-
-bool UEnemyMoraleComponent::CanWitnessDeath(const FVector& DeathLocation) const
-{
-	if (!OwnerEnemy.IsValid()) return false;
-
-	const FVector EyeLocation = OwnerEnemy->GetPawnViewLocation();
-
-	UWorld* World = GetWorld();
-	if (!World) return false;
-
-	// Earshot only counts on an acoustically clear path — a raw radius check had enemies calling
-	// "man down" through walls. ThroughDoorMult 0 also rules out closed doors: a muffled thud isn't
-	// certainty that someone died.
-	if (FVector::DistSquared(EyeLocation, DeathLocation) <= FMath::Square(DeathWitnessEarshot)
-		&& AIAcoustics::ComputeMultiplier(World, EyeLocation, DeathLocation + FVector(0.f, 0.f, 50.f),
-			OwnerEnemy.Get(), nullptr, /*ThroughDoorMult=*/0.f) > 0.f)
-		return true;
-
-	// Aim above the corpse point so a floor-level location doesn't start inside the ground.
-	FHitResult Hit;
-	FCollisionQueryParams Params(SCENE_QUERY_STAT(MoraleDeathWitness), /*bTraceComplex=*/false, OwnerEnemy.Get());
-	return !World->LineTraceSingleByChannel(Hit, EyeLocation,
-		DeathLocation + FVector(0.f, 0.f, 50.f), ECC_Visibility, Params);
 }
 
 // --- Suppression handler ---
@@ -417,16 +385,6 @@ void UEnemyMoraleComponent::RequestBark(EBarkType Type) const
 {
 	if (!OwnerEnemy.IsValid()) return;
 	if (!IsValid(CachedBarkSet)) return;
-
-	// A man-down call from an enemy that hasn't detected anything reveals knowledge it can't
-	// have (silent headshot = someone shouts "they got him" from the next room). Unaware
-	// witnesses stay quiet — the body-discovery path handles finding the corpse later.
-	if (Type == EBarkType::ManDown)
-	{
-		const AEnemyAIController* AIC = Cast<AEnemyAIController>(OwnerEnemy->GetController());
-		const UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
-		if (Awareness && Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware) return;
-	}
 
 	UWorld* World = GetWorld();
 	if (!World) return;

@@ -54,8 +54,8 @@ public:
 
 	// --- Phase 5: squad-routed ingress (called by UEnemySquad, bypasses radius check) ---
 
-	/** A squad member died. Applies ally/officer death morale loss without radius check.
-	 *  DeathLocation gates the bark only — morale still drops squad-wide (radio). */
+	/** A squad member died. Applies ally/officer death morale loss without radius check —
+	 *  morale drops squad-wide over the radio, so DeathLocation does not gate anything. */
 	void NotifySquadAllyDied(bool bWasOfficer, const FVector& DeathLocation);
 
 	/** Officer rally: boosts morale, temporarily raises morale floor, un-pins Broken/Shaken. */
@@ -139,7 +139,6 @@ private:
 	static constexpr float MoraleTickInterval = 1.f;
 	static constexpr float RecoveryGraceSeconds = 5.f;
 	static constexpr float AllyDeathRadius = 2500.f;
-	static constexpr float DeathWitnessEarshot = 1500.f;
 	static constexpr float LowHealthThreshold = 0.3f;
 	static constexpr float FlankedDotThreshold = -0.2f;
 
@@ -163,11 +162,6 @@ private:
 
 	/** Requests a bark through the subsystem if available. */
 	void RequestBark(EBarkType Type) const;
-
-	/** True if the owner plausibly witnessed a death there: close enough to hear it through walls,
-	 *  or has line of sight to the spot. Gates ManDown barks so an enemy in another room doesn't
-	 *  shout about a kill it can't see. */
-	bool CanWitnessDeath(const FVector& DeathLocation) const;
 
 	// --- Director death subscription ---
 	UFUNCTION()

@@ -13,6 +13,7 @@
 #include "MusicSubsystem.generated.h"
 
 class UAudioComponent;
+class UHealthComponent;
 class UMusicBankData;
 class USoundBase;
 
@@ -39,9 +40,24 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Audio|Music")
 	EMusicState GetMusicState() const { return State; }
 
+	/** Stamp a real combat event (a shot fired, a round landing, a near-miss). The world-audio hub
+	 *  calls this — the director's combat count can't tell a live fight from one that stopped, since
+	 *  an enemy stays in combat awareness for its archetype's LostContactGrace after losing the
+	 *  player. This is a gate on that count, never a trigger on its own. */
+	void NotifyCombatActivity();
+
 private:
 	void Poll();
 	EMusicState ComputeDesiredState(double Now) const;
+
+	/** Stamps combat activity when the player's damage timestamp advances. Polled rather than hooked
+	 *  because the melee and explosion damage paths never reach the world-audio hub, so hooking the
+	 *  audio cues alone would leave a fight with no shooting reading as quiet. */
+	void PollPlayerDamage(const UWorld& World, double Now);
+
+	/** Whether combat activity landed inside the bank's window — what separates a fight in progress
+	 *  from enemies still nominally "in combat" minutes after the shooting stopped. */
+	bool HasRecentCombatActivity(double Now) const;
 	void TransitionTo(EMusicState NewState, double Now);
 	void UpdateTrackForState();
 	void UpdateExplore(double Now);
@@ -106,10 +122,20 @@ private:
 	double ReliefUntilTime = 0.0;
 	double LastSuspicionSignalTime = -1e9;
 
-	/** Last poll that saw a live combatant. The director's own stamp marks combat ENTRY only, so a
-	 *  sustained fight with no fresh joiners reads stale long before it ends — this is what makes
-	 *  CombatHoldSeconds measure from the moment the fight actually went quiet. */
+	/** Last poll that saw a live combatant AND recent combat activity. The director's own stamp marks
+	 *  combat ENTRY only, so a sustained fight with no fresh joiners reads stale long before it ends —
+	 *  this is what makes CombatHoldSeconds measure from the moment the fight actually went quiet. */
 	double LastCombatSignalTime = -1e9;
+
+	/** World time of the last NotifyCombatActivity. */
+	double LastCombatActivityTime = -1e9;
+
+	/** Local player's health component, re-resolved whenever it goes stale (respawn, possession). */
+	TWeakObjectPtr<const UHealthComponent> PlayerHealth;
+
+	/** Last GetLastDamageWorldTime already turned into an activity stamp — an advance past this is a
+	 *  fresh hit. Shares the component's never-damaged sentinel so a fresh pawn can't stamp. */
+	float LastSeenPlayerDamageTime = -1e9f;
 
 	/** World time the queued all-clear resolve fires; 0 = none. Held back until the fight bed has
 	 *  actually ducked away, and cancelled outright if the fight re-ignites first. */

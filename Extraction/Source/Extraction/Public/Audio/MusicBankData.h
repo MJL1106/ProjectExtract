@@ -112,6 +112,16 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.0"))
 	float CombatHoldSeconds = 10.f;
 
+	/** How recently something must actually have happened — a shot, a round landing, a near-miss —
+	 *  for a live combat enemy count to read as a fight. Enemies hold combat awareness for their
+	 *  archetype's LostContactGrace (45s by default) after losing the player, so the count alone
+	 *  pins the music in Combat long after the shooting stops and CombatHoldSeconds never gets to
+	 *  start counting. Sized to ride out a cautious flank where nobody has a shot; the hold layers
+	 *  on top of it, so the audible tail after the last round is this plus CombatHoldSeconds.
+	 *  0 = gate off, i.e. a live count alone reads as a fight again (the pre-gate behaviour). */
+	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.0"))
+	float CombatActivityWindowSeconds = 8.f;
+
 	/** Quiet wind-down after a fight before explore ambience may resume. */
 	UPROPERTY(EditDefaultsOnly, Category = "Tuning", meta = (ClampMin = "0.0"))
 	float ReliefSeconds = 20.f;

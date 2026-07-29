@@ -1111,6 +1111,40 @@ void AEnemyCharacter::TrySpawnAmmoDrop()
 	Pickup->FinishSpawning(SpawnTransform);
 }
 
+namespace
+{
+	/** Used only when a drop entry has no override and the dropped gun has no data asset — without
+	 *  it a missing asset would size the reserve at zero mags and hand over an unusable gun. */
+	constexpr int32 FallbackRoundsPerMag = 30;
+
+	int32 GetDropRoundsPerMag(const FWeaponDropEntry& Entry, const AWeaponBase* Weapon)
+	{
+		if (Entry.RoundsPerMag > 0) return Entry.RoundsPerMag;
+
+		const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
+		if (Data && Data->MagazineSize > 0) return Data->MagazineSize;
+
+		return FallbackRoundsPerMag;
+	}
+
+	/** Partial mag left in the dropped gun — never more than the magazine physically holds. */
+	int32 RollDropMagRounds(const FWeaponDropEntry& Entry, const AWeaponBase* Weapon)
+	{
+		const int32 Lo = FMath::Max(0, FMath::Min(Entry.MinMag, Entry.MaxMag));
+		const int32 Hi = FMath::Max(Lo, Entry.MaxMag);
+		return FMath::Min(FMath::RandRange(Lo, Hi), GetDropRoundsPerMag(Entry, Weapon));
+	}
+
+	/** Reserve is always a whole number of magazines, minimum one — a looted gun never hands over
+	 *  a part-mag remainder the player can't reload with. */
+	int32 RollDropReserveRounds(const FWeaponDropEntry& Entry, const AWeaponBase* Weapon)
+	{
+		const int32 Lo = FMath::Max(1, FMath::Min(Entry.MinReserveMags, Entry.MaxReserveMags));
+		const int32 Hi = FMath::Max(Lo, Entry.MaxReserveMags);
+		return FMath::RandRange(Lo, Hi) * GetDropRoundsPerMag(Entry, Weapon);
+	}
+}
+
 void AEnemyCharacter::SetupCorpseWeaponPickup()
 {
 	if (!HasAuthority() || !AmmoDropTable) return;
@@ -1139,9 +1173,7 @@ void AEnemyCharacter::SetupCorpseWeaponPickup()
 	{
 		if (InitFn->ParmsSize == sizeof(int32) * 2)
 		{
-			int32 Parms[2] = {
-				FMath::RandRange(Entry->MinMag, Entry->MaxMag),
-				FMath::RandRange(Entry->MinReserve, Entry->MaxReserve) };
+			int32 Parms[2] = { RollDropMagRounds(*Entry, Weapon), RollDropReserveRounds(*Entry, Weapon) };
 			Pickup->ProcessEvent(InitFn, Parms);
 		}
 		else

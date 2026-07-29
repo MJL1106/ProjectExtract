@@ -1,5 +1,6 @@
 #include "Audio/GameAudioSubsystem.h"
 #include "Audio/ExtractionAudioSettings.h"
+#include "Audio/MusicSubsystem.h"
 #include "Audio/SurfaceAudioBank.h"
 #include "Components/AudioComponent.h"
 #include "Core/Extraction.h"
@@ -18,6 +19,13 @@
 static TAutoConsoleVariable<int32> CVarWorldAudioDebug(
 	TEXT("x.AudioDebug"), 0,
 	TEXT("1 = on-screen + log line for every world-audio play (footsteps, foley, impacts, fire reports)."),
+	ECVF_Default);
+
+// A CVar rather than a bank/config value because this is a "does it still drop out?" number: it wants
+// tuning live in PIE mid-firefight, which a DataAsset edit (PIE stop, reload) can't give.
+static TAutoConsoleVariable<float> CVarCombatCullRange(
+	TEXT("x.AudioCombatCullRange"), 7000.f,
+	TEXT("Distance in cm from the listener past which bullet impacts and flybys are skipped instead of taking a voice. 0 = never cull."),
 	ECVF_Default);
 
 static const FName AmbientReverbTag(TEXT("ExtractionAmbientReverb"));
@@ -93,14 +101,41 @@ EPhysicalSurface UGameAudioSubsystem::SurfaceFromHit(const FHitResult& Hit)
 	return PhysMat ? PhysMat->SurfaceType.GetValue() : SurfaceType_Default;
 }
 
+bool UGameAudioSubsystem::IsBeyondCombatCullRange(const FVector& Location) const
+{
+	const float Range = CVarCombatCullRange.GetValueOnGameThread();
+	if (Range <= 0.f) return false;
+
+	// The camera is the listener. No PC or no camera manager means we can't judge distance — never
+	// cull on a guess, a missing listener must not silence combat.
+	const UWorld* World = GetWorld();
+	const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
+	const APlayerCameraManager* Cam = PC ? PC->PlayerCameraManager : nullptr;
+	if (!IsValid(Cam)) return false;
+
+	return FVector::DistSquared(Cam->GetCameraLocation(), Location) > static_cast<double>(Range) * Range;
+}
+
+void UGameAudioSubsystem::StampCombatActivity() const
+{
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+	if (UMusicSubsystem* Music = World->GetSubsystem<UMusicSubsystem>())
+		Music->NotifyCombatActivity();
+}
+
 void UGameAudioSubsystem::PlayWorldImpact(const FHitResult& Hit)
 {
+	StampCombatActivity();
+	if (IsBeyondCombatCullRange(Hit.ImpactPoint)) return;
+
 	const FSurfaceSoundSet* Set = GetSurfaceSet(SurfaceFromHit(Hit));
 	if (Set) PlayAt(Set->BulletImpact, Hit.ImpactPoint);
 }
 
 void UGameAudioSubsystem::PlayFleshImpact(const FVector& Location, bool bAsLocal2D, bool bHeadshot)
 {
+	StampCombatActivity();
 	if (!IsValid(Bank)) return;
 	USoundBase* Crack = (bHeadshot && IsValid(Bank->HeadshotImpact)) ? Bank->HeadshotImpact.Get() : Bank->FleshImpact.Get();
 	if (bAsLocal2D)
@@ -115,6 +150,7 @@ void UGameAudioSubsystem::PlayFleshImpact(const FVector& Location, bool bAsLocal
 
 void UGameAudioSubsystem::PlayAIFireReport(USoundBase* Sound, const FVector& Location) const
 {
+	StampCombatActivity();
 	if (!IsValid(Sound)) return;
 	DebugPlay(TEXT("AI-FIRE"), Sound, Location.ToCompactString());
 	USoundAttenuation* Attenuation = IsValid(Bank) ? Bank->GunfireAttenuation.Get() : nullptr;
@@ -138,11 +174,12 @@ void UGameAudioSubsystem::PlayFoleyFor(const AActor* Owner, USoundBase* Sound, f
 	const APlayerController* PC = World ? World->GetFirstPlayerController() : nullptr;
 	if (PC && PC->GetPawn() == Owner)
 	{
-		// Not Play2D: the pack's wavs are stereo with baked L/R imaging, so flat playback makes
-		// own-body sounds wander around the head. Spatializing AT the listener collapses them to
-		// a centred mono point — dead-centre every time.
-		const APlayerCameraManager* Cam = PC->PlayerCameraManager;
-		PlayAt(Sound, Cam ? Cam->GetCameraLocation() : Owner->GetActorLocation(), Volume);
+		// Every foley wav is stereo and the footstep attenuation spreads stereo sources (non-zero
+		// StereoSpread, no stereo normalization, no non-spatialized radius). Played positionally
+		// at the listener that splits one step into two virtual sources straddling the head — heard
+		// as a doubled step orbiting the player. Play2D disables spatialization outright, so the
+		// wav's own L/R imaging plays as authored.
+		Play2D(Sound, Volume);
 		return;
 	}
 	PlayAt(Sound, Owner->GetActorLocation(), Volume);
@@ -150,11 +187,17 @@ void UGameAudioSubsystem::PlayFoleyFor(const AActor* Owner, USoundBase* Sound, f
 
 void UGameAudioSubsystem::PlayFlyby(const FVector& Location)
 {
+	StampCombatActivity();
+	if (IsBeyondCombatCullRange(Location)) return;
 	if (IsValid(Bank)) PlayAt(Bank->Flyby, Location);
 }
 
 void UGameAudioSubsystem::PlayShellDrop(const FVector& Location)
 {
+	// Player shots only reach the hub through their impacts, so suppressive fire into open space
+	// registered as nothing at all. A shell drops per shot whatever the round hits.
+	StampCombatActivity();
+
 	UWorld* World = GetWorld();
 	if (!World || !IsValid(Bank) || !IsValid(Bank->ShellBounce)) return;
 
@@ -166,6 +209,10 @@ void UGameAudioSubsystem::PlayShellDrop(const FVector& Location)
 
 void UGameAudioSubsystem::PlayThrowFoley()
 {
+	// The only grenade event C++ sees (the detonation is BP-side), so without this a grenade-led
+	// exchange with no gunfire reads as a quiet fight and the music winds down mid-throw.
+	StampCombatActivity();
+
 	UWorld* World = GetWorld();
 	if (!World || !IsValid(Bank) || !IsValid(Bank->ThrowFoley)) return;
 
