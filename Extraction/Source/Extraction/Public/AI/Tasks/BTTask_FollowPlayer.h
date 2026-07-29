@@ -32,6 +32,14 @@ public:
 	virtual void OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, EBTNodeResult::Type TaskResult) override;
 	virtual FString GetStaticDescription() const override;
 
+	/** Re-acquire band (cm) below UCompanionTuningDataAsset::SecondaryLeaderLeashDistance. The leash
+	 *  is latched, so without a release band a leader hovering on the boundary would swap the whole
+	 *  follow frame (anchor, pursuit target, sprint mirror) between leader and player every tick.
+	 *  Public because ACompanionAIController::GetFollowLeader adds it ON TOP of the break distance for
+	 *  its own combat-branch backstop — sharing the one constant is what keeps that backstop provably
+	 *  outside this task's latched band instead of contending with it. */
+	static constexpr float LeaderLeashReleaseHysteresis = 300.f;
+
 protected:
 	UPROPERTY(EditAnywhere, Category = "Blackboard")
 	FBlackboardKeySelector PlayerActorKey;
@@ -40,7 +48,9 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Follow")
 	bool bSprintToTarget = false;
 
-	/** Optional EQS query for picking a follow slot near the player. If unset, falls back to formation-offset target. */
+	/** Optional EQS query for picking a follow slot near the companion's leader — anchor it on
+	 *  UEnvQueryContext_FollowLeader, not the player, or a secondary gets the primary's slots. If
+	 *  unset, falls back to the formation-offset target. */
 	UPROPERTY(EditAnywhere, Category = "EQS")
 	TObjectPtr<UEnvQuery> FollowSlotQuery;
 
@@ -58,6 +68,42 @@ private:
 
 	/** ~1Hz throttle for the sprint-mode rescue-approach diagnostic log. */
 	float SprintLogAccumulator = 0.f;
+
+	// --- Rescue-approach pace (bSprintToTarget branch; see UpdateRescueSprint) ---
+
+	/** Latched sprint decision for the current rescue approach. Backs the hysteresis: without it the
+	 *  three thresholds are single edges and a companion running one of them flickers the sprint flag,
+	 *  which drives BOTH MaxWalkSpeed and the anim instance's sprint state. */
+	bool bRescueSprinting = false;
+
+	/** Release bands for the rescue-sprint hysteresis, same idiom as the stealth catch-up ladder's
+	 *  split enter/exit thresholds above. Once sprinting, EVERY trigger has to clear by its band
+	 *  before the approach drops back to a jog. */
+	static constexpr float RescueSprintBleedoutReleaseMargin = 5.f;   // seconds ABOVE the bleedout threshold
+	static constexpr float RescueSprintDistanceReleaseScale = 0.75f;  // fraction OF the distance threshold
+	static constexpr float RescueSprintThreatReleaseScale = 1.25f;    // multiple OF the threat radius
+
+	/** Re-decides the rescue approach's pace this tick and returns the sprint flag to apply. Sprint
+	 *  when the rescue is genuinely urgent — bleedout nearly out, a long way still to run, or a
+	 *  hostile standing over the body — and jog otherwise. The old branch called SetSprinting(true)
+	 *  unconditionally every tick, so the companion panic-sprinted a rescue with 80 seconds of
+	 *  bleedout left and an empty room. The threat term is READ, never scanned: the state service
+	 *  already sweeps the body every tick and publishes its nearest-hostile distance on the companion. */
+	bool UpdateRescueSprint(ACompanionCharacter& Companion, const UCompanionTuningDataAsset& Tuning,
+		float DistToPlayer, AActor& Player);
+
+	/** Latched sprint decision for the formation catch-up. Without a release band, bWantSprint
+	 *  flickers per-frame at SprintDistanceThreshold when any non-combat gameplay focal is live:
+	 *  the sprint clears the focal (facing yields to travel) and raises MaxWalkSpeed, closing the
+	 *  gap fast; the companion drops below the threshold within a frame or two and un-sprints; the
+	 *  focal re-asserts, the strafe clamp re-engages at 275, the companion falls behind again, and
+	 *  the cycle repeats. Enter at SprintDistanceThreshold, release at 0.6x. */
+	bool bFormationSprinting = false;
+
+	/** Release band fraction for the formation sprint latch. Sprint enters at
+	 *  SprintDistanceThreshold and releases at this fraction of it. Matches the stealth catch-up
+	 *  ladder's EffSprintBreak floor idiom already in this file (~lines 143-162). */
+	static constexpr float FormationSprintReleaseFraction = 0.6f;
 
 	/** Accumulates DeltaSeconds in the formation branch; gates the blocked-move re-issue below so a
 	 *  normal brief Idle blip (arrival, replan) doesn't spam repath. */
@@ -86,8 +132,9 @@ private:
 	FVector FightBiasThreatLocation = FVector::ZeroVector;
 
 	/** Cap on per-callback slot eye-line traces (best-scored slots first). Also sizes the accepted
-	 *  candidate window. Only a PRIMARY companion ever dispatches the query, so the window is a plain
-	 *  best-first fill — a non-empty result set always yields at least one candidate. */
+	 *  candidate window. Every slot the query returns is already anchored on this companion's own
+	 *  leader, so the window is a plain best-first fill — a non-empty result set always yields at
+	 *  least one candidate. */
 	static constexpr int32 MaxFightBiasSlotTraces = 8;
 
 	// Leader floor-transit detector (see UpdateLeaderZTransit). Envelope follower over the
@@ -113,10 +160,7 @@ private:
 
 	// --- Leader chain (non-primary companion trails the primary; see ResolveFollowLeader) ---
 
-	/** Re-acquire band (cm) below UCompanionTuningDataAsset::SecondaryLeaderLeashDistance. The leash
-	 *  is latched, so without a release band a leader hovering on the boundary would swap the whole
-	 *  follow frame (anchor, pursuit target, sprint mirror) between leader and player every tick. */
-	static constexpr float LeaderLeashReleaseHysteresis = 300.f;
+	// LeaderLeashReleaseHysteresis is declared public above — shared with the controller's backstop.
 
 	/** Min seconds between primary-companion lookups. GetPrimaryCompanion is a TActorIterator over
 	 *  the level — it may only run on a cache MISS, and then only this often. */

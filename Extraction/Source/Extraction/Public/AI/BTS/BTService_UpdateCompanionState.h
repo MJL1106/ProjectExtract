@@ -122,6 +122,26 @@ private:
 	void UpdateStealthCrouchMirror(ACompanionCharacter& Companion, const APawn* PlayerPawn,
 		const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
 
+	// --- Stance backstop (nothing owns the crouch any more; see UpdateStanceBackstop) ---
+
+	/** Consecutive seconds the companion has been crouched with NO system owning stance. */
+	float UnownedCrouchTime = 0.f;
+
+	/** Debounce before the backstop stands the companion up. Not a feel delay — a cover handoff (old
+	 *  combat task tearing down, replacement committing) spans two service ticks, and popping the
+	 *  crouch inside that seam pulls the companion out of cover mid-transition. Reset to zero the
+	 *  instant any owner reappears, so this only ever counts an uninterrupted orphaned run. */
+	static constexpr float StanceReconcileDebounceSeconds = 0.5f;
+
+	/** Per-tick stance reconcile: stands the companion up when it is crouched and nothing owns
+	 *  stance. Before this, the ONLY thing that un-crouched a merely-following companion was the wave
+	 *  hold's release edge — so any fight that ended without an active Director wave left the crouch
+	 *  latched for the rest of the level ("stuck crouched and moving around"). The ownership set is
+	 *  ACompanionCharacter::IsStanceOwnedElsewhere (DBNO / takedown / traversal / route) plus the
+	 *  stealth crouch-mirror, a held cover point, and a live combat target. */
+	void UpdateStanceBackstop(ACompanionCharacter& Companion, UBlackboardComponent& BB,
+		bool bHasTarget, float DeltaSeconds);
+
 	// --- Post-fight weapon-up hold (the gun stays up for a mode-scaled beat after the last target
 	// dies, WITHOUT holding the dead enemy's bearing; see the combat-decay branch in TickNode) ---
 

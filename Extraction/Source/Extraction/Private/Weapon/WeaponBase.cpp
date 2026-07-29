@@ -695,21 +695,47 @@ void AWeaponBase::OnAutoFireTimer()
 	FireShot();
 }
 
+const TArray<AActor*>& AWeaponBase::GetFriendlyFireIgnoreList()
+{
+	// Same staleness rule PerformHitscan uses. AI fire gates poll this while holding fire, long after
+	// the last burst rebuilt it, so it cannot simply return the cache: a companion that spawned or
+	// died since then would still be treated as solid (or transparent) by every withhold check.
+	const UWorld* World = GetWorld();
+	if (World && (World->GetTimeSeconds() - FFIgnoreListBuiltTime) > FFIgnoreListRefreshSeconds)
+		RebuildFFIgnoreList();
+
+	return CachedFFIgnoreList;
+}
+
 void AWeaponBase::RebuildFFIgnoreList()
 {
-	CachedFFIgnoreList.Reset();
-
+	// EMPTY and STALE are not the same risk, and the whole shape of this function turns on that.
+	// An empty list means the hitscan excludes NOBODY — a live friendly-fire shot. A stale one is
+	// merely wrong in both directions and harmless either way: it can over-ignore a team-mate that has
+	// since died, or under-ignore one that has since spawned, and neither costs anything worse than a
+	// withheld or wasted round. So the clear happens only once a rebuild is certain to complete, and
+	// every refusal path below leaves the LAST GOOD list intact. Clearing up front meant a transient
+	// null or non-ACharacter owner (possession swap, mid-destroy frame) emptied it and the next shot
+	// went through the team — sustained automatic fire refreshes only via PerformHitscan's staleness
+	// check, so nothing upstream would have caught it.
+	UWorld* World = GetWorld();
 	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
-	if (!IsValid(OwnerChar)) return;
-
 	const IGenericTeamAgentInterface* TeamAgent = Cast<IGenericTeamAgentInterface>(OwnerChar);
-	if (!TeamAgent) return;
+	const bool bCanBuild = World && IsValid(OwnerChar) && TeamAgent;
+
+	// Stamp on refusal as well as success: the stamp is the throttle for every caller, and leaving it
+	// unstamped meant a per-frame caller re-ran the whole pawn iteration each frame for as long as the
+	// refusing state lasted. But NOT before the first successful build — until then the list really is
+	// empty, so a refusal must stay retryable on the very next call rather than banking a full refresh
+	// interval of unfiltered fire.
+	if (World && (bCanBuild || FFIgnoreListBuiltTime > FFIgnoreListNeverBuilt))
+		FFIgnoreListBuiltTime = World->GetTimeSeconds();
+
+	if (!bCanBuild) return;
 
 	const FGenericTeamId OwnerTeam = TeamAgent->GetGenericTeamId();
 
-	UWorld* World = GetWorld();
-	if (!World) return;
-
+	CachedFFIgnoreList.Reset();
 	CachedFFIgnoreList.Reserve(32);
 	for (TActorIterator<APawn> It(World); It; ++It)
 	{
@@ -719,8 +745,6 @@ void AWeaponBase::RebuildFFIgnoreList()
 		if (OtherTeam && OtherTeam->GetGenericTeamId() == OwnerTeam)
 			CachedFFIgnoreList.Add(OtherPawn);
 	}
-
-	FFIgnoreListBuiltTime = World->GetTimeSeconds();
 }
 
 void AWeaponBase::RebuildSuppressionTargets()
@@ -954,7 +978,7 @@ void AWeaponBase::PerformHitscan()
 	const bool bAIOwned = !IsValid(PC);
 	{
 		const UWorld* QueryWorld = GetWorld();
-		if (QueryWorld && (QueryWorld->GetTimeSeconds() - FFIgnoreListBuiltTime) > 1.f)
+		if (QueryWorld && (QueryWorld->GetTimeSeconds() - FFIgnoreListBuiltTime) > FFIgnoreListRefreshSeconds)
 			RebuildFFIgnoreList();
 		QueryParams.AddIgnoredActors(CachedFFIgnoreList);
 	}

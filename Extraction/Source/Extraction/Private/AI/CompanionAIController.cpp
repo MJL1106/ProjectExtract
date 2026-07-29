@@ -2,6 +2,7 @@
 
 #include "CompanionAIController.h"
 #include "AI/CompanionTuningDataAsset.h"
+#include "AI/Tasks/BTTask_FollowPlayer.h" // LeaderLeashReleaseHysteresis — see GetFollowLeader
 #include "AI/Cover/AICoverSlot.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -11,6 +12,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.h"
+#include "HealthComponent.h"
 #include "Companion/CompanionBarkTypes.h"
 #include "Companion/CompanionRoute.h"
 #include "WeaponBase.h"
@@ -57,6 +59,7 @@ const FName ACompanionAIController::BB_CommandTargetActor(TEXT("CommandTargetAct
 const FName ACompanionAIController::BB_CommandTargetLocation(TEXT("CommandTargetLocation"));
 const FName ACompanionAIController::BB_TakedownMethod(TEXT("TakedownMethod"));
 const FName ACompanionAIController::BB_BreachType(TEXT("BreachType"));
+const FName ACompanionAIController::BB_FollowLeader(TEXT("FollowLeader"));
 
 ACompanionAIController::ACompanionAIController()
 {
@@ -111,6 +114,98 @@ bool ACompanionAIController::GetRecentAlertedThreat(float MaxAge, FVector& OutLo
 	if (!World || World->GetTimeSeconds() - LastAlertedThreatTime > MaxAge) return false;
 	OutLocation = LastAlertedThreatLocation;
 	return true;
+}
+
+// ---------------------------------------------------------------------
+// Follow leader — one published anchor for every system that has to form up on the same actor the
+// follow task does: the follow-slot EQS context and the cover-switch monitor's formation point.
+// Resolution itself stays in UBTTask_FollowPlayer::ResolveFollowLeader (throttled TActorIterator +
+// leash latches); this is the publish/read seam only.
+// ---------------------------------------------------------------------
+
+bool ACompanionAIController::IsUsableFollowLeader(const ACompanionCharacter* Leader, const ACompanionCharacter* Follower)
+{
+	if (!IsValid(Leader) || Leader == Follower) return false;
+	if (!Leader->GetController()) return false; // a still-captive extractee has no brain to trail
+	if (Leader->GetIsCompanionDBNO()) return false;
+
+	const UHealthComponent* LeaderHealth = Leader->GetHealthComponent();
+	return !IsValid(LeaderHealth) || !LeaderHealth->IsDead();
+}
+
+void ACompanionAIController::SetFollowLeader(AActor* Leader)
+{
+	// Assigned unconditionally: this member is the load-bearing value that GetFollowLeader and every
+	// consumer read, so it must land even on a tick where the blackboard is unavailable.
+	PublishedFollowLeader = Leader;
+
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	// The per-tick dedup guards the blackboard WRITE only, and is keyed on what was last actually
+	// mirrored — not on the member above. Keying it on the member meant a publish arriving while the BB
+	// was momentarily null still counted as "already published", so the key stayed empty for that
+	// leader for good.
+	if (MirroredFollowLeader.Get() == Leader) return;
+
+	// The key is authored on the companion blackboard asset in-engine. Until it exists, follow and
+	// cover both still read the leader through the accessors above — only the blackboard mirror goes
+	// dark — so this warns once and carries on rather than failing anything.
+	if (BB->GetKeyID(BB_FollowLeader) == FBlackboard::InvalidKey)
+	{
+		if (!bFollowLeaderKeyWarned)
+		{
+			bFollowLeaderKeyWarned = true;
+			UE_LOG(LogCompanionAI, Warning,
+				TEXT("%s: blackboard has no '%s' key — add it as Object with base class Actor to mirror the follow leader."),
+				*GetName(), *BB_FollowLeader.ToString());
+		}
+		return;
+	}
+
+	BB->SetValueAsObject(BB_FollowLeader, Leader);
+	MirroredFollowLeader = Leader;
+}
+
+AActor* ACompanionAIController::GetFollowLeader() const
+{
+	AActor* Leader = PublishedFollowLeader.Get();
+	if (!IsValid(Leader)) return CachedPlayerCharacter.Get();
+
+	// A COMPANION leader is re-tested at read time, not just at publish time: cover scoring reads this
+	// on the combat branch, long after the follow task that published it stopped ticking, so a primary
+	// that goes DBNO mid-fight must stop anchoring the VIP straight away. The player never fails the
+	// test (it isn't a companion) and so is returned unchanged.
+	const ACompanionCharacter* LeaderCompanion = Cast<ACompanionCharacter>(Leader);
+	if (!LeaderCompanion) return Leader;
+
+	if (!IsUsableFollowLeader(LeaderCompanion, Cast<ACompanionCharacter>(GetPawn())))
+		return CachedPlayerCharacter.Get();
+
+	// The LEASH is re-tested here for the same reason and at the same level as capability above —
+	// ResolveFollowLeader owns it, but that only runs on the follow branch, so a primary commanded away
+	// while the VIP is fighting would otherwise anchor its cover scoring at a departing leader forever.
+	// Overwatch happens to self-correct on its own radius; cover scoring has nothing that would.
+	//
+	// A BACKSTOP, not a co-equal arbiter — hence the margin, and it is load-bearing. This accessor is
+	// const and cannot latch, and on the combat branch it is the SOLE authority because the task is not
+	// ticking. Testing the same raw break distance the task tests would make a primary loitering on that
+	// boundary flip the answer every service tick, and BTService_CoverSwitchMonitor reads this straight
+	// into its formation anchor — so the anchor would jump the whole leader-to-player distance tick to
+	// tick and churn the cover scorer's proximity term. That is the exact indecision this round removes.
+	// Sitting a full release band ABOVE the break distance puts this strictly outside the task's latched
+	// hysteresis, so it can only ever fire for the runaway leader it was added to catch, never contend
+	// with a decision the task has already made.
+	const APawn* Player = CachedPlayerCharacter.Get();
+	const float BackstopDistance = Tuning
+		? Tuning->SecondaryLeaderLeashDistance + UBTTask_FollowPlayer::LeaderLeashReleaseHysteresis : 0.f;
+	if (Tuning && Tuning->SecondaryLeaderLeashDistance > 0.f && IsValid(Player)
+		&& FVector::Dist2D(Leader->GetActorLocation(), Player->GetActorLocation()) > BackstopDistance)
+	{
+		return CachedPlayerCharacter.Get();
+	}
+
+	return Leader;
 }
 
 // NB deliberately NO UpdateControlRotation override (2nd attempt REVERTED 2026-07-12, director
@@ -208,6 +303,12 @@ void ACompanionAIController::OnUnPossess()
 	// inheriting the last pawn's facing.
 	FacingReferenceRoute.Reset();
 
+	// Same scope, and the blackboard is rebuilt on the next possess: a stale published leader would
+	// otherwise dedup the first publish of the new pawn's follow and leave the mirror key empty.
+	PublishedFollowLeader.Reset();
+	MirroredFollowLeader.Reset();
+	bFollowLeaderKeyWarned = false;
+
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearAllTimersForObject(this);
 
@@ -229,6 +330,9 @@ void ACompanionAIController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	TimeSinceClosedToPlayer = 0.f;
 	TimeOnDifferentLevel = 0.f;
 	bWarpRefusalWarned = false;
+	PublishedFollowLeader.Reset();
+	MirroredFollowLeader.Reset();
+	bFollowLeaderKeyWarned = false;
 
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearAllTimersForObject(this);

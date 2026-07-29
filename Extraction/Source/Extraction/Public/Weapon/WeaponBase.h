@@ -159,6 +159,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	FVector GetMuzzleLocation() const;
 
+	/**
+	 * The same-team pawns this weapon's shot trace ignores. Friendly fire is prevented by excluding
+	 * them from the hitscan entirely, so a round passes straight THROUGH a team-mate rather than
+	 * stopping on one. Exposed so AI fire decisions can trace against the identical set: a LoS or
+	 * muzzle-clearance check that treats a friendly body as a blocker withholds a shot the bullet
+	 * would have taken, and reading the weapon's own list means the two can never drift apart.
+	 * Non-const because it refreshes the cache on the shared FFIgnoreListRefreshSeconds cadence —
+	 * callers that poll while NOT firing would otherwise read a list built for an earlier fight.
+	 * The reference aliases the cache: COPY IT before any further call on this weapon, since a
+	 * refresh reallocates and the hazard is invisible at the call site.
+	 */
+	const TArray<AActor*>& GetFriendlyFireIgnoreList();
+
 	/** Set by WeaponComponent when ADS state changes */
 	void SetOwnerIsAiming(bool bAiming) { bOwnerIsAiming = bAiming; }
 
@@ -751,8 +764,16 @@ private:
 
 	/** Friendly-fire ignore list rebuilt once per StartFiring call. Per-shot TActorIterator is too expensive. */
 	TArray<AActor*> CachedFFIgnoreList;
-	/** World time when CachedFFIgnoreList was last built. Used for the 1s refresh during sustained fire. */
-	float FFIgnoreListBuiltTime = -1e9f;
+	/** Sentinel for "CachedFFIgnoreList has never been built successfully" — the one state in which the
+	 *  list is empty, and an empty list means the hitscan excludes nobody. */
+	static constexpr float FFIgnoreListNeverBuilt = -1e9f;
+
+	/** World time when CachedFFIgnoreList was last built. See FFIgnoreListRefreshSeconds. */
+	float FFIgnoreListBuiltTime = FFIgnoreListNeverBuilt;
+
+	/** Rebuild cadence for CachedFFIgnoreList during sustained fire, and for GetFriendlyFireIgnoreList's
+	 *  own staleness check. The list is a whole-world pawn iteration, so it must never run per shot. */
+	static constexpr float FFIgnoreListRefreshSeconds = 1.f;
 
 	/** Near-miss radius for suppression reporting (cm). Pawn within this distance of the bullet segment gets suppressed. */
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Suppression", meta = (ClampMin = "0.0"))

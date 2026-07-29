@@ -70,6 +70,12 @@ static bool IsCompanionFireDebugEnabled()
 
 namespace
 {
+	// Tolerance (cm) for every "is this focal point still the one WE wrote" compare in the file:
+	// overwatch end, Tier-0-yield hand-off, route-facing release, watch-drop clean-up, and the
+	// sprint-yield releases. Declared up here rather than beside the overwatch constants because
+	// TickNode's ready-threat arm needs it too and sits above them.
+	constexpr float OverwatchFocalMatchTolerance = 1.f;
+
 	// Player-relative bearing tag for EnemyDirection bark variants (Left/Right/Front/High) — the
 	// lines name a direction, so an untagged random pick could call the wrong side.
 	FName DirectionBarkContext(const APawn* PlayerPawn, const AActor* Target)
@@ -302,8 +308,18 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 	// Shared ignore list for per-candidate eye-line traces (self + weapon + attached actors) — matches
 	// the final LoS filter and the combat task's trace so acquisition and firing agree on visibility.
-	TArray<AActor*, TInlineAllocator<4>> SelectIgnoredAttached;
-	Companion->ForEachAttachedActors([&](AActor* A) { SelectIgnoredAttached.Add(A); return true; });
+	//
+	// Plus every same-team pawn, taken from the weapon's own friendly-fire list: AWeaponBase excludes
+	// team-mates from the hitscan outright, so a round passes straight THROUGH the player and the other
+	// companion. A team-mate standing on the line is therefore not an obstruction to a shot, and
+	// dropping a candidate for one was a false negative. Widened here as well as in the combat task
+	// because the two are required to agree — leaving acquisition friendly-blind while firing is not
+	// would let the VIP engage targets it could never have selected. Inline capacity covers
+	// attachments plus a single-player team (player + up to two companions) without a heap alloc.
+	TArray<AActor*, TInlineAllocator<8>> SelectFireTraceIgnored;
+	Companion->ForEachAttachedActors([&](AActor* A) { SelectFireTraceIgnored.Add(A); return true; });
+	if (AWeaponBase* SelectWeapon = Companion->GetCurrentWeapon())
+		SelectFireTraceIgnored.Append(SelectWeapon->GetFriendlyFireIgnoreList());
 
 	// Considers one candidate for both tiers. Runs the eye-line trace only when the candidate could
 	// improve one of the tiers (nearer than the current BestAny, or nearer than the current BestVisible),
@@ -346,7 +362,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		FCollisionQueryParams SelParams(SCENE_QUERY_STAT(CompanionSelectLoS), true);
 		SelParams.AddIgnoredActor(Companion);
 		SelParams.AddIgnoredActor(Companion->GetCurrentWeapon());
-		for (AActor* Attached : SelectIgnoredAttached)
+		for (AActor* Attached : SelectFireTraceIgnored)
 			SelParams.AddIgnoredActor(Attached);
 		const bool bSelBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
 			SelHit, SelectAimOrigin, AITargeting::GetSightLocation(Candidate), ECC_Visibility, SelParams);
@@ -977,11 +993,19 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		if (ExistingTarget == nullptr)
 		{
 			BB->ClearValue(CombatTargetKey.SelectedKeyName);
-			// No enemies at all — combat is ending. Release cover so the companion stands up and
+			// No enemies at all -- combat is ending. Release cover so the companion stands up and
 			// the cover slot becomes available for the next engagement. Cover is cleared only when
 			// no target remains (combat ending); a live-but-temporarily-unperceived target retains
 			// both the BB target and the cover slot so the CoverSwitchMonitor stays active.
 			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+			// CoverTarget must also clear here. The combat task only clears it under
+			// bReleaseSlot && CoverHandle.IsValid(), and the CoverSwitchMonitor can write it
+			// independently. Any teardown where the monitor wrote the key but the task never
+			// claimed a handle leaves CoverTarget valid with no owner -- the stance backstop's
+			// bCoverHeld veto then reads it as "cover is held" permanently, and the companion
+			// stays crouched for the rest of the level.
+			if (CoverTargetKey.SelectedKeyType != nullptr)
+				BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
 		}
 	}
 
@@ -1006,7 +1030,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		// Same ignore set as the selection trace above so acquisition, firing and this agree on
 		// visibility. Load-bearing now that this flag also gates the wave hold: a companion's own
 		// attached actor blocking the line would otherwise read as "sees nothing" and release the hold.
-		for (AActor* Attached : SelectIgnoredAttached)
+		for (AActor* Attached : SelectFireTraceIgnored)
 			ReadyLosParams.AddIgnoredActor(Attached);
 		FHitResult ReadyLosHit;
 		const bool bReadyLosBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
@@ -1172,7 +1196,25 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			if (!bAimOwnedElsewhere)
 			{
 				Companion->SetLowReadyAim(false);
-				Controller->SetFocalPoint(AlertedThreatLocation, EAIFocusPriority::Gameplay);
+				// Travelling yields facing to travel. Travelling = sprinting OR closing a follow gap
+				// (IsStrafingForFocus returns false for both). The locomotion blendspace's only
+				// sprint-speed sample is forward-only, so a travelling companion with a threat focal
+				// held plays running-forwards legs under a side-on body. Releasing the Gameplay focal
+				// hands facing to path-following's Move-priority focus, which is the direction of
+				// travel. Compare-guarded like every other focal release here so a focal another
+				// system wrote is never stomped. The weapon stays up either way.
+				// NOT gated on the live-combat actor-target focus: that is owned by the combat task's
+				// own SetFocus(Actor) and must never be released by this tier.
+				const bool bTravellingToClose = !Companion->IsStrafingForFocus()
+					&& (Companion->IsSprinting() || Companion->IsFollowCatchupPace());
+				if (bTravellingToClose)
+				{
+					if (Controller->GetFocalPointForPriority(EAIFocusPriority::Gameplay)
+						.Equals(AlertedThreatLocation, OverwatchFocalMatchTolerance))
+						Controller->ClearFocus(EAIFocusPriority::Gameplay);
+				}
+				else
+					Controller->SetFocalPoint(AlertedThreatLocation, EAIFocusPriority::Gameplay);
 			}
 		}
 		else
@@ -1306,7 +1348,13 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 					WeaponUpHoldStartTime = HoldNow;
 					Companion->SetAimTarget(nullptr);
 
-					bWeaponUpHoldAsserted = HoldSeconds > 0.f;
+					// Never arm the hold on a travelling companion (sprinting OR closing a follow
+					// gap). Its focal is a FIXED world point sampled once from the pawn's forward, so
+					// travelling carries the body past it within a second and then turns it around to
+					// keep facing it — at those speeds the locomotion blendspace blends into the
+					// forward-only sample. A travelling companion faces travel.
+					bWeaponUpHoldAsserted = HoldSeconds > 0.f
+						&& !Companion->IsSprinting() && !Companion->IsFollowCatchupPace();
 					if (bWeaponUpHoldAsserted)
 					{
 						ArmWeaponUpHoldFocal(*Controller, *Companion);
@@ -1328,11 +1376,20 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				// second into whatever Blueprint graphs bind that delegate.
 				if (bWeaponUpHoldAsserted)
 				{
+					// Travelling STARTING mid-hold ends it, for the same reason the arm edge refuses
+					// one (see above): the hold's focal is a fixed point that travelling immediately
+					// runs past. Released through the normal path so the focal drop stays compare-guarded.
+					if (Companion->IsSprinting() || Companion->IsFollowCatchupPace())
+					{
+						bWeaponUpHoldAsserted = false;
+						Companion->SetLowReadyAim(true);
+						ReleaseWeaponUpHoldFocal(*Controller);
+					}
 					// HoldSeconds > 0 is re-tested, not assumed from the arm edge: if the world goes
 					// null on a LATER tick both HoldNow and HoldSeconds collapse to 0, and the elapsed
 					// compare alone reads (0 - StartTime) < 0 as TRUE against any real stamp — the hold
 					// would then assert weapon-up forever and never reach its own release.
-					if (HoldSeconds > 0.f && (HoldNow - WeaponUpHoldStartTime) < HoldSeconds)
+					else if (HoldSeconds > 0.f && (HoldNow - WeaponUpHoldStartTime) < HoldSeconds)
 					{
 						Companion->SetLowReadyAim(false);
 					}
@@ -1456,6 +1513,10 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	UpdateNonCombatFacing(*Controller, *Companion, *BB, PlayerPawn, RangeTuning,
 		bHasTarget, bReadyOnlyThreat, WatchCandidateEnemy, DeltaSeconds);
 
+	// --- Stance backstop ---
+	// Runs after the posture chain so it sees this tick's settled bHasTarget. See UpdateStanceBackstop.
+	UpdateStanceBackstop(*Companion, *BB, bHasTarget, DeltaSeconds);
+
 	// --- AimLog diagnostics (companion.AimLog 1) ---
 	if (CVarCompanionAimLog.GetValueOnGameThread() != 0)
 	{
@@ -1493,6 +1554,11 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 		bool bReviveWindowOpen = false;
 
+		// Nearest living hostile to the BODY, published on the companion at the end of this block for
+		// the rescue approach's sprint-vs-jog decision (BTTask_FollowPlayer). Negative = none found /
+		// not measured this tick. Filled from the sweep below rather than a second enemy scan.
+		float NearestThreatDist = -1.f;
+
 		// Latch: once the companion is mid-revive, hold the key true so the BT hold is uninterruptible.
 		if (Companion->IsRevivingPlayer())
 		{
@@ -1512,9 +1578,33 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			RevParams.AddIgnoredActor(Companion);
 			RevParams.AddIgnoredActor(PlayerPawn);
 
+			// One sweep, two consumers: the two-ring safety test below and the rescue approach's
+			// urgency read. Sized to cover whichever reaches further so neither under-samples -- the
+			// ring loop re-tests ThreatRadius per candidate (below), so a wider sphere cannot widen
+			// the safety rings. The rescue sprint gate's release band is SprintThreatRadius x 1.25
+			// (RescueSprintThreatReleaseScale), so the sweep must cover the release-scaled value or
+			// the hysteresis band falls outside the sweep and the threat gate releases early.
+			const float SprintThreatRadius = RangeTuning ? RangeTuning->ReviveSprintThreatRadius : 0.f;
+			constexpr float SprintThreatReleaseScale = 1.25f;
+			const float SprintReleaseBand = SprintThreatRadius * SprintThreatReleaseScale;
 			Companion->GetWorld()->OverlapMultiByObjectType(
 				ReviveOverlaps, PlayerLoc, FQuat::Identity,
-				RevObjParams, FCollisionShape::MakeSphere(ThreatRadius), RevParams);
+				RevObjParams, FCollisionShape::MakeSphere(FMath::Max(ThreatRadius, SprintReleaseBand)), RevParams);
+
+			// Nearest living hostile to the body. Alert state is deliberately NOT filtered here (the
+			// safety rings below do filter it): an unaware enemy standing over the body is every
+			// reason to run, and it becomes aware the instant the revive starts. Its own pass because
+			// the ring loop breaks out the moment it finds a reason to call the area hot.
+			for (const FOverlapResult& Overlap : ReviveOverlaps)
+			{
+				const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Overlap.GetActor());
+				if (!IsValid(Enemy)) continue;
+				const UHealthComponent* NearHP = Enemy->GetHealthComponent();
+				if (NearHP && NearHP->IsDead()) continue;
+
+				const float NearDist = FVector::Dist(Enemy->GetActorLocation(), PlayerLoc);
+				if (NearestThreatDist < 0.f || NearDist < NearestThreatDist) NearestThreatDist = NearDist;
+			}
 
 			// Two-ring threat test. Inner ring (ReviveHardThreatRadius): any alerted enemy is hot
 			// unconditionally — that close it would see the revive start. Outer ring (out to
@@ -1522,6 +1612,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			// Searching enemies in the outer ring never hold the window shut — post-fight survivors
 			// wandering the area blocked every quiet-scene revive until desperation.
 			const float HardRadiusSq = FMath::Square(Companion->ReviveHardThreatRadius);
+			const float ThreatRadiusSq = FMath::Square(ThreatRadius);
 			for (const FOverlapResult& Overlap : ReviveOverlaps)
 			{
 				const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Overlap.GetActor());
@@ -1530,7 +1621,12 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				const UHealthComponent* EHP = Enemy->GetHealthComponent();
 				if (EHP && EHP->IsDead()) continue;
 
-				if (FVector::DistSquared(Enemy->GetActorLocation(), PlayerLoc) <= HardRadiusSq)
+				// The sphere may reach past ReviveThreatRadius when the sprint radius is the larger of
+				// the two — re-test here so the safety rings stay exactly the size they were authored.
+				const float EnemyDistSq = FVector::DistSquared(Enemy->GetActorLocation(), PlayerLoc);
+				if (EnemyDistSq > ThreatRadiusSq) continue;
+
+				if (EnemyDistSq <= HardRadiusSq)
 				{
 					bHot = true;
 					break;
@@ -1666,6 +1762,10 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		// Approach damage resist rides the committed rescue (hold-phase resist is bIsRevivingPlayer).
 		Companion->SetRescueCommitted(bReviveWindowOpen);
 
+		// Stays -1 on the mid-revive latch path (no sweep runs there): the approach is over by then,
+		// so there is nothing left for the pace decision to read and a stale value would be worse.
+		Companion->SetNearestThreatToDownedPlayer(NearestThreatDist);
+
 		BB->SetValueAsBool(ReviveWindowOpenKey.SelectedKeyName, bReviveWindowOpen);
 	}
 	else
@@ -1675,6 +1775,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		bLastReviveWindowOpen = false;
 		bLastReviveClaimRefused = false;
 		Companion->SetRescueCommitted(false);
+		Companion->SetNearestThreatToDownedPlayer(-1.f);
 		// Player back up (or the pawn swapped out) — ExitDBNO already wipes the claim, but a
 		// possession change would otherwise strand this companion's hold on the old body.
 		if (PlayerIface) PlayerIface->ReleaseReviveClaim(Companion);
@@ -1752,6 +1853,62 @@ void UBTService_UpdateCompanionState::UpdateStealthCrouchMirror(
 }
 
 // ---------------------------------------------------------------------------
+// Stance backstop
+// ---------------------------------------------------------------------------
+
+void UBTService_UpdateCompanionState::UpdateStanceBackstop(
+	ACompanionCharacter& Companion, UBlackboardComponent& BB, bool bHasTarget, float DeltaSeconds)
+{
+	// Cheapest gate first — nothing to reconcile while standing, and the reads below are not free.
+	if (!Companion.bIsCrouched)
+	{
+		UnownedCrouchTime = 0.f;
+		return;
+	}
+
+	// A held cover point is stance ownership: the combat task crouches at cover and the service
+	// deliberately KEEPS the cover keys through a target death so the switch monitor can re-score the
+	// slot. Both keys are checked — HasCoverPosition is the arrival flag, CoverTarget is the claim,
+	// and either one alone can be live during a commit.
+	const bool bCoverHeld = BB.GetValueAsBool(HasCoverPositionKey.SelectedKeyName)
+		|| (CoverTargetKey.SelectedKeyType != nullptr
+			&& BB.GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID()).IsValid());
+
+	// Stealth is an owner in its own right, not just via bCrouchOwnedByStealth: the crouch-mirror
+	// self-reconciles a stance it did not itself apply (see UpdateStealthCrouchMirror), so standing
+	// the companion up here would only race the mirror's next reconcile.
+	const bool bStanceOwned = bHasTarget
+		|| bCoverHeld
+		|| Companion.IsStanceOwnedElsewhere()
+		|| Companion.IsCrouchOwnedByStealth()
+		|| Companion.IsStealthActive();
+
+	if (bStanceOwned)
+	{
+		UnownedCrouchTime = 0.f;
+		return;
+	}
+
+	UnownedCrouchTime += DeltaSeconds;
+	if (UnownedCrouchTime < StanceReconcileDebounceSeconds) return;
+
+	// Attempt the uncrouch. If UnCrouch is refused (no headroom under geometry), bIsCrouched stays
+	// true and this branch would re-fire every tick with a log each time. Gate the log on the first
+	// attempt; the timer keeps growing past the threshold, so bFirstAttempt stays false on retries
+	// and the retry is silent. Once the uncrouch succeeds, the timer resets to zero.
+	const bool bFirstAttempt = (UnownedCrouchTime - DeltaSeconds) < StanceReconcileDebounceSeconds;
+	if (bFirstAttempt)
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: stance backstop — crouched with no owner for %.2fs, standing up"),
+			*Companion.GetName(), StanceReconcileDebounceSeconds);
+	Companion.UnCrouch();
+
+	// If the uncrouch succeeded, reset the timer. If it was refused, keep it at the threshold so
+	// the next tick retries without re-logging (bFirstAttempt will be false).
+	if (!Companion.bIsCrouched)
+		UnownedCrouchTime = 0.f;
+}
+
+// ---------------------------------------------------------------------------
 // F3 + F1 — non-combat facing arbitration
 // ---------------------------------------------------------------------------
 
@@ -1773,9 +1930,9 @@ namespace
 	// "cover the direction they came from" read at all, so overwatch is declined outright.
 	constexpr float OverwatchMinAimStandoff = 200.f;
 
-	// Tolerance (cm) for every "is this focal point still the one WE wrote" compare in the file:
-	// overwatch end, Tier-0-yield hand-off, route-facing release, and watch-drop clean-up.
-	constexpr float OverwatchFocalMatchTolerance = 1.f;
+	// OverwatchFocalMatchTolerance — the shared focal-compare tolerance — now lives in the anonymous
+	// namespace at the top of the file: TickNode's ready-threat sprint-yield needs it and sits above
+	// this block.
 
 	// Route facing reference fallbacks — used only when the controller has no tuning asset. Each one
 	// mirrors the shipped default on UCompanionTuningDataAsset (Companion|Facing), so a missing asset
@@ -1831,8 +1988,6 @@ namespace
 // ---------------------------------------------------------------------------
 // Post-fight weapon-up hold
 // ---------------------------------------------------------------------------
-// Placed below the anonymous namespace above rather than beside UpdateStealthCrouchMirror so the
-// release can share OverwatchFocalMatchTolerance with every other focal compare in the file.
 
 float UBTService_UpdateCompanionState::GetWeaponUpHoldSeconds(
 	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning) const
@@ -1947,6 +2102,13 @@ bool UBTService_UpdateCompanionState::UpdateWaveHold(
 		&& Companion.IsCombatReady()
 		// Stealth's whole point is not holding a firing line.
 		&& Companion.GetMode() != ECompanionMode::Stealth
+		// Deliberately measured to the PLAYER, not the follow leader — do NOT chain this one to match
+		// the overwatch anchor above. This leash asks "has the player left me behind", and that has to
+		// stay a direct measurement: routed through the primary a secondary could hold at cover
+		// indefinitely while the player walked away, as long as the primary stayed near it, which is
+		// exactly the abandonment the leash exists to stop. The chained-offset problem that forced the
+		// overwatch change does not arise here either — 2500cm against a VIP resting ~700cm out is
+		// better than 3x margin, so nothing is sitting on the threshold.
 		&& IsValid(PlayerPawn)
 		&& FVector::DistSquared(Companion.GetActorLocation(), PlayerPawn->GetActorLocation())
 			<= FMath::Square(Tuning->WaveHoldLeashDistance);
@@ -2084,11 +2246,35 @@ bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 	// Wave hold widens the anchor to its own leash: during a defence the ally is meant to stay
 	// planted well beyond the normal overwatch radius, and without this overwatch would drop out at
 	// OverwatchBreakDistance while the hold kept the ally standing there with nothing aiming it.
+	//
+	// NOTE: WaveHoldLeashDistance is measured against a DIFFERENT actor in each of its two consumers, and
+	// that is intentional. UpdateWaveHold measures it to the PLAYER, because the question there is "has
+	// the player left me behind" and routing it through the primary would let a secondary hold at cover
+	// while the player walked away. Here it is a radius on the leader-anchored distance below, because
+	// this gate asks "am I still posted with what I form up on". A VIP can therefore be inside one and
+	// outside the other; the widening is only ever permissive (2500 vs 800), so the failure mode is
+	// overwatch persisting slightly past the hold, never the reverse. If the two ever need to disagree
+	// by more than that, give this path its own tunable rather than re-pointing either measurement.
 	const bool bWaveHold = Companion.IsWaveHoldActive();
 	const float AnchorRadius = bWaveHold ? Tuning->WaveHoldLeashDistance : Tuning->OverwatchBreakDistance;
 
-	const bool bPlayerAnchored = IsValid(PlayerPawn) && !bPlayerDBNO
-		&& FVector::DistSquared(Companion.GetActorLocation(), PlayerPawn->GetActorLocation())
+	// Measured to the companion's FORMATION LEADER, not the player. This gate asks "am I still posted
+	// with the thing I form up on" — for a primary the resolved leader IS the player, so its gate is
+	// unchanged by construction. The VIP forms up on the PRIMARY, and measuring it to the player
+	// instead chained two formation offsets into one budget: the primary sits ~403cm out
+	// (FormationOffsetBack 350 / Right 200) and the VIP lands ~700cm from the player once the mirror
+	// and the zeroed back-bias are applied, against an OverwatchBreakDistance of 800. It passed
+	// standing still and failed on any lag, cover detour or player step — which is why the VIP held
+	// weapon-up only sometimes while the primary did it reliably. Anchoring on the leader restores the
+	// VIP's real margin (~350-400cm, the same as the primary's) instead of widening the radius for
+	// everyone. The player fallback covers the pre-publish window before follow has run once.
+	const AActor* AnchorActor = Controller.GetFollowLeader();
+	if (!IsValid(AnchorActor)) AnchorActor = PlayerPawn;
+
+	// bPlayerDBNO stays player-keyed on purpose: a downed player ends overwatch no matter who the
+	// companion is anchored on, because the rescue branch owns the pawn from that moment.
+	const bool bFormationAnchored = IsValid(AnchorActor) && !bPlayerDBNO
+		&& FVector::DistSquared(Companion.GetActorLocation(), AnchorActor->GetActorLocation())
 			<= FMath::Square(AnchorRadius);
 	const bool bOwnerElsewhere = bTakedownOwnsAim || Companion.IsRevivingPlayer()
 		|| Companion.GetIsCompanionDBNO();
@@ -2114,11 +2300,16 @@ bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 		}
 
 		// Enter only on the fresh target-loss edge (a branch switch that already lowered must not
-		// re-raise the gun), standing still, player nearby, with threat memory to aim from.
+		// re-raise the gun), standing still, posted with the formation leader, with threat memory to
+		// aim from.
 		// The lowered-edge veto is waived under a wave hold: there the gun SHOULD come back up
 		// between squads, so a lower from an earlier lull must not lock overwatch out for the wave.
-		if ((bLoweredOnTargetLoss && !bWaveHold) || bOwnerElsewhere || !bPlayerAnchored) return false;
+		if ((bLoweredOnTargetLoss && !bWaveHold) || bOwnerElsewhere || !bFormationAnchored) return false;
 		if (Companion.GetVelocity().Size2D() > OverwatchBreakSpeed) return false;
+		// Travelling flag as well as velocity: the request lands a tick before the speed does, and
+		// entering a hold that the very next tick's travelling break would tear down is pure churn.
+		// Catch-up pace is included alongside sprint for the same reason.
+		if (Companion.IsSprinting() || Companion.IsFollowCatchupPace()) return false;
 
 		// Throttle failed entry retries to the refresh cadence. With the standoff refusal a companion
 		// tucked against cover fails ComputeOverwatchAimPoint and retries the full portal-candidate
@@ -2160,13 +2351,21 @@ bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 	// safety end (bCombatDecayRanThisTick), and the waived lowered-edge veto lets it re-enter with a
 	// fresh aim point once the next squad dies. On hold release the normal 6s cap resumes.
 	const bool bTimedOut = !bWaveHold && OverwatchElapsed >= Tuning->PostCombatOverwatchMaxTime;
-	if (bOwnerElsewhere || !bPlayerAnchored
+	// Travelling breaks the hold IMMEDIATELY rather than waiting out OverwatchMovingBreakTime.
+	// A third of a second of side-on travel is exactly the forward-legs-under-a-sideways-body tell
+	// the travelling-yields-facing rule exists to remove, and the sustained-move break was authored
+	// for a walk-away, not a run. Catch-up pace is included: 550-650 is above the strafe cap and
+	// would blend into the forward-sprint clip just as a full sprint does.
+	const bool bTravelling = Companion.IsSprinting() || Companion.IsFollowCatchupPace();
+	if (bOwnerElsewhere || !bFormationAnchored
+		|| bTravelling
 		|| OverwatchMovingTime > OverwatchMovingBreakTime
 		|| bTimedOut)
 	{
 		if (bDebugLogging)
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: post-combat overwatch END t=%.1f (anchored=%d moveT=%.1f)"),
-				*Companion.GetName(), OverwatchElapsed, (int32)bPlayerAnchored, OverwatchMovingTime);
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: post-combat overwatch END t=%.1f (anchored=%d moveT=%.1f travelling=%d)"),
+				*Companion.GetName(), OverwatchElapsed, (int32)bFormationAnchored, OverwatchMovingTime,
+				(int32)bTravelling);
 		EndPostCombatOverwatch(Controller, Companion, false);
 		return false;
 	}
@@ -2559,7 +2758,22 @@ bool UBTService_UpdateCompanionState::ComputeWatchThreat(
 
 void UBTService_UpdateCompanionState::ApplyWatchFacing(ACompanionAIController& Controller, ACompanionCharacter& Companion)
 {
-	Controller.SetFocalPoint(WatchThreatLocation, EAIFocusPriority::Gameplay);
+	// Travelling yields facing to travel: a watched threat is worth turning the head for at a walk,
+	// never worth running side-on for. Travelling = sprinting OR closing a follow gap (same widened
+	// condition as the ready-threat tier and IsStrafingForFocus). Releasing our focal hands facing to
+	// path-following's Move-priority focus. Compare-guarded so a focal another system wrote this tick
+	// is untouched. Stance below is unaffected — the companion keeps the weapon up (or stays
+	// low-profile in stealth) while it runs.
+	const bool bTravellingToClose = !Companion.IsStrafingForFocus()
+		&& (Companion.IsSprinting() || Companion.IsFollowCatchupPace());
+	if (bTravellingToClose)
+	{
+		if (Controller.GetFocalPointForPriority(EAIFocusPriority::Gameplay)
+			.Equals(WatchThreatLocation, OverwatchFocalMatchTolerance))
+			Controller.ClearFocus(EAIFocusPriority::Gameplay);
+	}
+	else
+		Controller.SetFocalPoint(WatchThreatLocation, EAIFocusPriority::Gameplay);
 
 	// Re-checked every tick (not just on first entry): a mode order landing mid-watch flips
 	// IsStealthActive() without ever leaving the watch tier, and the stance must follow it —
@@ -2616,6 +2830,20 @@ bool UBTService_UpdateCompanionState::ApplyRouteFacingReference(
 	{
 		ReleaseRouteFacingFocal(Controller);
 		return false;
+	}
+
+	// Travelling yields facing to travel. Travelling = sprinting OR closing a follow gap (same
+	// widened condition as the ready-threat and watch-threat tiers). Returning TRUE (rather than
+	// falling through) is deliberate: it claims the tick so Tier 3 doesn't write a focal in our
+	// place. Path-following's Move-priority focus then turns the body down the path. Gated behind
+	// the "a reference is actually installed" check above so a plain travelling companion with no
+	// route never suppresses ambient facing.
+	const bool bTravellingToClose = !Companion.IsStrafingForFocus()
+		&& (Companion.IsSprinting() || Companion.IsFollowCatchupPace());
+	if (bTravellingToClose)
+	{
+		ReleaseRouteFacingFocal(Controller);
+		return true;
 	}
 
 	const FVector PawnLoc = Companion.GetActorLocation();
@@ -2754,7 +2982,8 @@ void UBTService_UpdateCompanionState::ApplyAmbientFacing(
 	ACompanionAIController& Controller, const ACompanionCharacter& Companion,
 	const APawn* PlayerPawn, const UCompanionTuningDataAsset* Tuning, float DeltaSeconds)
 {
-	if (Tuning && !Tuning->bAmbientFacingEnabled) return;
+	// Null tuning = no DA assigned: treat as disabled rather than running the tier unconfigured.
+	if (!Tuning || !Tuning->bAmbientFacingEnabled) return;
 
 	const UPathFollowingComponent* PathFollowing = Controller.GetPathFollowingComponent();
 	const bool bPathMoving = IsValid(PathFollowing) && PathFollowing->GetStatus() == EPathFollowingStatus::Moving;

@@ -14,6 +14,7 @@ class UAISenseConfig_Hearing;
 class UCompanionTuningDataAsset;
 class UTraversalComponent;
 class ACompanionRoute;
+class ACompanionCharacter;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanionAI, Log, All);
 
@@ -49,6 +50,7 @@ public:
 	static const FName BB_CommandTargetLocation;         // Vector
 	static const FName BB_TakedownMethod;                // enum ETakedownMethod
 	static const FName BB_BreachType;                    // enum EBreachType
+	static const FName BB_FollowLeader;                  // Object (Actor) — see SetFollowLeader
 
 	/**
 	 * Write a command into the companion blackboard.
@@ -67,6 +69,32 @@ public:
 	APawn* GetPlayerCharacter() const { return CachedPlayerCharacter.Get(); }
 
 	void SetPlayerCharacter(APawn* InPlayer) { CachedPlayerCharacter = InPlayer; }
+
+	/**
+	 * Publishes the actor this companion forms up on: the player for a primary companion, the primary
+	 * companion for a secondary (the armed extractee VIP). UBTTask_FollowPlayer owns the resolution —
+	 * it holds the throttled primary-companion scan and the leash latches — and calls this once per
+	 * follow tick with its result, so nothing here rescans. Deduped on the pointer, so only a genuine
+	 * handover reaches the blackboard.
+	 */
+	void SetFollowLeader(AActor* Leader);
+
+	/**
+	 * The published follow leader, or the player when nothing has published one yet or the published
+	 * one has stopped being a usable anchor. Deliberately survives the follow task finishing: cover
+	 * scoring runs on the combat branch where follow is not ticking, and handing back the player there
+	 * would split a secondary's cover anchor from its follow anchor — the drift this exists to remove.
+	 * May return null before the player pawn is cached; callers keep their own fallback.
+	 */
+	AActor* GetFollowLeader() const;
+
+	/**
+	 * True when Leader is still a usable follow anchor for Follower: valid, not the follower itself,
+	 * possessed, not DBNO and not dead. Shared by the follow task's per-tick re-test and by
+	 * GetFollowLeader's read-time staleness check, so a leader that goes down mid-fight stops
+	 * anchoring cover scoring on the same tick it stops anchoring follow.
+	 */
+	static bool IsUsableFollowLeader(const ACompanionCharacter* Leader, const ACompanionCharacter* Follower);
 
 	const UCompanionTuningDataAsset* GetTuning() const { return Tuning; }
 
@@ -148,6 +176,19 @@ private:
 	TObjectPtr<UAISenseConfig_Hearing> HearingConfig;
 
 	TWeakObjectPtr<APawn> CachedPlayerCharacter;
+
+	/** Last leader published by the follow task (see SetFollowLeader). Weak: it is either the player
+	 *  or the primary companion, and neither is owned by this controller — the primary can die or be
+	 *  destroyed while a secondary is still reading it. */
+	TWeakObjectPtr<AActor> PublishedFollowLeader;
+
+	/** Last leader actually written to BB_FollowLeader. Separate from the member above so a publish that
+	 *  arrives while the blackboard is unavailable cannot be mistaken for one already mirrored. */
+	TWeakObjectPtr<AActor> MirroredFollowLeader;
+
+	/** One-shot latch for the missing-BB_FollowLeader warning. SetFollowLeader runs off a per-tick
+	 *  caller, so an unwired key must cost one log line, not a stream. */
+	bool bFollowLeaderKeyWarned = false;
 
 	/** Live facing reference (see SetFacingReferenceRoute). Weak because the route actor belongs to the
 	 *  level, not to us, and level streaming can pull it out from under an installed reference.

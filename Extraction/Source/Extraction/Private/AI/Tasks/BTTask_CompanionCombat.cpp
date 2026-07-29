@@ -75,7 +75,7 @@ namespace
 	};
 
 	// Point overload — caller pre-resolves the destination (avoids recomputing GetSightLocation in tight loops).
-	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, const FVector& ToLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredAttached)
+	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, const FVector& ToLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredForFireTrace)
 	{
 		OutBlockedBy = nullptr;
 		if (!World || !IsValid(ToTarget) || !IsValid(Companion)) return false;
@@ -84,7 +84,7 @@ namespace
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(Companion);
 		QueryParams.AddIgnoredActor(Companion->GetCurrentWeapon());
-		for (AActor* const A : IgnoredAttached) QueryParams.AddIgnoredActor(A);
+		for (AActor* const A : IgnoredForFireTrace) QueryParams.AddIgnoredActor(A);
 
 		const bool bHit = World->LineTraceSingleByChannel(Hit, FromLoc, ToLoc, ECC_Visibility, QueryParams);
 		if (bHit && Hit.GetActor() != ToTarget)
@@ -96,10 +96,10 @@ namespace
 	}
 
 	// Actor overload — resolves the sight point once and forwards to the point overload.
-	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredAttached)
+	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredForFireTrace)
 	{
 		if (!IsValid(ToTarget)) { OutBlockedBy = nullptr; return false; }
-		return HasLineOfSight(World, FromLoc, AITargeting::GetSightLocation(ToTarget), ToTarget, Companion, OutBlockedBy, IgnoredAttached);
+		return HasLineOfSight(World, FromLoc, AITargeting::GetSightLocation(ToTarget), ToTarget, Companion, OutBlockedBy, IgnoredForFireTrace);
 	}
 
 	// Root-motion peek commit: the peek montages own the step-out/return motion, so the capsule must
@@ -142,13 +142,13 @@ namespace
 	// Muzzle→target clearance for the instant a burst commits — the 10 Hz withhold only runs from
 	// the NEXT tick, so an unconditional StartWeaponFire at commit could put the first rounds into
 	// (or through) our own wall.
-	static bool IsBurstMuzzleClear(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached)
+	static bool IsBurstMuzzleClear(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace)
 	{
 		if (!IsValid(Companion) || !IsValid(Target)) return false;
 		AWeaponBase* W = Companion->GetCurrentWeapon();
 		if (!IsValid(W)) return true;
 		AActor* Blocker = nullptr;
-		return HasLineOfSight(Companion->GetWorld(), W->GetMuzzleLocation(), Target, Companion, Blocker, IgnoredAttached);
+		return HasLineOfSight(Companion->GetWorld(), W->GetMuzzleLocation(), Target, Companion, Blocker, IgnoredForFireTrace);
 	}
 
 	// Gathers the companion's known threats (sight-perceived, enemy-tagged, alive), sorted nearest-first
@@ -1116,7 +1116,7 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 
 void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
 	const FCoverData& CoverData, AActor* Target, bool bSuppressed, bool bLowHp,
-	TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+	TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds)
 {
 	if (!IsValid(Companion) || !IsValid(Target)) return;
 
@@ -1151,7 +1151,7 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 				AWeaponBase* W = Companion->GetCurrentWeapon();
 				const FVector FireOrigin = IsValid(W) ? W->GetMuzzleLocation()
 					: (Companion->GetActorLocation() + FVector(0.f, 0.f, StandFireEyeHeight));
-				const bool bLos = HasLineOfSight(Companion->GetWorld(), FireOrigin, Target, Companion, Blocker, IgnoredAttached);
+				const bool bLos = HasLineOfSight(Companion->GetWorld(), FireOrigin, Target, Companion, Blocker, IgnoredForFireTrace);
 				const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 				const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 					ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
@@ -1217,7 +1217,7 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 		{
 			AWeaponBase* W = Companion->GetCurrentWeapon();
 			const FVector FireOrigin = IsValid(W) ? W->GetMuzzleLocation() : (Next + FVector(0.f, 0.f, StandFireEyeHeight));
-			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredAttached);
+			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredForFireTrace);
 			const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 			const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 				ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
@@ -1264,7 +1264,7 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 		{
 			AWeaponBase* W = Companion->GetCurrentWeapon();
 			const FVector FireOrigin = IsValid(W) ? W->GetMuzzleLocation() : (Next + FVector(0.f, 0.f, StandFireEyeHeight));
-			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredAttached);
+			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredForFireTrace);
 			if (!bLos && bCornerPeekFiring)
 			{
 				Companion->StopWeaponFire();
@@ -1468,7 +1468,7 @@ bool UBTTask_CompanionCombat::TryPrePeekReloadGate(ACompanionCharacter* Companio
 }
 
 void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* Companion, AActor* Target,
-	TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds, const FCoverData* PeekConeCover)
+	TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds, const FCoverData* PeekConeCover)
 {
 	if (!IsValid(Companion) || !IsValid(Target)) return;
 	UWorld* World = Companion->GetWorld();
@@ -1487,7 +1487,7 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 	FCollisionQueryParams MuzzleParams(SCENE_QUERY_STAT(CompanionStandBurstMuzzle), true);
 	MuzzleParams.AddIgnoredActor(Companion);
 	MuzzleParams.AddIgnoredActor(BurstWeapon);
-	for (AActor* Attached : IgnoredAttached)
+	for (AActor* Attached : IgnoredForFireTrace)
 		MuzzleParams.AddIgnoredActor(Attached);
 	const bool bMuzzleBlocked = World->LineTraceSingleByChannel(
 		MuzzleHit, MuzzleLoc, AITargeting::GetSightLocation(Target), ECC_Visibility, MuzzleParams);
@@ -1542,26 +1542,37 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 
 // --- Open-area move-and-shoot ---
 
-bool UBTTask_CompanionCombat::PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredAttached) const
+bool UBTTask_CompanionCombat::PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace) const
 {
 	if (!IsValid(Companion) || !IsValid(Target)) return false;
 	AActor* BlockedBy = nullptr;
 	const FVector Eye = Point + FVector(0.f, 0.f, StandFireEyeHeight);
-	return HasLineOfSight(Companion->GetWorld(), Eye, Target, Companion, BlockedBy, IgnoredAttached);
+	return HasLineOfSight(Companion->GetWorld(), Eye, Target, Companion, BlockedBy, IgnoredForFireTrace);
 }
 
 void UBTTask_CompanionCombat::EnterMoveShootIfNeeded(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, UCharacterMovementComponent* CMC, const TCHAR* Reason)
 {
 	if (bMoveShootMoveActive) return;
-	// Single source for the MaxWalkSpeed + MaxAcceleration override; EndOpenAreaMoveShoot is the matching restore.
-	// Focus/facing is owned by UpdateMoveShootFacing, called each tick from the LoS-clear and LoS-blocked branches.
-	CachedDefaultWalkSpeed = CMC->MaxWalkSpeed;
-	CMC->MaxWalkSpeed = CombatMoveSpeed;
+	// Single source for the MaxWalkSpeed + MaxAcceleration override; EndOpenAreaMoveShoot is the
+	// matching restore. Focus/facing is owned by UpdateMoveShootFacing, called each tick from the
+	// LoS-clear and LoS-blocked branches.
+	//
+	// Capped at the companion's strafe tier, not taken raw. UpdateMoveShootFacing holds a Gameplay
+	// focus on the target for the whole of move-and-shoot, so the body faces the enemy while the
+	// feet travel -- the legs are playing the locomotion blendspace's directional rows, and those
+	// only go up to 275 (above that there is a single forward-only sprint sample). Move-and-shoot
+	// above the cap is the "runs forwards while side-stepping" report.
+	//
+	// The override is published on the character via SetTaskSpeedOverride so ApplyMovementSpeeds
+	// skips the walk channel while move-and-shoot is active. Crouched channel stays zero (not
+	// overridden) -- move-and-shoot never crouches.
+	const float Pace = FMath::Min(CombatMoveSpeed, Companion->GetStrafeMaxSpeed());
+	Companion->SetTaskSpeedOverride(Pace, 0.f);
 	CachedDefaultAcceleration = CMC->MaxAcceleration;
 	bMoveShootMoveActive = true;
 	MoveShootRepositionTimer = 0.f;
 	if (bDebugLogging)
-		UE_LOG(LogCompanionAI, Log, TEXT("%s: MOVESHOOT enter %s speed=%.0f"), *Companion->GetName(), Reason, CombatMoveSpeed);
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: MOVESHOOT enter %s speed=%.0f (authored=%.0f)"), *Companion->GetName(), Reason, Pace, CombatMoveSpeed);
 }
 
 void UBTTask_CompanionCombat::UpdateMoveShootFacing(AAIController* AIC, AActor* Target, bool bLosClear)
@@ -1600,7 +1611,7 @@ bool UBTTask_CompanionCombat::ShouldRepickMoveShoot(ACompanionCharacter* Compani
 	return true;
 }
 
-void UBTTask_CompanionCombat::RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached)
+void UBTTask_CompanionCombat::RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace)
 {
 	// Try up to JiggleLosRetryCount random ground-plane offsets. Loose cover bias: among LoS-valid
 	// candidates, prefer the one with a baked cover point nearest — the companion fights NEAR cover
@@ -1623,7 +1634,7 @@ void UBTTask_CompanionCombat::RerollJiggleOffset(ACompanionCharacter* Companion,
 		const float Angle = FMath::FRandRange(0.f, 2.f * PI);
 		const float Radius = FMath::FRandRange(0.f, JiggleRadius);
 		const FVector Candidate(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius, 0.f);
-		if (!PointHasLosToTarget(Companion, JiggleHome + Candidate, Target, IgnoredAttached)) continue;
+		if (!PointHasLosToTarget(Companion, JiggleHome + Candidate, Target, IgnoredForFireTrace)) continue;
 
 		if (!bBias)
 		{
@@ -1675,7 +1686,7 @@ UBTTask_CompanionCombat::EJiggleDrift UBTTask_CompanionCombat::RollJiggleDrift()
 	return EJiggleDrift::Hold;
 }
 
-void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds)
 {
 	JiggleDriftTimer -= DeltaSeconds;
 	if (JiggleDriftTimer > 0.f) return;
@@ -1715,7 +1726,7 @@ void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AA
 	if (!ProjectToNav(Companion->GetWorld(), Nudged, MoveShootNavProjectExtent, Projected)) return;
 
 	// LoS-gate the Closer drift: don't creep into the occluded zone near an elevated enemy.
-	if (Drift == EJiggleDrift::Closer && !PointHasLosToTarget(Companion, Projected, Target, IgnoredAttached)) return;
+	if (Drift == EJiggleDrift::Closer && !PointHasLosToTarget(Companion, Projected, Target, IgnoredForFireTrace)) return;
 
 	float KeepOut = 0.f;
 	if (APawn* KOPlayer = ResolvePlayerKeepOut(Companion, KeepOut))
@@ -2065,7 +2076,7 @@ static FVector SeedMoveDir(const FVector& MicroTarget, const FVector& CompanionL
 	return Dir.SizeSquared() > KINDA_SMALL_NUMBER ? Dir.GetSafeNormal() : CompanionForward;
 }
 
-void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds)
 {
 	if (!IsValid(Companion) || !IsValid(AIC) || !IsValid(Target)) return;
 	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
@@ -2114,19 +2125,19 @@ void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, A
 		}
 		JiggleDriftTimer = JiggleDriftInterval;
 		InConeContinuousTime = 0.f;
-		RerollJiggleOffset(Companion, Target, IgnoredAttached);
+		RerollJiggleOffset(Companion, Target, IgnoredForFireTrace);
 		SmoothedMoveDir = SeedMoveDir(JiggleHome + JiggleOffset, JiggleHome, Companion->GetActorForwardVector());
 		bJiggleActive = true;
 	}
 
-	TickJiggleDrift(Companion, Target, IgnoredAttached, DeltaSeconds);
+	TickJiggleDrift(Companion, Target, IgnoredForFireTrace, DeltaSeconds);
 
 	// Re-roll the micro-target on the timer or on reach, so the companion never settles.
 	const FVector CompanionLoc = Companion->GetActorLocation();
 	const FVector MicroTarget = JiggleHome + JiggleOffset;
 	JiggleRetargetTimer -= DeltaSeconds;
 	const bool bReached = FVector::DistSquared2D(CompanionLoc, MicroTarget) <= FMath::Square(JiggleReachThreshold);
-	if (JiggleRetargetTimer <= 0.f || bReached) RerollJiggleOffset(Companion, Target, IgnoredAttached);
+	if (JiggleRetargetTimer <= 0.f || bReached) RerollJiggleOffset(Companion, Target, IgnoredForFireTrace);
 
 	// Bounded-turn-rate input toward the micro-target — smoothly rotates the heading rather than snapping,
 	// so legs commit to full deliberate strafe steps instead of half-steps.
@@ -2215,7 +2226,7 @@ void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, A
 	Companion->AddMovementInput(SmoothedMoveDir, 1.0f);
 }
 
-void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds)
 {
 	if (!IsValid(Companion) || !IsValid(AIC) || !IsValid(Target)) return;
 	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
@@ -2237,11 +2248,11 @@ void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Compa
 	FVector Dest;
 	const TCHAR* FanDirName = TEXT("?");
 	bool bWideStep = false;
-	bool bHaveDest = PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance, Dest, &FanDirName);
+	bool bHaveDest = PickFanLosDestination(Companion, Target, IgnoredForFireTrace, MoveShootStrafeDistance, Dest, &FanDirName);
 	if (!bHaveDest)
 	{
 		bWideStep = true;
-		bHaveDest = PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance * WideStepFactor, Dest, &FanDirName);
+		bHaveDest = PickFanLosDestination(Companion, Target, IgnoredForFireTrace, MoveShootStrafeDistance * WideStepFactor, Dest, &FanDirName);
 	}
 
 	// No LoS-clear fan point at either distance — hold (respect the reposition timer, don't thrash the nav query).
@@ -2259,7 +2270,7 @@ void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Compa
 	AIC->MoveToLocation(MoveShootDestination, MoveShootAcceptRadius, false, true, false, true);
 }
 
-bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest, const TCHAR** OutDirName) const
+bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float StepDistance, FVector& OutDest, const TCHAR** OutDirName) const
 {
 	if (!IsValid(Companion) || !IsValid(Target)) return false;
 
@@ -2281,7 +2292,7 @@ bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Compani
 	for (int32 i = 0; i < UE_ARRAY_COUNT(Offsets); ++i)
 	{
 		FVector Candidate;
-		if (!TryLateralLosDestination(Companion, Target, IgnoredAttached, Offsets[i].GetSafeNormal() * StepDistance, Candidate)) continue;
+		if (!TryLateralLosDestination(Companion, Target, IgnoredForFireTrace, Offsets[i].GetSafeNormal() * StepDistance, Candidate)) continue;
 		const float DistSq = FVector::DistSquared(Candidate, MyLoc);
 		if (DistSq >= BestDistSq) continue;
 		BestDistSq = DistSq;
@@ -2292,7 +2303,7 @@ bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Compani
 	return bFound;
 }
 
-bool UBTTask_CompanionCombat::TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, const FVector& LateralOffset, FVector& OutDest) const
+bool UBTTask_CompanionCombat::TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, const FVector& LateralOffset, FVector& OutDest) const
 {
 	const FVector Candidate = Companion->GetActorLocation() + LateralOffset;
 	if (!ProjectToNav(Companion->GetWorld(), Candidate, MoveShootNavProjectExtent, OutDest)) return false;
@@ -2319,20 +2330,23 @@ bool UBTTask_CompanionCombat::TryLateralLosDestination(ACompanionCharacter* Comp
 			}
 		}
 	}
-	return PointHasLosToTarget(Companion, OutDest, Target, IgnoredAttached);
+	return PointHasLosToTarget(Companion, OutDest, Target, IgnoredForFireTrace);
 }
 
 void UBTTask_CompanionCombat::EndOpenAreaMoveShoot(ACompanionCharacter* Companion)
 {
 	if (!bMoveShootMoveActive) return;
 
-	// Restore speed first (so it's attempted even if the controller is gone), then stop/clear focus.
+	// Clear override then re-resolve from the tuning asset instead of restoring a cached value --
+	// the cached walk speed may be stale (e.g. taken before a focus edge, so it is unclamped 550),
+	// and writing it back with the task's gameplay focus still live leaves the companion at the
+	// wrong speed until the next edge fires.
 	if (IsValid(Companion))
 	{
+		Companion->ClearTaskSpeedOverride();
+		Companion->RefreshMovementSpeeds();
 		if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
 		{
-			if (CachedDefaultWalkSpeed > 0.f)
-				CMC->MaxWalkSpeed = CachedDefaultWalkSpeed;
 			if (CachedDefaultAcceleration > 0.f)
 				CMC->MaxAcceleration = CachedDefaultAcceleration;
 		}
@@ -2343,13 +2357,12 @@ void UBTTask_CompanionCombat::EndOpenAreaMoveShoot(ACompanionCharacter* Companio
 		}
 	}
 
-	// Always clear state — flags can never survive without the restore having been attempted,
+	// Always clear state -- flags can never survive without the restore having been attempted,
 	// and a recycled node instance can't carry stale move-shoot state.
 	bMoveShootMoveActive = false;
 	MoveShootRepositionTimer = 0.f;
 	MoveShootDestination = FVector::ZeroVector;
 	bMoveShootHolding = false;
-	CachedDefaultWalkSpeed = 0.f;
 	CachedDefaultAcceleration = 0.f;
 
 	// Jiggle teardown — reset anchor/offset + timers so a resumed engagement re-anchors fresh.
@@ -2372,6 +2385,9 @@ void UBTTask_CompanionCombat::TickMoveShootTowardPlayer(ACompanionCharacter* Com
 	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
 	if (!IsValid(CMC)) return;
 
+	// The pull destination is the PLAYER for every companion, primary or not — see the leash comment
+	// at its arming site. Sending a secondary back to the primary here would just duplicate what the
+	// follow task already does and would leave nothing tying the fight to the player.
 	APawn* Player = nullptr;
 	float StopDist = DefaultPlayerPullStopDist;
 	const UCompanionTuningDataAsset* PullTuning = nullptr;
@@ -2487,19 +2503,19 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 		}
 		if (bResetPosture)
 		{
-			if (bSmoothSnapping && bPendingCrouchAfterSnap)
-			{
-				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState_SkippedForPendingCrouch action=NoOp"),
-					*GetNameSafe(Companion),
-					Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
-			}
-			else
-			{
-				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState action=UnCrouch"),
-					*GetNameSafe(Companion),
-					Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
-				Companion->UnCrouch();
-			}
+			// UNCONDITIONAL. There used to be a skip here for "torn down mid smooth-snap with a crouch
+			// still pending", on the theory that the snap would land the crouch itself. It never
+			// could: this same function clears bSmoothSnapping and bPendingCrouchAfterSnap further
+			// down, so the deferred crouch was cancelled on the way out and nothing downstream ever
+			// applied OR popped it. The companion was left crouched with no owner — and AbortTask
+			// takes this path with bResetPosture defaulted true, which is exactly what the BB observer
+			// does the moment the last target clears. That is the "stuck crouched after a fight"
+			// report. The pendingCrouch flag is still logged so the old case stays greppable.
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState action=UnCrouch snapping=%d pendingCrouch=%d"),
+				*GetNameSafe(Companion),
+				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
+				(int32)bSmoothSnapping, (int32)bPendingCrouchAfterSnap);
+			Companion->UnCrouch();
 		}
 
 		UCompanionAnimInstance* Anim = GetCompanionAnim(Companion);
@@ -3278,10 +3294,28 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	const FCover Cover = Ctx.Blackboard->GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID());
 	const bool bHasCover = Cover.IsValid() && Ctx.Blackboard->GetValueAsBool(HasCoverPositionKey.SelectedKeyName);
 
-	// Build ignored-actors list once per tick — passed to all HasLineOfSight calls below.
-	// TInlineAllocator keeps up to 4 entries on the stack (weapons + accessories — no heap alloc in the common case).
-	TArray<AActor*, TInlineAllocator<4>> TickIgnoredAttached;
-	Ctx.Companion->ForEachAttachedActors([&TickIgnoredAttached](AActor* A) { TickIgnoredAttached.Add(A); return true; });
+	// Build the fire-trace ignore set once per tick — passed to every HasLineOfSight, muzzle-withhold
+	// and candidate-point LoS call below. Attachments (weapon + accessories), plus every same-team pawn
+	// taken from the weapon's OWN friendly-fire list.
+	//
+	// The friendly half is the load-bearing part: AWeaponBase excludes team-mates from the hitscan
+	// entirely, so a round passes straight THROUGH the player and the other companion. Tracing against
+	// them anyway made a friendly body a hard fire block for a shot that would never have hit it — and
+	// since the VIP forms up BEHIND the primary it was systematically the one blocked, then resumed a
+	// further FireInterval late after each withhold. Sourcing the set from the weapon rather than
+	// rebuilding it here means the decision and the bullet cannot drift apart.
+	//
+	// This does NOT weaken anything player-facing. The systems that keep the companion out of the
+	// player's way are positional, not traced, and none of them read this list: the keep-out ring
+	// (ClampOutsidePlayerCircle) and the ADS-cone push-out (ClampOutsidePlayerADSCone) are geometric
+	// clamps on a destination, and the angle-seek scan builds its own query params.
+	//
+	// Inline capacity covers attachments plus a single-player team (player + up to two companions)
+	// with no heap alloc on the common path.
+	TArray<AActor*, TInlineAllocator<8>> TickFireTraceIgnored;
+	Ctx.Companion->ForEachAttachedActors([&TickFireTraceIgnored](AActor* A) { TickFireTraceIgnored.Add(A); return true; });
+	if (AWeaponBase* TickWeapon = Ctx.Companion->GetCurrentWeapon())
+		TickFireTraceIgnored.Append(TickWeapon->GetFriendlyFireIgnoreList());
 
 	// Snapshot the handle we tracked BEFORE it can be overwritten — the slot-loss guard
 	// needs the previous-tick value to detect a monitor-commit vs genuine loss.
@@ -4017,7 +4051,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		AActor* StandEyeBlocker = nullptr;
 		const FVector StandEye = SubSlotLoc + FVector(0.f, 0.f, StandFireEyeHeight);
 		const bool bStandEyeClear = HasLineOfSight(Ctx.Companion->GetWorld(), StandEye, Ctx.Target,
-			Ctx.Companion, StandEyeBlocker, TickIgnoredAttached);
+			Ctx.Companion, StandEyeBlocker, TickFireTraceIgnored);
 		if (!bStandEyeClear && bDebugLogging)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-eye BLOCKED by %s — excluding in-place fire from roll"),
 				*Ctx.Companion->GetName(), *GetNameSafe(StandEyeBlocker));
@@ -4383,7 +4417,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			// likewise starts HELD until the animation reaches exposure.
 			StandBurstMuzzleCheckTimer = 0.f;
 			PeekFireDelayRemaining = PeekFireDelaySeconds;
-			if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickIgnoredAttached))
+			if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickFireTraceIgnored))
 			{
 				Ctx.Companion->StartWeaponFire();
 				bStandBurstFireHeld = false;
@@ -4514,7 +4548,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		StandBurstMuzzleCheckTimer = 0.f;
 		AmmoAtBurstStart = Ctx.Companion->GetCurrentAmmo();
 		PeekFireDelayRemaining = PeekFireDelaySeconds;
-		if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickIgnoredAttached))
+		if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickFireTraceIgnored))
 		{
 			Ctx.Companion->StartWeaponFire();
 			bStandBurstFireHeld = false;
@@ -4560,7 +4594,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				DebugBurstLosCheckTimer = 0.2f;
 				AActor* BurstBlocker = nullptr;
-				const bool bBurstLos = HasLineOfSight(Ctx.Companion->GetWorld(), Ctx.Companion->GetPawnViewLocation(), Ctx.Target, Ctx.Companion, BurstBlocker, TickIgnoredAttached);
+				const bool bBurstLos = HasLineOfSight(Ctx.Companion->GetWorld(), Ctx.Companion->GetPawnViewLocation(), Ctx.Target, Ctx.Companion, BurstBlocker, TickFireTraceIgnored);
 				const bool bNowBlocked = !bBurstLos;
 				const bool bBlockStateChanged = (bNowBlocked != bLastLosBlocked) || (BurstBlocker != LastLosBlocker.Get());
 				if (bBlockStateChanged)
@@ -4627,13 +4661,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			// a backstop so a mid-Phase-A occlusion pauses the trigger (no shots into our own wall). Phase B
 			// walks and owns its own fire cadence, so only guard Phase A (bRepositionStandPhase).
 			if (bRepositionStandPhase && !bSuppressed && !Ctx.Companion->IsReloading())
-				TickStandBurstMuzzleWithhold(Ctx.Companion, Ctx.Target, TickIgnoredAttached, DeltaSeconds, Cover.IsValid() ? &Cover.Data : nullptr);
+				TickStandBurstMuzzleWithhold(Ctx.Companion, Ctx.Target, TickFireTraceIgnored, DeltaSeconds, Cover.IsValid() ? &Cover.Data : nullptr);
 			TickStandUpAndRepositionAction(Ctx.Companion, Anim, Ctx.Blackboard, Cover.Data, bSuppressed, bLowHp, DeltaSeconds);
 			return;
 		}
 		if (CurrentBurstAction == EPeekAction::CornerPeek)
 		{
-			TickCornerPeekAction(Ctx.Companion, Anim, Cover.Data, Ctx.Target, bSuppressed, bLowHp, TickIgnoredAttached, DeltaSeconds);
+			TickCornerPeekAction(Ctx.Companion, Anim, Cover.Data, Ctx.Target, bSuppressed, bLowHp, TickFireTraceIgnored, DeltaSeconds);
 			return;
 		}
 
@@ -4687,7 +4721,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// target can duck behind cover mid-burst; withhold the trigger while the muzzle→target line is
 		// blocked (no shots into the wall) and resume when clear. BurstTimer keeps counting, so FSM flow is
 		// unchanged. Throttled to 10 Hz; uses the muzzle (where rounds originate), not the head eye.
-		TickStandBurstMuzzleWithhold(Ctx.Companion, Ctx.Target, TickIgnoredAttached, DeltaSeconds, Cover.IsValid() ? &Cover.Data : nullptr);
+		TickStandBurstMuzzleWithhold(Ctx.Companion, Ctx.Target, TickFireTraceIgnored, DeltaSeconds, Cover.IsValid() ? &Cover.Data : nullptr);
 
 		// Burst elapsed — return to cover.
 		if (BurstTimer <= 0.f)
@@ -4762,6 +4796,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(Ctx.Companion);
 		QueryParams.AddIgnoredActor(Ctx.Companion->GetCurrentWeapon());
+		// This one built its own params and so was the last trace still treating a team-mate as a
+		// blocker after the shared set was widened — the same false block, on the flag that gates the
+		// whole engage decision rather than a single shot.
+		for (AActor* const Ignored : TickFireTraceIgnored) QueryParams.AddIgnoredActor(Ignored);
 		// Trace from the eyeline (GetPawnViewLocation ~= head height), not the actor centre — the lowered-barrel
 		// height falsely reports blocked LoS against elevated enemies / low geometry.
 		const FVector AimOrigin = Ctx.Companion->GetPawnViewLocation();
@@ -4769,6 +4807,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	}
 	const bool bLineOfSight = (!LosHit.bBlockingHit) || (LosHit.GetActor() == Ctx.Target);
 
+	// Deliberately measured to the PLAYER, not the follow leader — do NOT chain this to match the
+	// overwatch anchor in BTService_UpdateCompanionState. This leash bounds how far the companion may
+	// fight from the PLAYER, and the pull it arms walks it back to the player specifically. Routed
+	// through the primary it would compound: a secondary at its full leash from a primary already at
+	// ITS full leash sits at twice the intended distance from the player and neither one trips. The
+	// threshold-margin problem that forced the overwatch change is absent here — 1500cm against a VIP
+	// resting ~700cm out is better than 2x margin.
 	bool bPlayerTooFar = false;
 	{
 		APawn* LeashPlayer = nullptr;
@@ -5016,7 +5061,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				if (bPlayerTooFar)
 					TickMoveShootTowardPlayer(Ctx.Companion, RegainAIC, Ctx.Target, DeltaSeconds);
 				else
-					TickRegainLosReposition(Ctx.Companion, RegainAIC, Ctx.Target, TickIgnoredAttached, DeltaSeconds);
+					TickRegainLosReposition(Ctx.Companion, RegainAIC, Ctx.Target, TickFireTraceIgnored, DeltaSeconds);
 				// Face the frozen last-seen position (not the live actor) while repositioning.
 				UpdateMoveShootFacing(RegainAIC, Ctx.Target, false);
 			}
@@ -5114,7 +5159,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			if (bPlayerTooFar)
 				TickMoveShootTowardPlayer(Ctx.Companion, MoveAIC, Ctx.Target, DeltaSeconds);
 			else
-				TickCombatJiggle(Ctx.Companion, MoveAIC, Ctx.Target, TickIgnoredAttached, DeltaSeconds);
+				TickCombatJiggle(Ctx.Companion, MoveAIC, Ctx.Target, TickFireTraceIgnored, DeltaSeconds);
 		}
 	}
 

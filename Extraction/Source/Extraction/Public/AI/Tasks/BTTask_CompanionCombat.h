@@ -150,9 +150,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot")
 	bool bEnableOpenAreaMoveAndShoot = true;
 
-	/** Movement speed (cm/s) while aiming + firing in the open — tactical pace, below WalkSpeed. */
+	/** Movement speed (cm/s) while aiming + firing in the open — tactical pace, below WalkSpeed.
+	 *  HARD-CAPPED at the companion's strafe tier (UCompanionTuningDataAsset::StrafeMaxSpeed, 275) at
+	 *  the point of use: move-and-shoot holds a focus on the target, so anything above the locomotion
+	 *  blendspace's top directional row plays a forward sprint clip while the body faces sideways.
+	 *  Values below the cap are honoured as authored; values above it are clamped down. */
 	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1.0"))
-	float CombatMoveSpeed = 300.f;
+	float CombatMoveSpeed = 275.f;
 
 	/** Below this range (cm) the companion retreats from the target. */
 	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.0"))
@@ -436,7 +440,7 @@ private:
 		const FCoverData& CoverData, bool bSuppressed, bool bLowHp, float DeltaSeconds);
 	void TickCornerPeekAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
 		const FCoverData& CoverData, AActor* Target, bool bSuppressed, bool bLowHp,
-		TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+		TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds);
 
 	/** Shared move-shoot entry: caches + lowers walk speed and focuses the target (single-source for the MaxWalkSpeed override). No-op if already active. */
 	void EnterMoveShootIfNeeded(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, UCharacterMovementComponent* CMC, const TCHAR* Reason);
@@ -445,13 +449,13 @@ private:
 	bool ShouldRepickMoveShoot(ACompanionCharacter* Companion, AAIController* AIC, float DeltaSeconds);
 
 	/** Open-area combat jiggle: continuous restless micro-motion (AddMovementInput) within JiggleRadius of JiggleHome while LoS is clear. SetFocus already faces the enemy; firing runs after this call. */
-	void TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+	void TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds);
 
 	/** Re-rolls JiggleOffset up to JiggleLosRetryCount times to find a micro-target with LoS; falls back to ZeroVector (sit on anchor) if none pass. Resets the retarget timer. */
-	void RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached);
+	void RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace);
 
 	/** Drift cycle: weighted-rolls Closer/Farther/Hold and nudges JiggleHome by JiggleDriftStep along the horizontal companion->target axis, clamped to [MoveShootIdealRangeMin, MoveShootIdealRangeMax] and nav-projected. LoS-gates the Closer drift. No-op on Hold or failed projection. */
-	void TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+	void TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds);
 
 	/** Player-pull move-and-shoot: when the player is too far, close the gap while keeping the enemy focused. Prefers player proximity over jiggle position. */
 	void TickMoveShootTowardPlayer(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, float DeltaSeconds);
@@ -460,19 +464,19 @@ private:
 	EJiggleDrift RollJiggleDrift() const;
 
 	/** LoS-blocked reposition: keep facing the target, sidestep laterally to a nav point that has LoS. Holds (no thrash) if no side works. */
-	void TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+	void TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds);
 
 	/** Shared LoS test: does Point (raised to eye height) have a clear ECC_Visibility line to the target? Ignores self + weapon + attached. */
-	bool PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredAttached) const;
+	bool PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace) const;
 
 	/** Move-shoot facing: live focus on actor when LoS is clear; frozen focal point at LastKnownTargetLocation when blocked. No-op if blocked and no last-known location yet. */
 	void UpdateMoveShootFacing(AAIController* AIC, AActor* Target, bool bLosClear);
 
 	/** Projects MyLoc+LateralOffset onto the navmesh and returns true only if the projected point has LoS to the target. */
-	bool TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, const FVector& LateralOffset, FVector& OutDest) const;
+	bool TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, const FVector& LateralOffset, FVector& OutDest) const;
 
 	/** Regain-LoS fan: tests right/left/back/back-right/back-left offsets at StepDistance, nav-projects + LoS-verifies each, returns the NEAREST valid point (smallest displacement). Biases toward a small back-step over a big swing. Returns false if none clear. */
-	bool PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest, const TCHAR** OutDirName = nullptr) const;
+	bool PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float StepDistance, FVector& OutDest, const TCHAR** OutDirName = nullptr) const;
 
 	/** Symmetric teardown for move-and-shoot: stop movement, clear focus, restore walk speed, reset state. */
 	void EndOpenAreaMoveShoot(ACompanionCharacter* Companion);
@@ -567,8 +571,9 @@ private:
 	float MoveShootRepositionTimer = 0.f;
 	/** True while holding after a failed nav projection — gate must wait the full interval (ignore bIdle) before re-picking. */
 	bool bMoveShootHolding = false;
-	/** CMC->MaxWalkSpeed captured on entry so it can be restored on exit. 0 = not captured. */
-	float CachedDefaultWalkSpeed = 0.f;
+	// CachedDefaultWalkSpeed removed: the task speed override API (SetTaskSpeedOverride /
+	// ClearTaskSpeedOverride + RefreshMovementSpeeds) re-derives from the tuning asset on exit
+	// instead of restoring a snapshot that may be stale.
 
 	/** Latched leash bool with hysteresis — trips at LeashDist, releases only once back inside the dead-band. */
 	bool bPlayerPullLatched = false;
@@ -812,7 +817,7 @@ private:
 	 *  line is blocked (no shots into our own wall), resuming when clear. Throttled to 10 Hz via
 	 *  StandBurstMuzzleCheckTimer; bStandBurstFireHeld latches the withheld state. Used by the plain
 	 *  Stand/Quick burst and by StandUpAndReposition Phase A (stand-fire-in-place). No-op if no weapon. */
-	void TickStandBurstMuzzleWithhold(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds, const FCoverData* PeekConeCover = nullptr);
+	void TickStandBurstMuzzleWithhold(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds, const FCoverData* PeekConeCover = nullptr);
 
 	virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 

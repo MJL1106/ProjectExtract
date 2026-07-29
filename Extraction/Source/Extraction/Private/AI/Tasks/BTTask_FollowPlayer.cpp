@@ -7,7 +7,7 @@
 #include "AI/CompanionAIController.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
-#include "HealthComponent.h"
+#include "Character/ExtractionPlayerInterface.h" // bleedout remaining drives the rescue-approach pace
 #include "EnvironmentQuery/EnvQuery.h"
 #include "EnvironmentQuery/EnvQueryManager.h"
 #include "EnvironmentQuery/EnvQueryTypes.h"
@@ -71,11 +71,17 @@ EBTNodeResult::Type UBTTask_FollowPlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	bWasPursuingLeader = false;
 
 	// Clear any stale sprint flag from a prior abort (e.g. combat or revive re-entry).
-	// Skip for sprint-to-target so the revive branch keeps sprint speed on entry.
-	// Pace always clears: rescue sprint must run at full SprintSpeed, never the catch-up tier.
+	// Pace always clears: a rescue sprint must run at full SprintSpeed, never the catch-up tier.
+	//
+	// The sprint-to-target exemption that used to live here (keep the flag latched so the revive
+	// branch entered at sprint speed) is gone: the approach's pace is now re-decided every tick from
+	// bleedout / distance / threat urgency, so entering with a latch inherited from a previous run
+	// would show one tick of the wrong pace before the first evaluation corrected it — and the whole
+	// point of the change is that a rescue is not always urgent.
+	bRescueSprinting = false;
+	bFormationSprinting = false;
 	Companion->SetFollowCatchupPace(false);
-	if (!bSprintToTarget)
-		Companion->SetSprinting(false);
+	Companion->SetSprinting(false);
 
 	return EBTNodeResult::InProgress;
 }
@@ -102,6 +108,10 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	// Leader resolution runs once per tick, before anything reads a formation frame. For a primary
 	// companion it returns the player, so every leader-keyed line below is the pre-chain behaviour.
 	AActor* Leader = ResolveFollowLeader(*Companion, *Player, *T, DeltaSeconds);
+	// Publish so everything that must form up on the SAME actor reads one value: the follow-slot EQS
+	// context and the cover-switch monitor's formation point. Deduped on the controller, so on all but
+	// a handover tick this is a pointer compare.
+	Controller->SetFollowLeader(Leader);
 	const bool bLeaderAnchored = Leader != Player; // secondary trailing the primary companion
 	const FVector LeaderLocation = Leader->GetActorLocation();
 	const float DistToLeader = bLeaderAnchored ? FVector::Dist(CompanionLocation, LeaderLocation) : DistToPlayer;
@@ -189,7 +199,10 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 		}
 
-		Companion->SetSprinting(true);
+		// Pace is re-decided every tick from the rescue's actual urgency instead of being pinned on.
+		// SetFollowCatchupPace stays false throughout (ExecuteTask), so when this DOES sprint it runs
+		// at the full SprintSpeed tier rather than the reduced formation catch-up one.
+		Companion->SetSprinting(UpdateRescueSprint(*Companion, *T, DistToPlayer, *Player));
 
 		// Approach diagnostic at ~1Hz — a rescue that stalls short of the arrival radius must be
 		// visible in the log (dist vs threshold), not inferred.
@@ -197,8 +210,9 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 		if (SprintLogAccumulator >= 1.f)
 		{
 			SprintLogAccumulator = 0.f;
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: RESCUE APPROACH dist=%.0f arrival=%.0f vel=%.0f"),
-				*Companion->GetName(), DistToPlayer, ArrivalRadius, Companion->GetVelocity().Size2D());
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: RESCUE APPROACH dist=%.0f arrival=%.0f vel=%.0f sprint=%d threatToBody=%.0f"),
+				*Companion->GetName(), DistToPlayer, ArrivalRadius, Companion->GetVelocity().Size2D(),
+				(int32)bRescueSprinting, Companion->GetNearestThreatToDownedPlayer());
 		}
 
 		// Rescue destination sits on the COVERED side of the body — offset away from the current
@@ -237,6 +251,11 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 			bHoldingForWave = true;
 			Controller->StopMovement();
 			Companion->SetSprinting(false);
+			// Clear catch-up pace and its sprint latch -- the wave hold is not a formation gap,
+			// and a latched pace would suppress overwatch entry + every non-combat facing tier
+			// for the entire hold.
+			Companion->SetFollowCatchupPace(false);
+			bFormationSprinting = false;
 			// Clear both move latches so the first post-hold formation move re-issues instead of
 			// deduping against a destination stamped before the hold began.
 			LastMoveTarget = FVector::ZeroVector;
@@ -387,6 +406,8 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 		bIsIdling = false;
 		Companion->SetSprinting(false);
+		Companion->SetFollowCatchupPace(false);
+		bFormationSprinting = false;
 
 		const FVector BackoutTarget = PlayerLocation + AwayDir * EffStandoff;
 		if (FVector::Dist(BackoutTarget, LastMoveTarget) > 50.f)
@@ -406,6 +427,8 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 			UE_LOG(LogCompanion, Log, TEXT("[FollowPlayer] >>> ENTER IDLE branch (GateDist=%.0f)"), IdleGateDist);
 			Controller->StopMovement();
 			Companion->SetSprinting(false);
+			Companion->SetFollowCatchupPace(false);
+			bFormationSprinting = false;
 			bIsIdling = true;
 		}
 		return;
@@ -426,14 +449,49 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	// Kick an async EQS request periodically when a query asset is set. EqsTarget overrides
 	// FormationDir when valid; otherwise we fall through to the formation target unchanged.
-	// Combat mode skips the EQS slot entirely — the query anchors slots around/behind the player,
+	// Combat mode skips the EQS slot entirely — the query anchors slots around/behind the leader,
 	// which would fight the lead point; MoveToLocation's nav projection handles off-mesh leads.
-	// PRIMARY ONLY: the query is player-anchored, so every slot it returns is a point in the player's
-	// formation ring — meaningless to a secondary that forms up on the primary, and on the leashed
-	// player-anchored fallback it would just steer it back onto the primary's own slot. A secondary
-	// therefore rides FormationDir in every state, which already IS its correct anchor.
+	//
+	// BOTH companions dispatch it. The query anchors on UEnvQueryContext_FollowLeader, i.e. the actor
+	// resolved above, which makes the primary's behaviour unchanged BY CONSTRUCTION: a primary's
+	// resolved leader IS the player (first line of ResolveFollowLeader), so the context hands the query
+	// the same actor the old player-anchored context did. Restoring it for the secondary is the point —
+	// a primary-only gate took the fight-bias branch below with it and left the VIP strolling through
+	// firefights on a raw geometric offset.
+	//
+	// bPlayerAnchoredSecondary is NOT a primary check in disguise — do not "simplify" it back to one.
+	// The hazard is two companions querying the SAME player-centred donut: the winning slot scores
+	// identically for both and overrides the mirrored FormationDir that was providing their separation,
+	// so they converge on one point (the original author's "it would just steer it back onto the
+	// primary's own slot").
+	//
+	// That needs a second FOLLOW-TICKING querier, which is a narrower thing than "a secondary anchored
+	// on the player", and the two hazard states are named directly rather than inferred:
+	//   - master switch off: both companions run player-anchored follow side by side, exactly as
+	//     bSecondaryFollowsPrimaryCompanion's own comment describes.
+	//   - leash broken: the primary is alive and still following, just too far out to trail.
+	// Both are readable here for free — T is already dereferenced throughout TickTask and the latch is
+	// a member — so no scan and no new state. They separate cleanly only because the latch is now
+	// cleared on every other hand-back path in ResolveFollowLeader: it is false on the master-switch
+	// and unusable-leader paths and true only on the leash path.
+	//
+	// A DOWN or DEAD primary is therefore explicitly NOT excluded, and that is the point rather than an
+	// oversight. It anchors on the player too, but a DBNO primary is not running its follow task, so
+	// there is no second querier to collide with — and primary-down-with-enemies-alive is precisely the
+	// state 66f10bc3 added fight-aware follow for. FormationDir would still separate correctly there,
+	// but separation was never what the query bought; slot-level fight awareness was.
+	//
+	// The real fix is an ally-spacing test in the follow-slot query itself, which would also separate
+	// the leader-anchored case and would let this guard be deleted. That is designer-side EQS work for
+	// a later in-engine pass.
+	//
+	// bLeaderAnchored is (Leader != Player), so the first half reads "a secondary that resolved onto
+	// the player" and the second narrows it to the two states where a rival querier actually exists.
+	const bool bPlayerAnchoredSecondary = !Companion->IsPrimaryCompanion() && !bLeaderAnchored
+		&& (!T->bSecondaryFollowsPrimaryCompanion || bLeaderLeashBroken);
+
 	TimeSinceLastEqs += DeltaSeconds;
-	if (FollowSlotQuery && Companion->IsPrimaryCompanion() && !bCombatLead && !bEqsQueryInProgress && TimeSinceLastEqs >= EqsQueryInterval)
+	if (FollowSlotQuery && !bCombatLead && !bPlayerAnchoredSecondary && !bEqsQueryInProgress && TimeSinceLastEqs >= EqsQueryInterval)
 	{
 		bEqsQueryInProgress = true;
 		TimeSinceLastEqs = 0.f;
@@ -449,9 +507,12 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 	// Wrong-floor EQS slots are discarded AND forgotten — not just down-scored: the query's donut
 	// projects onto whatever navmesh is in vertical range, and its Distance3D scoring can rank a
-	// slot directly above/below the player as near-perfect. Forgetting matters mid-stairwell: a
-	// stale upper-floor slot must not be re-accepted when the player's Z drifts back into its band.
-	if (bHasEqsTarget && EffMaxZDelta > 0.f && FMath::Abs(EqsTarget.Z - PlayerLocation.Z) > EffMaxZDelta)
+	// slot directly above/below the anchor as near-perfect. Forgetting matters mid-stairwell: a
+	// stale upper-floor slot must not be re-accepted when the anchor's Z drifts back into its band.
+	// Keyed on the LEADER, which is what the query anchored on — for a primary that is the player, so
+	// the gate is unchanged there, but judging a secondary's primary-anchored slots against the
+	// player's floor would reject every one of them whenever the two stand a storey apart.
+	if (bHasEqsTarget && EffMaxZDelta > 0.f && FMath::Abs(EqsTarget.Z - LeaderLocation.Z) > EffMaxZDelta)
 		bHasEqsTarget = false;
 
 	// Floor transit = pursue the leader's location directly. Mid-flight the leader's Z sits within
@@ -513,12 +574,31 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	// Stealth is exempt: its catch-up ladder owns pace there (sprint break deliberately unreachable).
 	// Both distances arm it: the leader gap is what this companion is actually closing, and the
 	// player gap bounds total convoy stretch (identical values unless leader-anchored).
-	const bool bWantSprint = DistToLeader > T->SprintDistanceThreshold
-		|| DistToPlayer > T->SprintDistanceThreshold
-		|| (bLeaderSprinting && DistToLeader > T->SprintDistanceThreshold * 0.5f)
-		|| (!bZAligned && !Companion->IsStealthActive());
-	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f LeaderDist=%.0f Thresh=%.0f EqsSlot=%d Pursue=%d -> SetSprinting(%d)"),
-		DistToPlayer, DistToLeader, T->SprintDistanceThreshold, bHasEqsTarget ? 1 : 0, bPursueLeader ? 1 : 0, bWantSprint ? 1 : 0);
+	//
+	// Hysteretic (latched): enter at SprintDistanceThreshold, release at 0.6x. Without the band
+	// the flag flip-flops per-frame at the threshold when any non-combat gameplay focal is live:
+	// sprint clears the focal and raises speed -> closes fast -> drops below threshold -> un-sprints
+	// -> focal re-asserts, strafe clamp re-engages at 275 -> falls behind again -> re-crosses.
+	// The sprint mirror arm uses the same release fraction on its own half-threshold floor.
+	const float SprintEnterDist = T->SprintDistanceThreshold;
+	const float SprintReleaseDist = SprintEnterDist * FormationSprintReleaseFraction;
+	const float SprintMirrorEnterDist = SprintEnterDist * 0.5f;
+	const float SprintMirrorReleaseDist = SprintMirrorEnterDist * FormationSprintReleaseFraction;
+
+	const bool bDistEnter = DistToLeader > SprintEnterDist || DistToPlayer > SprintEnterDist;
+	const bool bDistRelease = DistToLeader <= SprintReleaseDist && DistToPlayer <= SprintReleaseDist;
+	const bool bMirrorEnter = bLeaderSprinting && DistToLeader > SprintMirrorEnterDist;
+	const bool bMirrorRelease = !bLeaderSprinting || DistToLeader <= SprintMirrorReleaseDist;
+	const bool bOffLevel = !bZAligned && !Companion->IsStealthActive();
+
+	if (!bFormationSprinting)
+		bFormationSprinting = bDistEnter || bMirrorEnter || bOffLevel;
+	else
+		bFormationSprinting = !(bDistRelease && bMirrorRelease && bZAligned);
+
+	const bool bWantSprint = bFormationSprinting;
+	UE_LOG(LogCompanion, VeryVerbose, TEXT("[FollowPlayer] FORMATION branch: Dist=%.0f LeaderDist=%.0f Thresh=%.0f Release=%.0f EqsSlot=%d Pursue=%d -> SetSprinting(%d)"),
+		DistToPlayer, DistToLeader, SprintEnterDist, SprintReleaseDist, bHasEqsTarget ? 1 : 0, bPursueLeader ? 1 : 0, bWantSprint ? 1 : 0);
 
 	// Catch-up rides the reduced sprint tier (FollowCatchupSprintSpeed 650) — full SprintSpeed read
 	// as too fast for closing formation gaps. A leader-anchored secondary drops that tier once either
@@ -565,13 +645,54 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	}
 }
 
+bool UBTTask_FollowPlayer::UpdateRescueSprint(ACompanionCharacter& Companion,
+	const UCompanionTuningDataAsset& Tuning, float DistToPlayer, AActor& Player)
+{
+	// Gates widen while already sprinting so the decision cannot chatter: the bleedout gate rises,
+	// the distance gate falls, the threat gate grows. Same split enter/exit idiom as the stealth
+	// catch-up ladder in TickTask — a single threshold parks a companion running the boundary right
+	// on it, and every flip is visible (speed tier AND the anim instance's sprint state).
+	const float BleedoutGate = bRescueSprinting
+		? Tuning.ReviveSprintBleedoutThreshold + RescueSprintBleedoutReleaseMargin
+		: Tuning.ReviveSprintBleedoutThreshold;
+	const float DistanceGate = bRescueSprinting
+		? Tuning.ReviveSprintDistanceThreshold * RescueSprintDistanceReleaseScale
+		: Tuning.ReviveSprintDistanceThreshold;
+	const float ThreatGate = bRescueSprinting
+		? Tuning.ReviveSprintThreatRadius * RescueSprintThreatReleaseScale
+		: Tuning.ReviveSprintThreatRadius;
+
+	// Bleedout of exactly 0 means "no timer running" (see ACompanionCharacter/AExtractionPlayer's
+	// GetBleedoutTimeRemaining), not "out of time" — a plain <= compare would sprint every approach.
+	const IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(&Player);
+	const float BleedoutRemaining = PlayerIface ? PlayerIface->GetBleedoutTimeRemaining() : 0.f;
+	const bool bClockUrgent = BleedoutRemaining > 0.f && BleedoutRemaining <= BleedoutGate;
+
+	const bool bLongRun = DistToPlayer > DistanceGate;
+
+	// Negative = the state service found nothing (or is not sweeping) — never "distance 0".
+	const float ThreatToBody = Companion.GetNearestThreatToDownedPlayer();
+	const bool bThreatOnBody = ThreatToBody >= 0.f && ThreatToBody <= ThreatGate;
+
+	bRescueSprinting = bClockUrgent || bLongRun || bThreatOnBody;
+	return bRescueSprinting;
+}
+
 AActor* UBTTask_FollowPlayer::ResolveFollowLeader(ACompanionCharacter& Companion, AActor& Player,
 	const UCompanionTuningDataAsset& Tuning, float DeltaSeconds)
 {
 	// Zero-change gate for the primary: its leader IS the player, so every leader-keyed line in
 	// TickTask resolves exactly as it did before the chain existed. Same for the master switch off.
 	if (Companion.IsPrimaryCompanion()) return &Player;
-	if (!Tuning.bSecondaryFollowsPrimaryCompanion) return &Player;
+	if (!Tuning.bSecondaryFollowsPrimaryCompanion)
+	{
+		// Same clear every other hand-back-to-player path performs (unusable leader, leash disabled).
+		// Without it, flipping this switch off in the editor while a VIP happened to be latched broken
+		// left the latch stale-true for the rest of the run, since no later tick can reach the leash
+		// block to re-evaluate it.
+		bLeaderLeashBroken = false;
+		return &Player;
+	}
 
 	// Rescan only on a cache MISS, and then at most every LeaderRescanInterval: GetPrimaryCompanion
 	// is a TActorIterator over the whole level and must never run per tick. Pinned at the interval
@@ -592,13 +713,22 @@ AActor* UBTTask_FollowPlayer::ResolveFollowLeader(ACompanionCharacter& Companion
 
 	// Capability is re-tested EVERY tick against the cached pointer, never only at scan time: a
 	// leader that goes DBNO, dies or loses its controller mid-follow has to hand back to the player
-	// on the next tick, not at the end of the rescan interval.
+	// on the next tick, not at the end of the rescan interval. The test itself lives on the controller
+	// so its read-time staleness check on the published leader can't drift from this one.
 	ACompanionCharacter* Leader = CachedLeader.Get();
-	if (!IsValid(Leader) || Leader == &Companion) return &Player;
-	if (!Leader->GetController()) return &Player; // a still-captive extractee has no brain to trail
-	if (Leader->GetIsCompanionDBNO()) return &Player;
-	const UHealthComponent* LeaderHealth = Leader->GetHealthComponent();
-	if (IsValid(LeaderHealth) && LeaderHealth->IsDead()) return &Player;
+	if (!ACompanionAIController::IsUsableFollowLeader(Leader, &Companion))
+	{
+		// Drop the leash WITH the leader — not redundant, and not safe to delete. The latch means "the
+		// leader I am trailing has been commanded too far from the player to anchor on", so carrying it
+		// across a leader that is no longer usable at all makes it lie about itself. TickTask's
+		// follow-slot query gate reads it, and a stale-set latch would hold the fight-aware query off
+		// for the whole time the primary is down — precisely the firefight the query exists for.
+		// Re-acquiring later then re-enters on the full leash distance instead of the release band,
+		// which is correct: a leader we stopped trailing entirely and later pick up again is a fresh
+		// acquisition, and the band is hysteresis for a leader we never lost.
+		bLeaderLeashBroken = false;
+		return &Player;
+	}
 
 	// Leash: a leader commanded away (ping / route / breach) stops being a sane anchor long before
 	// the warp net would fire, and trailing it would drag the VIP off the player entirely. Latched
@@ -667,9 +797,10 @@ void UBTTask_FollowPlayer::OnFollowQueryFinished(TSharedPtr<FEnvQueryResult> Res
 	ACompanionCharacter* Companion = CachedCompanion.Get();
 	UWorld* World = Companion->GetWorld();
 
-	// Best-first window over the result set. Only a PRIMARY companion dispatches the query (see the
-	// gate in TickTask), so there is nothing to filter here — the window is the fight-bias TRACE
-	// budget and nothing else, and a non-empty result set always fills at least one candidate.
+	// Best-first window over the result set. Each companion's query is anchored on its OWN leader, so
+	// every returned slot already belongs to this companion's formation ring and there is nothing to
+	// filter here — the window is the fight-bias TRACE budget and nothing else, and a non-empty result
+	// set always fills at least one candidate.
 	TArray<FVector, TInlineAllocator<MaxFightBiasSlotTraces>> Candidates;
 	Candidates.Reserve(FMath::Min(Result->Items.Num(), MaxFightBiasSlotTraces));
 	for (int32 i = 0; i < Result->Items.Num() && Candidates.Num() < MaxFightBiasSlotTraces; ++i)
@@ -713,6 +844,12 @@ void UBTTask_FollowPlayer::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, uin
 		Companion->SetSprinting(false);
 		Companion->SetFollowCatchupPace(false);
 	}
+
+	// Pace latches — same reason as the EQS resets below: the hysteresis bands are only honest
+	// within one approach, and a latched sprint carried into the next one would skip its first
+	// evaluation's jog answer entirely.
+	bRescueSprinting = false;
+	bFormationSprinting = false;
 
 	bEqsQueryInProgress = false;
 	bHasEqsTarget = false;
