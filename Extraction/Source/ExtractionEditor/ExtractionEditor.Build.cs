@@ -16,7 +16,8 @@ public class ExtractionEditor : ModuleRules
 			"SlateCore",
 			"UnrealEd",
 			"InputCore",
-			"Extraction"
+			"Extraction",
+			"PropertyEditor"
 		});
 	}
 }

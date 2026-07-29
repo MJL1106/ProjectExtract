@@ -16,7 +16,7 @@ class USceneComponent;
 class UStaticMeshComponent;
 class UWeaponCaseSlotComponent;
 
-UCLASS(Blueprintable, HideCategories = (Replication, Input, LOD, Cooking))
+UCLASS(Blueprintable, HideCategories = (Replication, Input, LOD, Cooking), PrioritizeCategories = "Case")
 class EXTRACTION_API AWeaponCase : public AActor
 {
 	GENERATED_BODY()
