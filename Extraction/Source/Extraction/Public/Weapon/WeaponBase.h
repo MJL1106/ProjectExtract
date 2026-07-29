@@ -529,6 +529,10 @@ private:
 	/** True while the magazine is detached and riding the hand. */
 	bool bMagazineDetached = false;
 
+	/** Re-entrancy guard for the hoisted TriggerKitVisualItemCancelReload call in CancelReload.
+	 *  The ProcessEvent into the kit item BP could theoretically call back into CancelReload. */
+	bool bCancellingReload = false;
+
 	// ---- Patrol alignment runtime state ----
 
 	/** Relative transform of WeaponMesh at rest (captured by SetupPatrolAlign). Alpha=0 target. */

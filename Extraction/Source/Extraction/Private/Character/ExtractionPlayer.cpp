@@ -1492,10 +1492,16 @@ bool AExtractionPlayer::IsUsingStim() const
 
 void AExtractionPlayer::HandleStimUsed()
 {
-	// The injection owns the hands from here: drop the trigger and come out of ADS before the
-	// montage starts, so an already-held aim can't survive the lockout.
+	// The injection owns the hands from here. Pre-empt an in-flight reload first: the reload's
+	// detached magazine actor is a separate spawned mesh the weapon-hide does not cover, so it
+	// floats through the injection animation. Placed here (not UseStimInput) because
+	// HandleStimUsed only fires after the authority confirms the stim, so a refused press
+	// (empty pouch, full health) never cancels a reload the player intended to keep.
 	if (IsValid(WeaponComponent))
 	{
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
+			Weapon->CancelReload();
+
 		WeaponComponent->StopFire();
 		if (WeaponComponent->IsAiming())
 		{
@@ -1688,7 +1694,7 @@ void AExtractionPlayer::EnterDBNO()
 		WeaponComponent->StopFire();
 		WeaponComponent->SetAiming(false);
 		OnADSChanged(false);
-		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
 		{
 			Weapon->CancelRecoilRecovery();
 			Weapon->CancelReload();
@@ -1906,7 +1912,7 @@ void AExtractionPlayer::SetBeingRevived(bool bBeingRevived, float ExpectedDurati
 		OnADSChanged(false);
 		bAutoLeanActive = false;
 		AutoLeanTargetAlpha = 0.f;
-		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon()) Weapon->CancelReload();
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon)) Weapon->CancelReload();
 	}
 	// After the ADS/pose drops: OnADSChanged drives the kit's NewHandPose, which can re-show
 	// the hand-socket item a hide-first ordering just hid.
@@ -2156,7 +2162,7 @@ void AExtractionPlayer::SetReviveAnimsActive(bool bActive)
 		OnADSChanged(false);
 		bAutoLeanActive = false;
 		AutoLeanTargetAlpha = 0.f;
-		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
 		{
 			Weapon->CancelRecoilRecovery();
 			Weapon->CancelReload();

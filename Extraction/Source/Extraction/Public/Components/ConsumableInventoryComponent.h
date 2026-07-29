@@ -1,13 +1,17 @@
 // Player-owned, server-authoritative consumable inventory.
 // A stim use is a committed window, not an instant: the count is spent immediately, the heal
-// lands partway through on the needle hit, and the owning player locks fire/ADS/reload for the
-// duration (AExtractionPlayer gates on IsUsingStim).
+// is driven by UAnimNotify_StimHeal on the injection montage (designer places the needle-hit
+// frame), and the owning player locks fire/ADS/reload for the duration (AExtractionPlayer
+// gates on IsUsingStim). If the montage has no StimHeal notify, the heal lands at window end
+// as a backstop (FinishStimUse).
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
 #include "ConsumableInventoryComponent.generated.h"
+
+DECLARE_LOG_CATEGORY_EXTERN(LogConsumables, Log, All);
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnStimCountChanged, int32, NewStimCount);
 DECLARE_MULTICAST_DELEGATE(FOnStimUsedNative);
@@ -41,9 +45,9 @@ public:
 	bool TryUseStim();
 
 	/** Ends an injection early (DBNO, death). The stim itself is already spent, so a cancel
-	 *  forfeits the heal. Idempotent. AUTHORITY ONLY — the count, the heal and both timers live on
-	 *  the server, so a client-side cancel would reopen the local fire/ADS gate while the server
-	 *  ran the injection to completion anyway. Logs and no-ops off authority. */
+	 *  forfeits the heal. Idempotent. AUTHORITY ONLY -- the count, the heal and the use-window
+	 *  timer live on the server, so a client-side cancel would reopen the local fire/ADS gate
+	 *  while the server ran the injection to completion anyway. Logs and no-ops off authority. */
 	UFUNCTION(BlueprintCallable, Category = "Inventory|Consumables")
 	void CancelStimUse();
 
@@ -58,6 +62,13 @@ public:
 	 *  OnStimCountChanged fired into an empty delegate and nothing re-broadcasts. */
 	UFUNCTION(BlueprintCallable, Category = "Inventory|Consumables")
 	void BroadcastStimCountNow();
+
+	/** Applies the pending heal immediately (idempotent via bStimHealPending).
+	 *  Intended for UAnimNotify_StimHeal so the designer can place the heal moment on the
+	 *  injection montage. FinishStimUse calls ApplyStimHeal at window end as the backstop
+	 *  when no notify fires. Authority-only; logs Verbose and no-ops off authority. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory|Consumables")
+	void ApplyStimHealNow();
 
 	/** True for the whole committed injection window. Drives the player's fire/ADS/reload gate. */
 	UFUNCTION(BlueprintPure, Category = "Inventory|Consumables")
@@ -97,11 +108,6 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables", meta = (ClampMin = "0.0"))
 	float StimUseDurationSeconds = 3.4f;
 
-	/** When the needle lands. Clamped to StimUseDurationSeconds at use time so a mis-authored
-	 *  value can't strand the heal past the lockout. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables", meta = (ClampMin = "0.0"))
-	float StimHealDelaySeconds = 1.8f;
-
 	/** Toast raised on the owning client when the key is pressed with an empty pouch. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Inventory|Consumables")
 	FText NoStimsMessage = NSLOCTEXT("Loot", "StimNone", "No stims");
@@ -111,7 +117,7 @@ protected:
 	FText FullHealthMessage = NSLOCTEXT("Loot", "StimFullHealth", "Already at full health");
 
 private:
-	/** SetTimer never fires on a rate of zero — clamp both clocks above it. */
+	/** SetTimer never fires on a rate of zero -- clamp the use-window duration above it. */
 	static constexpr float MinStimUseDuration = 0.01f;
 
 	UPROPERTY(ReplicatedUsing = OnRep_StimCount)
@@ -125,7 +131,6 @@ private:
 	bool bStimHealPending = false;
 
 	FTimerHandle StimUseTimerHandle;
-	FTimerHandle StimHealTimerHandle;
 
 	UFUNCTION()
 	void OnRep_StimCount();
@@ -154,8 +159,9 @@ private:
 	/** Shared lockout clock (flag + end timer), run on whichever side calls it. */
 	void StartStimUseClock();
 
-	/** Authority-only companion to StartStimUseClock: schedules the mid-animation heal. */
-	void StartStimHealTimer();
+	/** Authority-only: marks the heal as pending. The actual heal is applied either by
+	 *  UAnimNotify_StimHeal (designer-placed on the montage) or by FinishStimUse (backstop). */
+	void MarkStimHealPending();
 
 	void ApplyStimHeal();
 	void FinishStimUse();

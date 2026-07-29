@@ -87,6 +87,22 @@ namespace
 		Item->ProcessEvent(ReloadFn, nullptr);
 	}
 
+	/** Cancels a reload animation on the kit visual item. Mirrors TriggerKitVisualItemReload:
+	 *  the item BP's CancelReload event stops the arms + weapon-mesh reload anim so the magazine
+	 *  mesh doesn't keep floating through a stim injection or other interrupt. No-ops when the
+	 *  item BP has no CancelReload function (kit originals, enemies, companion). */
+	void TriggerKitVisualItemCancelReload(AActor* OwnerActor)
+	{
+		if (!IsValid(OwnerActor)) return;
+		const FObjectProperty* ItemProp = CastField<FObjectProperty>(OwnerActor->GetClass()->FindPropertyByName(TEXT("SpawnedItem")));
+		if (!ItemProp) return;
+		UObject* Item = ItemProp->GetObjectPropertyValue_InContainer(OwnerActor);
+		if (!IsValid(Item)) return;
+		UFunction* CancelFn = Item->FindFunction(TEXT("CancelReload"));
+		if (!CancelFn || CancelFn->ParmsSize != 0) return;
+		Item->ProcessEvent(CancelFn, nullptr);
+	}
+
 	/** The kit's procedural fire feel (arms + gun kick via AC_ProceduralAnimation::RecoilAnimation and
 	 *  the arms fire anim) is normally driven by the kit item's own Trigger flow, which our C++ fire
 	 *  path bypasses — so the camera moved but the hands didn't. Our item BPs implement a cosmetic-only
@@ -1917,6 +1933,17 @@ void AWeaponBase::HandleShellInserted()
 
 void AWeaponBase::CancelReload()
 {
+	// Kit visual cancel runs unconditionally: the kit item's reload animation length is
+	// authored independently of WeaponData->ReloadTime, so CurrentState can already be Idle
+	// while the kit anim is still playing. The helper no-ops when there is no SpawnedItem
+	// or CancelReload function. Guard against re-entrancy from the ProcessEvent BP callback.
+	if (!bCancellingReload)
+	{
+		bCancellingReload = true;
+		TriggerKitVisualItemCancelReload(GetOwner());
+		bCancellingReload = false;
+	}
+
 	if (CurrentState != EWeaponState::Reloading) return;
 
 	if (const UWorld* World = GetWorld())
@@ -1928,7 +1955,7 @@ void AWeaponBase::CancelReload()
 	StopVisualWeaponReload();
 	StopReloadAudio();
 
-	// Shell-by-shell weapons prime their Loop to self-loop — force-stop the body montage
+	// Shell-by-shell weapons prime their Loop to self-loop -- force-stop the body montage
 	// so it doesn't keep looping after an interrupt.
 	if (IsValid(WeaponData) && WeaponData->bShellByShellReload)
 		StopBodyReloadMontage();

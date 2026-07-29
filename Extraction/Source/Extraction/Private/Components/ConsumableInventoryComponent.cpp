@@ -11,7 +11,7 @@
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogConsumables, Log, All);
+DEFINE_LOG_CATEGORY(LogConsumables);
 
 UConsumableInventoryComponent::UConsumableInventoryComponent()
 {
@@ -124,7 +124,7 @@ bool UConsumableInventoryComponent::TryUseStimAuthority()
 	Owner->ForceNetUpdate();
 
 	StartStimUseClock();
-	StartStimHealTimer();
+	MarkStimHealPending();
 	NotifyOwningPlayerStimUsed();
 	return true;
 }
@@ -163,16 +163,21 @@ void UConsumableInventoryComponent::StartStimUseClock()
 		StimUseTimerHandle, this, &UConsumableInventoryComponent::FinishStimUse, Duration, false);
 }
 
-void UConsumableInventoryComponent::StartStimHealTimer()
+void UConsumableInventoryComponent::MarkStimHealPending()
 {
-	UWorld* World = GetWorld();
-	if (!World) return;
-
 	bStimHealPending = true;
-	const float Duration = FMath::Max(StimUseDurationSeconds, MinStimUseDuration);
-	const float Delay = FMath::Clamp(StimHealDelaySeconds, MinStimUseDuration, Duration);
-	World->GetTimerManager().SetTimer(
-		StimHealTimerHandle, this, &UConsumableInventoryComponent::ApplyStimHeal, Delay, false);
+}
+
+void UConsumableInventoryComponent::ApplyStimHealNow()
+{
+	const AActor* Owner = GetOwner();
+	if (!IsValid(Owner) || !Owner->HasAuthority())
+	{
+		UE_LOG(LogConsumables, Verbose, TEXT("'%s': ApplyStimHealNow ignored off authority."), *GetNameSafe(Owner));
+		return;
+	}
+
+	ApplyStimHeal();
 }
 
 void UConsumableInventoryComponent::ApplyStimHeal()
@@ -189,8 +194,9 @@ void UConsumableInventoryComponent::ApplyStimHeal()
 
 void UConsumableInventoryComponent::FinishStimUse()
 {
-	// Safety net for a heal delay authored at (or past) the window length — the two timers can
-	// then expire in the same frame in either order.
+	// Backstop: if no StimHeal notify fired during the montage, the heal lands here at window
+	// end. ApplyStimHeal is idempotent via bStimHealPending, so a notify that already fired
+	// makes this a no-op.
 	ApplyStimHeal();
 	EndStimUse();
 }
@@ -211,7 +217,6 @@ void UConsumableInventoryComponent::ClearStimTimers()
 	if (!World) return;
 
 	World->GetTimerManager().ClearTimer(StimUseTimerHandle);
-	World->GetTimerManager().ClearTimer(StimHealTimerHandle);
 }
 
 void UConsumableInventoryComponent::OnRep_StimCount()
