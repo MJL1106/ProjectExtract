@@ -12,6 +12,7 @@
 #include "GameFramework/Actor.h"
 #include "WeaponCase.generated.h"
 
+class UMeshComponent;
 class USceneComponent;
 class UStaticMeshComponent;
 class UWeaponCaseSlotComponent;
@@ -99,6 +100,53 @@ private:
 
 	void SpawnSlotItems();
 
-	/** Attaches a spawned pickup to its slot component. No-op until the item has a root. */
+	/** Seats a spawned pickup on its slot component: attaches to the slot, defensively kills
+	 *  physics simulation, then delegates mesh-offset correction to CorrectMeshOffset.
+	 *  No-op until the item has a root. */
 	void SeatItemInSlot(AActor& Item, UWeaponCaseSlotComponent& SlotComp);
+
+	/** Offsets a seated item so its display mesh (not its root) coincides with the slot's
+	 *  authored transform.  Derives the mesh offset from SCS-template (archetype) transforms
+	 *  rather than live transforms, so construction-script repositioning (e.g.
+	 *  BP_Attachment_Pickup::FlattenDisplayMesh) is not inverted.
+	 *  Out params expose the intermediate values for diagnostic verification. */
+	void CorrectMeshOffset(AActor& Item, UWeaponCaseSlotComponent& SlotComp,
+		UMeshComponent*& OutDisplayMesh, FTransform& OutAuthoredOffset, FTransform& OutAppliedRelative);
+
+	/** Post-seat diagnostic: compares the display mesh's final world transform against the
+	 *  slot's world transform using quaternion rotation comparison (immune to gimbal lock).
+	 *  Logs Warning on mismatch, Verbose on match.  Read-only -- never writes transforms. */
+	void VerifySeatTransform(
+		const AActor& Item,
+		const UWeaponCaseSlotComponent& SlotComp,
+		const UMeshComponent* DisplayMesh,
+		const FTransform& AuthoredOffset,
+		const FTransform& AppliedRelative) const;
+
+	/** Composes the authored (SCS-template) relative transform from @p DisplayMesh up to
+	 *  (but excluding) @p Root.  Uses the live attach hierarchy for structure but reads
+	 *  each component's archetype for the relative transform values.  Returns Identity when
+	 *  DisplayMesh is the root or the parent chain is degenerate.
+	 *
+	 *  Precondition: every component in the chain attaches to socket NAME_None and uses
+	 *  no absolute-location/rotation/scale flags.  The walk composes relative transforms
+	 *  only; socket offsets and absolute-flag semantics are not replicated.  Violations
+	 *  are logged but do not abort the composition. */
+	static FTransform ComposeAuthoredMeshOffset(const UMeshComponent& DisplayMesh, const USceneComponent& Root);
+
+	/** Resolves a single component's authored (SCS-template) relative transform, logging
+	 *  diagnostics when the archetype lookup degrades to the class CDO or when the
+	 *  component violates ComposeAuthoredMeshOffset's attachment assumptions. */
+	static FTransform ResolveAuthoredLinkTransform(const USceneComponent& Comp);
+
+	/** Returns the item's display mesh (UStaticMeshComponent or USkeletalMeshComponent,
+	 *  excluding UWidgetComponent).  Checks the root component first, then direct children
+	 *  (shallowest), then all descendants depth-first as a fallback.  Skips components owned
+	 *  by a different actor.  Returns nullptr if none found. */
+	UMeshComponent* FindItemDisplayMesh(AActor& Item) const;
+
+	/** Defensively clears bSimulatePhysics on every UPrimitiveComponent the item owns.
+	 *  Current weapon skeletal meshes have no PhysicsAsset (so nothing actually simulates),
+	 *  but this prevents future PhysicsAsset additions from breaking the foam-seat attach. */
+	static void DisableItemPhysics(AActor& Item);
 };

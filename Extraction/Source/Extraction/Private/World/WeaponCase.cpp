@@ -3,7 +3,10 @@
 #include "World/WeaponCase.h"
 #include "World/WeaponCaseSlotComponent.h"
 
+#include "Components/ActorComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/WidgetComponent.h"
 #include "Engine/World.h"
 
 #if WITH_EDITOR
@@ -238,9 +241,11 @@ void AWeaponCase::SpawnSlotItems()
 		OnCaseItemPreFinish(Item, SlotComp->SlotId);
 		if (IsActorBeingDestroyed()) return;
 
-		// Seat before FinishSpawning: native-root pickups read GetAttachParentActor() in their
-		// own BeginPlay.  Seat again after: pure-BP pickups get their root from SCS inside
-		// FinishSpawning, and the second pass beats any construction-script repositioning.
+		// Seat before FinishSpawning: a no-op for SCS-rooted pickups (GetRootComponent() is
+		// null until FinishSpawning wires the SCS), but correct for a future native-root
+		// pickup whose BeginPlay reads GetAttachParentActor().  Seat again after: the
+		// authoritative pass -- the item now has its full component tree, and this beats any
+		// construction-script repositioning.
 		SeatItemInSlot(*Item, *SlotComp);
 		Item->FinishSpawning(SlotTransform);
 		if (!IsValid(Item)) continue;
@@ -256,11 +261,9 @@ void AWeaponCase::SeatItemInSlot(AActor& Item, UWeaponCaseSlotComponent& SlotCom
 {
 	if (!Item.GetRootComponent()) return;
 
-	// Attach to the slot component -- its transform IS the seat.  SnapToTargetIncludingScale
-	// because existing slots carry non-uniform scale (the injection pen's 0.59/0.55/0.50 shrink
-	// now rides on the slot component's own transform).
-	// A Static-mobility root under a non-Static parent is silently refused, and without an
-	// attach parent "relative" means world, teleporting the item to (0,0,0).
+	// Attach to the slot component -- SnapToTargetIncludingScale preserves the slot's authored
+	// scale (e.g. the stim pen's 0.59/0.55/0.50 shrink).  A Static-mobility root under a
+	// non-Static parent is silently refused; warn and bail rather than teleport to origin.
 	if (!Item.AttachToComponent(&SlotComp, FAttachmentTransformRules::SnapToTargetIncludingScale))
 	{
 		UE_LOG(LogWeaponCase, Warning,
@@ -269,5 +272,217 @@ void AWeaponCase::SeatItemInSlot(AActor& Item, UWeaponCaseSlotComponent& SlotCom
 		return;
 	}
 
-	Item.SetActorRelativeTransform(FTransform::Identity);
+	// Weapon skeletal meshes (SKM_InfimaAR_KitRig etc.) ship with no PhysicsAsset, so
+	// bSimulatePhysics = true on their mesh creates no bodies and nothing actually simulates
+	// today.  This is defensive: if a PhysicsAsset is ever added, a simulating body would
+	// ignore its attach parent and tumble off the foam cutout.
+	DisableItemPhysics(Item);
+
+	UMeshComponent* DisplayMesh = nullptr;
+	FTransform AuthoredOffset;
+	FTransform AppliedRelative;
+	CorrectMeshOffset(Item, SlotComp, DisplayMesh, AuthoredOffset, AppliedRelative);
+
+	VerifySeatTransform(Item, SlotComp, DisplayMesh, AuthoredOffset, AppliedRelative);
+}
+
+void AWeaponCase::CorrectMeshOffset(AActor& Item, UWeaponCaseSlotComponent& SlotComp,
+	UMeshComponent*& OutDisplayMesh, FTransform& OutAuthoredOffset, FTransform& OutAppliedRelative)
+{
+	// The pickup's visible mesh often sits at a non-identity AUTHORED offset from its actor
+	// root (weapon meshes carry +90 deg pitch and a small Z lift in their SCS template).
+	// Seat the *mesh* on the slot by applying the inverse of that authored offset.
+	//
+	// IMPORTANT: we read SCS-template (archetype) transforms, NOT live transforms.
+	// BP_Attachment_Pickup::FlattenDisplayMesh (construction script) recentres and optionally
+	// rotates the display mesh at runtime.  Using the live transform would invert that
+	// flatten, regressing every attachment cutout to a wrong orientation.
+	OutDisplayMesh = FindItemDisplayMesh(Item);
+	OutAuthoredOffset = FTransform::Identity;
+	OutAppliedRelative = FTransform::Identity;
+
+	if (!OutDisplayMesh)
+	{
+		Item.SetActorRelativeTransform(FTransform::Identity);
+		UE_LOG(LogWeaponCase, Warning,
+			TEXT("No display mesh on '%s' for slot '%s' -- seating root at slot origin."),
+			*Item.GetName(), *SlotComp.SlotId.ToString());
+		return;
+	}
+
+	// Strip scale before inverting so the inverse's translation is not contaminated by 1/S.
+	// The slot's own scale (applied by SnapToTargetIncludingScale) remains the sole source of
+	// item scaling.
+	OutAuthoredOffset = ComposeAuthoredMeshOffset(*OutDisplayMesh, *Item.GetRootComponent());
+	OutAuthoredOffset.SetScale3D(FVector::OneVector);
+	OutAppliedRelative = OutAuthoredOffset.Inverse();
+	Item.SetActorRelativeTransform(OutAppliedRelative);
+}
+
+void AWeaponCase::VerifySeatTransform(
+	const AActor& Item,
+	const UWeaponCaseSlotComponent& SlotComp,
+	const UMeshComponent* DisplayMesh,
+	const FTransform& AuthoredOffset,
+	const FTransform& AppliedRelative) const
+{
+	if (!IsValid(DisplayMesh)) return;
+
+	const FTransform SlotWorld = SlotComp.GetComponentTransform();
+	const FTransform MeshWorld = DisplayMesh->GetComponentTransform();
+	constexpr double LocationToleranceUU = 0.1;
+	constexpr double QuatTolerance = 0.01;
+	const bool bLocOK = MeshWorld.GetLocation().Equals(SlotWorld.GetLocation(), LocationToleranceUU);
+	const bool bRotOK = MeshWorld.GetRotation().Equals(SlotWorld.GetRotation(), QuatTolerance);
+
+	if (bLocOK && bRotOK)
+	{
+		UE_LOG(LogWeaponCase, Verbose, TEXT("SeatVerify OK | Slot='%s' Item='%s' Mesh='%s'"),
+			*SlotComp.SlotId.ToString(), *Item.GetName(), *DisplayMesh->GetName());
+		return;
+	}
+
+	const FTransform RootRelative = Item.GetRootComponent()
+		? Item.GetRootComponent()->GetRelativeTransform() : FTransform::Identity;
+	UE_LOG(LogWeaponCase, Warning,
+		TEXT("SeatVerify MISMATCH | Slot='%s' Item='%s' Mesh='%s' LocOK=%d RotOK=%d\n")
+		TEXT("  SlotWorld:  Loc=%s Rot=%s Quat=%s\n")
+		TEXT("  MeshWorld:  Loc=%s Rot=%s Quat=%s\n")
+		TEXT("  Authored:   Loc=%s Rot=%s Quat=%s\n")
+		TEXT("  Applied:    Loc=%s Rot=%s Quat=%s\n")
+		TEXT("  RootRel:    Loc=%s Rot=%s Quat=%s"),
+		*SlotComp.SlotId.ToString(), *Item.GetName(), *DisplayMesh->GetName(), bLocOK, bRotOK,
+		*SlotWorld.GetLocation().ToString(), *SlotWorld.Rotator().ToString(), *SlotWorld.GetRotation().ToString(),
+		*MeshWorld.GetLocation().ToString(), *MeshWorld.Rotator().ToString(), *MeshWorld.GetRotation().ToString(),
+		*AuthoredOffset.GetLocation().ToString(), *AuthoredOffset.Rotator().ToString(), *AuthoredOffset.GetRotation().ToString(),
+		*AppliedRelative.GetLocation().ToString(), *AppliedRelative.Rotator().ToString(), *AppliedRelative.GetRotation().ToString(),
+		*RootRelative.GetLocation().ToString(), *RootRelative.Rotator().ToString(), *RootRelative.GetRotation().ToString());
+}
+
+FTransform AWeaponCase::ResolveAuthoredLinkTransform(const USceneComponent& Comp)
+{
+	const auto* Archetype = Cast<USceneComponent>(Comp.GetArchetype());
+
+	// A genuine SCS component's archetype is the SCS template, not the class CDO.
+	// UserConstructionScript components resolve to the CDO instead.
+	if (IsValid(Archetype) &&
+		(Archetype->HasAnyFlags(RF_ClassDefaultObject) ||
+		 Comp.CreationMethod == EComponentCreationMethod::UserConstructionScript))
+	{
+		UE_LOG(LogWeaponCase, Warning,
+			TEXT("ComposeAuthoredMeshOffset: '%s' on '%s' archetype resolved to class CDO "
+			     "(CreationMethod %d) -- offset degrades to identity."),
+			*Comp.GetName(),
+			IsValid(Comp.GetOwner()) ? *Comp.GetOwner()->GetName() : TEXT("<no owner>"),
+			static_cast<int32>(Comp.CreationMethod));
+	}
+
+	// Socket attachment or absolute-transform flags add engine-side
+	// composition this relative-only walk does not replicate.
+	if (Comp.GetAttachSocketName() != NAME_None ||
+		Comp.IsUsingAbsoluteLocation() || Comp.IsUsingAbsoluteRotation() ||
+		Comp.IsUsingAbsoluteScale())
+	{
+		UE_LOG(LogWeaponCase, Warning,
+			TEXT("ComposeAuthoredMeshOffset: '%s' uses socket '%s' or absolute "
+			     "transform flags -- composed offset may be wrong."),
+			*Comp.GetName(), *Comp.GetAttachSocketName().ToString());
+	}
+
+	const USceneComponent* Source = IsValid(Archetype) ? Archetype : &Comp;
+	return FTransform(Source->GetRelativeRotation(),
+	                  Source->GetRelativeLocation(),
+	                  Source->GetRelativeScale3D());
+}
+
+FTransform AWeaponCase::ComposeAuthoredMeshOffset(
+	const UMeshComponent& DisplayMesh, const USceneComponent& Root)
+{
+	if (&DisplayMesh == &Root) return FTransform::Identity;
+
+	// Walk the live attach-parent chain from the display mesh up to (but excluding) Root,
+	// composing each link's ARCHETYPE relative transform.  For SCS-created components the
+	// archetype is the SCS template -- the designer-authored transform before any construction-
+	// script repositioning (e.g. BP_Attachment_Pickup::FlattenDisplayMesh).  When the template
+	// relative is identity (attachment pickups), the composed result is identity and the
+	// inverse in CorrectMeshOffset becomes a no-op, preserving the kit's flatten.
+	FTransform Composed = FTransform::Identity;
+	const USceneComponent* Current = &DisplayMesh;
+	constexpr int32 MaxHops = 16;
+
+	for (int32 Hop = 0; Hop < MaxHops; ++Hop)
+	{
+		Composed = Composed * ResolveAuthoredLinkTransform(*Current);
+
+		const USceneComponent* Parent = Current->GetAttachParent();
+		if (Parent == &Root) return Composed;
+		if (!IsValid(Parent))
+		{
+			UE_LOG(LogWeaponCase, Warning,
+				TEXT("ComposeAuthoredMeshOffset: parent chain from '%s' broke before reaching "
+				     "root on '%s' -- returning partial offset."),
+				*Current->GetName(),
+				IsValid(Current->GetOwner()) ? *Current->GetOwner()->GetName() : TEXT("<no owner>"));
+			return Composed;
+		}
+		Current = Parent;
+	}
+
+	UE_LOG(LogWeaponCase, Warning,
+		TEXT("ComposeAuthoredMeshOffset: parent chain exceeded %d hops without reaching root "
+		     "-- returning best-effort offset."),
+		MaxHops);
+	return Composed;
+}
+
+UMeshComponent* AWeaponCase::FindItemDisplayMesh(AActor& Item) const
+{
+	USceneComponent* Root = Item.GetRootComponent();
+	if (!Root) return nullptr;
+
+	// The root component itself may be the display mesh (e.g. a pickup whose skeletal mesh
+	// is the root).  Check it first before walking children.
+	if (!Root->IsA<UWidgetComponent>()
+		&& (Root->IsA<USkeletalMeshComponent>() || Root->IsA<UStaticMeshComponent>()))
+	{
+		return Cast<UMeshComponent>(Root);
+	}
+
+	// Pass 0: direct children only (guarantees shallowest -- one directly parented to root --
+	// so children-of-children like Handguard under Weapon never win over the weapon mesh
+	// itself).  Pass 1: all descendants depth-first as a fallback.
+	// UWidgetComponent is excluded: it inherits UMeshComponent, and the kit's interaction
+	// widget sits on every pickup.  Components owned by a different actor (the child-actor
+	// interaction area) are also skipped.
+	// Plain TArray, not TInlineComponentArray: GetChildrenComponents takes a default-allocator
+	// TArray&, which an inline-allocator array cannot bind to.
+	TArray<USceneComponent*> ChildComps;
+	for (int32 Pass = 0; Pass < 2; ++Pass)
+	{
+		Root->GetChildrenComponents(Pass > 0, ChildComps);
+		for (USceneComponent* Child : ChildComps)
+		{
+			if (!IsValid(Child) || Child->GetOwner() != &Item) continue;
+			if (Child->IsA<UWidgetComponent>()) continue;
+			if (Child->IsA<USkeletalMeshComponent>() || Child->IsA<UStaticMeshComponent>())
+			{
+				return Cast<UMeshComponent>(Child);
+			}
+		}
+	}
+
+	return nullptr;
+}
+
+void AWeaponCase::DisableItemPhysics(AActor& Item)
+{
+	TInlineComponentArray<UPrimitiveComponent*> Primitives(&Item);
+	for (UPrimitiveComponent* Prim : Primitives)
+	{
+		// No IsSimulatingPhysics() gate: that queries GetBodyInstance(NAME_None), which returns
+		// nullptr when the mesh has no PhysicsAsset -- exactly the weapon skeletal meshes this
+		// targets.  SetSimulatePhysics(false) safely clears BodyInstance.bSimulatePhysics
+		// whether or not a physics body exists.
+		if (IsValid(Prim)) Prim->SetSimulatePhysics(false);
+	}
 }
