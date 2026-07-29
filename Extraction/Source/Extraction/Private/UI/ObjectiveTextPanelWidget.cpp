@@ -16,6 +16,8 @@ void UObjectiveTextPanelWidget::NativeConstruct()
 	CachedSubsystem = Subsystem;
 	if (!Subsystem->OnObjectivesChanged.IsAlreadyBound(this, &UObjectiveTextPanelWidget::Rebuild))
 		Subsystem->OnObjectivesChanged.AddDynamic(this, &UObjectiveTextPanelWidget::Rebuild);
+	if (!Subsystem->OnObjectiveLabelChanged.IsAlreadyBound(this, &UObjectiveTextPanelWidget::HandleLabelChanged))
+		Subsystem->OnObjectiveLabelChanged.AddDynamic(this, &UObjectiveTextPanelWidget::HandleLabelChanged);
 
 	Rebuild();
 }
@@ -23,7 +25,10 @@ void UObjectiveTextPanelWidget::NativeConstruct()
 void UObjectiveTextPanelWidget::NativeDestruct()
 {
 	if (UObjectiveSubsystem* Subsystem = CachedSubsystem.Get())
+	{
 		Subsystem->OnObjectivesChanged.RemoveDynamic(this, &UObjectiveTextPanelWidget::Rebuild);
+		Subsystem->OnObjectiveLabelChanged.RemoveDynamic(this, &UObjectiveTextPanelWidget::HandleLabelChanged);
+	}
 
 	Super::NativeDestruct();
 }
@@ -50,4 +55,11 @@ void UObjectiveTextPanelWidget::Rebuild()
 	ObjectiveListText->SetText(FText::Join(FText::FromString(LINE_TERMINATOR), Lines));
 	ObjectiveListText->SetVisibility(Lines.Num() > 0
 		? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
+}
+
+void UObjectiveTextPanelWidget::HandleLabelChanged(FName /*Id*/, const FText& /*NewLabel*/)
+{
+	// A label mutation is cheap enough to just re-join the text. Tracking per-id text blocks
+	// would be more code for no visible gain on a single SetText call.
+	Rebuild();
 }

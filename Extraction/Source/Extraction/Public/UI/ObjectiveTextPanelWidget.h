@@ -32,5 +32,10 @@ private:
 	UFUNCTION()
 	void Rebuild();
 
+	/** A label-only mutation is cheap enough to just rebuild the joined text. The alternative —
+	 *  tracking per-id text blocks — is more code for no visible gain on a single-line SetText. */
+	UFUNCTION()
+	void HandleLabelChanged(FName Id, const FText& NewLabel);
+
 	TWeakObjectPtr<UObjectiveSubsystem> CachedSubsystem;
 };

@@ -154,7 +154,7 @@ protected:
 	UPROPERTY()
 	TObjectPtr<ULootNotificationWidget> LootToastWidget;
 
-	/** "[E] Revive" prompt class (assigned in BP defaults — no C++ asset path). */
+	/** "[F] Revive" prompt class (assigned in BP defaults — no C++ asset path). */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<URevivePromptWidget> RevivePromptWidgetClass;
 

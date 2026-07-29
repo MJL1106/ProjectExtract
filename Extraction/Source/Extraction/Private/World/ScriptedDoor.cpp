@@ -47,8 +47,11 @@ void AScriptedDoor::BeginPlay()
 
 void AScriptedDoor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	GetWorldTimerManager().ClearTimer(NotifyTimeoutHandle);
-	GetWorldTimerManager().ClearTimer(RestoreRetryHandle);
+	if (UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().ClearTimer(NotifyTimeoutHandle);
+		World->GetTimerManager().ClearTimer(RestoreRetryHandle);
+	}
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -87,16 +90,22 @@ void AScriptedDoor::ForceOpenInstant()
 	Breach_Implementation(nullptr);
 }
 
-void AScriptedDoor::NotifySwingStarting()
+bool AScriptedDoor::NotifySwingStarting()
 {
-	// No CanBreach gating: unlike a breach, a player swing may be an open OR a close.
+	if (IsExternalGateLocked())
+	{
+		UE_LOG(LogScriptedDoor, Log,
+			TEXT("%s (%s): NotifySwingStarting refused — door is externally gate-locked"),
+			*GetName(), *GetClass()->GetName());
+		return false;
+	}
+
 	UE_LOG(LogScriptedDoor, Log, TEXT("%s: NotifySwingStarting — player swing, applying pawn pass-through"), *GetName());
 	bOpenInFlight = true;
 	ApplyPawnPassThrough();
 	GetWorldTimerManager().SetTimer(NotifyTimeoutHandle, this, &AScriptedDoor::HandleNotifyTimeout, BreachNotifyTimeout, false);
-
-	// Player interact swing — a close creaks the same as an open, which is the desired read.
 	PlayOpenSoundDeduped();
+	return true;
 }
 
 void AScriptedDoor::NotifyDoorStateChanged(bool bNowOpen)
@@ -202,4 +211,7 @@ void AScriptedDoor::HandleNotifyTimeout()
 	}
 	bOpenInFlight = false;
 	RestorePawnCollision();
+	// An AI already inside DoorwayTrigger when the timeout clears gets no new BeginOverlap,
+	// so it never auto-opens until it leaves and re-enters. Rescan to cover that case.
+	RescanDoorwayForAutoOpen();
 }

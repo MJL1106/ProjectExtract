@@ -709,7 +709,7 @@ void ALevelObjectiveFlow::UpdatePrimaryObjective()
 	case ELevelObjectiveStep::ReachExtractionTarget:
 		if (IsValid(Extractee))
 		{
-			Label = NSLOCTEXT("LevelFlow", "FreeHostage", "Free the hostage - hold E"); Target = Extractee;
+			Label = NSLOCTEXT("LevelFlow", "FreeHostage", "Free the hostage - hold F"); Target = Extractee;
 		}
 		else
 		{

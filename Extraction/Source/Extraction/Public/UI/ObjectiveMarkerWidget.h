@@ -27,6 +27,12 @@ public:
 	/** Called by the layer right after spawn. */
 	void SetObjective(const FObjectiveMarker& InObjective);
 
+	/** Label-only update. Updates the stored label without resetting the smoothed screen position
+	 *  or projection state — the marker keeps its interpolation continuity. */
+	void UpdateLabel(const FText& NewLabel) { Objective.Label = NewLabel; }
+
+	FName GetObjectiveId() const { return Objective.Id; }
+
 	/** Exponential interpolation with the same result for equivalent elapsed time. */
 	static FVector2D InterpolateScreenPosition(const FVector2D& Current, const FVector2D& Target,
 		float DeltaTime, float Speed);

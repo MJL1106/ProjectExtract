@@ -6,7 +6,7 @@
 		{
 			"sourceId": "neostack.core",
 			"sourceVersion": "2.0.45",
-			"shippedDigest": "07a4eaf9b7d6ffaa0d2532c79ad3bdb0bfe6a8c3",
+			"shippedDigest": "6487c4b927a7d293b434577d1786484dfe29ead1",
 			"writtenDigest": "6487c4b927a7d293b434577d1786484dfe29ead1",
 			"conflictPending": false
 		},
@@ -14,7 +14,7 @@
 		{
 			"sourceId": "neostack.core",
 			"sourceVersion": "2.0.45",
-			"shippedDigest": "b079c1225e0b102fa2867092d7fac6c202bc6ce3",
+			"shippedDigest": "044661705dae5c390b5bc1a57b8ec8be41492a42",
 			"writtenDigest": "044661705dae5c390b5bc1a57b8ec8be41492a42",
 			"conflictPending": false
 		},
@@ -22,7 +22,7 @@
 		{
 			"sourceId": "neostack.core",
 			"sourceVersion": "2.0.45",
-			"shippedDigest": "1d5423169ca8552bd65fbcab0444506bbe4d74a8",
+			"shippedDigest": "82406fae87b761be8eac8d68e445bc390755b306",
 			"writtenDigest": "82406fae87b761be8eac8d68e445bc390755b306",
 			"conflictPending": false
 		},
@@ -30,7 +30,7 @@
 		{
 			"sourceId": "neostack.core",
 			"sourceVersion": "2.0.45",
-			"shippedDigest": "1b265ae26c33f6a4d9ff7b993321bf91a3219ce8",
+			"shippedDigest": "3f5150f20b1a9138932719d5e1b9a966ab0c9b12",
 			"writtenDigest": "3f5150f20b1a9138932719d5e1b9a966ab0c9b12",
 			"conflictPending": false
 		},
@@ -38,7 +38,7 @@
 		{
 			"sourceId": "neostack.core",
 			"sourceVersion": "2.0.45",
-			"shippedDigest": "3f1fbef1b97c12013feef879841148788a4655ca",
+			"shippedDigest": "02fe1f2a2dbe815e353c1332074c0f05c0c7df39",
 			"writtenDigest": "02fe1f2a2dbe815e353c1332074c0f05c0c7df39",
 			"conflictPending": false
 		}

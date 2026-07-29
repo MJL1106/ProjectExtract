@@ -39,6 +39,13 @@ struct EXTRACTION_API FStealthDisciplineSettings
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float SprintSpeedThreshold = 550.f;
+
+	/** How long a dip below SprintSpeedThreshold is tolerated before the sprint streak resets.
+	 *  Zero disables lapse tolerance (old hard-reset behaviour). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "5.0", UIMax = "5.0"))
+	float SprintLapseGraceSeconds = 0.75f;
+
+	static constexpr float MaxSprintLapseGraceSeconds = 5.f;
 };
 
 /** Pure per-actor pressure tracker. Not reflected -- lives on the discipline volume only. */
@@ -46,6 +53,7 @@ struct EXTRACTION_API FStealthPressureAccumulator
 {
 	float Pressure = 0.f;
 	float ContinuousSprintSeconds = 0.f;
+	float SecondsSinceSprint = 0.f;
 	bool bWarned = false;
 	bool bEscalated = false;
 
@@ -56,14 +64,31 @@ struct EXTRACTION_API FStealthPressureAccumulator
 		// ClampMin metadata is editor-UI only; a zero/negative escalation threshold would trip on entry.
 		if (Settings.EscalationThreshold <= 0.f) return EStealthPressureTransition::None;
 
-		ContinuousSprintSeconds = bSprinting ? ContinuousSprintSeconds + DeltaSeconds : 0.f;
+		const float EffectiveLapseGrace = FMath::Clamp(Settings.SprintLapseGraceSeconds, 0.f,
+			FStealthDisciplineSettings::MaxSprintLapseGraceSeconds);
+
+		if (bSprinting)
+		{
+			SecondsSinceSprint = 0.f;
+			ContinuousSprintSeconds += DeltaSeconds;
+		}
+		else
+		{
+			SecondsSinceSprint += DeltaSeconds;
+			// Tolerated lapse: preserve the sprint streak across a brief dip. Decay still runs below.
+			const bool bToleratedLapse = ContinuousSprintSeconds > 0.f && EffectiveLapseGrace > 0.f
+				&& SecondsSinceSprint <= EffectiveLapseGrace;
+
+			if (!bToleratedLapse) ContinuousSprintSeconds = 0.f;
+		}
 
 		const bool bSprintPressure = bSprinting && ContinuousSprintSeconds > Settings.SprintGraceSeconds;
 		if (bSprintPressure) Pressure += Settings.SprintPressurePerSecond * DeltaSeconds;
 
 		if (NormalShots > 0) Pressure += Settings.PressurePerShot * static_cast<float>(NormalShots);
 
-		if (!bSprinting && NormalShots <= 0) Pressure -= Settings.DecayPerSecond * DeltaSeconds;
+		if (!bSprinting && NormalShots <= 0)
+			Pressure -= Settings.DecayPerSecond * DeltaSeconds;
 
 		Pressure = FMath::Clamp(Pressure, 0.f, Settings.EscalationThreshold);
 
@@ -87,6 +112,7 @@ struct EXTRACTION_API FStealthPressureAccumulator
 	{
 		Pressure = 0.f;
 		ContinuousSprintSeconds = 0.f;
+		SecondsSinceSprint = 0.f;
 		bWarned = false;
 		bEscalated = false;
 	}

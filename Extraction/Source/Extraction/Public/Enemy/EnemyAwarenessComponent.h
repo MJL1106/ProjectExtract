@@ -308,6 +308,29 @@ private:
 	bool bHadLOS = false;
 	float TimeSinceLOSLost = 0.f;
 
+	// Director-seeded pursuit: set AFTER EnterCombat in ForceEngage (only when freshly
+	// entering combat), cleared unconditionally at the TOP of EnterCombat (so any non-director
+	// re-entry clears it by construction), and additionally by the FOV-LOS contact-hold signal.
+	// While active AND bHadLOS is false:
+	//   1. Suppression contact-hold is skipped so LostContactGrace can actually expire.
+	//   2. Arrival near DirectorSeedLocation triggers Searching after a brief grace.
+	bool bDirectorSeeded = false;
+
+	// The per-member approach point assigned at ForceEngage time. Arrival detection measures
+	// against THIS, not against LastKnownLocation (which is live-refreshed by EnterCombat/
+	// squad relay and would track the player). Set alongside bDirectorSeeded.
+	FVector DirectorSeedLocation = FVector::ZeroVector;
+
+	// Accumulated time spent near DirectorSeedLocation without LOS — must reach
+	// DirectorSeedArrivalGrace before transitioning to Searching (debounce).
+	float DirectorSeedArrivalAccum = 0.f;
+
+	// Persistent spawn-source flag: set in ForceEngage, never cleared (survives combat
+	// transitions, target swaps, search cycles). Gates the sustained-pressure search
+	// re-target so only director-spawned enemies keep pressing — hand-placed patrols,
+	// isolated encounters, and corpse investigators are unaffected.
+	bool bWasDirectorSpawned = false;
+
 	// Searching timeout
 	float TimeSpentSearching = 0.f;
 

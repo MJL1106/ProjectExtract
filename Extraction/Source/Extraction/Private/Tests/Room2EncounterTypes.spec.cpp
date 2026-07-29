@@ -87,8 +87,139 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 	ResetAcc.Reset();
 	TestEqual(TEXT("reset zeroes pressure"), ResetAcc.Pressure, 0.f);
 	TestEqual(TEXT("reset zeroes continuous sprint time"), ResetAcc.ContinuousSprintSeconds, 0.f);
+	TestEqual(TEXT("reset zeroes seconds-since-sprint"), ResetAcc.SecondsSinceSprint, 0.f);
 	TestFalse(TEXT("reset clears the warned latch"), ResetAcc.bWarned);
 	TestFalse(TEXT("reset clears the escalated latch"), ResetAcc.bEscalated);
+
+	// -- Lapse tolerance: sub-grace dip preserves streak, decay still runs --
+	{
+		FStealthDisciplineSettings LapseSettings;
+		LapseSettings.SprintGraceSeconds = 1.5f;
+		LapseSettings.SprintPressurePerSecond = 8.f;
+		LapseSettings.PressurePerShot = 6.f;
+		LapseSettings.DecayPerSecond = 10.f;
+		LapseSettings.WarningThreshold = 35.f;
+		LapseSettings.EscalationThreshold = 70.f;
+		LapseSettings.SprintLapseGraceSeconds = 0.75f;
+
+		FStealthPressureAccumulator LapseAcc;
+		LapseAcc.Advance(3.f, true, 0, LapseSettings);
+		TestTrue(TEXT("lapse: sprint past grace builds pressure"), LapseAcc.Pressure > 0.f);
+
+		const float PressureBeforeDip = LapseAcc.Pressure;
+		const float StreakBeforeDip = LapseAcc.ContinuousSprintSeconds;
+		LapseAcc.Advance(0.5f, false, 0, LapseSettings);
+		TestEqual(TEXT("lapse: sub-grace dip preserves sprint streak"),
+			LapseAcc.ContinuousSprintSeconds, StreakBeforeDip);
+		TestTrue(TEXT("lapse: sub-grace dip still decays pressure"),
+			LapseAcc.Pressure < PressureBeforeDip);
+
+		const float PressureAfterDip = LapseAcc.Pressure;
+		LapseAcc.Advance(0.25f, true, 0, LapseSettings);
+		TestTrue(TEXT("lapse: resumed sprint gains pressure immediately (no re-paying grace)"),
+			LapseAcc.Pressure > PressureAfterDip);
+	}
+
+	// -- Lapse tolerance: over-grace dip resets streak and resumes decay --
+	{
+		FStealthDisciplineSettings LapseSettings;
+		LapseSettings.SprintGraceSeconds = 1.5f;
+		LapseSettings.SprintPressurePerSecond = 8.f;
+		LapseSettings.PressurePerShot = 6.f;
+		LapseSettings.DecayPerSecond = 10.f;
+		LapseSettings.WarningThreshold = 35.f;
+		LapseSettings.EscalationThreshold = 70.f;
+		LapseSettings.SprintLapseGraceSeconds = 0.75f;
+
+		FStealthPressureAccumulator LapseAcc;
+		LapseAcc.Advance(2.f, true, 0, LapseSettings);
+		const float PressureBeforeLongDip = LapseAcc.Pressure;
+		LapseAcc.Advance(1.f, false, 0, LapseSettings);
+		TestEqual(TEXT("lapse: over-grace dip resets sprint streak"),
+			LapseAcc.ContinuousSprintSeconds, 0.f);
+		TestTrue(TEXT("lapse: over-grace dip resumes decay"),
+			LapseAcc.Pressure < PressureBeforeLongDip);
+	}
+
+	// -- Stop-start sprinting (2s run / 0.5s stop) reaches Warned via lapse tolerance --
+	{
+		FStealthDisciplineSettings LapseSettings;
+		LapseSettings.SprintGraceSeconds = 1.5f;
+		LapseSettings.SprintPressurePerSecond = 8.f;
+		LapseSettings.PressurePerShot = 6.f;
+		LapseSettings.DecayPerSecond = 10.f;
+		LapseSettings.WarningThreshold = 35.f;
+		LapseSettings.EscalationThreshold = 70.f;
+		LapseSettings.SprintLapseGraceSeconds = 0.75f;
+
+		FStealthPressureAccumulator StopStartAcc;
+		EStealthPressureTransition StopStartResult = EStealthPressureTransition::None;
+
+		for (int32 Cycle = 0; Cycle < 20 && StopStartResult != EStealthPressureTransition::Warned; ++Cycle)
+		{
+			for (int32 j = 0; j < 8; ++j)
+			{
+				const EStealthPressureTransition R = StopStartAcc.Advance(0.25f, true, 0, LapseSettings);
+				if (R == EStealthPressureTransition::Warned) { StopStartResult = R; break; }
+			}
+			if (StopStartResult == EStealthPressureTransition::Warned) break;
+
+			for (int32 j = 0; j < 2; ++j)
+			{
+				const EStealthPressureTransition R = StopStartAcc.Advance(0.25f, false, 0, LapseSettings);
+				if (R == EStealthPressureTransition::Warned) { StopStartResult = R; break; }
+			}
+		}
+
+		TestEqual(TEXT("stop-start sprinting reaches Warned via lapse tolerance"),
+			StopStartResult, EStealthPressureTransition::Warned);
+	}
+
+	// -- Zero lapse grace: old hard-reset behaviour (regression guard) --
+	{
+		FStealthDisciplineSettings ZeroGraceSettings;
+		ZeroGraceSettings.SprintGraceSeconds = 1.5f;
+		ZeroGraceSettings.SprintPressurePerSecond = 8.f;
+		ZeroGraceSettings.PressurePerShot = 6.f;
+		ZeroGraceSettings.DecayPerSecond = 10.f;
+		ZeroGraceSettings.WarningThreshold = 35.f;
+		ZeroGraceSettings.EscalationThreshold = 70.f;
+		ZeroGraceSettings.SprintLapseGraceSeconds = 0.f;
+
+		FStealthPressureAccumulator ZeroGraceAcc;
+		ZeroGraceAcc.Advance(2.f, true, 0, ZeroGraceSettings);
+		const float PressureBeforeDip = ZeroGraceAcc.Pressure;
+		ZeroGraceAcc.Advance(0.5f, false, 0, ZeroGraceSettings);
+		TestEqual(TEXT("zero-grace: dip resets sprint streak"),
+			ZeroGraceAcc.ContinuousSprintSeconds, 0.f);
+		TestTrue(TEXT("zero-grace: dip decays pressure"),
+			ZeroGraceAcc.Pressure < PressureBeforeDip);
+	}
+
+	// -- Shot accrual during tolerated lapse --
+	{
+		FStealthDisciplineSettings ShotLapseSettings;
+		ShotLapseSettings.SprintGraceSeconds = 1.5f;
+		ShotLapseSettings.SprintPressurePerSecond = 8.f;
+		ShotLapseSettings.PressurePerShot = 6.f;
+		ShotLapseSettings.DecayPerSecond = 10.f;
+		ShotLapseSettings.WarningThreshold = 35.f;
+		ShotLapseSettings.EscalationThreshold = 70.f;
+		ShotLapseSettings.SprintLapseGraceSeconds = 0.75f;
+
+		FStealthPressureAccumulator ShotLapseAcc;
+		ShotLapseAcc.Advance(3.f, true, 0, ShotLapseSettings);
+		const float PressureBeforeShots = ShotLapseAcc.Pressure;
+
+		ShotLapseAcc.Advance(0.25f, false, 6, ShotLapseSettings);
+		const float ExpectedShotPressure = ShotLapseSettings.PressurePerShot * 6.f;
+		TestEqual(TEXT("shot-lapse: shots during tolerated lapse add correct pressure"),
+			ShotLapseAcc.Pressure, PressureBeforeShots + ExpectedShotPressure);
+
+		const EStealthPressureTransition EscResult = ShotLapseAcc.Advance(0.25f, false, 3, ShotLapseSettings);
+		TestEqual(TEXT("shot-lapse: escalation fires during tolerated lapse"),
+			EscResult, EStealthPressureTransition::Escalated);
+	}
 
 	return true;
 }

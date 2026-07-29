@@ -46,8 +46,9 @@ public:
 	/** True if this zone should produce spawns during the given phase. Empty ActivePhases = all phases. */
 	bool IsActiveForPhase(EMissionPhase Phase) const;
 
-	/** Deterministic spread inside the box. Index-based so a squad gets separated points. Z at box base. */
-	FTransform GetSpawnTransform(int32 Index) const;
+	/** Deterministic spread inside the box. Index-based so a squad gets separated points.
+	 *  SquadSize scales the radius so the full usable box is covered regardless of member count. Z at box base. */
+	FTransform GetSpawnTransform(int32 Index, int32 SquadSize) const;
 
 	/** World-space centre of the box volume. */
 	FVector GetZoneOrigin() const;

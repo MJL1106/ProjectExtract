@@ -1,5 +1,6 @@
-// BT task -- companion coordinated takedown. Approaches victim (knife: crouched sneak),
-// arms the takedown on CompanionCharacter, then waits for the player's commit signal.
+// BT task -- companion coordinated takedown. Approaches victim (knife: crouched sneak to stab
+// range; shoot: repositions until it has a line), arms the takedown on CompanionCharacter, then
+// waits for the player's commit signal.
 
 #pragma once
 
@@ -10,6 +11,7 @@
 #include "BTTask_CompanionTakedown.generated.h"
 
 class ACompanionCharacter;
+class AAIController;
 
 UCLASS()
 class EXTRACTION_API UBTTask_CompanionTakedown : public UBTTaskNode
@@ -62,6 +64,30 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Takedown|Shoot", meta = (ClampMin = "0.5"))
 	float AutonomousShootDelayMax = 4.f;
 
+	/** Accept radius for the shoot repositioning MoveToLocation. Rarely reached — the approach arms
+	 *  the moment the line clears, so this only matters when the anchor IS the firing spot. */
+	UPROPERTY(EditAnywhere, Category = "Takedown|Shoot", meta = (ClampMin = "10.0"))
+	float ShootApproachAcceptRadius = 60.f;
+
+	/** Step distance (cm) for the shoot repositioning fan taken from the companion's own position
+	 *  (right / left / back / back-right / back-left). Tried at this distance, then at double it. */
+	UPROPERTY(EditAnywhere, Category = "Takedown|Shoot", meta = (ClampMin = "30.0"))
+	float ShootAnchorStepDistance = 200.f;
+
+	/** Distance (cm) from the victim for the ring fallback, used only when no step off the
+	 *  companion's own position finds a line. Keep inside effective weapon range. */
+	UPROPERTY(EditAnywhere, Category = "Takedown|Shoot", meta = (ClampMin = "100.0"))
+	float ShootAnchorRingStandoff = 500.f;
+
+	/** Max time (seconds) across ALL shoot repositioning before aborting to normal gunfire. */
+	UPROPERTY(EditAnywhere, Category = "Takedown|Shoot", meta = (ClampMin = "1.0"))
+	float ShootApproachTimeout = 8.f;
+
+	/** Seconds between line-of-sight re-tests while armed and waiting to fire — the victim can walk
+	 *  behind cover during the settle. Throttled because a full trace every tick is wasted work. */
+	UPROPERTY(EditAnywhere, Category = "Takedown|Shoot", meta = (ClampMin = "0.05"))
+	float ShootLosRecheckInterval = 0.25f;
+
 	/** Seconds the companion stays locked onto a victim it failed to take down silently, killing it
 	 *  with normal gunfire before it may pick any other combat target. Safety valve only — the lock
 	 *  releases the moment the victim dies. 0 disables the commitment entirely. */
@@ -71,7 +97,7 @@ protected:
 private:
 	enum class EPhase : uint8
 	{
-		Approaching,    // Knife: moving to stab anchor
+		Approaching,    // Knife: moving to stab anchor. Shoot: repositioning for a clear line
 		Armed,          // In position, waiting for player commit
 		Executing,      // Takedown in progress (montage / shot)
 		Done,
@@ -84,6 +110,35 @@ private:
 
 	/** Single-candidate helper for ComputeKnifeAnchor. */
 	FVector ComputeAnchorCandidate(const FVector& VictimLoc, const FVector& Behind, float AngleDeg) const;
+
+	/** Shoot entry: arms in place when the line is already clear, otherwise starts the reposition.
+	 *  False = nowhere on the navmesh can see the victim, so the caller must fail the task. */
+	bool BeginShootTakedown(ACompanionCharacter* Companion, AAIController* AIC, AActor* Victim);
+
+	/** Shoot: picks a firing anchor and issues the move. False = no anchor, or nav refused it. */
+	bool BeginShootApproach(ACompanionCharacter* Companion, AAIController* AIC, AActor* Victim);
+
+	/** Shoot: arms the takedown exactly where the companion stands (line already verified clear). */
+	void ArmShootInPlace(ACompanionCharacter* Companion, AAIController* AIC);
+
+	/** Shoot approach tick. Returns true once it has finished the latent task — the caller must
+	 *  return immediately, since CleanupTask has already torn the node state down by then. */
+	bool TickShootApproach(UBehaviorTreeComponent& OwnerComp, AAIController* AIC,
+		ACompanionCharacter* Companion, AActor* Victim, float DeltaSeconds);
+
+	/** Shoot: nav-reachable spot with a clear line to the victim. Fan from the companion's own
+	 *  position first (cheapest, smallest displacement), ring around the victim as the fallback. */
+	bool ComputeShootAnchor(const ACompanionCharacter* Companion, const AActor* Victim, FVector& OutAnchor) const;
+
+	/** One fan pass at StepDistance: lateral right/left, back, back-right, back-left. */
+	bool TryShootFanAnchor(const ACompanionCharacter* Companion, const AActor* Victim, float StepDistance, FVector& OutAnchor) const;
+
+	/** Ring fallback: yaw offsets around the victim at ShootAnchorRingStandoff, nearest wins. */
+	bool TryShootRingAnchor(const ACompanionCharacter* Companion, const AActor* Victim, FVector& OutAnchor) const;
+
+	/** Single-candidate helper for the fan/ring passes: nav-project, then line-verify. */
+	bool TryShootAnchorCandidate(const ACompanionCharacter* Companion, const AActor* Victim,
+		const FVector& RawCandidate, FVector& OutProjected) const;
 
 	/** Returns Succeeded if the victim is dead/destroyed, Failed otherwise. */
 	EBTNodeResult::Type CompletionResult() const;
@@ -102,4 +157,25 @@ private:
 	bool bAutonomousCommitSent = false;
 	float AutonomousShootElapsed = 0.f;
 	float AutonomousShootDelay = 0.f;
+
+	/** Shoot: seconds since the current reposition move was issued. Debounces the settle test —
+	 *  GetMoveStatus still reads Idle for a frame or two after MoveToLocation. */
+	float ShootMoveIssuedElapsed = 0.f;
+	/** Shoot: accumulator for the throttled armed-phase line re-test. */
+	float ShootLosRecheckElapsed = 0.f;
+	/** Shoot: true once the approach has re-anchored after a dead settle. A second dead settle
+	 *  means no reachable firing spot exists, so the task degrades to gunfire instead of looping. */
+	bool bShootReanchorUsed = false;
+
+	/** Count of armed-phase LoS re-breaks that returned to Approaching during a single task run.
+	 *  A victim patrolling across a pillar edge can flicker the aim-point trace indefinitely,
+	 *  cycling Armed->Approaching hundreds of times (each costing a full ComputeShootAnchor: worst
+	 *  case 18 nav projections + 18 line traces). Capped at MaxArmedReanchors so the flicker path
+	 *  degrades to normal gunfire instead of looping. The approach-path dead-settle re-anchor
+	 *  (bShootReanchorUsed) is counted separately. */
+	int32 ArmedReanchorCount = 0;
+
+	/** Max armed-phase LoS re-breaks before degrating to gunfire. Must stay small: each cycle is
+	 *  ~0.25s of stutter-stop. Same self-limiting idiom as bShootReanchorUsed. */
+	static constexpr int32 MaxArmedReanchors = 3;
 };

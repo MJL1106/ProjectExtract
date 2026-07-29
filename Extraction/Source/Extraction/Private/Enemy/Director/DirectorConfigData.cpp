@@ -51,6 +51,11 @@ bool UDirectorConfigData::Validate(FString& OutError) const
 			OutError += FString::Printf(TEXT("%s: Compositions array is empty (spawn starvation). "), P.Name);
 			bValid = false;
 		}
+		if (P.Cfg.ConcurrentSpawnZones < 1 || P.Cfg.ConcurrentSpawnZones > 4)
+		{
+			OutError += FString::Printf(TEXT("%s: ConcurrentSpawnZones=%d out of range [1,4]. "), P.Name, P.Cfg.ConcurrentSpawnZones);
+			bValid = false;
+		}
 	}
 
 	if (ReliefEntryThreshold >= PeakTensionThreshold)
@@ -62,6 +67,24 @@ bool UDirectorConfigData::Validate(FString& OutError) const
 	if (SpawnDistanceMin > SpawnDistanceMax)
 	{
 		OutError += TEXT("SpawnDistanceMin > SpawnDistanceMax. ");
+		bValid = false;
+	}
+
+	if (StoreySeparationHeight <= 0.f)
+	{
+		OutError += TEXT("StoreySeparationHeight <= 0 (storey detection disabled). ");
+		bValid = false;
+	}
+
+	if (SpawnDistanceMinDifferentStorey <= 0.f)
+	{
+		OutError += TEXT("SpawnDistanceMinDifferentStorey <= 0 (no minimum on other-storey zones). ");
+		bValid = false;
+	}
+
+	if (SpawnDistanceMinDifferentStorey > SpawnDistanceMin)
+	{
+		OutError += TEXT("SpawnDistanceMinDifferentStorey > SpawnDistanceMin (other-storey zones are harder to use than same-floor -- defeats the purpose). ");
 		bValid = false;
 	}
 

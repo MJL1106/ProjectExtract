@@ -520,7 +520,7 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
 	TObjectPtr<UAnimMontage> BeingRevivedMontage;
 
-	/** Kneel montage played on this player's OWN body while they hold E reviving a downed
+	/** Kneel montage played on this player's OWN body while they hold F reviving a downed
 	 *  teammate — rate-scaled so one cycle spans ReviveDuration. The FP camera rides the head
 	 *  bone through it (takedown-style), so this is what "locks" the reviver's view. */
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")

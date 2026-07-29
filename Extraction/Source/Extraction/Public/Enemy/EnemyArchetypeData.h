@@ -149,6 +149,25 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
 	float LostContactGrace = 45.f;
 
+	// --- Director Seed (reinforcement dispatch) ---
+
+	/** Spread radius (cm) for director-spawned squad dispersal — each member offsets from
+	 *  the shared intel point by this distance at a unique angle so they approach and search
+	 *  on different lines. Separate from MinAllySpacing which is a cover-avoidance minimum. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Director", meta = (ClampMin = "100.0"))
+	float DirectorSeedSpreadRadius = 500.f;
+
+	/** 3D distance (cm) from the seed location at which a director-spawned enemy considers
+	 *  itself arrived and transitions to Searching if it has not gained real LOS. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Director", meta = (ClampMin = "50.0"))
+	float DirectorSeedArrivalRadius = 250.f;
+
+	/** Seconds the director-seeded enemy must be near its seed location without LOS before
+	 *  transitioning to Searching. Prevents a momentary close-range LOS break (duck behind
+	 *  a crate) from triggering the search transition. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Director", meta = (ClampMin = "0.0"))
+	float DirectorSeedArrivalGrace = 2.f;
+
 	/** Maximum yaw offset (degrees) between actor forward and the aim target before GetAIAimTarget/GetAIAimLocation
 	 *  returns null/false — forces the weapon to fall back to forward-fire while the body rotates.
 	 *  0 = unlimited (default for all non-heavy archetypes). Heavy DA sets ~60. */

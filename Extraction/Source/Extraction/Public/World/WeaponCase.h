@@ -1,53 +1,20 @@
 // AWeaponCase — designer-placed open weapon case whose foam cutouts hold real pickup actors.
-// Two levels of authoring: slot definitions are fixed per case TYPE (class defaults, authored
-// once in the BP), while a placed INSTANCE only ticks which of those slots are filled.
-// In the editor the filled slots show preview meshes; on BeginPlay the authority destroys the
-// previews and spawns the real pickup actors attached to the same socket + offset.
+// Each cutout is a UWeaponCaseSlotComponent added in the Blueprint's Components panel — the
+// designer drags the gizmo to position it and parents preview meshes under it as children.
+// A placed INSTANCE only ticks which of those slots are filled (FilledSlots).
+// In the editor the filled slots show their preview children; on BeginPlay the authority hides
+// every preview and spawns the real pickup actors attached to the slot components.
 // Meshes and pickup classes are assigned in the Blueprint subclass — C++ stays asset-agnostic.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
-#include "Templates/SubclassOf.h"
 #include "WeaponCase.generated.h"
 
 class USceneComponent;
-class USkeletalMesh;
-class UStaticMesh;
 class UStaticMeshComponent;
-
-/** One foam cutout: what sits in it, where that sits, and what it looks like before play. */
-USTRUCT(BlueprintType)
-struct FWeaponCaseSlot
-{
-	GENERATED_BODY()
-
-	/** Designer-facing name. This is what a placed case's FilledSlots dropdown offers. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Case|Slot")
-	FName SlotId;
-
-	/** Socket on the case mesh. None = parent straight to the case mesh and let Offset place it
-	 *  (the hand-aligned injector pen in the assault-rifle case is authored that way). */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Case|Slot")
-	FName SocketName;
-
-	/** Pickup actor spawned into this cutout on BeginPlay. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Case|Slot")
-	TSubclassOf<AActor> PickupClass;
-
-	/** Editor preview only — assign whichever of the two matches the pickup, never both. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Case|Slot")
-	TObjectPtr<UStaticMesh> PreviewMesh;
-
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Case|Slot")
-	TObjectPtr<USkeletalMesh> PreviewSkeletalMesh;
-
-	/** Relative to the socket, or to the case mesh itself when SocketName is None.
-	 *  Non-uniform scale is supported and expected. */
-	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Case|Slot")
-	FTransform Offset;
-};
+class UWeaponCaseSlotComponent;
 
 UCLASS(Blueprintable, HideCategories = (Replication, Input, LOD, Cooking))
 class EXTRACTION_API AWeaponCase : public AActor
@@ -91,12 +58,8 @@ protected:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Case")
 	bool bIgnoreInteractionTrace = false;
 
-	/** Every cutout this case type has. Authored once on the BP, not per placed instance. */
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Case")
-	TArray<FWeaponCaseSlot> SlotDefinitions;
-
-	/** Which cutouts this placed case actually holds. Picked from a dropdown of SlotDefinitions
-	 *  names; duplicates are ignored and unknown names are logged. */
+	/** Which cutouts this placed case actually holds. Picked from a dropdown of slot component
+	 *  SlotIds; duplicates are ignored and unknown names are logged. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Case", meta = (GetOptions = "GetSlotIdOptions"))
 	TArray<FName> FilledSlots;
 
@@ -121,35 +84,21 @@ protected:
 	void OnCaseItemSpawned(AActor* Item, FName SlotId);
 
 private:
-	/** Tag stamped on every preview component. This — not the array below — is the identity
-	 *  ClearPreviewComponents sweeps on, because the array does not survive an editor undo. */
-	static const FName PreviewComponentTag;
-
-	/** Editor dressing only, never saved into the level and never created in a game world.
-	 *  Bookkeeping convenience only: Transient still round-trips through the transaction buffer,
-	 *  so an undo can hand this back stale. The tag sweep is the source of truth. */
-	UPROPERTY(Transient)
-	TArray<TObjectPtr<USceneComponent>> PreviewComponents;
-
 	/** Weak: pickups destroy themselves when collected. */
 	TArray<TWeakObjectPtr<AActor>> SpawnedItems;
 
-	const FWeaponCaseSlot* FindSlot(FName SlotId) const;
+	/** Logs warnings for slot components with blank or duplicate SlotIds. */
+	void ValidateSlotIds(TConstArrayView<UWeaponCaseSlotComponent*> AllSlots) const;
 
-	/** De-duplicated resolution of FilledSlots against SlotDefinitions, warning on unknowns. */
-	void ResolveFilledSlots(TArray<const FWeaponCaseSlot*>& OutSlots) const;
-
-	/** World transform of a slot's seat: Offset applied on top of the socket (or the case mesh). */
-	FTransform GetSlotWorldTransform(const FWeaponCaseSlot& Slot) const;
+	/** De-duplicated resolution of FilledSlots against slot components, warning on unknowns. */
+	void ResolveFilledSlots(TArray<UWeaponCaseSlotComponent*>& OutSlots) const;
 
 	/** Applies bIgnoreInteractionTrace + the CoverGen opt-out. Runs from OnConstruction rather
 	 *  than the constructor: a BP subclass's property defaults aren't loaded onto the CDO yet. */
 	void ApplyCaseMeshCollision();
 
-	void ClearPreviewComponents();
-	void BuildPreviewComponents();
 	void SpawnSlotItems();
 
-	/** Attaches a spawned pickup to its cutout. No-op until the item has a root component. */
-	void SeatItemInSlot(AActor& Item, const FWeaponCaseSlot& Slot);
+	/** Attaches a spawned pickup to its slot component. No-op until the item has a root. */
+	void SeatItemInSlot(AActor& Item, UWeaponCaseSlotComponent& SlotComp);
 };

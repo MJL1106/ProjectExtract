@@ -10,6 +10,7 @@
 #include "Net/UnrealNetwork.h"
 #include "TimerManager.h"
 #include "UObject/Class.h"
+#include "UI/LootMarkerComponent.h"
 #include "World/InteractionEventSubsystem.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogLootContainer, Log, All);
@@ -42,6 +43,10 @@ ALootContainer::ALootContainer()
 	Billboard->bIsScreenSizeScaled = true;
 	Billboard->SetHiddenInGame(true);
 #endif
+
+	LootMarker = CreateDefaultSubobject<ULootMarkerComponent>(TEXT("LootMarker"));
+	LootMarker->SetupAttachment(InteractVolume);
+	LootMarker->MarkerWorldZOffset = 60.f;
 }
 
 void ALootContainer::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -118,6 +123,11 @@ void ALootContainer::Loot_Implementation(AActor* Looter)
 	if (UInteractionEventSubsystem* Events = GetWorld() ? GetWorld()->GetSubsystem<UInteractionEventSubsystem>() : nullptr)
 		Events->NotifyWorldInteract(this, Looter);
 
+	if (IsValid(LootMarker))
+	{
+		LootMarker->RefreshMarkerNow();
+	}
+
 	UE_LOG(LogLootContainer, Log, TEXT("%s: looted by %s (%d grants)"),
 		*GetName(), *GetNameSafe(Looter), Contents.Num());
 }
@@ -130,6 +140,11 @@ void ALootContainer::MarkLootedForCheckpoint()
 	// No ForceNetUpdate here, unlike the live loot path: this runs at level load with nobody
 	// standing in the volume looking at a prompt, so there is nothing to push early to.
 	bLooted = true;
+
+	if (IsValid(LootMarker))
+	{
+		LootMarker->RefreshMarkerNow();
+	}
 
 	UWorld* World = GetWorld();
 

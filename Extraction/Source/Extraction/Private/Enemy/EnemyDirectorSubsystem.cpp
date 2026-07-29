@@ -51,6 +51,7 @@ void UEnemyDirectorSubsystem::Deinitialize()
 	WaveMembers.Empty();
 	PunishmentSource.Reset();
 	PunishmentConfig = nullptr;
+	bAmbientSpawningEnabled = true;
 
 	Super::Deinitialize();
 }
@@ -193,6 +194,18 @@ void UEnemyDirectorSubsystem::SetMissionPhase(EMissionPhase NewPhase)
 
 	UE_LOG(LogEnemyAI, Log, TEXT("Mission phase: %d -> %d"), static_cast<int32>(OldPhase), static_cast<int32>(NewPhase));
 	OnMissionPhaseChanged.Broadcast(OldPhase, NewPhase);
+}
+
+// ============================================================
+// v2: Ambient Spawning Control
+// ============================================================
+
+void UEnemyDirectorSubsystem::SetAmbientSpawningEnabled(bool bEnabled)
+{
+	if (bAmbientSpawningEnabled == bEnabled) return;
+
+	bAmbientSpawningEnabled = bEnabled;
+	UE_LOG(LogEnemyAI, Log, TEXT("Director ambient spawning %s"), bEnabled ? TEXT("enabled") : TEXT("disabled"));
 }
 
 // ============================================================
@@ -365,26 +378,57 @@ void UEnemyDirectorSubsystem::DirectorTick()
 
 		if (!bWaveBlocksSpawn && ShouldSpawn(Sweep.AliveCount))
 		{
-			TArray<AEnemyCharacter*> Spawned;
-			const bool bSpawned = TrySpawn(Sweep.AliveCount, &Spawned);
+			const bool bIsWave = WaveProgress.IsActive();
+			const FMissionPhaseConfig& PhaseConfig = GetCurrentPhaseConfig();
+			const int32 ZoneCount = (!bIsWave && PhaseConfig.ConcurrentSpawnZones > 1)
+				? PhaseConfig.ConcurrentSpawnZones : 1;
 
-			if (WaveProgress.IsActive())
+			TSet<AEnemySpawnZone*> UsedZones;
+			int32 RunningAlive = Sweep.AliveCount;
+
+			for (int32 ZoneIdx = 0; ZoneIdx < ZoneCount; ++ZoneIdx)
 			{
+				// MaxAlive gate for additional squads only — iteration 0's cap is ShouldSpawn's
+				// job and already waives the cap for guaranteed wave squads (see FindGuaranteedSquadForNext).
+				if (ZoneIdx > 0 && RunningAlive >= PhaseConfig.MaxAlive) break;
+
+				TArray<AEnemyCharacter*> Spawned;
+				AEnemySpawnZone* PickedZone = nullptr;
+				const TSet<AEnemySpawnZone*>* Exclusion = UsedZones.Num() > 0 ? &UsedZones : nullptr;
+				const bool bSpawned = TrySpawn(RunningAlive, &Spawned, Exclusion, &PickedZone);
+
 				if (bSpawned)
 				{
-					WaveProgress.RecordSuccessfulSquad(Spawned.Num());
-					for (AEnemyCharacter* Member : Spawned)
-					{
-						if (IsValid(Member)) WaveMembers.Add(Member);
-					}
-					WaveBlockedTime = 0.f;
-					OnDirectorWaveProgress.Broadcast(ActiveWaveRequest.WaveId,
-						WaveProgress.SpawnedSquads, WaveProgress.RemainingMembers);
+					RunningAlive += Spawned.Num();
+
+					// Track the zone just used so the next iteration picks a different one.
+					if (IsValid(PickedZone))
+						UsedZones.Add(PickedZone);
 				}
-				else
+
+				if (bIsWave)
 				{
-					AccrueWaveBlockedTime();
+					if (bSpawned)
+					{
+						WaveProgress.RecordSuccessfulSquad(Spawned.Num());
+						for (AEnemyCharacter* Member : Spawned)
+						{
+							if (IsValid(Member)) WaveMembers.Add(Member);
+						}
+						WaveBlockedTime = 0.f;
+						OnDirectorWaveProgress.Broadcast(ActiveWaveRequest.WaveId,
+							WaveProgress.SpawnedSquads, WaveProgress.RemainingMembers);
+					}
+					else
+					{
+						AccrueWaveBlockedTime();
+					}
+					// Waves always field one squad per beat — break after the first attempt.
+					break;
 				}
+
+				// Ambient: if this iteration failed to find a zone, no point retrying.
+				if (!bSpawned) break;
 			}
 		}
 	}
@@ -597,9 +641,15 @@ bool UEnemyDirectorSubsystem::ShouldSpawn(int32 AliveCount) const
 	if (bWaveActive && !bWaveCanSpawn) return false;
 	if (!bWaveActive)
 	{
+		if (!bAmbientSpawningEnabled) return false;
 		if (AlertLevel != EGlobalAlertLevel::Loud) return false;
-		if (DirectorState != EDirectorState::Build) return false;
-		if (Tension >= PhaseConfig.IntensityCeiling) return false;
+		// Sustained-pressure phases bypass the sawtooth: no Peak/Relief pauses, no tension ceiling.
+		// Cadence and MaxAlive still gate below.
+		if (!PhaseConfig.bSustainedPressure)
+		{
+			if (DirectorState != EDirectorState::Build) return false;
+			if (Tension >= PhaseConfig.IntensityCeiling) return false;
+		}
 	}
 
 	// The wave's FIRST squad gets its own delay. StartWave zeroes TimeSinceLastSpawn, so the cadence
@@ -621,7 +671,8 @@ bool UEnemyDirectorSubsystem::ShouldSpawn(int32 AliveCount) const
 	return true;
 }
 
-bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*>* OutSpawned)
+bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*>* OutSpawned,
+	const TSet<AEnemySpawnZone*>* ExcludedZones, AEnemySpawnZone** OutUsedZone)
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_TrySpawn);
 
@@ -652,10 +703,12 @@ bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*
 	FRotator ViewRot;
 	PC->GetPlayerViewPoint(ViewLoc, ViewRot);
 
-	AEnemySpawnZone* Zone = PickSpawnZone(PlayerPawn->GetActorLocation(), ViewLoc, ViewRot, GetCompositionSize(Composition));
+	AEnemySpawnZone* Zone = PickSpawnZone(PlayerPawn->GetActorLocation(), ViewLoc, ViewRot, GetCompositionSize(Composition), ExcludedZones);
 	if (!IsValid(Zone))
 	{
-		if (!bLoggedNoZone)
+		// Suppress the warning for secondary picks in a multi-zone beat — running out of
+		// distinct zones is a legitimate outcome, not a fault.
+		if (!bLoggedNoZone && !ExcludedZones)
 		{
 			UE_LOG(LogEnemyAI, Warning, TEXT("Director: no eligible spawn zone (phase %d, %d zones registered, wave=%s) — %s"),
 				static_cast<int32>(GetEffectivePhase()), SpawnZones.Num(),
@@ -666,8 +719,14 @@ bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*
 		return false;
 	}
 
-	ConsecutiveZonePicks = (Zone == LastPickedZone.Get()) ? ConsecutiveZonePicks + 1 : 1;
-	LastPickedZone = Zone;
+	// Beat-to-beat repeat-zone penalty: only update for the primary pick (no exclusion
+	// set). Secondary picks differ by construction; letting them touch the counter would
+	// reset it to 1 every beat and kill the penalty.
+	if (!ExcludedZones)
+	{
+		ConsecutiveZonePicks = (Zone == LastPickedZone.Get()) ? ConsecutiveZonePicks + 1 : 1;
+		LastPickedZone = Zone;
+	}
 
 	TArray<AEnemyCharacter*> Spawned;
 	SpawnSquadAtZone(Composition, Zone, Spawned);
@@ -679,6 +738,7 @@ bool UEnemyDirectorSubsystem::TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*
 	bLoggedNoZone = false;
 
 	if (OutSpawned) *OutSpawned = MoveTemp(Spawned);
+	if (OutUsedZone) *OutUsedZone = Zone;
 
 	return true;
 }
@@ -772,7 +832,8 @@ bool UEnemyDirectorSubsystem::PickComposition(const FMissionPhaseConfig& PhaseCo
 	return false;
 }
 
-AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize) const
+AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize,
+	const TSet<AEnemySpawnZone*>* ExcludedZones) const
 {
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return nullptr;
@@ -785,7 +846,6 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 		DistMin = Effective->SpawnDistanceMin;
 		DistMax = Effective->SpawnDistanceMax;
 	}
-
 	const FVector ViewDir = ViewRot.Vector();
 
 	FCollisionQueryParams QueryParams;
@@ -827,16 +887,17 @@ AEnemySpawnZone* UEnemyDirectorSubsystem::PickSpawnZone(const FVector& PlayerLoc
 		AEnemySpawnZone* Zone = WeakZone.Get();
 		if (!IsValid(Zone)) continue;
 		++LastZoneRejects.Considered;
+		if (ExcludedZones && ExcludedZones->Contains(Zone)) continue;
 		if (!Zone->IsActiveForPhase(GetEffectivePhase())) { ++LastZoneRejects.Phase; continue; }
 		if (bWaveActive && !Zone->bWaveEligible) { ++LastZoneRejects.WaveIneligible; continue; }
 
 		const FVector ZoneLoc = Zone->GetZoneOrigin();
 		if (bUseScopeVolumes && !IsPointInsideAnyScope(ZoneLoc)) { ++LastZoneRejects.OutsideScope; continue; }
 
-		if (FVector::DistSquared(PlayerLoc, Zone->GetClosestPointInZone(PlayerLoc)) < DistMin * DistMin) { ++LastZoneRejects.TooClose; continue; }
+		if (IsZoneTooClose(Zone, PlayerLoc)) { ++LastZoneRejects.TooClose; continue; }
 		if (FVector::DistSquared(PlayerLoc, ZoneLoc) > DistMax * DistMax) { ++LastZoneRejects.TooFar; continue; }
 
-		if (!bWaveSightlineWaived && !IsZoneHiddenFromPlayer(Zone, FMath::Max(MinSightlineSamples, SquadSize), ViewLoc, ViewDir, QueryParams, NavSys)) { ++LastZoneRejects.Visible; continue; }
+		if (!bWaveSightlineWaived && !IsZoneHiddenFromPlayer(Zone, FMath::Max(MinSightlineSamples, SquadSize), SquadSize, ViewLoc, ViewDir, QueryParams, NavSys)) { ++LastZoneRejects.Visible; continue; }
 
 		if (IsValid(NavSys))
 		{
@@ -876,7 +937,38 @@ FString UEnemyDirectorSubsystem::FZoneRejectCounts::ToString() const
 		Considered, Phase, WaveIneligible, OutsideScope, TooClose, TooFar, Visible, OffNavMesh);
 }
 
-bool UEnemyDirectorSubsystem::IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const
+bool UEnemyDirectorSubsystem::IsZoneTooClose(const AEnemySpawnZone* Zone, const FVector& PlayerLoc) const
+{
+	float DistMin = DefaultSpawnDistMin;
+	float StoreySep = DefaultStoreySeparationHeight;
+	float DistMinOtherStorey = DefaultSpawnDistMinDifferentStorey;
+
+	const UDirectorConfigData* Cfg = GetEffectiveConfig();
+	if (IsValid(Cfg))
+	{
+		DistMin = Cfg->SpawnDistanceMin;
+		StoreySep = Cfg->StoreySeparationHeight;
+		DistMinOtherStorey = Cfg->SpawnDistanceMinDifferentStorey;
+	}
+
+	const FVector ClosestPt = Zone->GetClosestPointInZone(PlayerLoc);
+	const float VerticalSep = FMath::Abs(ClosestPt.Z - PlayerLoc.Z);
+
+	// The storey relaxation is only defensible while the sightline gate (IsZoneHiddenFromPlayer)
+	// is actually running -- it independently rejects zones the player can see through stairwells
+	// or over mezzanine rails. When bWaveSightlineWaived is set, that gate is skipped, so the
+	// distance gate is the last line of defence against visible pop-in and must stay strict.
+	if (!bWaveSightlineWaived && VerticalSep >= StoreySep)
+	{
+		const float HorizDistSq = FVector::DistSquared2D(ClosestPt, PlayerLoc);
+		return HorizDistSq < DistMinOtherStorey * DistMinOtherStorey;
+	}
+
+	// Same floor (or sightline waived): full 3D distance against the standard minimum.
+	return FVector::DistSquared(PlayerLoc, ClosestPt) < DistMin * DistMin;
+}
+
+bool UEnemyDirectorSubsystem::IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, int32 SquadSize, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const
 {
 	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Director_ZoneVisibility);
 
@@ -894,7 +986,7 @@ bool UEnemyDirectorSubsystem::IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone
 
 	for (int32 Si = 0; Si < SampleCount; ++Si)
 	{
-		FVector Pt = Zone->GetSpawnTransform(Si).GetLocation();
+		FVector Pt = Zone->GetSpawnTransform(Si, SquadSize).GetLocation();
 
 		if (IsValid(NavSys))
 		{
@@ -975,9 +1067,9 @@ bool UEnemyDirectorSubsystem::IsPointInPlayerSightline(const FVector& Point, con
 	return !bBlocked;
 }
 
-AEnemyCharacter* UEnemyDirectorSubsystem::SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index)
+AEnemyCharacter* UEnemyDirectorSubsystem::SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index, int32 SquadSize)
 {
-	FTransform SpawnTransform = Zone->GetSpawnTransform(Index);
+	FTransform SpawnTransform = Zone->GetSpawnTransform(Index, SquadSize);
 	FVector SpawnLoc = SpawnTransform.GetLocation();
 
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
@@ -1061,7 +1153,7 @@ void UEnemyDirectorSubsystem::SpawnSquadAtZone(const FSquadComposition& Composit
 
 		for (int32 i = 0; i < Entry.Count; ++i)
 		{
-			AEnemyCharacter* Spawned = SpawnEntryAtZone(World, Entry.EnemyClass, Zone, SpawnIndex);
+			AEnemyCharacter* Spawned = SpawnEntryAtZone(World, Entry.EnemyClass, Zone, SpawnIndex, ExpectedSize);
 			if (IsValid(Spawned)) OutSpawned.Add(Spawned);
 			++SpawnIndex;
 		}
@@ -1090,7 +1182,11 @@ void UEnemyDirectorSubsystem::SeedSquadWithFight(UEnemySquad* Squad) const
 	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
 	if (!IsValid(PlayerPawn)) return;
 
-	if (WaveProgress.IsActive() && ActiveWaveRequest.bAutoEngage)
+	const bool bWaveAutoEngage = WaveProgress.IsActive() && ActiveWaveRequest.bAutoEngage;
+	// Sustained pressure is an ambient concept; the wave request's own bAutoEngage governs waves.
+	const bool bSustainedPressure = !WaveProgress.IsActive() && GetCurrentPhaseConfig().bSustainedPressure;
+
+	if (bWaveAutoEngage || bSustainedPressure)
 	{
 		Squad->ForceEngage(PlayerPawn, PlayerPawn->GetActorLocation());
 		return;
@@ -1115,6 +1211,13 @@ EMissionPhase UEnemyDirectorSubsystem::GetEffectivePhase() const
 	return FDirectorProfileSelector::SelectPhase(
 		WaveProgress.IsActive(), ActiveWaveRequest.MissionPhase,
 		PunishmentSource.IsValid(), PunishmentPhase, CurrentMissionPhase);
+}
+
+bool UEnemyDirectorSubsystem::IsSustainedPressureActive() const
+{
+	// Sustained pressure is an ambient concept — waves use bAutoEngage, not this flag.
+	if (WaveProgress.IsActive()) return false;
+	return GetCurrentPhaseConfig().bSustainedPressure;
 }
 
 // ============================================================
@@ -1272,8 +1375,9 @@ void UEnemyDirectorSubsystem::AccrueWaveBlockedTime()
 	}
 
 	// Sightline relief: once blocked for twice the warning period, waive the IsZoneHiddenFromPlayer
-	// gate so the wave can make progress via a visible spawn zone. All other filters (distance,
-	// scope, nav, phase, wave-eligible) remain enforced.
+	// gate so the wave can make progress via a visible spawn zone. All other filters (scope, nav,
+	// phase, wave-eligible) remain enforced; the storey-distance relaxation reverts to the strict
+	// same-floor 3D minimum so enemies cannot pop in over a mezzanine rail without occlusion cover.
 	if (!bWaveSightlineWaived && WaveBlockedTime >= ActiveWaveRequest.BlockedWarningSeconds * 2.f)
 	{
 		bWaveSightlineWaived = true;

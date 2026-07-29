@@ -2,6 +2,8 @@
 
 #include "CompanionCharacter.h"
 
+#include "AIController.h"  // EAIFocusPriority / GetFocalPointForPriority — strafe clamp focus test
+#include "AITypes.h"       // FAISystem::IsValidLocation — same
 #include "AI/AITargetingStatics.h"
 #include "Animation/AnimMontage.h"
 #include "AI/CompanionDiag.h"
@@ -202,6 +204,15 @@ void ACompanionCharacter::PossessedBy(AController* NewController)
 	ApplyMovementSpeeds();
 }
 
+void ACompanionCharacter::UnPossessed()
+{
+	// No BT task can survive losing the controller -- release any speed override so the pawn
+	// is not pinned at a stale task speed if it is ever re-possessed.
+	ClearTaskSpeedOverride();
+
+	Super::UnPossessed();
+}
+
 ACompanionCharacter* ACompanionCharacter::GetPrimaryCompanion(UWorld* World)
 {
 	if (!World) return nullptr;
@@ -310,6 +321,10 @@ void ACompanionCharacter::BeginPlay()
 
 void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// No BT task survives EndPlay -- unconditionally release any speed override so it cannot
+	// persist into a respawn or a stale actor state.
+	ClearTaskSpeedOverride();
+
 	if (IsValid(TraversalComponent))
 	{
 		TraversalComponent->OnTraversalStarted.RemoveAll(this);
@@ -345,6 +360,20 @@ void ACompanionCharacter::Tick(float DeltaTime)
 
 	if (CurrentAimTarget.IsValid())
 		TimeAimingAtCurrentTarget += DeltaTime;
+
+	// Strafe clamp re-resolve, EDGE ONLY. ApplyMovementSpeeds is otherwise invoked solely on
+	// sprint / stance / stealth / catch-up-pace edges, so a Gameplay focus appearing or vanishing
+	// under it would leave MaxWalkSpeed resolved against the old answer -- a companion that acquires
+	// a focus mid-jog keeps running the forward-only sprint clip at 550, and one that drops its focus
+	// keeps crawling at the strafe cap. Deliberately NOT a per-frame re-resolve. Any task that owns
+	// MaxWalkSpeed does so via SetTaskSpeedOverride (ApplyMovementSpeeds skips overridden channels),
+	// so the edge test here cannot fight active task speeds.
+	const bool bStrafingNow = IsStrafingForFocus();
+	if (bStrafingNow != bLastStrafingForFocus)
+	{
+		bLastStrafingForFocus = bStrafingNow;
+		ApplyMovementSpeeds();
+	}
 
 	TickPlayerSoftSeparation();
 	TickAllySoftSeparation();
@@ -480,6 +509,29 @@ void ACompanionCharacter::StampConfirmedKill()
 {
 	if (GetWorld())
 		LastConfirmedKillTime = GetWorld()->GetTimeSeconds();
+}
+
+// Params are NOT named WalkSpeed/CrouchedWalkSpeed: those are member fallbacks on this class and
+// shadowing them trips C4458, which this module escalates to an error.
+void ACompanionCharacter::SetTaskSpeedOverride(float InWalkSpeed, float InCrouchedSpeed)
+{
+	TaskSpeedOverrideWalk = InWalkSpeed;
+	TaskSpeedOverrideCrouched = InCrouchedSpeed;
+
+	// Apply the overridden values to the CMC immediately so the task's authored pace takes effect
+	// on the same frame it was set, not the next Tick edge.
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!MoveComp) return;
+	if (InWalkSpeed > 0.f)
+		MoveComp->MaxWalkSpeed = InWalkSpeed;
+	if (InCrouchedSpeed > 0.f)
+		MoveComp->MaxWalkSpeedCrouched = InCrouchedSpeed;
+}
+
+void ACompanionCharacter::ClearTaskSpeedOverride()
+{
+	TaskSpeedOverrideWalk = 0.f;
+	TaskSpeedOverrideCrouched = 0.f;
 }
 
 void ACompanionCharacter::SetFollowCatchupPace(bool bPace)
@@ -707,18 +759,27 @@ void ACompanionCharacter::TryLinkModeWidget()
 		World->GetTimerManager().SetTimer(ModeWidgetLinkTimerHandle, this, &ACompanionCharacter::TryLinkModeWidget, 0.25f, false);
 }
 
+bool ACompanionCharacter::IsStanceOwnedElsewhere() const
+{
+	// Single definition of the stance-ownership set, shared by ApplyStealthMovementClamps and the BT
+	// service's stance backstop. Two hand-written copies of this list is exactly how one of them ends
+	// up popping a crouch the other was protecting: takedowns own the crouch-approach and the authored
+	// knife pose, traversal resizes the capsule mid-vault, route legs set their own stances, and a
+	// downed companion's stance belongs to the DBNO pose.
+	if (bIsDBNO || bTakedownArmed || bTakedownExecuting || bTakedownMontagePlaying) return true;
+	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy()) return true;
+
+	const AAIController* AIC = Cast<AAIController>(GetController());
+	const UBlackboardComponent* BB = AIC ? AIC->GetBlackboardComponent() : nullptr;
+	return BB && BB->GetValueAsBool(ACompanionAIController::BB_RouteActive);
+}
+
 void ACompanionCharacter::ApplyStealthMovementClamps()
 {
 	// Stance enforcement yields to systems that own stance/aim right now (mirrors the BT service's
-	// enforcement-yield set): takedowns own the crouch-approach and the authored knife pose,
-	// traversal resizes the capsule mid-vault, route legs set their own stances. A stealth break /
-	// mode keypress landing mid-vault must not Crouch/UnCrouch under them. Speeds always apply.
-	bool bStanceOwnedElsewhere = bIsDBNO || bTakedownArmed || bTakedownExecuting || bTakedownMontagePlaying
-		|| (IsValid(TraversalComponent) && TraversalComponent->IsBusy());
-	if (!bStanceOwnedElsewhere)
-		if (const AAIController* AIC = Cast<AAIController>(GetController()))
-			if (const UBlackboardComponent* BB = AIC->GetBlackboardComponent())
-				bStanceOwnedElsewhere = BB->GetValueAsBool(ACompanionAIController::BB_RouteActive);
+	// enforcement-yield set). A stealth break / mode keypress landing mid-vault must not Crouch/
+	// UnCrouch under them. Speeds always apply.
+	const bool bStanceOwnedElsewhere = IsStanceOwnedElsewhere();
 
 	if (!bStanceOwnedElsewhere)
 	{
@@ -959,15 +1020,71 @@ float ACompanionCharacter::TunedCrouchedWalkSpeed() const
 	return T ? T->CrouchedWalkSpeed : CrouchedWalkSpeed;
 }
 
+float ACompanionCharacter::GetStrafeMaxSpeed() const
+{
+	const UCompanionTuningDataAsset* T = GetTuning();
+	return T ? T->StrafeMaxSpeed : StrafeMaxSpeed;
+}
+
+bool ACompanionCharacter::IsStrafingForFocus() const
+{
+	// Travelling and strafing are mutually exclusive by policy. Travelling = sprinting OR closing a
+	// follow gap (bFollowCatchupPace). A travelling companion faces where it is going at full speed;
+	// a strafing companion holds its gameplay focal at the capped speed. Never both.
+	//
+	// bFollowCatchupPace is the explicit follow-gap signal set by BTTask_FollowPlayer. Without it
+	// the strafe clamp (275) would apply while the companion closes a gap at 550-650, starving it
+	// below the player's walk speed (410) and creating an oscillation at the sprint threshold.
+	// Every non-combat facing tier in BTService_UpdateCompanionState releases its focal under the
+	// same widened condition (IsTravellingToClose) so the body actually faces travel, not sideways
+	// at the capped speed in a forward-sprint clip.
+	if (bIsSprinting) return false;
+	if (bFollowCatchupPace) return false;
+
+	const AAIController* AIC = Cast<AAIController>(GetController());
+	if (!AIC) return false;
+
+	// Gameplay priority only. The Move-priority focal is path-following's own "look where you are
+	// going" point, which is travel-facing by definition and must never trip the clamp. Mirrors how
+	// UCompanionAnimInstance derives bFocusLive.
+	return FAISystem::IsValidLocation(AIC->GetFocalPointForPriority(EAIFocusPriority::Gameplay));
+}
+
 void ACompanionCharacter::ApplyMovementSpeeds()
 {
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
 	if (!MoveComp) return;
 
-	MoveComp->MaxWalkSpeed = bIsSprinting
-		? (bFollowCatchupPace ? TunedFollowCatchupSprintSpeed() : TunedSprintSpeed())
-		: TunedWalkSpeed();
-	MoveComp->MaxWalkSpeedCrouched = TunedCrouchedWalkSpeed();
+	// Task speed override contract: a BT task that has called SetTaskSpeedOverride owns the
+	// overridden channels. Positive = overridden (skip), zero/negative = normal control. Each
+	// channel is independent so e.g. the combat task can override walk while leaving crouched
+	// under normal control, and the route task can override whichever channel its stance needs.
+	const bool bWalkOverridden = TaskSpeedOverrideWalk > 0.f;
+	const bool bCrouchOverridden = TaskSpeedOverrideCrouched > 0.f;
+
+	if (!bWalkOverridden)
+	{
+		float Resolved = bIsSprinting
+			? (bFollowCatchupPace ? TunedFollowCatchupSprintSpeed() : TunedSprintSpeed())
+			: TunedWalkSpeed();
+
+		// Strafe cap. Clamp, never raise: the tiers above are still the ceiling, this only lowers
+		// them. A focus-held body faces the focus while the feet travel sideways, and the locomotion
+		// blendspace only carries a full directional sample set up to its 275 row -- above that the
+		// legs blend into a forward-only sprint clip and the companion visibly runs forwards while
+		// side-stepping.
+		if (IsStrafingForFocus())
+			Resolved = FMath::Min(Resolved, GetStrafeMaxSpeed());
+
+		MoveComp->MaxWalkSpeed = Resolved;
+	}
+
+	if (!bCrouchOverridden)
+	{
+		// MaxWalkSpeedCrouched is deliberately NOT strafe-clamped: the crouch blendspace's top row
+		// is fully directional, so an over-speed crouch foot-slides rather than facing the wrong way.
+		MoveComp->MaxWalkSpeedCrouched = TunedCrouchedWalkSpeed();
+	}
 }
 
 // --- Soft Collision (F2 asymmetric blocking — companion self-push) ---
@@ -1280,6 +1397,10 @@ void ACompanionCharacter::EnterDBNO()
 		SetIsRevivingPlayer(false);
 	}
 
+	// No live task can survive DBNO entry -- clear any active override so it can never latch past
+	// the revive (the revived companion would be pinned at a stale task speed forever).
+	ClearTaskSpeedOverride();
+
 	if (UCharacterMovementComponent* Movement = GetCharacterMovement())
 	{
 		Movement->StopMovementImmediately();
@@ -1532,7 +1653,10 @@ void ACompanionCharacter::HandleRevive()
 		Movement->bOrientRotationToMovement = false;
 	}
 
-	// Undo the DBNO crawl clamp — re-derive walk/crouch speeds from the tuning asset.
+	// Undo the DBNO crawl clamp — clear any stale override (EnterDBNO already clears it, but a
+	// task that started between DBNO and revive could theoretically set one) then re-derive
+	// walk/crouch speeds from the tuning asset.
+	ClearTaskSpeedOverride();
 	ApplyMovementSpeeds();
 }
 

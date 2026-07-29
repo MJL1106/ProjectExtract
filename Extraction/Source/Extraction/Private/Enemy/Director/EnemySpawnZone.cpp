@@ -5,7 +5,18 @@
 #include "Components/BoxComponent.h"
 #include "Components/BillboardComponent.h"
 
+/** Golden angle (degrees) for sunflower-spiral point distribution. Produces the most uniform
+ *  angular spread for any number of samples. */
 static constexpr float GoldenAngle = 137.508f;
+
+/** Spawns should not ride the very edge of the box -- nav-projection tends to fail where the
+ *  floor polygon ends before the box does. 0.9 keeps points inside the practical walkable area. */
+static constexpr float MaxUsableRadiusFraction = 0.9f;
+
+/** Floor on the denominator used for the radius fraction. Prevents small squads (1-3 members)
+ *  from dividing by a tiny number and bunching indices at the box edge. 4 spreads a 3-member
+ *  squad across the usable area (indices land at radius fractions 0, 0.5, 0.71). */
+static constexpr int32 MinSpreadDenominator = 4;
 
 AEnemySpawnZone::AEnemySpawnZone()
 {
@@ -54,7 +65,7 @@ bool AEnemySpawnZone::IsActiveForPhase(EMissionPhase Phase) const
 	return ActivePhases.Contains(Phase);
 }
 
-FTransform AEnemySpawnZone::GetSpawnTransform(int32 Index) const
+FTransform AEnemySpawnZone::GetSpawnTransform(int32 Index, int32 SquadSize) const
 {
 	const FVector Extent = ZoneBox->GetScaledBoxExtent();
 	const FVector Origin = ZoneBox->GetComponentLocation();
@@ -66,9 +77,13 @@ FTransform AEnemySpawnZone::GetSpawnTransform(int32 Index) const
 		return FTransform(GetActorRotation(), Loc);
 	}
 
+	// Scale the radius fraction against SquadSize so a squad of N spreads across the full usable
+	// box. Both call sites pass a strictly positive size; the floor handles defensive callers.
+	const int32 Denominator = FMath::Max(SquadSize, MinSpreadDenominator);
+
 	const float AngleDeg = FMath::Fmod(static_cast<float>(Index) * GoldenAngle, 360.f);
-	const float RadiusFrac = FMath::Sqrt(static_cast<float>(Index) / 20.f);
-	const float ClampedFrac = FMath::Min(RadiusFrac, 0.9f);
+	const float RadiusFrac = FMath::Sqrt(static_cast<float>(Index) / static_cast<float>(Denominator));
+	const float ClampedFrac = FMath::Min(RadiusFrac, MaxUsableRadiusFraction);
 
 	const float Rad = FMath::DegreesToRadians(AngleDeg);
 	const float LocalX = FMath::Cos(Rad) * Extent.X * ClampedFrac;

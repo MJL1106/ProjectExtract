@@ -8,6 +8,7 @@
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
 #include "EnemyDirectorSubsystem.h"
+#include "Director/DirectorConfigData.h"
 #include "Squad/EnemySquadSubsystem.h"
 #include "Squad/EnemySquad.h"
 #include "BarkSubsystem.h"
@@ -29,6 +30,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "NavigationSystem.h"
 #include "EngineUtils.h" // TActorIterator — DBNO combat-handoff companion lookup
 #include "EnemyDebug.h"
 
@@ -599,7 +601,88 @@ void UEnemyAwarenessComponent::ForceEngage(AActor* Target)
 		return;
 	}
 
+	// Only arm the director seed when freshly entering combat — an already-fighting enemy
+	// (wave re-engagement rally) must not inherit the close-range quit or suppression bypass.
+	const bool bFreshSeed = (CurrentState != EEnemyAwarenessState::Combat);
+
 	EnterCombat(Target, /*bConfirmedVisual*/ false);
+	// EnterCombat unconditionally clears bDirectorSeeded; re-arm after if fresh.
+
+	bWasDirectorSpawned = true;
+
+	if (bFreshSeed && IsValid(ArchetypeData))
+	{
+		bDirectorSeeded = true;
+		DirectorSeedArrivalAccum = 0.f;
+
+		// Per-member approach dispersal: offset LastKnownLocation by a unique angle per
+		// squad member so the squad fans out during the approach instead of travelling as
+		// a column. The seed location captures the offset point for arrival detection.
+		FVector Offset = FVector::ZeroVector;
+		const AAIController* MyC = Cast<AAIController>(GetOwner());
+		const AEnemyCharacter* MyEnemy = MyC ? Cast<AEnemyCharacter>(MyC->GetPawn()) : nullptr;
+		if (IsValid(MyEnemy))
+		{
+			UEnemySquadSubsystem* SquadSS = SquadSubsystem.Get();
+			UEnemySquad* Squad = IsValid(SquadSS) ? SquadSS->GetSquadFor(MyEnemy) : nullptr;
+			if (IsValid(Squad))
+			{
+				// Dense living-member rank so dead entries don't collapse angles.
+				const TArray<TWeakObjectPtr<AEnemyCharacter>>& Members = Squad->GetMembers();
+				int32 LivingRank = 0;
+				int32 LivingTotal = 0;
+				for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
+				{
+					if (!M.IsValid()) continue;
+					UHealthComponent* HP = M->GetHealthComponent();
+					if (!IsValid(HP) || HP->IsDead()) continue;
+					if (M.Get() == MyEnemy) LivingRank = LivingTotal;
+					++LivingTotal;
+				}
+
+				if (LivingTotal > 1)
+				{
+					// Per-squad phase jitter so concurrent squads don't ring-overlap.
+					// Frac wraps [0,4.29e6] to [0,1) — without it float32 ULP absorbs
+					// the rank fraction and collapses most members onto one angle.
+					const float PhaseJitter = FMath::Frac(static_cast<float>(Squad->GetSquadId().IsNone()
+						? 0 : GetTypeHash(Squad->GetSquadId())) * 0.001f);
+					const float Angle = ((static_cast<float>(LivingRank) / LivingTotal) + PhaseJitter) * 2.f * UE_PI;
+					const float Radius = ArchetypeData->DirectorSeedSpreadRadius;
+					Offset = FVector(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius, 0.f);
+				}
+			}
+		}
+
+		// Nav-project the offset point; on failure retry at half radius rotated by pi
+		// before falling back to the un-offset location.
+		FVector OffsetTarget = LastKnownLocation + Offset;
+		if (!Offset.IsNearlyZero())
+		{
+			UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+			if (IsValid(NavSys))
+			{
+				FNavLocation NavLoc;
+				const FVector NavExtent(200.f, 200.f, 400.f);
+				if (NavSys->ProjectPointToNavigation(OffsetTarget, NavLoc, NavExtent))
+				{
+					OffsetTarget = NavLoc.Location;
+				}
+				else
+				{
+					const FVector Retry = LastKnownLocation - Offset * 0.5f;
+					if (NavSys->ProjectPointToNavigation(Retry, NavLoc, NavExtent))
+						OffsetTarget = NavLoc.Location;
+					else
+						OffsetTarget = LastKnownLocation;
+				}
+			}
+		}
+
+		LastKnownLocation = OffsetTarget;
+		WriteBBVectors();
+		DirectorSeedLocation = OffsetTarget;
+	}
 }
 
 // --- Shot-At Notification ---
@@ -757,9 +840,50 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 				TimeSpentSearching += UpdateInterval;
 				if (TimeSpentSearching >= ArchetypeData->SearchDuration)
 				{
-					ClearInvestigateBody();
-					SetCombatTarget(nullptr);
-					SetState(EEnemyAwarenessState::Unaware);
+					// Sustained-pressure re-target: ONLY director-spawned, non-isolated
+					// enemies whose search expires keep pressing. Hand-placed patrols,
+					// isolated encounters, and corpse investigators decay normally.
+					// Uses the effective config/phase via IsSustainedPressureActive
+					// (folds in wave exclusion + punishment overrides).
+					UEnemyDirectorSubsystem* Dir = Director.Get();
+					const bool bShouldRetarget = bWasDirectorSpawned
+						&& !IsOwnerIsolatedEncounter()
+						&& IsValid(Dir)
+						&& Dir->IsSustainedPressureActive();
+
+					if (bShouldRetarget)
+					{
+						UWorld* SWorld = GetWorld();
+						APawn* SPawn = IsValid(SWorld) ? UGameplayStatics::GetPlayerPawn(SWorld, 0) : nullptr;
+						const AAIController* LogC = Cast<AAIController>(GetOwner());
+						const APawn* LogP = LogC ? LogC->GetPawn() : nullptr;
+
+						// Distance cap: a cross-map reinforcement decays instead of
+						// trekking the whole level on a stale position.
+						const float MaxRetargetDist = IsValid(ArchetypeData) ? ArchetypeData->SightRadius * 2.f : 5000.f;
+						const bool bInRange = IsValid(SPawn) && IsValid(LogP)
+							&& FVector::Dist(LogP->GetActorLocation(), SPawn->GetActorLocation()) <= MaxRetargetDist;
+
+						if (bInRange)
+						{
+							SetInvestigateLocation(SPawn->GetActorLocation());
+							TimeSpentSearching = 0.f;
+							UE_LOG(LogEnemyAI, Log, TEXT("[AWARENESS] %s search expired under sustained pressure — re-targeting player"),
+								IsValid(LogP) ? *LogP->GetName() : TEXT("?"));
+						}
+						else
+						{
+							ClearInvestigateBody();
+							SetCombatTarget(nullptr);
+							SetState(EEnemyAwarenessState::Unaware);
+						}
+					}
+					else
+					{
+						ClearInvestigateBody();
+						SetCombatTarget(nullptr);
+						SetState(EEnemyAwarenessState::Unaware);
+					}
 				}
 			}
 		}
@@ -1005,6 +1129,10 @@ void UEnemyAwarenessComponent::UpdateCombat()
 			}
 
 			// 2) Recently damaged by any hostile
+			// Note: NotifyDamaged calls EnterCombat which unconditionally re-zeroes
+			// TimeSinceLOSLost and re-writes LastKnownLocation. No skip needed here —
+			// the re-seed happens at the EnterCombat site. Fixing that is out of scope
+			// (it affects every enemy in the game, not just director-spawned ones).
 			if (!bHoldContact)
 			{
 				const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
@@ -1012,8 +1140,11 @@ void UEnemyAwarenessComponent::UpdateCombat()
 					bHoldContact = true;
 			}
 
-			// 3) Currently suppressed
-			if (!bHoldContact)
+			// 3) Currently suppressed — director-seeded enemies that never gained real LOS
+			// skip this: near-miss suppression during a defend would zero TimeSinceLOSLost
+			// every tick and keep them in Combat indefinitely at the stale position.
+			// Geometric LOS (check 1 above) still holds — that's a real sighting.
+			if (!bHoldContact && !(bDirectorSeeded && !bHadLOS))
 			{
 				const AEnemyCharacter* MyEnemy = Cast<AEnemyCharacter>(MyPawn);
 				if (IsValid(MyEnemy))
@@ -1031,6 +1162,10 @@ void UEnemyAwarenessComponent::UpdateCombat()
 			// Only refresh last-known when we actually see the target (FOV LOS)
 			if (bHoldViaFOVLOS)
 			{
+				// Geometric LOS is the honest "we can see them" signal — clear the seed
+				// so normal combat behaviour takes over (even beyond SightRadius where
+				// perception never delivers a stimulus edge).
+				bDirectorSeeded = false;
 				LastKnownLocation = CombatTarget->GetActorLocation();
 				WriteBBVectors();
 				BroadcastSightingToSquad();
@@ -1039,6 +1174,32 @@ void UEnemyAwarenessComponent::UpdateCombat()
 		else
 		{
 			TimeSinceLOSLost += UpdateInterval;
+
+			// Director-seeded arrival: the enemy reached its per-member approach point and
+			// found nobody. Measure against DirectorSeedLocation (the offset point captured
+			// at ForceEngage), NOT LastKnownLocation (which is live-refreshed by
+			// EnterCombat / squad relay and would track the player). Require a brief grace
+			// so a momentary LOS break at close range doesn't read as "arrived and nobody".
+			if (bDirectorSeeded && IsValid(MyPawn) && IsValid(ArchetypeData))
+			{
+				const float DistToSeed = FVector::Dist(MyPawn->GetActorLocation(), DirectorSeedLocation);
+				if (DistToSeed < ArchetypeData->DirectorSeedArrivalRadius)
+				{
+					DirectorSeedArrivalAccum += UpdateInterval;
+					if (DirectorSeedArrivalAccum >= ArchetypeData->DirectorSeedArrivalGrace)
+					{
+						UE_LOG(LogEnemyAI, Log, TEXT("[AWARENESS] %s director-seeded arrival (dist=%.0f, grace=%.1f) — searching"),
+							*MyPawn->GetName(), DistToSeed, DirectorSeedArrivalAccum);
+						TransitionToSearching(true);
+						return;
+					}
+				}
+				else
+				{
+					DirectorSeedArrivalAccum = 0.f;
+				}
+			}
+
 			// Log contact-hold evaluation while grace is counting (not while at 0 — avoids per-tick spam)
 			if (TimeSinceLOSLost > 0.f)
 			{
@@ -1228,6 +1389,10 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 	// and a DBNO COMPANION must keep flowing through (UpdateCombat's mirror owns that case).
 	if (IsValid(Target) && Target == FindDownedPlayerPawn(this)) return;
 
+	// Any non-ForceEngage entry clears the director seed by construction. ForceEngage
+	// re-arms it AFTER this call returns, so no conditional logic is needed here.
+	bDirectorSeeded = false;
+
 	if (CurrentState != EEnemyAwarenessState::Combat && GetDetectionLogLevel() > 0)
 	{
 		const AAIController* DbgC = Cast<AAIController>(GetOwner());
@@ -1281,9 +1446,82 @@ void UEnemyAwarenessComponent::TransitionToSearching(bool bContactLost)
 	if (const UWorld* World = GetWorld())
 		LastCombatExitWorldTime = World->GetTimeSeconds();
 
-	SetInvestigateLocation(LastKnownLocation);
+	// Search dispersal for director-seeded squads: spread members on a ring around the
+	// investigate point using a dense living-member rank. Nav-projected so an offset into
+	// a wall falls back to the raw location rather than failing pathfinding silently.
+	FVector SearchTarget = LastKnownLocation;
+	if (bDirectorSeeded && IsValid(MyPawn) && IsValid(ArchetypeData))
+	{
+		const AEnemyCharacter* MyEnemy = Cast<AEnemyCharacter>(MyPawn);
+		if (IsValid(MyEnemy))
+		{
+			UEnemySquadSubsystem* SquadSS = SquadSubsystem.Get();
+			UEnemySquad* Squad = IsValid(SquadSS) ? SquadSS->GetSquadFor(MyEnemy) : nullptr;
+			if (IsValid(Squad))
+			{
+				// Dense rank among living members — dead entries don't collapse angles.
+				const TArray<TWeakObjectPtr<AEnemyCharacter>>& Members = Squad->GetMembers();
+				int32 LivingRank = 0;
+				int32 LivingTotal = 0;
+				for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
+				{
+					if (!M.IsValid()) continue;
+					UHealthComponent* HP = M->GetHealthComponent();
+					if (!IsValid(HP) || HP->IsDead()) continue;
+					if (M.Get() == MyEnemy) LivingRank = LivingTotal;
+					++LivingTotal;
+				}
+
+				if (LivingTotal > 1)
+				{
+					const float PhaseJitter = FMath::Frac(static_cast<float>(Squad->GetSquadId().IsNone()
+						? 0 : GetTypeHash(Squad->GetSquadId())) * 0.001f);
+					// +0.5 rank offset so the search ring is rotated half a slot from
+					// the approach ring — the enemy searches a new bearing, not the
+					// corridor it just walked and cleared.
+					const float Angle = ((static_cast<float>(LivingRank) + 0.5f) / LivingTotal + PhaseJitter) * 2.f * UE_PI;
+					const float Radius = ArchetypeData->DirectorSeedSpreadRadius;
+					FVector Candidate = LastKnownLocation + FVector(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius, 0.f);
+
+					// Nav-project; on failure retry at half radius and rotated by pi
+					// before falling back to the un-offset location — thin navmesh at
+					// the full ring (doorways, balcony edges) would otherwise re-clump
+					// several members onto the centre.
+					UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
+					const FVector NavExtent(200.f, 200.f, 400.f);
+					bool bProjected = false;
+					if (IsValid(NavSys))
+					{
+						FNavLocation NavLoc;
+						if (NavSys->ProjectPointToNavigation(Candidate, NavLoc, NavExtent))
+						{
+							SearchTarget = NavLoc.Location;
+							bProjected = true;
+						}
+						else
+						{
+							// Retry: half radius, rotated pi
+							const FVector Retry = LastKnownLocation + FVector(
+								FMath::Cos(Angle + UE_PI) * Radius * 0.5f,
+								FMath::Sin(Angle + UE_PI) * Radius * 0.5f, 0.f);
+							if (NavSys->ProjectPointToNavigation(Retry, NavLoc, NavExtent))
+							{
+								SearchTarget = NavLoc.Location;
+								bProjected = true;
+							}
+						}
+					}
+					// If both projections failed (or no NavSys), SearchTarget stays
+					// at the un-offset LastKnownLocation — at least it is reachable.
+				}
+			}
+		}
+	}
+
+	SetInvestigateLocation(SearchTarget);
 	SetCombatTarget(nullptr);
 	TimeSpentSearching = 0.f;
+	bDirectorSeeded = false;
 	SetState(EEnemyAwarenessState::Searching);
 }
 

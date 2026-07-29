@@ -2222,7 +2222,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					const AWeaponBase* GrenWeapon = Enemy->GetCurrentWeapon();
 					const bool bGrenReloading = IsValid(GrenWeapon) && GrenWeapon->IsReloading();
 					const FVector GrenLastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
-					if (!bGrenReloading && GrenComp->CanThrow() && !GrenLastKnown.IsNearlyZero())
+					// A never-sighted ForceEngage'd enemy must not lob at a wall — parity
+					// with the blind-fire gate below.
+					if (!bGrenReloading && GrenComp->CanThrow() && !GrenLastKnown.IsNearlyZero()
+						&& Mem->bEverHadEffectiveLOS)
 						GrenComp->TryThrowAt(GrenLastKnown);
 				}
 			}
@@ -3032,8 +3035,11 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				const bool bHasCoverLob = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
 				const AWeaponBase* LobWeapon = Enemy->GetCurrentWeapon();
 				const bool bLobReloading = IsValid(LobWeapon) && LobWeapon->IsReloading();
+				// A never-sighted ForceEngage'd enemy must not lob at a stale position —
+				// parity with the hiding-lob and blind-fire gates.
 				if (bHasCoverLob && !bSuppressed && !bLobReloading && IsValid(Target)
-					&& LobComp->CanThrow() && DA->GrenadeCoverLobChance > 0.f)
+					&& LobComp->CanThrow() && DA->GrenadeCoverLobChance > 0.f
+					&& Mem->bEverHadEffectiveLOS)
 				{
 					const FCover LobCover = ReadCoverFromBB(BB);
 					const bool bCrouchOverTop = LobCover.IsValid()

@@ -26,6 +26,7 @@
 #include "World/DoorBase.h"
 #include "World/ExtractionTargetActor.h"
 #include "World/InteractionEventSubsystem.h"
+#include "World/InteractionVolume.h"
 #include "World/LevelCompletionLiftGate.h"
 #include "World/LootContainer.h"
 #include "World/ObjectiveChainWalker.h"
@@ -140,7 +141,9 @@ void AObjectiveStep::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		World->GetTimerManager().ClearTimer(WaveRetryHandle);
 		World->GetTimerManager().ClearTimer(CheckpointHealPollHandle);
 		World->GetTimerManager().ClearTimer(CheckpointSpawnRetryHandle);
+		World->GetTimerManager().ClearTimer(SquadTeleportRetryHandle);
 	}
+	StopDefendCountdown();
 	Deactivate();
 	Super::EndPlay(EndPlayReason);
 }
@@ -216,6 +219,15 @@ void AObjectiveStep::ActivateInternal(bool bResumeReplay)
 	// never re-broadcasts, so re-read the world rather than wait for an event that already fired.
 	EvaluateCondition();
 
+	// The countdown timer fires after its first interval, and the objective is not registered until
+	// UpdateMarker (210). Writing the clock label here — after both the marker registration and the
+	// late-entry re-read — so the HUD line shows "Label — M:SS" from the first frame rather than
+	// the bare Label for a full second. Placed after EvaluateCondition because a late-entry
+	// completion above would have already deactivated this beat (stopping the countdown), so a
+	// label write for a beat that is already done is harmless but pointless.
+	if (Condition == EObjectiveCondition::SurviveDuration && bActive)
+		UpdateDefendCountdownLabel();
+
 	// Never persistent. The player finishing this beat for real, minutes after the resume, is a live
 	// completion and runs every effect.
 	bCompletingUnderResume = false;
@@ -242,6 +254,11 @@ void AObjectiveStep::Deactivate()
 		World->GetTimerManager().ClearTimer(CheckpointHealPollHandle);
 	}
 	PendingWaveRequests.Reset();
+
+	// Dropped here rather than alongside the delegate unbinds below, because the unbind is skipped
+	// entirely for an already-inactive step — and a countdown that outlives its beat keeps rewriting
+	// an objective line that has already been removed from the HUD.
+	StopDefendCountdown();
 
 	if (!bActive) return;
 	bActive = false;
@@ -356,7 +373,8 @@ void AObjectiveStep::BindConditionDelegates()
 			|| TrackedInteractable->IsA<ALevelCompletionLiftGate>()
 			|| TrackedInteractable->IsA<AExtractionTargetActor>()
 			|| TrackedInteractable->IsA<AExtracteeCompanion>()
-			|| TrackedInteractable->IsA<AExtracteeCharacter>();
+			|| TrackedInteractable->IsA<AExtracteeCharacter>()
+			|| TrackedInteractable->IsA<AInteractionVolume>();
 		if (!bNativeRaiser)
 			UE_LOG(LogObjectiveStep, Warning,
 				TEXT("'%s' (step '%s'): TrackedInteractable '%s' is not one of the actors that raise "
@@ -391,6 +409,12 @@ void AObjectiveStep::BindConditionDelegates()
 			// idea why the objective will not tick.
 			Director->OnDirectorWaveBlocked.AddUniqueDynamic(this, &AObjectiveStep::HandleDirectorWaveBlocked);
 		}
+		break;
+
+	case EObjectiveCondition::SurviveDuration:
+		// The clock is this condition's "delegate" — armed on the same call every other condition
+		// binds on, and torn down on the same call every other condition unbinds on.
+		StartDefendCountdown();
 		break;
 
 	case EObjectiveCondition::ReachLocation:
@@ -440,6 +464,12 @@ void AObjectiveStep::UnbindConditionDelegates()
 		Director->OnDirectorWaveCompleted.RemoveDynamic(this, &AObjectiveStep::HandleDirectorWaveCompleted);
 		Director->OnDirectorWaveBlocked.RemoveDynamic(this, &AObjectiveStep::HandleDirectorWaveBlocked);
 	}
+
+	// The countdown is this condition's timer equivalent of every other condition's delegate — it
+	// belongs in the same teardown. Today Deactivate calls StopDefendCountdown separately above the
+	// !bActive guard, so this is redundant but future-proof: a caller that unbinds without
+	// deactivating must not leave a 1Hz writer running.
+	StopDefendCountdown();
 }
 
 void AObjectiveStep::EvaluateCondition()
@@ -480,11 +510,67 @@ bool AObjectiveStep::IsConditionSatisfied() const
 		// stage early depending on which path got there first.
 		return IsValid(TrackedExtractee) && !TrackedExtractee->IsCaptive() && TrackedExtractee->IsArmed();
 
-	// ReachLocation, RouteCompleted, Interacted, WaveCompleted and Manual have no queryable world
-	// state — their one-shot delegate (or an explicit CompleteStep) is the only way in.
+	// ReachLocation, RouteCompleted, Interacted, WaveCompleted, SurviveDuration and Manual have no
+	// queryable world state — their one-shot delegate or timer (or an explicit CompleteStep) is the
+	// only way in.
 	default:
 		return false;
 	}
+}
+
+void AObjectiveStep::StartDefendCountdown()
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// Clamped, not trusted: ClampMin only holds in the details panel, and a zero here would fire the
+	// completion on the next tick and hand the player the beat.
+	const float Duration = FMath::Max(DefendSeconds, DefendCountdownSeconds);
+	World->GetTimerManager().SetTimer(DefendTimerHandle, this,
+		&AObjectiveStep::HandleDefendElapsed, Duration, /*bLoop=*/false);
+	World->GetTimerManager().SetTimer(DefendCountdownHandle, this,
+		&AObjectiveStep::UpdateDefendCountdownLabel, DefendCountdownSeconds, /*bLoop=*/true);
+
+	UE_LOG(LogObjectiveStep, Log, TEXT("Step '%s': holding for %.0fs"),
+		*GetEffectiveStepId().ToString(), Duration);
+}
+
+void AObjectiveStep::StopDefendCountdown()
+{
+	const UWorld* World = GetWorld();
+	if (!World) return;
+
+	World->GetTimerManager().ClearTimer(DefendTimerHandle);
+	World->GetTimerManager().ClearTimer(DefendCountdownHandle);
+}
+
+void AObjectiveStep::UpdateDefendCountdownLabel()
+{
+	UObjectiveSubsystem* Objectives = GetObjectiveSubsystem();
+	const UWorld* World = GetWorld();
+	if (!Objectives || !World) return;
+
+	// Read back off the completion timer rather than tracked separately — one clock, so the number on
+	// the HUD is the number that ends the beat even after a pause or a time-dilation.
+	const float Remaining = FMath::Max(World->GetTimerManager().GetTimerRemaining(DefendTimerHandle), 0.f);
+	const int32 WholeSeconds = FMath::CeilToInt(Remaining);
+	const FText Clock = FText::FromString(FString::Printf(TEXT("%d:%02d"),
+		WholeSeconds / SecondsPerMinute, WholeSeconds % SecondsPerMinute));
+
+	// An unlabelled beat shows the bare clock. Prefixing "Objective" or similar would invent copy the
+	// designer never wrote.
+	Objectives->UpdateObjectiveLabel(GetEffectiveStepId(), Label.IsEmpty()
+		? Clock
+		: FText::Format(NSLOCTEXT("ObjectiveStep", "DefendCountdown", "{0} — {1}"), Label, Clock));
+}
+
+void AObjectiveStep::HandleDefendElapsed()
+{
+	// The countdown goes first: CompleteStep re-registers the HUD line under the next beat's id, and
+	// a surviving 1Hz writer would keep stamping this beat's clock over it.
+	StopDefendCountdown();
+	if (!bActive) return;
+	CompleteStep();
 }
 
 void AObjectiveStep::CaptureEnemySnapshot()
@@ -645,8 +731,9 @@ AActor* AObjectiveStep::ResolveMarkerTarget() const
 	case EObjectiveCondition::ExtracteeRescued:
 		return IsValid(TrackedExtractee) ? static_cast<AActor*>(TrackedExtractee.Get()) : nullptr;
 
-	// ReachLocation / AcquireKeycard / RouteCompleted / WaveCompleted / Manual carry no single
-	// actor worth pointing at — the step actor's own placed location is the marker.
+	// ReachLocation / AcquireKeycard / RouteCompleted / WaveCompleted / SurviveDuration / Manual carry
+	// no single actor worth pointing at — the step actor's own placed location is the marker. For a
+	// defend beat that is exactly right: the marker holds the ground, not a squadmate standing on it.
 	default:
 		return nullptr;
 	}
@@ -777,31 +864,82 @@ void AObjectiveStep::ApplySideEffect(const FObjectiveSideEffect& Effect, bool bR
 		break;
 
 	case EObjectiveSideEffectType::ActivateActor:
-		if (!IsValid(Effect.ActivateTarget))
+		ApplyActivateActor(Effect, bResumeReplay);
+		break;
+
+	case EObjectiveSideEffectType::TripAlarm:
+		// Ambient (non-wave) Director spawning is hard-gated on the alert being Loud, so a floor the
+		// player cleared quietly would answer a defend beat with an empty room. The ladder is a
+		// ratchet — this only ever forces it up, which is why it stays replayable on a resume.
+		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+			Director->TripAlarm();
+		break;
+
+	case EObjectiveSideEffectType::TeleportSquad:
+		TeleportSquad(Effect);
+		break;
+
+	case EObjectiveSideEffectType::SetDirectorSpawning:
+		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+			Director->SetAmbientSpawningEnabled(Effect.bDirectorSpawningEnabled);
+		break;
+
+	case EObjectiveSideEffectType::SetDoorsLocked:
+		for (const TObjectPtr<ADoorBase>& Door : Effect.DoorTargets)
 		{
-			Unset(TEXT("ActivateTarget"));
-			break;
+			if (!IsValid(Door)) continue;
+			if (Effect.bDoorsLocked && Door->IsOpenForAcoustics())
+			{
+				UE_LOG(LogObjectiveStep, Warning,
+					TEXT("'%s' (step '%s'): locking door %s that is already open — the lock prevents new opens but does not close the door"),
+					*GetName(), *GetEffectiveStepId().ToString(), *Door->GetName());
+			}
+			Door->SetExternalGateLocked(Effect.bDoorsLocked);
 		}
-		if (AExtractionTargetActor* ExtractionTarget = Cast<AExtractionTargetActor>(Effect.ActivateTarget.Get()))
-		{
-			// The step owns the HUD line under its own StepId — tell the target to keep its hands
-			// off the objective panel first, or the one beat reads as two.
-			ExtractionTarget->SetObjectiveManagedExternally(true);
-			ExtractionTarget->ActivateTarget();
-		}
-		else if (AObjectiveStep* Step = Cast<AObjectiveStep>(Effect.ActivateTarget.Get()))
-			// Hand the filter on. This is the one branch where a resume reaches a beat it is not
-			// itself replaying, and that beat's OnActivate effects are exactly as dangerous to repeat.
-			// ActivateInternal owns the other half — a target at or after the resume point drops the
-			// filter, and the resume point itself is held back for the post-teleport activation.
-			Step->ActivateInternal(bResumeReplay);
-		else
-			UE_LOG(LogObjectiveStep, Warning,
-				TEXT("'%s' (step '%s'): ActivateActor target '%s' is neither an extraction target nor an "
-					 "objective step — nothing to activate"),
-				*GetName(), *GetEffectiveStepId().ToString(), *GetNameSafe(Effect.ActivateTarget));
 		break;
 	}
+}
+
+void AObjectiveStep::ApplyActivateActor(const FObjectiveSideEffect& Effect, bool bResumeReplay)
+{
+	if (!IsValid(Effect.ActivateTarget))
+	{
+		UE_LOG(LogObjectiveStep, Warning, TEXT("'%s' (step '%s'): side effect ActivateTarget is unset — skipped"),
+			*GetName(), *GetEffectiveStepId().ToString());
+		return;
+	}
+
+	if (AExtractionTargetActor* ExtractionTarget = Cast<AExtractionTargetActor>(Effect.ActivateTarget.Get()))
+	{
+		// The step owns the HUD line under its own StepId — tell the target to keep its hands off
+		// the objective panel first, or the one beat reads as two.
+		ExtractionTarget->SetObjectiveManagedExternally(true);
+		ExtractionTarget->ActivateTarget();
+		return;
+	}
+
+	// The endgame shape: a hold-to-interact box that stays dark until the beat before it asks for it,
+	// so the player cannot call for extraction ahead of the mission.
+	if (AInteractionVolume* Volume = Cast<AInteractionVolume>(Effect.ActivateTarget.Get()))
+	{
+		Volume->SetInteractionEnabled(true);
+		return;
+	}
+
+	if (AObjectiveStep* Step = Cast<AObjectiveStep>(Effect.ActivateTarget.Get()))
+	{
+		// Hand the filter on. This is the one branch where a resume reaches a beat it is not itself
+		// replaying, and that beat's OnActivate effects are exactly as dangerous to repeat.
+		// ActivateInternal owns the other half — a target at or after the resume point drops the
+		// filter, and the resume point itself is held back for the post-teleport activation.
+		Step->ActivateInternal(bResumeReplay);
+		return;
+	}
+
+	UE_LOG(LogObjectiveStep, Warning,
+		TEXT("'%s' (step '%s'): ActivateActor target '%s' is not an extraction target, an interaction "
+			 "volume or an objective step — nothing to activate"),
+		*GetName(), *GetEffectiveStepId().ToString(), *GetNameSafe(Effect.ActivateTarget));
 }
 
 void AObjectiveStep::CommandCompanionRoute(ACompanionRoute* Route)
@@ -835,6 +973,178 @@ void AObjectiveStep::CommandCompanionRoute(ACompanionRoute* Route)
 	// The same one call a placed ACompanionRouteTrigger makes. StartRoute owns the empty-route
 	// refusal, the already-running guard and every blackboard write, so this stays a hand-off.
 	CompanionController->StartRoute(Route);
+}
+
+void AObjectiveStep::TeleportSquad(const FObjectiveSideEffect& Effect)
+{
+	if (!IsValid(Effect.PlayerDestination))
+	{
+		UE_LOG(LogObjectiveStep, Warning,
+			TEXT("'%s' (step '%s'): TeleportSquad has no PlayerDestination — the squad is not moved"),
+			*GetName(), *GetEffectiveStepId().ToString());
+		return;
+	}
+
+	// Companions FIRST, unconditionally. The player pawn may not exist yet (actor BeginPlay order
+	// vs player spawn is unspecified on a resume), but every possessed companion is already in the
+	// world and standing on a floor the mission is about to leave behind.
+	TArray<ACompanionCharacter*> Companions;
+	GatherSquadCompanions(Companions);
+
+	for (int32 Index = 0; Index < Companions.Num(); ++Index)
+	{
+		const AActor* Destination = Effect.CompanionDestinations.IsValidIndex(Index)
+			? Effect.CompanionDestinations[Index].Get() : nullptr;
+		if (!IsValid(Destination)) continue;
+		TeleportCompanionToDestination(Companions[Index], Destination);
+	}
+
+	const FVector PlayerLocation = Effect.PlayerDestination->GetActorLocation();
+	// Yaw only: a destination actor left pitched or rolled in the viewport would tip the camera.
+	const FRotator PlayerRotation(0.f, Effect.PlayerDestination->GetActorRotation().Yaw, 0.f);
+
+	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
+	if (!IsValid(PlayerPawn))
+	{
+		UE_LOG(LogObjectiveStep, Warning,
+			TEXT("'%s' (step '%s'): TeleportSquad has no player pawn — deferring player teleport"),
+			*GetName(), *GetEffectiveStepId().ToString());
+		DeferTeleportSquad(Effect);
+		return;
+	}
+
+	// TeleportTo reaches UCharacterMovementComponent::OnTeleported(), which saves the base
+	// location, sets bJustTeleported and corrects the movement mode when the destination has no
+	// walkable floor. SetActorLocationAndRotation skips all three, so a pawn still BASED ON THE
+	// LIFT would keep accumulating the old base's delta.
+	if (!PlayerPawn->TeleportTo(PlayerLocation, PlayerRotation))
+		PlayerPawn->TeleportTo(PlayerLocation, PlayerRotation, /*bIsATest=*/false, /*bNoCheck=*/true);
+	if (AController* PlayerController = PlayerPawn->GetController())
+		PlayerController->SetControlRotation(PlayerRotation);
+}
+
+void AObjectiveStep::GatherSquadCompanions(TArray<ACompanionCharacter*>& OutCompanions)
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// A captive extractee has no controller and sits at its staged spot — the checkpoint teleport at
+	// TryApplyCheckpointSpawn filters on the same criterion. A dead or DBNO companion is ragdolled;
+	// a direct location set leaves its physics body behind, so skipping it is the only safe path.
+	auto IsMoveable = [](const ACompanionCharacter* Companion)
+	{
+		if (!IsValid(Companion) || !Companion->GetController()) return false;
+		const UHealthComponent* Health = Companion->GetHealthComponent();
+		return IsValid(Health) && Health->IsAlive() && !Companion->GetIsCompanionDBNO();
+	};
+
+	TArray<ACompanionCharacter*> InLevel;
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
+		if (IsMoveable(*It)) InLevel.Add(*It);
+
+	OutCompanions.Reserve(InLevel.Num());
+
+	// Slot 0 is the primary, always. Actor iteration order is not the order the designer thinks
+	// in — pinning the primary is what makes a hand-authored destination list mean the same thing
+	// on every run.
+	ACompanionCharacter* Primary = ResolvePrimaryCompanion();
+	if (IsValid(Primary) && IsMoveable(Primary)) OutCompanions.Add(Primary);
+
+	for (ACompanionCharacter* Companion : InLevel)
+	{
+		if (Companion == Primary) continue;
+		OutCompanions.Add(Companion);
+	}
+}
+
+void AObjectiveStep::TeleportCompanionToDestination(ACompanionCharacter* Companion, const AActor* Destination) const
+{
+	if (!IsValid(Companion) || !IsValid(Destination)) return;
+
+	const FVector Location = Destination->GetActorLocation();
+	const FRotator Rotation(0.f, Destination->GetActorRotation().Yaw, 0.f);
+
+	// The controller's own teleport, the same call ATeleportVolume makes: it cancels a traversal in
+	// flight, drops the active move order and projects onto the navmesh. Moving the actor directly
+	// would leave the order standing and the companion would walk straight back to the old floor.
+	ACompanionAIController* CompanionController = Companion->GetController<ACompanionAIController>();
+	if (IsValid(CompanionController))
+		CompanionController->TeleportToLocation(Location, Rotation);
+
+	// TeleportToLocation returns true on a successful nav projection regardless of whether the
+	// underlying TeleportTo actually landed the pawn (encroachment). Verify arrival by position.
+	// Split horizontal and vertical: the controller snaps to the navmesh and TeleportTo's
+	// encroachment resolution lifts the capsule to resting contact, so a successful move settles
+	// ~88cm above a floor-level destination. A single 3D radius would spend most of its budget on
+	// that vertical offset and leave no headroom for the horizontal snap.
+	const FVector Delta = Companion->GetActorLocation() - Location;
+	const bool bArrived = Delta.SizeSquared2D() < CompanionArrivalToleranceSq
+		&& FMath::Abs(Delta.Z) < CompanionArrivalHeightTolerance;
+	if (!bArrived)
+	{
+		if (!Companion->TeleportTo(Location, Rotation))
+			Companion->TeleportTo(Location, Rotation, /*bIsATest=*/false, /*bNoCheck=*/true);
+	}
+}
+
+void AObjectiveStep::DeferTeleportSquad(const FObjectiveSideEffect& Effect)
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// On a checkpoint resume BeginCheckpointSpawn and the resume step's OnActivate TeleportSquad can
+	// both arm pawn-retry timers at the same 0.25s cadence. Both call TeleportTo on the same pawn
+	// and the winner is whichever the timer heap pops last — unspecified. There must be exactly one
+	// owner of the player's landing spot, so drop the checkpoint's retry and take over.
+	World->GetTimerManager().ClearTimer(CheckpointSpawnRetryHandle);
+
+	PendingSquadTeleport = Effect;
+
+	if (!World->GetTimerManager().IsTimerActive(SquadTeleportRetryHandle))
+	{
+		SquadTeleportRetries = 0;
+		World->GetTimerManager().SetTimer(SquadTeleportRetryHandle, this,
+			&AObjectiveStep::TryApplyDeferredSquadTeleport, CheckpointSpawnPollSeconds, /*bLoop=*/true);
+	}
+}
+
+void AObjectiveStep::TryApplyDeferredSquadTeleport()
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(this, 0);
+	if (!IsValid(PlayerPawn))
+	{
+		if (++SquadTeleportRetries <= MaxCheckpointSpawnRetries) return;
+
+		World->GetTimerManager().ClearTimer(SquadTeleportRetryHandle);
+		UE_LOG(LogObjectiveStep, Warning,
+			TEXT("'%s' (step '%s'): no player pawn after %d squad-teleport polls — player teleport skipped"),
+			*GetName(), *GetEffectiveStepId().ToString(), SquadTeleportRetries);
+		return;
+	}
+	World->GetTimerManager().ClearTimer(SquadTeleportRetryHandle);
+
+	if (!IsValid(PendingSquadTeleport.PlayerDestination))
+	{
+		UE_LOG(LogObjectiveStep, Warning,
+			TEXT("'%s' (step '%s'): deferred TeleportSquad lost its PlayerDestination — player teleport skipped"),
+			*GetName(), *GetEffectiveStepId().ToString());
+		return;
+	}
+
+	const FVector Location = PendingSquadTeleport.PlayerDestination->GetActorLocation();
+	const FRotator Rotation(0.f, PendingSquadTeleport.PlayerDestination->GetActorRotation().Yaw, 0.f);
+
+	if (!PlayerPawn->TeleportTo(Location, Rotation))
+		PlayerPawn->TeleportTo(Location, Rotation, /*bIsATest=*/false, /*bNoCheck=*/true);
+	if (AController* PlayerController = PlayerPawn->GetController())
+		PlayerController->SetControlRotation(Rotation);
+
+	UE_LOG(LogObjectiveStep, Log,
+		TEXT("'%s' (step '%s'): deferred squad teleport — player landed after %d poll(s)"),
+		*GetName(), *GetEffectiveStepId().ToString(), SquadTeleportRetries);
 }
 
 void AObjectiveStep::QueueDirectorWave(const FDirectorWaveRequest& Request)
@@ -1069,7 +1379,9 @@ void AObjectiveStep::ApplyCompletedWorldState()
 		break;
 
 	// ReachLocation / Interacted / RouteCompleted / WaveCompleted / Manual leave no world state
-	// behind — only their side effects need replaying.
+	// behind — only their side effects need replaying. SurviveDuration is the same: a hold the player
+	// already stood through is a stretch of time, not a change to the level, and the Deactivate above
+	// guarantees a fast-forward never leaves its countdown running.
 	default:
 		break;
 	}
@@ -1229,9 +1541,67 @@ void AObjectiveStep::AuditStepWiring()
 	case EObjectiveCondition::WaveCompleted:
 		if (WatchedWaveId.IsNone()) Missing(TEXT("WatchedWaveId"));
 		break;
+	case EObjectiveCondition::SurviveDuration:
+		if (DefendSeconds <= 0.f) Missing(TEXT("DefendSeconds"));
+		break;
 	case EObjectiveCondition::Manual:
 	default:
 		break;
+	}
+
+	for (const FObjectiveSideEffect& Effect : SideEffects)
+	{
+		if (Effect.Type == EObjectiveSideEffectType::TeleportSquad) AuditTeleportSquad(Effect);
+
+		if (Effect.Type == EObjectiveSideEffectType::SetDoorsLocked)
+		{
+			if (Effect.DoorTargets.IsEmpty())
+			{
+				UE_LOG(LogObjectiveStep, Warning,
+					TEXT("'%s' (step '%s'): SetDoorsLocked has no DoorTargets — the exits stay unlocked and the defend can be skipped"),
+					*GetName(), *GetEffectiveStepId().ToString());
+			}
+			else
+			{
+				// Collect all mode-gate target doors once, rather than running a full
+				// actor scan per DoorTargets entry.
+				TArray<TPair<ADoorBase*, ACompanionModeDoorGate*>, TInlineAllocator<4>> GatedDoors;
+				if (UWorld* World = GetWorld())
+				{
+					for (TActorIterator<ACompanionModeDoorGate> GateIt(World); GateIt; ++GateIt)
+					{
+						ADoorBase* GateDoor = GateIt->GetTargetDoor();
+						if (IsValid(GateDoor))
+							GatedDoors.Emplace(GateDoor, *GateIt);
+					}
+				}
+
+				for (int32 Index = 0; Index < Effect.DoorTargets.Num(); ++Index)
+				{
+					if (!IsValid(Effect.DoorTargets[Index]))
+					{
+						UE_LOG(LogObjectiveStep, Warning,
+							TEXT("'%s' (step '%s'): SetDoorsLocked DoorTargets[%d] is unset — that door will not be locked"),
+							*GetName(), *GetEffectiveStepId().ToString(), Index);
+						continue;
+					}
+					// A CompanionModeDoorGate that targets the same door writes the same
+					// bExternalGateLocked bool. If the gate unlocks mid-defend (the player
+					// sets the required mode), the lock placed by this effect is silently
+					// cleared and the defend can be escaped.
+					for (const auto& [GateDoor, Gate] : GatedDoors)
+					{
+						if (GateDoor == Effect.DoorTargets[Index].Get())
+						{
+							UE_LOG(LogObjectiveStep, Warning,
+								TEXT("'%s' (step '%s'): SetDoorsLocked DoorTargets[%d] (%s) is also targeted by CompanionModeDoorGate %s — a mode change mid-defend will silently unlock it"),
+								*GetName(), *GetEffectiveStepId().ToString(), Index,
+								*Effect.DoorTargets[Index]->GetName(), *Gate->GetName());
+						}
+					}
+				}
+			}
+		}
 	}
 
 	// Braces are load-bearing: UE_LOG expands to a braced block, so an unbraced if-body ends the
@@ -1251,6 +1621,26 @@ void AObjectiveStep::AuditStepWiring()
 		UE_LOG(LogObjectiveStep, Warning,
 			TEXT("'%s' (step '%s'): checkpoint step has no CheckpointSpawn — a restart resumes at the level-start position"),
 			*GetName(), *GetEffectiveStepId().ToString());
+}
+
+void AObjectiveStep::AuditTeleportSquad(const FObjectiveSideEffect& Effect)
+{
+	if (!IsValid(Effect.PlayerDestination))
+		UE_LOG(LogObjectiveStep, Warning,
+			TEXT("'%s' (step '%s'): TeleportSquad has no PlayerDestination — the whole effect is skipped, "
+				 "companions included"),
+			*GetName(), *GetEffectiveStepId().ToString());
+
+	TArray<ACompanionCharacter*> Companions;
+	GatherSquadCompanions(Companions);
+	if (Effect.CompanionDestinations.Num() >= Companions.Num()) return;
+
+	// Verbose, not a warning: a short list is how a designer deliberately leaves one squadmate behind.
+	// The count also changes across the mission because the gather filters on controller + alive +
+	// not DBNO, so a companion downed between beats drops out of the list.
+	UE_LOG(LogObjectiveStep, Verbose,
+		TEXT("'%s' (step '%s'): TeleportSquad has %d destination(s) for %d companion(s) — the rest stay put"),
+		*GetName(), *GetEffectiveStepId().ToString(), Effect.CompanionDestinations.Num(), Companions.Num());
 }
 
 void AObjectiveStep::AuditLevelWiring()
@@ -1398,6 +1788,10 @@ void AObjectiveStep::ValidateConfig() const
 		UE_LOG(LogObjectiveStep, Warning, TEXT("%s: ReachLocation with CompletionRadius %.1f (<= 0)"),
 			*GetName(), CompletionRadius);
 
+	if (Condition == EObjectiveCondition::SurviveDuration && DefendSeconds <= 0.f)
+		UE_LOG(LogObjectiveStep, Warning, TEXT("%s: SurviveDuration with DefendSeconds %.1f (<= 0)"),
+			*GetName(), DefendSeconds);
+
 	if (Condition == EObjectiveCondition::ContainerLooted && TrackedContainers.Num() < 2 && !bRequiresAllContainers)
 		UE_LOG(LogObjectiveStep, Warning, TEXT("%s: bRequiresAllContainers is off with %d container(s) — the flag does nothing"),
 			*GetName(), TrackedContainers.Num());
@@ -1420,6 +1814,10 @@ void AObjectiveStep::ValidateConfig() const
 			UE_LOG(LogObjectiveStep, Warning, TEXT("%s: SetExtracteeRescuable side effect has no ExtracteeTarget"), *GetName());
 		if (Effect.Type == EObjectiveSideEffectType::CommandCompanionRoute && !IsValid(Effect.RouteTarget))
 			UE_LOG(LogObjectiveStep, Warning, TEXT("%s: CommandCompanionRoute side effect has no RouteTarget"), *GetName());
+		if (Effect.Type == EObjectiveSideEffectType::TeleportSquad && !IsValid(Effect.PlayerDestination))
+			UE_LOG(LogObjectiveStep, Warning, TEXT("%s: TeleportSquad side effect has no PlayerDestination"), *GetName());
+		if (Effect.Type == EObjectiveSideEffectType::SetDoorsLocked && Effect.DoorTargets.IsEmpty())
+			UE_LOG(LogObjectiveStep, Warning, TEXT("%s: SetDoorsLocked side effect has no DoorTargets"), *GetName());
 	}
 }
 #endif

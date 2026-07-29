@@ -37,5 +37,10 @@ private:
 	UFUNCTION()
 	void RebuildMarkers();
 
+	/** Targeted label update — avoids the full ClearChildren + CreateWidget rebuild, preserving
+	 *  each marker widget's per-tick RenderTranslation smoothing state. */
+	UFUNCTION()
+	void HandleLabelChanged(FName Id, const FText& NewLabel);
+
 	TWeakObjectPtr<UObjectiveSubsystem> CachedSubsystem;
 };

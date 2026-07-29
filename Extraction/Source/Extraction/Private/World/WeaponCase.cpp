@@ -1,17 +1,18 @@
 // AWeaponCase implementation.
 
 #include "World/WeaponCase.h"
+#include "World/WeaponCaseSlotComponent.h"
 
-#include "Components/MeshComponent.h"
-#include "Components/SkeletalMeshComponent.h"
 #include "Components/StaticMeshComponent.h"
-#include "Engine/SkeletalMesh.h"
-#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 
-DEFINE_LOG_CATEGORY_STATIC(LogWeaponCase, Log, All);
+#if WITH_EDITOR
+#include "Engine/BlueprintGeneratedClass.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
+#endif
 
-const FName AWeaponCase::PreviewComponentTag(TEXT("WeaponCaseSlotPreview"));
+// LogWeaponCase is DECLARE'd in WeaponCaseSlotComponent.h, DEFINE'd in WeaponCaseSlotComponent.cpp.
 
 AWeaponCase::AWeaponCase()
 {
@@ -34,20 +35,50 @@ void AWeaponCase::OnConstruction(const FTransform& Transform)
 
 	ApplyCaseMeshCollision();
 
-	// Unconditional: a PIE duplicate can carry previews in, and a re-run must never stack them.
-	ClearPreviewComponents();
-
 	const UWorld* World = GetWorld();
 	if (World && World->IsGameWorld()) return;
 
-	BuildPreviewComponents();
+	// BP class preview (EditorPreview world): show every slot so designers can see and
+	// position meshes in the Blueprint viewport.  Level editor (Editor world): show only
+	// the slots this placed instance actually holds.
+	if (!World || World->WorldType != EWorldType::Editor)
+	{
+		TInlineComponentArray<UWeaponCaseSlotComponent*> SlotComps(this);
+		for (UWeaponCaseSlotComponent* SlotComp : SlotComps)
+		{
+			if (IsValid(SlotComp)) SlotComp->SetPreviewVisible(true);
+		}
+		return;
+	}
+
+	// Level editor: show previews only for filled slots.
+	TSet<FName> FilledSet;
+	FilledSet.Reserve(FilledSlots.Num());
+	for (const FName& Id : FilledSlots)
+	{
+		if (!Id.IsNone()) FilledSet.Add(Id);
+	}
+
+	TInlineComponentArray<UWeaponCaseSlotComponent*> SlotComps(this);
+	for (UWeaponCaseSlotComponent* SlotComp : SlotComps)
+	{
+		if (!IsValid(SlotComp)) continue;
+		SlotComp->SetPreviewVisible(FilledSet.Contains(SlotComp->SlotId));
+	}
 }
 
 void AWeaponCase::BeginPlay()
 {
 	Super::BeginPlay();
 
-	ClearPreviewComponents();
+	// Hide EVERY slot's preview before spawning the real items.  The cross-actor guard in
+	// SetPreviewVisible makes this order-independent, but hiding first avoids a flicker where
+	// previews and real pickups are both visible between BeginPlay and the spawn.
+	TInlineComponentArray<UWeaponCaseSlotComponent*> SlotComps(this);
+	for (UWeaponCaseSlotComponent* SlotComp : SlotComps)
+	{
+		if (IsValid(SlotComp)) SlotComp->SetPreviewVisible(false);
+	}
 
 	if (!HasAuthority()) return;
 	SpawnSlotItems();
@@ -69,66 +100,95 @@ bool AWeaponCase::IsEmpty() const
 TArray<FString> AWeaponCase::GetSlotIdOptions() const
 {
 	TArray<FString> Options;
-	Options.Reserve(SlotDefinitions.Num());
 
-	for (const FWeaponCaseSlot& Slot : SlotDefinitions)
+	// Live slot components exist on placed actors and in PIE.
+	TInlineComponentArray<UWeaponCaseSlotComponent*> SlotComps(this);
+	Options.Reserve(SlotComps.Num());
+	for (const UWeaponCaseSlotComponent* SlotComp : SlotComps)
 	{
-		if (Slot.SlotId.IsNone()) continue;
-		Options.AddUnique(Slot.SlotId.ToString());
+		if (!IsValid(SlotComp) || SlotComp->SlotId.IsNone()) continue;
+		Options.AddUnique(SlotComp->SlotId.ToString());
 	}
+
+	if (!Options.IsEmpty()) return Options;
+
+#if WITH_EDITOR
+	// CDO has no SCS components -- walk the SimpleConstructionScript node tree up the
+	// UBlueprintGeneratedClass super-class chain to populate the dropdown on a Blueprint's
+	// Class Defaults tab.  GetActualComponentTemplate resolves InheritableComponentHandler
+	// overrides so a child BP that changes SlotId shows the child's value, not the parent's.
+	UBlueprintGeneratedClass* LeafBPGC = Cast<UBlueprintGeneratedClass>(GetClass());
+	const UBlueprintGeneratedClass* BPGC = LeafBPGC;
+	while (BPGC)
+	{
+		if (const USimpleConstructionScript* SCS = BPGC->SimpleConstructionScript)
+		{
+			for (const USCS_Node* Node : SCS->GetAllNodes())
+			{
+				if (!Node) continue;
+				const auto* Template = Cast<UWeaponCaseSlotComponent>(
+					Node->GetActualComponentTemplate(LeafBPGC));
+				if (!Template || Template->SlotId.IsNone()) continue;
+				Options.AddUnique(Template->SlotId.ToString());
+			}
+		}
+		BPGC = Cast<UBlueprintGeneratedClass>(BPGC->GetSuperClass());
+	}
+#endif
 
 	return Options;
 }
 
-const FWeaponCaseSlot* AWeaponCase::FindSlot(FName SlotId) const
+void AWeaponCase::ValidateSlotIds(TConstArrayView<UWeaponCaseSlotComponent*> AllSlots) const
 {
-	return SlotDefinitions.FindByPredicate(
-		[SlotId](const FWeaponCaseSlot& Slot) { return Slot.SlotId == SlotId; });
-}
-
-void AWeaponCase::ResolveFilledSlots(TArray<const FWeaponCaseSlot*>& OutSlots) const
-{
-	OutSlots.Reset();
-	OutSlots.Reserve(FilledSlots.Num());
-
-	TSet<FName> Seen;
-	Seen.Reserve(FilledSlots.Num());
-
-	for (const FName& SlotId : FilledSlots)
+	TSet<FName> SeenIds;
+	SeenIds.Reserve(AllSlots.Num());
+	for (const UWeaponCaseSlotComponent* Comp : AllSlots)
 	{
-		if (SlotId.IsNone()) continue;
-
-		bool bAlreadySeen = false;
-		Seen.Add(SlotId, &bAlreadySeen);
-		if (bAlreadySeen) continue;
-
-		const FWeaponCaseSlot* Slot = FindSlot(SlotId);
-		if (!Slot)
+		if (!IsValid(Comp)) continue;
+		if (Comp->SlotId.IsNone())
 		{
-			UE_LOG(LogWeaponCase, Warning, TEXT("'%s': FilledSlots entry '%s' matches no slot definition."),
-				*GetName(), *SlotId.ToString());
+			UE_LOG(LogWeaponCase, Warning, TEXT("'%s': slot '%s' has no SlotId."),
+				*GetName(), *Comp->GetName());
 			continue;
 		}
-
-		if (!Slot->SocketName.IsNone() && IsValid(CaseMesh) && !CaseMesh->DoesSocketExist(Slot->SocketName))
+		bool bDupe = false;
+		SeenIds.Add(Comp->SlotId, &bDupe);
+		if (bDupe)
 		{
-			UE_LOG(LogWeaponCase, Warning, TEXT("'%s': slot '%s' names socket '%s', which the case mesh does not have."),
-				*GetName(), *SlotId.ToString(), *Slot->SocketName.ToString());
+			UE_LOG(LogWeaponCase, Warning, TEXT("'%s': duplicate SlotId '%s' on '%s'."),
+				*GetName(), *Comp->SlotId.ToString(), *Comp->GetName());
 		}
-
-		OutSlots.Add(Slot);
 	}
 }
 
-FTransform AWeaponCase::GetSlotWorldTransform(const FWeaponCaseSlot& Slot) const
+void AWeaponCase::ResolveFilledSlots(TArray<UWeaponCaseSlotComponent*>& OutSlots) const
 {
-	if (!IsValid(CaseMesh)) return GetActorTransform();
+	OutSlots.Reset();
+	OutSlots.Reserve(FilledSlots.Num());
+	TInlineComponentArray<UWeaponCaseSlotComponent*> AllSlots(this);
 
-	const FTransform Base = Slot.SocketName.IsNone()
-		? CaseMesh->GetComponentTransform()
-		: CaseMesh->GetSocketTransform(Slot.SocketName, RTS_World);
+	ValidateSlotIds(AllSlots);
 
-	return Slot.Offset * Base;
+	TSet<FName> Seen;
+	Seen.Reserve(FilledSlots.Num());
+	for (const FName& Id : FilledSlots)
+	{
+		if (Id.IsNone()) continue;
+		bool bDupe = false;
+		Seen.Add(Id, &bDupe);
+		if (bDupe) continue;
+
+		UWeaponCaseSlotComponent** Found = AllSlots.FindByPredicate(
+			[Id](const UWeaponCaseSlotComponent* C) { return IsValid(C) && C->SlotId == Id; });
+		if (!Found)
+		{
+			UE_LOG(LogWeaponCase, Warning, TEXT("'%s': FilledSlots entry '%s' matches no slot component."),
+				*GetName(), *Id.ToString());
+			continue;
+		}
+		OutSlots.Add(*Found);
+	}
 }
 
 void AWeaponCase::ApplyCaseMeshCollision()
@@ -146,113 +206,68 @@ void AWeaponCase::ApplyCaseMeshCollision()
 	CaseMesh->SetCollisionResponseToChannel(ECC_GameTraceChannel1 /* CoverGen — DefaultEngine.ini */, ECR_Ignore);
 }
 
-void AWeaponCase::ClearPreviewComponents()
-{
-	// Sweep by tag, never by the array: UPROPERTY(Transient) is still written to the transaction
-	// buffer (ShouldSerializeValue only skips transients for persistent archives), so an editor
-	// undo hands back the PRE-edit array — components already destroyed — while the live previews
-	// from the newer construction run stay registered. The tag rides the components themselves.
-	TInlineComponentArray<USceneComponent*> SceneComponents(this);
-	for (USceneComponent* Component : SceneComponents)
-	{
-		if (!IsValid(Component) || !Component->ComponentHasTag(PreviewComponentTag)) continue;
-		Component->DestroyComponent();
-	}
-
-	PreviewComponents.Reset();
-}
-
-void AWeaponCase::BuildPreviewComponents()
-{
-	if (!IsValid(CaseMesh)) return;
-
-	TArray<const FWeaponCaseSlot*> Slots;
-	ResolveFilledSlots(Slots);
-	if (Slots.IsEmpty()) return;
-
-	PreviewComponents.Reserve(Slots.Num());
-
-	for (const FWeaponCaseSlot* Slot : Slots)
-	{
-		UMeshComponent* Preview = nullptr;
-		if (IsValid(Slot->PreviewMesh))
-		{
-			UStaticMeshComponent* StaticPreview = NewObject<UStaticMeshComponent>(this, NAME_None, RF_Transient);
-			StaticPreview->SetStaticMesh(Slot->PreviewMesh);
-			Preview = StaticPreview;
-		}
-		else if (IsValid(Slot->PreviewSkeletalMesh))
-		{
-			USkeletalMeshComponent* SkeletalPreview = NewObject<USkeletalMeshComponent>(this, NAME_None, RF_Transient);
-			SkeletalPreview->SetSkeletalMeshAsset(Slot->PreviewSkeletalMesh);
-			Preview = SkeletalPreview;
-		}
-
-		if (!Preview) continue;
-
-		Preview->ComponentTags.Add(PreviewComponentTag);
-		Preview->bIsEditorOnly = true;
-		Preview->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-		Preview->SetCanEverAffectNavigation(false);
-		Preview->SetHiddenInGame(true);
-		Preview->SetupAttachment(CaseMesh, Slot->SocketName);
-		Preview->SetRelativeTransform(Slot->Offset);
-		Preview->RegisterComponent();
-
-		PreviewComponents.Add(Preview);
-	}
-}
-
 void AWeaponCase::SpawnSlotItems()
 {
 	UWorld* World = GetWorld();
-	if (!World || !IsValid(CaseMesh)) return;
+	if (!World) return;
 
-	TArray<const FWeaponCaseSlot*> Slots;
+	TArray<UWeaponCaseSlotComponent*> Slots;
 	ResolveFilledSlots(Slots);
 	if (Slots.IsEmpty()) return;
 
 	SpawnedItems.Reserve(Slots.Num());
 
-	for (const FWeaponCaseSlot* Slot : Slots)
+	for (UWeaponCaseSlotComponent* SlotComp : Slots)
 	{
-		if (!IsValid(Slot->PickupClass.Get()))
+		// BP hooks can destroy the case actor or invalidate slots mid-iteration.
+		if (!IsValid(SlotComp)) continue;
+
+		if (!IsValid(SlotComp->PickupClass.Get()))
 		{
-			UE_LOG(LogWeaponCase, Warning, TEXT("'%s': slot '%s' has no PickupClass — cutout left empty."),
-				*GetName(), *Slot->SlotId.ToString());
+			UE_LOG(LogWeaponCase, Warning, TEXT("'%s': slot '%s' has no PickupClass -- cutout left empty."),
+				*GetName(), *SlotComp->SlotId.ToString());
 			continue;
 		}
 
-		const FTransform SlotTransform = GetSlotWorldTransform(*Slot);
+		const FTransform SlotTransform = SlotComp->GetComponentTransform();
 		AActor* Item = World->SpawnActorDeferred<AActor>(
-			Slot->PickupClass, SlotTransform, this, nullptr,
+			SlotComp->PickupClass, SlotTransform, this, nullptr,
 			ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
 		if (!IsValid(Item)) continue;
 
-		// A Blueprint pickup's construction script runs INSIDE FinishSpawning, so this gap is the
-		// only place its lie-flat behaviour can still be switched off. Fire before seating: the
-		// hook sets variables the script is about to read, and a pure-BP item has no root yet.
-		OnCaseItemPreFinish(Item, Slot->SlotId);
+		OnCaseItemPreFinish(Item, SlotComp->SlotId);
+		if (IsActorBeingDestroyed()) return;
 
-		// Seat BEFORE FinishSpawning so a pickup with a NATIVE root sees GetAttachParentActor()
-		// inside its own BeginPlay — that is what makes the ammo box skip its ground-settle and
-		// its despawn timer. A pure-Blueprint pickup has no root until its SCS runs inside
-		// FinishSpawning, so seat again after: the second pass also beats any construction-script
-		// repositioning.
-		SeatItemInSlot(*Item, *Slot);
+		// Seat before FinishSpawning: native-root pickups read GetAttachParentActor() in their
+		// own BeginPlay.  Seat again after: pure-BP pickups get their root from SCS inside
+		// FinishSpawning, and the second pass beats any construction-script repositioning.
+		SeatItemInSlot(*Item, *SlotComp);
 		Item->FinishSpawning(SlotTransform);
 		if (!IsValid(Item)) continue;
-		SeatItemInSlot(*Item, *Slot);
+		SeatItemInSlot(*Item, *SlotComp);
 
 		SpawnedItems.Add(Item);
-		OnCaseItemSpawned(Item, Slot->SlotId);
+		OnCaseItemSpawned(Item, SlotComp->SlotId);
+		if (IsActorBeingDestroyed()) return;
 	}
 }
 
-void AWeaponCase::SeatItemInSlot(AActor& Item, const FWeaponCaseSlot& Slot)
+void AWeaponCase::SeatItemInSlot(AActor& Item, UWeaponCaseSlotComponent& SlotComp)
 {
-	if (!Item.GetRootComponent() || !IsValid(CaseMesh)) return;
+	if (!Item.GetRootComponent()) return;
 
-	Item.AttachToComponent(CaseMesh, FAttachmentTransformRules::SnapToTargetIncludingScale, Slot.SocketName);
-	Item.SetActorRelativeTransform(Slot.Offset);
+	// Attach to the slot component -- its transform IS the seat.  SnapToTargetIncludingScale
+	// because existing slots carry non-uniform scale (the injection pen's 0.59/0.55/0.50 shrink
+	// now rides on the slot component's own transform).
+	// A Static-mobility root under a non-Static parent is silently refused, and without an
+	// attach parent "relative" means world, teleporting the item to (0,0,0).
+	if (!Item.AttachToComponent(&SlotComp, FAttachmentTransformRules::SnapToTargetIncludingScale))
+	{
+		UE_LOG(LogWeaponCase, Warning,
+			TEXT("Failed to attach '%s' to slot '%s' on '%s' -- check mobility."),
+			*Item.GetName(), *SlotComp.GetName(), *GetName());
+		return;
+	}
+
+	Item.SetActorRelativeTransform(FTransform::Identity);
 }

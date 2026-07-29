@@ -54,6 +54,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Overhead", meta = (ClampMin = "0.0"))
 	float CoverOccluderMaxDistance = 300.f;
 
+	/** Resets occlusion tracking so the next visible tick traces immediately and applies a
+	 *  fresh scale. Called by subclasses that toggle visibility (e.g. ULootMarkerComponent). */
+	void ResetOcclusionState();
+
 private:
 	float TimeSinceOcclusionTrace = 0.f;
 	bool bOccluded = false;

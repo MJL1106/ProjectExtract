@@ -122,6 +122,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
 	float CrouchedWalkSpeed = 250.f;
 
+	// Speed cap (cm/s) applied whenever the companion is STRAFING — moving while a Gameplay focus
+	// holds the body facing something other than its direction of travel. 275 is not a feel number:
+	// it is the Y value of the TOP DIRECTIONAL ROW of BS_Companion_Rifle02_Locomotion, whose Y axis is
+	// raw cm/s (0 / 100 / 275 / 850). The 850 row has ONE sample and it is forward-only, so any speed
+	// above 275 blends the legs into a forward sprint clip while the body faces the focus — the
+	// companion appears to run forwards while side-stepping. Do NOT raise this without re-authoring
+	// that blendspace's top row with a full directional set. Enemy parity: UEnemyArchetypeData's
+	// StrafeWalkSpeed sits at the same tier (250).
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float StrafeMaxSpeed = 275.f;
+
 	// Fast-crouch catch-up tier while stealth-active and falling behind: keeps the low silhouette
 	// but hustles. Applied to MaxWalkSpeedCrouched while the follow task reports FastCrouch stage.
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
@@ -161,6 +172,31 @@ public:
 	// figures are where 700 came from.
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
 	float PlayerSprintSpeedThreshold = 700.f;
+
+	// --- Rescue-approach urgency (BTTask_FollowPlayer's sprint-to-target branch) ---
+	// The approach used to sprint unconditionally, which read as panic even with 80 seconds of
+	// bleedout left and the room empty. Pace is now re-decided every tick: sprint when ANY of the
+	// three below trips, jog otherwise. All three are hysteretic in the task so a companion running
+	// a boundary can't flicker the sprint flag (which drives both speed AND the anim's sprint state).
+
+	// Bleedout seconds remaining at/below which the approach sprints. Sits well above
+	// ACompanionCharacter::DesperationBleedoutThreshold (12s, the "commit through threats" line) —
+	// this is "hurry up", that one is "go anyway".
+	UPROPERTY(EditAnywhere, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveSprintBleedoutThreshold = 25.f;
+
+	// Distance (cm) to the downed player above which the approach sprints regardless of the clock —
+	// a long run is worth sprinting even on a full bleedout timer.
+	UPROPERTY(EditAnywhere, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveSprintDistanceThreshold = 1200.f;
+
+	// Distance (cm) from the DOWNED PLAYER to the nearest living hostile at/below which the approach
+	// sprints. Fed by the state service's existing revive threat sweep (published on the companion as
+	// GetNearestThreatToDownedPlayer) — never re-scanned here. Deliberately tighter than
+	// ACompanionCharacter::ReviveThreatRadius: that radius gates whether reviving is SAFE, this one
+	// only asks whether it is worth running.
+	UPROPERTY(EditAnywhere, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveSprintThreatRadius = 1000.f;
 
 	// --- Stealth crouch-mirror (F4a: companion mirrors the player's own crouch/uncrouch, with a
 	// randomized human-reaction delay, instead of Stealth force-crouching) ---

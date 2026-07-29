@@ -16,6 +16,7 @@
 
 class UBillboardComponent;
 class UBoxComponent;
+class ULootMarkerComponent;
 class ALootContainer;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnLootCompleted, ALootContainer*, Container, AActor*, Looter);
@@ -67,6 +68,10 @@ protected:
 	/** The searchable space. Scale it over the drawer/table/shelf the loot is meant to live in. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Loot")
 	TObjectPtr<UBoxComponent> InteractVolume;
+
+	/** Overhead loot marker -- visibility driven by CanLoot(). Designer assigns the widget class on BP. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Loot")
+	TObjectPtr<ULootMarkerComponent> LootMarker;
 
 #if WITH_EDITORONLY_DATA
 	/** Viewport handle for an otherwise invisible actor. Sprite assigned in the BP subclass. */

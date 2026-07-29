@@ -203,9 +203,35 @@ public:
 	void StampConfirmedKill();
 	float GetLastConfirmedKillTime() const { return LastConfirmedKillTime; }
 
+	// --- Task speed override (single writer for MaxWalkSpeed / MaxWalkSpeedCrouched) ---
+	// Any BT task that needs to author its own walk speeds (combat move-shoot, route stances, etc.)
+	// sets the override while active; ApplyMovementSpeeds skips channels that have a positive
+	// override, so the Tick focus-edge re-resolve cannot stomp the authored pace. Exactly one task
+	// may own it at a time. Cleared unconditionally at DBNO entry, revive, UnPossessed and EndPlay
+	// -- no live task can survive any of those transitions.
+
+	/** Sets a task speed override. Positive values override that channel; zero or negative leaves
+	 *  the channel under normal ApplyMovementSpeeds control. */
+	void SetTaskSpeedOverride(float InWalkSpeed, float InCrouchedSpeed);
+
+	/** Clears both channels unconditionally. */
+	void ClearTaskSpeedOverride();
+
+	/** True while any channel is overridden. */
+	bool HasTaskSpeedOverride() const { return TaskSpeedOverrideWalk > 0.f || TaskSpeedOverrideCrouched > 0.f; }
+
+	/** Force a re-resolve of walk / crouch speeds from the tuning asset right now. Public wrapper
+	 *  so tasks can re-derive after clearing the override without caching the old value. */
+	void RefreshMovementSpeeds() { ApplyMovementSpeeds(); }
+
 	// --- Follow catch-up pace (reduced sprint tier for formation catch-up only) ---
 
 	void SetFollowCatchupPace(bool bPace);
+
+	/** True while the follow task is closing a formation gap at the reduced catch-up sprint tier.
+	 *  Read by IsStrafingForFocus and the BT service's non-combat facing tiers so the strafe clamp
+	 *  and gameplay focals yield during catch-up, same as they do during a full sprint. */
+	bool IsFollowCatchupPace() const { return bFollowCatchupPace; }
 
 	// --- Purposeful cover-commit grant (combat-task-written, MoveToCoverPoint-consumed one-shot) ---
 	// Set while the pending CoverTarget was deliberately chosen by the combat task (angle-seek pick
@@ -274,6 +300,53 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
 	bool IsSprinting() const { return bIsSprinting; }
+
+	/** Speed cap (cm/s) applied while strafing — see UCompanionTuningDataAsset::StrafeMaxSpeed for
+	 *  why the number is the locomotion blendspace's top directional row and not a feel lever. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
+	float GetStrafeMaxSpeed() const;
+
+	/** True while the companion is moving with the body pointed somewhere other than its direction of
+	 *  travel: not sprinting, not closing a follow gap, AND a Gameplay-priority focus is live on the AI
+	 *  controller. That focus is exactly what drives yaw (the companion runs
+	 *  bUseControllerDesiredRotation), so it is the honest test for "the legs are playing the
+	 *  directional locomotion rows". Mirrors how UCompanionAnimInstance derives bFocusLive.
+	 *
+	 *  bFollowCatchupPace is included alongside the sprint check because catch-up pace travels at a
+	 *  speed (550-650) well above the strafe cap (275). Without it the companion faces its gameplay
+	 *  focal while closing a follow gap and the strafe clamp starves it to 275, which is below the
+	 *  player's walk speed (410) -- the companion physically cannot close and the sprint gate flip-flops
+	 *  at the boundary. The generalised rule: TRAVELLING (sprinting OR closing a follow gap) means
+	 *  facing travel at full speed; holding a gameplay focus while NOT travelling means strafing at the
+	 *  capped speed. Never both. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
+	bool IsStrafingForFocus() const;
+
+	/** True while another system owns this companion's stance (crouch/stand) right now: DBNO, a
+	 *  commanded takedown (armed / executing / montage playing), traversal (the capsule resizes
+	 *  mid-vault), or an active route leg (its Alert/Crouch legs set their own stances). Shared by the
+	 *  stealth clamp teardown and the BT service's stance backstop so the two can never drift — every
+	 *  one of these owners restores stance in its own teardown, and popping a crouch out from under
+	 *  an authored takedown pose or a mid-vault capsule resize is a proven visual break. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
+	bool IsStanceOwnedElsewhere() const;
+
+	/** True while the current crouch was applied by the stealth crouch-mirror (MirrorCrouch). Read by
+	 *  the BT service's stance backstop so it never pops a crouch the mirror owns. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Movement")
+	bool IsCrouchOwnedByStealth() const { return bCrouchOwnedByStealth; }
+
+	// --- Revive urgency mirror (BTService_UpdateCompanionState-written, BTTask_FollowPlayer-read) ---
+	// The service's revive threat sweep already overlaps the downed player every tick; publishing its
+	// nearest-hostile result here is what lets the rescue approach decide sprint-vs-jog without a
+	// second enemy scan. Same no-BB-plumbing pattern as the LOS / player-focus mirrors above.
+
+	void SetNearestThreatToDownedPlayer(float Distance) { NearestThreatToDownedPlayerDist = Distance; }
+
+	/** Distance (cm) from the DOWNED player to the nearest living hostile inside the service's sweep
+	 *  radius. Negative when the player isn't down, the companion is already in the revive hold, or
+	 *  nothing was found — callers must treat negative as "no threat", never as "distance 0". */
+	float GetNearestThreatToDownedPlayer() const { return NearestThreatToDownedPlayerDist; }
 
 	// --- Stealth catch-up (set by the follow task; shapes ApplyStealthMovementClamps) ---
 
@@ -596,6 +669,7 @@ protected:
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void PostInitializeComponents() override;
 	virtual void PossessedBy(AController* NewController) override;
+	virtual void UnPossessed() override;
 
 	// --- Components ---
 
@@ -763,6 +837,14 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
 	float CrouchedWalkSpeed = 250.f;
+
+	// Strafe speed cap fallback — mirror of UCompanionTuningDataAsset::StrafeMaxSpeed. 275 is the
+	// TOP DIRECTIONAL ROW of BS_Companion_Rifle02_Locomotion (Y axis = raw cm/s: 0 / 100 / 275 / 850;
+	// the 850 row holds a single forward-only sample). Above it the legs blend into a forward sprint
+	// clip while the body faces its focus, which is the "runs forwards while side-stepping" report.
+	// Re-author that blendspace's top row before raising this.
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Movement")
+	float StrafeMaxSpeed = 275.f;
 
 	// Standing-channel stealth fallbacks (used when no tuning asset is assigned) — mirror of the
 	// tuning asset's UCompanionTuningDataAsset::StealthWalkSpeed / StealthCatchupSpeed. Stealth no
@@ -994,6 +1076,14 @@ private:
 	/** Mirror of the BT service's "enemies focused on the player" tally. Transient, not replicated. */
 	int32 PlayerFocusedEnemyCount = 0;
 
+	/** See GetNearestThreatToDownedPlayer. Negative = no threat / not applicable. Transient. */
+	float NearestThreatToDownedPlayerDist = -1.f;
+
+	/** IsStrafingForFocus() as of the last Tick. ApplyMovementSpeeds only runs on sprint/stance/
+	 *  stealth edges, so a focus appearing or vanishing under it would leave the strafe clamp
+	 *  resolved against a stale answer; Tick re-resolves on this edge and only on this edge. */
+	bool bLastStrafingForFocus = false;
+
 	/** World time of the last committed-time natural cover release. */
 	float LastNaturalReleaseTime = -1e9f;
 
@@ -1002,6 +1092,11 @@ private:
 
 	/** World time of this companion's last confirmed kill. Backs the Combat-mode post-kill advance. */
 	float LastConfirmedKillTime = -1e9f;
+
+	/** Task speed override channels. Positive = overridden; zero/negative = under normal control.
+	 *  See SetTaskSpeedOverride / ClearTaskSpeedOverride. */
+	float TaskSpeedOverrideWalk = 0.f;
+	float TaskSpeedOverrideCrouched = 0.f;
 
 	/** True while the follow task's catch-up sprint should use the reduced FollowCatchupSprintSpeed
 	 *  tier instead of full SprintSpeed. Never set by rescue sprint-to-target or stealth catch-up. */

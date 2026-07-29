@@ -1,5 +1,5 @@
 // URevivePromptWidget -- the player's hold-prompt HUD. Serves two sources: a downed teammate in
-// revive range ("[E] Revive"), and an IWorldInteractable under the crosshair (its own prompt
+// revive range ("[F] Revive"), and an IWorldInteractable under the crosshair (its own prompt
 // text, e.g. "Rescue"). Fills a progress bar during either hold. Polls the owning pawn each
 // tick (no delegate plumbing), same self-managed pattern as the other HUD widgets.
 //
@@ -43,17 +43,18 @@ protected:
 	// --- Designer-editable labels ---
 
 	UPROPERTY(EditAnywhere, Category = "Revive|Hints")
-	FText ReviveHint = NSLOCTEXT("RevivePrompt", "Revive", "[E] Revive");
+	FText ReviveHint = NSLOCTEXT("RevivePrompt", "Revive", "[F] Revive");
 
 	UPROPERTY(EditAnywhere, Category = "Revive|Hints")
 	FText RevivingHint = NSLOCTEXT("RevivePrompt", "Reviving", "Reviving...");
 
-	/** Wraps the interactable's own prompt text as "[E] {0}" — the actor supplies the verb
-	 *  ("Rescue"), the widget supplies the key. */
+	/** Wraps the interactable's own prompt text as "[F] {0}" — the actor supplies the verb
+	 *  ("Rescue"), the widget supplies the key. Revive and world-interact share IA_Interact, so
+	 *  one key spelling serves both hints. */
 	UPROPERTY(EditAnywhere, Category = "Interaction|Hints")
-	FText InteractHintFormat = NSLOCTEXT("RevivePrompt", "InteractFormat", "[E] {0}");
+	FText InteractHintFormat = NSLOCTEXT("RevivePrompt", "InteractFormat", "[F] {0}");
 
 	/** Shown while a hold-to-interact is filling. Empty = keep showing the wrapped prompt. */
 	UPROPERTY(EditAnywhere, Category = "Interaction|Hints")
-	FText InteractHoldingHint = NSLOCTEXT("RevivePrompt", "InteractHolding", "Hold E...");
+	FText InteractHoldingHint = NSLOCTEXT("RevivePrompt", "InteractHolding", "Hold F...");
 };

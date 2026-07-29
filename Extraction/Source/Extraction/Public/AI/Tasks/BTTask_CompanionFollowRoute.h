@@ -62,9 +62,8 @@ private:
 
 		int32 MoveFailCount = 0;
 
-		// Snapshots at task start, restored on cleanup
-		float OriginalMaxWalkSpeed = 0.f;
-		float OriginalMaxWalkSpeedCrouched = 0.f;
+		// OriginalMaxWalkSpeed / OriginalMaxWalkSpeedCrouched removed: RestoreDefaults now uses
+		// ClearTaskSpeedOverride + RefreshMovementSpeeds to re-derive from the tuning asset.
 
 		// Cached focal point to skip redundant SetFocalPoint calls
 		FVector LastFocalPoint = FVector::ZeroVector;

@@ -54,6 +54,17 @@ struct FMissionPhaseConfig
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Phase", meta = (ClampMin = "1", ToolTip = "Maximum alive enemies allowed inside the active director scope for this phase. Placed enemies count too; if the alive count is at or above this value, no squad spawns."))
 	int32 MaxAlive = 12;
 
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Phase", meta = (ToolTip = "Treat this phase as a sustained assault: spawning paces on cadence and MaxAlive only, ignoring the tension sawtooth (no Peak/Relief pauses), and squads arrive already engaged. Meant for defend/siege phases where the player must hold a position under continuous pressure, not for exploration where the sawtooth creates readable lulls."))
+	bool bSustainedPressure = false;
+
+	/** Squads fielded from different zones in a single ambient spawn beat. 1 = one direction
+	 *  at a time (today's behaviour). Higher values make reinforcements arrive from multiple
+	 *  directions simultaneously. Scripted waves are unaffected (always one squad per beat).
+	 *  MaxAlive is respected across the whole beat, not per squad. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Phase", meta = (ClampMin = "1", ClampMax = "4",
+		ToolTip = "Squads fielded from different zones in one ambient spawn beat. 1 = single direction; 2+ = multi-directional. Waves unaffected. MaxAlive shared across the beat."))
+	int32 ConcurrentSpawnZones = 1;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Phase", meta = (ToolTip = "Weighted squad options for this phase. Empty means this phase cannot spawn. Compositions too large for the current MaxAlive headroom are skipped."))
 	TArray<FSquadComposition> Compositions;
 };
@@ -93,8 +104,14 @@ public:
 
 	// --- Spawning ---
 
-	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawning", meta = (ToolTip = "Minimum 3D distance from the player to an eligible spawn zone. Higher values prevent close pop-ins; too high can starve small interiors."))
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawning", meta = (ToolTip = "Minimum 3D distance from the player to an eligible spawn zone on the SAME storey. Higher values prevent close pop-ins; too high can starve small interiors."))
 	float SpawnDistanceMin = 1500.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawning", meta = (ClampMin = "1.0", ToolTip = "Vertical gap (cm) above which a zone counts as a different storey from the player. Zones on another storey use SpawnDistanceMinDifferentStorey instead of SpawnDistanceMin, since the ceiling blocks the pop-in that the same-floor gate prevents."))
+	float StoreySeparationHeight = 250.f;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawning", meta = (ClampMin = "1.0", ToolTip = "Minimum horizontal distance from the player to an eligible spawn zone on a DIFFERENT storey. Deliberately smaller than SpawnDistanceMin because the ceiling blocks the pop-in that the same-floor gate prevents. Must not exceed SpawnDistanceMin (a larger value would make other-storey zones harder to use than same-floor ones, defeating the purpose)."))
+	float SpawnDistanceMinDifferentStorey = 350.f;
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawning", meta = (ToolTip = "Maximum 3D distance from the player to an eligible spawn zone. Lower values keep reinforcements local; too low can starve large or multi-floor layouts."))
 	float SpawnDistanceMax = 4500.f;

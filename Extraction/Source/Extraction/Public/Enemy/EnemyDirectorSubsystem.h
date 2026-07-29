@@ -94,6 +94,17 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Director")
 	FOnMissionPhaseChanged OnMissionPhaseChanged;
 
+	// ---------- v2 API: ambient spawning control ----------
+
+	/** Shuts off (or restores) ambient/tension spawning without touching scripted waves, the alert
+	 *  ladder, or enemies already alive. The defend timer's completion side effect uses this to stop
+	 *  reinforcements while letting the surviving fight play out. */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Director")
+	void SetAmbientSpawningEnabled(bool bEnabled);
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director")
+	bool IsAmbientSpawningEnabled() const { return bAmbientSpawningEnabled; }
+
 	// ---------- v2 API: config ----------
 
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Director")
@@ -109,6 +120,11 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|Director")
 	float GetTension() const { return Tension; }
+
+	/** True when the effective phase has bSustainedPressure AND no scripted wave owns the
+	 *  director (sustained pressure is an ambient concept — waves use bAutoEngage). Folds
+	 *  in the effective config/phase resolution so callers do not reach past the director. */
+	bool IsSustainedPressureActive() const;
 
 	// ---------- v2 API: spawn zone registration ----------
 
@@ -188,6 +204,8 @@ private:
 	static constexpr float DefaultReliefDuration = 25.f;
 	static constexpr float DefaultSpawnDistMin = 1500.f;
 	static constexpr float DefaultSpawnDistMax = 4500.f;
+	static constexpr float DefaultStoreySeparationHeight = 250.f;
+	static constexpr float DefaultSpawnDistMinDifferentStorey = 350.f;
 	static constexpr float NavProjectExtentXY = 200.f;
 	static constexpr float NavProjectExtentZ = 400.f;
 
@@ -213,7 +231,9 @@ private:
 	void UpdateTension(float DeltaSeconds, float EngagedCount);
 	float PollPlayerHealthLost();
 	void UpdateSawtooth(float DeltaSeconds);
-	bool TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*>* OutSpawned = nullptr);
+	bool TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*>* OutSpawned = nullptr,
+		const TSet<AEnemySpawnZone*>* ExcludedZones = nullptr,
+		AEnemySpawnZone** OutUsedZone = nullptr);
 	bool ShouldSpawn(int32 AliveCount) const;
 
 	// ---------- v2: effective config / phase selection ----------
@@ -242,6 +262,10 @@ private:
 
 	EDirectorState DirectorState = EDirectorState::Build;
 	float ReliefTimer = 0.f;
+
+	// ---------- v2: ambient spawning gate ----------
+
+	bool bAmbientSpawningEnabled = true;
 
 	// ---------- v2: mission phase ----------
 
@@ -277,13 +301,15 @@ private:
 	/** The guaranteed-squad entry pinned to the wave's NEXT squad slot, or nullptr. Shared by
 	 *  ShouldSpawn (which must waive the alive cap for it) and PickComposition (which resolves it). */
 	const FDirectorGuaranteedSquad* FindGuaranteedSquadForNext() const;
-	AEnemySpawnZone* PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize) const;
+	AEnemySpawnZone* PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize,
+		const TSet<AEnemySpawnZone*>* ExcludedZones = nullptr) const;
+	bool IsZoneTooClose(const AEnemySpawnZone* Zone, const FVector& PlayerLoc) const;
 	bool IsPointInPlayerSightline(const FVector& Point, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams) const;
-	bool IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const;
+	bool IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, int32 SquadSize, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const;
 	float ScoreZone(const AEnemySpawnZone* Zone, const FVector& PlayerLoc, const FVector& CompanionLoc, bool bHasCompanion, float DistMin, float DistMax) const;
 	const ACompanionCharacter* FindCompanion() const;
 	void SpawnSquadAtZone(const FSquadComposition& Composition, AEnemySpawnZone* Zone, TArray<AEnemyCharacter*>& OutSpawned);
-	AEnemyCharacter* SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index);
+	AEnemyCharacter* SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index, int32 SquadSize);
 	void SeedSquadWithFight(UEnemySquad* Squad) const;
 
 	TWeakObjectPtr<UEnemySquadSubsystem> CachedSquadSubsystem;

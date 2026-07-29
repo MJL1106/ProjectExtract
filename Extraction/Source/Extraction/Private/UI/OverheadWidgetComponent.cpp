@@ -19,6 +19,14 @@ static TAutoConsoleVariable<int32> CVarOverheadDebug(
 	TEXT("If non-zero, log each overhead widget's occlusion trace result and applied render scale."),
 	ECVF_Cheat);
 
+void UOverheadWidgetComponent::ResetOcclusionState()
+{
+	TimeSinceOcclusionTrace = OcclusionTraceInterval;
+	bOccluded = false;
+	// Sentinel ensures the next computed scale is unconditionally applied.
+	LastAppliedScale = FVector2D(-1.f, -1.f);
+}
+
 UOverheadWidgetComponent::UOverheadWidgetComponent()
 {
 	PrimaryComponentTick.bCanEverTick = true;

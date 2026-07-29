@@ -109,6 +109,7 @@ void ATeleportVolume::TeleportAndHealCompanion(const FTransform& SpawnTransform)
 {
 	// Every ACTIVE companion rides along (the armed extractee included); a captive extractee has
 	// no controller yet and stays put -- teleporting the hostage would break its rescue staging.
+	bool bAnyCompanionFound = false;
 	bool bAnyMoved = false;
 	for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It)
 	{
@@ -118,8 +119,21 @@ void ATeleportVolume::TeleportAndHealCompanion(const FTransform& SpawnTransform)
 		ACompanionAIController* CompanionController = Cast<ACompanionAIController>(Companion->GetController());
 		if (!IsValid(CompanionController)) continue;
 
-		CompanionController->TeleportToLocation(SpawnTransform.GetLocation(), SpawnTransform.GetRotation().Rotator());
-		bAnyMoved = true;
+		bAnyCompanionFound = true;
+
+		const FVector Loc = SpawnTransform.GetLocation();
+		const FRotator Rot = SpawnTransform.GetRotation().Rotator();
+
+		// A heal volume must never leave a squadmate behind, so the destination is not negotiable.
+		// Forcing still goes through the controller: teleporting the pawn directly would skip the
+		// navmesh projection, the traversal cancel and StopMovement, leaving a stale move order to
+		// walk the companion straight back out of the volume.
+		const bool bMoved = CompanionController->TeleportToLocation(Loc, Rot, /*bForce*/ true);
+		if (!bMoved)
+			UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume [%s]: forced teleport failed for companion %s at %s — navmesh projection failed or destination blocked/encroached"),
+				*GetName(), *Companion->GetName(), *Loc.ToString());
+
+		bAnyMoved |= bMoved;
 
 		UHealthComponent* Health = Companion->FindComponentByClass<UHealthComponent>();
 		if (!IsValid(Health)) continue;
@@ -130,8 +144,14 @@ void ATeleportVolume::TeleportAndHealCompanion(const FTransform& SpawnTransform)
 			Health->Heal(Health->GetMaxHealth());
 	}
 
-	if (!bAnyMoved)
-		UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume: no possessed companion found — skipping companion teleport"));
+	if (!bAnyCompanionFound)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume [%s]: no possessed companion found — skipping companion teleport"), *GetName());
+	}
+	else if (!bAnyMoved)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume [%s]: companions found but none could be moved — squad left at its old location"), *GetName());
+	}
 }
 
 FTransform ATeleportVolume::GetPlayerSpawnTransform() const

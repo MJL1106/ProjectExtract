@@ -32,7 +32,10 @@ class USphereComponent;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogObjectiveStep, Log, All);
 
-/** What finishes this beat. Each entry has its own payload fields below, shown only when picked. */
+/** What finishes this beat. Each entry has its own payload fields below, shown only when picked.
+ *
+ *  New entries APPEND. A placed step serialises its condition by value, not by name, so inserting one
+ *  mid-list silently re-points every step in every level authored past it. */
 UENUM(BlueprintType)
 enum class EObjectiveCondition : uint8
 {
@@ -56,6 +59,11 @@ enum class EObjectiveCondition : uint8
 	WaveCompleted,
 	/** Nothing watches — Blueprint or level script calls CompleteStep(). */
 	Manual,
+	/** DefendSeconds elapse with the beat live. The clock is the whole condition — nothing about the
+	 *  fight is checked, because what makes a defend beat readable is that it ends when it says it
+	 *  will. Pair it with a TripAlarm side effect: the Director's ambient pressure is what fills the
+	 *  time, and that is gated on the alarm being up. */
+	SurviveDuration,
 };
 
 UENUM(BlueprintType)
@@ -65,6 +73,8 @@ enum class EObjectiveSideEffectWhen : uint8
 	OnComplete,
 };
 
+/** New entries APPEND, for the same reason the condition list does — a placed step's side effects
+ *  serialise by value. */
 UENUM(BlueprintType)
 enum class EObjectiveSideEffectType : uint8
 {
@@ -78,12 +88,30 @@ enum class EObjectiveSideEffectType : uint8
 	SetCompanionMode,
 	/** End the level through the game mode. */
 	CompleteLevel,
-	/** Turn something on: ActivateTarget on an extraction target, Activate on another step. */
+	/** Turn something on: ActivateTarget on an extraction target, the interaction on an interaction
+	 *  volume, Activate on another step. */
 	ActivateActor,
 	/** Open or shut the extractee's rescue gate, so the VIP cannot be freed ahead of his beat. */
 	SetExtracteeRescuable,
 	/** Send the primary companion off along a placed route. */
 	CommandCompanionRoute,
+	/** Force the global alert to Loud. The Director's ambient (non-wave) spawning is hard-gated on
+	 *  it, so a floor the player cleared quietly answers a defend beat with an empty room — this is
+	 *  what turns the pressure back on without scripting a finite wave. The alert ladder is a
+	 *  ratchet, so applying it twice is applying it once. */
+	TripAlarm,
+	/** Move the whole squad at once — the player pawn to PlayerDestination, each companion to its
+	 *  slot in CompanionDestinations. The endgame lift ride, without a level transition. */
+	TeleportSquad,
+	/** Enable or disable the Director's ambient (non-wave) spawning. Scripted waves still run.
+	 *  The defend timer's OnComplete side effect uses this to halt reinforcements while letting
+	 *  surviving enemies fight on. Idempotent — re-applying the same state is a no-op. */
+	SetDirectorSpawning,
+	/** Lock or unlock placed doors via their external gate. The defend beat locks the exits on
+	 *  activation so the player cannot walk out early, then unlocks them on completion. Idempotent —
+	 *  a checkpoint resume before the defend re-locks the doors, and one after it re-unlocks them,
+	 *  restoring the world the player left behind. */
+	SetDoorsLocked,
 };
 
 /** One scripted consequence of a step activating or completing. */
@@ -132,24 +160,56 @@ struct EXTRACTION_API FObjectiveSideEffect
 		meta = (EditCondition = "Type == EObjectiveSideEffectType::CommandCompanionRoute", EditConditionHides))
 	TObjectPtr<ACompanionRoute> RouteTarget;
 
-	/** Whether a checkpoint fast-forward re-runs this effect for a beat the player already finished.
-	 *  On for the idempotent types (phase, gate unlock, companion mode, rescue gate, activation) —
-	 *  re-applying them just re-asserts the world the player left behind. Turn it off for anything
-	 *  the resume must not repeat. Hidden for the three types a fast-forward NEVER replays. */
+	/** TeleportSquad: where the player lands. Its yaw becomes the player's control rotation, so point
+	 *  the marker at whatever the squad is meant to be looking at on arrival. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Side Effect",
+		meta = (EditCondition = "Type == EObjectiveSideEffectType::TeleportSquad", EditConditionHides))
+	TObjectPtr<AActor> PlayerDestination;
+
+	/** TeleportSquad: one landing spot per companion, slot 0 = the primary and the rest in level
+	 *  order. A short list is legitimate — a companion with no slot simply stays where it is. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Side Effect",
+		meta = (EditCondition = "Type == EObjectiveSideEffectType::TeleportSquad", EditConditionHides))
+	TArray<TObjectPtr<AActor>> CompanionDestinations;
+
+	/** SetDirectorSpawning: true re-enables ambient spawning, false disables it. Default false because
+	 *  the typical use is "stop spawning after the defend timer", paired with a re-enable on a later beat
+	 *  if the mission needs pressure again. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Side Effect",
-		meta = (EditCondition = "Type != EObjectiveSideEffectType::StartDirectorWave && Type != EObjectiveSideEffectType::CompleteLevel && Type != EObjectiveSideEffectType::CommandCompanionRoute",
+		meta = (EditCondition = "Type == EObjectiveSideEffectType::SetDirectorSpawning", EditConditionHides))
+	bool bDirectorSpawningEnabled = false;
+
+	/** SetDoorsLocked: level-placed doors whose external gate is toggled by this effect. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadWrite, Category = "Side Effect",
+		meta = (EditCondition = "Type == EObjectiveSideEffectType::SetDoorsLocked", EditConditionHides))
+	TArray<TObjectPtr<ADoorBase>> DoorTargets;
+
+	/** SetDoorsLocked: true locks the doors (blocks player open), false unlocks them. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Side Effect",
+		meta = (EditCondition = "Type == EObjectiveSideEffectType::SetDoorsLocked", EditConditionHides))
+	bool bDoorsLocked = true;
+
+	/** Whether a checkpoint fast-forward re-runs this effect for a beat the player already finished.
+	 *  On for the idempotent types (phase, gate unlock, companion mode, rescue gate, activation,
+	 *  alarm) — re-applying them just re-asserts the world the player left behind. Turn it off for
+	 *  anything the resume must not repeat. Hidden for the four types a fast-forward NEVER replays. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Side Effect",
+		meta = (EditCondition = "Type != EObjectiveSideEffectType::StartDirectorWave && Type != EObjectiveSideEffectType::CompleteLevel && Type != EObjectiveSideEffectType::CommandCompanionRoute && Type != EObjectiveSideEffectType::TeleportSquad",
 			EditConditionHides))
 	bool bReplayOnResume = true;
 
 	/** A wave the player already beat must not be re-started at level load; a CompleteLevel on any
-	 *  earlier beat would end the level the instant the player resumes; and a route command would
-	 *  march the companion off from wherever the checkpoint teleport just dropped him, walking a
-	 *  cinematic the player already watched. None is ever a replay, so none is offered as one. */
+	 *  earlier beat would end the level the instant the player resumes; a route command would march
+	 *  the companion off from wherever the checkpoint teleport just dropped him, walking a cinematic
+	 *  the player already watched; and a squad teleport would yank the party clean across the level
+	 *  at load, straight past the checkpoint teleport that owns where the player starts. None is ever
+	 *  a replay, so none is offered as one. */
 	bool ShouldReplayOnResume() const
 	{
 		if (Type == EObjectiveSideEffectType::StartDirectorWave) return false;
 		if (Type == EObjectiveSideEffectType::CompleteLevel) return false;
 		if (Type == EObjectiveSideEffectType::CommandCompanionRoute) return false;
+		if (Type == EObjectiveSideEffectType::TeleportSquad) return false;
 		return bReplayOnResume;
 	}
 };
@@ -327,6 +387,14 @@ protected:
 		meta = (EditCondition = "Condition == EObjectiveCondition::WaveCompleted", EditConditionHides))
 	FName WatchedWaveId = NAME_None;
 
+	/** SurviveDuration: how long the beat holds, in seconds. Counted down on the HUD line, and a
+	 *  fresh full clock every time the beat goes live — elapsed time is never carried across a
+	 *  checkpoint resume, because a player who reloads into six seconds of a ninety-second hold has
+	 *  been handed the beat rather than made to play it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Step|Completion",
+		meta = (EditCondition = "Condition == EObjectiveCondition::SurviveDuration", EditConditionHides, ClampMin = "1.0"))
+	float DefendSeconds = 90.f;
+
 	// --- Marker presentation ---
 
 	/** The marker follows this actor. Null falls back, in order, to: the condition's derived anchor
@@ -400,6 +468,22 @@ private:
 	/** Lift applied to derived area anchors — they are sampled at capsule centre, so without it
 	 *  they read lower than target-based markers resolved from a bounds base. */
 	static constexpr float AreaMarkerLift = 80.f;
+	/** How often a live SurviveDuration beat rewrites its HUD clock. One second is the resolution the
+	 *  label is formatted at, so anything faster is churn nobody can read. */
+	static constexpr float DefendCountdownSeconds = 1.f;
+	/** Clock formatting only. */
+	static constexpr int32 SecondsPerMinute = 60;
+	/** Horizontal arrival test (squared, cm^2). TeleportToLocation projects to the navmesh and then
+	 *  TeleportTo resolves encroachment, settling the capsule at resting contact — a successful move
+	 *  can land ~88cm above a floor-level destination (capsule half-height). Splitting the axes
+	 *  keeps the horizontal budget clean: 100cm catches a refused encroachment while tolerating
+	 *  navmesh snap. */
+	static constexpr float CompanionArrivalToleranceSq = 100.f * 100.f;
+	/** Vertical arrival tolerance (cm). One capsule height: generous enough for the capsule-lift
+	 *  that every successful move produces, tight enough to catch a wrong-storey landing — storey
+	 *  spacing in the lift shaft is well inside the controller's 500cm projection extent, so a
+	 *  wider band would accept a companion teleported to the wrong floor. */
+	static constexpr float CompanionArrivalHeightTolerance = 180.f;
 
 	// --- Lifecycle (native) ---
 
@@ -460,6 +544,25 @@ private:
 	FTimerHandle CheckpointSpawnRetryHandle;
 	int32 CheckpointSpawnRetries = 0;
 
+	/** SurviveDuration: the one-shot that completes the beat, and the 1Hz clock that writes the HUD
+	 *  line under it. The remaining time is read back off the first rather than tracked separately,
+	 *  so there is no second copy of "how long is left" to drift or to survive a pause. */
+	FTimerHandle DefendTimerHandle;
+	FTimerHandle DefendCountdownHandle;
+
+	/** TeleportSquad: held while the player pawn retry polls. Companions move immediately in
+	 *  TeleportSquad; only the player is deferred when the pawn is not yet spawned. Cleared in
+	 *  EndPlay. */
+	FTimerHandle SquadTeleportRetryHandle;
+	int32 SquadTeleportRetries = 0;
+
+	/** The side effect kept alive for the deferred player-only teleport. Companions already moved
+	 *  by the time the deferral begins — only the player destination is still needed. Reflected so
+	 *  the reference collector sees PlayerDestination — without UPROPERTY the TObjectPtr is not
+	 *  nulled on collect and the retry reads freed memory. */
+	UPROPERTY()
+	FObjectiveSideEffect PendingSquadTeleport;
+
 	/** Lazily-resolved level companion for the checkpoint heal. */
 	TWeakObjectPtr<ACompanionCharacter> CachedCompanion;
 
@@ -472,6 +575,20 @@ private:
 	 *  door breached before its step went live never re-broadcasts, so entry must re-read state. */
 	void EvaluateCondition();
 	bool IsConditionSatisfied() const;
+
+	/** SurviveDuration: arm the completion one-shot and the HUD clock under it. Always a fresh full
+	 *  DefendSeconds — see the property comment on why a resume does not inherit elapsed time. */
+	void StartDefendCountdown();
+
+	/** Drops both defend timers. Reached from Deactivate and EndPlay, and safe on a beat that never
+	 *  started one. */
+	void StopDefendCountdown();
+
+	/** Rewrites the HUD line to "<Label> — M:SS" off the completion timer's own remaining time. */
+	void UpdateDefendCountdownLabel();
+
+	/** The completion one-shot's target. */
+	void HandleDefendElapsed();
 
 	/** Snapshots valid tracked enemies and the area centroid. Activation-time only. */
 	void CaptureEnemySnapshot();
@@ -509,6 +626,27 @@ private:
 	/** bResumeReplay is carried through rather than re-derived: an ActivateActor effect running under
 	 *  a resume must hand the same filter to the step it activates, or the side-chain runs unfiltered. */
 	void ApplySideEffect(const FObjectiveSideEffect& Effect, bool bResumeReplay);
+
+	/** ActivateActor: the "turn something on" branch, lifted out because it is the only effect that
+	 *  has to dispatch on what it was handed. */
+	void ApplyActivateActor(const FObjectiveSideEffect& Effect, bool bResumeReplay);
+
+	/** TeleportSquad: player first, then each companion to its slot. */
+	void TeleportSquad(const FObjectiveSideEffect& Effect);
+
+	/** Companions in the slot order CompanionDestinations is authored against: the primary always
+	 *  first, then everything else in level-actor order. Deterministic by construction — a list whose
+	 *  slot 0 meant a different squadmate between runs would be unauthorable. */
+	void GatherSquadCompanions(TArray<ACompanionCharacter*>& OutCompanions);
+
+	/** One companion moved, through its AI controller where it has one — the controller's teleport is
+	 *  what cancels the move order that would otherwise walk it straight back. */
+	void TeleportCompanionToDestination(ACompanionCharacter* Companion, const AActor* Destination) const;
+
+	/** Player pawn not yet available — poll on the same cadence and budget as the checkpoint spawn
+	 *  retry, which faces the same actor-ordering hazard. */
+	void DeferTeleportSquad(const FObjectiveSideEffect& Effect);
+	void TryApplyDeferredSquadTeleport();
 
 	/** True when one of this step's side effects asks the Director for WaveId. */
 	bool StartsDirectorWave(FName WaveId) const;
@@ -565,6 +703,10 @@ private:
 
 	/** Non-fatal audit at activation: unset payloads, self-reference, cycles, missing spawn point. */
 	void AuditStepWiring();
+
+	/** TeleportSquad's share of that audit. Runs at activation, so it can count the companions that
+	 *  actually exist rather than guess from the wiring. */
+	void AuditTeleportSquad(const FObjectiveSideEffect& Effect);
 
 	/** Level-wide audit run once, from the first placed step: entry-step count, duplicate ids. */
 	void AuditLevelWiring();

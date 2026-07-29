@@ -236,6 +236,9 @@ bool FObjectiveSideEffectReplayRuleTest::RunTest(const FString& Parameters)
 		EObjectiveSideEffectType::SetCompanionMode,
 		EObjectiveSideEffectType::SetExtracteeRescuable,
 		EObjectiveSideEffectType::ActivateActor,
+		EObjectiveSideEffectType::TripAlarm,
+		EObjectiveSideEffectType::SetDirectorSpawning,
+		EObjectiveSideEffectType::SetDoorsLocked,
 	};
 	for (EObjectiveSideEffectType Type : Idempotent)
 	{
@@ -268,6 +271,15 @@ bool FObjectiveSideEffectReplayRuleTest::RunTest(const FString& Parameters)
 	Route.bReplayOnResume = true;
 	TestFalse(TEXT("a route command stays un-replayable even when the flag is set"),
 		Route.ShouldReplayOnResume());
+
+	// The checkpoint teleport owns where the player starts; a replayed squad teleport would yank the
+	// party clean across the level the instant the save loads.
+	FObjectiveSideEffect Teleport;
+	Teleport.Type = EObjectiveSideEffectType::TeleportSquad;
+	TestFalse(TEXT("a squad teleport never replays on resume"), Teleport.ShouldReplayOnResume());
+	Teleport.bReplayOnResume = true;
+	TestFalse(TEXT("a squad teleport stays un-replayable even when the flag is set"),
+		Teleport.ShouldReplayOnResume());
 	return true;
 }
 

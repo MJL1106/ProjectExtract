@@ -42,6 +42,13 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gate")
 	ECompanionMode RequiredMode = ECompanionMode::Stealth;
 
+	/** Off suppresses the gate's own HUD objective line, for levels where an AObjectiveStep
+	 *  watching this gate registers the beat under its own StepId. Without this, one beat
+	 *  renders as two entries with mismatched wording. On by default so every gate placed
+	 *  before this flag existed behaves as it always has. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gate|Objective")
+	bool bRegisterOwnObjective = true;
+
 	/** Objective id registered with UObjectiveSubsystem while the gate is active. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Gate|Objective")
 	FName ObjectiveId = TEXT("CompanionModeGate");

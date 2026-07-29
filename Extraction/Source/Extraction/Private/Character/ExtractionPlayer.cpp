@@ -1004,10 +1004,10 @@ void AExtractionPlayer::UpdateAutoLean(float DeltaTime)
 void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 {
 	if (bIsDBNO) return;
-	// Mid-takedown E would start the revive: the kneel's stop-all Montage_Play kills the takedown
+	// Mid-takedown F would start the revive: the kneel's stop-all Montage_Play kills the takedown
 	// montage (orphaning the victim) and the seat snap flips the capsule mid-kill.
 	if (bTakedownMontageActive) return;
-	// Mid-traversal E is the reverse of TryStartTraversal's bIsReviving guard: the revive hold
+	// Mid-traversal F is the reverse of TryStartTraversal's bIsReviving guard: the revive hold
 	// would snapshot bUseControllerRotationYaw while traversal already holds it false, and
 	// its restore then leaves yaw-follow stuck off — the body stops tracking the camera and the
 	// kit's turn/aim layers contort the pose (the "player floats at doors" latch).
@@ -1037,7 +1037,7 @@ void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 
 	if (bIsInteractHolding)
 	{
-		UE_LOG(LogExtraction, Log, TEXT("Interact hold cancel: E released at %.2fs / %.2fs on '%s'"),
+		UE_LOG(LogExtraction, Log, TEXT("Interact hold cancel: F released at %.2fs / %.2fs on '%s'"),
 			InteractHoldElapsed, InteractHoldDuration, *GetNameSafe(InteractHoldTarget));
 		CancelInteractHold();
 		return;
@@ -1045,7 +1045,7 @@ void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 
 	if (!bIsReviving) return;
 
-	UE_LOG(LogExtraction, Log, TEXT("Revive cancel: E released at %.2fs / %.2fs"), ReviveElapsed, ReviveDuration);
+	UE_LOG(LogExtraction, Log, TEXT("Revive cancel: F released at %.2fs / %.2fs"), ReviveElapsed, ReviveDuration);
 	CancelRevive();
 }
 
