@@ -2712,6 +2712,7 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	// Pressure tracking: reset distance sample so first tick after re-entry doesn't false-detect closing.
 	PreviousNearestThreatDist = -1.f;
 	Pressure01 = 0.f;
+	if (IsValid(Companion)) Companion->SetPressure01(0.f, IsValid(Companion->GetWorld()) ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 	bPreviousThreatWasClosing = false;
 	PressureSampleTimer = 0.f;
 	// Keep PeekImpulseCooldownRemaining across task restarts (same reason as angle-seek cooldown).
@@ -3797,9 +3798,28 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				const float FarDist = TickTuning->PressureFarDistance;
 				const float NearDist = TickTuning->PressureNearDistance;
-				Pressure01 = (NearestDist < TNumericLimits<float>::Max())
+				const float DistanceTerm = (NearestDist < TNumericLimits<float>::Max())
 					? FMath::Clamp((FarDist - NearestDist) / FMath::Max(FarDist - NearDist, 1.f), 0.f, 1.f)
 					: 0.f;
+
+				// Fire term: incoming fire raises pressure independently of distance so a
+				// firefight at mid-range no longer reads as calm.
+				const float Supp01 = Ctx.Companion->GetSuppression01();
+				const float SuppContrib = Supp01 * TickTuning->PressureSuppressionWeight;
+				const int32 DmgHitsMax = FMath::Max(TickTuning->PressureDamageHitsForMax, 1);
+				const int32 RecentHits = Ctx.Companion->GetRecentDamageCount(
+					TickTuning->CoverCommitUnderFireWindow);
+				const float DmgContrib = FMath::Clamp(
+					static_cast<float>(RecentHits) / static_cast<float>(DmgHitsMax), 0.f, 1.f);
+				const float FireTerm = FMath::Clamp(FMath::Max(SuppContrib, DmgContrib), 0.f, 1.f);
+
+				Pressure01 = FMath::Max(DistanceTerm, FireTerm);
+
+				// Mirror to the character for the debug distance overlay.
+				{
+					const UWorld* PressureWorld = Ctx.Companion->GetWorld();
+					Ctx.Companion->SetPressure01(Pressure01, IsValid(PressureWorld) ? PressureWorld->GetTimeSeconds() : 0.f);
+				}
 
 				const bool bClosingNow = (PreviousNearestThreatDist >= 0.f && NearestDist < PreviousNearestThreatDist);
 				const bool bClosingConfirmed = bClosingNow && bPreviousThreatWasClosing;
@@ -3826,15 +3846,21 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				if (CovDbg())
 				{
 					UE_LOG(LogCompanionAI, Log,
-						TEXT("[COVDBG] %s PRESSURE p01=%.2f nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
-						*Ctx.Companion->GetName(), Pressure01, NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
+						TEXT("[COVDBG] %s PRESSURE p01=%.2f distTerm=%.2f fireTerm=%.2f(supp=%.2f w=%.1f dmg=%d/%d) nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
+						*Ctx.Companion->GetName(), Pressure01, DistanceTerm, FireTerm,
+						Supp01, TickTuning->PressureSuppressionWeight, RecentHits, DmgHitsMax,
+						NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
 						ModePeekConfidenceScale(Ctx.Companion, TickTuning, false, Pressure01),
 						(int32)bImpulseFired);
 				}
 			}
 		}
 		if (!bPressureOn)
+		{
 			Pressure01 = 0.f;
+			const UWorld* PressureOffWorld = Ctx.Companion->GetWorld();
+			Ctx.Companion->SetPressure01(0.f, IsValid(PressureOffWorld) ? PressureOffWorld->GetTimeSeconds() : 0.f);
+		}
 
 		// Mode + pressure confidence shrink the whole wait; the first peek at a fresh point shrinks
 		// it again on top, so taking cover under fire is answered rather than waited out.

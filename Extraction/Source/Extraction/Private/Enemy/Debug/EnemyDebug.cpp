@@ -171,3 +171,14 @@ int32 GetCoverMoveDebugLevel()
 {
 	return CVarCoverMoveDebug.GetValueOnGameThread();
 }
+
+static TAutoConsoleVariable<int32> CVarDrawDistances(
+	TEXT("enemy.DrawDistances"),
+	0,
+	TEXT("Distance/pressure overlay: 0=off, 1=each alive enemy shows 2D distances to player and companion (cm) above its head; the primary companion shows its live Pressure01 (cover-branch only; value shown as stale outside cover idle)."),
+	ECVF_Cheat);
+
+int32 GetDrawDistancesLevel()
+{
+	return CVarDrawDistances.GetValueOnGameThread();
+}

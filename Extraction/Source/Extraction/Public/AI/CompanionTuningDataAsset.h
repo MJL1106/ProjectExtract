@@ -761,6 +761,20 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.5"))
 	float PeekImpulseRearmSeconds = 3.f;
 
+	// --- Pressure fire term (incoming-fire contributes to Pressure01 alongside distance) ---
+	// Being shot at raises pressure even when the nearest threat is far away — a firefight at 18m
+	// no longer reads as calm just because nobody has closed. Gated by bPressureResponsiveCover.
+
+	// Weight [0,1] for the suppression01 half of the fire term. 0 disables suppression's
+	// contribution; 1 means full suppression01 equals full pressure on its own.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PressureSuppressionWeight = 1.f;
+
+	// Recent damage hits (within CoverCommitUnderFireWindow) that equal maximum fire-term
+	// pressure. Fewer hits contribute proportionally. Clamped >= 1 to prevent division by zero.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 PressureDamageHitsForMax = 3;
+
 	// A VISIBLE threat inside this range defeats cover logic entirely: in-cover releases to
 	// open-engage (which move-shoots) and new cover commits are declined — no cat-and-mouse
 	// laps around the same rock with a chaser on the companion's tail. 0 disables.

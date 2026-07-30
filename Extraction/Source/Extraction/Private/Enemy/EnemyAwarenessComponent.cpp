@@ -37,6 +37,7 @@
 #if ENABLE_DRAW_DEBUG
 #include "DrawDebugHelpers.h"
 #include "BehaviorTree/BehaviorTreeComponent.h"
+#include "Components/WidgetComponent.h" // AwarenessWidgetComponent is only dereferenced by the distance overlay
 #endif
 
 UEnemyAwarenessComponent::UEnemyAwarenessComponent()
@@ -779,6 +780,19 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 	RefreshSearchRoomExposure();
 	RefreshAlwaysCloakedCompanion();
 
+#if ENABLE_DRAW_DEBUG
+	// Distance overlay runs before the debug-auto-engage early return so force-engaged enemies
+	// still render their P/C labels (force-engage is the standard staging tool for tuning).
+	{
+		const AAIController* EarlyCtrl = Cast<AAIController>(GetOwner());
+		const AEnemyCharacter* EarlyChar = EarlyCtrl ? Cast<AEnemyCharacter>(EarlyCtrl->GetPawn()) : nullptr;
+		if (IsValid(EarlyChar))
+		{
+			DrawDistanceOverlay(EarlyChar, GetWorld());
+		}
+	}
+#endif
+
 	// Debug auto-engage: force Combat with the player pawn every tick while the flag is set.
 	// Runs before the normal Combat/Suspicion branch so it re-asserts target and state even if
 	// a previous tick decayed to Searching.
@@ -1036,6 +1050,65 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 			}
 		}
 	}
+}
+
+// --- Distance/pressure overlay (enemy.DrawDistances) ---
+
+void UEnemyAwarenessComponent::DrawDistanceOverlay(const AEnemyCharacter* MyChar, UWorld* World) const
+{
+#if ENABLE_DRAW_DEBUG
+	if (GetDrawDistancesLevel() <= 0) return;
+	if (!IsValid(MyChar) || !IsValid(World)) return;
+	if (!IsValid(MyChar->GetHealthComponent()) || !MyChar->GetHealthComponent()->IsAlive()) return;
+
+	// Refresh the cached companion when stale to avoid a TActorIterator per enemy per tick.
+	if (!CachedPrimaryCompanion.IsValid())
+	{
+		CachedPrimaryCompanion = ACompanionCharacter::GetPrimaryCompanion(World);
+	}
+
+	constexpr float WidgetLabelGap = 30.f;
+	constexpr float FallbackLabelOffset = 60.f;
+	constexpr float FallbackHalfHeight = 90.f;
+	constexpr float OverlayDurationScale = 1.5f;
+
+	const APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
+	const ACompanionCharacter* Companion = CachedPrimaryCompanion.Get();
+
+	// Position above the awareness widget so the label stacks above the meter.
+	FVector LabelPos = MyChar->GetActorLocation();
+	if (IsValid(MyChar->AwarenessWidgetComponent))
+	{
+		LabelPos = MyChar->AwarenessWidgetComponent->GetComponentLocation()
+			+ FVector(0.f, 0.f, WidgetLabelGap);
+	}
+	else
+	{
+		const float HH = MyChar->GetCapsuleComponent()
+			? MyChar->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : FallbackHalfHeight;
+		LabelPos.Z += HH + FallbackLabelOffset;
+	}
+
+	const float PDist = IsValid(PlayerPawn)
+		? FVector::Dist2D(MyChar->GetActorLocation(), PlayerPawn->GetActorLocation()) : -1.f;
+	const float CDist = IsValid(Companion)
+		? FVector::Dist2D(MyChar->GetActorLocation(), Companion->GetActorLocation()) : -1.f;
+
+	FString Label;
+	if (PDist >= 0.f) Label += FString::Printf(TEXT("P %.0f"), PDist);
+	if (CDist >= 0.f)
+	{
+		if (Label.Len() > 0) Label += TEXT("  ");
+		Label += FString::Printf(TEXT("C %.0f"), CDist);
+	}
+	if (Label.Len() > 0)
+	{
+		// const, not constexpr: FColor::Yellow is a dllimported out-of-line object, not a constant expression.
+		const FColor DistanceColor = FColor::Yellow;
+		DrawDebugString(World, LabelPos, Label, nullptr, DistanceColor,
+			UpdateInterval * OverlayDurationScale, true);
+	}
+#endif
 }
 
 void UEnemyAwarenessComponent::UpdateCombat()

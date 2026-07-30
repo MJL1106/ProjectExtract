@@ -180,6 +180,14 @@ public:
 	void SetPlayerFocusedEnemyCount(int32 Count) { PlayerFocusedEnemyCount = Count; }
 	int32 GetPlayerFocusedEnemyCount() const { return PlayerFocusedEnemyCount; }
 
+	// --- Pressure01 mirror (BTTask_CompanionCombat-written) ---
+	// Live pressure signal [0,1] including both distance and incoming-fire terms. Written by the
+	// combat task each pressure sample; consumed by the debug distance overlay (enemy.DrawDistances).
+
+	void SetPressure01(float Value, float WorldTime) { CachedPressure01 = Value; CachedPressure01Time = WorldTime; }
+	float GetPressure01() const { return CachedPressure01; }
+	float GetPressure01Time() const { return CachedPressure01Time; }
+
 	// --- Natural cover release (committed-time cycling back to mobile fighting) ---
 	// Stamped by CoverSwitchMonitor's natural-release vacate; both cover commit sites read it to
 	// block an immediate re-commit (unless fresh strong pressure) so cycling can't become cover-hop.
@@ -1085,6 +1093,11 @@ private:
 
 	/** Mirror of the BT service's "enemies focused on the player" tally. Transient, not replicated. */
 	int32 PlayerFocusedEnemyCount = 0;
+
+	/** Mirror of BTTask_CompanionCombat's computed Pressure01 (distance + fire terms). Transient. */
+	float CachedPressure01 = 0.f;
+	/** World time of the last SetPressure01 write. Used to detect stale values in the overlay. */
+	float CachedPressure01Time = -1e9f;
 
 	/** See GetNearestThreatToDownedPlayer. Negative = no threat / not applicable. Transient. */
 	float NearestThreatToDownedPlayerDist = -1.f;

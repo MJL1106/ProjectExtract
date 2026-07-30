@@ -62,3 +62,9 @@ int32 GetForceCoverRepositionLevel();
  *  directional arrows during cover-move windows: shuffle hold, facing-active transit, SeekingCover
  *  phase, and a post-arrival soak window). */
 int32 GetCoverMoveDebugLevel();
+
+/** Returns the current enemy.DrawDistances cvar value (0=off, 1=on). When on, each alive enemy
+ *  draws a "P <dist>  C <dist>" label above its head showing 2D distance to the player and
+ *  companion in cm, and the primary companion draws its live Pressure01 above its head.
+ *  Pressure01 is a cover-branch-only signal; the readout shows "(stale)" when not in cover idle. */
+int32 GetDrawDistancesLevel();

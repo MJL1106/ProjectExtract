@@ -36,6 +36,8 @@
 #include "Net/UnrealNetwork.h"
 #include "EngineUtils.h"
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
+#include "DrawDebugHelpers.h"
+#include "EnemyDebug.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
@@ -377,6 +379,26 @@ void ACompanionCharacter::Tick(float DeltaTime)
 
 	TickPlayerSoftSeparation();
 	TickAllySoftSeparation();
+
+#if ENABLE_DRAW_DEBUG
+	if (GetDrawDistancesLevel() > 0 && bIsPrimaryCompanion)
+	{
+		constexpr float PressureLabelOffset = 60.f;
+		constexpr float FallbackHalfHeight = 90.f;
+		constexpr float StaleThreshold = 0.5f;
+		const float HH = GetCapsuleComponent()
+			? GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : FallbackHalfHeight;
+		const FVector LabelPos = GetActorLocation() + FVector(0.f, 0.f, HH + PressureLabelOffset);
+		const UWorld* DrawWorld = GetWorld();
+		const float Age = IsValid(DrawWorld) ? (DrawWorld->GetTimeSeconds() - CachedPressure01Time) : 0.f;
+		const bool bStale = Age > StaleThreshold;
+		const FString Label = bStale
+			? FString::Printf(TEXT("p01 %.2f (stale)"), CachedPressure01)
+			: FString::Printf(TEXT("p01 %.2f"), CachedPressure01);
+		const FColor LabelColor = bStale ? FColor(128, 128, 128) : FColor::Green;
+		DrawDebugString(GetWorld(), LabelPos, Label, nullptr, LabelColor, DeltaTime * 2.f, true);
+	}
+#endif
 }
 
 void ACompanionCharacter::Bark(ECompanionBarkType Type, FName Context) const
@@ -1362,6 +1384,7 @@ FVector ACompanionCharacter::GetAimPointForTarget(const AActor* Target) const
 void ACompanionCharacter::HandleDeath()
 {
 	UE_LOG(LogCompanion, Log, TEXT("%s died — entering DBNO"), *GetName());
+	CachedPressure01 = 0.f;
 	EnterDBNO();
 }
 
