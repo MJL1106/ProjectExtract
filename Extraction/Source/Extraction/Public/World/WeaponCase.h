@@ -12,6 +12,7 @@
 #include "GameFramework/Actor.h"
 #include "WeaponCase.generated.h"
 
+class ULootMarkerComponent;
 class UMeshComponent;
 class USceneComponent;
 class UStaticMeshComponent;
@@ -27,8 +28,12 @@ public:
 
 	virtual void OnConstruction(const FTransform& Transform) override;
 
-	/** True once every spawned item has been collected (pickups destroy themselves on collect).
-	 *  A case that spawned nothing reads as empty. Hook for "case is picked clean" dressing.
+	/** True once every spawned item has been collected. Designer-facing hook for "case is picked
+	 *  clean" dressing, so it does not require destruction: an item counts as gone when it is
+	 *  destroyed, stale, HIDDEN, or has actor collision fully disabled -- this project's loot
+	 *  convention (ALootPickup) hides + disables collision + SetLifeSpan rather than destroying,
+	 *  and a kit BP pickup may only hide itself and never die at all.
+	 *  A case that spawned nothing reads as empty.
 	 *  ALWAYS false off authority: only the server spawns the items, so a client's list is empty
 	 *  from BeginPlay onward and "empty" there would be a lie, not a state. Nothing consumes this
 	 *  across the network yet, so there is deliberately no replicated counter behind it. */
@@ -41,6 +46,7 @@ public:
 
 protected:
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Case")
 	TObjectPtr<USceneComponent> SceneRoot;
@@ -50,6 +56,15 @@ protected:
 	 *  on a table can't bake AI cover points. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Case")
 	TObjectPtr<UStaticMeshComponent> CaseMesh;
+
+	/** Overhead loot marker -- the same ring affordance ALootContainer carries. AWeaponCase implements
+	 *  neither ILootable nor IWorldInteractable, so the component falls through to its manual
+	 *  availability flag, which BeginPlay and HandleItemDestroyed drive off IsEmpty(). BeginPlay also
+	 *  binds IsMarkerAvailable as the component's availability query, so a hide-only pickup that
+	 *  broadcasts nothing still clears the marker on the next poll. Designer assigns the widget class
+	 *  on the BP subclass. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Case")
+	TObjectPtr<ULootMarkerComponent> LootMarker;
 
 	/** Escape hatch, off by default. The kit interaction component traces ECC_Visibility from the
 	 *  camera, so a blocking case body can in principle swallow that trace before it reaches an
@@ -87,6 +102,19 @@ protected:
 private:
 	/** Weak: pickups destroy themselves when collected. */
 	TArray<TWeakObjectPtr<AActor>> SpawnedItems;
+
+	/** Bound to every spawned item's OnDestroyed so the marker clears the moment the last one is
+	 *  collected. Drops the dying actor from SpawnedItems explicitly -- see the implementation for
+	 *  why its weak pointer cannot be trusted here. */
+	UFUNCTION()
+	void HandleItemDestroyed(AActor* DestroyedActor);
+
+	/** Re-resolves the overhead marker from the current contents. Authority-only, matching IsEmpty. */
+	void RefreshLootMarker();
+
+	/** Bound to the marker's availability query -- the polled counterpart to HandleItemDestroyed,
+	 *  covering pickups that are collected without ever being destroyed. */
+	bool IsMarkerAvailable() const;
 
 	/** Logs warnings for slot components with blank or duplicate SlotIds. */
 	void ValidateSlotIds(TConstArrayView<UWeaponCaseSlotComponent*> AllSlots) const;

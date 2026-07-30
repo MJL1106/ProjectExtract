@@ -9,6 +9,10 @@
 #include "UI/OverheadWidgetComponent.h"
 #include "LootMarkerComponent.generated.h"
 
+/** Optional native availability query an owner can bind. Return-value delegate, so it is
+ *  single-bind by design; unbound is the default and costs nothing. */
+DECLARE_DELEGATE_RetVal(bool, FLootMarkerAvailabilityQuery);
+
 /**
  * Drop-in component for lootable actors. Drives visibility from interface availability
  * checks and a max-distance threshold; occlusion and scaling are inherited from the parent.
@@ -33,6 +37,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Loot Marker")
 	void RefreshMarkerNow();
 
+	/** Binds an owner-supplied availability query, evaluated on the EXISTING availability poll and
+	 *  AND'd into whatever the interface/manual branches resolve. For owners whose "looted" state
+	 *  fires no event at all (a pickup that only hides itself), where polling is the only signal.
+	 *  Bind weak-safe -- CreateUObject or CreateWeakLambda, never a raw capturing lambda. */
+	void SetAvailabilityQuery(const FLootMarkerAvailabilityQuery& InQuery);
+
+	/** Drops any bound availability query, returning resolution to interface + manual state. */
+	void ClearAvailabilityQuery();
+
 	/** World-space Z offset (cm) from the attach parent's origin to the marker. Divided by the
 	 *  parent's world scale at BeginPlay so a scaled volume does not inflate the clearance. */
 	UPROPERTY(EditAnywhere, Category = "Loot Marker", meta = (ClampMin = "0.0"))
@@ -50,6 +63,9 @@ protected:
 private:
 	/** Fallback availability flag when no interface is found on the owner. */
 	bool bMarkerAvailable = true;
+
+	/** Unbound by default -- see SetAvailabilityQuery. */
+	FLootMarkerAvailabilityQuery AvailabilityQuery;
 
 	FTimerHandle AvailabilityTimerHandle;
 

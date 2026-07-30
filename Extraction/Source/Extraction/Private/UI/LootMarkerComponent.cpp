@@ -69,6 +69,8 @@ void ULootMarkerComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		World->GetTimerManager().ClearTimer(AvailabilityTimerHandle);
 	}
 
+	AvailabilityQuery.Unbind();
+
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -81,6 +83,17 @@ void ULootMarkerComponent::SetMarkerAvailable(bool bAvailable)
 void ULootMarkerComponent::RefreshMarkerNow()
 {
 	RefreshAvailability();
+}
+
+void ULootMarkerComponent::SetAvailabilityQuery(const FLootMarkerAvailabilityQuery& InQuery)
+{
+	AvailabilityQuery = InQuery;
+	RefreshAvailability();
+}
+
+void ULootMarkerComponent::ClearAvailabilityQuery()
+{
+	AvailabilityQuery.Unbind();
 }
 
 void ULootMarkerComponent::RefreshAvailability()
@@ -115,6 +128,10 @@ bool ULootMarkerComponent::ResolveAvailability(AActor* Owner) const
 	{
 		return false;
 	}
+
+	// Owner-supplied query, AND'd into every branch below. Unbound is the default and the common
+	// case: nothing bound means resolution is exactly the interface/manual logic that follows.
+	if (AvailabilityQuery.IsBound() && !AvailabilityQuery.Execute()) return false;
 
 	// Interface-based availability, AND'd with the manual toggle.
 	if (Owner->GetClass()->ImplementsInterface(ULootable::StaticClass()))

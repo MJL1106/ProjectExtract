@@ -1144,7 +1144,9 @@ bool AExtractionCharacter::SetCapsuleHalfHeightWithFloorAdjust(float NewHalfHeig
 		FCollisionQueryParams Params;
 		Params.AddIgnoredActor(this);
 
-		if (GetWorld()->OverlapAnyTestByChannel(
+		// Blocking-only: overlap volumes (ammo drops, doorway triggers, objective steps) are not
+		// obstructions, and OverlapAnyTest would treat them as ceiling and refuse the stand-up.
+		if (GetWorld()->OverlapBlockingTestByChannel(
 				TestLocation, FQuat::Identity, ECC_Pawn, TestShape, Params))
 			return false;
 	}

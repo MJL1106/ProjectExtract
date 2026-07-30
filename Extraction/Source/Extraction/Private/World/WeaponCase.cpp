@@ -1,6 +1,7 @@
 // AWeaponCase implementation.
 
 #include "World/WeaponCase.h"
+#include "UI/LootMarkerComponent.h"
 #include "World/WeaponCaseSlotComponent.h"
 
 #include "Components/ActorComponent.h"
@@ -30,6 +31,11 @@ AWeaponCase::AWeaponCase()
 	// bIgnoreInteractionTrace is actually readable.
 	CaseMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	CaseMesh->SetCollisionResponseToChannel(ECC_GameTraceChannel1 /* CoverGen — DefaultEngine.ini */, ECR_Ignore);
+
+	// Widget class, Z offset and max distance are all designer-facing on the component itself, so
+	// nothing is stamped here — the BP subclass owns the look.
+	LootMarker = CreateDefaultSubobject<ULootMarkerComponent>(TEXT("LootMarker"));
+	LootMarker->SetupAttachment(SceneRoot);
 }
 
 void AWeaponCase::OnConstruction(const FTransform& Transform)
@@ -85,6 +91,41 @@ void AWeaponCase::BeginPlay()
 
 	if (!HasAuthority()) return;
 	SpawnSlotItems();
+
+	// A BP spawn hook can destroy the case mid-spawn; SpawnSlotItems bails out when it does.
+	if (IsActorBeingDestroyed()) return;
+
+	// An item that is collected by being HIDDEN rather than destroyed fires no OnDestroyed, so the
+	// marker also polls the case on its own availability timer. The OnDestroyed bindings stay: they
+	// clear the marker the instant the last item dies instead of up to one poll interval later.
+	if (IsValid(LootMarker))
+	{
+		LootMarker->SetAvailabilityQuery(
+			FLootMarkerAvailabilityQuery::CreateUObject(this, &AWeaponCase::IsMarkerAvailable));
+	}
+
+	// A case whose slots were all empty (no FilledSlots, or no PickupClass on them) starts unmarked
+	// rather than advertising loot it never held.
+	RefreshLootMarker();
+}
+
+void AWeaponCase::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// Symmetry with the BeginPlay bindings. Both are hygiene rather than a leak fix -- an item
+	// detached from a dying case would otherwise hold a stale binding back to it.
+	for (const TWeakObjectPtr<AActor>& WeakItem : SpawnedItems)
+	{
+		if (AActor* Item = WeakItem.Get()) Item->OnDestroyed.RemoveAll(this);
+	}
+
+	if (IsValid(LootMarker)) LootMarker->ClearAvailabilityQuery();
+
+	Super::EndPlay(EndPlayReason);
+}
+
+bool AWeaponCase::IsMarkerAvailable() const
+{
+	return !IsEmpty();
 }
 
 bool AWeaponCase::IsEmpty() const
@@ -93,9 +134,21 @@ bool AWeaponCase::IsEmpty() const
 	// "not empty" rather than firing every picked-clean reaction the moment the level loads.
 	if (!HasAuthority()) return false;
 
-	for (const TWeakObjectPtr<AActor>& Item : SpawnedItems)
+	for (const TWeakObjectPtr<AActor>& WeakItem : SpawnedItems)
 	{
-		if (Item.IsValid()) return false;
+		const AActor* Item = WeakItem.Get();
+		if (!IsValid(Item)) continue;
+
+		// Destruction is NOT this project's loot convention: ALootPickup hides itself, disables
+		// collision, then SetLifeSpan(2.f), and a kit BP pickup may only hide itself and never die
+		// at all. A hidden or fully collision-disabled item has been taken -- counting it as still
+		// present leaves the case marker lit for two seconds, or forever.
+		// Both conditions, not either: a seated case item can legitimately spawn with actor collision
+		// off (it is parented into foam and must not block the case), and treating that alone as
+		// "collected" would leave every case reading empty and its marker permanently dark.
+		if (Item->IsHidden() && !Item->GetActorEnableCollision()) continue;
+
+		return false;
 	}
 	return true;
 }
@@ -252,9 +305,35 @@ void AWeaponCase::SpawnSlotItems()
 		SeatItemInSlot(*Item, *SlotComp);
 
 		SpawnedItems.Add(Item);
+
+		// Pickups Destroy() themselves on collect, so their own destruction is the only "case was
+		// looted" signal there is. Authority-only, matching the spawn itself.
+		Item->OnDestroyed.AddDynamic(this, &AWeaponCase::HandleItemDestroyed);
+
 		OnCaseItemSpawned(Item, SlotComp->SlotId);
 		if (IsActorBeingDestroyed()) return;
 	}
+}
+
+void AWeaponCase::HandleItemDestroyed(AActor* DestroyedActor)
+{
+	// OnDestroyed broadcasts from inside UWorld::DestroyActor BEFORE the actor is marked garbage, so
+	// the dying item's weak pointer can still read valid right here -- leave it in the array and
+	// IsEmpty() reports "not empty" on the very last item and the marker never clears. Drop it by
+	// pointer identity, and sweep out any entry that has already gone stale while we are here.
+	SpawnedItems.RemoveAll([DestroyedActor](const TWeakObjectPtr<AActor>& Item)
+	{
+		return !Item.IsValid() || Item.Get() == DestroyedActor;
+	});
+
+	RefreshLootMarker();
+}
+
+void AWeaponCase::RefreshLootMarker()
+{
+	// IsEmpty() is deliberately authority-gated and lies off authority, so the marker follows it.
+	if (!HasAuthority() || !IsValid(LootMarker)) return;
+	LootMarker->SetMarkerAvailable(!IsEmpty());
 }
 
 void AWeaponCase::SeatItemInSlot(AActor& Item, UWeaponCaseSlotComponent& SlotComp)
