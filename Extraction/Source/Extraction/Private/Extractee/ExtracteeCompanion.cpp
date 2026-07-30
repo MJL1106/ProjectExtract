@@ -2,6 +2,8 @@
 
 #include "Extractee/ExtracteeCompanion.h"
 
+#include "CompanionAnimInstance.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Components/WidgetComponent.h"
 #include "Net/UnrealNetwork.h"
 #include "Perception/AISense_Sight.h"
@@ -222,6 +224,9 @@ void AExtracteeCompanion::ArmWithPistol(bool bCeremony)
 	if (AWeaponBase* Weapon = GetCurrentWeapon())
 		Weapon->SetWeaponHidden(false);
 
+	// Same weapon actor as at BeginPlay; re-baseline so ABP-specific cover align values take effect.
+	RebaselineWeaponAlign();
+
 	UE_LOG(LogCompanion, Log, TEXT("%s armed -- second companion active"), *GetName());
 
 	if (!bCeremony) return;
@@ -245,6 +250,26 @@ void AExtracteeCompanion::ArmWithPistol(bool bCeremony)
 			WaveDelayAfterArmed, /*bLoop=*/false);
 	else
 		OnRescued.Broadcast();
+}
+
+void AExtracteeCompanion::RebaselineWeaponAlign()
+{
+	const USkeletalMeshComponent* BodyMesh = GetMesh();
+	UCompanionAnimInstance* CompAnim = IsValid(BodyMesh)
+		? Cast<UCompanionAnimInstance>(BodyMesh->GetAnimInstance())
+		: nullptr;
+	if (!IsValid(CompAnim))
+	{
+		// The exact designer mis-wire that reproduces the pistol drift (ABP not a
+		// UCompanionAnimInstance) would otherwise fail invisibly here.
+		UE_LOG(LogCompanion, Warning,
+			TEXT("%s: RebaselineWeaponAlign -- ABP is not a UCompanionAnimInstance (class '%s'); "
+				 "weapon align will not re-bake and the pistol drift this fixes will reproduce"),
+			*GetName(), BodyMesh ? *GetNameSafe(BodyMesh->GetAnimInstance()) : TEXT("null"));
+		return;
+	}
+
+	CompAnim->RequestWeaponAlignRebake();
 }
 
 FText AExtracteeCompanion::GetBleedoutFailReason() const

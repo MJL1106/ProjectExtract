@@ -9,6 +9,7 @@
 #include "Companion/CompanionRoute.h"
 #include "Components/HealthComponent.h"
 #include "Components/SphereComponent.h"
+#include "EnhancedInputSubsystems.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 #include "Enemy/EnemyCharacter.h"
@@ -20,8 +21,10 @@
 #include "Game/MissionInventorySubsystem.h"
 #include "Game/ObjectiveSubsystem.h"
 #include "GameFramework/Pawn.h"
+#include "InputAction.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
+#include "UI/KeybindHintLibrary.h"
 #include "World/CompanionModeDoorGate.h"
 #include "World/DoorBase.h"
 #include "World/ExtractionTargetActor.h"
@@ -80,6 +83,14 @@ namespace
 	{
 		return !ActiveResumeWalk || !ActiveResumeWalk->AtOrAfterResume.Contains(Step);
 	}
+
+	/** Label tokens the display formatter substitutes. NAMED rather than positional so a designer's own
+	 *  "{0}" in a label can never collide with a key hint, and so the token reads as documentation in
+	 *  the details panel. */
+	const FString PromptKeyToken = TEXT("PromptKey");
+	const FString SecondaryPromptKeyToken = TEXT("SecondaryPromptKey");
+
+	FString BracedToken(const FString& Token) { return FString::Printf(TEXT("{%s}"), *Token); }
 }
 
 AObjectiveStep::AObjectiveStep()
@@ -103,6 +114,7 @@ void AObjectiveStep::OnConstruction(const FTransform& Transform)
 
 	// Keep the viewport sphere honest about CompletionRadius while the designer drags it.
 	CompletionSphere->SetSphereRadius(FMath::Max(CompletionRadius, 0.f));
+	RefreshLabelHintTokenFlag();
 }
 
 void AObjectiveStep::PostInitializeComponents()
@@ -112,6 +124,7 @@ void AObjectiveStep::PostInitializeComponents()
 	// The one runtime sizing. OnConstruction covers the editor viewport while the designer drags
 	// the value; this covers every load path that never re-runs a construction script.
 	CompletionSphere->SetSphereRadius(FMath::Max(CompletionRadius, 0.f));
+	RefreshLabelHintTokenFlag();
 
 	// Bound HERE, not in BeginPlay: a checkpoint resume activates its target step from the ENTRY
 	// step's BeginPlay, and an ActivateActor effect can activate any step at any time. Actor
@@ -206,6 +219,10 @@ void AObjectiveStep::ActivateInternal(bool bResumeReplay)
 		TryApplyCompanionCheckpointHeal();
 	}
 
+	// Before the push, so the line is already listening by the time the first mapping rebuild lands at
+	// the end of this frame — that rebuild is what turns a BeginPlay-time "[unbound]" into the real key.
+	BindMappingRebuildListener();
+
 	UpdateMarker();
 	UE_LOG(LogObjectiveStep, Log, TEXT("Step '%s' activated"), *GetEffectiveStepId().ToString());
 	OnStepActivated.Broadcast(this);
@@ -259,6 +276,11 @@ void AObjectiveStep::Deactivate()
 	// entirely for an already-inactive step — and a countdown that outlives its beat keeps rewriting
 	// an objective line that has already been removed from the HUD.
 	StopDefendCountdown();
+
+	// Above the guard for the same reason: a rebuild listener that outlives its beat keeps rewriting an
+	// objective line that has already been removed from the HUD. Its own flag makes it a no-op for a
+	// step that never bound.
+	UnbindMappingRebuildListener();
 
 	if (!bActive) return;
 	bActive = false;
@@ -559,9 +581,14 @@ void AObjectiveStep::UpdateDefendCountdownLabel()
 
 	// An unlabelled beat shows the bare clock. Prefixing "Objective" or similar would invent copy the
 	// designer never wrote.
-	Objectives->UpdateObjectiveLabel(GetEffectiveStepId(), Label.IsEmpty()
+	//
+	// The key hint is resolved FIRST and the clock formats over the result. Nothing double-substitutes:
+	// FText::Format does not recurse into its argument values, so a resolved key inside DisplayLabel is
+	// inert here, and the positional {0}/{1} of this pattern cannot collide with the named hint tokens.
+	const FText DisplayLabel = BuildDisplayLabel();
+	Objectives->UpdateObjectiveLabel(GetEffectiveStepId(), DisplayLabel.IsEmpty()
 		? Clock
-		: FText::Format(NSLOCTEXT("ObjectiveStep", "DefendCountdown", "{0} — {1}"), Label, Clock));
+		: FText::Format(NSLOCTEXT("ObjectiveStep", "DefendCountdown", "{0} — {1}"), DisplayLabel, Clock));
 }
 
 void AObjectiveStep::HandleDefendElapsed()
@@ -681,6 +708,10 @@ void AObjectiveStep::UpdateMarker()
 	UObjectiveSubsystem* Objectives = GetObjectiveSubsystem();
 	if (!Objectives || !bActive) return;
 
+	// Resolved here rather than stored: the label the subsystem holds is what the text panel, the marker
+	// widget layer and the world billboard all read, and only three of the four consumers are ours.
+	const FText DisplayLabel = BuildDisplayLabel();
+
 	if (bFreezeMarkerAtActivation)
 	{
 		if (!bMarkerFrozen)
@@ -690,14 +721,14 @@ void AObjectiveStep::UpdateMarker()
 		}
 		// Registered with NO target: handing one over would let the subsystem re-resolve against a
 		// mover every frame, which is the whole thing this flag exists to stop.
-		Objectives->AddObjective(GetEffectiveStepId(), Label, FrozenMarkerLocation, nullptr,
+		Objectives->AddObjective(GetEffectiveStepId(), DisplayLabel, FrozenMarkerLocation, nullptr,
 			MarkerOffset, bShowWorldMarker, MarkerHeightAboveBase);
 		return;
 	}
 
 	AActor* Target = ResolveMarkerTarget();
 	const FVector Location = IsValid(Target) ? Target->GetActorLocation() : ResolveStaticMarkerLocation();
-	Objectives->AddObjective(GetEffectiveStepId(), Label, Location, Target,
+	Objectives->AddObjective(GetEffectiveStepId(), DisplayLabel, Location, Target,
 		MarkerOffset, bShowWorldMarker, MarkerHeightAboveBase);
 }
 
@@ -777,9 +808,91 @@ void AObjectiveStep::RaiseCompletionToast() const
 	UMissionInventorySubsystem* Inventory = World ? World->GetSubsystem<UMissionInventorySubsystem>() : nullptr;
 	if (!Inventory) return;
 
-	Inventory->OnLootNotify.Broadcast(Label.IsEmpty()
+	// The resolved label, not the authored one: the toast goes out through OnLootNotify as a bare FText
+	// with no id and no action attached, so this is the last point that can substitute anything. Pushing
+	// Label raw would put "{PromptKey}" on the completion toast.
+	const FText DisplayLabel = BuildDisplayLabel();
+	Inventory->OnLootNotify.Broadcast(DisplayLabel.IsEmpty()
 		? NSLOCTEXT("ObjectiveStep", "CompletedPlain", "Objective complete")
-		: FText::Format(NSLOCTEXT("ObjectiveStep", "Completed", "Objective complete: {0}"), Label));
+		: FText::Format(NSLOCTEXT("ObjectiveStep", "Completed", "Objective complete: {0}"), DisplayLabel));
+}
+
+// ------------------------------------------------------------------
+// Label presentation
+// ------------------------------------------------------------------
+
+void AObjectiveStep::RefreshLabelHintTokenFlag()
+{
+	const FString LabelString = Label.ToString();
+	bLabelHasHintToken = LabelString.Contains(BracedToken(PromptKeyToken))
+		|| LabelString.Contains(BracedToken(SecondaryPromptKeyToken));
+}
+
+FText AObjectiveStep::BuildDisplayLabel() const
+{
+	if (Label.IsEmpty()) return Label;
+
+	// Nothing authored and nothing wired — return the label untouched rather than round-tripping it
+	// through FText::Format, so a label that legitimately contains a brace is never reinterpreted.
+	const bool bHasAction = IsValid(PromptAction) || IsValid(SecondaryPromptAction);
+	if (!bLabelHasHintToken && !bHasAction) return Label;
+
+	// BOTH tokens are always supplied, even when only one action is wired. FText::Format leaves an
+	// unmatched token in the output verbatim, so a label carrying "{PromptKey}" with nothing assigned
+	// would otherwise put a literal brace on the HUD; "[unbound]" is the honest reading and the audit
+	// names the mis-wire in the log.
+	FFormatNamedArguments Arguments;
+	Arguments.Add(PromptKeyToken, UKeybindHintLibrary::GetActionKeyText(this, PromptAction));
+	Arguments.Add(SecondaryPromptKeyToken, UKeybindHintLibrary::GetActionKeyText(this, SecondaryPromptAction));
+	return FText::Format(Label, Arguments);
+}
+
+void AObjectiveStep::BindMappingRebuildListener()
+{
+	// An OnActivate side effect can reach CompleteStep synchronously, which Deactivates (clearing
+	// bActive) before ActivateInternal's own BindMappingRebuildListener call. Without this guard the
+	// bind lands on a completed, inactive step with no matching unbind until EndPlay.
+	if (!bActive) return;
+	if (bMappingRebuildBound) return;
+	if (!bLabelHasHintToken && !IsValid(PromptAction) && !IsValid(SecondaryPromptAction)) return;
+
+	UEnhancedInputLocalPlayerSubsystem* Input = UKeybindHintLibrary::FindLocalPlayerInputSubsystem(this);
+	if (!IsValid(Input))
+	{
+		UE_LOG(LogObjectiveStep, Warning,
+			TEXT("'%s' (step '%s'): no local player input subsystem at activation — the key hint on this "
+				 "line is stuck at whatever the mapping table read on this frame"),
+			*GetName(), *GetEffectiveStepId().ToString());
+		return;
+	}
+
+	Input->ControlMappingsRebuiltDelegate.AddUniqueDynamic(this, &AObjectiveStep::HandleControlMappingsRebuilt);
+	bMappingRebuildBound = true;
+}
+
+void AObjectiveStep::UnbindMappingRebuildListener()
+{
+	if (!bMappingRebuildBound) return;
+	bMappingRebuildBound = false;
+
+	if (UEnhancedInputLocalPlayerSubsystem* Input = UKeybindHintLibrary::FindLocalPlayerInputSubsystem(this))
+		Input->ControlMappingsRebuiltDelegate.RemoveDynamic(this, &AObjectiveStep::HandleControlMappingsRebuilt);
+}
+
+void AObjectiveStep::HandleControlMappingsRebuilt()
+{
+	if (!bActive) return;
+
+	// A defend beat's line is owned by its 1Hz clock writer, which would stamp over a plain label write
+	// within the second. Route through the clock so the re-resolved key survives.
+	if (Condition == EObjectiveCondition::SurviveDuration)
+	{
+		UpdateDefendCountdownLabel();
+		return;
+	}
+
+	if (UObjectiveSubsystem* Objectives = GetObjectiveSubsystem())
+		Objectives->UpdateObjectiveLabel(GetEffectiveStepId(), BuildDisplayLabel());
 }
 
 // ------------------------------------------------------------------
@@ -1549,6 +1662,8 @@ void AObjectiveStep::AuditStepWiring()
 		break;
 	}
 
+	AuditPromptKeyHint();
+
 	for (const FObjectiveSideEffect& Effect : SideEffects)
 	{
 		if (Effect.Type == EObjectiveSideEffectType::TeleportSquad) AuditTeleportSquad(Effect);
@@ -1621,6 +1736,37 @@ void AObjectiveStep::AuditStepWiring()
 		UE_LOG(LogObjectiveStep, Warning,
 			TEXT("'%s' (step '%s'): checkpoint step has no CheckpointSpawn — a restart resumes at the level-start position"),
 			*GetName(), *GetEffectiveStepId().ToString());
+}
+
+void AObjectiveStep::AuditPromptKeyHint() const
+{
+	const FString LabelString = Label.ToString();
+
+	// Deliberately does NOT report "assigned but nothing bound": this runs at activation, and Enhanced
+	// Input has not rebuilt its mapping table by then, so every hinted beat would warn on the frame it
+	// goes live. The rebuild listener is what corrects the line; a genuinely unbound action shows up as
+	// "[unbound]" on the HUD, which is louder than a log line anyway.
+	auto AuditSlot = [this, &LabelString](const FString& Token, const UInputAction* Action, const TCHAR* PropertyName)
+	{
+		const bool bHasToken = LabelString.Contains(BracedToken(Token));
+		const bool bHasAction = IsValid(Action);
+		if (bHasToken == bHasAction) return;
+
+		if (bHasToken)
+		{
+			UE_LOG(LogObjectiveStep, Warning,
+				TEXT("'%s' (step '%s'): Label contains {%s} but %s is unset — the line will read \"[unbound]\""),
+				*GetName(), *GetEffectiveStepId().ToString(), *Token, PropertyName);
+			return;
+		}
+
+		UE_LOG(LogObjectiveStep, Warning,
+			TEXT("'%s' (step '%s'): %s is assigned but Label has no {%s} token — the key hint will not appear"),
+			*GetName(), *GetEffectiveStepId().ToString(), PropertyName, *Token);
+	};
+
+	AuditSlot(PromptKeyToken, PromptAction, TEXT("PromptAction"));
+	AuditSlot(SecondaryPromptKeyToken, SecondaryPromptAction, TEXT("SecondaryPromptAction"));
 }
 
 void AObjectiveStep::AuditTeleportSquad(const FObjectiveSideEffect& Effect)
@@ -1918,5 +2064,17 @@ void AObjectiveStep::TestSetTrackedContainers(const TArray<ALootContainer*>& InC
 	TrackedContainers.Reset(InContainers.Num());
 	for (ALootContainer* Container : InContainers)
 		TrackedContainers.Add(Container);
+}
+
+// Defined here rather than inline so ObjectiveStep.h keeps a forward declaration of UInputAction and
+// does not drag EnhancedInput into every translation unit that includes it.
+void AObjectiveStep::TestSetPromptAction(const UInputAction* InAction)
+{
+	PromptAction = InAction;
+}
+
+void AObjectiveStep::TestSetSecondaryPromptAction(const UInputAction* InAction)
+{
+	SecondaryPromptAction = InAction;
 }
 #endif

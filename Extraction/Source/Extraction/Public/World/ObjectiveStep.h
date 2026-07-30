@@ -27,6 +27,7 @@ class AExtracteeCompanion;
 class ALevelCompletionLiftGate;
 class ALootContainer;
 class AObjectiveStep;
+class UInputAction;
 class UObjectiveSubsystem;
 class USphereComponent;
 
@@ -265,6 +266,12 @@ public:
 
 #if WITH_DEV_AUTOMATION_TESTS
 	void TestSetStepId(FName InStepId) { StepId = InStepId; }
+	/** Refreshes the token flag exactly as PostInitializeComponents does — a test sets the label after
+	 *  the actor is already initialised. */
+	void TestSetLabel(const FText& InLabel) { Label = InLabel; RefreshLabelHintTokenFlag(); }
+	void TestSetPromptAction(const UInputAction* InAction);
+	void TestSetSecondaryPromptAction(const UInputAction* InAction);
+	FText TestBuildDisplayLabel() const { return BuildDisplayLabel(); }
 	void TestSetCondition(EObjectiveCondition InCondition) { Condition = InCondition; }
 	void TestSetNextStep(AObjectiveStep* InNextStep) { NextStep = InNextStep; }
 	void TestSetEntryStep(bool bInEntry) { bIsEntryStep = bInEntry; }
@@ -309,9 +316,29 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Step")
 	FName StepId = NAME_None;
 
-	/** The HUD objective line. */
+	/** The HUD objective line. Authored ONCE and stored with its key-hint tokens intact — see
+	 *  PromptAction. A resolved key is never written back here, so a saved label can never carry a
+	 *  key the player has since rebound. A literal '{' in the text must be escaped as '{{' when
+	 *  PromptAction is set, or FText::Format will consume it as a token. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Step")
 	FText Label;
+
+	/** Optional key hint for this beat's HUD line. Assign the input action the player has to press and
+	 *  put "{PromptKey}" in Label where the key name belongs; the key is resolved from the live mapping
+	 *  every time the line is pushed, and again whenever Enhanced Input rebuilds its mappings.
+	 *
+	 *  Designer-authored on purpose, and defaulting to none. Deriving "this is a breach beat" from the
+	 *  tracked door instead would advertise a breach hint on EVERY unlocked breachable-door objective,
+	 *  including beats meant to be opened by hand — a false positive only visible by reading the line
+	 *  in PIE. The capability check on the door cannot help either: it takes no interactor, so it
+	 *  cannot know whether there is a companion alive to do the breaching. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Step")
+	TObjectPtr<const UInputAction> PromptAction;
+
+	/** Second key for a two-press prompt — mark the target, then confirm the order. Token:
+	 *  "{SecondaryPromptKey}". Leave unset for a one-key hint. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Step")
+	TObjectPtr<const UInputAction> SecondaryPromptAction;
 
 	/** This step activates on BeginPlay and owns the checkpoint-resume walk for its chain.
 	 *  Exactly one step per chain should have it set. */
@@ -534,6 +561,15 @@ private:
 	FVector FrozenMarkerLocation = FVector::ZeroVector;
 	bool bMarkerFrozen = false;
 
+	/** Whether Label carries a key-hint token. Answered once from authored data rather than scanned on
+	 *  every push, and cached so the substitution still runs for a label that authored a token with no
+	 *  action wired — otherwise a mis-wire reaches the HUD as a literal brace. */
+	bool bLabelHasHintToken = false;
+
+	/** Whether this step is listening for Enhanced Input mapping rebuilds. Guards the bind/unbind pair
+	 *  so the teardown is safe to call on a step that never bound. */
+	bool bMappingRebuildBound = false;
+
 	/** Wave requests the Director has not accepted yet. Drained by the retry timer. Reflected: the
 	 *  request holds a UDirectorConfigData override the GC would otherwise never see. */
 	UPROPERTY()
@@ -614,6 +650,32 @@ private:
 	FVector CaptureFrozenMarkerLocation() const;
 	UObjectiveSubsystem* GetObjectiveSubsystem() const;
 	void RaiseCompletionToast() const;
+
+	// --- Label presentation ---
+
+	/** The authored Label with its key-hint tokens resolved against the CURRENT mapping. Every path
+	 *  that shows this beat's text goes through here — the marker push, the defend countdown and the
+	 *  completion toast — so there is one substitution and the toast can never carry a raw token.
+	 *
+	 *  Returns Label untouched when there is nothing to substitute, which is the case for every beat
+	 *  with no hint: a label that legitimately contains a brace is then never handed to FText::Format. */
+	FText BuildDisplayLabel() const;
+
+	/** Re-reads Label for hint tokens. Called wherever CompletionSphere's radius is re-derived, for the
+	 *  same reason: authored data, answered on both the editor path and every runtime load path. */
+	void RefreshLabelHintTokenFlag();
+
+	/** Subscribes to the local player's mapping-rebuild event so a hinted line follows a rebind, and —
+	 *  the case that actually bites — is correct on the first frame at all. AddMappingContext defers
+	 *  the mapping rebuild, so a step activating from BeginPlay queries an empty table and would
+	 *  otherwise show "[unbound]" for the whole mission. No-op for a beat with no hint. */
+	void BindMappingRebuildListener();
+	void UnbindMappingRebuildListener();
+
+	/** Re-pushes the HUD line with freshly resolved keys. Cheap and idempotent: UpdateObjectiveLabel
+	 *  is silent when the id is not registered or the text is unchanged. */
+	UFUNCTION()
+	void HandleControlMappingsRebuilt();
 
 	// --- Side effects ---
 
@@ -707,6 +769,11 @@ private:
 	/** TeleportSquad's share of that audit. Runs at activation, so it can count the companions that
 	 *  actually exist rather than guess from the wiring. */
 	void AuditTeleportSquad(const FObjectiveSideEffect& Effect);
+
+	/** Key-hint wiring: a token with no action, or an action with no token. Neither breaks the beat, and
+	 *  neither is visible anywhere except by reading the objective line in PIE — which is exactly the
+	 *  class of defect this audit exists for. */
+	void AuditPromptKeyHint() const;
 
 	/** Level-wide audit run once, from the first placed step: entry-step count, duplicate ids. */
 	void AuditLevelWiring();

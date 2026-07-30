@@ -4,6 +4,7 @@
 #include "Character/ExtractionPlayer.h"
 #include "Components/BoxComponent.h"
 #include "WeaponComponent.h"
+#include "WeaponBase.h"
 #include "Enemy/EnemyDirectorSubsystem.h"
 #include "Enemy/Director/DirectorConfigData.h"
 #include "Game/MissionInventorySubsystem.h"
@@ -60,7 +61,9 @@ void AStealthDisciplineVolume::BeginPlay()
 		BindShotRelay(Player->GetWeaponComponent());
 		Accumulator.Reset();
 		PendingNormalShots = 0;
+		PendingSuppressedShots = 0;
 		bWarningSent = false;
+		bPlayerInsideVolume = true;
 		StartSampling();
 	}
 
@@ -77,7 +80,10 @@ void AStealthDisciplineVolume::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		World->GetTimerManager().ClearTimer(SamplingTimerHandle);
 
 		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+		{
+			Director->DeactivatePunishmentProfile(this);
 			Director->OnDirectorWaveStarted.RemoveDynamic(this, &AStealthDisciplineVolume::OnWaveStarted);
+		}
 	}
 
 	Super::EndPlay(EndPlayReason);
@@ -96,17 +102,40 @@ void AStealthDisciplineVolume::OnBeginOverlap(
 	AExtractionPlayer* Player = Cast<AExtractionPlayer>(OtherActor);
 	if (!IsValid(Player)) return;
 
-	// Already tracking a player (re-entry or second player in co-op).
+	// Re-entry: the player walked back in. Resume full sampling with pressure intact.
+	if (TrackedPlayer == Player)
+	{
+		bPlayerInsideVolume = true;
+		PendingNormalShots = 0;
+		PendingSuppressedShots = 0;
+
+		// Rebind the shot relay if it was unbound during escalated-outside sampling stop.
+		if (!BoundWeaponComponent.IsValid())
+			BindShotRelay(Player->GetWeaponComponent());
+
+		if (!GetWorldTimerManager().IsTimerActive(SamplingTimerHandle))
+			StartSampling();
+
+		UE_LOG(LogExtraction, Verbose, TEXT("StealthDisciplineVolume '%s': player '%s' re-entered (pressure %.1f)"),
+			*GetNameSafe(this), *GetNameSafe(Player), Accumulator.Pressure);
+		return;
+	}
+
+	HandleNewPlayerEntry(Player);
+}
+
+void AStealthDisciplineVolume::HandleNewPlayerEntry(AExtractionPlayer* Player)
+{
 	if (TrackedPlayer.IsValid()) return;
 
 	TrackedPlayer = Player;
-
-	UWeaponComponent* WeaponComp = Player->GetWeaponComponent();
-	BindShotRelay(WeaponComp);
+	BindShotRelay(Player->GetWeaponComponent());
 
 	Accumulator.Reset();
 	PendingNormalShots = 0;
+	PendingSuppressedShots = 0;
 	bWarningSent = false;
+	bPlayerInsideVolume = true;
 
 	StartSampling();
 
@@ -121,7 +150,12 @@ void AStealthDisciplineVolume::OnEndOverlap(
 	if (!HasAuthority()) return;
 	if (OtherActor != TrackedPlayer.Get()) return;
 
-	CleanupTrackedPlayer();
+	// Leaving the volume does NOT wipe pressure or stop sampling. Pressure bleeds via
+	// decay-only ticks. Sprint/shot accrual is gated on bPlayerInsideVolume in SampleTick.
+	bPlayerInsideVolume = false;
+
+	UE_LOG(LogExtraction, Verbose, TEXT("StealthDisciplineVolume '%s': player exited (pressure %.1f, decay-only sampling continues)"),
+		*GetNameSafe(this), Accumulator.Pressure);
 }
 
 // ---- Sampling ----
@@ -147,83 +181,109 @@ void AStealthDisciplineVolume::SampleTick()
 	AExtractionPlayer* Player = TrackedPlayer.Get();
 	if (!IsValid(Player))
 	{
-		// Player destroyed while inside (died, left, etc.).
+		// Player destroyed (died, left level, etc.). Deactivate punishment -- death ends the
+		// discipline, but walking OUT does not (the profile survives exit).
+		if (UWorld* World = GetWorld())
+		{
+			if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+				Director->DeactivatePunishmentProfile(this);
+		}
 		CleanupTrackedPlayer();
 		return;
 	}
 
-	// Determine sprinting from horizontal speed.
-	const UCharacterMovementComponent* MoveComp = Player->GetCharacterMovement();
-	const float HorizontalSpeed = IsValid(MoveComp)
-		? MoveComp->Velocity.Size2D()
-		: 0.f;
-	const bool bSprinting = HorizontalSpeed >= Settings.SprintSpeedThreshold;
+	if (bPlayerInsideVolume)
+		SampleTickInside(Player);
+	else
+		SampleTickOutside();
+}
 
-	// Feed accumulated non-exempt shots since last sample.
-	const int32 Shots = PendingNormalShots;
-	PendingNormalShots = 0;
-
-	const EStealthPressureTransition Result = Accumulator.Advance(
-		SamplingIntervalSeconds, bSprinting, Shots, Settings);
-
-	if (Result == EStealthPressureTransition::None) return;
-
-	UWorld* World = GetWorld();
-	if (!World) return;
-
-	// Warned: show the warning toast once.
-	if (Result == EStealthPressureTransition::Warned)
+void AStealthDisciplineVolume::SampleTickOutside()
+{
+	// Escalated and outside the volume -- nothing left to observe.
+	if (Accumulator.bEscalated)
 	{
-		if (!bWarningSent)
-		{
-			bWarningSent = true;
-			if (UMissionInventorySubsystem* Inventory = World->GetSubsystem<UMissionInventorySubsystem>())
-			{
-				Inventory->OnLootNotify.Broadcast(
-					WarningText.IsEmpty()
-						? NSLOCTEXT("StealthDiscipline", "DefaultWarning", "You are being too loud")
-						: WarningText);
-			}
-		}
+		StopSampling();
+		UnbindShotRelay();
 		return;
 	}
 
-	// Escalated: show warning if it was never sent (single sample crossed both thresholds),
-	// then activate punishment.
-	if (Result == EStealthPressureTransition::Escalated)
+	Accumulator.Advance(SamplingIntervalSeconds, false, 0, 0, Settings);
+
+	PendingNormalShots = 0;
+	PendingSuppressedShots = 0;
+
+	if (Accumulator.Pressure <= 0.f)
 	{
-		UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>();
-
-		// A wave can start inside the same sample window as the escalation crossing.
-		if (Director && Director->IsWaveActive())
-		{
-			DisableForWave();
-			return;
-		}
-
-		if (!bWarningSent)
-		{
-			bWarningSent = true;
-			if (UMissionInventorySubsystem* Inventory = World->GetSubsystem<UMissionInventorySubsystem>())
-			{
-				Inventory->OnLootNotify.Broadcast(
-					WarningText.IsEmpty()
-						? NSLOCTEXT("StealthDiscipline", "DefaultWarning", "You are being too loud")
-						: WarningText);
-			}
-		}
-
-		if (Director)
-		{
-			const bool bActivated = Director->ActivatePunishmentProfile(this, PunishmentConfig, PunishmentPhase);
-			if (!bActivated)
-				UE_LOG(LogExtraction, Warning, TEXT("StealthDisciplineVolume '%s': ActivatePunishmentProfile FAILED (another source holds the slot, or config is null)"), *GetNameSafe(this));
-
-			Director->TripAlarm();
-		}
-
-		UE_LOG(LogExtraction, Warning, TEXT("StealthDisciplineVolume '%s': ESCALATED"), *GetNameSafe(this));
+		StopSampling();
+		UE_LOG(LogExtraction, Verbose, TEXT("StealthDisciplineVolume '%s': pressure decayed to zero outside volume -- sampling stopped"),
+			*GetNameSafe(this));
 	}
+}
+
+void AStealthDisciplineVolume::SampleTickInside(AExtractionPlayer* Player)
+{
+	const UCharacterMovementComponent* MoveComp = Player->GetCharacterMovement();
+	const float HorizontalSpeed = IsValid(MoveComp) ? MoveComp->Velocity.Size2D() : 0.f;
+	const bool bSprinting = HorizontalSpeed >= Settings.SprintSpeedThreshold;
+
+	const int32 NormalShots = PendingNormalShots;
+	const int32 SuppressedShots = PendingSuppressedShots;
+	PendingNormalShots = 0;
+	PendingSuppressedShots = 0;
+
+	const EStealthPressureTransition Result = Accumulator.Advance(
+		SamplingIntervalSeconds, bSprinting, NormalShots, SuppressedShots, Settings);
+
+	if (Result != EStealthPressureTransition::None)
+		HandlePressureTransition(Result);
+}
+
+void AStealthDisciplineVolume::BroadcastWarningToast(UWorld* World)
+{
+	if (bWarningSent) return;
+
+	bWarningSent = true;
+	if (UMissionInventorySubsystem* Inventory = World->GetSubsystem<UMissionInventorySubsystem>())
+	{
+		Inventory->OnLootNotify.Broadcast(
+			WarningText.IsEmpty()
+				? NSLOCTEXT("StealthDiscipline", "DefaultWarning", "You are being too loud")
+				: WarningText);
+	}
+}
+
+void AStealthDisciplineVolume::HandlePressureTransition(EStealthPressureTransition Result)
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	if (Result == EStealthPressureTransition::Warned)
+	{
+		BroadcastWarningToast(World);
+		return;
+	}
+
+	// Escalated: show warning if never sent, then activate punishment.
+	UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>();
+
+	if (Director && Director->IsWaveActive())
+	{
+		DisableForWave();
+		return;
+	}
+
+	BroadcastWarningToast(World);
+
+	if (Director)
+	{
+		const bool bActivated = Director->ActivatePunishmentProfile(this, PunishmentConfig, PunishmentPhase);
+		if (!bActivated)
+			UE_LOG(LogExtraction, Warning, TEXT("StealthDisciplineVolume '%s': ActivatePunishmentProfile FAILED"), *GetNameSafe(this));
+		Director->TripAlarm();
+	}
+
+	UE_LOG(LogExtraction, Warning, TEXT("StealthDisciplineVolume '%s': ESCALATED"), *GetNameSafe(this));
 }
 
 // ---- Shot relay ----
@@ -250,7 +310,21 @@ void AStealthDisciplineVolume::UnbindShotRelay()
 void AStealthDisciplineVolume::OnPlayerShotFired(bool bStealthExempt)
 {
 	if (bStealthExempt) return;
-	++PendingNormalShots;
+	if (!bPlayerInsideVolume) return;
+
+	// Resolve suppression at shot time via the tracked player's current weapon.
+	UWeaponComponent* WeaponComp = BoundWeaponComponent.Get();
+	AWeaponBase* CurrentWeapon = IsValid(WeaponComp) ? WeaponComp->GetCurrentWeapon() : nullptr;
+	const bool bSuppressed = IsValid(CurrentWeapon) && CurrentWeapon->IsSuppressedEffective();
+
+	if (bSuppressed)
+	{
+		++PendingSuppressedShots;
+	}
+	else
+	{
+		++PendingNormalShots;
+	}
 }
 
 // ---- Wave gate ----
@@ -268,13 +342,15 @@ void AStealthDisciplineVolume::DisableForWave()
 	if (bPermanentlyDisabled) return;
 	bPermanentlyDisabled = true;
 
-	// Also tears down an already-running punishment via DeactivatePunishmentProfile.
 	CleanupTrackedPlayer();
 
 	if (UWorld* World = GetWorld())
 	{
 		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+		{
+			Director->DeactivatePunishmentProfile(this);
 			Director->OnDirectorWaveStarted.RemoveDynamic(this, &AStealthDisciplineVolume::OnWaveStarted);
+		}
 	}
 }
 
@@ -285,14 +361,10 @@ void AStealthDisciplineVolume::CleanupTrackedPlayer()
 	StopSampling();
 	UnbindShotRelay();
 
-	if (UWorld* World = GetWorld())
-	{
-		if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
-			Director->DeactivatePunishmentProfile(this);
-	}
-
 	TrackedPlayer.Reset();
 	Accumulator.Reset();
 	PendingNormalShots = 0;
+	PendingSuppressedShots = 0;
 	bWarningSent = false;
+	bPlayerInsideVolume = false;
 }

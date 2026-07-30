@@ -20,14 +20,60 @@
 #include "RevivePromptWidget.h"
 #include "HitmarkerWidget.h"
 #include "DamageNumberWidget.h"
+#include "ConsumableWidget.h"
 #include "ExtractionGameMode.h"
 #include "Extraction.h"
 #include "Widgets/Input/SVirtualJoystick.h"
+#include "Widgets/SWidget.h"
 
 namespace
 {
 	// Above every HUD layer so the completion/failure screen popup sits on top.
 	constexpr int32 LevelEndPopupZOrder = 50;
+
+	// Every widget the controller owns shares the base layer; add order decides the stack.
+	constexpr int32 HUDLayerZOrder = 0;
+
+	/** True only when the widget is both registered with the viewport AND its Slate widget still has
+	 *  a live parent. IsInViewport() alone is not enough: it reads a cached flag that only
+	 *  UGameViewportSubsystem maintains, while UWidgetLayoutLibrary::RemoveAllWidgets empties the
+	 *  viewport overlay through UGameViewportClient without telling that subsystem — so an orphaned
+	 *  widget keeps reporting itself as added while being nowhere on screen. */
+	bool IsWidgetLiveOnPlayerScreen(const UUserWidget* Widget)
+	{
+		if (!IsValid(Widget)) return false;
+		if (!Widget->IsInViewport()) return false;
+
+		const TSharedPtr<SWidget> CachedWidget = Widget->GetCachedWidget();
+		return CachedWidget.IsValid() && CachedWidget->IsParentValid();
+	}
+
+	/** Creates the widget if it does not exist, then puts it on the player screen if it is not
+	 *  already there. Existing widgets are re-added rather than rebuilt, so pooled children and
+	 *  accumulated state survive; an unassigned class is skipped silently. */
+	template <typename TWidget>
+	void EnsureOnPlayerScreen(APlayerController* Owner, TObjectPtr<TWidget>& Instance, const TSubclassOf<TWidget>& WidgetClass, int32 ZOrder)
+	{
+		if (!WidgetClass) return;
+
+		const bool bFreshInstance = !IsValid(Instance);
+		if (bFreshInstance) Instance = CreateWidget<TWidget>(Owner, WidgetClass);
+		if (!IsValid(Instance)) return;
+
+		if (!bFreshInstance)
+		{
+			if (IsWidgetLiveOnPlayerScreen(Instance)) return;
+			// Releases a stale viewport registration so the re-add is not refused as a duplicate.
+			Instance->RemoveFromParent();
+		}
+
+		if (Instance->AddToPlayerScreen(ZOrder)) return;
+		if (bFreshInstance) return;
+
+		// The viewport refused the re-add. Losing this widget's state beats losing the widget.
+		Instance = CreateWidget<TWidget>(Owner, WidgetClass);
+		if (IsValid(Instance)) Instance->AddToPlayerScreen(ZOrder);
+	}
 }
 
 AExtractionPlayerController::AExtractionPlayerController()
@@ -53,111 +99,47 @@ void AExtractionPlayerController::BeginPlay()
 {
 	Super::BeginPlay();
 
-	
-	// only spawn touch controls on local player controllers
-	if (ShouldUseTouchControls() && IsLocalPlayerController())
+	RestoreHUD();
+
+	if (!IsLocalPlayerController()) return;
+
+	// Supply world-space marker display class to the objective subsystem. Deliberately NOT part of
+	// RestoreHUD: the subsystem keeps the class for the level's lifetime, and re-supplying it on
+	// every rebuild would be redundant work on a path that must stay side-effect free.
+	if (!MarkerDisplayClass)
 	{
-		// spawn the mobile controls widget
-		MobileControlsWidget = CreateWidget<UUserWidget>(this, MobileControlsWidgetClass);
+		UE_LOG(LogTemp, Warning, TEXT("AExtractionPlayerController: MarkerDisplayClass is null -- "
+			"world-space objective markers will not spawn. Assign it in the BP subclass defaults."));
+		return;
+	}
 
-		if (MobileControlsWidget)
-		{
-			// add the controls to the player screen
-			MobileControlsWidget->AddToPlayerScreen(0);
+	if (UObjectiveSubsystem* Objectives = GetWorld()->GetSubsystem<UObjectiveSubsystem>())
+		Objectives->SetMarkerDisplayClass(MarkerDisplayClass);
+}
 
-		} else {
+void AExtractionPlayerController::RestoreHUD()
+{
+	if (!IsLocalPlayerController()) return;
 
+	// Add order is layer order — every widget here shares HUDLayerZOrder, so the viewport stacks
+	// them in the order they are added. Keep this sequence as-is; it is BeginPlay's original order.
+	if (ShouldUseTouchControls())
+	{
+		EnsureOnPlayerScreen(this, MobileControlsWidget, MobileControlsWidgetClass, HUDLayerZOrder);
+		if (MobileControlsWidgetClass && !IsValid(MobileControlsWidget))
 			UE_LOG(LogExtraction, Error, TEXT("Could not spawn mobile controls widget."));
-
-		}
-
 	}
 
-	// Spawn health/shield HUD for local player
-	if (IsLocalPlayerController() && HUDWidgetClass)
-	{
-		HUDWidget = CreateWidget<UPlayerHealthWidget>(this, HUDWidgetClass);
-		if (IsValid(HUDWidget))
-			HUDWidget->AddToPlayerScreen();
-	}
-
-	// Spawn ammo display for local player
-	if (IsLocalPlayerController() && AmmoWidgetClass)
-	{
-		AmmoWidget = CreateWidget<UAmmoWidget>(this, AmmoWidgetClass);
-		if (IsValid(AmmoWidget))
-			AmmoWidget->AddToPlayerScreen();
-	}
-
-	// Spawn companion mode chip for local player
-	if (IsLocalPlayerController() && CompanionModeWidgetClass)
-	{
-		CompanionModeWidget = CreateWidget<UCompanionModeWidget>(this, CompanionModeWidgetClass);
-		if (IsValid(CompanionModeWidget))
-			CompanionModeWidget->AddToPlayerScreen();
-	}
-
-	// Spawn objective waypoint layer for local player (edge indicator only)
-	if (IsLocalPlayerController() && ObjectiveLayerWidgetClass)
-	{
-		ObjectiveLayerWidget = CreateWidget<UObjectiveMarkerLayer>(this, ObjectiveLayerWidgetClass);
-		if (IsValid(ObjectiveLayerWidget))
-			ObjectiveLayerWidget->AddToPlayerScreen();
-	}
-
-	// Spawn screen-space objective text panel for local player
-	if (IsLocalPlayerController() && ObjectiveTextPanelWidgetClass)
-	{
-		ObjectiveTextPanelWidget = CreateWidget<UObjectiveTextPanelWidget>(this, ObjectiveTextPanelWidgetClass);
-		if (IsValid(ObjectiveTextPanelWidget))
-			ObjectiveTextPanelWidget->AddToPlayerScreen();
-	}
-
-	// Supply world-space marker display class to the objective subsystem.
-	if (IsLocalPlayerController())
-	{
-		if (!MarkerDisplayClass)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("AExtractionPlayerController: MarkerDisplayClass is null -- "
-				"world-space objective markers will not spawn. Assign it in the BP subclass defaults."));
-		}
-		else if (UObjectiveSubsystem* Objectives = GetWorld()->GetSubsystem<UObjectiveSubsystem>())
-		{
-			Objectives->SetMarkerDisplayClass(MarkerDisplayClass);
-		}
-	}
-
-	// Spawn loot acquisition toast for local player
-	if (IsLocalPlayerController() && LootToastWidgetClass)
-	{
-		LootToastWidget = CreateWidget<ULootNotificationWidget>(this, LootToastWidgetClass);
-		if (IsValid(LootToastWidget))
-			LootToastWidget->AddToPlayerScreen();
-	}
-
-	// Spawn revive prompt for local player
-	if (IsLocalPlayerController() && RevivePromptWidgetClass)
-	{
-		RevivePromptWidget = CreateWidget<URevivePromptWidget>(this, RevivePromptWidgetClass);
-		if (IsValid(RevivePromptWidget))
-			RevivePromptWidget->AddToPlayerScreen();
-	}
-
-	// Spawn hitmarker for local player
-	if (IsLocalPlayerController() && HitmarkerWidgetClass)
-	{
-		HitmarkerWidget = CreateWidget<UHitmarkerWidget>(this, HitmarkerWidgetClass);
-		if (IsValid(HitmarkerWidget))
-			HitmarkerWidget->AddToPlayerScreen();
-	}
-
-	// Spawn damage-number layer for local player
-	if (IsLocalPlayerController() && DamageNumberWidgetClass)
-	{
-		DamageNumberWidget = CreateWidget<UDamageNumberWidget>(this, DamageNumberWidgetClass);
-		if (IsValid(DamageNumberWidget))
-			DamageNumberWidget->AddToPlayerScreen();
-	}
+	EnsureOnPlayerScreen(this, HUDWidget, HUDWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, AmmoWidget, AmmoWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, CompanionModeWidget, CompanionModeWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, ObjectiveLayerWidget, ObjectiveLayerWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, ObjectiveTextPanelWidget, ObjectiveTextPanelWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, LootToastWidget, LootToastWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, RevivePromptWidget, RevivePromptWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, HitmarkerWidget, HitmarkerWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, DamageNumberWidget, DamageNumberWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, ConsumableWidget, ConsumableWidgetClass, HUDLayerZOrder);
 }
 
 void AExtractionPlayerController::NotifyDamageDealt(AActor* Victim, float Damage, float HeadshotDamage, bool bKilled, const FVector& WorldLocation)

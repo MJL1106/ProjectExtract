@@ -469,8 +469,13 @@ private:
 	/** Shared LoS test: does Point (raised to eye height) have a clear ECC_Visibility line to the target? Ignores self + weapon + attached. */
 	bool PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace) const;
 
-	/** Move-shoot facing: live focus on actor when LoS is clear; frozen focal point at LastKnownTargetLocation when blocked. No-op if blocked and no last-known location yet. */
-	void UpdateMoveShootFacing(AAIController* AIC, AActor* Target, bool bLosClear);
+	/** Move-shoot facing. LoS clear: live actor focus on the target. LoS blocked: the frozen
+	 *  LastKnownTargetLocation, but only while a fresh trace still proves that spot visible — the
+	 *  snapshot is LoS-verified at capture time only, and this runs every blocked tick, so asserting it
+	 *  unverified is a through-wall bearing held for the length of the block. With no provable bearing
+	 *  (including no snapshot yet) it holds the pawn's own forward rather than leaving a stale focus up. */
+	void UpdateMoveShootFacing(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target,
+		bool bLosClear, TArrayView<AActor* const> IgnoredForFireTrace);
 
 	/** Projects MyLoc+LateralOffset onto the navmesh and returns true only if the projected point has LoS to the target. */
 	bool TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, const FVector& LateralOffset, FVector& OutDest) const;

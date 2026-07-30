@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WeaponBase.h"
+#include "WeaponVisibilityUtils.h"
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "AI/CompanionDiag.h"
 #include "WeaponDataAsset.h"
@@ -144,6 +145,14 @@ static TAutoConsoleVariable<int32> CVarFireAlignDebug(
 	TEXT("weapon.FireAlignDebug"),
 	0,
 	TEXT("If non-zero, log enemy weapon fire-align: SetupFireAlign captures (rest/fire relative, sockets, fire offset) and SetFireAlignAlpha (alpha + resulting WeaponMesh relative/world transform). Diagnoses misalignment from the WeaponSocket_Fire blend. Default 0 = no logging, no behavior change."),
+	ECVF_Cheat);
+
+// Single definition — UCompanionAnimInstance re-queries this by name via
+// IConsoleManager::Get().FindConsoleVariable to avoid duplicate CVar registration.
+static TAutoConsoleVariable<int32> CVarCompanionAlignDebug(
+	TEXT("companion.AlignDebug"),
+	0,
+	TEXT("If non-zero, log the weapon-align writer race: which of fire-align / patrol-align / cover-align actually wrote the weapon mesh this frame (they all write an ABSOLUTE relative transform, so the last writer is the only visible one), plus a one-shot dump of each align bake (sockets, the pose-dependent socket-to-bone term, per-scenario offsets). Use during a cover peek-fire to identify the visible writer. Default 0 = no logging, no behavior change."),
 	ECVF_Cheat);
 
 // Single definition — other translation units (companion BT service/task) re-query this by name
@@ -518,6 +527,8 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		SpawnedVisualActor->Destroy();
 		SpawnedVisualActor = nullptr;
+		VisualActorHiddenSnapshot.Reset();
+		bWeaponHiddenBySnapshot = false;
 	}
 
 	StopReloadAudio();
@@ -558,9 +569,23 @@ USkeletalMeshComponent* AWeaponBase::GetThirdPersonGripMesh() const
 
 void AWeaponBase::SetWeaponHidden(bool bNewHidden)
 {
+	if (bWeaponHiddenBySnapshot == bNewHidden) return;
+	bWeaponHiddenBySnapshot = bNewHidden;
+
 	SetActorHiddenInGame(bNewHidden);
 	if (IsValid(SpawnedVisualActor))
-		SpawnedVisualActor->SetActorHiddenInGame(bNewHidden);
+	{
+		if (bNewHidden)
+		{
+			VisualActorHiddenSnapshot.Reset();
+			WeaponVisibilityUtils::SnapshotAndHideActorTree(SpawnedVisualActor, VisualActorHiddenSnapshot);
+		}
+		else
+		{
+			WeaponVisibilityUtils::RestoreActorTree(SpawnedVisualActor, VisualActorHiddenSnapshot);
+			VisualActorHiddenSnapshot.Reset();
+		}
+	}
 }
 
 // ---- Fire Control ----
@@ -649,7 +674,7 @@ void AWeaponBase::StartFiring()
 	}
 }
 
-void AWeaponBase::StopFiring()
+void AWeaponBase::StopFiringInternal()
 {
 	bWantsToFire = false;
 
@@ -669,11 +694,21 @@ void AWeaponBase::StopFiring()
 		RecoilRecoveryPitchApplied = 0.f;
 		RecoilRecoveryYawApplied = 0.f;
 	}
+}
 
-	// Auto-reload if magazine empty and we have reserve (player UX — AI weapons set bAutoReloadOnEmpty=false to defer to BT).
+void AWeaponBase::StopFiring()
+{
+	StopFiringInternal();
+
+	// Auto-reload if magazine empty and we have reserve (player UX -- AI weapons set bAutoReloadOnEmpty=false to defer to BT).
 	if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
 		Reload();
+}
 
+void AWeaponBase::AbortFireAndReload()
+{
+	StopFiringInternal();
+	CancelReload();
 }
 
 void AWeaponBase::OnAutoFireTimer()
@@ -1373,6 +1408,30 @@ void AWeaponBase::ReattachMagazine()
 	bMagazineDetached = false;
 }
 
+// ---- Weapon align rest pose ----
+
+void AWeaponBase::CaptureAlignRestPoseOnce()
+{
+	if (bAlignRestPoseCaptured || !IsValid(WeaponMesh)) return;
+
+	// First setup of this equip runs before any align writer has moved the mesh, so this read is
+	// the one genuinely pristine one. Everything later reads back a writer's output.
+	AlignRestPose = WeaponMesh->GetRelativeTransform();
+	bAlignRestPoseCaptured = true;
+}
+
+void AWeaponBase::RestoreAlignRestPose()
+{
+	if (!bAlignRestPoseCaptured || !IsValid(WeaponMesh)) return;
+
+	// The enemy hand-swap settle owns the mesh while it runs and eases to its own identity rest —
+	// stealing it back mid-settle would snap the gun. Nothing else can be mid-write here: the
+	// caller re-baselines immediately after, which resets the align writers' targets anyway.
+	if (bHandSwapSettling) return;
+
+	WeaponMesh->SetRelativeTransform(AlignRestPose);
+}
+
 // ---- Weapon fire alignment ----
 
 void AWeaponBase::SetupFireAlign(USkeletalMeshComponent* EnemyMesh, FName FireSocket)
@@ -1380,6 +1439,7 @@ void AWeaponBase::SetupFireAlign(USkeletalMeshComponent* EnemyMesh, FName FireSo
 	bFireAlignReady = false;
 
 	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+	CaptureAlignRestPoseOnce();
 	if (FireSocket.IsNone())
 	{
 		UE_LOG(LogExtraction, Warning, TEXT("SetupFireAlign: %s — FireSocket is None"), *GetNameSafe(this));
@@ -1468,6 +1528,7 @@ void AWeaponBase::SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName Socke
 	for (bool& bReady : bCoverAlignTargetReady) bReady = false;
 
 	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+	CaptureAlignRestPoseOnce();
 
 	const FName RestSocket = WeaponMesh->GetAttachSocketName();
 	if (!EnemyMesh->DoesSocketExist(RestSocket) || !EnemyMesh->DoesSocketExist(SocketSpaceBone))
@@ -1495,6 +1556,31 @@ void AWeaponBase::SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName Socke
 	}
 
 	CoverAlignCurrent = CoverAlignRestRelative;
+	if (CVarCompanionAlignDebug.GetValueOnGameThread() != 0)
+		LogCoverAlignBake(RestSocket, SocketSpaceBone, TRest * TBone.Inverse());
+}
+
+void AWeaponBase::LogCoverAlignBake(FName RestSocket, FName AlignBone, const FTransform& SocketToBone) const
+{
+	static const TCHAR* ScenarioNames[CoverAlignScenarioCount] = {
+		TEXT("Idle"), TEXT("OverTop"), TEXT("PeekLeft"), TEXT("PeekRight"),
+		TEXT("StandIdleLeft"), TEXT("StandIdleRight"), TEXT("StandPeekLeft"), TEXT("StandPeekRight")
+	};
+
+	UE_LOG(LogExtraction, Warning,
+		TEXT("[ALIGN-BAKE] %s restSock='%s' alignBone='%s' | socketToBone loc=%s rotDeg=%s | rest loc=%s rotDeg=%s"),
+		*GetNameSafe(this), *RestSocket.ToString(), *AlignBone.ToString(),
+		*SocketToBone.GetLocation().ToString(), *SocketToBone.Rotator().ToString(),
+		*CoverAlignRestRelative.GetLocation().ToString(), *CoverAlignRestRelative.Rotator().ToString());
+
+	for (int32 i = 0; i < CoverAlignScenarioCount; ++i)
+	{
+		if (!bCoverAlignTargetReady[i]) continue;
+		const FTransform Offset = CoverAlignTargets[i].GetRelativeTransform(CoverAlignRestRelative);
+		UE_LOG(LogExtraction, Warning, TEXT("[ALIGN-BAKE] %s scenario=%s offsetLoc=%s offsetRotDeg=%s"),
+			*GetNameSafe(this), ScenarioNames[i],
+			*Offset.GetLocation().ToString(), *Offset.Rotator().ToString());
+	}
 }
 
 void AWeaponBase::UpdateCoverAlign(ECoverWeaponAlign Scenario, float DeltaSeconds, float InterpSpeed)
@@ -1537,6 +1623,7 @@ void AWeaponBase::SetupMeleeAlign(USkeletalMeshComponent* EnemyMesh, FName Melee
 	bMeleeAlignReady = false;
 
 	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+	CaptureAlignRestPoseOnce();
 	if (MeleeSocket.IsNone())
 	{
 		UE_LOG(LogExtraction, Warning, TEXT("SetupMeleeAlign: %s — MeleeSocket is None"), *GetNameSafe(this));
@@ -1590,7 +1677,17 @@ void AWeaponBase::SetupPatrolAlign()
 	bPatrolAlignReady = false;
 
 	if (!IsValid(WeaponMesh)) return;
+	CaptureAlignRestPoseOnce();
 	if (!IsValid(WeaponData)) return;
+
+	// Patrol offsets come from the weapon's OWN DataAsset, so a pistol and a rifle never share
+	// them — unlike the cover/fire align values, which live on the ABP and follow a duplicate.
+	if (CVarCompanionAlignDebug.GetValueOnGameThread() != 0)
+		UE_LOG(LogExtraction, Warning,
+			TEXT("[ALIGN-BAKE] %s patrol-align DA='%s' locOffset=%s rotOffsetDeg=%s"),
+			*GetNameSafe(this), *GetNameSafe(WeaponData),
+			*WeaponData->PatrolAlignLocationOffset.ToString(),
+			*WeaponData->PatrolAlignRotationOffset.ToString());
 
 	// Zero offsets = no patrol-carry pose. Weapon stays at ADS — skip entirely.
 	if (WeaponData->PatrolAlignLocationOffset.IsNearlyZero() &&

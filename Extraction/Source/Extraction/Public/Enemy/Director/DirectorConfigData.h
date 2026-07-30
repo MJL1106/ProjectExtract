@@ -116,6 +116,20 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawning", meta = (ToolTip = "Maximum 3D distance from the player to an eligible spawn zone. Lower values keep reinforcements local; too low can starve large or multi-floor layouts."))
 	float SpawnDistanceMax = 4500.f;
 
+	// --- Punishment squad tracking ---
+
+	/** While the director alarm is raised, periodically refresh punishment-spawned squads'
+	 *  last-known position so they push toward the player's current area instead of freezing
+	 *  on a stale point. Disable to let squads rely on their own perception only. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawning", meta = (ToolTip = "Refresh punishment-spawned squads' search target while the alarm is raised so they track the player's current area."))
+	bool bRefreshSquadSearchTarget = true;
+
+	/** Seconds between search-target refreshes for punishment squads while the alarm is up.
+	 *  Must be greater than the squad's internal SightingRelayInterval (1s) to avoid fighting
+	 *  its rate limiter. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Spawning", meta = (ClampMin = "1.5", ToolTip = "Interval between search-target refreshes for punishment squads."))
+	float SquadSearchRefreshInterval = 3.f;
+
 	// --- Per-phase configs ---
 
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Phases", meta = (ToolTip = "Phase config used for the early or stealth portion of the mission. Usually slower cadence, lower cap, and lighter squads."))

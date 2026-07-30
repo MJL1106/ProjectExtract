@@ -927,9 +927,29 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "200.0", EditCondition = "bEnablePostCombatOverwatch"))
 	float OverwatchBreakDistance = 800.f;
 
-	// Max distance (cm) from the companion to a door for it to count as the aim chokepoint.
-	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "300.0", EditCondition = "bEnablePostCombatOverwatch"))
-	float OverwatchDoorMaxDist = 1500.f;
+	// Radius (cm, 2D) around the companion searched for recent enemy corpses. Their centroid is the
+	// first threat reference the hold tries: the pile of enemies that just died marks where the fight
+	// physically happened, and a body cannot have walked somewhere the ally has no sight of. Only
+	// corpses killed during the CURRENT fight are counted (pre-fight bodies are filtered out), and
+	// a separate Z-delta gate stops a 3D radius spanning floors. 0 disables the corpse source and
+	// falls straight through to the last-threat/first-contact chain.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "0.0", UIMin = "500.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchCorpseSearchRadius = 2000.f;
+
+	// Max |Z delta| (cm) between the companion and a corpse for it to count. DemoMap is a stacked
+	// skyscraper, so a pure 3D radius spans several storeys -- 4 enemies killed on floor 2 plus 2
+	// on floor 1 drag the centroid Z into the slab. Same lesson as FollowMaxZDelta, CoverPickMaxZDelta
+	// and RouteFacingMaxZDelta. 0 disables the storey gate.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "0.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchCorpseMaxZDelta = 250.f;
+
+	// Max pairwise 2D separation (cm) among qualifying corpses before the centroid is rejected in
+	// favour of the single NEAREST corpse. A centroid of two separate clusters always lands in the
+	// wall between them -- e.g. 3 corpses in Room A and 2 in Room B produce a centroid inside the
+	// partition. When any pair exceeds this threshold the nearest corpse alone is used, which always
+	// sits in the room the companion is actually standing in. 0 disables the spread reject.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "0.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchCorpseMaxSpread = 1500.f;
 
 	// Threat-memory points closer than this (cm) are skipped (the fight ended at the companion's
 	// feet); the aim falls back to first-contact, then to the pure bearing.

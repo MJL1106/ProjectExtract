@@ -23,6 +23,12 @@ public:
 	virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 	virtual FString GetStaticDescription() const override;
 
+	/** Projects a loot container's collision base onto the navmesh. Shared by both the loot sweep
+	 *  and the explore room evaluation so nav projection logic lives in one place. Returns false
+	 *  when the container cannot be projected (candidate should be skipped at selection time). */
+	static bool ProjectContainerToNav(UWorld* World, const AActor* Container,
+		float HorizExtent, float VertExtent, float AboveRejectTolerance, FVector& OutNavPoint);
+
 protected:
 	/** How close the companion must be to a container before looting it (cm). */
 	UPROPERTY(EditAnywhere, Category = "Loot", meta = (ClampMin = "10.0"))
@@ -68,6 +74,38 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Loot", meta = (ClampMin = "0.0"))
 	float LootOcclusionTolerance = 40.f;
 
+	/** Maximum vertical distance (cm) between the pawn and the container's collision bounds that
+	 *  still counts as "close enough to loot". Containers draped over furniture can sit hundreds of
+	 *  units above the floor navmesh; a 3D range check rejects them. This tolerance is checked
+	 *  independently of InteractionRange / ArrivalLootRange (which measure horizontal distance). */
+	UPROPERTY(EditAnywhere, Category = "Loot", meta = (ClampMin = "0.0"))
+	float VerticalLootTolerance = 500.f;
+
+	/** Maximum distance (cm) the pawn may sit below the container's collision base (Bounds.Min.Z)
+	 *  and still loot it. The generous VerticalLootTolerance covers the draped-furniture case where
+	 *  the volume sits above the pawn on the same floor; this tighter gate rejects a pawn on the
+	 *  storey below that would otherwise loot through the floor slab. */
+	UPROPERTY(EditAnywhere, Category = "Loot", meta = (ClampMin = "0.0"))
+	float BelowContainerRejectHeight = 100.f;
+
+	/** Horizontal navmesh search half-extent (cm) when projecting a container's origin onto the
+	 *  navmesh. Constraining this prevents a container in a sealed closet from projecting metres
+	 *  into the next room. Keep in sync with BTTask_CompanionExplore::NavProjectHorizontalExtent. */
+	UPROPERTY(EditAnywhere, Category = "Loot|NavProject", meta = (ClampMin = "1.0"))
+	float NavProjectHorizontalExtent = 150.f;
+
+	/** Vertical navmesh search half-extent (cm) when projecting a container's collision base
+	 *  onto the navmesh. Kept small (roughly one capsule height) so the query box cannot reach
+	 *  through a floor slab to the storey below. Keep in sync with
+	 *  BTTask_CompanionExplore::NavProjectVerticalExtent. */
+	UPROPERTY(EditAnywhere, Category = "Loot|NavProject", meta = (ClampMin = "1.0"))
+	float NavProjectVerticalExtent = 200.f;
+
+	/** A nav-projected point whose Z exceeds the container origin Z by more than this is rejected
+	 *  (it landed on the floor above). Keep in sync with BTTask_CompanionExplore's equivalent. */
+	UPROPERTY(EditAnywhere, Category = "Loot|NavProject", meta = (ClampMin = "0.0"))
+	float NavProjectAboveRejectTolerance = 50.f;
+
 	/** Safety cap on containers looted per sweep. 0 = unlimited (radius is the real bound). */
 	UPROPERTY(EditAnywhere, Category = "Loot", meta = (ClampMin = "0"))
 	int32 MaxContainersPerSweep = 0;
@@ -96,15 +134,18 @@ private:
 
 	int32 LootedCount = 0;
 
-	/** Issues MoveToActor toward CurrentTarget (or flags for immediate loot when already close). */
-	bool StartMoveToCurrentTarget(UBehaviorTreeComponent& OwnerComp);
+	/** Issues MoveToLocation toward CurrentTarget's nav goal (or flags for immediate loot when
+	 *  already close). When PrecomputedNavGoal is set, skips the projection (FindNextContainer
+	 *  already computed it). */
+	bool StartMoveToCurrentTarget(UBehaviorTreeComponent& OwnerComp, const FVector* PrecomputedNavGoal = nullptr);
 
 	/** Loots CurrentTarget: stop movement, montage, Execute_Loot, start the pause. */
 	void LootCurrentTarget(UBehaviorTreeComponent& OwnerComp);
 
 	/** Picks the nearest still-lootable container within SweepRadius of SweepAnchor.
-	 *  Returns null when the sweep is exhausted. */
-	AActor* FindNextContainer(UBehaviorTreeComponent& OwnerComp) const;
+	 *  Returns null when the sweep is exhausted. On success, OutNavGoal receives the
+	 *  pre-computed navmesh goal so StartMoveToCurrentTarget can skip re-projecting. */
+	AActor* FindNextContainer(UBehaviorTreeComponent& OwnerComp, FVector& OutNavGoal) const;
 
 	/** Chain to the next container, or finish the task (Succeeded if anything was looted). */
 	void AdvanceSweep(UBehaviorTreeComponent& OwnerComp);

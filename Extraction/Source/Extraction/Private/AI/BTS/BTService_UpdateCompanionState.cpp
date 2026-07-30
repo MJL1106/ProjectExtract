@@ -36,8 +36,7 @@
 #include "EngineUtils.h"            // TActorIterator for combat-enemy proximity scan
 #include "TraversalComponent.h"     // stealth-pin enforcement must not crouch mid-traversal
 #include "Navigation/PathFollowingComponent.h" // ready-only threat stance yields facing to an active move
-#include "World/DoorBase.h"              // post-combat overwatch aims at the chokepoint door
-#include "World/DoorRegistrySubsystem.h" // portal-path door lookup toward the threat memory
+#include "AI/CompanionAimValidation.h" // the one seam every threat-derived aim bearing is proven through
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics CVar
 #include "DrawDebugHelpers.h"    // companion.RouteFacingDebug heading arrow
 
@@ -947,6 +946,22 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 					*Companion->GetName(), *ForcedTarget->GetName(), *GetNameSafe(BestTarget));
 			BestTarget = ForcedTarget;
 			BestDistSq = FVector::DistSquared(MyLocation, ForcedTarget->GetActorLocation());
+
+			// The main LOS filter above ran against the old BestTarget; refresh the anim-side
+			// mirror for this override so the non-cover aim fade has an honest signal. The ignore
+			// set must match SelectFireTraceIgnored (self + weapon + attached actors + team-mates)
+			// so acquisition and firing agree on visibility -- the comment at ~308-321 states that
+			// agreement is load-bearing.
+			FCollisionQueryParams ForcedLosParams(SCENE_QUERY_STAT(CompanionForcedTargetLoS), true);
+			ForcedLosParams.AddIgnoredActor(Companion);
+			ForcedLosParams.AddIgnoredActor(Companion->GetCurrentWeapon());
+			for (AActor* Attached : SelectFireTraceIgnored)
+				ForcedLosParams.AddIgnoredActor(Attached);
+			FHitResult ForcedLosHit;
+			const bool bForcedBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
+				ForcedLosHit, Companion->GetPawnViewLocation(),
+				AITargeting::GetSightLocation(ForcedTarget), ECC_Visibility, ForcedLosParams);
+			Companion->SetHasTargetLOS(!bForcedBlocked || ForcedLosHit.GetActor() == ForcedTarget);
 		}
 	}
 
@@ -1065,6 +1080,13 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		{
 			FightFirstContactLocation = LastThreatLocation;
 			bHasFightFirstContact = true;
+			// Snapshot the director's corpse FIFO so ResolveRecentCorpseCentroid can filter
+			// to kills from THIS fight only. Without this, a previous room's 6 bodies outnumber
+			// the current fight's 2 and drag the centroid back through the wall.
+			const UWorld* FightWorld = Companion->GetWorld();
+			const UEnemyDirectorSubsystem* FightDirector = FightWorld
+				? FightWorld->GetSubsystem<UEnemyDirectorSubsystem>() : nullptr;
+			PreFightCorpses = FightDirector ? FightDirector->GetCorpses() : TArray<TWeakObjectPtr<AEnemyCharacter>>();
 		}
 	}
 
@@ -1316,6 +1338,40 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				// demonstrably not over, so the usual "last target died, lower it" edge must not fire.
 				// Overwatch normally owns this, but its anchor radius can legitimately be exceeded
 				// while the far wider wave leash still holds, leaving nobody to raise the weapon.
+				//
+				// "Nobody to aim" was literal, and it is what made the allies-aim-through-walls report
+				// visible: this arm raised the weapon and wrote NO focal at all, so the gun came up over
+				// whatever the combat task had last left in the focus channel — historically a live
+				// SetFocus(Actor) on the enemy, which the controller re-resolves to that pawn's CURRENT
+				// position every tick, pitch preserved, straight through geometry. Worst for the
+				// extractee, the ally most likely to sit outside the overwatch anchor while inside the
+				// wave leash. Arm the same forward focal the post-fight hold uses instead: it points
+				// down the pawn's own forward, it is what the anim's bFocusLive gate actually needs, and
+				// it is already in the Tier-0 hand-off compare set.
+				//
+				// Travelling is refused for the same reason the post-fight hold refuses it — the focal
+				// is a FIXED world point, and travelling carries the body past it and then turns it
+				// around to keep facing it. The raise itself is unchanged either way.
+				const bool bWaveTravelling = Companion->IsSprinting() || Companion->IsFollowCatchupPace();
+				if (bWaveTravelling && bWeaponUpHoldAsserted)
+				{
+					bWeaponUpHoldAsserted = false;
+					ReleaseWeaponUpHoldFocal(*Controller);
+				}
+				else if (!bWaveTravelling && !bWeaponUpHoldAsserted)
+				{
+					bWeaponUpHoldAsserted = true;
+					// Stale actor-aim backstop, mirrors the lower path and overwatch entry: the anim's
+					// actor-target branch bypasses low-ready entirely, so a leftover aim target is its
+					// own through-wall stare regardless of what the focal says.
+					Companion->SetAimTarget(nullptr);
+					ArmWeaponUpHoldFocal(*Controller, *Companion);
+					// Deliberately NOT stamping WeaponUpHoldStartTime: this raise is governed by the
+					// wave hold, not by GetWeaponUpHoldSeconds. Leaving the stamp at its sentinel means
+					// that when the wave hold drops and the sibling arm below inherits the flag, the
+					// elapsed compare reads "long expired" and releases cleanly — the documented safe
+					// reading of a stale stamp.
+				}
 				Companion->SetLowReadyAim(false);
 			}
 			else if (!bTakedownOwnsAim)
@@ -1458,7 +1514,13 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		if (bOwnsAim)
 		{
 			bWaveOverwatchRanThisTick = true;
-			Companion->SetLowReadyAim(false); // assert combat presentation
+			// Only raise when the hold is actively asserting a bearing. When
+			// OverwatchRefreshFailures > 0 the hold is in its holding-lowered state (aim point
+			// failed validation, debouncing before ending). Re-raising here would undo the
+			// SetLowReadyAim(true) that UpdatePostCombatOverwatch just wrote, flipping it true->false
+			// every tick and firing ~8 OnLowReadyAimChanged broadcasts per second.
+			if (OverwatchRefreshFailures == 0)
+				Companion->SetLowReadyAim(false);
 		}
 	}
 
@@ -1918,17 +1980,11 @@ namespace
 	// UCompanionTuningDataAsset under Companion|PostCombatOverwatch).
 	constexpr float OverwatchBreakSpeed = 60.f;        // cm/s of self-movement that counts as a real move
 	constexpr float OverwatchMovingBreakTime = 0.3f;   // sustained-move seconds before the hold breaks
-	constexpr float OverwatchDoorAimZOffset = 110.f;   // chest height through the doorway, not the floor pivot
-	constexpr float OverwatchDoorMaxZDelta = 250.f;    // same-storey gate — the portal metric is 3D and can pick a stairwell door
-	constexpr float OverwatchDoorMinDist = 200.f;      // companion standing in the doorway itself — aiming at it points at its own feet
-	constexpr float OverwatchNearWallPullback = 50.f;  // aim just short of a blocking wall on the bearing fallback
-	constexpr float OverwatchDoorTowardThreatMinDot = 0.1f; // door must lie roughly toward the threat, not behind us
-	constexpr int32 OverwatchDoorCandidateCount = 4;   // portal candidates pulled from the registry per pick
-	// Sanity floor on the blocked-trace fallback: a hit nearer than this is the ally's own cover, and
-	// pulling back from it puts the aim point half a metre in front of its face. That is what made the
-	// extraction VIP look like it was staring into a wall. Below this distance there is no honest
-	// "cover the direction they came from" read at all, so overwatch is declined outright.
-	constexpr float OverwatchMinAimStandoff = 200.f;
+	constexpr float OverwatchCorpseAimZOffset = 110.f; // chest height over the pile, not the floor the bodies lie on
+	// Slack (cm) for the blocked-trace LOS check: a hit essentially AT the threat point (floor/prop
+	// under a ground-level spawn-zone reference) counts as seen, not as a wall. Beyond this the
+	// trace genuinely hit blocking geometry and the aim point is declined.
+	constexpr float OverwatchAimLosSlack = 150.f;
 
 	// OverwatchFocalMatchTolerance — the shared focal-compare tolerance — now lives in the anonymous
 	// namespace at the top of the file: TickNode's ready-threat sprint-yield needs it and sits above
@@ -1955,34 +2011,10 @@ namespace
 	// in the firing line cycled overwatch END/START.
 	constexpr int32 OverwatchRefreshFailuresToEnd = 2;
 
-	// How many pawns the overwatch traces step past before giving up. Bounds the re-trace loop — a
-	// firing line with five bodies standing in it is not a standoff measurement worth salvaging.
-	constexpr int32 OverwatchTracePawnSkipLimit = 4;
-
-	// First GEOMETRY hit along a line; pawns are stepped past instead of counted as walls. Characters
-	// block ECC_Visibility, so the player or another ally crossing within the standoff made the aim
-	// resolve fail and ended overwatch, then entry re-entered once they cleared — an END/START cycle
-	// driven by nothing but the player's footwork. Params is by value: each skipped pawn joins its
-	// ignore list before the re-trace. Returns false when the line holds nothing but pawns.
-	bool TraceGeometryPastPawns(const UWorld& World, const FVector& Start, const FVector& End,
-		FCollisionQueryParams Params, FHitResult& OutHit)
-	{
-		for (int32 Attempt = 0; Attempt <= OverwatchTracePawnSkipLimit; ++Attempt)
-		{
-			if (!World.LineTraceSingleByChannel(OutHit, Start, End, ECC_Visibility, Params)) return false;
-
-			const AActor* HitActor = OutHit.GetActor();
-			if (!IsValid(HitActor)) return true;
-
-			// A weapon or other attached actor rides its owner — same "not a wall" read.
-			const AActor* HitOwner = HitActor->GetOwner();
-			if (!HitActor->IsA<APawn>() && !(IsValid(HitOwner) && HitOwner->IsA<APawn>())) return true;
-
-			Params.AddIgnoredActor(HitActor);
-		}
-		// Out of skips: treat the last hit as geometry rather than claim a clear line.
-		return true;
-	}
+	// TraceGeometryPastPawns and its pawn-skip limit moved to CompanionAim (Public/AI +
+	// Private/AI/CompanionAimValidation) — it is now THE seam every threat-derived bearing is proven
+	// through, and it must stay off the visible-enemy paths (it has no "the hit IS the target"
+	// exemption; see the header note there).
 }
 
 // ---------------------------------------------------------------------------
@@ -2384,7 +2416,32 @@ bool UBTService_UpdateCompanionState::UpdatePostCombatOverwatch(
 		return false;
 	}
 
+	// Debounce the END, not the POSE. OverwatchRefreshFailures stays non-zero from the first refusal
+	// until a refresh succeeds, so this covers the whole debounce window — including the ticks between
+	// refresh attempts, where the refresh itself early-returns true. The hold keeps its window (that is
+	// the LOS-flicker hysteresis the debounce exists for) but stops asserting a bearing it can no
+	// longer justify: previously the ally held a now-invalid aim for ~2s, which for "must never happen"
+	// is simply the bug with a timer on it. Returning true keeps ownership, so the facing arbitration
+	// still Tier-0-yields and nothing else writes a focal in the gap.
+	if (OverwatchRefreshFailures > 0)
+	{
+		Companion.SetScriptedAim(false);
+		Companion.SetLowReadyAim(true);
+		if (Controller.GetFocalPointForPriority(EAIFocusPriority::Gameplay)
+			.Equals(OverwatchAimPoint, OverwatchFocalMatchTolerance))
+		{
+			Controller.ClearFocus(EAIFocusPriority::Gameplay);
+		}
+		return true;
+	}
+
 	Controller.SetFocalPoint(OverwatchAimPoint, EAIFocusPriority::Gameplay);
+	// Re-asserted every tick rather than only on entry, so a refusal that dropped the pose above comes
+	// back up when the bearing clears. Free to repeat: both setters are change-guarded (SetLowReadyAim
+	// early-outs and only then broadcasts), and while bOverwatchActive holds, the facing arbitration
+	// Tier-0-yields, so there is no edge-guarded stance for this to fight.
+	Companion.SetLowReadyAim(false);
+	Companion.SetScriptedAim(true);
 	return true;
 }
 
@@ -2403,8 +2460,10 @@ bool UBTService_UpdateCompanionState::RefreshOverwatchAimPoint(
 	if (!ComputeOverwatchAimPoint(Companion, Tuning, Refreshed))
 	{
 		// Debounced. A refusal is one trace sample on a ~1s cadence, so ending the hold on the first
-		// one let anything transient in the firing line cycle overwatch END/START. Keep asserting the
-		// last justified point until the refusal repeats.
+		// one let anything transient in the firing line cycle overwatch END/START. The hold therefore
+		// survives one refusal — but the last justified point is NOT re-asserted meanwhile: the caller
+		// reads OverwatchRefreshFailures and drops to low-ready for as long as it is non-zero. Holding
+		// a bearing that can no longer be proven open was the defect, debounce or not.
 		++OverwatchRefreshFailures;
 		return OverwatchRefreshFailures < OverwatchRefreshFailuresToEnd;
 	}
@@ -2414,119 +2473,215 @@ bool UBTService_UpdateCompanionState::RefreshOverwatchAimPoint(
 	return true;
 }
 
-bool UBTService_UpdateCompanionState::ResolveOverwatchThreatRef(
-	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning, FVector& OutThreatRef) const
+void UBTService_UpdateCompanionState::ResolveOverwatchThreatCandidates(
+	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning,
+	TArray<FVector, TInlineAllocator<5>>& OutCandidates) const
 {
-	// Freshest threat point that isn't at our feet; else first contact; else a point pushed out along
-	// the bearing of whatever memory we do have.
+	if (!Tuning) return;
+
+	// Ordered list of pre-existing threat memories, each with the at-our-feet floor applied. The
+	// caller validates each in turn and takes the first whose bearing is provably open, so a blocked
+	// corpse centroid no longer kills the entire chain.
 	const FVector CompLoc = Companion.GetActorLocation();
 	const float MinDistSq = FMath::Square(Tuning->OverwatchMinThreatDist);
 
+	// 1. Corpse centroid -- the pile of enemies that just died.
+	FVector CorpseCentroid;
+	if (ResolveRecentCorpseCentroid(Companion, Tuning, CorpseCentroid)
+		&& FVector::DistSquared2D(CorpseCentroid, CompLoc) > MinDistSq)
+	{
+		OutCandidates.Add(CorpseCentroid);
+	}
+
+	// 2. Last threat location -- freshest "threat was here" point.
 	if (bHasLastThreatLocation && FVector::DistSquared2D(LastThreatLocation, CompLoc) > MinDistSq)
-	{
-		OutThreatRef = LastThreatLocation;
-		return true;
-	}
+		OutCandidates.Add(LastThreatLocation);
+
+	// 3. First contact location -- where this fight started.
 	if (bHasFightFirstContact && FVector::DistSquared2D(FightFirstContactLocation, CompLoc) > MinDistSq)
-	{
-		OutThreatRef = FightFirstContactLocation;
-		return true;
-	}
+		OutCandidates.Add(FightFirstContactLocation);
+
+	// 4. Bearing push-out -- a point along the direction of whatever memory exists.
+	// OverwatchMinThreatDist floor applied for consistency with candidates 1-3 and 5 (header
+	// contract). Safe at defaults (OverwatchBearingDistance 1200 >> OverwatchMinThreatDist 400);
+	// without the floor a designer lowering BearingDistance below MinThreatDist would produce a
+	// candidate the other four already rejected.
 	if (bHasLastThreatLocation || bHasFightFirstContact)
 	{
 		const FVector Src = bHasLastThreatLocation ? LastThreatLocation : FightFirstContactLocation;
 		const FVector Dir = (Src - CompLoc).GetSafeNormal2D();
-		if (Dir.IsNearlyZero()) return false;
-		OutThreatRef = CompLoc + Dir * Tuning->OverwatchBearingDistance;
-		return true;
+		if (!Dir.IsNearlyZero())
+		{
+			const FVector PushOut = CompLoc + Dir * Tuning->OverwatchBearingDistance;
+			if (FVector::DistSquared2D(PushOut, CompLoc) > MinDistSq)
+				OutCandidates.Add(PushOut);
+		}
 	}
 
-	// No fight memory at all -- wave fallback: derive from the director's spawn zone so the ally
-	// covers the door the waves come through even when its own fight memory was reset.
+	// 5. Wave spawn reference -- the direction waves come through, even when own fight memory was
+	// reset (the ally covers the door the next squad emerges from).
 	const UWorld* World = Companion.GetWorld();
 	const UEnemyDirectorSubsystem* Director = World ? World->GetSubsystem<UEnemyDirectorSubsystem>() : nullptr;
 	FVector WaveThreat;
-	if (!Director || !Director->IsWaveActive() || !Director->GetWaveThreatReference(WaveThreat)) return false;
-	if (FVector::DistSquared2D(WaveThreat, CompLoc) <= MinDistSq) return false;
+	if (Director && Director->IsWaveActive() && Director->GetWaveThreatReference(WaveThreat)
+		&& FVector::DistSquared2D(WaveThreat, CompLoc) > MinDistSq)
+	{
+		OutCandidates.Add(WaveThreat);
+	}
+}
 
-	OutThreatRef = WaveThreat;
+void UBTService_UpdateCompanionState::CollectQualifyingCorpseLocations(
+	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning,
+	TArray<FVector, TInlineAllocator<10>>& OutLocations, int32& OutNearestIdx) const
+{
+	const UWorld* World = Companion.GetWorld();
+	const UEnemyDirectorSubsystem* Director = World ? World->GetSubsystem<UEnemyDirectorSubsystem>() : nullptr;
+	if (!Director) return;
+
+	const FVector CompLoc = Companion.GetActorLocation();
+	const float RadiusSq = FMath::Square(Tuning->OverwatchCorpseSearchRadius);
+	const float MaxZDelta = Tuning->OverwatchCorpseMaxZDelta;
+
+	float NearestDistSq = MAX_FLT;
+	for (const TWeakObjectPtr<AEnemyCharacter>& Entry : Director->GetCorpses())
+	{
+		const AEnemyCharacter* Corpse = Entry.Get();
+		if (!IsValid(Corpse)) continue;
+		// Recency: skip corpses that existed before this fight started.
+		if (PreFightCorpses.Contains(Entry)) continue;
+		const FVector CorpseLoc = Corpse->GetCorpseLocation();
+		// 2D distance gate (the old 3D test let a floor-spanning sphere drag the centroid).
+		const float Dist2DSq = FVector::DistSquared2D(CorpseLoc, CompLoc);
+		if (Dist2DSq > RadiusSq) continue;
+		// Storey gate: same lesson as FollowMaxZDelta and RouteFacingMaxZDelta.
+		if (MaxZDelta > 0.f && FMath::Abs(CorpseLoc.Z - CompLoc.Z) > MaxZDelta) continue;
+		const int32 Idx = OutLocations.Add(CorpseLoc);
+		if (Dist2DSq < NearestDistSq) { NearestDistSq = Dist2DSq; OutNearestIdx = Idx; }
+	}
+}
+
+bool UBTService_UpdateCompanionState::ResolveRecentCorpseCentroid(
+	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning, FVector& OutCentroid) const
+{
+	if (!Tuning || Tuning->OverwatchCorpseSearchRadius <= 0.f) return false;
+
+	TArray<FVector, TInlineAllocator<10>> Locations;
+	int32 NearestIdx = INDEX_NONE;
+	CollectQualifyingCorpseLocations(Companion, Tuning, Locations, NearestIdx);
+	if (Locations.Num() == 0) return false;
+
+	// Spread reject: a centroid of two separate clusters lands in the wall between them. When any
+	// pair exceeds the threshold, fall back to the single nearest corpse.
+	bool bUseCentroid = true;
+	const float MaxSpreadSq = FMath::Square(Tuning->OverwatchCorpseMaxSpread);
+	if (Locations.Num() > 1 && MaxSpreadSq > 0.f)
+	{
+		for (int32 i = 0; i < Locations.Num() && bUseCentroid; ++i)
+			for (int32 j = i + 1; j < Locations.Num(); ++j)
+				if (FVector::DistSquared2D(Locations[i], Locations[j]) > MaxSpreadSq)
+				{ bUseCentroid = false; break; }
+	}
+
+	if (bUseCentroid)
+	{
+		FVector Sum = FVector::ZeroVector;
+		for (const FVector& Loc : Locations) Sum += Loc;
+		OutCentroid = Sum / static_cast<float>(Locations.Num());
+	}
+	else
+	{
+		OutCentroid = Locations[NearestIdx];
+	}
+	OutCentroid.Z += OverwatchCorpseAimZOffset;
 	return true;
 }
 
-bool UBTService_UpdateCompanionState::PickOverwatchDoorAim(
-	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning,
-	const FVector& ThreatRef, const FCollisionQueryParams& LosParams, FVector& OutAim) const
+bool UBTService_UpdateCompanionState::ValidateThreatAimPoint(
+	const ACompanionCharacter& Companion, const FVector& Point, FVector& OutValidated) const
 {
 	const UWorld* World = Companion.GetWorld();
-	UDoorRegistrySubsystem* DoorRegistry = World ? World->GetSubsystem<UDoorRegistrySubsystem>() : nullptr;
-	if (!DoorRegistry) return false;
+	if (!World) return false;
 
-	const FVector CompLoc = Companion.GetActorLocation();
-	TArray<ADoorBase*> Doors;
-	Doors.Reserve(OverwatchDoorCandidateCount);
-	DoorRegistry->CollectPortalCandidates(CompLoc, ThreatRef, OverwatchDoorCandidateCount, Doors);
-
-	const FVector Eye = Companion.GetPawnViewLocation();
-	const FVector ToThreat2D = (ThreatRef - CompLoc).GetSafeNormal2D();
-	for (ADoorBase* Door : Doors)
+	// Build the full ignore set: self, weapon, attached actors, friendly-fire list. Same ignore set as
+	// the ready-threat gate in TickNode, and load-bearing for the same reason: a companion's own
+	// attached actor sitting on the line otherwise reads as "sees nothing" and the bearing is wrongly
+	// declined. Team-mates come from the weapon's own friendly-fire list — rounds pass straight
+	// THROUGH them (AWeaponBase excludes them from the hitscan), so an ally standing on the line is
+	// not an obstruction to a shot either.
+	FCollisionQueryParams LosParams(SCENE_QUERY_STAT(CompanionThreatAimLoS), true);
+	LosParams.AddIgnoredActor(&Companion);
+	AWeaponBase* Weapon = Companion.GetCurrentWeapon();
+	LosParams.AddIgnoredActor(Weapon);
+	Companion.ForEachAttachedActors([&LosParams](AActor* Attached)
 	{
-		if (!IsValid(Door)) continue;
-		const FVector DoorLoc = Door->GetActorLocation();
-		const float DoorDistSq = FVector::DistSquared2D(DoorLoc, CompLoc);
-		if (DoorDistSq > FMath::Square(Tuning->OverwatchDoorMaxDist)) continue;
-		if (DoorDistSq < FMath::Square(OverwatchDoorMinDist)) continue;
-		if (FMath::Abs(DoorLoc.Z - CompLoc.Z) > OverwatchDoorMaxZDelta) continue;
-		if (FVector::DotProduct((DoorLoc - CompLoc).GetSafeNormal2D(), ToThreat2D)
-			< OverwatchDoorTowardThreatMinDot) continue;
-		// The door panel itself may block the eye-line (closed door) — that's still a valid "cover the
-		// door" aim; only a wall between us and the doorway disqualifies it. Pawns don't disqualify it
-		// either: the player walking through the line must not silently re-pick the aim point.
-		FCollisionQueryParams DoorLosParams = LosParams;
-		DoorLosParams.AddIgnoredActor(Door);
-		const FVector Aim = DoorLoc + FVector(0.f, 0.f, OverwatchDoorAimZOffset);
-		FHitResult Hit;
-		if (TraceGeometryPastPawns(*World, Eye, Aim, DoorLosParams, Hit)) continue;
-
-		OutAim = Aim;
+		LosParams.AddIgnoredActor(Attached);
 		return true;
+	});
+	if (IsValid(Weapon))
+	{
+		for (AActor* Friendly : Weapon->GetFriendlyFireIgnoreList())
+			LosParams.AddIgnoredActor(Friendly);
 	}
-	return false;
+
+	return ValidateThreatAimPoint(Companion, Point, LosParams, OutValidated);
+}
+
+bool UBTService_UpdateCompanionState::ValidateThreatAimPoint(
+	const ACompanionCharacter& Companion, const FVector& Point,
+	const FCollisionQueryParams& PrebuiltParams, FVector& OutValidated) const
+{
+	const UWorld* World = Companion.GetWorld();
+	if (!World) return false;
+
+	// Pawn-transparent: the player or another ally crossing the line is not geometry; counting them as
+	// a wall cycled overwatch END/START on nothing but footwork. A hit essentially AT the point (the
+	// floor or a prop under a ground-level reference) counts as seen; anything further back is a wall.
+	FHitResult Hit;
+	const bool bBlocked = CompanionAim::TraceGeometryPastPawns(
+		*World, Companion.GetPawnViewLocation(), Point, PrebuiltParams, Hit);
+	if (bBlocked && FVector::DistSquared(Hit.ImpactPoint, Point) > FMath::Square(OverwatchAimLosSlack))
+		return false;
+
+	OutValidated = Point;
+	return true;
 }
 
 bool UBTService_UpdateCompanionState::ComputeOverwatchAimPoint(
 	const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning, FVector& OutAimPoint) const
 {
-	const UWorld* World = Companion.GetWorld();
-	if (!World) return false;
+	// Walk the ordered candidate list and take the FIRST whose bearing is provably open. A blocked
+	// corpse centroid (ally behind a crate, or the centroid itself inside a wall from cluster spread)
+	// no longer kills the chain -- it falls through to last-threat, first-contact, bearing push-out,
+	// then the wave spawn reference. False only when EVERY candidate is refused or no memory exists.
+	//
+	// This is NOT a search for an arbitrary open direction (the sweep-arc facing was scrapped). Every
+	// candidate comes from a concrete threat memory; validation merely filters which one is honest.
+	TArray<FVector, TInlineAllocator<5>> Candidates;
+	ResolveOverwatchThreatCandidates(Companion, Tuning, Candidates);
 
-	FVector ThreatRef;
-	if (!ResolveOverwatchThreatRef(Companion, Tuning, ThreatRef)) return false;
-
-	FCollisionQueryParams LosParams(SCENE_QUERY_STAT(CompanionOverwatchLoS), true);
+	// Build the ignore set ONCE for the whole candidate pass. The set depends only on the companion
+	// (self, weapon, attached actors, friendly-fire list), which is const across candidates.
+	FCollisionQueryParams LosParams(SCENE_QUERY_STAT(CompanionThreatAimLoS), true);
 	LosParams.AddIgnoredActor(&Companion);
-	LosParams.AddIgnoredActor(Companion.GetCurrentWeapon());
+	AWeaponBase* Weapon = Companion.GetCurrentWeapon();
+	LosParams.AddIgnoredActor(Weapon);
+	Companion.ForEachAttachedActors([&LosParams](AActor* Attached)
+	{
+		LosParams.AddIgnoredActor(Attached);
+		return true;
+	});
+	if (IsValid(Weapon))
+	{
+		for (AActor* Friendly : Weapon->GetFriendlyFireIgnoreList())
+			LosParams.AddIgnoredActor(Friendly);
+	}
 
-	// Chokepoint first: nearest same-storey door on the portal path toward the threat, visible
-	// from here — "cover the door they came through".
-	if (PickOverwatchDoorAim(Companion, Tuning, ThreatRef, LosParams, OutAimPoint)) return true;
-
-	// No usable door: aim at the threat point directly; a wall on the way pulls the aim just short
-	// of it, which still reads as covering the direction the fight came from — but only while the
-	// wall is far enough away for that to be true. Blocked inside the standoff means the ally is
-	// tucked against its own cover; there is no aim point to hold, so decline rather than plant one
-	// in the geometry and hold it (with the wave-hold cap waived, that state never expired).
-	// Pawn-transparent: the player or another ally stepping inside the standoff is not cover, and
-	// counting them as a wall cycled overwatch END/START on nothing but footwork.
-	const FVector Eye = Companion.GetPawnViewLocation();
-	FHitResult Hit;
-	const bool bBlocked = TraceGeometryPastPawns(*World, Eye, ThreatRef, LosParams, Hit);
-	if (bBlocked && FVector::DistSquared(Hit.ImpactPoint, Eye) < FMath::Square(OverwatchMinAimStandoff))
-		return false;
-
-	OutAimPoint = bBlocked
-		? Hit.ImpactPoint + (Eye - Hit.ImpactPoint).GetSafeNormal() * OverwatchNearWallPullback
-		: ThreatRef;
-	return true;
+	for (const FVector& Candidate : Candidates)
+	{
+		if (ValidateThreatAimPoint(Companion, Candidate, LosParams, OutAimPoint))
+			return true;
+	}
+	return false;
 }
 
 void UBTService_UpdateCompanionState::EndPostCombatOverwatch(
@@ -2560,6 +2715,7 @@ void UBTService_UpdateCompanionState::ResetFightThreatMemory()
 {
 	bHasFightFirstContact = false;
 	bHasLastThreatLocation = false;
+	PreFightCorpses.Reset();
 }
 
 void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
@@ -2581,16 +2737,31 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 	const bool bReadyThreatOwnsFacing = CompanionSearchRoomPolicy::PostureOwnsReadyThreatFacing(
 		Companion.IsStealthActive(), ActiveCommand, bPathMoving,
 		Companion.IsSearchRoomExposureActive());
-	const bool bTierZeroYield = bHasTarget || (bReadyOnlyThreat && bReadyThreatOwnsFacing)
+	// Split in two so the wave hold can be told apart from every OTHER yield reason. The wave hold is
+	// the one member of this set that does not necessarily write a facing of its own — it just holds
+	// the gun up — so when it is the only reason we yielded, the posture chain's forward focal IS the
+	// facing and the hand-off below must leave it alone. Every other member either writes its own
+	// focal or is a state where ours must not survive.
+	//
+	// bActiveAimOwnerYields is the subset of members that ACTIVELY WRITE a facing this tick: target,
+	// ready-threat, overwatch, revive, takedown, traversal, DBNO. Excluded: BB_RouteActive (a
+	// HoldAtFinal park keeps it true indefinitely without writing any focal -- the route task is done)
+	// and bCommandYieldsFacing (a command may yield facing without actively writing one this tick).
+	// The full set (bOtherOwnerYields) is still used for the Tier-0-yield decision and the hand-off
+	// cleanup; the narrow set gates only bWaveHoldOwnsForwardFocal, where the question is "will
+	// another owner overwrite the wave hold's focal this tick", not "should non-combat facing yield".
+	const bool bActiveAimOwnerYields = bHasTarget || (bReadyOnlyThreat && bReadyThreatOwnsFacing)
 		|| bOverwatchActive // post-fight hold owns aim/focus for its whole window
-		|| Companion.IsWaveHoldActive() // wave hold owns weapon-up; ambient facing must not compete
 		|| Companion.IsRevivingPlayer()
 		|| Companion.IsCommandedTakedownArmed() || Companion.IsCommandedTakedownExecuting()
 		|| Companion.IsTakedownMontagePlaying()
 		|| (IsValid(Traversal) && Traversal->IsBusy())
-		|| BB.GetValueAsBool(ACompanionAIController::BB_RouteActive)
-		|| bCommandYieldsFacing
 		|| Companion.GetIsCompanionDBNO();
+	const bool bOtherOwnerYields = bActiveAimOwnerYields
+		|| BB.GetValueAsBool(ACompanionAIController::BB_RouteActive)
+		|| bCommandYieldsFacing;
+	// Wave hold owns weapon-up; ambient facing must not compete.
+	const bool bTierZeroYield = bOtherOwnerYields || Companion.IsWaveHoldActive();
 
 	if (bTierZeroYield)
 	{
@@ -2616,7 +2787,23 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 		// Note the route task's own focal setter is a pure distance dedup with no live-focal check, so
 		// at a stationary waypoint dwell it would skip re-asserting and our stale point would override
 		// the designer's authored waypoint aim for the rest of the hold.
-		const bool bFocalIsOurs = !bHasTarget && !bReadyOnlyThreat
+		// One exception to the whole hand-off: the WAVE HOLD's forward focal. IsWaveHoldActive() is
+		// itself in this yield set, so during a wave hold there is no other facing owner to hand off
+		// TO — the hold's own raise is the facing. Clearing it here would drop the focal on the same
+		// tick the posture chain armed it, every tick, and the anim's bFocusLive gate would never see
+		// a valid focal, so the gun would never actually come up.
+		//
+		// Gated on bActiveAimOwnerYields (not the full bOtherOwnerYields) because BB_RouteActive and
+		// bCommandYieldsFacing can be true WITHOUT actively writing a focal this tick. A HoldAtFinal
+		// park keeps BB_RouteActive true indefinitely (CompanionCommandComponent.cpp:81-82) while the
+		// route task is done walking and writes nothing — under those conditions bOtherOwnerYields was
+		// true, this exemption was false, and the focal was cleared-and-re-armed every tick, so the
+		// anim's bFocusLive gate never saw a valid focal and the gun never came up. The narrowed set
+		// still contains every system that would overwrite the wave hold's focal: combat target,
+		// ready-threat, overwatch, revive, takedown, traversal, DBNO.
+		const bool bWaveHoldOwnsForwardFocal = bWeaponUpHoldAsserted
+			&& Companion.IsWaveHoldActive() && !bActiveAimOwnerYields;
+		const bool bFocalIsOurs = !bHasTarget && !bReadyOnlyThreat && !bWaveHoldOwnsForwardFocal
 			&& ((!LastNonCombatFocalPoint.IsZero() && CurrentFocal.Equals(LastNonCombatFocalPoint, OverwatchFocalMatchTolerance))
 				|| ((WatchThreatLingerRemaining > 0.f || bWatchStanceApplied)
 					&& CurrentFocal.Equals(WatchThreatLocation, OverwatchFocalMatchTolerance))
@@ -2649,8 +2836,13 @@ void UBTService_UpdateCompanionState::UpdateNonCombatFacing(
 		// Same for the post-fight hold — it has yielded its facing to a real aim owner, which is the
 		// correct outcome. Only the facing is surrendered; posture and the bLoweredOnTargetLoss latch
 		// stay exactly where the decay branch left them, since this block owns neither.
-		bWeaponUpHoldAsserted = false;
-		WeaponUpHoldFocalPoint = FVector::ZeroVector;
+		// Skipped while the wave hold owns the forward focal (see above): there the yield is caused by
+		// the hold itself, so tearing its state down here would fight the posture chain every tick.
+		if (!bWaveHoldOwnsForwardFocal)
+		{
+			bWeaponUpHoldAsserted = false;
+			WeaponUpHoldFocalPoint = FVector::ZeroVector;
+		}
 		return;
 	}
 
@@ -2744,11 +2936,23 @@ bool UBTService_UpdateCompanionState::ComputeWatchThreat(
 	// The signal refreshes every tick while the fight is live, so freshness IS the hold; no linger
 	// bookkeeping. WatchedEnemy stays null: there is no actor to track, only a bearing. This is
 	// what stops a trailing companion (the extractee behind a wall) strolling through a firefight.
+	//
+	// The signal itself is PURE RADIUS -- NoteAlertedThreat publishes unconditionally, with no
+	// line-of-sight trace anywhere behind it -- so it is the one watch source that can name a point
+	// inside a wall. The facing is accepted unconditionally: this branch exists precisely for the ally
+	// behind a wall, so refusing it dropped the facing entirely and the ally strolled through the
+	// firefight. ApplyWatchFacing never raises on it (bFallbackWatch) -- a lowered weapon pointed
+	// at an unseen bearing is the honest pose, and that is the only constraint this signal needs.
 	const float SignalMaxAge = Tuning ? Tuning->FightSignalMaxAge : 4.f;
 	FVector AlertedLocation;
 	if (Controller.GetRecentAlertedThreat(SignalMaxAge, AlertedLocation))
 	{
 		WatchedEnemy = nullptr;
+		// The facing is ALWAYS accepted: this branch exists for the trailing ally behind a wall, so
+		// refusing it dropped the facing entirely and the ally strolled through the firefight.
+		// ValidateThreatAimPoint's only output is OutValidated = Point (the input unchanged), so both
+		// validated and refused branches yielded AlertedLocation — the call was a full ignore-set
+		// rebuild + up to 5 line traces per tick for no information. Assigned directly.
 		WatchThreatLocation = AlertedLocation;
 		return true;
 	}
@@ -2779,16 +2983,26 @@ void UBTService_UpdateCompanionState::ApplyWatchFacing(ACompanionAIController& C
 	// IsStealthActive() without ever leaving the watch tier, and the stance must follow it —
 	// otherwise ordering Stealth during a Normal-mode watch keeps the gun raised (ScriptedAim
 	// raises unconditionally regardless of mode), and Stealth->Normal keeps it wrongly lowered.
+	//
+	// The fight-signal fallback (WatchedEnemy null) joins that key for exactly the same reason. A
+	// single watch slides visible -> linger -> fallback without ever leaving this tier, so keying the
+	// re-apply on stealth alone let the fallback INHERIT the raise the visible watch had applied —
+	// a weapon left up on a radius-only bearing, which is one of the ways the ally ended up aiming
+	// through a wall. bFallbackWatch reuses the exact WatchedEnemy.IsValid() test the stealth bark
+	// below already discriminates on, so there is one discriminator here, not two.
 	const bool bStealthNow = Companion.IsStealthActive();
-	if (bWatchStanceApplied && bWatchStanceStealth == bStealthNow) return;
+	const bool bFallbackWatch = !WatchedEnemy.IsValid();
+	if (bWatchStanceApplied && bWatchStanceStealth == bStealthNow
+		&& bWatchStanceFallback == bFallbackWatch) return;
 	const bool bFreshWatch = !bWatchStanceApplied;
 	bWatchStanceApplied = true;
 	bWatchStanceStealth = bStealthNow;
+	bWatchStanceFallback = bFallbackWatch;
 
 	// Fresh stealth watch = hostile spotted while sneaking — whisper it once per watch entry
 	// (a mode flip mid-watch re-applies stance but is not a new sighting). Fallback watches
 	// (WatchedEnemy null — fight-signal bearing only) never bark: nothing was actually spotted.
-	if (bFreshWatch && bStealthNow && WatchedEnemy.IsValid())
+	if (bFreshWatch && bStealthNow && !bFallbackWatch)
 		Companion.Bark(ECompanionBarkType::StealthSpotEnemy);
 
 	if (bStealthNow)
@@ -2798,10 +3012,23 @@ void UBTService_UpdateCompanionState::ApplyWatchFacing(ACompanionAIController& C
 		Companion.SetScriptedAim(false);
 		Companion.SetLowReadyAim(true);
 	}
+	else if (bFallbackWatch)
+	{
+		// Fight-signal fallback: FACE, do not raise. Its point comes from the pure-radius alerted
+		// threat signal, so nothing behind it has ever confirmed a sighting — the ally is turning
+		// toward a fight it can hear, not covering a target it can see. The facing and the hold stay
+		// (that is what stops the extractee strolling through a firefight, and the in-code intent of
+		// this branch); only the raise is dropped, because raising here is what "aiming through the
+		// wall" actually looks like on screen. Weapon-down and rotated is the honest pose.
+		Companion.SetScriptedAim(false);
+		Companion.SetLowReadyAim(true);
+	}
 	else
 	{
-		// Normal: weapon raised via the scripted-aim gate (posture stays Exploration — this
-		// deliberately does not flip to Combat, which would drag posture-scoring/formation with it).
+		// Normal, with a real enemy watched (visible this tick, or held inside its linger window —
+		// last-known-position aim, which is correct behaviour and the doorway-flicker hysteresis):
+		// weapon raised via the scripted-aim gate (posture stays Exploration — this deliberately
+		// does not flip to Combat, which would drag posture-scoring/formation with it).
 		Companion.SetLowReadyAim(false);
 		Companion.SetScriptedAim(true);
 	}
@@ -2906,7 +3133,7 @@ bool UBTService_UpdateCompanionState::IsRouteFacingInRange(
 
 	// A separate storey gate, not a 3D distance test. DemoMap is a stacked skyscraper: a plain 3D
 	// radius keeps a floor-2 reference live while the companion walks floor 1 and points it down a
-	// corridor over its head. Same lesson already baked into OverwatchDoorMaxZDelta and FollowMaxZDelta.
+	// corridor over its head. Same lesson already baked into FollowMaxZDelta.
 	const float MaxZDelta = Tuning ? Tuning->RouteFacingMaxZDelta : RouteFacingMaxZDeltaFallback;
 	return MaxZDelta <= 0.f || FMath::Abs(PawnLocation.Z - RoutePoint.Z) <= MaxZDelta;
 }

@@ -108,15 +108,16 @@ AWeaponBase* UWeaponComponent::ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<
 	if (!IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return nullptr;
 	if (!NewWeaponClass) return nullptr;
 	if (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown()) return nullptr;
-	if (IsValid(CurrentWeapon) && CurrentWeapon->IsReloading()) return nullptr;
 
 	bNextShotStealthExempt = false;
 
-	if (IsValid(CurrentWeapon))
-		CurrentWeapon->StopFiring(); // no mid-burst swap — the held weapon may be replaced below
-
 	TObjectPtr<AWeaponBase>& Slot = bPrimarySlot ? PrimaryWeapon : SecondaryWeapon;
 	const bool bSlotWasHeld = !IsValid(CurrentWeapon) || CurrentWeapon == Slot;
+
+	// Only cancel the held weapon's reload/fire when the replaced slot IS the held one.
+	// Picking up into the stowed slot must not disturb the gun in your hands.
+	if (bSlotWasHeld && IsValid(CurrentWeapon))
+		CurrentWeapon->AbortFireAndReload();
 
 	if (IsValid(Slot))
 	{
@@ -156,6 +157,22 @@ AWeaponBase* UWeaponComponent::FindWeaponByAmmoCategory(EEnemyWeaponAnimType Cat
 		if (Data && Data->EnemyWeaponAnimType == Category)
 			return Candidate;
 	}
+	return nullptr;
+}
+
+EWeaponSlot UWeaponComponent::GetActiveWeaponSlot() const
+{
+	if (!IsValid(CurrentWeapon)) return EWeaponSlot::None;
+	if (CurrentWeapon == PrimaryWeapon) return EWeaponSlot::Primary;
+	if (CurrentWeapon == SecondaryWeapon) return EWeaponSlot::Secondary;
+	return EWeaponSlot::None;
+}
+
+AWeaponBase* UWeaponComponent::GetStowedWeapon() const
+{
+	if (!IsValid(CurrentWeapon)) return nullptr;
+	if (CurrentWeapon == PrimaryWeapon) return SecondaryWeapon;
+	if (CurrentWeapon == SecondaryWeapon) return PrimaryWeapon;
 	return nullptr;
 }
 
@@ -204,8 +221,7 @@ void UWeaponComponent::SetActiveWeapon(AWeaponBase* NewWeapon)
 
 	if (IsValid(CurrentWeapon))
 	{
-		if (CurrentWeapon->IsReloading()) return; // mid-reload switch would orphan the kit reload montage
-		CurrentWeapon->StopFiring();
+		CurrentWeapon->AbortFireAndReload();
 		CurrentWeapon->OnWeaponFired.RemoveAll(this);
 		CurrentWeapon->SetWeaponHidden(true);
 	}
@@ -278,10 +294,7 @@ bool UWeaponComponent::SetThrowableEquipped(bool bEquipped)
 	{
 		if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return false;
 		if (IsValid(CurrentWeapon))
-		{
-			if (CurrentWeapon->IsReloading()) return false;
-			CurrentWeapon->StopFiring();
-		}
+			CurrentWeapon->AbortFireAndReload();
 		if (bIsAiming)
 			SetAiming(false);
 	}

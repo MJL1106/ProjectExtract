@@ -8,6 +8,7 @@
 #include "World/WorldInteractable.h"
 #include "Enemy/EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
+#include "Character/ExtractionPlayer.h"
 #include "AI/CompanionAIController.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Camera/CameraComponent.h"
@@ -108,6 +109,14 @@ void UCompanionCommandComponent::IssuePing()
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionPing), false, Owner);
 	Params.AddIgnoredActor(Owner);
+
+	// Same ally blindness the player's interaction traces need, from the same single source of truth:
+	// an ally's mesh blocks ECC_Visibility (that block is what makes it take hitscan damage), so the
+	// primary standing in front of the player won the nearer-hit comparison below and the ping resolved
+	// to the ally — which matches no command and reads as a dead ping. No command targets an ally, and
+	// an ally that is itself interactable is deliberately still traceable, so nothing is lost here.
+	if (const AExtractionPlayer* PlayerOwner = Cast<AExtractionPlayer>(Owner))
+		Params.AddIgnoredActors(PlayerOwner->GetInteractTraceIgnoredActors());
 
 	// Second pass on the dedicated Interact channel so a loot volume (which ignores Visibility so
 	// it can't block AI sight or cover generation) can still be pinged for the companion to search.

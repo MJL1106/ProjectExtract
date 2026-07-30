@@ -6,6 +6,7 @@
 #include "World/Lootable.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "NavigationSystem.h"
 #include "Kismet/GameplayStatics.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogCompanionLoot, Log, All);
@@ -61,14 +62,63 @@ static bool LootViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor* C
 	return false;
 }
 
-// Distance from pawn to the nearest point on the container's collision bounds (not its origin) —
-// robust to wide cabinets whose pivot sits at one end. Mirrors BTTask_CompanionBreach's helper.
-static float DistanceFromPawnToActor(const APawn* Pawn, const AActor* Target)
+// Horizontal (2D) distance from a point to the nearest XY point on a collision AABB footprint.
+// Robust to wide cabinets whose pivot sits at one end, immune to vertical offset. The caller
+// fetches the bounds once and passes them to both this and VerticalDistFromBounds, avoiding a
+// redundant GetComponentsBoundingBox call per tick.
+static float HorizontalDistFromBounds(const FVector& PawnLoc, const FBox& Bounds, const FVector& FallbackLoc)
 {
-	if (!IsValid(Pawn) || !IsValid(Target)) return TNumericLimits<float>::Max();
-	const FBox Bounds = Target->GetComponentsBoundingBox(false);
-	if (!Bounds.IsValid) return FVector::Dist(Pawn->GetActorLocation(), Target->GetActorLocation());
-	return FMath::Sqrt(Bounds.ComputeSquaredDistanceToPoint(Pawn->GetActorLocation()));
+	if (!Bounds.IsValid) return FVector::Dist2D(PawnLoc, FallbackLoc);
+	const float ClosestX = FMath::Clamp(PawnLoc.X, Bounds.Min.X, Bounds.Max.X);
+	const float ClosestY = FMath::Clamp(PawnLoc.Y, Bounds.Min.Y, Bounds.Max.Y);
+	return FVector::Dist2D(PawnLoc, FVector(ClosestX, ClosestY, PawnLoc.Z));
+}
+
+// Vertical distance from a Z coordinate to the nearest Z face of a collision AABB. Returns 0
+// when the coordinate is within the box's vertical range. See HorizontalDistFromBounds for the
+// single-fetch rationale.
+static float VerticalDistFromBounds(float PawnZ, const FBox& Bounds, float FallbackZ)
+{
+	if (!Bounds.IsValid) return FMath::Abs(PawnZ - FallbackZ);
+	if (PawnZ < Bounds.Min.Z) return Bounds.Min.Z - PawnZ;
+	if (PawnZ > Bounds.Max.Z) return PawnZ - Bounds.Max.Z;
+	return 0.f;
+}
+
+// Project a container's collision base onto the navmesh. The query originates at the container's
+// Bounds.Min.Z (its bottom face) with a tight vertical half-extent (roughly one capsule height),
+// so the search box stays on the container's own storey and cannot reach through a floor slab.
+// Both an above-reject and a below-reject guard against inter-storey projection in stacked
+// buildings. Shared by both BTTask_CompanionLoot and BTTask_CompanionExplore (public static).
+bool UBTTask_CompanionLoot::ProjectContainerToNav(UWorld* World, const AActor* Container,
+	float HorizExtent, float VertExtent, float AboveRejectTolerance, FVector& OutNavPoint)
+{
+	if (!World || !IsValid(Container)) return false;
+	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(World);
+	if (!NavSys) return false;
+
+	const FBox Bounds = Container->GetComponentsBoundingBox(false);
+	const FVector Origin = Container->GetActorLocation();
+	const float BaseZ = Bounds.IsValid ? Bounds.Min.Z : Origin.Z;
+
+	const FVector QueryOrigin(Origin.X, Origin.Y, BaseZ);
+	const FVector QueryExtent(HorizExtent, HorizExtent, VertExtent);
+
+	FNavLocation Projected;
+	if (!NavSys->ProjectPointToNavigation(QueryOrigin, Projected, QueryExtent))
+		return false;
+
+	// Above-reject: landed on a higher storey.
+	if (Projected.Location.Z > Origin.Z + AboveRejectTolerance)
+		return false;
+
+	// Below-reject: landed on a lower storey. The container's own floor sits at most one capsule
+	// height below the collision base; anything further is a different storey.
+	if (Projected.Location.Z < BaseZ - VertExtent)
+		return false;
+
+	OutNavPoint = Projected.Location;
+	return true;
 }
 
 UBTTask_CompanionLoot::UBTTask_CompanionLoot()
@@ -181,9 +231,24 @@ void UBTTask_CompanionLoot::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		return;
 	}
 
-	const float Dist = DistanceFromPawnToActor(Pawn, Container);
+	// Horizontal + vertical proximity. Bounds fetched once for both gates (avoids a redundant
+	// GetComponentsBoundingBox call per tick).
+	const FBox ContainerBounds = Container->GetComponentsBoundingBox(false);
+	const FVector PawnLoc = Pawn->GetActorLocation();
+	const FVector ContainerLoc = Container->GetActorLocation();
+	const float HorizDist = HorizontalDistFromBounds(PawnLoc, ContainerBounds, ContainerLoc);
+	const float VertDist = VerticalDistFromBounds(PawnLoc.Z, ContainerBounds, ContainerLoc.Z);
+
+	// Asymmetric vertical gate: VerticalLootTolerance covers the legitimate draped-furniture case
+	// (pawn on the floor, volume on furniture above on the same storey). BelowContainerRejectHeight
+	// catches the through-floor case (pawn directly underneath on a lower storey).
+	const float PawnBelowBase = ContainerBounds.IsValid
+		? FMath::Max(0.f, ContainerBounds.Min.Z - PawnLoc.Z)
+		: FMath::Max(0.f, ContainerLoc.Z - PawnLoc.Z);
+	const bool bVertOk = (VertDist <= VerticalLootTolerance) && (PawnBelowBase <= BelowContainerRejectHeight);
 	const bool bPathDone = (AIC->GetMoveStatus() == EPathFollowingStatus::Idle);
-	const bool bShouldLoot = (Dist <= InteractionRange) || (bPathDone && Dist <= ArrivalLootRange);
+	const bool bShouldLoot = bVertOk
+		&& ((HorizDist <= InteractionRange) || (bPathDone && HorizDist <= ArrivalLootRange));
 
 	if (bShouldLoot)
 	{
@@ -195,8 +260,8 @@ void UBTTask_CompanionLoot::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 	// (or FindNextContainer would re-select it forever) and continue with the next one.
 	if (bMoveRequested && bPathDone)
 	{
-		UE_LOG(LogCompanionLoot, Warning, TEXT("TickTask: %s unreachable (%.0f > %.0f) — skipping"),
-			*GetNameSafe(Container), Dist, ArrivalLootRange);
+		UE_LOG(LogCompanionLoot, Warning, TEXT("TickTask: %s unreachable (horiz=%.0f vert=%.0f, range=%.0f/%.0f) — skipping"),
+			*GetNameSafe(Container), HorizDist, VertDist, ArrivalLootRange, VerticalLootTolerance);
 		SkippedThisSweep.Add(Container);
 		AdvanceSweep(OwnerComp);
 	}
@@ -213,7 +278,7 @@ FString UBTTask_CompanionLoot::GetStaticDescription() const
 	return FString::Printf(TEXT("Loot pinged container, sweep others within %.0f cm"), SweepRadius);
 }
 
-bool UBTTask_CompanionLoot::StartMoveToCurrentTarget(UBehaviorTreeComponent& OwnerComp)
+bool UBTTask_CompanionLoot::StartMoveToCurrentTarget(UBehaviorTreeComponent& OwnerComp, const FVector* PrecomputedNavGoal)
 {
 	ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
 	AActor* Container = CurrentTarget.Get();
@@ -221,16 +286,44 @@ bool UBTTask_CompanionLoot::StartMoveToCurrentTarget(UBehaviorTreeComponent& Own
 
 	bMoveRequested = false;
 
-	// Already close enough — TickTask loots on the next tick.
+	// Already close enough (horizontal + vertical) — TickTask loots on the next tick.
 	if (const APawn* Pawn = AIC->GetPawn())
-		if (DistanceFromPawnToActor(Pawn, Container) <= InteractionRange)
+	{
+		const FBox Bounds = Container->GetComponentsBoundingBox(false);
+		const FVector PLoc = Pawn->GetActorLocation();
+		const FVector CLoc = Container->GetActorLocation();
+		const float Below = Bounds.IsValid
+			? FMath::Max(0.f, Bounds.Min.Z - PLoc.Z) : FMath::Max(0.f, CLoc.Z - PLoc.Z);
+		if (HorizontalDistFromBounds(PLoc, Bounds, CLoc) <= InteractionRange
+			&& VerticalDistFromBounds(PLoc.Z, Bounds, CLoc.Z) <= VerticalLootTolerance
+			&& Below <= BelowContainerRejectHeight)
 			return true;
+	}
+
+	// Use the pre-computed goal when available (FindNextContainer already projected), otherwise
+	// project now. The projection queries from the container's collision base with a tight vertical
+	// extent so it stays on the container's own storey.
+	FVector NavGoal;
+	if (PrecomputedNavGoal)
+	{
+		NavGoal = *PrecomputedNavGoal;
+	}
+	else if (!ProjectContainerToNav(AIC->GetWorld(), Container,
+		NavProjectHorizontalExtent, NavProjectVerticalExtent, NavProjectAboveRejectTolerance, NavGoal))
+	{
+		UE_LOG(LogCompanionLoot, Warning, TEXT("StartMove: %s cannot project to navmesh (h=%.0f v=%.0f)"),
+			*GetNameSafe(Container), NavProjectHorizontalExtent, NavProjectVerticalExtent);
+		return false;
+	}
 
 	const EPathFollowingRequestResult::Type MoveResult =
-		AIC->MoveToActor(Container, MoveAcceptRadius, true, true, false, nullptr, true);
+		AIC->MoveToLocation(NavGoal, MoveAcceptRadius, /*bStopOnOverlap*/ true,
+			/*bUsePathfinding*/ true, /*bProjectDestinationToNavigation*/ true,
+			/*bCanStrafe*/ false);
 	if (MoveResult == EPathFollowingRequestResult::Failed)
 	{
-		UE_LOG(LogCompanionLoot, Warning, TEXT("StartMove: MoveToActor failed for %s"), *GetNameSafe(Container));
+		UE_LOG(LogCompanionLoot, Warning, TEXT("StartMove: MoveToLocation failed for %s (nav goal %s)"),
+			*GetNameSafe(Container), *NavGoal.ToString());
 		return false;
 	}
 
@@ -259,7 +352,7 @@ void UBTTask_CompanionLoot::LootCurrentTarget(UBehaviorTreeComponent& OwnerComp)
 		*GetNameSafe(Container), LootedCount, InterLootPause);
 }
 
-AActor* UBTTask_CompanionLoot::FindNextContainer(UBehaviorTreeComponent& OwnerComp) const
+AActor* UBTTask_CompanionLoot::FindNextContainer(UBehaviorTreeComponent& OwnerComp, FVector& OutNavGoal) const
 {
 	const ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
 	const APawn* Pawn = IsValid(AIC) ? AIC->GetPawn() : nullptr;
@@ -270,26 +363,42 @@ AActor* UBTTask_CompanionLoot::FindNextContainer(UBehaviorTreeComponent& OwnerCo
 	UGameplayStatics::GetAllActorsWithInterface(World, ULootable::StaticClass(), Lootables);
 
 	AActor* Best = nullptr;
+	FVector BestNavGoal = FVector::ZeroVector;
 	float BestDistSq = TNumericLimits<float>::Max();
 	const float SweepRadiusSq = FMath::Square(SweepRadius);
 
 	for (AActor* Candidate : Lootables)
 	{
+		// Cheap gates first.
 		if (!IsValid(Candidate) || !ILootable::Execute_CanLoot(Candidate)) continue;
 		if (SkippedThisSweep.Contains(Candidate)) continue;
 		if (FVector::DistSquared(Candidate->GetActorLocation(), SweepAnchor) > SweepRadiusSq) continue;
+
+		// Distance from pawn — skip if farther than current best (avoids the expensive LoS + nav
+		// projection below for candidates that could never win the nearest-first selection).
+		const float DistSq = FVector::DistSquared(Candidate->GetActorLocation(), Pawn->GetActorLocation());
+		if (DistSq >= BestDistSq) continue;
+
 		// Same-room gate — a container it can't see is a container in another room; never chain
-		// through walls/closed doors. The commanded (pinged) first target never routes through here,
+		// through walls/closed doors. Cheaper than nav projection (two cached-scene line traces
+		// vs a Recast poly query). The commanded (pinged) first target never routes through here,
 		// so an explicitly pinged far container still works.
 		if (!LootViewerHasLoS(World, Pawn, Candidate, Lootables, LootOcclusionTolerance)) continue;
 
-		const float DistSq = FVector::DistSquared(Candidate->GetActorLocation(), Pawn->GetActorLocation());
-		if (DistSq < BestDistSq)
-		{
-			BestDistSq = DistSq;
-			Best = Candidate;
-		}
+		// Nav projection — the most expensive gate. Stores the result so the caller can skip
+		// re-projecting in StartMoveToCurrentTarget.
+		FVector CandidateNavGoal;
+		if (!ProjectContainerToNav(World, Candidate,
+			NavProjectHorizontalExtent, NavProjectVerticalExtent, NavProjectAboveRejectTolerance,
+			CandidateNavGoal))
+			continue;
+
+		BestDistSq = DistSq;
+		Best = Candidate;
+		BestNavGoal = CandidateNavGoal;
 	}
+
+	if (Best) OutNavGoal = BestNavGoal;
 	return Best;
 }
 
@@ -301,13 +410,27 @@ void UBTTask_CompanionLoot::AdvanceSweep(UBehaviorTreeComponent& OwnerComp)
 	if (MaxContainersPerSweep <= 0 || LootedCount < MaxContainersPerSweep)
 	{
 		// Keep trying candidates until one accepts a move — unpathable ones get blacklisted.
-		while (AActor* Next = FindNextContainer(OwnerComp))
+		// Capped per tick: each FindNextContainer iterates all lootables with LoS and nav queries,
+		// so an unbounded retry loop can burst hundreds of Recast queries in one frame.
+		constexpr int32 MaxRetriesPerTick = 3;
+		int32 Retries = 0;
+		FVector NavGoal;
+		while (AActor* Next = FindNextContainer(OwnerComp, NavGoal))
 		{
 			CurrentTarget = Next;
-			if (StartMoveToCurrentTarget(OwnerComp)) return;
+			if (StartMoveToCurrentTarget(OwnerComp, &NavGoal)) return;
 
 			UE_LOG(LogCompanionLoot, Warning, TEXT("AdvanceSweep: no path to %s — skipping"), *GetNameSafe(Next));
 			SkippedThisSweep.Add(Next);
+
+			if (++Retries >= MaxRetriesPerTick)
+			{
+				// Defer remaining retries to the next tick. TickTask sees CurrentTarget invalid +
+				// bMoveRequested false and re-enters AdvanceSweep via the "target vanished" path.
+				CurrentTarget.Reset();
+				bMoveRequested = false;
+				return;
+			}
 		}
 	}
 

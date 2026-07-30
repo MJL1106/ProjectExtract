@@ -119,6 +119,25 @@ namespace
 		}
 	}
 
+	/** Distance (cm) out from the pawn for the "no aim bearing" hold focal. Far enough that the
+	 *  yaw it resolves is the pawn's own forward to within rounding. */
+	constexpr float NoBearingHoldFocalDistance = 1000.f;
+
+	// "I have no bearing worth pointing at" facing: a focal point straight down the pawn's OWN forward
+	// at view height. Holds the current yaw and invents no new bearing (the same idiom the state
+	// service's weapon-up hold uses). Preferred over a bare ClearFocus because clearing stops
+	// UpdateControlRotation, which leaves a bUseControllerDesiredRotation pawn easing toward whatever
+	// yaw the dead focus last resolved — for a blocked combat target that is the through-wall bearing
+	// we are trying to stop asserting.
+	static void CompanionHoldOwnForwardFocal(ACompanionCharacter* Companion, AAIController* AIC)
+	{
+		if (!IsValid(Companion) || !IsValid(AIC)) return;
+		FVector HoldPoint = Companion->GetActorLocation()
+			+ Companion->GetActorForwardVector() * NoBearingHoldFocalDistance;
+		HoldPoint.Z = Companion->GetPawnViewLocation().Z;
+		AIC->SetFocalPoint(HoldPoint, EAIFocusPriority::Gameplay);
+	}
+
 	static const UCompanionTuningDataAsset* GetCompanionTuning(const ACompanionCharacter* Companion)
 	{
 		const ACompanionAIController* AIC = IsValid(Companion) ? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
@@ -1558,10 +1577,12 @@ void UBTTask_CompanionCombat::EnterMoveShootIfNeeded(ACompanionCharacter* Compan
 	// LoS-clear and LoS-blocked branches.
 	//
 	// Capped at the companion's strafe tier, not taken raw. UpdateMoveShootFacing holds a Gameplay
-	// focus on the target for the whole of move-and-shoot, so the body faces the enemy while the
-	// feet travel -- the legs are playing the locomotion blendspace's directional rows, and those
-	// only go up to 275 (above that there is a single forward-only sprint sample). Move-and-shoot
-	// above the cap is the "runs forwards while side-stepping" report.
+	// focus for the whole of move-and-shoot -- on the target itself while LoS is clear, and otherwise
+	// on a point (the last-seen spot while it is still provably visible, else the pawn's own forward)
+	// -- so the body faces its bearing while the feet travel. The legs are playing the locomotion
+	// blendspace's directional rows, and those only go up to 275 (above that there is a single
+	// forward-only sprint sample). Move-and-shoot above the cap is the "runs forwards while
+	// side-stepping" report.
 	//
 	// The override is published on the character via SetTaskSpeedOverride so ApplyMovementSpeeds
 	// skips the walk channel while move-and-shoot is active. Crouched channel stays zero (not
@@ -1575,19 +1596,41 @@ void UBTTask_CompanionCombat::EnterMoveShootIfNeeded(ACompanionCharacter* Compan
 		UE_LOG(LogCompanionAI, Log, TEXT("%s: MOVESHOOT enter %s speed=%.0f (authored=%.0f)"), *Companion->GetName(), Reason, Pace, CombatMoveSpeed);
 }
 
-void UBTTask_CompanionCombat::UpdateMoveShootFacing(AAIController* AIC, AActor* Target, bool bLosClear)
+void UBTTask_CompanionCombat::UpdateMoveShootFacing(ACompanionCharacter* Companion, AAIController* AIC,
+	AActor* Target, bool bLosClear, TArrayView<AActor* const> IgnoredForFireTrace)
 {
 	if (!IsValid(AIC)) return;
+
 	if (bLosClear)
 	{
 		if (IsValid(Target))
 			AIC->SetFocus(Target, EAIFocusPriority::Gameplay);
+		return;
 	}
-	else if (bHasLastKnownTargetLocation)
+
+	// LoS-BLOCKED. LastKnownTargetLocation is LoS-verified only at the instant it is captured, and this
+	// runs EVERY blocked tick — re-asserting it unverified holds a bearing straight through geometry for
+	// the length of the block, a live through-wall aim source during the tail of a fight rather than
+	// just a teardown leak. So re-verify each assertion: the snapshot is worth pointing at only while
+	// the companion can still SEE the spot it last saw the enemy at (an enemy that stepped behind a
+	// pillar in open view still resolves clear — that IS the last-known-position aim this exists for).
+	// Fire suppression stays in the caller (weapon stopped, aim dropped, low-ready raised for the whole
+	// blocked stretch), so this only ever moves yaw, and it invents no bearing: no search, no sweep.
+	AActor* SnapshotBlocker = nullptr;
+	const bool bSnapshotStillVisible = bHasLastKnownTargetLocation && IsValid(Companion)
+		&& HasLineOfSight(Companion->GetWorld(), Companion->GetPawnViewLocation(), LastKnownTargetLocation,
+			Target, Companion, SnapshotBlocker, IgnoredForFireTrace);
+
+	if (bSnapshotStillVisible)
 	{
 		AIC->SetFocalPoint(LastKnownTargetLocation, EAIFocusPriority::Gameplay);
+		return;
 	}
-	// If no last-known location yet, hold current facing — do not snap to live position.
+
+	// No provable bearing — including "no snapshot captured yet", which used to leave focus untouched.
+	// That hole mattered: an engagement that opens already blocked can still be holding approach-fire's
+	// LIVE enemy actor focus, and leaving it alone tracked that enemy through the wall.
+	CompanionHoldOwnForwardFocal(Companion, AIC);
 }
 
 bool UBTTask_CompanionCombat::ShouldRepickMoveShoot(ACompanionCharacter* Companion, AAIController* AIC, float DeltaSeconds)
@@ -2487,6 +2530,32 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 
 	if (IsValid(Companion))
 	{
+		// UNCONDITIONAL focus release — the primary fix for "allies aim at enemies through walls after
+		// combat". EndOpenAreaMoveShoot above clears the Gameplay focus too, but it early-returns unless
+		// move-and-shoot was actually active, so it never covered the cover branch. The focus this task
+		// leaves behind is an ACTOR focus (UpdateMoveShootFacing's SetFocus(Target), plus the one
+		// MoveToCoverPoint's approach-fire hands over on arrival), and the controller re-resolves an
+		// actor focus to that enemy's LIVE location every tick with pitch preserved, straight through
+		// geometry. Nothing downstream released it: every service-side release compares against a
+		// stored POINT, while GetFocalPointForPriority resolves an actor focus to the actor's live
+		// location, so those comparisons essentially never matched. The post-combat aim-point maths was
+		// never the cause.
+		//
+		// This runs on the ExecuteTask ENTRY call as well, deliberately. ExecuteTask sets no focus of
+		// its own (only SetAimTarget), so the only thing entry can be holding is MoveToCoverPoint's
+		// arrival hand-off — and a live enemy focus is precisely what spins a wall-relative pose once
+		// the entry snap lands on the cover's fire-arc yaw. StopCoverApproachFire now keeps that
+		// hand-off only while the blackboard still names the focused actor. On the MoveToCoverPoint
+		// path, ResetTaskState clears it unconditionally on entry -- so the receiver check is inert
+		// there. It IS still live for this task's own final-approach call (~3277).
+		//
+		// Residual yaw is expected and is NOT this function's job to place: a bare ClearFocus stops
+		// UpdateControlRotation, so a bUseControllerDesiredRotation pawn holds the control rotation the
+		// dead focus last resolved (BTTask_CompanionFollowRoute's "Fix 10" lesson). That bearing is
+		// frozen, not tracking, and the state service's facing arbitration writes the next one.
+		if (AAIController* FocusAIC = Cast<AAIController>(Companion->GetController()))
+			FocusAIC->ClearFocus(EAIFocusPriority::Gameplay);
+
 		Companion->StopWeaponFire();
 		Companion->SetAimTarget(nullptr);
 		// Lower on teardown: this runs AFTER the service's edge-lower when the abort came from a
@@ -5062,8 +5131,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					TickMoveShootTowardPlayer(Ctx.Companion, RegainAIC, Ctx.Target, DeltaSeconds);
 				else
 					TickRegainLosReposition(Ctx.Companion, RegainAIC, Ctx.Target, TickFireTraceIgnored, DeltaSeconds);
-				// Face the frozen last-seen position (not the live actor) while repositioning.
-				UpdateMoveShootFacing(RegainAIC, Ctx.Target, false);
+				// Face the last-seen position (not the live actor) while repositioning — and only while
+				// a fresh trace still proves that spot visible; otherwise it holds the pawn's forward.
+				UpdateMoveShootFacing(Ctx.Companion, RegainAIC, Ctx.Target, false, TickFireTraceIgnored);
 			}
 		}
 		else
@@ -5113,7 +5183,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	if (bEnableOpenAreaMoveAndShoot)
 	{
 		if (AAIController* ClearAIC = Cast<AAIController>(Ctx.Companion->GetController()))
-			UpdateMoveShootFacing(ClearAIC, Ctx.Target, true);
+			UpdateMoveShootFacing(Ctx.Companion, ClearAIC, Ctx.Target, true, TickFireTraceIgnored);
 	}
 	else
 	{
@@ -5205,6 +5275,13 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 	AAIController* Controller = OwnerComp.GetAIOwner();
 	ACompanionCharacter* Companion = Controller ? Cast<ACompanionCharacter>(Controller->GetPawn()) : nullptr;
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+
+	// Focus release runs FIRST and independently of the Companion cast. ResetTaskState clears the
+	// Gameplay focus too, but it is only reached when the pawn resolves — and on the death/unpossess
+	// exit it does not, which left a live enemy-actor focus on a controller with no owner. No focus
+	// this task established may outlive the task on any exit.
+	if (IsValid(Controller))
+		Controller->ClearFocus(EAIFocusPriority::Gameplay);
 
 	if (Companion)
 	{

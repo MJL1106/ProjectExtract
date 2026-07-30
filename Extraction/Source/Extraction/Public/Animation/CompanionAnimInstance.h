@@ -116,6 +116,25 @@ public:
 	/** Called by the character's OnWeaponFiredCallback to add one shot's impulse to the spring. */
 	void AddRecoilImpulse();
 
+	// --- Weapon-align re-baseline ---
+
+	/**
+	 * Asks for the one-time weapon-align bake (patrol / cover / fire) to run again, because the
+	 * pose it was baselined against is no longer the pose the character holds. Drops the cached
+	 * weapon handle so NativeUpdateAnimation's existing equip block re-fires — one bake path, not
+	 * a second partially-initialised one.
+	 *
+	 * The armed extractee VIP is the case this exists for: its weapon is spawned and attached by
+	 * ACompanionCharacter::BeginPlay while the VIP is still captive and the ABP holds a kneeling,
+	 * hands-bound pose, and arming only unhides the SAME weapon actor — so nothing ever re-bakes.
+	 *
+	 * Deferred, not immediate: the request is held until the pose the bake reads has stopped
+	 * moving (see AlignRebakeSettleSeconds), so a re-bake never lands mid-transition out of the
+	 * captive pose and merely swaps one wrong baseline for another. Survives an anim re-init.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Weapon|CoverAlign")
+	void RequestWeaponAlignRebake();
+
 	// --- Cover Pose Interface ---
 
 	/** Enter cover idle pose on the given side. For Stand height, plays no montage (companion stays in locomotion idle). */
@@ -315,6 +334,15 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|AimOffset")
 	float AimPitchClampDeg = 55.f;
 
+	/** Grace before the non-cover LOS fade begins (absorbs the 0.25s service mirror cadence
+	 *  and sub-frame trace jitter). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|AimOffset")
+	float AimLosFadeGraceSeconds = 0.35f;
+
+	/** FInterpTo speed for the non-cover LOS aim fade (matches CoverAimGateSpeed). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Animation|AimOffset")
+	float AimLosFadeSpeed = 8.f;
+
 	/** Eased aim gate speed — scales AimPitch/AimYaw to 0 while tucked in cover idle. */
 	UPROPERTY(EditDefaultsOnly, Category = "Cover")
 	float CoverAimGateSpeed = 8.f;
@@ -367,6 +395,34 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign")
 	float CoverAlignBlendSpeed = 8.f;
+
+	// --- Align re-baseline gating (see RequestWeaponAlignRebake) ---
+
+	/** Seconds the bake's pose reference must hold still before a requested re-baseline fires.
+	 *  Sized to outlast the AnimBP's blend out of the captive branch — too short and the re-bake
+	 *  lands mid-transition and bakes a different wrong reference. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign", meta = (ClampMin = "0.0"))
+	float AlignRebakeSettleSeconds = 0.4f;
+
+	/** Hard ceiling on how long a requested re-baseline waits for the pose to settle. Fires anyway
+	 *  at this point and logs a Warning, so a re-bake that never gets a still pose is visible in
+	 *  the log instead of silently never happening. 0 disables the ceiling (wait forever). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign", meta = (ClampMin = "0.0"))
+	float AlignRebakeMaxWaitSeconds = 3.f;
+
+	/** Translation tolerance (cm) for "the bake's pose reference has stopped moving". Strict on
+	 *  purpose: when the reference genuinely cannot move it settles at any tolerance, and when it can,
+	 *  a loose value would let a re-bake land mid-blend. Loosen only if the log shows forced re-bakes. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign", meta = (ClampMin = "0.0"))
+	float AlignRebakeTranslationTolerance = 0.05f;
+
+	/** Rotation tolerance (degrees) for "the bake's pose reference has stopped moving". Separate from
+	 *  translation because the old single-tolerance path fed the same float to quaternion component
+	 *  comparison, where 0.05 is roughly 5.7 degrees -- far looser than the 0.05cm translation gate.
+	 *  1 degree is strict enough for the typical case (weapon attach socket parented to the align bone,
+	 *  so the rotation term is constant) and generous enough for a blend-tail wobble. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Weapon|CoverAlign", meta = (ClampMin = "0.0"))
+	float AlignRebakeRotationTolerance = 1.f;
 
 	// --- Fire-Align Config (dormant until designer sets FireAlignSocketName on ABP defaults) ---
 
@@ -470,11 +526,56 @@ private:
 	// --- Cover-align state ---
 	bool bCoverAlignSetup = false;
 
+	// --- Align re-baseline state (RequestWeaponAlignRebake) ---
+
+	/** A re-baseline has been asked for and is waiting on the settle gate. Deliberately NOT reset
+	 *  in NativeInitializeAnimation: a re-init between the request and the gate passing must not
+	 *  swallow it (the init's own bake can land mid-transition just as easily). */
+	bool bAlignRebakePending = false;
+
+	/** Seconds the bake's pose reference has held still, continuously. Reset on any movement. */
+	float AlignRebakeStableTime = 0.f;
+
+	/** Seconds since the re-baseline was requested — feeds AlignRebakeMaxWaitSeconds. */
+	float AlignRebakeWaitTime = 0.f;
+
+	/** Previous frame's socket-to-align-bone offset — the only pose-dependent term the bake reads. */
+	FTransform AlignRebakeLastPoseRef = FTransform::Identity;
+
+	/** False until AlignRebakeLastPoseRef holds a sample to compare against. */
+	bool bAlignRebakePoseRefSampled = false;
+
+	/** Advances the settle gate for a pending re-baseline. Returns true on the frame the caller
+	 *  should drop its cached weapon handle so the equip block re-bakes. */
+	bool TryConsumeAlignRebake(AWeaponBase* Weapon, float DeltaSeconds);
+
+	/** True once the ONLY pose-dependent term the align bake reads — the weapon's attach socket
+	 *  measured against the align bone — has held still for AlignRebakeSettleSeconds. The cover-align-
+	 *  writing refusal is hoisted into TryConsumeAlignRebake (above the wait-time accumulator). */
+	bool IsAlignRebakePoseSettled(const AWeaponBase* Weapon, float DeltaSeconds);
+
+	/** Throttle accumulator for the [ALIGN] writer-race diagnostic (companion.AlignDebug). */
+	float AlignDebugLogAccum = 0.f;
+
+	/** companion.AlignDebug: names the align writer that actually wrote the weapon mesh this frame.
+	 *  All three write an ABSOLUTE relative transform, so only the last one to write is visible. */
+	void LogWeaponAlignWriters(const AWeaponBase* Weapon, bool bFireWriting, bool bPatrolWriting,
+		int32 CoverScenario, float DeltaSeconds);
+
+	/** companion.AlignDebug: one-shot dump of the ABP-side align config on equip — the values that
+	 *  follow an ABP duplicate and so are shared between the two allies regardless of weapon. */
+	void LogAlignSetupConfig() const;
+
 	// --- Cover pose cache (resolved at init, re-resolved if stale) ---
 	TWeakObjectPtr<UCoverPoseComponent> CachedCoverPoseComponent;
 
 	// --- Weapon cache ---
 	TWeakObjectPtr<AWeaponBase> CachedWeapon;
+
+	/** The weapon actor the equip block last completed for. Unlike CachedWeapon, never cleared by
+	 *  a re-bake request or anim re-init — persists so the equip block can detect a re-entry on the
+	 *  same weapon and preserve the visual-pose alphas instead of snapping to rest. */
+	TWeakObjectPtr<AWeaponBase> LastEquippedWeapon;
 
 	// --- Left-Hand IK cache (resolved once on weapon equip) ---
 	bool bGripSocketValid = false;
@@ -489,6 +590,20 @@ private:
 
 	/** Throttle accumulator for the [RELOADTUCK] cover-reload-spine diagnostic line. */
 	float CoverReloadTuckLogAccum = 0.f;
+
+	/** Eased 0..1 — fades aim pitch/yaw while the service-written HasTargetLOS mirror is false
+	 *  outside cover. Separate from CoverAimTrackAlpha (that alpha's reset-to-1-outside-cover
+	 *  contract is load-bearing for peek-fire). */
+	float TargetLosAimAlpha = 1.f;
+
+	/** Seconds the LOS mirror has been continuously false (non-cover scope). Reset on clear or
+	 *  on leaving scope. Grace absorbs the service's 0.25s cadence jitter. */
+	float TargetLosLostTime = 0.f;
+
+	/** Fades AimPitch/AimYaw toward zero while the companion has no eye-line to its aim target
+	 *  outside cover. Inert while in cover or during a peek montage; alpha recovers toward 1
+	 *  while inert so peek starts never inherit a zeroed alpha. */
+	void UpdateTargetLosAimFade(AActor* AimTarget, bool bPeekMontagePlaying, float DeltaSeconds);
 
 	/** Unclamped aim yaw (deg) captured before the cover clamp — feeds the track-limit test. */
 	float RawAimYawDeg = 0.f;

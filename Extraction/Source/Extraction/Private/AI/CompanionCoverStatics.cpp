@@ -365,6 +365,13 @@ void TickCoverApproachFire(ACompanionCharacter* Companion, AAIController* Contro
 	else if (!bCanFire && State.bFiring)
 	{
 		Companion->StopWeaponFire();
+		Companion->SetAimTarget(nullptr);
+		// Release the actor focus too: SetFocus(Target) re-resolves to the enemy's LIVE location
+		// every tick with pitch preserved, so the torso and gun track the enemy through the wall
+		// for the rest of the approach. Cleared unconditionally rather than compare-guarded: we
+		// set it, we know it is ours, and no other system writes a Gameplay focal mid-approach.
+		// If LOS is regained before arrival the bCanFire && !State.bFiring branch re-issues it.
+		Controller->ClearFocus(EAIFocusPriority::Gameplay);
 		State.bFiring = false;
 	}
 }
@@ -377,8 +384,33 @@ void StopCoverApproachFire(ACompanionCharacter* Companion, AAIController* Contro
 		if (State.bFiring) Companion->StopWeaponFire();
 		Companion->SetAimTarget(nullptr);
 	}
-	if (!bKeepFocus && IsValid(Controller))
-		Controller->ClearFocus(EAIFocusPriority::Gameplay);
+	// bKeepFocus is a HAND-OFF, not a licence to leak. It exists because arrival at a cover point used to
+	// flick the torso off the threat in the gap between transit fire ending and the next owner taking
+	// over facing, and a flick reads worse than a held torso. But the hand-off is only real while a
+	// receiver exists: the intended receiver is the companion combat task, which runs off the blackboard
+	// combat target and establishes no focus of its own on entry — so once that key stops naming the
+	// actor this focus points at, NOBODY owns it. An actor focus re-resolves to the enemy's LIVE location
+	// every tick with pitch preserved, straight through geometry, which is the "ally aims through walls
+	// after the fight" defect: the target dies or clears on the frame the pawn arrives, the combat task
+	// never runs, and the focus rides into FollowPlayer/overwatch tracking a hidden enemy.
+	//
+	// So honour bKeepFocus only while the blackboard still names the focused actor. Gated here rather
+	// than flipped at the call sites: both callers want the same "hand over only if there is someone to
+	// hand over to" contract, and a flag flip would have cost the arrival facing it was added for.
+	if (IsValid(Controller))
+	{
+		bool bHandOffHasReceiver = false;
+		if (bKeepFocus)
+		{
+			const AActor* FocusActor = Controller->GetFocusActorForPriority(EAIFocusPriority::Gameplay);
+			const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
+			const AActor* BBTarget = BB
+				? Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)) : nullptr;
+			bHandOffHasReceiver = IsValid(BBTarget) && IsValid(FocusActor) && BBTarget == FocusActor;
+		}
+		if (!bHandOffHasReceiver)
+			Controller->ClearFocus(EAIFocusPriority::Gameplay);
+	}
 	State.Reset();
 }
 

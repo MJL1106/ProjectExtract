@@ -79,6 +79,25 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Search", meta = (ClampMin = "0.0"))
 	float LootOcclusionTolerance = 40.f;
 
+	/** Horizontal navmesh search half-extent (cm) when projecting loot container origins onto the
+	 *  navmesh during room evaluation. Constraining this prevents a container in a sealed closet
+	 *  from projecting metres into the next room. Keep in sync with
+	 *  BTTask_CompanionLoot::NavProjectHorizontalExtent. */
+	UPROPERTY(EditAnywhere, Category = "Search|NavProject", meta = (ClampMin = "1.0"))
+	float NavProjectHorizontalExtent = 150.f;
+
+	/** Vertical navmesh search half-extent (cm) when projecting a container's collision base
+	 *  onto the navmesh. Kept small (roughly one capsule height) so the query box cannot reach
+	 *  through a floor slab to the storey below. Keep in sync with
+	 *  BTTask_CompanionLoot::NavProjectVerticalExtent. */
+	UPROPERTY(EditAnywhere, Category = "Search|NavProject", meta = (ClampMin = "1.0"))
+	float NavProjectVerticalExtent = 200.f;
+
+	/** A nav-projected point whose Z exceeds the container origin Z by more than this is rejected
+	 *  (it landed on the floor above). Keep in sync with BTTask_CompanionLoot's equivalent. */
+	UPROPERTY(EditAnywhere, Category = "Search|NavProject", meta = (ClampMin = "0.0"))
+	float NavProjectAboveRejectTolerance = 50.f;
+
 private:
 	enum class ESearchPhase : uint8
 	{
@@ -149,11 +168,16 @@ private:
 	 *  the search from where it stands instead. */
 	bool StartEnterMove(ACompanionAIController* AIC, APawn* Pawn, AActor* Door);
 
-	/** Room check at the anchor: stamp the engagement grant, then hot room -> clear (combat brain
-	 *  takes over), quiet room with a container -> chain a loot sweep, empty room -> start the
-	 *  dwell. Unbroken Stealth skips the grant/loot and goes straight to the dwell. Finishes the
-	 *  task on every path except the dwell. */
+	/** Room check at the anchor: hot room -> clear (combat brain takes over), quiet room with a
+	 *  container -> chain a loot sweep, empty room -> start the dwell. Unbroken Stealth skips
+	 *  the grant/loot and goes straight to the dwell. Finishes the task on every path except
+	 *  the dwell. */
 	void EvaluateRoom(UBehaviorTreeComponent& OwnerComp, class ACompanionAIController* AIC, APawn* Pawn);
+
+	/** Engagement grant + hot-room check + loot-chain dispatch. Returns true if the room was
+	 *  handled (hot or loot chain started) and EvaluateRoom should return immediately. */
+	bool TryHandleOccupiedRoom(UBehaviorTreeComponent& OwnerComp, class ACompanionAIController* AIC,
+		class ACompanionCharacter* Companion);
 
 	/** Suppress/release the door's AI auto-open trigger while this task owns it — the companion
 	 *  walking to its stand point would otherwise trip the trigger and pop the door with no

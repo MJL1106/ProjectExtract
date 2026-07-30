@@ -8,6 +8,7 @@
 #include "Companion/CompanionTypes.h"
 #include "BTService_UpdateCompanionState.generated.h"
 
+struct FCollisionQueryParams;
 class ACompanionAIController;
 class ACompanionCharacter;
 class AEnemyCharacter;
@@ -15,7 +16,6 @@ class APawn;
 class UBlackboardComponent;
 class UCompanionTuningDataAsset;
 class UEnemyDirectorSubsystem;
-struct FCollisionQueryParams;
 
 UCLASS()
 class EXTRACTION_API UBTService_UpdateCompanionState : public UBTService
@@ -178,8 +178,14 @@ private:
 	/** Drops the hold's forward focal if it is still the one we wrote. */
 	void ReleaseWeaponUpHoldFocal(ACompanionAIController& Controller);
 
-	// --- Post-combat overwatch state (weapon held ready on the chokepoint/bearing the threat came
-	// from after the last kill; see UpdatePostCombatOverwatch/ComputeOverwatchAimPoint) ---
+	// --- Post-combat overwatch state (weapon held ready on the bearing the threat came from after the
+	// last kill; see UpdatePostCombatOverwatch/ComputeOverwatchAimPoint) ---
+	//
+	// There is no door/chokepoint pick any more: it aimed at the hinge, flush inside the jamb, while
+	// removing the whole door actor from the very trace meant to validate the point. Deleted outright
+	// by direction rather than tuned. Every aim point now comes from threat memory (recent corpses,
+	// last-threat, first contact, bearing push-out, wave spawn reference) and must pass the shared
+	// validation seam before it is asserted.
 
 	/** Where the FIRST target of the current fight stood when acquired. Set once per fight,
 	 *  cleared with the rest of the fight memory on the Exploration flip / stealth re-pin. */
@@ -189,6 +195,13 @@ private:
 	/** Rolling location of the current combat target — the freshest "threat was here" point. */
 	FVector LastThreatLocation = FVector::ZeroVector;
 	bool bHasLastThreatLocation = false;
+
+	/** Snapshot of the director's corpse FIFO at the moment the current fight started (when
+	 *  bHasFightFirstContact flips to true). ResolveRecentCorpseCentroid skips any corpse in this
+	 *  set, so only kills from the CURRENT fight contribute to the centroid. Without this, a room
+	 *  with 6 previous-fight bodies and 2 fresh kills drags the centroid back through the wall into
+	 *  the cleared room. Cleared with fight memory in ResetFightThreatMemory. */
+	TArray<TWeakObjectPtr<AEnemyCharacter>> PreFightCorpses;
 
 	/** True while the post-fight hold owns aim/focus. Suspends the immediate weapon-lower and the
 	 *  Exploration decay accrual in the combat-decay branch, and Tier-0-yields UpdateNonCombatFacing. */
@@ -224,25 +237,57 @@ private:
 		const APawn* PlayerPawn, const UCompanionTuningDataAsset* Tuning,
 		bool bTakedownOwnsAim, bool bPlayerDBNO, float DeltaSeconds);
 
-	/** Aim-point pick: nearest same-floor door on the portal path toward the threat memory (LoS
-	 *  checked), else the last-threat/first-contact point, else a point along the threat bearing.
-	 *  Returns false when no usable memory exists (overwatch is skipped). */
+	/** Aim-point pick: walks the ordered candidate list from ResolveOverwatchThreatCandidates and
+	 *  validates each through the shared seam, taking the first whose bearing is provably open.
+	 *  Returns false when no usable memory exists or every candidate is blocked -- declining is the
+	 *  answer, never inventing a bearing (overwatch is then skipped or debounce-ended). */
 	bool ComputeOverwatchAimPoint(const ACompanionCharacter& Companion,
 		const UCompanionTuningDataAsset* Tuning, FVector& OutAimPoint) const;
 
-	/** Threat point the aim pick is measured against: freshest threat memory, else first contact,
-	 *  else a bearing push-out, else the director's wave spawn reference. False = no memory at all. */
-	bool ResolveOverwatchThreatRef(const ACompanionCharacter& Companion,
-		const UCompanionTuningDataAsset* Tuning, FVector& OutThreatRef) const;
+	/** Fills an ordered list of pre-existing threat-memory candidates: corpse centroid, last-threat
+	 *  location, first-contact location, bearing push-out, wave spawn reference. Each has the
+	 *  OverwatchMinThreatDist floor applied. The caller validates each in turn and takes the first
+	 *  that passes. This is NOT a search for an arbitrary open direction -- every candidate comes
+	 *  from a concrete threat memory. */
+	void ResolveOverwatchThreatCandidates(const ACompanionCharacter& Companion,
+		const UCompanionTuningDataAsset* Tuning, TArray<FVector, TInlineAllocator<5>>& OutCandidates) const;
 
-	/** Chokepoint pick: nearest same-storey door on the portal path toward ThreatRef with an
-	 *  unobstructed eye-line. False = no usable door, caller falls through to the direct aim. */
-	bool PickOverwatchDoorAim(const ACompanionCharacter& Companion, const UCompanionTuningDataAsset* Tuning,
-		const FVector& ThreatRef, const FCollisionQueryParams& LosParams, FVector& OutAim) const;
+	/** Centroid of the director's recent corpses within OverwatchCorpseSearchRadius (2D) of the
+	 *  companion, gated by a storey Z-delta and filtered to corpses killed during the CURRENT fight
+	 *  only (pre-fight bodies are excluded via the PreFightCorpses snapshot). When the qualifying
+	 *  corpses span more than OverwatchCorpseMaxSpread (2D pairwise), the nearest single corpse is
+	 *  used instead of the centroid -- a centroid of two separate clusters always lands in the wall
+	 *  between them. Result is lifted to chest height. False = no qualifying corpse. */
+	bool ResolveRecentCorpseCentroid(const ACompanionCharacter& Companion,
+		const UCompanionTuningDataAsset* Tuning, FVector& OutCentroid) const;
+
+	/** Collect phase of the corpse centroid: gathers qualifying corpse locations (2D distance + storey
+	 *  gate + current-fight recency filter) and tracks the nearest. */
+	void CollectQualifyingCorpseLocations(const ACompanionCharacter& Companion,
+		const UCompanionTuningDataAsset* Tuning,
+		TArray<FVector, TInlineAllocator<10>>& OutLocations,
+		int32& OutNearestIdx) const;
+
+	/** THE validation seam for threat-derived aim. Builds the companion's full trace-ignore set (self,
+	 *  weapon, attached actors, the weapon's friendly-fire list — all load-bearing), traces the bearing
+	 *  pawn-transparently, and writes Point into OutValidated ONLY when the line is provably open.
+	 *  False = decline; the caller lowers and lets the existing debounce end the hold. Never call this
+	 *  for a VISIBLE enemy: the trace has no "the hit IS the target" exemption, so it would decline a
+	 *  clear shot at an enemy standing off a wall. Those paths keep their own gates. */
+	bool ValidateThreatAimPoint(const ACompanionCharacter& Companion, const FVector& Point,
+		FVector& OutValidated) const;
+
+	/** Overload with pre-built collision params — avoids rebuilding the ignore set per candidate when
+	 *  the caller validates multiple points against the same companion (ComputeOverwatchAimPoint). */
+	bool ValidateThreatAimPoint(const ACompanionCharacter& Companion, const FVector& Point,
+		const FCollisionQueryParams& PrebuiltParams, FVector& OutValidated) const;
 
 	/** Re-resolves OverwatchAimPoint on the tuning's refresh cadence while the hold is active.
 	 *  Returns false only after OverwatchRefreshFailuresToEnd CONSECUTIVE failures — the caller then
-	 *  ends the hold rather than keep asserting a world point the ally can no longer justify. */
+	 *  ends the hold rather than keep asserting a world point the ally can no longer justify.
+	 *  Only the hold's EXIT is debounced. The raised POSE is not: OverwatchRefreshFailures stays
+	 *  non-zero until a refresh succeeds, and the caller drops to low-ready and stops re-asserting the
+	 *  focal for as long as it is, so a stale bearing is never held for the debounce window. */
 	bool RefreshOverwatchAimPoint(const ACompanionCharacter& Companion,
 		const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
 
@@ -351,6 +396,13 @@ private:
 	 *  leaking the old one for the rest of the watch. */
 	bool bWatchStanceStealth = false;
 
+	/** True when the applied stance belongs to the FIGHT-SIGNAL FALLBACK watch (WatchedEnemy null).
+	 *  Joins the re-apply key alongside bWatchStanceStealth for exactly the same reason: a watch can
+	 *  slide from visible -> linger -> fallback without ever leaving the tier, and the fallback must
+	 *  not inherit the raise the visible watch applied. That inheritance is one of the ways the ally
+	 *  ended up aiming at an unseen bearing. */
+	bool bWatchStanceFallback = false;
+
 	// --- F1 ambient facing state (idle scan-glance roll) + the focal dedup cache shared by every
 	// non-combat facing tier (see ComputeAttentionYaw/ApplyAmbientFacing/SetNonCombatFocalDeduped) ---
 
@@ -395,7 +447,9 @@ private:
 		const AEnemyCharacter* Candidate, const UCompanionTuningDataAsset* Tuning, float DeltaSeconds);
 
 	/** Faces WatchThreatLocation every tick; applies the Normal (weapon-raise) or Stealth
-	 *  (low-profile rotate-only) stance once on the rising edge (bWatchStanceApplied). */
+	 *  (low-profile rotate-only) stance once on the rising edge (bWatchStanceApplied). The
+	 *  fight-signal fallback (WatchedEnemy null) faces low-ready and never raises — its point is a
+	 *  pure-radius signal with no eye-line behind it, so raising on it IS aiming through a wall. */
 	void ApplyWatchFacing(ACompanionAIController& Controller, ACompanionCharacter& Companion);
 
 	/** Base idle attention yaw (player 2D velocity heading, else view yaw) plus the rolled idle
@@ -412,8 +466,8 @@ private:
 
 	/** True while the companion is close enough to the reference route for that route's direction to
 	 *  still describe the space it is standing in. 2D distance PLUS a separate storey gate: DemoMap
-	 *  is a stacked skyscraper, and a 3D-only test keeps a floor-2 reference live on floor 1 (the
-	 *  lesson already baked into OverwatchDoorMaxZDelta and FollowMaxZDelta). 0 = unlimited, on both. */
+	 *  is a stacked skyscraper, and a 3D-only test keeps a floor-2 reference live on floor 1 (the same
+	 *  lesson baked into FollowMaxZDelta). 0 = unlimited, on both. */
 	bool IsRouteFacingInRange(const FVector& PawnLocation, const FVector& RoutePoint,
 		const UCompanionTuningDataAsset* Tuning) const;
 

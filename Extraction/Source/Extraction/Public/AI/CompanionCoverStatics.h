@@ -130,7 +130,11 @@ namespace CompanionCover
 		UBlackboardComponent* BB, FApproachFireState& State, float DeltaSeconds);
 
 	/** Approach-fire teardown: stop fire, clear aim, reset the state latch. bKeepFocus=true on
-	 *  arrival (keep facing the threat while entering cover); false on every failure/abort exit. */
+	 *  arrival (keep facing the threat while entering cover); false on every failure/abort exit.
+	 *  bKeepFocus is CONDITIONAL — it is a hand-off to the combat task, which runs off the blackboard
+	 *  combat target, so the focus is only kept while that key still names the focused actor. With no
+	 *  receiver the focus is released regardless: an unowned actor focus tracks the enemy's live
+	 *  location through geometry and is the "ally aims through walls after the fight" defect. */
 	void StopCoverApproachFire(ACompanionCharacter* Companion, AAIController* Controller,
 		FApproachFireState& State, bool bKeepFocus);
 

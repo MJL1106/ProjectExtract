@@ -21,6 +21,7 @@ class ULootNotificationWidget;
 class ULevelCompleteWidget;
 class ULevelFailedWidget;
 class URevivePromptWidget;
+class UConsumableWidget;
 
 /** Fired on the local player controller when the player's weapon deals damage. One event per
  *  trigger pull per victim (shotgun pellets aggregated). HeadshotDamage > 0 marks a headshot;
@@ -58,6 +59,22 @@ public:
 
 	/** Called by the weapon damage pass when this controller's pawn dealt damage. */
 	void NotifyDamageDealt(AActor* Victim, float Damage, float HeadshotDamage, bool bKilled, const FVector& WorldLocation);
+
+	/** Puts every HUD widget this controller owns back on the player screen: creates the ones that no
+	 *  longer exist, re-adds the ones that were torn off, and leaves the ones already up completely
+	 *  alone so their state, pooled children and delegate bindings survive. Idempotent — safe to call
+	 *  at any time, including while the game is paused. BeginPlay builds the HUD through this same
+	 *  call, so the two paths can never drift.
+	 *
+	 *  WHY THIS EXISTS — DO NOT DELETE AS UNUSED. Its only C++ caller is BeginPlay; the real caller is
+	 *  the pause/resume Blueprint flow. Any Blueprint "Remove All Widgets" node
+	 *  (UWidgetLayoutLibrary::RemoveAllWidgets) tears EVERY widget off the player screen, including
+	 *  the ten top-level widgets created here that no Blueprint knows how to rebuild — the pawn's
+	 *  CreateHUD only restores the three legacy kit widgets. Without this call on the resume path, one
+	 *  pause cycle permanently kills the ammo counter, hitmarkers, damage numbers, health, companion
+	 *  mode chip, objective layer, loot toast and revive prompt for the rest of the session. */
+	UFUNCTION(BlueprintCallable, Category = "UI")
+	void RestoreHUD();
 
 	/** Broadcast on the local controller for HUD hit feedback (hitmarker, damage numbers). */
 	UPROPERTY(BlueprintAssignable, Category = "UI|Events")
@@ -177,6 +194,14 @@ protected:
 	/** Active damage-number layer instance */
 	UPROPERTY()
 	TObjectPtr<UDamageNumberWidget> DamageNumberWidget;
+
+	/** Consumable HUD (stim + grenade slots) class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UConsumableWidget> ConsumableWidgetClass;
+
+	/** Active consumable HUD instance */
+	UPROPERTY()
+	TObjectPtr<UConsumableWidget> ConsumableWidget;
 
 	/** If true, the player will use UMG touch controls even if not playing on mobile platforms */
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")

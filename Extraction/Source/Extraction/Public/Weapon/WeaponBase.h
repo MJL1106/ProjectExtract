@@ -69,6 +69,13 @@ public:
 
 	void StartFiring();
 	void StopFiring();
+
+	/** Stops fire and cancels reload atomically, WITHOUT the auto-reload-on-empty block that
+	 *  StopFiring carries. Use at weapon-swap / state-interrupt sites where a reload would be
+	 *  immediately cancelled anyway -- avoids a spurious 600cm AI noise event from the phantom
+	 *  reload that StopFiring+CancelReload otherwise produces on an empty magazine. */
+	void AbortFireAndReload();
+
 	bool CanFire() const;
 
 	/** Cosmetic-only fire: muzzle flash + tracer + fire montage broadcast, NO hitscan/damage/alert/ammo.
@@ -381,6 +388,22 @@ public:
 	/** True while cover-align is actively writing WeaponMesh's relative transform. */
 	bool IsCoverAlignWriting() const { return bCoverAlignWriting; }
 
+	// ---- Align rest pose (shared baseline for every Setup*Align) ----
+
+	/**
+	 * Restores WeaponMesh to the relative transform captured by this equip's FIRST align setup —
+	 * the pose before any align writer had moved it — so a re-run of Setup*Align baselines from a
+	 * pristine mesh rather than from another writer's output.
+	 *
+	 * Load-bearing for any re-bake: every Setup*Align takes its rest / Alpha=0 target from a live
+	 * WeaponMesh->GetRelativeTransform(), which is only pristine on the first bake. By the time
+	 * anything asks for a re-bake, patrol-align (and possibly fire/cover align) have already
+	 * written that transform, so re-baking straight over their output compounds the offset on
+	 * every re-bake. No-op until the first setup has captured — a freshly equipped weapon mesh is
+	 * already at its rest pose.
+	 */
+	void RestoreAlignRestPose();
+
 	// ---- Hand-swap settle (two-socket weapon carry) ----
 
 	/**
@@ -475,6 +498,15 @@ protected:
 	/** Runtime instance of ThirdPersonVisualActorClass, spawned in BeginPlay. */
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> SpawnedVisualActor;
+
+	/** Descendants of SpawnedVisualActor that were already hidden when SetWeaponHidden(true) ran.
+	 *  Restored on SetWeaponHidden(false) so BP-hidden attachment slots stay hidden. */
+	TSet<TWeakObjectPtr<AActor>> VisualActorHiddenSnapshot;
+
+	/** Latch for SetWeaponHidden: true while the snapshot-hide is active. Re-hides and re-shows
+	 *  become no-ops, preventing a second hide from re-capturing descendants that the first hide
+	 *  legitimately turned off (scope/laser/magazine stay hidden forever otherwise). */
+	bool bWeaponHiddenBySnapshot = false;
 
 	/** When true, the weapon auto-reloads on empty (suitable for player UX).
 	 *  AI-controlled weapons should set this false so the BT task drives reload timing —
@@ -594,6 +626,26 @@ private:
 	/** True while UpdateCoverAlign is writing WeaponMesh's relative transform (off-rest). */
 	bool bCoverAlignWriting = false;
 
+	// ---- Align rest pose runtime state ----
+
+	/** WeaponMesh's relative transform as it was before any align writer touched it, captured by
+	 *  the first Setup*Align of this equip. Per-attachment: the companion never re-attaches its
+	 *  weapon, and the enemy hand-swap path defines its own rest as identity. */
+	FTransform AlignRestPose = FTransform::Identity;
+
+	/** True once AlignRestPose holds a real capture. */
+	bool bAlignRestPoseCaptured = false;
+
+	/** Captures AlignRestPose the first time any align setup runs. Called at the top of every
+	 *  Setup*Align, before that setup reads GetRelativeTransform() for its own rest target. */
+	void CaptureAlignRestPoseOnce();
+
+	/** companion.AlignDebug one-shot bake dump. SocketToBone is TRest * TBone.Inverse() — the ONLY
+	 *  pose-dependent term in the composition, so comparing it across two bakes says whether the
+	 *  pose at bake time affects the result at all (it cancels when the weapon's attach socket is
+	 *  parented to the align bone). */
+	void LogCoverAlignBake(FName RestSocket, FName AlignBone, const FTransform& SocketToBone) const;
+
 	// ---- Recoil offset runtime state ----
 
 	/**
@@ -619,6 +671,11 @@ private:
 	bool bMeleeAlignReady = false;
 
 	// ---- Fire ----
+
+	/** Shared stop mechanics used by both StopFiring and AbortFireAndReload: clears bWantsToFire,
+	 *  cancels the auto-fire timer, transitions state to Idle, and begins recoil recovery.
+	 *  Does NOT trigger auto-reload -- that decision belongs to the caller. */
+	void StopFiringInternal();
 
 	void FireShot();
 	void PerformHitscan();

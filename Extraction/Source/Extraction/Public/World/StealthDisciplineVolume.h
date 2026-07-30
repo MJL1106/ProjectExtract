@@ -60,7 +60,12 @@ private:
 	TWeakObjectPtr<UWeaponComponent> BoundWeaponComponent;
 	FStealthPressureAccumulator Accumulator;
 	int32 PendingNormalShots = 0;
+	int32 PendingSuppressedShots = 0;
 	bool bWarningSent = false;
+
+	/** True while the tracked player is physically inside the box. When outside,
+	 *  sampling continues (decay-only) but new sprint/shot pressure is suppressed. */
+	bool bPlayerInsideVolume = false;
 
 	/** Set once defend waves begin -- discipline never re-arms for the rest of the level. */
 	bool bPermanentlyDisabled = false;
@@ -78,11 +83,17 @@ private:
 	void OnEndOverlap(UPrimitiveComponent* OverlappedComp, AActor* OtherActor,
 		UPrimitiveComponent* OtherComp, int32 OtherBodyIndex);
 
+	void HandleNewPlayerEntry(AExtractionPlayer* Player);
+
 	// ---- Sampling ----
 
 	void StartSampling();
 	void StopSampling();
 	void SampleTick();
+	void SampleTickOutside();
+	void SampleTickInside(AExtractionPlayer* Player);
+	void HandlePressureTransition(EStealthPressureTransition Result);
+	void BroadcastWarningToast(UWorld* World);
 
 	// ---- Shot relay binding ----
 

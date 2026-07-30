@@ -295,6 +295,12 @@ public:
 
 	// --- Sprint API ---
 
+	/** Gate checked by SetSprinting before latching bIsSprinting. Every sprint-tier speed
+	 *  (catch-up 650, rescue/stealth 850, traversal mirror) resolves through
+	 *  ApplyMovementSpeeds off bIsSprinting, and bIsSprinting only moves through SetSprinting,
+	 *  so this single gate is exhaustive. */
+	virtual bool CanSprint() const { return true; }
+
 	UFUNCTION(BlueprintCallable, Category = "Companion|Movement")
 	void SetSprinting(bool bSprint);
 

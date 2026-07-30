@@ -40,50 +40,51 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 {
 	FStealthDisciplineSettings Settings;
 	Settings.SprintGraceSeconds = 1.5f;
-	Settings.SprintPressurePerSecond = 8.f;
-	Settings.PressurePerShot = 6.f;
-	Settings.DecayPerSecond = 10.f;
-	Settings.WarningThreshold = 35.f;
-	Settings.EscalationThreshold = 70.f;
+	Settings.SprintPressurePerSecond = 18.f;
+	Settings.PressurePerShot = 15.f;
+	Settings.SuppressedPressurePerShot = 3.f;
+	Settings.DecayPerSecond = 5.f;
+	Settings.WarningThreshold = 25.f;
+	Settings.EscalationThreshold = 75.f;
 
 	FStealthPressureAccumulator Acc;
 
-	Acc.Advance(0.5f, true, 0, Settings);
+	Acc.Advance(0.5f, true, 0, 0, Settings);
 	TestEqual(TEXT("brief sprint remains pressure-free"), Acc.Pressure, 0.f);
 
-	TestEqual(TEXT("exempt shot contributes no pressure"), Acc.Advance(0.25f, false, 0, Settings), EStealthPressureTransition::None);
+	TestEqual(TEXT("exempt shot contributes no pressure"), Acc.Advance(0.25f, false, 0, 0, Settings), EStealthPressureTransition::None);
 	TestEqual(TEXT("exempt shot leaves pressure at zero"), Acc.Pressure, 0.f);
 
 	EStealthPressureTransition Transition = EStealthPressureTransition::None;
 	for (int32 i = 0; i < 6 && Transition == EStealthPressureTransition::None; ++i)
 	{
-		Transition = Acc.Advance(1.f, false, 1, Settings);
+		Transition = Acc.Advance(1.f, false, 1, 0, Settings);
 	}
 	TestEqual(TEXT("warning fires once"), Transition, EStealthPressureTransition::Warned);
 
 	const float PressureAfterWarning = Acc.Pressure;
-	Transition = Acc.Advance(1.f, false, 1, Settings);
+	Transition = Acc.Advance(1.f, false, 1, 0, Settings);
 	TestNotEqual(TEXT("warning does not re-fire on the following sample"), Transition, EStealthPressureTransition::Warned);
 	TestTrue(TEXT("pressure still accumulates after warning"), Acc.Pressure >= PressureAfterWarning);
 
 	for (int32 i = 0; i < 12 && Transition != EStealthPressureTransition::Escalated; ++i)
 	{
-		Transition = Acc.Advance(1.f, false, 1, Settings);
+		Transition = Acc.Advance(1.f, false, 1, 0, Settings);
 	}
 	TestEqual(TEXT("escalation fires once"), Transition, EStealthPressureTransition::Escalated);
 	TestEqual(TEXT("pressure clamps to the escalation threshold"), Acc.Pressure, Settings.EscalationThreshold);
 
-	Transition = Acc.Advance(1.f, false, 1, Settings);
+	Transition = Acc.Advance(1.f, false, 1, 0, Settings);
 	TestNotEqual(TEXT("escalation does not re-fire on the following sample"), Transition, EStealthPressureTransition::Escalated);
 
 	FStealthPressureAccumulator DecayAcc;
-	DecayAcc.Advance(1.f, false, 5, Settings);
+	DecayAcc.Advance(1.f, false, 5, 0, Settings);
 	const float PressureBeforeDecay = DecayAcc.Pressure;
-	DecayAcc.Advance(1.f, false, 0, Settings);
+	DecayAcc.Advance(1.f, false, 0, 0, Settings);
 	TestTrue(TEXT("pressure decays when neither sprinting nor firing"), DecayAcc.Pressure < PressureBeforeDecay);
 
 	FStealthPressureAccumulator ResetAcc;
-	ResetAcc.Advance(5.f, true, 3, Settings);
+	ResetAcc.Advance(5.f, true, 3, 0, Settings);
 	ResetAcc.Reset();
 	TestEqual(TEXT("reset zeroes pressure"), ResetAcc.Pressure, 0.f);
 	TestEqual(TEXT("reset zeroes continuous sprint time"), ResetAcc.ContinuousSprintSeconds, 0.f);
@@ -91,31 +92,82 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("reset clears the warned latch"), ResetAcc.bWarned);
 	TestFalse(TEXT("reset clears the escalated latch"), ResetAcc.bEscalated);
 
+	// -- Suppressed shots cost less than unsuppressed --
+	{
+		FStealthPressureAccumulator UnsuppAcc;
+		UnsuppAcc.Advance(0.25f, false, 1, 0, Settings);
+		const float UnsuppressedPressure = UnsuppAcc.Pressure;
+
+		FStealthPressureAccumulator SuppAcc;
+		SuppAcc.Advance(0.25f, false, 0, 1, Settings);
+		const float SuppressedPressure = SuppAcc.Pressure;
+
+		TestTrue(TEXT("suppressed shot costs less than unsuppressed"),
+			SuppressedPressure < UnsuppressedPressure);
+		TestTrue(TEXT("suppressed shot is not free"),
+			SuppressedPressure > 0.f);
+		TestEqual(TEXT("unsuppressed shot applies PressurePerShot"),
+			UnsuppressedPressure, Settings.PressurePerShot);
+		TestEqual(TEXT("suppressed shot applies SuppressedPressurePerShot"),
+			SuppressedPressure, Settings.SuppressedPressurePerShot);
+	}
+
+	// -- Suppressed shots suspend decay --
+	{
+		FStealthPressureAccumulator SuppDecayAcc;
+		SuppDecayAcc.Advance(0.25f, false, 3, 0, Settings);
+		const float PressureBefore = SuppDecayAcc.Pressure;
+		// Fire suppressed shots: should add pressure, NOT decay.
+		SuppDecayAcc.Advance(1.f, false, 0, 1, Settings);
+		TestTrue(TEXT("suppressed shots suspend decay"),
+			SuppDecayAcc.Pressure >= PressureBefore);
+	}
+
+	// -- Pressure persists (no reset on simulated exit/re-entry) --
+	{
+		FStealthPressureAccumulator PersistAcc;
+		PersistAcc.Advance(0.25f, false, 2, 0, Settings);
+		const float PressureBeforeExit = PersistAcc.Pressure;
+		TestTrue(TEXT("persist: pressure accrued before exit"), PressureBeforeExit > 0.f);
+
+		// Simulate outside: decay-only ticks (no sprint, no shots).
+		PersistAcc.Advance(0.5f, false, 0, 0, Settings);
+		TestTrue(TEXT("persist: pressure decays but does not reset"),
+			PersistAcc.Pressure > 0.f && PersistAcc.Pressure < PressureBeforeExit);
+
+		// Simulate re-entry: resume sprinting.
+		const float PressureBeforeReEntry = PersistAcc.Pressure;
+		PersistAcc.Advance(2.f, true, 0, 0, Settings);
+		TestTrue(TEXT("persist: pressure accumulates on re-entry from surviving base"),
+			PersistAcc.Pressure > PressureBeforeReEntry);
+	}
+
 	// -- Lapse tolerance: sub-grace dip preserves streak, decay still runs --
 	{
 		FStealthDisciplineSettings LapseSettings;
 		LapseSettings.SprintGraceSeconds = 1.5f;
-		LapseSettings.SprintPressurePerSecond = 8.f;
-		LapseSettings.PressurePerShot = 6.f;
-		LapseSettings.DecayPerSecond = 10.f;
-		LapseSettings.WarningThreshold = 35.f;
-		LapseSettings.EscalationThreshold = 70.f;
+		LapseSettings.SprintPressurePerSecond = 18.f;
+		LapseSettings.PressurePerShot = 15.f;
+		LapseSettings.SuppressedPressurePerShot = 3.f;
+		LapseSettings.DecayPerSecond = 5.f;
+		LapseSettings.WarningThreshold = 25.f;
+		LapseSettings.EscalationThreshold = 75.f;
 		LapseSettings.SprintLapseGraceSeconds = 0.75f;
 
 		FStealthPressureAccumulator LapseAcc;
-		LapseAcc.Advance(3.f, true, 0, LapseSettings);
+		LapseAcc.Advance(3.f, true, 0, 0, LapseSettings);
 		TestTrue(TEXT("lapse: sprint past grace builds pressure"), LapseAcc.Pressure > 0.f);
 
 		const float PressureBeforeDip = LapseAcc.Pressure;
 		const float StreakBeforeDip = LapseAcc.ContinuousSprintSeconds;
-		LapseAcc.Advance(0.5f, false, 0, LapseSettings);
+		LapseAcc.Advance(0.5f, false, 0, 0, LapseSettings);
 		TestEqual(TEXT("lapse: sub-grace dip preserves sprint streak"),
 			LapseAcc.ContinuousSprintSeconds, StreakBeforeDip);
 		TestTrue(TEXT("lapse: sub-grace dip still decays pressure"),
 			LapseAcc.Pressure < PressureBeforeDip);
 
 		const float PressureAfterDip = LapseAcc.Pressure;
-		LapseAcc.Advance(0.25f, true, 0, LapseSettings);
+		LapseAcc.Advance(0.25f, true, 0, 0, LapseSettings);
 		TestTrue(TEXT("lapse: resumed sprint gains pressure immediately (no re-paying grace)"),
 			LapseAcc.Pressure > PressureAfterDip);
 	}
@@ -124,17 +176,18 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 	{
 		FStealthDisciplineSettings LapseSettings;
 		LapseSettings.SprintGraceSeconds = 1.5f;
-		LapseSettings.SprintPressurePerSecond = 8.f;
-		LapseSettings.PressurePerShot = 6.f;
-		LapseSettings.DecayPerSecond = 10.f;
-		LapseSettings.WarningThreshold = 35.f;
-		LapseSettings.EscalationThreshold = 70.f;
+		LapseSettings.SprintPressurePerSecond = 18.f;
+		LapseSettings.PressurePerShot = 15.f;
+		LapseSettings.SuppressedPressurePerShot = 3.f;
+		LapseSettings.DecayPerSecond = 5.f;
+		LapseSettings.WarningThreshold = 25.f;
+		LapseSettings.EscalationThreshold = 75.f;
 		LapseSettings.SprintLapseGraceSeconds = 0.75f;
 
 		FStealthPressureAccumulator LapseAcc;
-		LapseAcc.Advance(2.f, true, 0, LapseSettings);
+		LapseAcc.Advance(2.f, true, 0, 0, LapseSettings);
 		const float PressureBeforeLongDip = LapseAcc.Pressure;
-		LapseAcc.Advance(1.f, false, 0, LapseSettings);
+		LapseAcc.Advance(1.f, false, 0, 0, LapseSettings);
 		TestEqual(TEXT("lapse: over-grace dip resets sprint streak"),
 			LapseAcc.ContinuousSprintSeconds, 0.f);
 		TestTrue(TEXT("lapse: over-grace dip resumes decay"),
@@ -145,11 +198,12 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 	{
 		FStealthDisciplineSettings LapseSettings;
 		LapseSettings.SprintGraceSeconds = 1.5f;
-		LapseSettings.SprintPressurePerSecond = 8.f;
-		LapseSettings.PressurePerShot = 6.f;
-		LapseSettings.DecayPerSecond = 10.f;
-		LapseSettings.WarningThreshold = 35.f;
-		LapseSettings.EscalationThreshold = 70.f;
+		LapseSettings.SprintPressurePerSecond = 18.f;
+		LapseSettings.PressurePerShot = 15.f;
+		LapseSettings.SuppressedPressurePerShot = 3.f;
+		LapseSettings.DecayPerSecond = 5.f;
+		LapseSettings.WarningThreshold = 25.f;
+		LapseSettings.EscalationThreshold = 75.f;
 		LapseSettings.SprintLapseGraceSeconds = 0.75f;
 
 		FStealthPressureAccumulator StopStartAcc;
@@ -159,14 +213,14 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 		{
 			for (int32 j = 0; j < 8; ++j)
 			{
-				const EStealthPressureTransition R = StopStartAcc.Advance(0.25f, true, 0, LapseSettings);
+				const EStealthPressureTransition R = StopStartAcc.Advance(0.25f, true, 0, 0, LapseSettings);
 				if (R == EStealthPressureTransition::Warned) { StopStartResult = R; break; }
 			}
 			if (StopStartResult == EStealthPressureTransition::Warned) break;
 
 			for (int32 j = 0; j < 2; ++j)
 			{
-				const EStealthPressureTransition R = StopStartAcc.Advance(0.25f, false, 0, LapseSettings);
+				const EStealthPressureTransition R = StopStartAcc.Advance(0.25f, false, 0, 0, LapseSettings);
 				if (R == EStealthPressureTransition::Warned) { StopStartResult = R; break; }
 			}
 		}
@@ -179,17 +233,18 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 	{
 		FStealthDisciplineSettings ZeroGraceSettings;
 		ZeroGraceSettings.SprintGraceSeconds = 1.5f;
-		ZeroGraceSettings.SprintPressurePerSecond = 8.f;
-		ZeroGraceSettings.PressurePerShot = 6.f;
-		ZeroGraceSettings.DecayPerSecond = 10.f;
-		ZeroGraceSettings.WarningThreshold = 35.f;
-		ZeroGraceSettings.EscalationThreshold = 70.f;
+		ZeroGraceSettings.SprintPressurePerSecond = 18.f;
+		ZeroGraceSettings.PressurePerShot = 15.f;
+		ZeroGraceSettings.SuppressedPressurePerShot = 3.f;
+		ZeroGraceSettings.DecayPerSecond = 5.f;
+		ZeroGraceSettings.WarningThreshold = 25.f;
+		ZeroGraceSettings.EscalationThreshold = 75.f;
 		ZeroGraceSettings.SprintLapseGraceSeconds = 0.f;
 
 		FStealthPressureAccumulator ZeroGraceAcc;
-		ZeroGraceAcc.Advance(2.f, true, 0, ZeroGraceSettings);
+		ZeroGraceAcc.Advance(2.f, true, 0, 0, ZeroGraceSettings);
 		const float PressureBeforeDip = ZeroGraceAcc.Pressure;
-		ZeroGraceAcc.Advance(0.5f, false, 0, ZeroGraceSettings);
+		ZeroGraceAcc.Advance(0.5f, false, 0, 0, ZeroGraceSettings);
 		TestEqual(TEXT("zero-grace: dip resets sprint streak"),
 			ZeroGraceAcc.ContinuousSprintSeconds, 0.f);
 		TestTrue(TEXT("zero-grace: dip decays pressure"),
@@ -200,23 +255,26 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 	{
 		FStealthDisciplineSettings ShotLapseSettings;
 		ShotLapseSettings.SprintGraceSeconds = 1.5f;
-		ShotLapseSettings.SprintPressurePerSecond = 8.f;
-		ShotLapseSettings.PressurePerShot = 6.f;
-		ShotLapseSettings.DecayPerSecond = 10.f;
-		ShotLapseSettings.WarningThreshold = 35.f;
-		ShotLapseSettings.EscalationThreshold = 70.f;
+		ShotLapseSettings.SprintPressurePerSecond = 18.f;
+		ShotLapseSettings.PressurePerShot = 15.f;
+		ShotLapseSettings.SuppressedPressurePerShot = 3.f;
+		ShotLapseSettings.DecayPerSecond = 5.f;
+		ShotLapseSettings.WarningThreshold = 25.f;
+		ShotLapseSettings.EscalationThreshold = 75.f;
 		ShotLapseSettings.SprintLapseGraceSeconds = 0.75f;
 
 		FStealthPressureAccumulator ShotLapseAcc;
-		ShotLapseAcc.Advance(3.f, true, 0, ShotLapseSettings);
+		ShotLapseAcc.Advance(3.f, true, 0, 0, ShotLapseSettings);
 		const float PressureBeforeShots = ShotLapseAcc.Pressure;
 
-		ShotLapseAcc.Advance(0.25f, false, 6, ShotLapseSettings);
-		const float ExpectedShotPressure = ShotLapseSettings.PressurePerShot * 6.f;
+		// 1 shot at 15 keeps us below the 75 escalation threshold.
+		ShotLapseAcc.Advance(0.25f, false, 1, 0, ShotLapseSettings);
+		const float ExpectedShotPressure = ShotLapseSettings.PressurePerShot * 1.f;
 		TestEqual(TEXT("shot-lapse: shots during tolerated lapse add correct pressure"),
 			ShotLapseAcc.Pressure, PressureBeforeShots + ExpectedShotPressure);
 
-		const EStealthPressureTransition EscResult = ShotLapseAcc.Advance(0.25f, false, 3, ShotLapseSettings);
+		// 1 more shot pushes past 75 -> Escalated.
+		const EStealthPressureTransition EscResult = ShotLapseAcc.Advance(0.25f, false, 1, 0, ShotLapseSettings);
 		TestEqual(TEXT("shot-lapse: escalation fires during tolerated lapse"),
 			EscResult, EStealthPressureTransition::Escalated);
 	}

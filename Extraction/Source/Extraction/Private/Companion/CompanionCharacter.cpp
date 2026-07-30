@@ -877,6 +877,7 @@ void ACompanionCharacter::SetScriptedAim(bool bNewScriptedAim)
 void ACompanionCharacter::SetSprinting(bool bSprint)
 {
 	if (!HasAuthority()) return;
+	if (bSprint && !CanSprint()) return;
 	// Stealth rules: no sprinting — except the Sprint catch-up stage (clearly losing the player).
 	if (bSprint && IsStealthActive() && StealthCatchupStage != EStealthCatchup::Sprint) return;
 	if (bIsSprinting == bSprint) return;
@@ -1788,13 +1789,20 @@ void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod M
 	if (AEnemyCharacter* ReservedVictim = Cast<AEnemyCharacter>(Victim))
 		ReservedVictim->ReserveForTakedown(this);
 
-	// Aim at the victim
+	// Aim at the victim — and mark LOS clear so the anim-side fade does not relax the spine
+	// while the companion holds the armed aim (the service pins HasTargetLOS false in stealth).
 	SetAimTarget(Victim);
+	SetHasTargetLOS(true);
 
 	// Shoot: raise weapon + face immediately so the companion lines up the instant it's commanded
 	// (and stays aimed through the autonomous 2-4s wait / until the player's synced shot).
 	if (Method == ETakedownMethod::Shoot)
 	{
+		// A commanded execution owns the weapon immediately. Do not let an empty-mag auto-reload
+		// delay the takedown; normal combat can resume reloading after the execution finishes.
+		if (IsValid(CurrentWeapon))
+			CurrentWeapon->AbortFireAndReload();
+
 		SetLowReadyAim(false);
 		if (AAIController* AIC = Cast<AAIController>(GetController()))
 			AIC->SetFocus(Victim, EAIFocusPriority::Gameplay);
@@ -2090,12 +2098,16 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 	}
 	else // Shoot — phased aim-in → cosmetic fire → kill → lower
 	{
-		if (!CanFire())
+		if (!IsValid(CurrentWeapon))
 		{
-			UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot aborted — cannot fire (no ammo or weapon)"));
+			UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot aborted - no weapon"));
 			FinishCommandedTakedown();
 			return;
 		}
+
+		// The execution uses the cosmetic shot path and owns ammo handling independently. Cancel any
+		// reload that restarted during the armed delay so zero ammo cannot postpone the kill.
+		CurrentWeapon->AbortFireAndReload();
 
 		// LoS trace from companion eyes to victim
 		const UWorld* World = GetWorld();
@@ -2122,8 +2134,10 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 			return;
 		}
 
-		// Phase 0: aim in — face + raise weapon
+		// Phase 0: aim in — face + raise weapon. Re-confirm LOS clear so the anim-side fade
+		// recovers even if the service overwrote it between arm and commit.
 		SetAimTarget(Victim);
+		SetHasTargetLOS(true);
 		SetLowReadyAim(false);
 		if (AAIController* AIC = Cast<AAIController>(GetController()))
 			AIC->SetFocus(Victim, EAIFocusPriority::Gameplay);

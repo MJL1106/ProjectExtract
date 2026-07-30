@@ -10,6 +10,7 @@
 #include "DirectorWaveTypes.h"
 #include "EnemyDirectorSubsystem.generated.h"
 
+class APawn;
 class ACompanionCharacter;
 class AEnemyCharacter;
 class AEnemyDirectorScopeVolume;
@@ -309,7 +310,10 @@ private:
 	float ScoreZone(const AEnemySpawnZone* Zone, const FVector& PlayerLoc, const FVector& CompanionLoc, bool bHasCompanion, float DistMin, float DistMax) const;
 	const ACompanionCharacter* FindCompanion() const;
 	void SpawnSquadAtZone(const FSquadComposition& Composition, AEnemySpawnZone* Zone, TArray<AEnemyCharacter*>& OutSpawned);
-	AEnemyCharacter* SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index, int32 SquadSize);
+	void FinalizeSpawnedSquad(const TArray<AEnemyCharacter*>& Spawned);
+	AEnemyCharacter* SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index, int32 SquadSize, TArray<FVector>& UsedPositions);
+	bool FindSeparatedSpawnLocation(UNavigationSystemV1* NavSys, AEnemySpawnZone* Zone, int32 Index, int32 SquadSize, TArray<FVector>& UsedPositions, FVector& OutLocation, FRotator& OutRotation) const;
+	bool ProjectSpawnPointToNav(UNavigationSystemV1* NavSys, const AEnemySpawnZone* Zone, int32 EffectiveIndex, FVector& InOutLocation) const;
 	void SeedSquadWithFight(UEnemySquad* Squad) const;
 
 	TWeakObjectPtr<UEnemySquadSubsystem> CachedSquadSubsystem;
@@ -382,6 +386,20 @@ private:
 	TObjectPtr<UDirectorConfigData> PunishmentConfig;
 
 	EMissionPhase PunishmentPhase = EMissionPhase::Infiltration;
+
+	// ---------- v2: punishment squad search-target refresh ----------
+
+	/** Squads spawned while the punishment profile is active. Their search target is
+	 *  periodically refreshed in DirectorTick while the alarm is raised. */
+	TArray<TWeakObjectPtr<UEnemySquad>> PunishmentSquads;
+
+	/** Wall-clock stamp of the last search-target refresh for punishment squads.
+	 *  Initialised to a negative sentinel so the first refresh is never skipped
+	 *  when a punishment activates in the opening seconds of a level. */
+	double LastPunishmentSquadRefreshTime = -1e9;
+
+	void RefreshPunishmentSquadTargets();
+	FVector FindBestLastKnownFromSquad(const UEnemySquad* Squad, const APawn* PlayerPawn) const;
 
 	// ---------- timers ----------
 

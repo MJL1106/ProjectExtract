@@ -1,6 +1,7 @@
 // BT task — companion commanded search: breach-enter the pinged door, then engage/loot/dwell.
 
 #include "AI/Tasks/BTTask_CompanionExplore.h"
+#include "AI/Tasks/BTTask_CompanionLoot.h"
 #include "AIController.h"
 #include "AI/CompanionAIController.h"
 #include "AI/CompanionSearchRoomPolicy.h"
@@ -15,6 +16,7 @@
 #include "World/Lootable.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "NavigationSystem.h"
 #include "GameFramework/Character.h"
 #include "Kismet/GameplayStatics.h"
 #include "EngineUtils.h"
@@ -128,8 +130,12 @@ static bool ExploreLootableHasLoS(UWorld* World, const APawn* Viewer, const AAct
 
 // Nearest still-lootable container within the radius (mirrors BTTask_CompanionLoot's sweep filter),
 // LoS-gated to the pinged room so the chain can't drag the companion through another door.
+// Nav projection gates navigability: a candidate whose origin cannot project onto the navmesh is
+// silently rejected here rather than selected and then failed on during MoveToLocation downstream.
+// Nav projection delegates to UBTTask_CompanionLoot::ProjectContainerToNav (shared helper).
 static AActor* ExploreFindNearestLootable(UWorld* World, const FVector& Center, float Radius,
-	const APawn* Viewer, const AActor* IgnoreDoor, float OcclusionTolerance)
+	const APawn* Viewer, const AActor* IgnoreDoor, float OcclusionTolerance,
+	float NavHorizExtent, float NavVertExtent, float NavAboveRejectTolerance)
 {
 	if (!World || !IsValid(Viewer)) return nullptr;
 
@@ -143,7 +149,16 @@ static AActor* ExploreFindNearestLootable(UWorld* World, const FVector& Center, 
 		if (!IsValid(Candidate) || !ILootable::Execute_CanLoot(Candidate)) continue;
 		const float DistSq = FVector::DistSquared(Candidate->GetActorLocation(), Center);
 		if (DistSq > BestDistSq) continue;
+
+		// LoS first (cheaper: two cached-scene traces vs a Recast poly query).
 		if (!ExploreLootableHasLoS(World, Viewer, Candidate, IgnoreDoor, OcclusionTolerance)) continue;
+
+		// Nav projection via the shared helper (same bounds-based query as BTTask_CompanionLoot).
+		FVector Unused;
+		if (!UBTTask_CompanionLoot::ProjectContainerToNav(World, Candidate,
+			NavHorizExtent, NavVertExtent, NavAboveRejectTolerance, Unused))
+			continue;
+
 		BestDistSq = DistSq;
 		Best = Candidate;
 	}
@@ -538,11 +553,11 @@ void UBTTask_CompanionExplore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 	{
 		PhaseElapsed += DeltaSeconds;
 
-		// ANY live combat target (or a fight starting anywhere) ends the dwell — the search
+		// ANY live combat target (or a fight starting anywhere) ends the dwell - the search
 		// already succeeded, so even a held-over mid-fight target hands control back here.
 		if (!bInCombat && !bFreshCombat && PhaseElapsed < DwellDuration) return;
 
-		UE_LOG(LogCompanionExplore, Log, TEXT("TickTask: dwell over (%.1fs%s) — returning to follow"),
+		UE_LOG(LogCompanionExplore, Log, TEXT("TickTask: dwell over (%.1fs%s) - returning to follow"),
 			PhaseElapsed, bInCombat ? TEXT(", combat") : TEXT(""));
 		FinishSearch(OwnerComp, AIC);
 		return;
@@ -608,6 +623,48 @@ bool UBTTask_CompanionExplore::StartEnterMove(ACompanionAIController* AIC, APawn
 	return true;
 }
 
+bool UBTTask_CompanionExplore::TryHandleOccupiedRoom(UBehaviorTreeComponent& OwnerComp,
+	ACompanionAIController* AIC, ACompanionCharacter* Companion)
+{
+	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
+	const float LootRadius = Tuning ? Tuning->ExploreLootRadius : 1200.f;
+	const float GrantDuration = Tuning ? Tuning->ExploreEngagementDuration : 8.f;
+
+	const ECompanionMode Mode = Companion->GetMode();
+	if (CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Mode))
+		Companion->SetPostBreachEngagement(RoomAnchor, LootRadius, GrantDuration);
+
+	const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	const bool bInCombat = IsValid(BB)
+		&& IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
+	AActor* SearchedDoor = CachedDoor.Get();
+	const bool bVisibleLiveEnemy = Mode == ECompanionMode::Combat
+		&& ExploreAnyLiveEnemyWithin(Companion->GetWorld(), RoomAnchor, LootRadius,
+			Companion, SearchedDoor);
+
+	if (CompanionSearchRoomPolicy::ShouldTreatRoomAsHot(Mode, bInCombat, bVisibleLiveEnemy))
+	{
+		UE_LOG(LogCompanionExplore, Log, TEXT("EvaluateRoom: room hot — handing to combat"));
+		FinishSearch(OwnerComp, AIC);
+		return true;
+	}
+
+	if (AActor* Container = ExploreFindNearestLootable(Companion->GetWorld(), RoomAnchor, LootRadius,
+		Companion, SearchedDoor, LootOcclusionTolerance,
+		NavProjectHorizontalExtent, NavProjectVerticalExtent, NavProjectAboveRejectTolerance))
+	{
+		UE_LOG(LogCompanionExplore, Log, TEXT("EvaluateRoom: room quiet — chaining loot sweep to %s"),
+			*GetNameSafe(Container));
+		// The Explore decorator observes BB_CompanionCommand — writing Loot here triggers it to
+		// self-abort this Explore task, handing control to the loot sweep.
+		AIC->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife,
+			Container, Container->GetActorLocation(), true);
+		return true;
+	}
+
+	return false;
+}
+
 void UBTTask_CompanionExplore::EvaluateRoom(UBehaviorTreeComponent& OwnerComp, ACompanionAIController* AIC, APawn* Pawn)
 {
 	// The dwell may outlast the task's ownership of the door — release it before deciding.
@@ -616,42 +673,9 @@ void UBTTask_CompanionExplore::EvaluateRoom(UBehaviorTreeComponent& OwnerComp, A
 	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn);
 	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
 	const float LootRadius = Tuning ? Tuning->ExploreLootRadius : 1200.f;
-	const float GrantDuration = Tuning ? Tuning->ExploreEngagementDuration : 8.f;
 
-	// Combat is weapons-free and treats a visible live enemy as hot. Normal and Stealth preserve
-	// no-first-shot behavior, so an unaware/searching enemy can be watched while loot continues.
-	if (IsValid(Companion) && LootRadius > 0.f)
-	{
-		const ECompanionMode Mode = Companion->GetMode();
-		if (CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Mode))
-			Companion->SetPostBreachEngagement(RoomAnchor, LootRadius, GrantDuration);
-
-		const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
-		const bool bInCombat = IsValid(BB)
-			&& IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
-		AActor* SearchedDoor = CachedDoor.Get();
-		const bool bVisibleLiveEnemy = Mode == ECompanionMode::Combat
-			&& ExploreAnyLiveEnemyWithin(Companion->GetWorld(), RoomAnchor, LootRadius,
-				Companion, SearchedDoor);
-		if (CompanionSearchRoomPolicy::ShouldTreatRoomAsHot(Mode, bInCombat, bVisibleLiveEnemy))
-		{
-			UE_LOG(LogCompanionExplore, Log, TEXT("EvaluateRoom: room hot — handing to combat"));
-			FinishSearch(OwnerComp, AIC);
-			return;
-		}
-
-		if (AActor* Container = ExploreFindNearestLootable(Companion->GetWorld(), RoomAnchor, LootRadius,
-			Companion, SearchedDoor, LootOcclusionTolerance))
-		{
-			UE_LOG(LogCompanionExplore, Log, TEXT("EvaluateRoom: room quiet — chaining loot sweep to %s"),
-				*GetNameSafe(Container));
-			AIC->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife,
-				Container, Container->GetActorLocation(), true);
-			// The Explore decorator observes CompanionCommand and self-aborts this task.
-			// That abort owns the handoff; finishing this task again would cancel Loot.
-			return;
-		}
-	}
+	if (IsValid(Companion) && LootRadius > 0.f && TryHandleOccupiedRoom(OwnerComp, AIC, Companion))
+		return;
 
 	// Empty room: stand a beat, then hand back to follow.
 	const float DwellMin = Tuning ? Tuning->SearchDwellMin : 2.f;

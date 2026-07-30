@@ -23,19 +23,24 @@ struct EXTRACTION_API FStealthDisciplineSettings
 	float SprintGraceSeconds = 1.5f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float SprintPressurePerSecond = 8.f;
+	float SprintPressurePerSecond = 18.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float PressurePerShot = 6.f;
+	float PressurePerShot = 15.f;
+
+	/** Pressure cost per suppressed shot. Suppressed fire is much quieter and should
+	 *  barely move the needle compared to unsuppressed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
+	float SuppressedPressurePerShot = 3.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float DecayPerSecond = 10.f;
+	float DecayPerSecond = 5.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float WarningThreshold = 35.f;
+	float WarningThreshold = 25.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float EscalationThreshold = 70.f;
+	float EscalationThreshold = 75.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float SprintSpeedThreshold = 550.f;
@@ -58,7 +63,8 @@ struct EXTRACTION_API FStealthPressureAccumulator
 	bool bEscalated = false;
 
 	// Escalated supersedes Warned: a single sample crossing both thresholds returns only Escalated.
-	EStealthPressureTransition Advance(float DeltaSeconds, bool bSprinting, int32 NormalShots,
+	EStealthPressureTransition Advance(float DeltaSeconds, bool bSprinting,
+		int32 NormalShots, int32 SuppressedShots,
 		const FStealthDisciplineSettings& Settings)
 	{
 		// ClampMin metadata is editor-UI only; a zero/negative escalation threshold would trip on entry.
@@ -86,8 +92,10 @@ struct EXTRACTION_API FStealthPressureAccumulator
 		if (bSprintPressure) Pressure += Settings.SprintPressurePerSecond * DeltaSeconds;
 
 		if (NormalShots > 0) Pressure += Settings.PressurePerShot * static_cast<float>(NormalShots);
+		if (SuppressedShots > 0) Pressure += Settings.SuppressedPressurePerShot * static_cast<float>(SuppressedShots);
 
-		if (!bSprinting && NormalShots <= 0)
+		const int32 TotalShots = NormalShots + SuppressedShots;
+		if (!bSprinting && TotalShots <= 0)
 			Pressure -= Settings.DecayPerSecond * DeltaSeconds;
 
 		Pressure = FMath::Clamp(Pressure, 0.f, Settings.EscalationThreshold);

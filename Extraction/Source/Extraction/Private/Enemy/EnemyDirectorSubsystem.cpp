@@ -364,6 +364,7 @@ void UEnemyDirectorSubsystem::DirectorTick()
 	PruneStaleScopeVolumes();
 	PruneStaleWaveMembers();
 	ReassertWaveMemberEngagement();
+	RefreshPunishmentSquadTargets();
 
 	UpdateTension(DirectorTickInterval, Sweep.EngagedCount);
 	UpdateSawtooth(DirectorTickInterval);
@@ -1067,65 +1068,98 @@ bool UEnemyDirectorSubsystem::IsPointInPlayerSightline(const FVector& Point, con
 	return !bBlocked;
 }
 
-AEnemyCharacter* UEnemyDirectorSubsystem::SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index, int32 SquadSize)
+bool UEnemyDirectorSubsystem::ProjectSpawnPointToNav(UNavigationSystemV1* NavSys, const AEnemySpawnZone* Zone,
+	int32 EffectiveIndex, FVector& InOutLocation) const
 {
-	FTransform SpawnTransform = Zone->GetSpawnTransform(Index, SquadSize);
-	FVector SpawnLoc = SpawnTransform.GetLocation();
+	static constexpr float GoldenAngleDeg = 137.508f;
+	const FVector Extent(NavProjectExtentXY, NavProjectExtentXY, NavProjectExtentZ);
 
+	FNavLocation NavLoc;
+	if (NavSys->ProjectPointToNavigation(InOutLocation, NavLoc, Extent))
+	{
+		InOutLocation = NavLoc.Location;
+		return true;
+	}
+
+	// Jittered fallback: offset from zone origin using this index's spiral angle
+	// so failures fan out instead of collapsing onto one point.
+	const float Rad = FMath::DegreesToRadians(FMath::Fmod(float(EffectiveIndex) * GoldenAngleDeg, 360.f));
+	const float R = NavProjectExtentXY * 0.5f;
+	FVector Fb = Zone->GetZoneOrigin() + FVector(FMath::Cos(Rad) * R, FMath::Sin(Rad) * R, 0.f);
+	FNavLocation FbLoc;
+	if (!NavSys->ProjectPointToNavigation(Fb, FbLoc, Extent)) return false;
+	InOutLocation = FbLoc.Location;
+	return true;
+}
+
+bool UEnemyDirectorSubsystem::FindSeparatedSpawnLocation(UNavigationSystemV1* NavSys, AEnemySpawnZone* Zone,
+	int32 Index, int32 SquadSize, TArray<FVector>& UsedPositions, FVector& OutLocation, FRotator& OutRotation) const
+{
+	static constexpr int32 MaxRetries = 3;
+	const float ClampedSep = FMath::Max(Zone->MinSpawnSeparation, 0.f);
+	const float MinSepSq = ClampedSep * ClampedSep;
+
+	for (int32 Retry = 0; Retry <= MaxRetries; ++Retry)
+	{
+		const int32 EffIdx = Index + Retry;
+		const FTransform SpawnXform = Zone->GetSpawnTransform(EffIdx, SquadSize);
+		FVector Loc = SpawnXform.GetLocation();
+
+		if (IsValid(NavSys) && !ProjectSpawnPointToNav(NavSys, Zone, EffIdx, Loc))
+			continue;
+
+		// Reject points within MinSpawnSeparation of an already-used position in this squad.
+		bool bTooClose = false;
+		if (MinSepSq > 0.f)
+			for (const FVector& U : UsedPositions)
+				if (FVector::DistSquared2D(Loc, U) < MinSepSq) { bTooClose = true; break; }
+
+		if (bTooClose && Retry < MaxRetries) continue;
+		if (bTooClose)
+			UE_LOG(LogEnemyAI, Warning, TEXT("Director: separation retries exhausted at zone '%s' (index %d)"), *Zone->GetName(), Index);
+
+		UsedPositions.Add(Loc);
+		OutLocation = Loc;
+		OutRotation = SpawnXform.GetRotation().Rotator();
+		return true;
+	}
+	return false;
+}
+
+AEnemyCharacter* UEnemyDirectorSubsystem::SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass,
+	AEnemySpawnZone* Zone, int32 Index, int32 SquadSize, TArray<FVector>& UsedPositions)
+{
 	UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
-	if (IsValid(NavSys))
+
+	FVector SpawnLoc;
+	FRotator SpawnRot;
+	if (!FindSeparatedSpawnLocation(NavSys, Zone, Index, SquadSize, UsedPositions, SpawnLoc, SpawnRot))
 	{
-		FNavLocation NavLoc;
-		const FVector Extent(NavProjectExtentXY, NavProjectExtentXY, NavProjectExtentZ);
-		if (NavSys->ProjectPointToNavigation(SpawnLoc, NavLoc, Extent))
-		{
-			SpawnLoc = NavLoc.Location;
-		}
-		else
-		{
-			FNavLocation FallbackLoc;
-			const FVector ZoneOrigin = Zone->GetZoneOrigin();
-			if (NavSys->ProjectPointToNavigation(ZoneOrigin, FallbackLoc, Extent))
-			{
-				SpawnLoc = FallbackLoc.Location;
-			}
-			else
-			{
-				UE_LOG(LogEnemyAI, Warning, TEXT("Director: nav-project failed for spawn point AND zone origin at %s (index %d) — skipping"),
-					*Zone->GetName(), Index);
-				return nullptr;
-			}
-		}
+		UE_LOG(LogEnemyAI, Warning, TEXT("Director: nav-project failed for all retries at zone '%s' (index %d)"),
+			*Zone->GetName(), Index);
+		return nullptr;
 	}
 
-	// Nav-projected locations are on the floor; SpawnActor places the capsule CENTRE
-	// there, embedding the character waist-deep. Raise by the class's capsule half-height.
+	// Nav-projected locations are on the floor; raise by the class's capsule half-height.
 	float CapsuleHalfHeight = 88.f;
-	if (const AEnemyCharacter* ClassDefaults = EnemyClass->GetDefaultObject<AEnemyCharacter>())
-	{
-		if (const UCapsuleComponent* Capsule = ClassDefaults->GetCapsuleComponent())
-			CapsuleHalfHeight = Capsule->GetScaledCapsuleHalfHeight();
-	}
+	if (const AEnemyCharacter* CDO = EnemyClass->GetDefaultObject<AEnemyCharacter>())
+		if (const UCapsuleComponent* Cap = CDO->GetCapsuleComponent())
+			CapsuleHalfHeight = Cap->GetScaledCapsuleHalfHeight();
 	SpawnLoc.Z += CapsuleHalfHeight + SpawnGroundClearance;
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
 
 	AEnemyCharacter* Spawned = World->SpawnActor<AEnemyCharacter>(
-		EnemyClass,
-		SpawnLoc,
-		SpawnTransform.GetRotation().Rotator(),
-		SpawnParams);
+		EnemyClass, SpawnLoc, SpawnRot, SpawnParams);
 
 	if (IsValid(Spawned))
 	{
-		UE_LOG(LogEnemyAI, Verbose, TEXT("Director spawned %s at zone %s (index %d)"),
-			*Spawned->GetName(), *Zone->GetName(), Index);
+		UE_LOG(LogEnemyAI, Verbose, TEXT("Director spawned %s at zone %s (index %d)"), *Spawned->GetName(), *Zone->GetName(), Index);
 	}
 	else
 	{
-		UE_LOG(LogEnemyAI, Warning, TEXT("Director spawn failed for %s at zone %s (index %d)"),
-			*EnemyClass->GetName(), *Zone->GetName(), Index);
+		UE_LOG(LogEnemyAI, Warning, TEXT("Director spawn failed for %s at zone %s (index %d)"), *EnemyClass->GetName(), *Zone->GetName(), Index);
 	}
 
 	return Spawned;
@@ -1145,6 +1179,8 @@ void UEnemyDirectorSubsystem::SpawnSquadAtZone(const FSquadComposition& Composit
 
 	const int32 ExpectedSize = GetCompositionSize(Composition);
 	OutSpawned.Reserve(ExpectedSize);
+	TArray<FVector> UsedPositions;
+	UsedPositions.Reserve(ExpectedSize);
 	int32 SpawnIndex = 0;
 
 	for (const FSquadCompositionEntry& Entry : Composition.Entries)
@@ -1153,25 +1189,29 @@ void UEnemyDirectorSubsystem::SpawnSquadAtZone(const FSquadComposition& Composit
 
 		for (int32 i = 0; i < Entry.Count; ++i)
 		{
-			AEnemyCharacter* Spawned = SpawnEntryAtZone(World, Entry.EnemyClass, Zone, SpawnIndex, ExpectedSize);
+			AEnemyCharacter* Spawned = SpawnEntryAtZone(World, Entry.EnemyClass, Zone, SpawnIndex, ExpectedSize, UsedPositions);
 			if (IsValid(Spawned)) OutSpawned.Add(Spawned);
 			++SpawnIndex;
 		}
 	}
 
-	UEnemySquad* Squad = nullptr;
-	if (OutSpawned.Num() > 0 && CachedSquadSubsystem.IsValid())
-	{
-		Squad = CachedSquadSubsystem->CreateSquadForGroup(OutSpawned);
-	}
-
-	if (IsValid(Squad))
-	{
-		SeedSquadWithFight(Squad);
-	}
+	FinalizeSpawnedSquad(OutSpawned);
 
 	UE_LOG(LogEnemyAI, Log, TEXT("Director spawned squad (%d/%d members) at zone %s"),
 		OutSpawned.Num(), SpawnIndex, *Zone->GetName());
+}
+
+void UEnemyDirectorSubsystem::FinalizeSpawnedSquad(const TArray<AEnemyCharacter*>& Spawned)
+{
+	if (Spawned.Num() == 0 || !CachedSquadSubsystem.IsValid()) return;
+
+	UEnemySquad* Squad = CachedSquadSubsystem->CreateSquadForGroup(Spawned);
+	if (!IsValid(Squad)) return;
+
+	SeedSquadWithFight(Squad);
+
+	if (PunishmentSource.IsValid())
+		PunishmentSquads.Add(Squad);
 }
 
 void UEnemyDirectorSubsystem::SeedSquadWithFight(UEnemySquad* Squad) const
@@ -1417,4 +1457,74 @@ void UEnemyDirectorSubsystem::DeactivatePunishmentProfile(AActor* Source)
 	PunishmentSource.Reset();
 	PunishmentConfig = nullptr;
 	PunishmentPhase = EMissionPhase::Infiltration;
+	PunishmentSquads.Empty();
+	LastPunishmentSquadRefreshTime = -1e9;
+}
+
+void UEnemyDirectorSubsystem::RefreshPunishmentSquadTargets()
+{
+	// Prune unconditionally so dead squads don't accumulate behind the config/rate gates.
+	PunishmentSquads.RemoveAll([](const TWeakObjectPtr<UEnemySquad>& Entry) { return !Entry.IsValid(); });
+
+	if (AlertLevel != EGlobalAlertLevel::Loud) return;
+	if (!PunishmentSource.IsValid()) return;
+
+	const UDirectorConfigData* EffectiveConfig = GetEffectiveConfig();
+	if (!EffectiveConfig || !EffectiveConfig->bRefreshSquadSearchTarget) return;
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	const double Now = World->GetTimeSeconds();
+	if (Now - LastPunishmentSquadRefreshTime < EffectiveConfig->SquadSearchRefreshInterval) return;
+	LastPunishmentSquadRefreshTime = Now;
+
+	APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
+	if (!IsValid(PlayerPawn)) return;
+
+	for (const TWeakObjectPtr<UEnemySquad>& WeakSquad : PunishmentSquads)
+	{
+		UEnemySquad* Squad = WeakSquad.Get();
+		if (!IsValid(Squad)) continue;
+
+		// Feed squads the best PERCEIVED position instead of the player's live location.
+		// If no member has perceived the player, the escalation-time snapshot already
+		// stored in SquadLastKnown is the correct fallback.
+		const FVector LastKnown = FindBestLastKnownFromSquad(Squad, PlayerPawn);
+		if (!LastKnown.IsZero())
+			Squad->ReportSighting(PlayerPawn, LastKnown);
+	}
+}
+
+FVector UEnemyDirectorSubsystem::FindBestLastKnownFromSquad(const UEnemySquad* Squad, const APawn* PlayerPawn) const
+{
+	if (!IsValid(Squad) || !IsValid(PlayerPawn)) return FVector::ZeroVector;
+
+	FVector BestLastKnown = FVector::ZeroVector;
+
+	for (const TWeakObjectPtr<AEnemyCharacter>& WeakMember : Squad->GetMembers())
+	{
+		AEnemyCharacter* Member = WeakMember.Get();
+		if (!IsValid(Member)) continue;
+
+		AEnemyAIController* AIC = Cast<AEnemyAIController>(Member->GetController());
+		if (!IsValid(AIC)) continue;
+
+		UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+		if (!IsValid(Awareness)) continue;
+
+		// Only accept members whose combat target is the player pawn. Members fighting
+		// the companion would relay the companion's position as the player's last-known.
+		// GetCombatTarget() returns nullptr outside Combat, so only Combat-state members
+		// that are actively targeting the player pass this check.
+		if (Awareness->GetCombatTarget() != PlayerPawn) continue;
+
+		const FVector MemberLastKnown = Awareness->GetLastKnownLocation();
+		if (MemberLastKnown.IsZero()) continue;
+
+		BestLastKnown = MemberLastKnown;
+		if (Awareness->HasLOSToTarget()) break;
+	}
+
+	return BestLastKnown;
 }

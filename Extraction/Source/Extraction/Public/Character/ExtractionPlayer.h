@@ -17,6 +17,7 @@
 class AWeaponBase;
 class AEnemyCharacter;
 class ACompanionCharacter;
+class AExtracteeCharacter;
 class UInputComponent;
 class UInputAction;
 class UInputMappingContext;
@@ -230,6 +231,40 @@ public:
 	{
 		return InteractHoldDuration > 0.f ? FMath::Clamp(InteractHoldElapsed / InteractHoldDuration, 0.f, 1.f) : 0.f;
 	}
+
+	/**
+	 * Every live ally an interaction trace must step past, with this player itself at index 0 so the
+	 * array can replace a one-element ignore list wholesale. Covers both ACompanionCharacter allies
+	 * (primary + armed VIP) and the unarmed AExtracteeCharacter escort, plus everything attached to
+	 * each of them — an ally's attachments block ECC_Visibility in their own right, the same inclusion
+	 * the companion's own LoS traces make (BTService_UpdateCompanionState, where it is load-bearing).
+	 *
+	 * Allies are in here because their meshes BLOCK ECC_Visibility, and that block is exactly what
+	 * makes them take hitscan damage — it must never be relaxed, so the traces step past them instead.
+	 *
+	 * An ally that is currently interactable ITSELF is deliberately left out: the captive VIP and the
+	 * unrescued escort are both IWorldInteractable, and ignoring them would make the rescue press
+	 * impossible. Both refuse CanWorldInteract once rescued, so they join the list from that frame on.
+	 *
+	 * CONSUMED BY THE AC_Interaction BLUEPRINT COMPONENT on BP_ExtractionCharacter: wire this straight
+	 * into its Line Trace By Channel -> Actors To Ignore, replacing the Make Array that holds only the
+	 * player pawn. The C++ interact traces and UCompanionCommandComponent's ping trace read the same
+	 * list, so all three interaction paths agree on one ignore set.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	const TArray<AActor*>& GetInteractTraceIgnoredActors() const;
+
+	// ---- Companion command input action accessors ----
+	// Read-only handles for UI that resolves an input action to its bound key name. The actions
+	// themselves stay assigned on the BP child class.
+
+	/** Middle-mouse companion ping action, or null while the BP child leaves it unassigned. */
+	UFUNCTION(BlueprintPure, Category = "Input|Companion")
+	UInputAction* GetCompanionPingAction() const { return IA_CompanionPing; }
+
+	/** Companion breach-confirm action, or null while the BP child leaves it unassigned. */
+	UFUNCTION(BlueprintPure, Category = "Input|Companion")
+	UInputAction* GetCompanionBreachAction() const { return IA_CompanionBreach; }
 
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const override { return CachedAnimInstance; }
@@ -520,6 +555,12 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
 	TObjectPtr<UAnimMontage> BeingRevivedMontage;
 
+	/** Extra seconds the being-revived montage holds at full weight AFTER ExitDBNO fires,
+	 *  covering the AnimBP's Blend Poses (IsDBNO bool) crossfade from the downed to standing
+	 *  base pose. Must match ABP_Manny's IsDBNO blend node blend time (authored 0.35s). */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
+	float ReviveMontageHoldoverSeconds = 0.35f;
+
 	/** Kneel montage played on this player's OWN body while they hold F reviving a downed
 	 *  teammate — rate-scaled so one cycle spans ReviveDuration. The FP camera rides the head
 	 *  bone through it (takedown-style), so this is what "locks" the reviver's view. */
@@ -629,12 +670,37 @@ private:
 
 	/** Every companion in the world. The armed VIP is a second ACompanionCharacter the command
 	 *  component will never resolve (primary only, by design), so without this its capsule
-	 *  hard-blocks the player. Rebuilt on a slow rescan — TActorIterator can't run per frame. */
+	 *  hard-blocks the player. Rebuilt on a slow rescan — TActorIterator can't run per frame.
+	 *  Also the ally source for GetInteractTraceIgnoredActors — one collection, two consumers. */
 	TArray<TWeakObjectPtr<ACompanionCharacter>> SoftCollisionCompanions;
 
-	/** World seconds of the last companion rescan. Sentinel-low so the first tick always scans —
+	/** The unarmed escort civilian. A second array rather than an entry above because it is not an
+	 *  ACompanionCharacter and runs its own soft-separation pass — it is cached here purely so the
+	 *  interaction traces can step past its capsule and mesh. */
+	TArray<TWeakObjectPtr<AExtracteeCharacter>> AllyExtractees;
+
+	/** Reused across calls to GetInteractTraceIgnoredActors so the Blueprint interaction
+	 *  component's ~100 Hz re-trace never heap-allocates. Rebuilt from the ally cache each call;
+	 *  Reset() keeps the slack from the first Reserve. */
+	mutable TArray<AActor*> CachedInteractIgnored;
+
+	/** World seconds of the last ally rescan. Sentinel-low so the first tick always scans —
 	 *  the interval alone then gates the empty-list case too. */
 	float LastCompanionScanTime = -1e9f;
+
+	/** Set by HandleActorSpawned so an ally spawned mid-level joins the ignore set on the next tick
+	 *  instead of after up to a full rescan interval. True initially so the first tick scans. */
+	bool bAllyCacheDirty = true;
+
+	/** Flags the ally cache dirty when a companion or escort spawns. Bound to the world's
+	 *  OnActorSpawned; handle released in EndPlay. */
+	void HandleActorSpawned(AActor* SpawnedActor);
+
+	FDelegateHandle ActorSpawnedHandle;
+
+	/** Adds Ally and (recursively) everything attached to it to OutIgnored, unless the ally is itself
+	 *  the current interact target. */
+	void AppendAllyInteractIgnore(AActor* Ally, TArray<AActor*>& OutIgnored) const;
 
 	/** Sums both passes' pushes into a single clamped AddMovementInput — see the cpp for why they
 	 *  must not be applied independently. */
@@ -648,7 +714,11 @@ private:
 	 *  Returns the summed push contribution; does not apply it. */
 	FVector UpdateAllyCompanionSoftCollision();
 
-	void RefreshSoftCollisionCompanions();
+	/** Rebuilds both ally collections on the slow rescan (or immediately when an entry went stale or
+	 *  an ally spawned). Driven once per tick from Tick rather than from the soft-collision pass —
+	 *  that pass early-returns while DBNO / reviving / mid-traversal, and the const interaction
+	 *  accessors only read this cache, they never refresh it. */
+	void RefreshAllyCache();
 
 	/** Shared tail of both passes: idempotent ignore assert, then the overlap-depth push RETURNED
 	 *  to the caller (zero when out of range) so the two passes can be clamped as one input. */
@@ -784,6 +854,12 @@ private:
 	bool bBeingRevivedAnimActive = false;
 
 	void SetBeingRevivedCameraAnimationControl(bool bActive);
+
+	/** Plays or stops BeingRevivedMontage on the body mesh, rate-scaled so the auto blend-out
+	 *  window covers ExpectedDuration + ReviveMontageHoldoverSeconds. Extracted from SetBeingRevived
+	 *  to keep both halves under the 40-line function limit. */
+	void UpdateBeingRevivedMontage(bool bPlay, float ExpectedDuration);
+
 	bool bBeingRevivedCameraOverrideActive = false;
 	bool bBeingRevivedSavedSpringArmUsePawnControlRotation = false;
 
@@ -947,6 +1023,16 @@ private:
 
 	/** Hide/show the held weapon visuals (weapon actor + the kit's hand-socket visual actors). */
 	void SetHeldWeaponHidden(bool bHideWeapon);
+
+	/** Descendants of hand-socket actors that were already hidden when SetHeldWeaponHidden(true) ran.
+	 *  Restored on show so BP-hidden attachment slots stay hidden. Uses TWeakObjectPtr so stale
+	 *  entries from destroyed actors across weapon swaps are harmless. */
+	TSet<TWeakObjectPtr<AActor>> HeldWeaponHiddenSnapshot;
+
+	/** Latch for SetHeldWeaponHidden: true while the batch is hidden. Re-hides and re-shows
+	 *  become no-ops, preventing a second hide from re-capturing descendants that the first hide
+	 *  legitimately turned off. Wraps the entire batch (weapon actor + hand-socket actors). */
+	bool bHeldWeaponHidden = false;
 
 	/** Snaps this reviver into the authored pair frame anchored on the (already rotated) downed
 	 *  companion — radial step to the authored 88cm along the approach line, capsule at the

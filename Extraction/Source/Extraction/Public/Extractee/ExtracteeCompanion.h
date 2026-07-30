@@ -64,6 +64,10 @@ public:
 	// back. Zeroed damage alone still left the squad aiming and firing at the hostage.
 	virtual bool IsAlwaysSightCloaked() const override;
 
+	// The armed VIP never sprints — class invariant, not a tunable (the VIP may share
+	// DA_CompanionTuning, so a per-asset bool cannot distinguish it from the primary).
+	virtual bool CanSprint() const override { return false; }
+
 	// --- IWorldInteractable (rescue) ---
 	virtual bool CanWorldInteract_Implementation(AActor* Interactor) const override;
 	virtual void WorldInteract_Implementation(AActor* Interactor) override;
@@ -161,4 +165,21 @@ private:
 
 	/** Stage 3: pistol visible, ABP swaps to the armed pose, reply line, then the wave timer. */
 	void ArmWithPistol(bool bCeremony);
+
+	/** Asks the anim instance to re-fire its existing one-time equip bake (patrol / cover / fire
+	 *  baselines). The re-baseline exists as a correctness guarantee: every Setup*Align reads
+	 *  WeaponMesh->GetRelativeTransform() at bake time, which is only pristine on the first bake;
+	 *  the RestoreAlignRestPose call inside the equip block corrects a real pre-existing bug where
+	 *  any later bake composed on top of the previous bake's output. The re-baseline also lets
+	 *  ABP_ExtracteeMain carry its own CoverAlign*Transform class defaults without inheriting the
+	 *  primary companion's rifle-tuned values (which is the actual source of the observed pistol
+	 *  drift; the captive-kneel pose is NOT the cause -- the socketToBone term cancels because the
+	 *  weapon's attach socket is parented to the align bone).
+	 *
+	 *  To verify: companion.AlignDebug 1, compare the socketToBone term between the BeginPlay
+	 *  bake and the post-arming bake -- identical means the baseline was never the cause.
+	 *
+	 *  Deferred, not immediate: the anim instance waits until the pose the bake reads has stopped
+	 *  moving, so this never trades one baseline for a mid-transition one. */
+	void RebaselineWeaponAlign();
 };

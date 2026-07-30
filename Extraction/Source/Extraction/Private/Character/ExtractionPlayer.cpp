@@ -26,9 +26,12 @@
 #include "EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
 #include "Extractee/ExtracteeCompanion.h"
+#include "Extractee/ExtracteeCharacter.h"
 #include "EngineUtils.h"
+#include "Engine/World.h"
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
+#include "WeaponVisibilityUtils.h"
 #include "ExtractionDamageType.h"
 #include "TimerManager.h"
 #include "Engine/DamageEvents.h"
@@ -181,6 +184,15 @@ void AExtractionPlayer::BeginPlay()
 		ConsumableInventoryComponent->OnStimUseEndedNative.AddUObject(this, &AExtractionPlayer::HandleStimUseEnded);
 	}
 
+	// Ally spawn watch: the interaction ignore set is read straight off the rescan cache, so an ally
+	// that appears at runtime (a Director respawn) would otherwise block interaction until the next
+	// scheduled rescan. The handler only sets a flag.
+	if (const UWorld* World = GetWorld())
+	{
+		ActorSpawnedHandle = World->AddOnActorSpawnedHandler(
+			FOnActorSpawned::FDelegate::CreateUObject(this, &AExtractionPlayer::HandleActorSpawned));
+	}
+
 	// Late-join / standalone catch-up: re-fire OnWeaponEquipped if weapon already equipped
 	if (IsLocallyControlled() && !GetIsDBNO() && IsValid(WeaponComponent))
 	{
@@ -212,7 +224,13 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	}
 
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+
+		if (ActorSpawnedHandle.IsValid())
+			World->RemoveOnActorSpawnedHandler(ActorSpawnedHandle);
+	}
+	ActorSpawnedHandle.Reset();
 
 	// Takedown was committed — kill the frozen victim so player despawn can't leave them stuck alive.
 	if (AEnemyCharacter* Victim = PendingTakedownVictim.Get())
@@ -322,7 +340,15 @@ void AExtractionPlayer::Tick(float DeltaTime)
 		AutoLeanAlpha = FMath::FInterpTo(AutoLeanAlpha, AutoLeanTargetAlpha, DeltaTime, AutoLeanInterpSpeed);
 	}
 
-	if (IsLocallyControlled()) UpdateCompanionSoftCollision();
+	if (IsLocallyControlled())
+	{
+		// Refreshed here rather than only inside the soft-collision pass: that pass early-returns while
+		// DBNO / reviving / mid-traversal, and the interaction ignore set reads this same cache from a
+		// const accessor that never refreshes it. Interval-gated internally, so this is a float compare
+		// on all but every SoftCollisionRescanInterval-th frame.
+		RefreshAllyCache();
+		UpdateCompanionSoftCollision();
+	}
 }
 
 void AExtractionPlayer::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -812,6 +838,12 @@ namespace
 	// Primary + armed VIP. Sized once on the first build; Reset() then keeps the slack, so the
 	// Reserve is a deliberate no-op on every rebuild after that and none of them reallocate.
 	constexpr int32 ExpectedSoftCollisionCompanionCount = 2;
+
+	// One escort civilian per mission.
+	constexpr int32 ExpectedAllyExtracteeCount = 1;
+
+	// Self + primary + armed VIP + escort, each with room for a weapon and a couple of attachments.
+	constexpr int32 ExpectedInteractIgnoreCount = 12;
 }
 
 void AExtractionPlayer::UpdateCompanionSoftCollision()
@@ -864,7 +896,9 @@ FVector AExtractionPlayer::UpdatePrimaryCompanionSoftCollision()
 
 FVector AExtractionPlayer::UpdateAllyCompanionSoftCollision()
 {
-	RefreshSoftCollisionCompanions();
+	// Kept despite Tick refreshing first: interval-gated, so the second call of the frame is a float
+	// compare, and this pass then never depends on its caller having refreshed for it.
+	RefreshAllyCache();
 
 	FVector Push = FVector::ZeroVector;
 	for (const TWeakObjectPtr<ACompanionCharacter>& Entry : SoftCollisionCompanions)
@@ -887,35 +921,64 @@ FVector AExtractionPlayer::UpdateAllyCompanionSoftCollision()
 	return Push;
 }
 
-void AExtractionPlayer::RefreshSoftCollisionCompanions()
+void AExtractionPlayer::RefreshAllyCache()
 {
 	const UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 
-	// Rebuild on the interval, plus immediately when an entry goes stale. Interval-gated rather
-	// than empty-gated: before any companion exists an empty-list trigger would re-walk every actor
-	// in the level on every frame of the player's tick.
-	const float Now = World->GetTimeSeconds();
-	bool bRebuild = (Now - LastCompanionScanTime) >= SoftCollisionRescanInterval;
-	if (!bRebuild)
+	auto HasStaleEntry = [](const auto& Entries)
 	{
-		for (const TWeakObjectPtr<ACompanionCharacter>& Entry : SoftCollisionCompanions)
+		for (const auto& Entry : Entries)
 		{
-			if (Entry.IsValid()) continue;
-			bRebuild = true;
-			break;
+			if (!Entry.IsValid()) return true;
 		}
-	}
+		return false;
+	};
+
+	// Rebuild on the interval, plus immediately when an entry goes stale or an ally spawned. Interval-
+	// gated rather than empty-gated: before any ally exists an empty-list trigger would re-walk every
+	// actor in the level on every frame of the player's tick. Short-circuit order matters — the two
+	// staleness walks only run once the cheap checks have both declined.
+	const float Now = World->GetTimeSeconds();
+	const bool bRebuild = bAllyCacheDirty
+		|| (Now - LastCompanionScanTime) >= SoftCollisionRescanInterval
+		|| HasStaleEntry(SoftCollisionCompanions)
+		|| HasStaleEntry(AllyExtractees);
 	if (!bRebuild) return;
 
 	LastCompanionScanTime = Now;
+	bAllyCacheDirty = false;
+
 	SoftCollisionCompanions.Reset();
 	SoftCollisionCompanions.Reserve(ExpectedSoftCollisionCompanionCount);
-	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
+	AllyExtractees.Reset();
+	AllyExtractees.Reserve(ExpectedAllyExtracteeCount);
+
+	// Single pass: ACompanionCharacter and AExtracteeCharacter are both ACharacter subclasses on
+	// separate branches, so one iterator with two casts covers both collections in one walk.
+	for (TActorIterator<ACharacter> It(World); It; ++It)
 	{
-		ACompanionCharacter* Companion = *It;
-		if (IsValid(Companion)) SoftCollisionCompanions.Add(Companion);
+		if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(*It))
+		{
+			SoftCollisionCompanions.Add(Companion);
+		}
+		else if (AExtracteeCharacter* Extractee = Cast<AExtracteeCharacter>(*It))
+		{
+			AllyExtractees.Add(Extractee);
+		}
 	}
+}
+
+void AExtractionPlayer::HandleActorSpawned(AActor* SpawnedActor)
+{
+	if (!SpawnedActor) return;
+
+	// Fires for every spawn in the level, so this stays two class-chain walks and a flag write — the
+	// actual rescan is deferred to the next RefreshAllyCache. Nothing may touch the actor here: the
+	// broadcast lands mid-SpawnActor, before BeginPlay.
+	if (!SpawnedActor->IsA<ACompanionCharacter>() && !SpawnedActor->IsA<AExtracteeCharacter>()) return;
+
+	bAllyCacheDirty = true;
 }
 
 FVector AExtractionPlayer::ApplyCompanionSoftCollision(ACompanionCharacter& Companion, UCapsuleComponent& CompanionCapsule)
@@ -1051,6 +1114,58 @@ void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 	CancelRevive();
 }
 
+const TArray<AActor*>& AExtractionPlayer::GetInteractTraceIgnoredActors() const
+{
+	// Reuse the member buffer: Reset() keeps the allocation from the first Reserve, so the two
+	// C++ callers (TraceInteractHit and the ping trace in the command component) never
+	// heap-allocate after the first call.
+	CachedInteractIgnored.Reset();
+	CachedInteractIgnored.Reserve(ExpectedInteractIgnoreCount);
+
+	// Index 0 is this player, so the array can drop straight into a Blueprint ignore list that
+	// previously held only the pawn. const_cast: trace params and Blueprint both take non-const
+	// actors, and every consumer of this list does nothing but compare pointers.
+	CachedInteractIgnored.Add(const_cast<AExtractionPlayer*>(this));
+
+	// Read-only over the rescan cache — Tick owns the refresh (see RefreshAllyCache).
+	// DBNO / CanWorldInteract filtering is applied per call in AppendAllyInteractIgnore so
+	// dynamic state changes are always current, not stale from the last cache rebuild.
+	for (const TWeakObjectPtr<ACompanionCharacter>& Entry : SoftCollisionCompanions)
+		AppendAllyInteractIgnore(Entry.Get(), CachedInteractIgnored);
+
+	for (const TWeakObjectPtr<AExtracteeCharacter>& Entry : AllyExtractees)
+		AppendAllyInteractIgnore(Entry.Get(), CachedInteractIgnored);
+
+	return CachedInteractIgnored;
+}
+
+void AExtractionPlayer::AppendAllyInteractIgnore(AActor* Ally, TArray<AActor*>& OutIgnored) const
+{
+	if (!IsValid(Ally)) return;
+
+	// A downed companion must block the interact trace so the revive press reaches FindReviveTarget
+	// instead of punching through to a loot container behind. AExtracteeCompanion inherits from
+	// ACompanionCharacter, so this covers the armed VIP as well.
+	if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Ally))
+		if (Companion->GetIsCompanionDBNO()) return;
+
+	// An ally that is the interact TARGET stays traceable: the captive VIP and the unrescued escort
+	// are both IWorldInteractable, and ignoring them would make the rescue press impossible. Both
+	// refuse CanWorldInteract once rescued, so they join the ignore set from that frame — which is
+	// also why no possession hook is needed for the VIP, only for allies that spawn at runtime.
+	if (Ally->Implements<UWorldInteractable>()
+		&& IWorldInteractable::Execute_CanWorldInteract(Ally, const_cast<AExtractionPlayer*>(this)))
+		return;
+
+	OutIgnored.Add(Ally);
+
+	// Attachments occlude in their own right: the C++ WeaponMesh is NoCollision, so anything solid on
+	// an ally is a BP-added component or an attached actor. Recursive — a sight attached to an attached
+	// weapon blocks the ray just as well. The companion's own LoS traces append the same set (see
+	// BTService_UpdateCompanionState, where the inclusion is called load-bearing).
+	Ally->GetAttachedActors(OutIgnored, /*bResetArray*/ false, /*bRecursivelyIncludeAttachedActors*/ true);
+}
+
 bool AExtractionPlayer::TraceInteractHit(FHitResult& OutHit) const
 {
 	const UWorld* World = GetWorld();
@@ -1063,6 +1178,13 @@ bool AExtractionPlayer::TraceInteractHit(FHitResult& OutHit) const
 		C->GetPlayerViewPoint(ViewLoc, ViewRot);
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(PlayerInteract), false, this);
+	// Allies must not swallow the ray. Their meshes BLOCK ECC_Visibility (that block is what makes
+	// them take hitscan damage, so it stays), which meant an ally standing between the player and a
+	// container produced the nearer hit, won the comparison below, and handed TryWorldInteract an actor
+	// implementing neither interaction interface — the press then silently did nothing. The nearer-hit
+	// rule itself is untouched: it is what stops the player interacting through walls.
+	Params.AddIgnoredActors(GetInteractTraceIgnoredActors());
+
 	const FVector TraceEnd = ViewLoc + ViewRot.Vector() * InteractTraceRange;
 
 	// Two passes over the same ray: solid world interactables on Visibility, plus the dedicated
@@ -1502,9 +1624,8 @@ void AExtractionPlayer::HandleStimUsed()
 	if (IsValid(WeaponComponent))
 	{
 		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
-			Weapon->CancelReload();
+			Weapon->AbortFireAndReload();
 
-		WeaponComponent->StopFire();
 		if (WeaponComponent->IsAiming())
 		{
 			WeaponComponent->SetAiming(false);
@@ -1693,14 +1814,13 @@ void AExtractionPlayer::EnterDBNO()
 	// if they fire after the hide (same ordering rule as SetReviveAnimsActive).
 	if (IsValid(WeaponComponent))
 	{
-		WeaponComponent->StopFire();
-		WeaponComponent->SetAiming(false);
-		OnADSChanged(false);
 		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
 		{
+			Weapon->AbortFireAndReload();
 			Weapon->CancelRecoilRecovery();
-			Weapon->CancelReload();
 		}
+		WeaponComponent->SetAiming(false);
+		OnADSChanged(false);
 	}
 	SetHeldWeaponHidden(true);
 	SetDBNOMovementProfile(true);
@@ -1793,7 +1913,6 @@ void AExtractionPlayer::OnBleedoutExpired()
 
 void AExtractionPlayer::FullDeath()
 {
-	bIsDBNO = false;
 	BleedoutTimeRemaining = 0.f;
 
 	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
@@ -1801,8 +1920,11 @@ void AExtractionPlayer::FullDeath()
 
 	bAutoLeanActive = false;
 	AutoLeanTargetAlpha = 0.f;
+	// bIsDBNO stays set across CancelStimUse and SetBeingRevived below: both of their
+	// weapon-restore paths are gated on !bIsDBNO, and a corpse must keep the gun hidden.
 	CancelStimUse();
 	SetBeingRevived(false);
+	bIsDBNO = false;
 	SetDBNOCameraFreeLook(false);
 	// Weapon stays hidden — the level-fail flow owns the screen from here.
 	SetDBNOMovementProfile(false);
@@ -1909,30 +2031,45 @@ void AExtractionPlayer::SetBeingRevived(bool bBeingRevived, float ExpectedDurati
 
 	if (bBeingRevived && IsValid(WeaponComponent))
 	{
-		WeaponComponent->StopFire();
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
+			Weapon->AbortFireAndReload();
 		WeaponComponent->SetAiming(false);
 		OnADSChanged(false);
 		bAutoLeanActive = false;
 		AutoLeanTargetAlpha = 0.f;
-		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon)) Weapon->CancelReload();
 	}
 	// After the ADS/pose drops: OnADSChanged drives the kit's NewHandPose, which can re-show
 	// the hand-socket item a hide-first ordering just hid.
-	SetHeldWeaponHidden(bBeingRevived);
+	if (bBeingRevived)
+		SetHeldWeaponHidden(true);
+	else if (!bIsDBNO && !bIsReviving)
+		SetHeldWeaponHidden(false);
 
+	UpdateBeingRevivedMontage(bBeingRevived, ExpectedDuration);
+}
+
+void AExtractionPlayer::UpdateBeingRevivedMontage(bool bPlay, float ExpectedDuration)
+{
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
 	if (!IsValid(AnimInst) || !BeingRevivedMontage) return;
-	if (bBeingRevived && bIsDBNO)
+
+	if (bPlay && bIsDBNO)
 	{
 		AnimInst->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
+
+		// Match the companion reviver's full-clip-over-hold timing. The anti-snap holdover belongs
+		// to the explicit stop blend below; folding it into the rate visibly slows only the player.
 		const float Length = BeingRevivedMontage->GetPlayLength();
-		const float Rate = ExpectedDuration > 0.f && Length > 0.f ? Length / ExpectedDuration : 1.f;
+		const float Rate = Length > KINDA_SMALL_NUMBER && ExpectedDuration > KINDA_SMALL_NUMBER
+			? FMath::Clamp(Length / ExpectedDuration, 0.1f, 10.f)
+			: 1.f;
 		AnimInst->Montage_Play(BeingRevivedMontage, Rate);
 	}
 	else if (AnimInst->Montage_IsPlaying(BeingRevivedMontage))
 	{
-		AnimInst->Montage_Stop(0.25f, BeingRevivedMontage);
+		const float StopBlendTime = FMath::Max(ReviveMontageHoldoverSeconds, 0.25f);
+		AnimInst->Montage_Stop(StopBlendTime, BeingRevivedMontage);
 	}
 }
 
@@ -1961,7 +2098,11 @@ void AExtractionPlayer::SetBeingRevivedCameraAnimationControl(bool bActive)
 
 void AExtractionPlayer::SetHeldWeaponHidden(bool bHideWeapon)
 {
+	if (bHeldWeaponHidden == bHideWeapon) return;
+	bHeldWeaponHidden = bHideWeapon;
+
 	// SetWeaponHidden, not SetActorHiddenInGame: the visible gun is a separate visual actor.
+	// WeaponBase owns its own visibility snapshot for SpawnedVisualActor descendants.
 	if (IsValid(WeaponComponent))
 	{
 		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
@@ -1969,17 +2110,32 @@ void AExtractionPlayer::SetHeldWeaponHidden(bool bHideWeapon)
 	}
 
 	// The kit's VISIBLE third-person gun is a separate BP-spawned actor (BP_Item_Base's Item_Mesh)
-	// attached to a hand socket — C++ has no direct ref (BP-only SpawnedItemRef), so hide any actor
-	// hanging off the weapon-hand sockets. Covers the gun body + its attachment meshes in one call.
+	// attached to a hand socket -- C++ has no direct ref (BP-only SpawnedItemRef), so hide any actor
+	// hanging off the weapon-hand sockets. Walks the full subtree of each matched actor so spawned
+	// attachment actors (scope, laser) one level deeper are caught.
+	// Symmetric: on hide, snapshot descendants that were already hidden by the owning BP
+	// (variable-driven attachment slots). On show, only restore what this system hid.
 	TArray<AActor*> AttachedActors;
 	GetAttachedActors(AttachedActors);
+
+	if (bHideWeapon)
+		HeldWeaponHiddenSnapshot.Reset();
+
 	for (AActor* Attached : AttachedActors)
 	{
 		const USceneComponent* AttachedRoot = IsValid(Attached) ? Attached->GetRootComponent() : nullptr;
 		const FName Socket = AttachedRoot ? AttachedRoot->GetAttachSocketName() : NAME_None;
 		if (Socket == TEXT("ik_hand_gun") || Socket == TEXT("ItemHand_R") || Socket == TEXT("ItemHand_L"))
-			Attached->SetActorHiddenInGame(bHideWeapon);
+		{
+			if (bHideWeapon)
+				WeaponVisibilityUtils::SnapshotAndHideActorTree(Attached, HeldWeaponHiddenSnapshot);
+			else
+				WeaponVisibilityUtils::RestoreActorTree(Attached, HeldWeaponHiddenSnapshot);
+		}
 	}
+
+	if (!bHideWeapon)
+		HeldWeaponHiddenSnapshot.Reset();
 }
 
 // Reads a float-ish BP variable off an anim instance (UE5 BP floats are doubles).
@@ -2159,16 +2315,15 @@ void AExtractionPlayer::SetReviveAnimsActive(bool bActive)
 {
 	if (bActive && IsValid(WeaponComponent))
 	{
-		WeaponComponent->StopFire();
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
+		{
+			Weapon->AbortFireAndReload();
+			Weapon->CancelRecoilRecovery();
+		}
 		WeaponComponent->SetAiming(false);
 		OnADSChanged(false);
 		bAutoLeanActive = false;
 		AutoLeanTargetAlpha = 0.f;
-		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
-		{
-			Weapon->CancelRecoilRecovery();
-			Weapon->CancelReload();
-		}
 	}
 	// After the ADS/pose drops: OnADSChanged drives the kit's NewHandPose, which can re-show
 	// the hand-socket item a hide-first ordering just hid.

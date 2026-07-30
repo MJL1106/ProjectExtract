@@ -10,6 +10,15 @@ class AWeaponBase;
 class IExtractionPlayerInterface;
 enum class EEnemyWeaponAnimType : uint8;
 
+/** Identifies which weapon slot the player is currently holding. */
+UENUM(BlueprintType)
+enum class EWeaponSlot : uint8
+{
+	None		UMETA(DisplayName = "None"),
+	Primary		UMETA(DisplayName = "Primary"),
+	Secondary	UMETA(DisplayName = "Secondary"),
+};
+
 /** Broadcast per actual shot with stealth exemption context. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerWeaponShot, bool, bStealthExempt);
 
@@ -30,12 +39,12 @@ public:
 	void EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass);
 
 	/** Activate the primary/secondary slot weapon (1 / 2 keys). Server-authoritative;
-	 *  blocked while the current weapon is reloading or the owner is DBNO/in a takedown. */
+	 *  cancels any in-progress reload on the current weapon. Blocked while DBNO/in a takedown. */
 	void SwitchToPrimary();
 	void SwitchToSecondary();
 
-	/** Replace a slot's weapon with a new class (weapon-pickup swap). Authority-only; refused
-	 *  while the held weapon is reloading or the owner is DBNO/in a takedown. Mag/Reserve < 0
+	/** Replace a slot's weapon with a new class (weapon-pickup swap). Authority-only; cancels
+	 *  any in-progress reload on the held weapon. Refused while DBNO/in a takedown. Mag/Reserve < 0
 	 *  keep the new weapon's data-asset defaults. Activates the new weapon if the replaced slot
 	 *  was the held one. Returns the spawned weapon, or null when refused. */
 	UFUNCTION(BlueprintCallable, Category = "Weapon")
@@ -43,8 +52,9 @@ public:
 
 	/** Mark the kit throwable (grenade) slot equipped/unequipped — called by the char BP's kit
 	 *  swap pipeline. While set, fire/reload/ADS divert away from the C++ hitscan weapon and the
-	 *  char BP routes fire to the kit item. Returns false (and changes nothing) when the equip is
-	 *  refused: mid-reload, DBNO, or takedown. Cleared automatically on any real weapon switch. */
+	 *  char BP routes fire to the kit item. Cancels any in-progress reload on the held weapon.
+	 *  Returns false (and changes nothing) when refused: DBNO or takedown. Cleared automatically
+	 *  on any real weapon switch. */
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Throwable")
 	bool SetThrowableEquipped(bool bEquipped);
 
@@ -74,6 +84,16 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	AWeaponBase* GetSecondaryWeapon() const { return SecondaryWeapon; }
+
+	/** Which slot the currently held weapon occupies (None when no weapon is held or it matches
+	 *  neither slot pointer — e.g. after both slots were destroyed). */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	EWeaponSlot GetActiveWeaponSlot() const;
+
+	/** The weapon in the slot the player is NOT currently holding. Null when there is no held
+	 *  weapon or the other slot is empty. */
+	UFUNCTION(BlueprintPure, Category = "Weapon")
+	AWeaponBase* GetStowedWeapon() const;
 
 	/** First carried weapon whose ammo category matches — held weapon first, then the stowed
 	 *  slot. Null when neither carried weapon uses this category. */
