@@ -15,6 +15,7 @@
 #include "TimerManager.h"
 #include "Engine/World.h"
 #include "Engine/HitResult.h"
+#include "CollisionShape.h"
 
 // Projects a world-space point down to the nearest WorldStatic surface below it.
 // Returns Point with its Z replaced by the hit Z. Falls back to subtracting a nominal capsule half-height on miss.
@@ -145,6 +146,36 @@ bool UEnemyGrenadierComponent::TryThrowAt(const FVector& TargetLocation)
 		0.5f);
 
 	if (!bSolved) return false;
+
+	// --- Launch clearance: sweep a sphere along the initial trajectory to catch wall collisions ---
+	// The arc solver does no obstruction testing, so a grenadier behind tall cover (or in the
+	// open after the lob gate was widened) can solve an arc that plants the grenade straight
+	// into the wall it is hiding behind. This catches that case at commit time.
+	// Deliberately absent from SpawnGrenadeFromSocket() — refusing at release would consume the
+	// wind-up montage without spawning or decrementing supply.
+	constexpr float ClearanceProbeRadius = 15.f;   // slightly larger than the 10 cm projectile sphere
+	constexpr float ClearanceProbeDistance = 150.f; // ~1.5 m along the solved velocity — clears the thrower's cover lip
+	{
+		const FVector SweepDir = OutVelocity.GetSafeNormal();
+		const FVector SweepEnd = LaunchOrigin + SweepDir * ClearanceProbeDistance;
+
+		FCollisionQueryParams ClearanceParams(SCENE_QUERY_STAT(GrenadeLaunchClearance), false);
+		ClearanceParams.AddIgnoredActor(Owner);
+
+		FHitResult ClearanceHit;
+		if (World->SweepSingleByChannel(
+				ClearanceHit,
+				LaunchOrigin,
+				SweepEnd,
+				FQuat::Identity,
+				ECC_WorldStatic,
+				FCollisionShape::MakeSphere(ClearanceProbeRadius),
+				ClearanceParams)
+			&& ClearanceHit.bBlockingHit && !ClearanceHit.bStartPenetrating)
+		{
+			return false;
+		}
+	}
 
 	PendingLaunchVelocity = OutVelocity;
 	PendingLandingLocation = AdjustedTarget;

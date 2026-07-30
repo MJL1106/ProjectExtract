@@ -334,11 +334,11 @@ public:
 
 	/** Max number of grenades the enemy carries. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1"))
-	int32 GrenadeSupply = 3;
+	int32 GrenadeSupply = 8;
 
 	/** Minimum seconds between grenade throws. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.5"))
-	float GrenadeCooldown = 12.f;
+	float GrenadeCooldown = 6.f;
 
 	/** Seconds until the grenade detonates after spawning. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.5"))
@@ -348,9 +348,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.1"))
 	float GrenadeTelegraphTime = 1.0f;
 
-	/** Minimum throw distance (cm). Targets closer than this won't be lobbed at. */
+	/** Minimum throw distance (cm). Targets closer than this won't be lobbed at.
+	 *  Currently < GrenadeDamageRadius — the thrower survives close-range blasts only because the
+	 *  team filter ignores friendly pawns. Do not remove the filter without raising this value. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.0"))
-	float GrenadeMinRange = 500.f;
+	float GrenadeMinRange = 400.f;
 
 	/** Maximum throw distance (cm). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1.0"))
@@ -362,11 +364,11 @@ public:
 
 	/** Radius (cm) of the radial damage sphere. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1.0"))
-	float GrenadeDamageRadius = 350.f;
+	float GrenadeDamageRadius = 600.f;
 
 	/** Seconds the target must be LOS-blocked before the grenadier lobs. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.5"))
-	float GrenadeLobTriggerLOSBlockedTime = 4.f;
+	float GrenadeLobTriggerLOSBlockedTime = 2.5f;
 
 	/** Projectile class spawned on throw. Blueprint-assigned. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier")
@@ -393,7 +395,7 @@ public:
 	 *  during live engagement (independent of the LOS-blocked hiding lob). Naturally rate-limited by
 	 *  GrenadeCooldown + GrenadeSupply, so this just adds variety on top of the cooldown. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float GrenadeCoverLobChance = 0.20f;
+	float GrenadeCoverLobChance = 0.40f;
 
 	/** Of the proactive cover lobs, the fraction that pop up over the wall (stand + throw + duck) vs
 	 *  lobbing from the tucked crouch pose. 0.35 = ~35% pop-up, ~65% tucked. */

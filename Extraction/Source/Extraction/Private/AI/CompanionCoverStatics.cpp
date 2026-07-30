@@ -22,6 +22,40 @@
 namespace CompanionCover
 {
 
+// Few-enemy Combat gate: true when the companion is in Combat mode with fewer than the
+// outnumbered threshold of known threats. Uses the same CountKnownThreats value and
+// CombatOutnumberedCount the outnumbered trigger uses, so the >= path is provably untouched.
+static bool IsFewEnemyCombat(const ACompanionCharacter& Companion,
+	const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount)
+{
+	if (!Tuning.bFewEnemyCombatMobileCover) return false;
+	if (!Tuning.bCombatModeStricterCommit) return false;
+	if (Companion.GetMode() != ECompanionMode::Combat) return false;
+	return KnownThreatCount < Tuning.CombatOutnumberedCount;
+}
+
+// Wounded-fire pairing: "is anyone actually shooting at us". The bar is deliberately the
+// pressure-SPIKE bar (OR, not the trigger's AND) — lower reopens the ~8s duck-in/duck-out
+// cycle the widened windows exist to stop. Release variant widens exactly like every other
+// clause (window x2, one fewer hit, suppression release-scaled) so a lull between bursts
+// cannot pop the companion out.
+static bool HasWoundedFirePairing(const ACompanionCharacter& Companion,
+	const UCompanionTuningDataAsset& Tuning, bool bForRelease)
+{
+	const float SuppBar = bForRelease
+		? Tuning.FewEnemyWoundedCoverSuppressionFrac * Tuning.UnderFireSuppressionReleaseScale
+		: Tuning.FewEnemyWoundedCoverSuppressionFrac;
+	if (Companion.GetSuppression01() >= SuppBar) return true;
+
+	const float Window = bForRelease
+		? Tuning.CoverCommitUnderFireWindow * 2.f
+		: Tuning.CoverCommitUnderFireWindow;
+	const int32 HitsNeeded = bForRelease
+		? FMath::Max(1, Tuning.FewEnemyWoundedCoverDamageHits - 1)
+		: Tuning.FewEnemyWoundedCoverDamageHits;
+	return Companion.GetRecentDamageCount(Window) >= HitsNeeded;
+}
+
 FCoverTriggers EvaluateTriggers(const ACompanionCharacter& Companion,
 	const UCompanionTuningDataAsset& Tuning, int32 KnownThreatCount, bool bForRelease)
 {
@@ -69,6 +103,14 @@ FCoverTriggers EvaluateTriggers(const ACompanionCharacter& Companion,
 		? FMath::Max(Tuning.CoverTriggerHealthReleaseFrac, Tuning.CoverTriggerHealthFrac)
 		: Tuning.CoverTriggerHealthFrac;
 	Out.bLowHealth = Companion.GetHealthFraction() < HealthThresh;
+
+	// Few-enemy Combat: being wounded is not on its own a reason to hide from one or two enemies —
+	// require live incoming fire (suppression spike or hit burst) as well. This is also the CAMP fix:
+	// low health passes commit in ALL modes and blocks release via IsStrongPressure, and regen delay
+	// resets on every chip hit so it never clears mid-fight. The fire pairing breaks that deadlock.
+	if (Out.bLowHealth && IsFewEnemyCombat(Companion, Tuning, KnownThreatCount)
+		&& !HasWoundedFirePairing(Companion, Tuning, bForRelease))
+		Out.bLowHealth = false;
 
 	// Reloading is RELEASE-ONLY: already behind cover, stay there through the reload — but never
 	// run to cover from the open just because a reload started (reload on the move instead).
@@ -119,7 +161,13 @@ bool IsStrongPressure(const ACompanionCharacter& Companion,
 {
 	// Low health is a static condition, not a spike — it belongs only on the release-blocking
 	// side (hold working cover while wounded), never on the recommit-bypass side.
-	if (Companion.GetHealthFraction() < Tuning.CoverTriggerHealthFrac) return true;
+	// Few-enemy Combat: the static low-health release-blocker also requires fire pairing —
+	// without it the 4s Combat natural release never fires while wounded and the companion
+	// camps until regen crosses 50% (the regen delay resets on every chip hit).
+	if (Companion.GetHealthFraction() < Tuning.CoverTriggerHealthFrac
+		&& (!IsFewEnemyCombat(Companion, Tuning, KnownThreatCount)
+			|| HasWoundedFirePairing(Companion, Tuning, /*bForRelease=*/true)))
+		return true;
 	return HasPressureSpiked(Companion, Tuning, KnownThreatCount);
 }
 

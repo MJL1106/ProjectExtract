@@ -239,6 +239,7 @@ bool FObjectiveSideEffectReplayRuleTest::RunTest(const FString& Parameters)
 		EObjectiveSideEffectType::TripAlarm,
 		EObjectiveSideEffectType::SetDirectorSpawning,
 		EObjectiveSideEffectType::SetDoorsLocked,
+		EObjectiveSideEffectType::DeactivateActor,
 	};
 	for (EObjectiveSideEffectType Type : Idempotent)
 	{

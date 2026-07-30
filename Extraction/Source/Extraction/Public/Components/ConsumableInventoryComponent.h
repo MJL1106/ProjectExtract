@@ -40,6 +40,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Inventory|Consumables")
 	int32 AddStims(int32 Amount);
 
+	/** Authority-only. Overwrites the stim count (checkpoint restore). Broadcasts the change. */
+	UFUNCTION(BlueprintCallable, Category = "Inventory|Consumables")
+	void SetStimCount(int32 NewCount);
+
 	/** Uses a stim on authority or requests use from the owning client. */
 	UFUNCTION(BlueprintCallable, Category = "Inventory|Consumables")
 	bool TryUseStim();

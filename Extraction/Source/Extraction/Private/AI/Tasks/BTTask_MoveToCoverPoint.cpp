@@ -230,11 +230,24 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 				return EBTNodeResult::Failed;
 			}
 
-			// Multi-threat first pick: the shared EQS scores exposure against the FOCUSED target only
-			// — when several enemies converge, the EQS winner can be wide open to the others until the
-			// switch monitor's next re-eval. Re-rank locally against all known threats and override the
-			// BB if a better-shielding candidate exists. Companion-only; the shared scorer is untouched.
-			const FCover Reranked = RerankCoverForMultiThreat(OwnerComp, Controller, Pawn, *Tuning, Cover);
+			// Eyes-on validation + multi-threat re-rank: the EQS winner must have a usable peek line
+			// to the combat target AND shield against extra threats. If the pick is blind and no nearby
+			// candidate passes, decline the commit (routes to open-engage / turn-and-fight via ForceSuccess).
+			bool bNoEyesOn = false;
+			const FCover Reranked = ValidateAndRerankCover(OwnerComp, Controller, Pawn, *Tuning, Cover, bNoEyesOn);
+			if (bNoEyesOn)
+			{
+				UE_LOG(LogCompanionAI, Log,
+					TEXT("%s: cover-commit DECLINED reason=no-eyes-on — open-engage"),
+					*Pawn->GetName());
+				if (UCoverReservationSubsystem* EyesOnResSub = OwnerComp.GetWorld() ? OwnerComp.GetWorld()->GetSubsystem<UCoverReservationSubsystem>() : nullptr)
+				{
+					EyesOnResSub->MarkVacated(Cover.Handle, Controller);
+					EyesOnResSub->ClearIntendedCover(Controller);
+				}
+				BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
+				return EBTNodeResult::Failed;
+			}
 			if (Reranked.IsValid() && Reranked.Handle != Cover.Handle)
 			{
 				Cover = Reranked;
@@ -906,41 +919,59 @@ void UBTTask_MoveToCoverPoint::HandleFailure(UBehaviorTreeComponent& OwnerComp,
 	}
 }
 
-FCover UBTTask_MoveToCoverPoint::RerankCoverForMultiThreat(UBehaviorTreeComponent& OwnerComp, AAIController* Controller,
-	APawn* Pawn, const UCompanionTuningDataAsset& Tuning, const FCover& ChosenCover) const
+FCover UBTTask_MoveToCoverPoint::ValidateAndRerankCover(UBehaviorTreeComponent& OwnerComp, AAIController* Controller,
+	APawn* Pawn, const UCompanionTuningDataAsset& Tuning, const FCover& ChosenCover,
+	bool& bOutNoEyesOnCandidate) const
 {
+	bOutNoEyesOnCandidate = false;
+
 	UWorld* World = OwnerComp.GetWorld();
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
-	if (!World || !BB || !Tuning.bCoverRequiresBodyProtection) return ChosenCover;
+	if (!World || !BB) return ChosenCover;
 
+	// No combat target = DBNO retreat / wave hold / stealth — both jobs skipped.
 	AActor* FocusTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
 	if (!IsValid(FocusTarget)) return ChosenCover;
-
-	const float Penalty = FMath::Clamp(Tuning.MultiThreatExposurePenalty, 0.f, 1.f);
-	const int32 MaxExtra = FMath::Max(0, Tuning.MaxThreatsForCoverScoring - 1);
-	if (MaxExtra <= 0 || Penalty >= 1.f) return ChosenCover;
-
-	TArray<AActor*, TInlineAllocator<8>> ExtraThreats;
-	CompanionCover::GatherExtraThreatActors(Controller, Pawn, FocusTarget, MaxExtra, ExtraThreats);
-	if (ExtraThreats.Num() == 0) return ChosenCover;
 
 	const ACharacter* PawnChar = Cast<ACharacter>(Pawn);
 	const UCapsuleComponent* Cap = PawnChar ? PawnChar->GetCapsuleComponent() : nullptr;
 	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : MoveToCoverDefaultCapsuleRadius) + 10.f;
 
-	const int32 ChosenUncovered = CompanionCover::CountUncoveredThreats(World, ChosenCover.Data, Standoff,
-		Tuning.CoverProtectionChestHeight, Pawn, ExtraThreats);
-	if (ChosenUncovered == 0) return ChosenCover; // already shields every known threat
-
-	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(World);
-	if (!CoverSys) return ChosenCover;
-	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
-	AController* CoverController = Pawn->GetController();
 	const FVector MyLoc = Pawn->GetActorLocation();
 	const FVector ThreatLoc = FocusTarget->GetActorLocation();
 	// Head-height LoS anchor for the peek test (centre-mass reads a standing shooter behind crouch
 	// cover as blocked — shared resolver with the state service and aim).
 	const FVector ThreatSightLoc = AITargeting::GetSightLocation(FocusTarget);
+
+	// --- Eyes-on validation: does the chosen point have a peek line to the target? ---
+	const bool bChosenEyesOn = !Tuning.bCoverRequiresPeekLosToTarget
+		|| UCoverGeometryStatics::CanPeekShoot(World, ChosenCover.Data,
+			UCoverGeometryStatics::GetCoverHeight(ChosenCover.Data) == ECoverHeight::Crouch,
+			ThreatSightLoc, Tuning.CoverEyesOnPeekEyeHeight, FocusTarget, Pawn);
+
+	// --- Multi-threat inputs ---
+	const float Penalty = FMath::Clamp(Tuning.MultiThreatExposurePenalty, 0.f, 1.f);
+	const int32 MaxExtra = FMath::Max(0, Tuning.MaxThreatsForCoverScoring - 1);
+	const bool bMultiThreat = Tuning.bCoverRequiresBodyProtection && MaxExtra > 0 && Penalty < 1.f;
+
+	TArray<AActor*, TInlineAllocator<8>> ExtraThreats;
+	if (bMultiThreat)
+		CompanionCover::GatherExtraThreatActors(Controller, Pawn, FocusTarget, MaxExtra, ExtraThreats);
+
+	const int32 ChosenUncovered = ExtraThreats.Num() > 0
+		? CompanionCover::CountUncoveredThreats(World, ChosenCover.Data, Standoff,
+			Tuning.CoverProtectionChestHeight, Pawn, ExtraThreats)
+		: 0;
+
+	// Nothing to fix: chosen has eyes-on AND shields all extra threats.
+	if (bChosenEyesOn && ChosenUncovered == 0) return ChosenCover;
+
+	// Fail OPEN if cover infrastructure is missing — never decline every commit.
+	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(World);
+	if (!CoverSys) return ChosenCover;
+
+	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
+	AController* CoverController = Pawn->GetController();
 
 	// Hostile-adjacency reject (enemy-parity) — never re-rank onto a spot an enemy holds or heads to.
 	FHostileAnchors HostileAnchors;
@@ -966,14 +997,25 @@ FCover UBTTask_MoveToCoverPoint::RerankCoverForMultiThreat(UBehaviorTreeComponen
 	CoverSys->GetCoverDataWithinBounds(Bounds, Candidates);
 
 	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(Tuning.CoverFlankArcHalfAngleDeg));
+	const float OuterCapSq = FMath::Square(FMath::Max(Tuning.CoverCommitMaxDistance, Tuning.CoverSearchRadius));
+
+	const bool bBlindIncumbent = !bChosenEyesOn;
+
+	// Blind incumbent: sort candidates nearest-first so the first peek-passing candidate is the
+	// closest adoptable point. The multi-threat path keeps today's octree iteration order.
+	if (bBlindIncumbent)
+	{
+		Candidates.Sort([&MyLoc](const FCover& A, const FCover& B)
+		{
+			return FVector::DistSquared(MyLoc, A.Data.Location) < FVector::DistSquared(MyLoc, B.Data.Location);
+		});
+	}
 
 	FCover Best = ChosenCover;
 	float BestScore = PenalizedScore(ChosenCover.Data, ChosenUncovered);
 	int32 BestUncovered = ChosenUncovered;
-
-	// Same outer cap the commit gate enforced on the original pick — the box bounds query can hand
-	// back corner candidates ~1.41x the radius out.
-	const float OuterCapSq = FMath::Square(FMath::Max(Tuning.CoverCommitMaxDistance, Tuning.CoverSearchRadius));
+	int32 PeekTraces = 0;
+	bool bAdopted = false;
 
 	for (const FCover& Candidate : Candidates)
 	{
@@ -994,28 +1036,72 @@ FCover UBTTask_MoveToCoverPoint::RerankCoverForMultiThreat(UBehaviorTreeComponen
 		if (FVector::DotProduct(UCoverGeometryStatics::GetFireArcForward(Candidate.Data), ToTarget2D) < ArcCos) continue;
 		if (bRejectHostileAdjacent && UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location,
 			HostileAnchors, Tuning.MinHostileCoverDistance, Tuning.MinHostilePawnDistance)) continue;
+
+		// Cap peek traces for the blind-incumbent fallback — avoid unbounded trace cost.
+		if (bBlindIncumbent && PeekTraces >= Tuning.CoverEyesOnMaxCandidateTraces) break;
+		++PeekTraces;
+
 		if (!UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data,
 			UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch,
-			ThreatSightLoc, 150.f, FocusTarget, Pawn)) continue;
-		if (!UCoverGeometryStatics::IsThreatCovered(World, Candidate.Data, ThreatLoc, Standoff,
-			Tuning.CoverProtectionChestHeight, FocusTarget, Pawn)) continue;
+			ThreatSightLoc, Tuning.CoverEyesOnPeekEyeHeight, FocusTarget, Pawn)) continue;
+		if (Tuning.bCoverRequiresBodyProtection
+			&& !UCoverGeometryStatics::IsThreatCovered(World, Candidate.Data, ThreatLoc, Standoff,
+				Tuning.CoverProtectionChestHeight, FocusTarget, Pawn)) continue;
 
-		const int32 Uncovered = CompanionCover::CountUncoveredThreats(World, Candidate.Data, Standoff,
-			Tuning.CoverProtectionChestHeight, Pawn, ExtraThreats);
-		if (Uncovered >= BestUncovered) continue; // override only for strictly better shielding
+		const int32 Uncovered = ExtraThreats.Num() > 0
+			? CompanionCover::CountUncoveredThreats(World, Candidate.Data, Standoff,
+				Tuning.CoverProtectionChestHeight, Pawn, ExtraThreats)
+			: 0;
 
-		const float Score = PenalizedScore(Candidate.Data, Uncovered);
-		if (Score > BestScore)
+		if (!bBlindIncumbent)
 		{
+			// Multi-threat path (today's rule verbatim): override only for strictly better shielding.
+			if (Uncovered >= BestUncovered) continue;
+			const float Score = PenalizedScore(Candidate.Data, Uncovered);
+			if (Score <= BestScore) continue;
+
 			Best = Candidate;
 			BestScore = Score;
 			BestUncovered = Uncovered;
 		}
+		else
+		{
+			// Blind-incumbent path: first passing candidate beats the blind chosen outright;
+			// subsequent replacements ranked by shielding then score.
+			if (bAdopted)
+			{
+				if (Uncovered > BestUncovered) continue;
+				const float Score = PenalizedScore(Candidate.Data, Uncovered);
+				if (Uncovered == BestUncovered && Score <= BestScore) continue;
+
+				Best = Candidate;
+				BestScore = Score;
+				BestUncovered = Uncovered;
+			}
+			else
+			{
+				Best = Candidate;
+				BestScore = PenalizedScore(Candidate.Data, Uncovered);
+				BestUncovered = Uncovered;
+				bAdopted = true;
+			}
+		}
+	}
+
+	// Blind incumbent with no adoptable candidate — caller declines the commit.
+	if (bBlindIncumbent && !bAdopted)
+	{
+		bOutNoEyesOnCandidate = true;
+		UE_LOG(LogCompanionAI, Log,
+			TEXT("%s: EYES-ON fail — chosen point has no peek line to %s and no candidate in %.0fcm does (traces=%d)"),
+			*Pawn->GetName(), *GetNameSafe(FocusTarget), FMath::Sqrt(OuterCapSq), PeekTraces);
+		return ChosenCover;
 	}
 
 	if (Best.Handle != ChosenCover.Handle)
-		UE_LOG(LogCompanionAI, Log, TEXT("%s: first-pick re-rank — EQS cover exposed to %d extra threat(s), overriding to one exposed to %d"),
-			*Pawn->GetName(), ChosenUncovered, BestUncovered);
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: first-pick re-rank — EQS cover %s to one eyesOn=%d uncovered=%d (was uncovered=%d, traces=%d)"),
+			*Pawn->GetName(), bBlindIncumbent ? TEXT("blind→adopted") : TEXT("multi-threat override"),
+			bChosenEyesOn ? 0 : 1, BestUncovered, ChosenUncovered, PeekTraces);
 
 	return Best;
 }

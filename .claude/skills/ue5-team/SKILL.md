@@ -1,6 +1,6 @@
 ---
 name: ue5-team
-description: Auto-decision engine for spawning UE5 agent teams in ProjectExtract. Evaluates the current task against heuristics and creates the optimal team composition using project-specific agent roles. Use proactively at the start of every non-trivial task — not only when the user mentions "team" or "parallel".
+description: Decision engine for spawning UE5 agent teams in ProjectExtract. Evaluates a task against heuristics and creates the optimal team composition using project-specific agent roles. Invoke ONLY for tier 3 work (new class, 4+ files, new subsystem, or spanning 3+ subsystem dirs) or when the user asks for a team. Do NOT invoke on tier 1 / tier 2 tasks — concluding "SOLO" on a small change costs more than it saves.
 compatibility: Claude Code. Requires CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 in settings.
 metadata:
   author: Matthew
@@ -14,7 +14,13 @@ metadata:
 ## Purpose
 Evaluate whether the current task warrants spawning an agent team, and if so, create the optimal team composition using ProjectExtract's custom agents in `.claude/agents/`.
 
-This skill should be invoked **at the start of every non-trivial task**, before planning. It's a meta-skill: it decides whether the work goes solo (single `ue5-cpp-implementer`) or fans out to a team.
+This skill is for **tier 3 work only** (see "Review tiers" in `CLAUDE.md`): a new class, 4+ files, a new subsystem, or a change spanning 3+ subsystem dirs. It is **not** a mandatory Step 0 any more — invoking it on a small task to conclude "SOLO" was pure overhead and is a documented cause of slow turnaround. Tier 1 and tier 2 tasks skip it entirely and go straight to a single named `ue5-cpp-implementer`.
+
+## Teams are for parallel work, not for review loops
+
+A team is worth it when **2+ implementers have a genuine integration boundary** — implementer A's header is implementer B's dependency, and routing every handoff through the lead is the bottleneck.
+
+A team is **not** the answer to a slow implement → review → fix cycle. That chain is serial; a team cannot compress it, and it adds spawn plus coordination overhead on top. Worse, letting implementer and reviewer message each other directly removes main chat's `WARNING` triage — the only place the task goal and user intent actually live — so the pair chases every finding and the loop gets longer, not shorter. Persistence across rounds is what fixes review-loop latency, and named subagents plus `SendMessage` already give you that without a team.
 
 ## Auto-Decision Heuristics
 
@@ -62,7 +68,7 @@ Use 3 agents (no Implementer B) if the feature has minimal UI. Use 4 when there'
 ### QA Review Team (2 agents — reviewer in plan mode)
 
 ```
-Lead (you): Collates findings, prioritises fixes, re-dispatches ue5-cpp-implementer to apply.
+Lead (you): Collates findings, triages WARNINGs against the goal, messages the existing ue5-cpp-implementer to apply.
 Reviewer: subagent_type=ue5-reviewer. Plan mode. Safety, performance, and edge-case in a single consolidated pass.
 ```
 
@@ -104,7 +110,7 @@ These prevent merge conflicts when teammates work in parallel:
 
 4. **Build.cs bottleneck**: Only the lead edits `Extraction.Build.cs`. Teammates request new module dependencies / include paths via message.
 
-5. **Reviewers never edit**: All reviewer agents run in plan mode. They flag issues; the lead re-dispatches `ue5-cpp-implementer` to apply fixes.
+5. **Reviewers never edit**: All reviewer agents run in plan mode. They flag issues; the lead routes fixes to the **existing** `ue5-cpp-implementer` via `SendMessage`. Never spawn a fresh implementer or reviewer for a follow-up round, in team mode or solo — the cold re-read is the dominant cost.
 
 6. **Worktree isolation**: When parallel implementation teammates would touch the same area despite ownership rules, use worktrees (`isolation: "worktree"`) so each agent works on an isolated copy and the lead merges after review.
 

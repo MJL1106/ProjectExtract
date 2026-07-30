@@ -25,6 +25,11 @@ struct FMusicPhaseSet
 	UPROPERTY(EditDefaultsOnly, Category = "Tracks")
 	TObjectPtr<USoundBase> SuspicionTrack;
 
+	/** Continuous bed while the player is inside a stealth-discipline zone. Must be
+	 *  loop-authored. Falls back to SuspicionTrack when unset. */
+	UPROPERTY(EditDefaultsOnly, Category = "Tracks")
+	TObjectPtr<USoundBase> StealthTrack;
+
 	/** Full combat track. Must be loop-authored. */
 	UPROPERTY(EditDefaultsOnly, Category = "Tracks")
 	TObjectPtr<USoundBase> CombatTrack;

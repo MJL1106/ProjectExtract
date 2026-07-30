@@ -19,14 +19,14 @@ struct FGrenadierInitParams
 {
 	GENERATED_BODY()
 
-	int32 GrenadeSupply = 3;
-	float GrenadeCooldown = 12.f;
+	int32 GrenadeSupply = 8;
+	float GrenadeCooldown = 6.f;
 	float GrenadeFuseTime = 2.5f;
 	float GrenadeTelegraphTime = 1.f;
-	float GrenadeMinRange = 500.f;
+	float GrenadeMinRange = 400.f;
 	float GrenadeMaxRange = 2000.f;
 	float GrenadeDamage = 80.f;
-	float GrenadeDamageRadius = 350.f;
+	float GrenadeDamageRadius = 600.f;
 	float GrenadeLandingDistanceScale = 1.f;
 	FName GrenadeThrowSocket = TEXT("GrenadeSocket");
 
@@ -91,14 +91,14 @@ public:
 
 private:
 	/** Cached from DA at InitFromArchetype. */
-	int32 GrenadeSupply = 3;
-	float GrenadeCooldown = 12.f;
+	int32 GrenadeSupply = 8;
+	float GrenadeCooldown = 6.f;
 	float GrenadeFuseTime = 2.5f;
 	float GrenadeTelegraphTime = 1.f;
-	float GrenadeMinRange = 500.f;
+	float GrenadeMinRange = 400.f;
 	float GrenadeMaxRange = 2000.f;
 	float GrenadeDamage = 80.f;
-	float GrenadeDamageRadius = 350.f;
+	float GrenadeDamageRadius = 600.f;
 
 	UPROPERTY()
 	TSubclassOf<AEnemyGrenadeProjectile> GrenadeProjectileClass;

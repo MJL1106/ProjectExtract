@@ -9,6 +9,7 @@
 #include "Enemy/EnemyDirectorSubsystem.h"
 #include "EngineUtils.h"
 #include "Extractee/ExtracteeCompanion.h"
+#include "Character/ExtractionPlayer.h"
 #include "Game/ExtractionGameInstance.h"
 #include "Game/ExtractionGameMode.h"
 #include "Game/MissionInventorySubsystem.h"
@@ -424,6 +425,13 @@ void ALevelObjectiveFlow::Advance(ELevelObjectiveEvent Event)
 		// Record the checkpoint so a level restart (fail flow) resumes here.
 		if (UExtractionGameInstance* GameInstance = Cast<UExtractionGameInstance>(GetGameInstance()))
 			GameInstance->SetCheckpoint(FName(*UGameplayStatics::GetCurrentLevelName(this, true)), CurrentStep);
+
+		// Capture the player's loadout so the restart restores weapons/ammo/stims.
+		if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
+		{
+			if (AExtractionPlayer* Player = Cast<AExtractionPlayer>(PC->GetPawn()))
+				Player->RequestLoadoutCapture();
+		}
 	}
 
 	ForceNetUpdate();

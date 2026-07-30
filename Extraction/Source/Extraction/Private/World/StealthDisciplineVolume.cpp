@@ -5,6 +5,7 @@
 #include "Components/BoxComponent.h"
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
+#include "Audio/MusicSubsystem.h"
 #include "Enemy/EnemyDirectorSubsystem.h"
 #include "Enemy/Director/DirectorConfigData.h"
 #include "Game/MissionInventorySubsystem.h"
@@ -64,6 +65,7 @@ void AStealthDisciplineVolume::BeginPlay()
 		PendingSuppressedShots = 0;
 		bWarningSent = false;
 		bPlayerInsideVolume = true;
+		SetStealthMusicActive(true);
 		StartSampling();
 	}
 
@@ -106,6 +108,7 @@ void AStealthDisciplineVolume::OnBeginOverlap(
 	if (TrackedPlayer == Player)
 	{
 		bPlayerInsideVolume = true;
+		SetStealthMusicActive(true);
 		PendingNormalShots = 0;
 		PendingSuppressedShots = 0;
 
@@ -136,6 +139,7 @@ void AStealthDisciplineVolume::HandleNewPlayerEntry(AExtractionPlayer* Player)
 	PendingSuppressedShots = 0;
 	bWarningSent = false;
 	bPlayerInsideVolume = true;
+	SetStealthMusicActive(true);
 
 	StartSampling();
 
@@ -153,6 +157,7 @@ void AStealthDisciplineVolume::OnEndOverlap(
 	// Leaving the volume does NOT wipe pressure or stop sampling. Pressure bleeds via
 	// decay-only ticks. Sprint/shot accrual is gated on bPlayerInsideVolume in SampleTick.
 	bPlayerInsideVolume = false;
+	SetStealthMusicActive(false);
 
 	UE_LOG(LogExtraction, Verbose, TEXT("StealthDisciplineVolume '%s': player exited (pressure %.1f, decay-only sampling continues)"),
 		*GetNameSafe(this), Accumulator.Pressure);
@@ -354,10 +359,31 @@ void AStealthDisciplineVolume::DisableForWave()
 	}
 }
 
+// ---- Stealth music ----
+
+void AStealthDisciplineVolume::SetStealthMusicActive(bool bActive)
+{
+	if (bStealthMusicActive == bActive) return;
+
+	const UWorld* World = GetWorld();
+	UMusicSubsystem* Music = World ? World->GetSubsystem<UMusicSubsystem>() : nullptr;
+	if (!IsValid(Music)) return;
+
+	// Assigned after the resolve so a null subsystem leaves the flag unchanged -- a later call
+	// with the same value retries rather than silently no-oping with a desynced count.
+	bStealthMusicActive = bActive;
+
+	if (bActive)
+		Music->EnterStealthZone();
+	else
+		Music->ExitStealthZone();
+}
+
 // ---- Cleanup ----
 
 void AStealthDisciplineVolume::CleanupTrackedPlayer()
 {
+	SetStealthMusicActive(false);
 	StopSampling();
 	UnbindShotRelay();
 

@@ -4,20 +4,12 @@
 
 #include "CoreMinimal.h"
 #include "Components/ActorComponent.h"
+#include "ExtractionTypes.h"
 #include "WeaponComponent.generated.h"
 
 class AWeaponBase;
 class IExtractionPlayerInterface;
 enum class EEnemyWeaponAnimType : uint8;
-
-/** Identifies which weapon slot the player is currently holding. */
-UENUM(BlueprintType)
-enum class EWeaponSlot : uint8
-{
-	None		UMETA(DisplayName = "None"),
-	Primary		UMETA(DisplayName = "Primary"),
-	Secondary	UMETA(DisplayName = "Secondary"),
-};
 
 /** Broadcast per actual shot with stealth exemption context. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerWeaponShot, bool, bStealthExempt);
@@ -42,6 +34,12 @@ public:
 	 *  cancels any in-progress reload on the current weapon. Blocked while DBNO/in a takedown. */
 	void SwitchToPrimary();
 	void SwitchToSecondary();
+
+	/** Activate a weapon slot by enum. Authority-only; refused while DBNO/in a takedown.
+	 *  No-ops for None or when the slot is empty. Used by the checkpoint restore to select
+	 *  the exact slot the player had out, independent of the kit's SwapWeapon pipeline. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	void ActivateSlot(EWeaponSlot Slot);
 
 	/** Replace a slot's weapon with a new class (weapon-pickup swap). Authority-only; cancels
 	 *  any in-progress reload on the held weapon. Refused while DBNO/in a takedown. Mag/Reserve < 0
@@ -102,6 +100,21 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	bool IsAiming() const { return bIsAiming; }
 
+	// ---- Audio suppression (checkpoint restore) ----
+
+	/** Suppresses pickup and weapon-switch foley while set. The BP restore chain brackets its
+	 *  ReplaceSlotWeapon / SetActiveWeapon calls between Begin/End so the level restart sounds
+	 *  like a normal spawn, not a weapon swap. Refcounted so nested callers are safe. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Audio")
+	void BeginAudioSuppression();
+
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Audio")
+	void EndAudioSuppression();
+
+	/** True while any audio suppression scope is active. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Audio")
+	bool IsAudioSuppressed() const { return AudioSuppressionDepth > 0; }
+
 protected:
 
 	virtual void BeginPlay() override;
@@ -142,6 +155,9 @@ private:
 
 	/** Kit throwable slot held (single-player state, not replicated). See SetThrowableEquipped. */
 	bool bThrowableEquipped = false;
+
+	/** Refcount for audio suppression scopes — see BeginAudioSuppression / EndAudioSuppression. */
+	int32 AudioSuppressionDepth = 0;
 
 	/** Spawn + attach + init a slot weapon. Spawns hidden — SetActiveWeapon unhides on activation. */
 	AWeaponBase* SpawnWeaponActor(TSubclassOf<AWeaponBase> WeaponClass);

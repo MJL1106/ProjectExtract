@@ -131,6 +131,30 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory|Consumables")
 	void OnStimUseEnded();
 
+	// ---- Checkpoint loadout snapshot ----
+
+	/** Fired by the checkpoint system when the player reaches a checkpoint. BP captures
+	 *  the four slot records (PrimarySlot, SecondarySlot, ThrowableSlot, MeleeSlot) and
+	 *  the active slot index from its kit-side DT_Item_C variables, builds
+	 *  FCheckpointSlotSnapshot structs, and calls CommitLoadoutSnapshot to hand them back. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Checkpoint")
+	void OnCaptureLoadoutRequested();
+
+	/** Called by BP after it has built the four slot snapshots. C++ overwrites the two gun
+	 *  slots' Ammo/ReserveAmmo from the live AWeaponBase actors (the slot records go stale
+	 *  as the player shoots), fills in the stim count, derives bValid from whether any slot
+	 *  is valid, and stores the snapshot on the GameInstance keyed by level name. */
+	UFUNCTION(BlueprintCallable, Category = "Checkpoint")
+	void CommitLoadoutSnapshot(const FCheckpointLoadoutSnapshot& Snapshot);
+
+	/** Fired on BeginPlay (next tick) when the GameInstance holds a loadout snapshot for
+	 *  the current level. BP writes the four slot records from the snapshot, calls
+	 *  ReplaceSlotWeapon per gun slot in slot-write-first order (bracketed by
+	 *  BeginAudioSuppression/EndAudioSuppression on the WeaponComponent), then swaps to
+	 *  the recorded active slot. C++ restores the stim count itself before firing this. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Checkpoint")
+	void OnRestoreLoadoutRequested(const FCheckpointLoadoutSnapshot& Snapshot);
+
 	/** True for the whole committed injection window. Fire, ADS and reload refuse while set;
 	 *  movement stays free. The kit BP can gate its own actions on this too. */
 	UFUNCTION(BlueprintPure, Category = "Inventory|Consumables")
@@ -343,6 +367,10 @@ public:
 	 *  already-running sprint on engage, mirroring OnRouteSpeedLockChanged. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Movement")
 	void OnWalkHeldChanged(bool bHeld);
+
+	/** Called by the objective/checkpoint system when the player reaches a checkpoint.
+	 *  Fires OnCaptureLoadoutRequested so BP can build and commit the snapshot. */
+	void RequestLoadoutCapture();
 
 	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
 	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }
@@ -871,11 +899,15 @@ private:
 	UFUNCTION()
 	void OnRep_IsDBNO();
 
-	/** Temp debug: apply 25 damage to self (bound to H key) */
-	void DebugApplyDamage();
-
 	void HandleStimUsed();
 	void HandleStimUseEnded();
+
+	/** Deferred restore: fires OnRestoreLoadoutRequested after the BP BeginPlay spine,
+	 *  then polls to verify the weapon classes match the snapshot. */
+	void DeferredRestoreLoadout();
+
+	/** Polling verify: re-fires the restore if the primary weapon class does not match. */
+	void VerifyLoadoutRestore();
 
 	/** Ends any injection in progress (DBNO entry, death) so the lockout and the BP-side injector
 	 *  prop can't strand. Idempotent. */
@@ -905,6 +937,37 @@ private:
 	float LastReviveWorldTime = -1e9f;
 
 	FTimerHandle BleedoutTimerHandle;
+
+	/** One-tick deferral for the loadout restore so it lands after the character BP's
+	 *  BeginPlay spine (Load/SwapWeapon) has finished. Cleared in EndPlay. */
+	FTimerHandle LoadoutRestoreTimerHandle;
+
+	/** Polling timer that verifies the restore took (weapon class match). Cleared in EndPlay. */
+	FTimerHandle LoadoutVerifyTimerHandle;
+
+	/** Failsafe timer that force-zeroes AudioSuppressionDepth if the BP restore chain
+	 *  early-outs before EndAudioSuppression. Cleared in EndPlay. */
+	FTimerHandle AudioSuppressionFailsafeHandle;
+
+	/** Cached copy of the GameInstance snapshot at BeginPlay time so a stray
+	 *  CommitLoadoutSnapshot from the resume-activated checkpoint step cannot corrupt
+	 *  the in-flight restore. */
+	FCheckpointLoadoutSnapshot CachedRestoreSnapshot;
+
+	/** True once the loadout restore has completed (or was skipped because no snapshot
+	 *  existed). Gates RequestLoadoutCapture to prevent the resume-activated checkpoint
+	 *  step from overwriting the good snapshot with the default loadout. */
+	bool bLoadoutRestoreSettled = false;
+
+	/** Whether CommitLoadoutSnapshot was called during the current RequestLoadoutCapture
+	 *  dispatch. Detects an unimplemented or half-wired BP capture. */
+	bool bLoadoutCommitReceived = false;
+
+	/** Retry counter for VerifyLoadoutRestore. */
+	int32 LoadoutVerifyRetries = 0;
+
+	/** Releases the audio suppression failsafe. */
+	void ReleaseAudioSuppressionFailsafe();
 
 #if !UE_BUILD_SHIPPING
 	// Edge-triggered map: tracks the last logged CanBeSeenFrom result per observer to avoid log spam.
@@ -957,6 +1020,24 @@ private:
 	/** console: VipReload — trigger a reload on the armed extraction VIP. */
 	UFUNCTION(Exec)
 	void VipReload();
+
+	/** console: VipRescue — instantly free + arm the VIP (checkpoint fast-forward, no VO). */
+	UFUNCTION(Exec)
+	void VipRescue();
+
+	/** console: VipDebug 1 — pause the VIP's AI so forced poses stick; VipDebug 0 — resume. */
+	UFUNCTION(Exec)
+	void VipDebug(bool bFreeze);
+
+	/** console: VipCover bEnable [bStand] [bLeft] — force the VIP's cover pose on/off.
+	 *  bStand=1 for stand height (default 0 = crouch), bLeft=1 for left side (default 0 = right).
+	 *  Stop the brain first (VipDebug 1) so the BT does not override the pose. */
+	UFUNCTION(Exec)
+	void VipCover(bool bEnable, bool bStand = false, bool bLeft = false);
+
+	/** console: VipPeek — play a peek montage from the current cover pose using the active side. */
+	UFUNCTION(Exec)
+	void VipPeek();
 
 	// ---- Takedown state ----
 

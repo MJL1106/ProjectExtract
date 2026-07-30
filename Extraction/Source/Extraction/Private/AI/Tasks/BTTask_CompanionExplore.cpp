@@ -13,6 +13,7 @@
 #include "Enemy/EnemyDirectorSubsystem.h"
 #include "World/Breachable.h"
 #include "World/DoorBase.h"
+#include "World/InteractionEventSubsystem.h"
 #include "World/Lootable.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Navigation/PathFollowingComponent.h"
@@ -673,6 +674,36 @@ void UBTTask_CompanionExplore::EvaluateRoom(UBehaviorTreeComponent& OwnerComp, A
 	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn);
 	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
 	const float LootRadius = Tuning ? Tuning->ExploreLootRadius : 1200.f;
+
+	// Signal that the companion has completed a sweep of this room. Placed objective steps watch for
+	// it via Condition = Interacted, TrackedInteractable = <this door>, bAnyInteractorCounts = true.
+	// Doors raise no interact notify of their own (ADoorBase broadcasts OnDoorOpened, not
+	// NotifyWorldInteract), so this introduces no false positives on existing beats.
+	//
+	// Gated on Phase == Entering: EvaluateRoom is reached from several non-sweep paths as well —
+	// StartEnterMove failure (companion never crossed the threshold), doorway combat break-off during
+	// Holding (companion at the door, not inside), and door-destroyed-while-Holding (CachedDoor is
+	// already stale). Only the Entering phase means the companion physically walked through the door
+	// and reached (or was reaching) the interior point. Both Entering callers count: the normal move
+	// completion and the mid-enter combat interruption ("the entry already happened").
+	//
+	// Placed HERE rather than at the top of EvaluateRoom: NotifyWorldInteract dispatches synchronously
+	// through HandleWorldInteract -> CompleteStep -> RunSideEffects(OnComplete), so any OnComplete
+	// effect on the watching beat (SetCompanionMode, CommandCompanionRoute, TeleportSquad) would
+	// execute before SetDoorAutoOpenSuppressed and before TryHandleOccupiedRoom reads the companion's
+	// mode and issues the loot command. Sitting below both locals keeps the room evaluation's own
+	// reads stable.
+	if (Phase == ESearchPhase::Entering)
+	{
+		if (AActor* Door = CachedDoor.Get())
+		{
+			if (UWorld* World = Door->GetWorld())
+			{
+				if (UInteractionEventSubsystem* Events = World->GetSubsystem<UInteractionEventSubsystem>())
+					Events->NotifyWorldInteract(Door, Pawn);
+			}
+		}
+	}
 
 	if (IsValid(Companion) && LootRadius > 0.f && TryHandleOccupiedRoom(OwnerComp, AIC, Companion))
 		return;

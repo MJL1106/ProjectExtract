@@ -105,9 +105,12 @@ private:
 	void HandleFailure(UBehaviorTreeComponent& OwnerComp, FMoveToCoverPointMemory* Mem,
 		UBlackboardComponent* BB, AAIController* Controller) const;
 
-	/** Companion-only: re-scores the EQS-chosen cover against ALL known threats (not just the
-	 *  focused target) and returns a better-shielding nearby candidate, or ChosenCover unchanged.
-	 *  The shared EQS/scorer is untouched — this is a local post-filter on the result. */
-	FCover RerankCoverForMultiThreat(UBehaviorTreeComponent& OwnerComp, AAIController* Controller,
-		APawn* Pawn, const class UCompanionTuningDataAsset& Tuning, const FCover& ChosenCover) const;
+	/** Companion-only: validates the EQS-chosen cover has a usable peek line to the combat target
+	 *  (eyes-on) AND re-scores it against ALL known threats (multi-threat re-rank). If the chosen
+	 *  point is blind, the nearest candidate with a peek line is adopted; if none passes,
+	 *  bOutNoEyesOnCandidate is set and the caller declines the commit. No-combat-target (DBNO
+	 *  retreat, wave hold, stealth) skips both jobs and returns unchanged. */
+	FCover ValidateAndRerankCover(UBehaviorTreeComponent& OwnerComp, AAIController* Controller,
+		APawn* Pawn, const class UCompanionTuningDataAsset& Tuning, const FCover& ChosenCover,
+		bool& bOutNoEyesOnCandidate) const;
 };

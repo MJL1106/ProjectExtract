@@ -21,6 +21,7 @@ UENUM(BlueprintType)
 enum class EMusicState : uint8
 {
 	Explore,
+	Stealth,
 	Suspicion,
 	Combat,
 	Wave,
@@ -45,6 +46,11 @@ public:
 	 *  an enemy stays in combat awareness for its archetype's LostContactGrace after losing the
 	 *  player. This is a gate on that count, never a trigger on its own. */
 	void NotifyCombatActivity();
+
+	/** Ref-counted stealth zone presence. Overlapping volumes and re-entry stay balanced;
+	 *  ExitStealthZone floors at zero so a mismatched call never strands the state. */
+	void EnterStealthZone();
+	void ExitStealthZone();
 
 private:
 	void Poll();
@@ -141,6 +147,7 @@ private:
 	 *  actually ducked away, and cancelled outright if the fight re-ignites first. */
 	double PendingAllClearTime = 0.0;
 
+	int32 StealthZoneCount = 0;
 	bool bWaveActive = false;
 	bool bOverlayOn = false;
 

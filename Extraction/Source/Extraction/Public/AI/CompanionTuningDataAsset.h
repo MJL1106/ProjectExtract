@@ -495,6 +495,24 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
 	float CombatCoverMaxCommitTime = 4.f;
 
+	// Few-enemy Combat mode: with fewer than CombatOutnumberedCount known threats, low HP alone
+	// (while calm) neither commits to nor holds cover — the companion stays mobile alongside the
+	// player. Heavy incoming fire still forces cover. Disable to restore the pre-change behavior
+	// where any sub-50% HP hides the companion regardless of threat count.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers")
+	bool bFewEnemyCombatMobileCover = true;
+
+	// Suppression bar for the wounded-fire pairing (few-enemy Combat only). The companion must be
+	// under at least this much suppression OR taking hits for low-HP to trigger/hold cover. Set at
+	// the pressure-spike bar so a wounded recommit cannot sneak in cheaper than a genuine spike.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FewEnemyWoundedCoverSuppressionFrac = 0.75f;
+
+	// Hit count for the wounded-fire pairing (few-enemy Combat only). The companion must have taken
+	// at least this many hits in CoverCommitUnderFireWindow for low-HP to trigger/hold cover.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 FewEnemyWoundedCoverDamageHits = 3;
+
 	// --- Combat-mode advance hops (cover-to-cover pushes — mobile but cover-clever) ---
 
 	// Master switch: in COMBAT mode, periodically bound to a cover point that gains ground toward
@@ -591,6 +609,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "300.0"))
 	float CombatLeashDistance = 2250.f;
 
+	// Suppress the LostContact bark when the LoS blocker's impact point is within this distance
+	// (cm) of the companion's eye — the blocker is the companion's own cover wall, not an escaped
+	// enemy. Measured to the IMPACT POINT, not the blocking actor's origin (a long wall's pivot
+	// can sit metres away while the surface we're pressed against is 40cm out). 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0"))
+	float SelfOcclusionBarkSuppressRadius = 250.f;
+
 	// Same leash for fights while in NORMAL (or Stealth-broken) mode — tighter, stays in your fight.
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "300.0"))
 	float NormalCombatLeashDistance = 1500.f;
@@ -641,6 +666,28 @@ public:
 	// to the threat are discarded. Disable to revert to the old unfiltered pick.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
 	bool bCoverRequiresBodyProtection = true;
+
+	// When true, ValidateAndRerankCover rejects any EQS-chosen cover point that has NO peek line
+	// to the combat target (CanPeekShoot fails). The companion either adopts a nearby candidate
+	// that passes, or declines the commit entirely (routes to open-engage / turn-and-fight).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
+	bool bCoverRequiresPeekLosToTarget = true;
+
+	// Eye height (cm) for the peek-LOS validation trace at cover commit. Matches the existing
+	// CanPeekShoot call sites (switch monitor, advance hop, open-engage re-seek all use 150).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0"))
+	float CoverEyesOnPeekEyeHeight = 150.f;
+
+	// Max CanPeekShoot traces the eyes-on fallback loop may fire when the EQS winner is blind.
+	// Caps the worst-case cost (12 traces once per commit, only when the pick has no peek line).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1", ClampMax = "64"))
+	int32 CoverEyesOnMaxCandidateTraces = 12;
+
+	// When true, a speculative (no-LOS) peek burst aims down the cover fire arc instead of
+	// tracking the live enemy through the wall. Aim hands back to the target the instant the
+	// muzzle gate reports a clear line, so shot accuracy is unaffected.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
+	bool bSpeculativePeekAimsPeekDirection = true;
 
 	// Chest height (cm) used for the body-shield trace from the behind-cover position.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0"))

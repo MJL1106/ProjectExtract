@@ -74,8 +74,44 @@ The user is the director, not the engineer. Cut everything that isn't load-beari
 
 - **In-engine work = invoke `inengine-checklist` skill EVERY TIME — no exceptions.** Whenever the response would tell the user to do something in the Unreal editor (open a BP, set a property, place an actor, add a component, edit a DataAsset, create a child class), invoke `inengine-checklist` first. The skill enforces a tight numbered-list format with exact menu paths and verbatim values, and strips all code/architecture commentary. Even a single editor step goes through it. If the work is large (BP graph edits, repetitive bulk, many reference wires), use `inengine-prompt` instead — but never freehand prose for editor instructions.
 
-**The loop:** Plan → Implement → Review → Fix-review-findings → Review → ... → Done.
-Continue the implement/review loop until no `CRITICAL` or `WARNING` findings remain.
+**The loop:** Plan → Implement → Review → Fix-review-findings → Done.
+Continue the implement/review loop until no `CRITICAL` or `MISSING` findings remain. **`WARNING` does not gate the loop** — see "Review tiers" below.
+
+### Review tiers — size the process to the change
+
+The single biggest waste in this project's workflow was running the full three-dimension review loop on a five-line tweak. Classify every change before dispatching anything:
+
+| Tier | Trigger | Process |
+|---|---|---|
+| **1 — Trivial** | ≤30 changed lines, one file, no new members / timers / delegates / UPROPERTYs, no new call sites | **No plan, no `ue5-team`, no reviewer.** Main chat may edit directly. Straight to build. |
+| **2 — Ordinary** | 1–3 files, existing systems, no new class | One implementer, **one review round**. Fix `CRITICAL`/`MISSING`, ship. Second round only if the fix itself was non-trivial. |
+| **3 — System** | New class, 4+ files, new subsystem, or spans 3+ subsystem dirs | Full loop as documented below. `ue5-team` decides solo vs team here and **only** here. |
+
+Tier 1 is a real tier, not an aspiration. Use it. If you catch yourself dispatching a reviewer for a renamed variable or a nudged collision box, stop.
+
+### Never re-spawn a reviewer — message the one you have
+
+A fresh `ue5-reviewer` re-reads its own 11k-char prompt, then every `.h` and `.cpp`, parent classes and interfaces, then re-runs all three dimensions over the *whole* change. Round 3 costs exactly what round 1 cost. That, not the number of rounds, is what made a trivial change take an hour.
+
+- **Name every agent on dispatch** (`name: "reviewer"` / `name: "impl"` on the `Agent` tool) so it is addressable.
+- **Follow-up rounds go through `SendMessage`, never a new `Agent` call.** The agent keeps its full context: the files it read, the findings it raised, what it already cleared.
+- A follow-up message is short by construction: *"Fixed 1, 3, 4 as you specified. Skipped 2 — out of scope for this task. Re-check only those."* If you are writing a long re-briefing message, you have spawned a new agent by mistake.
+- Same rule for `ue5-cpp-implementer`. It keeps the file context across fix rounds.
+- Both agents stay alive for the whole task. Let them go stale only when the task is done.
+
+### Warm the reviewer in parallel (tier 2 and 3)
+
+Dispatch `ue5-reviewer` **at task start**, before the code exists, briefed with the goal and the plan and told to read the current state of the target files and wait. Its expensive cold-read phase then overlaps with implementation instead of sitting on the critical path after it. When the implementer finishes, `SendMessage` the reviewer the diff summary and it reviews a delta against context it already holds.
+
+### Main chat owns the WARNING triage — this is the brake
+
+`ue5-reviewer` has ~40 pattern rows and an 8-category edge-case checklist. It will always produce `WARNING`s. Looping on them is what produced five review rounds.
+
+- `CRITICAL` and `MISSING` → always fix, always another round.
+- `WARNING` → **one judgement call from main chat against the task goal**: fix it inline if it is a one-liner, roll it into the current fix round if the implementer is already going back, or explicitly defer it and say so. Never a dedicated extra round for a `WARNING`.
+- `INFO` → ignore unless already touching that line.
+
+This decision needs the plan and the user's intent, which only main chat holds. It is the reason implementer and reviewer talk **through** main chat rather than directly to each other — a direct loop has no basis for "does this matter for what we're shipping" and will chase every finding.
 
 ### Role of the main chat
 The main Claude chat = **senior-dev watchdog (Opus 5, 1M context)**.
@@ -84,7 +120,8 @@ The main Claude chat = **senior-dev watchdog (Opus 5, 1M context)**.
 - Breaks tasks into file-ownership slices
 - Coordinates the team (team-lead role for `agent-teams:team-spawn`, or direct dispatch for solo work)
 - Reviews implementer output before declaring "done"
-- **Never writes substantive code itself** — that's the implementer's job. Trivial typos / renames / single-line tweaks are the only main-chat code exception.
+- Owns the `WARNING` triage call — the brake on the review loop
+- **Never writes substantive code itself** — that's the implementer's job. The main-chat code exceptions are typos, renames, single-line tweaks, **and tier 1 changes** (≤30 lines, one file, no new members/timers/delegates). Dispatching an implementer for a tier 1 change costs more than doing it.
 
 ### Model policy by role
 
@@ -117,15 +154,15 @@ When planning, investigating a bug, or forming a picture of "what does this actu
 
 ### The loop in detail
 
-0. **`ue5-team` skill** — decide solo vs team (mandatory Step 0 for every non-trivial task)
-1. **Implement:**
-   - Solo → `ue5-cpp-implementer`
-   - Team → `agent-teams:team-spawn` preset `feature` (parallel implementers with file ownership)
+0. **Classify the tier** (see "Review tiers" above). Tier 1 → skip to step 4. Tier 2 → skip step 0's team question, go solo. **Tier 3 only** → invoke `ue5-team` to decide solo vs team.
+1. **Implement** (name the agent so it stays addressable):
+   - Solo → `ue5-cpp-implementer`, `name: "impl"`
+   - Team → `agent-teams:team-spawn` preset `feature` (parallel implementers with file ownership). **Only when 2+ implementers have a genuine integration boundary** — A's header is B's dependency. One implementer never needs a team.
 2. **Review (single consolidated reviewer, covers safety + performance + edge-case in one pass):**
-   - `ue5-reviewer` — always, every C++ change. MUST be briefed with: (a) the task goal in one or two sentences, (b) the list of changed files with brief description, (c) the plan file path if one exists. Without the goal the edge-case dimension is degraded (safety/performance still run).
+   - `ue5-reviewer`, `name: "reviewer"` — every tier 2 and 3 C++ change. Warm-dispatch it at task start (see above). MUST be briefed with: (a) the task goal in one or two sentences, (b) the list of changed files with brief description, (c) the plan file path if one exists. Without the goal the edge-case dimension is degraded (safety/performance still run).
    - `ue5-ui-specialist` — if UMG / Slate / widget code touched
    - `ue5-build-specialist` — if `Build.cs` / `Target.cs` / `.uproject` / plugin config / include paths touched
-3. **Fix review findings:** any `CRITICAL` or `WARNING` → re-dispatch `ue5-cpp-implementer` with the consolidated findings. **Do NOT fix in main chat.** Loop back to step 2 if the fix is non-trivial.
+3. **Fix review findings:** `CRITICAL` or `MISSING` → `SendMessage` the existing `impl` agent with the findings block passed through **verbatim** (it already carries file:line and a specific fix — do not re-summarise it). `WARNING` → main-chat triage per the brake rule above. Then `SendMessage` the existing `reviewer` to re-check **only the changed findings**. Never spawn a fresh agent for a follow-up round.
 4. **Build + reboot — you own it, never the user.** Invoke the **`build-and-reboot`** skill. It carries the ordering rule (review must be clean first, never build in parallel with the reviewer), the project-scoped editor kill, the `Build.bat` command, `Result: Succeeded` verification, and the failure-dispatch split. Two rules apply always, skill loaded or not: **always `AskUserQuestion` before closing the editor** ("Close the Unreal Editor to build?" → "Yes, close now" / "No, hold off — another chat is still working"), asked fresh every single time; and ⚠️ **NEVER `Stop-Process -Name UnrealEditor`** — scope the kill by `Extraction.uproject` or you kill the user's other projects' editors and their unsaved work.
 5. **"Ready" / "done" = the user can literally press Play.** Build-green is a mid-step, not a stopping point — never report ready while the editor is closed.
 
@@ -135,7 +172,7 @@ When planning, investigating a bug, or forming a picture of "what does this actu
 
 Local skills under `.claude/skills/` are loaded on demand and cheap. **Invoke a skill the moment its subsystem is mentioned**, not just when writing code.
 
-Each skill's own description carries its trigger conditions, and those descriptions are already in context every session — match against them directly rather than a duplicate table here. Two that need the extra pointer: `agent_docs/UnrealWorkflow.md` for driving the editor from the CLI yourself (VibeUE :8088 + NeoStack :9315), and `ue5-team` as mandatory Step 0 on any non-trivial task.
+Each skill's own description carries its trigger conditions, and those descriptions are already in context every session — match against them directly rather than a duplicate table here. Two that need the extra pointer: `agent_docs/UnrealWorkflow.md` for driving the editor from the CLI yourself (VibeUE :8088 + NeoStack :9315), and `ue5-team` on **tier 3 tasks only** (it is no longer a mandatory Step 0 — invoking it to conclude "SOLO" on every small task was pure overhead).
 
 If unsure whether to invoke, **bias toward invoking the skill** — it just loads reference. Skills and subagents are not a trade-off here: load the skill *and* dispatch the agent when both fit.
 
@@ -177,11 +214,12 @@ Falls back to keyword when a node isn't embedded. Reach for `Glob`/`Grep` or a c
 
 ## Session Start
 
-At session start, on a fresh task, do this in order before responding:
-1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + NeoStack tooling map + gotchas); `companion_testing.md` for companion QA; **`project_roadmap.md` for the live feature checklist (what's done / in progress / to-do)**
+At session start, on a fresh task, do this in order before responding. **Scale it to the tier** — a tier 1 change does not need the full ritual, and running it anyway is the slow-turnaround failure mode this workflow was rewritten to kill.
+
+1. Check `agent_docs/` for any topic-relevant docs — **`UnrealWorkflow.md` before any in-engine/editor work** (VibeUE + NeoStack tooling map + gotchas); `companion_testing.md` for companion QA; **`project_roadmap.md` for the live feature checklist (what's done / in progress / to-do)**. Tier 1: skip unless the change is in-engine.
 2. Confirm the active branch matches the feature being worked on (`git status`)
 3. If the task touches AI / movement / animation / UI, **invoke the matching skill from the table above before any tool calls**
-4. **Invoke `ue5-team`** to decide solo vs team for the task — this is Step 0 of the workflow
+4. Tier 3 only: **invoke `ue5-team`** to decide solo vs team. Tiers 1 and 2 go straight to work.
 
 ## Required environment
 

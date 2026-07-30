@@ -1914,6 +1914,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (ReseekCooldown > 0.f
 			&& !BB->GetValueAsBool(AEnemyAIController::BB_HasCover)
 			&& Mem->Phase != EFireTaskPhase::SeekingCover && Mem->Phase != EFireTaskPhase::Pursuing
+			&& !IsGrenadeTelegraphing(Enemy)
 			&& (TickNow - Mem->LastReseekCoverTime) >= ReseekCooldown)
 		{
 			Mem->LastReseekCoverTime = TickNow;
@@ -2147,7 +2148,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				}
 
 				// FIX 2 — Deferred commit: execute the pending relocate at the first safe non-firing phase.
+				// Skip while a grenade wind-up is playing — ExecuteRelocate cancels the throw.
 				if (Mem->bRelocatePending && bSafePhase && bNotFiring && bCooledDown
+					&& !IsGrenadeTelegraphing(Enemy)
 					&& Mem->PeekCyclesAtCover >= DA->MinPeekCyclesBeforeRelocate)
 				{
 					Mem->bRelocatePending = false;
@@ -2172,7 +2175,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					bHasCoverNow ? 1 : 0);
 			}
 
-			if (bSafePhase && bNotFiring && bHasLOS)
+			if (bSafePhase && bNotFiring && bHasLOS && !IsGrenadeTelegraphing(Enemy))
 			{
 				// Prefer getting back into cover (NOT gated on suppression). Fall back to open-ground strafe.
 				if ((Now - Mem->LastReseekCoverTime) >= SuppressedReseekCooldown)
@@ -3003,15 +3006,27 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					Mem->PhaseTimer = 0.1f;
 					break;
 				}
-				// Released (or cancelled): duck back into cover and settle before the next peek.
-				if (UCoverPoseComponent* PopPose = Enemy->GetCoverPoseComponent())
-				{
-					PopPose->SetPeeking(false);
-					PopPose->SetLean(ECoverLean::None);
-					PopPose->SetInCover(true, ECoverHeight::Crouch);
-				}
-				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				// Released (or cancelled): duck back. Re-validate cover — it may have been
+				// lost during the wind-up; posing crouched-in-cover in the open is wrong.
 				Mem->bGrenadeLobPopUp = false;
+				const bool bStillHasCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+				if (bStillHasCover)
+				{
+					if (UCoverPoseComponent* PopPose = Enemy->GetCoverPoseComponent())
+					{
+						PopPose->SetPeeking(false);
+						PopPose->SetLean(ECoverLean::None);
+						PopPose->SetInCover(true, ECoverHeight::Crouch);
+					}
+					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				}
+				else
+				{
+					// Cover lost mid-wind-up: clear the cover pose entirely and stand.
+					if (UCoverPoseComponent* PopPose = Enemy->GetCoverPoseComponent())
+						PopPose->ResetCoverPose();
+					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+				}
 				Mem->Phase = EFireTaskPhase::Recover;
 				Mem->PhaseTimer = FMath::RandRange(DA->RecoverPhaseMin, DA->RecoverPhaseMax);
 				break;
@@ -3024,78 +3039,80 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				break;
 			}
 
-			// --- Grenadier proactive cover lob (chance-based, over the top) ---
-			// Fires during live engagement — independent of the LOS-blocked hiding lob above — when the
-			// enemy holds crouch cover with an over-the-top firing side. CanThrow()/cooldown/supply
-			// throttle the rate; the shared CanThrow() gate means it never double-throws with the hiding
-			// lob. Presentation splits tucked (crouch montage, stays hunkered) vs pop-up (stands over the
-			// wall, stand montage, ducks back) via the DA fields.
+			// --- Grenadier proactive lob (chance-based, any position) ---
+			// Fires during live engagement — independent of the LOS-blocked hiding lob above.
+			// CanThrow()/cooldown/supply throttle the rate; the shared CanThrow() gate means it
+			// never double-throws with the hiding lob. Pop-up presentation (stand over the wall,
+			// throw, duck back) is only available from crouch-front cover; every other position
+			// takes the tucked path without touching cover pose state.
 			if (UEnemyGrenadierComponent* LobComp = Enemy->GetGrenadierComponent())
 			{
-				const bool bHasCoverLob = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
 				const AWeaponBase* LobWeapon = Enemy->GetCurrentWeapon();
 				const bool bLobReloading = IsValid(LobWeapon) && LobWeapon->IsReloading();
 				// A never-sighted ForceEngage'd enemy must not lob at a stale position —
 				// parity with the hiding-lob and blind-fire gates.
-				if (bHasCoverLob && !bSuppressed && !bLobReloading && IsValid(Target)
+				if (!bSuppressed && !bLobReloading && IsValid(Target)
 					&& LobComp->CanThrow() && DA->GrenadeCoverLobChance > 0.f
 					&& Mem->bEverHadEffectiveLOS)
 				{
-					const FCover LobCover = ReadCoverFromBB(BB);
-					const bool bCrouchOverTop = LobCover.IsValid()
-						&& UCoverGeometryStatics::GetCoverHeight(LobCover.Data) == ECoverHeight::Crouch
-						&& LobCover.Data.bFrontCoverCrouched;
-					if (bCrouchOverTop)
+					const FVector LobTarget = GetPerceivedThreatLoc(Controller, Target);
+					const float LobDistSq = FVector::DistSquared2D(Pawn->GetActorLocation(), LobTarget);
+					// Cheap range pre-check (TryThrowAt re-checks from the socket) — skips the pose
+					// churn of committing a pop-up only for the throw to fail out-of-range.
+					const bool bInLobRange = !LobTarget.IsNearlyZero()
+						&& LobDistSq >= FMath::Square(DA->GrenadeMinRange)
+						&& LobDistSq <= FMath::Square(DA->GrenadeMaxRange);
+					if (bInLobRange && FMath::FRand() < DA->GrenadeCoverLobChance)
 					{
-						const FVector LobTarget = GetPerceivedThreatLoc(Controller, Target);
-						const float LobDistSq = FVector::DistSquared2D(Pawn->GetActorLocation(), LobTarget);
-						// Cheap range pre-check (TryThrowAt re-checks from the socket) — skips the pose
-						// churn of committing a pop-up only for the throw to fail out-of-range.
-						const bool bInLobRange = !LobTarget.IsNearlyZero()
-							&& LobDistSq >= FMath::Square(DA->GrenadeMinRange)
-							&& LobDistSq <= FMath::Square(DA->GrenadeMaxRange);
-						if (bInLobRange && FMath::FRand() < DA->GrenadeCoverLobChance)
+						// Determine if the pop-up option is available: crouch-front cover only.
+						bool bCrouchOverTop = false;
+						FCover LobCover;
+						if (BB->GetValueAsBool(AEnemyAIController::BB_HasCover))
 						{
-							if (FMath::FRand() < DA->GrenadeCoverLobPopUpChance)
+							LobCover = ReadCoverFromBB(BB);
+							bCrouchOverTop = LobCover.IsValid()
+								&& UCoverGeometryStatics::GetCoverHeight(LobCover.Data) == ECoverHeight::Crouch
+								&& LobCover.Data.bFrontCoverCrouched;
+						}
+
+						if (bCrouchOverTop && FMath::FRand() < DA->GrenadeCoverLobPopUpChance)
+						{
+							// Pop up over the wall: stand + front + peek so the stand throw montage
+							// plays and the grenade clears the low cover. Pose is set BEFORE TryThrowAt
+							// because the telegraph -> montage-select chain is synchronous and reads the
+							// cover pose height. bGrenadeLobPopUp holds it and drives the duck-back.
+							UCoverPoseComponent* LobPose = Enemy->GetCoverPoseComponent();
+							if (IsValid(LobPose))
 							{
-								// Pop up over the wall: stand + front + peek so the stand throw montage
-								// plays and the grenade clears the low cover. Pose is set BEFORE TryThrowAt
-								// because the telegraph → montage-select chain is synchronous and reads the
-								// cover pose height. bGrenadeLobPopUp holds it and drives the duck-back.
-								UCoverPoseComponent* LobPose = Enemy->GetCoverPoseComponent();
-								if (IsValid(LobPose))
-								{
-									LobPose->SetInCover(true, ECoverHeight::Stand);
-									LobPose->SetLean(ECoverLean::Front);
-									LobPose->SetPeeking(true);
-								}
-								if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
-								ApplyCoverFacing(Controller, Pawn, LobCover.Data);
-
-								if (LobComp->TryThrowAt(LobTarget))
-								{
-									Mem->bGrenadeLobPopUp = true;
-									Mem->PhaseTimer = 0.1f;
-									break;
-								}
-
-								// Throw refused (arc unsolvable) — revert the pop-up pose, fall through.
-								if (IsValid(LobPose))
-								{
-									LobPose->SetPeeking(false);
-									LobPose->SetLean(ECoverLean::None);
-									LobPose->SetInCover(true, ECoverHeight::Crouch);
-								}
-								if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+								LobPose->SetInCover(true, ECoverHeight::Stand);
+								LobPose->SetLean(ECoverLean::Front);
+								LobPose->SetPeeking(true);
 							}
-							else if (LobComp->TryThrowAt(LobTarget))
+							if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+							ApplyCoverFacing(Controller, Pawn, LobCover.Data);
+
+							if (LobComp->TryThrowAt(LobTarget))
 							{
-								// Tucked lob: stay hunkered. The generic telegraph hold above keeps the
-								// pause and blocks peeks until release; the crouch pose selects the crouch
-								// throw montage, and the grenade still arcs over the low wall.
-								Mem->PhaseTimer = 0.25f;
+								Mem->bGrenadeLobPopUp = true;
+								Mem->PhaseTimer = 0.1f;
 								break;
 							}
+
+							// Throw refused (arc unsolvable / clearance blocked) — revert the pop-up pose, fall through.
+							if (IsValid(LobPose))
+							{
+								LobPose->SetPeeking(false);
+								LobPose->SetLean(ECoverLean::None);
+								LobPose->SetInCover(true, ECoverHeight::Crouch);
+							}
+							if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+						}
+						else if (LobComp->TryThrowAt(LobTarget))
+						{
+							// Tucked lob from any position (cover or open ground). No cover pose
+							// changes — the generic telegraph hold above keeps the pause until release.
+							Mem->PhaseTimer = 0.25f;
+							break;
 						}
 					}
 				}

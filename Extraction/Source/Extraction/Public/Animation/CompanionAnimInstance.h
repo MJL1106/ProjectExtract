@@ -506,6 +506,11 @@ private:
 	UFUNCTION()
 	void OnReloadMontageBlendingOut(UAnimMontage* Montage, bool bInterrupted);
 
+	/** True while the weapon is reloading OR a reload montage is still blending out.
+	 *  Used by both the cover-align gate and the Left-Hand IK gate so they suppress in lockstep
+	 *  and neither wakes early when the montage outlasts the weapon state. */
+	bool IsReloadPoseActive() const;
+
 	// --- Recoil spring state ---
 	FEnemyRecoilProfile RecoilProfile;
 	bool bHasRecoilProfile = false;
@@ -549,10 +554,23 @@ private:
 	 *  should drop its cached weapon handle so the equip block re-bakes. */
 	bool TryConsumeAlignRebake(AWeaponBase* Weapon, float DeltaSeconds);
 
+	/** Returns true (and resets settle bookkeeping) when the rebake must not fire: in cover,
+	 *  during a reload pose, or while cover-align is still easing back to rest after a peek.
+	 *  Extracted so TryConsumeAlignRebake stays under the 40-line limit. */
+	bool IsAlignRebakeBlocked(const AWeaponBase* Weapon);
+
 	/** True once the ONLY pose-dependent term the align bake reads — the weapon's attach socket
 	 *  measured against the align bone — has held still for AlignRebakeSettleSeconds. The cover-align-
 	 *  writing refusal is hoisted into TryConsumeAlignRebake (above the wait-time accumulator). */
 	bool IsAlignRebakePoseSettled(const AWeaponBase* Weapon, float DeltaSeconds);
+
+	/** Wall-clock time the rebake has been gated (bInCover / reload / cover-align writing).
+	 *  Unlike AlignRebakeWaitTime (which freezes while gated), this ticks every frame while
+	 *  bAlignRebakePending is true so the starvation diagnostic can fire. */
+	float AlignRebakeGatedWallTime = 0.f;
+
+	/** True once the starvation diagnostic has fired for this rebake request, so it emits once. */
+	bool bAlignRebakeStarvationLogged = false;
 
 	/** Throttle accumulator for the [ALIGN] writer-race diagnostic (companion.AlignDebug). */
 	float AlignDebugLogAccum = 0.f;

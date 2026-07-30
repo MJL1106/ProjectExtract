@@ -919,7 +919,16 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 						BB->ClearValue(CombatTargetKey.SelectedKeyName);
 						BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
 						ExistingTarget = nullptr;
-						Companion->Bark(ECompanionBarkType::LostContact);
+						// Suppress the bark when the LoS blocker is the companion's own wall —
+						// measured to the impact point (a long wall's pivot can sit far away).
+						const float SelfOccludeRadius = RangeTuning ? RangeTuning->SelfOcclusionBarkSuppressRadius : 250.f;
+						const bool bSelfOccluded = SelfOccludeRadius > 0.f && LosHit.bBlockingHit
+							&& FVector::Dist(AimOrigin, LosHit.ImpactPoint) <= SelfOccludeRadius;
+						if (!bSelfOccluded)
+							Companion->Bark(ECompanionBarkType::LostContact);
+						else if (bDebugLogging)
+							UE_LOG(LogCompanionAI, Log, TEXT("%s: LostContact bark suppressed — self-occluded by %s at %.0fcm"),
+								*Companion->GetName(), *GetNameSafe(LosHit.GetActor()), FVector::Dist(AimOrigin, LosHit.ImpactPoint));
 					}
 				}
 			}

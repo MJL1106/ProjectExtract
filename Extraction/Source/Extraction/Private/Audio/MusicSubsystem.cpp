@@ -32,6 +32,7 @@ namespace
 		switch (S)
 		{
 		case EMusicState::Explore:   return TEXT("Explore");
+		case EMusicState::Stealth:   return TEXT("Stealth");
 		case EMusicState::Suspicion: return TEXT("Suspicion");
 		case EMusicState::Combat:    return TEXT("Combat");
 		case EMusicState::Wave:      return TEXT("Wave");
@@ -103,6 +104,7 @@ void UMusicSubsystem::Deinitialize()
 	bReliefDucked = false;
 	bOutgoingFightBed = false;
 	PendingAllClearTime = 0.0;
+	StealthZoneCount = 0;
 
 	Super::Deinitialize();
 }
@@ -200,6 +202,10 @@ EMusicState UMusicSubsystem::ComputeDesiredState(double Now) const
 
 	if ((Now - LastSuspicionSignalTime) < Bank->SuspicionHoldSeconds) return EMusicState::Suspicion;
 
+	// Inside a stealth zone the tension bed replaces sparse explore ambience -- but only when
+	// the bank actually has something to play for it, otherwise it falls through to Explore.
+	if (StealthZoneCount > 0 && IsValid(TrackForState(EMusicState::Stealth))) return EMusicState::Stealth;
+
 	return EMusicState::Explore;
 }
 
@@ -208,6 +214,20 @@ void UMusicSubsystem::NotifyCombatActivity()
 	const UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 	LastCombatActivityTime = World->GetTimeSeconds();
+}
+
+void UMusicSubsystem::EnterStealthZone()
+{
+	++StealthZoneCount;
+	// Actor BeginPlay can call this before OnWorldBeginPlay has initialised the state machine --
+	// the kick-off Poll() there picks up the count, so only force one when already live.
+	if (PollTimerHandle.IsValid()) Poll();
+}
+
+void UMusicSubsystem::ExitStealthZone()
+{
+	StealthZoneCount = FMath::Max(0, StealthZoneCount - 1);
+	if (PollTimerHandle.IsValid()) Poll();
 }
 
 void UMusicSubsystem::PollPlayerDamage(const UWorld& World, double Now)
@@ -266,6 +286,13 @@ void UMusicSubsystem::TransitionTo(EMusicState NewState, double Now)
 		StartTrack(TrackForState(EMusicState::Suspicion), FadeSecondsLeavingFightBed());
 		break;
 
+	case EMusicState::Stealth:
+		// Entering a stealth zone is not "enemies are hunting again" — a pending all-clear resolve
+		// is still owed, but it must not outlive the relief window.
+		PendingAllClearTime = FMath::Min(PendingAllClearTime, ReliefUntilTime);
+		StartTrack(TrackForState(EMusicState::Stealth), FadeSecondsLeavingFightBed());
+		break;
+
 	case EMusicState::Relief:
 	{
 		ReliefUntilTime = Now + Bank->ReliefSeconds;
@@ -301,7 +328,7 @@ void UMusicSubsystem::UpdateTrackForState()
 {
 	// Looping states re-check their prescribed track each poll — this is what swaps the
 	// palette mid-state when the mission phase flips (e.g. combat rolls into Extraction).
-	if (State != EMusicState::Suspicion && State != EMusicState::Combat && State != EMusicState::Wave) return;
+	if (State != EMusicState::Stealth && State != EMusicState::Suspicion && State != EMusicState::Combat && State != EMusicState::Wave) return;
 
 	USoundBase* Target = TrackForState(State);
 	if (!IsValid(Target)) return;
@@ -560,6 +587,7 @@ USoundBase* UMusicSubsystem::TrackForState(EMusicState ForState) const
 
 	switch (ForState)
 	{
+	case EMusicState::Stealth:   return IsValid(Set.StealthTrack) ? Set.StealthTrack.Get() : Set.SuspicionTrack.Get();
 	case EMusicState::Suspicion: return Set.SuspicionTrack;
 	case EMusicState::Combat:    return Set.CombatTrack;
 	case EMusicState::Wave:      return IsValid(Set.WaveTrack) ? Set.WaveTrack.Get() : Set.CombatTrack.Get();

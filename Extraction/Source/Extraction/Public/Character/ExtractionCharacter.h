@@ -461,9 +461,6 @@ private:
 	UFUNCTION()
 	void OnRep_IsDBNO();
 
-	/** Temp debug: apply 25 damage to self (bound to H key) */
-	void DebugApplyDamage();
-
 	FTimerHandle BleedoutTimerHandle;
 
 	UPROPERTY(VisibleInstanceOnly, Category = "Tags")

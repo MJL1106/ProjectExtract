@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/GameInstance.h"
+#include "ExtractionTypes.h"
 #include "World/LevelObjectiveFlow.h"
 #include "ExtractionGameInstance.generated.h"
 
@@ -36,8 +37,16 @@ public:
 	/** The recorded step checkpoint for LevelName, or None when that level has none. */
 	FName GetStepCheckpointForLevel(FName LevelName) const;
 
-	/** Drops both records — call on level completion so the next run starts clean. */
+	/** Drops both records and the loadout snapshot — call on level completion so the next run starts clean. */
 	void ClearCheckpoint();
+
+	// ---- Loadout snapshot (checkpoint restart) ----
+
+	/** Stores a loadout snapshot keyed by level name. */
+	void SetLoadoutSnapshot(FName LevelName, const FCheckpointLoadoutSnapshot& Snapshot);
+
+	/** Returns the snapshot for LevelName, or an invalid (bValid=false) snapshot when none exists. */
+	const FCheckpointLoadoutSnapshot& GetLoadoutSnapshotForLevel(FName LevelName) const;
 
 private:
 	FName CheckpointLevelName;
@@ -45,4 +54,11 @@ private:
 
 	FName StepCheckpointLevelName;
 	FName LastCheckpointStepId;
+
+	/** Level name the loadout snapshot belongs to — prevents leaking into a different map. */
+	FName LoadoutSnapshotLevelName;
+
+	/** Loadout captured at the last checkpoint. UPROPERTY because it holds TSubclassOf<> refs. */
+	UPROPERTY()
+	FCheckpointLoadoutSnapshot LoadoutSnapshot;
 };

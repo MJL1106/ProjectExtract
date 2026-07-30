@@ -110,6 +110,13 @@ private:
 
 	void DisableForWave();
 
+	// ---- Stealth music ----
+
+	/** Drives Enter/ExitStealthZone on the music subsystem via a single flag so the
+	 *  refcount stays balanced regardless of how many code paths touch it. */
+	void SetStealthMusicActive(bool bActive);
+	bool bStealthMusicActive = false;
+
 	// ---- Cleanup ----
 
 	void CleanupTrackedPlayer();

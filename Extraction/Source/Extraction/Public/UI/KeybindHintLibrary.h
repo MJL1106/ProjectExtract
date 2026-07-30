@@ -40,8 +40,9 @@ public:
 	 *
 	 *  Rule: the first keyboard-or-mouse key in the order Enhanced Input reports them, which is
 	 *  highest-priority applied mapping context first, then authoring order within that context.
-	 *  IA_CompanionBreach is bound to both B and I, so "first one wins" is not hypothetical — it is
-	 *  what stops the hint flapping between two equally valid answers between runs.
+	 *  Not hypothetical: IA_CompanionBreach shipped with both B and I mapped (B removed 30/07, leaving
+	 *  I), and IMC_Default still lists the same action in both the legacy Mappings array and the nested
+	 *  DefaultKeyMappings one. "First one wins" is what stops the hint flapping between runs.
 	 *
 	 *  Gamepad and touch keys are only used when the action has NO keyboard or mouse binding at all:
 	 *  a pad-only binding is still better information for the player than "unbound". */

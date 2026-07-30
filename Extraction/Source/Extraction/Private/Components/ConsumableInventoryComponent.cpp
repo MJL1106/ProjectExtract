@@ -72,6 +72,19 @@ int32 UConsumableInventoryComponent::AddStims(const int32 Amount)
 	return Added;
 }
 
+void UConsumableInventoryComponent::SetStimCount(const int32 NewCount)
+{
+	AActor* Owner = GetOwner();
+	if (!IsValid(Owner) || !Owner->HasAuthority()) return;
+
+	const int32 Clamped = FMath::Clamp(NewCount, 0, MaxStims);
+	if (Clamped == StimCount) return;
+
+	StimCount = Clamped;
+	BroadcastStimCount();
+	Owner->ForceNetUpdate();
+}
+
 bool UConsumableInventoryComponent::TryUseStim()
 {
 	AActor* Owner = GetOwner();

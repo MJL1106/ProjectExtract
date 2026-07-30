@@ -137,6 +137,7 @@ AWeaponBase* UWeaponComponent::ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<
 		SetActiveWeapon(Slot);
 
 	// Corpse-gun grab — layered under SetActiveWeapon's handling foley when the slot was held.
+	if (AudioSuppressionDepth <= 0)
 	{
 		const UWorld* World = GetWorld();
 		UGameAudioSubsystem* AudioSys = World ? World->GetSubsystem<UGameAudioSubsystem>() : nullptr;
@@ -236,7 +237,7 @@ void UWeaponComponent::SetActiveWeapon(AWeaponBase* NewWeapon)
 	CurrentWeapon->SetOwnerIsAiming(bIsAiming);
 	SeatWeaponGripSocket();
 
-	if (bAudibleSwap)
+	if (bAudibleSwap && AudioSuppressionDepth <= 0)
 	{
 		const UWorld* World = GetWorld();
 		UGameAudioSubsystem* AudioSys = World ? World->GetSubsystem<UGameAudioSubsystem>() : nullptr;
@@ -278,6 +279,19 @@ void UWeaponComponent::SwitchToSecondary()
 		SetActiveWeapon(SecondaryWeapon);
 	else
 		Server_SwitchWeapon(1);
+}
+
+void UWeaponComponent::ActivateSlot(EWeaponSlot Slot)
+{
+	if (!IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return;
+	if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return;
+
+	AWeaponBase* Target = nullptr;
+	if (Slot == EWeaponSlot::Primary) Target = PrimaryWeapon;
+	else if (Slot == EWeaponSlot::Secondary) Target = SecondaryWeapon;
+
+	if (IsValid(Target))
+		SetActiveWeapon(Target);
 }
 
 void UWeaponComponent::Server_SwitchWeapon_Implementation(uint8 SlotIndex)
@@ -516,6 +530,19 @@ void UWeaponComponent::SeatWeaponGripSocket()
 }
 
 // ---- Stealth Exemption ----
+
+// ---- Audio Suppression ----
+
+void UWeaponComponent::BeginAudioSuppression()
+{
+	++AudioSuppressionDepth;
+}
+
+void UWeaponComponent::EndAudioSuppression()
+{
+	if (AudioSuppressionDepth > 0)
+		--AudioSuppressionDepth;
+}
 
 bool UWeaponComponent::ResolveServerTakedownSnapshot()
 {

@@ -391,17 +391,31 @@ void AObjectiveStep::BindConditionDelegates()
 		// interactable calls NotifyWorldInteract from its own success branch (WorldInteract has no
 		// return value and implementers routinely accept the call and refuse the action), so a
 		// Blueprint interactable has to make that call itself.
+		// ADoorBase does not raise NotifyWorldInteract from its own code, but the companion explore
+		// task raises it on the door's behalf when a room sweep completes — a door-tracking Interacted
+		// step with bAnyInteractorCounts is how a designer says "the companion searched this room".
 		const bool bNativeRaiser = TrackedInteractable->IsA<ALootContainer>()
 			|| TrackedInteractable->IsA<ALevelCompletionLiftGate>()
 			|| TrackedInteractable->IsA<AExtractionTargetActor>()
 			|| TrackedInteractable->IsA<AExtracteeCompanion>()
 			|| TrackedInteractable->IsA<AExtracteeCharacter>()
-			|| TrackedInteractable->IsA<AInteractionVolume>();
+			|| TrackedInteractable->IsA<AInteractionVolume>()
+			|| TrackedInteractable->IsA<ADoorBase>();
 		if (!bNativeRaiser)
 			UE_LOG(LogObjectiveStep, Warning,
 				TEXT("'%s' (step '%s'): TrackedInteractable '%s' is not one of the actors that raise "
 					 "NotifyWorldInteract natively — its Blueprint must call Notify World Interact on its "
 					 "own success branch or this beat can never complete"),
+				*GetName(), *GetEffectiveStepId().ToString(), *GetNameSafe(TrackedInteractable));
+		// A door-tracking beat is only ever raised by the companion explore task's room sweep, which
+		// passes the companion pawn as interactor. With bAnyInteractorCounts false the handler rejects
+		// anything that is not AExtractionPlayer — and the player cannot interact with a door — so the
+		// beat silently never completes.
+		if (TrackedInteractable->IsA<ADoorBase>() && !bAnyInteractorCounts)
+			UE_LOG(LogObjectiveStep, Warning,
+				TEXT("'%s' (step '%s'): TrackedInteractable '%s' is a door — the only NotifyWorldInteract raise "
+					 "comes from the companion room sweep, which needs bAnyInteractorCounts to be true or "
+					 "this beat can never complete"),
 				*GetName(), *GetEffectiveStepId().ToString(), *GetNameSafe(TrackedInteractable));
 		if (UInteractionEventSubsystem* Events = World->GetSubsystem<UInteractionEventSubsystem>())
 			Events->OnWorldInteractPerformed.AddUniqueDynamic(this, &AObjectiveStep::HandleWorldInteract);
@@ -1010,6 +1024,39 @@ void AObjectiveStep::ApplySideEffect(const FObjectiveSideEffect& Effect, bool bR
 			Door->SetExternalGateLocked(Effect.bDoorsLocked);
 		}
 		break;
+
+	case EObjectiveSideEffectType::DeactivateActor:
+	{
+		if (!IsValid(Effect.ActivateTarget))
+		{
+			Unset(TEXT("ActivateTarget (DeactivateActor)"));
+			break;
+		}
+		// Only objective steps can be deactivated — the concept is not meaningful for an extraction
+		// target or an interaction volume, and silently ignoring a mis-wire here is invisible in play.
+		AObjectiveStep* Step = Cast<AObjectiveStep>(Effect.ActivateTarget.Get());
+		if (!Step)
+		{
+			UE_LOG(LogObjectiveStep, Warning,
+				TEXT("'%s' (step '%s'): DeactivateActor target '%s' is not an objective step — only steps can be deactivated"),
+				*GetName(), *GetEffectiveStepId().ToString(), *GetNameSafe(Effect.ActivateTarget));
+			break;
+		}
+		// Deactivate clears bActive but never bCompleted, so a deactivated step can never later
+		// complete — CompleteStep refuses. That is exactly the retire semantics for an off-chain
+		// optional beat (NextStep = None), but aimed at a live main-chain beat it permanently
+		// soft-locks: the chain cannot advance through a step that refuses to complete.
+		if (Step->IsStepActive() && IsValid(Step->GetNextStep()))
+		{
+			UE_LOG(LogObjectiveStep, Warning,
+				TEXT("'%s' (step '%s'): DeactivateActor is retiring step '%s' which is active and has a NextStep — "
+					 "this permanently prevents that step from completing and the chain from advancing. "
+					 "DeactivateActor is intended for off-chain optional beats (NextStep = None)."),
+				*GetName(), *GetEffectiveStepId().ToString(), *Step->GetEffectiveStepId().ToString());
+		}
+		Step->Deactivate();
+		break;
+	}
 	}
 }
 
@@ -1317,6 +1364,13 @@ void AObjectiveStep::RecordCheckpoint()
 	const FName LevelName(*UGameplayStatics::GetCurrentLevelName(this, true));
 	GameInstance->SetStepCheckpoint(LevelName, GetEffectiveStepId());
 	UE_LOG(LogObjectiveStep, Log, TEXT("Checkpoint recorded at step '%s'"), *GetEffectiveStepId().ToString());
+
+	// Capture the player's loadout so the restart restores weapons/ammo/stims.
+	if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
+	{
+		if (AExtractionPlayer* Player = Cast<AExtractionPlayer>(PC->GetPawn()))
+			Player->RequestLoadoutCapture();
+	}
 }
 
 ACompanionCharacter* AObjectiveStep::ResolvePrimaryCompanion()
@@ -1666,6 +1720,22 @@ void AObjectiveStep::AuditStepWiring()
 
 	for (const FObjectiveSideEffect& Effect : SideEffects)
 	{
+		if (Effect.Type == EObjectiveSideEffectType::DeactivateActor)
+		{
+			if (!IsValid(Effect.ActivateTarget))
+			{
+				UE_LOG(LogObjectiveStep, Warning,
+					TEXT("'%s' (step '%s'): DeactivateActor has no ActivateTarget — the effect will do nothing"),
+					*GetName(), *GetEffectiveStepId().ToString());
+			}
+			else if (!Effect.ActivateTarget->IsA<AObjectiveStep>())
+			{
+				UE_LOG(LogObjectiveStep, Warning,
+					TEXT("'%s' (step '%s'): DeactivateActor target '%s' is not an objective step — only steps can be deactivated"),
+					*GetName(), *GetEffectiveStepId().ToString(), *GetNameSafe(Effect.ActivateTarget));
+			}
+		}
+
 		if (Effect.Type == EObjectiveSideEffectType::TeleportSquad) AuditTeleportSquad(Effect);
 
 		if (Effect.Type == EObjectiveSideEffectType::SetDoorsLocked)
@@ -1954,6 +2024,8 @@ void AObjectiveStep::ValidateConfig() const
 			UE_LOG(LogObjectiveStep, Warning, TEXT("%s: UnlockGate side effect has no GateTarget"), *GetName());
 		if (Effect.Type == EObjectiveSideEffectType::ActivateActor && !IsValid(Effect.ActivateTarget))
 			UE_LOG(LogObjectiveStep, Warning, TEXT("%s: ActivateActor side effect has no ActivateTarget"), *GetName());
+		if (Effect.Type == EObjectiveSideEffectType::DeactivateActor && !IsValid(Effect.ActivateTarget))
+			UE_LOG(LogObjectiveStep, Warning, TEXT("%s: DeactivateActor side effect has no ActivateTarget"), *GetName());
 		if (Effect.Type == EObjectiveSideEffectType::StartDirectorWave && Effect.WaveRequest.WaveId.IsNone())
 			UE_LOG(LogObjectiveStep, Warning, TEXT("%s: StartDirectorWave side effect has no WaveId"), *GetName());
 		if (Effect.Type == EObjectiveSideEffectType::SetExtracteeRescuable && !IsValid(Effect.ExtracteeTarget))

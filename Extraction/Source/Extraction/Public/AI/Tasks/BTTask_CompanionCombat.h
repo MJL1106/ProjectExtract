@@ -708,6 +708,15 @@ private:
 	float StandBurstMuzzleCheckTimer = 0.f;
 	bool bStandBurstFireHeld = false;
 
+	/** True when the current burst was committed with NO verified peek line — the target bearing
+	 *  runs through the companion's own cover wall. Aim points down the cover fire arc until the
+	 *  muzzle gate proves the line is clear. */
+	bool bBurstCommitSpeculative = false;
+
+	/** Set the first time the muzzle/corner fire gate reports a clear line during a speculative
+	 *  burst — aim hands back to the live target that instant so the shot stays accurate. */
+	bool bSpeculativeAimVerified = false;
+
 	/** World time the muzzle-withhold last resumed fire. StartFiring() fires an instant shot on every call
 	 *  with no internal refire guard, so a 10 Hz blocked/clear flicker could resume-fire faster than the
 	 *  weapon's cadence. The resume path gates on this + the weapon fire interval. 0 = never resumed. */

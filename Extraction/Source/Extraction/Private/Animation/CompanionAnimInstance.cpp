@@ -84,11 +84,13 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 	// The equip block zeroes both on a genuine weapon change; member initializers handle first init.
 	bWasAlive = true;
 
-	// bAlignRebakePending deliberately survives a re-init (see its declaration) — only the settle
+	// bAlignRebakePending deliberately survives a re-init (see its declaration) -- only the settle
 	// measurement resets, so the gate re-samples against the pose this init leaves the mesh in.
 	AlignRebakeStableTime = 0.f;
 	AlignRebakeWaitTime = 0.f;
 	bAlignRebakePoseRefSampled = false;
+	AlignRebakeGatedWallTime = 0.f;
+	bAlignRebakeStarvationLogged = false;
 }
 
 void UCompanionAnimInstance::NativeUninitializeAnimation()
@@ -112,6 +114,24 @@ void UCompanionAnimInstance::OnReloadMontageBlendingOut(UAnimMontage* Montage, b
 
 	if (IsValid(W))
 		W->StopVisualWeaponReload();
+}
+
+bool UCompanionAnimInstance::IsReloadPoseActive() const
+{
+	if (bIsReloading) return true;
+
+	// The reload montage can outlast the weapon's Reloading state when MontageLength > 2x ReloadTime
+	// (play-rate clamp caps at 2.0). Check all three montage sources so the hand stays uncontested
+	// through the blend-out tail.
+	if (IsValid(ReloadMontage) && Montage_IsPlaying(ReloadMontage)) return true;
+	if (IsValid(ReloadMontage_Crouch) && Montage_IsPlaying(ReloadMontage_Crouch)) return true;
+
+	AWeaponBase* W = IsValid(OwningCompanion) ? OwningCompanion->GetCurrentWeapon() : nullptr;
+	const UWeaponDataAsset* DA = IsValid(W) ? W->GetWeaponData() : nullptr;
+	if (DA && IsValid(DA->EnemyAnimSet.Reload) && Montage_IsPlaying(DA->EnemyAnimSet.Reload))
+		return true;
+
+	return false;
 }
 
 void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
@@ -574,41 +594,54 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			}
 		}
 
+		// Hoisted once: both cover-align and LHIK suppress during the reload pose (weapon state
+		// OR montage blend-out tail). Nothing between the two sites starts or stops a montage,
+		// so the value cannot change — one call saves the per-frame montage-list scans.
+		const bool bReloadPose = IsReloadPoseActive();
+
 		// --- Cover-align: ease the weapon to the per-scenario cover socket while posed ---
 		// Scenario by inference (no BT plumbing): peek montage playing selects the aim scenario,
 		// tucked in cover selects the idle scenario, out of cover eases home (None).
 		if (bCoverAlignSetup && IsValid(Weapon))
 		{
 			ECoverWeaponAlign Scenario = ECoverWeaponAlign::None;
-			if (bPeekMontagePlaying)
+
+			// While a reload pose is active, leave Scenario at None so UpdateCoverAlign eases
+			// the weapon back to rest -- the reload montage owns hand_r and cover-align would
+			// fight it. Shared with the LHIK gate below via bReloadPose.
+			if (!bReloadPose)
 			{
-				if (LatchedCoverHeight == ECoverHeight::Crouch && !bIsCrouched)
+				if (bPeekMontagePlaying)
 				{
-					Scenario = ECoverWeaponAlign::OverTop;
+					if (LatchedCoverHeight == ECoverHeight::Crouch && !bIsCrouched)
+					{
+						Scenario = ECoverWeaponAlign::OverTop;
+					}
+					else if (LatchedCoverHeight == ECoverHeight::Stand)
+					{
+						Scenario = (ActivePeekSide == EPeekSide::Left)
+							? ECoverWeaponAlign::StandPeekLeft : ECoverWeaponAlign::StandPeekRight;
+					}
+					else
+					{
+						Scenario = (ActivePeekSide == EPeekSide::Left)
+							? ECoverWeaponAlign::PeekLeft : ECoverWeaponAlign::PeekRight;
+					}
 				}
-				else if (LatchedCoverHeight == ECoverHeight::Stand)
+				else if (bInCover)
 				{
-					Scenario = (ActivePeekSide == EPeekSide::Left)
-						? ECoverWeaponAlign::StandPeekLeft : ECoverWeaponAlign::StandPeekRight;
-				}
-				else
-				{
-					Scenario = (ActivePeekSide == EPeekSide::Left)
-						? ECoverWeaponAlign::PeekLeft : ECoverWeaponAlign::PeekRight;
+					if (LatchedCoverHeight == ECoverHeight::Stand)
+					{
+						Scenario = (ActivePeekSide == EPeekSide::Left)
+							? ECoverWeaponAlign::StandIdleLeft : ECoverWeaponAlign::StandIdleRight;
+					}
+					else
+					{
+						Scenario = ECoverWeaponAlign::Idle;
+					}
 				}
 			}
-			else if (bInCover)
-			{
-				if (LatchedCoverHeight == ECoverHeight::Stand)
-				{
-					Scenario = (ActivePeekSide == EPeekSide::Left)
-						? ECoverWeaponAlign::StandIdleLeft : ECoverWeaponAlign::StandIdleRight;
-				}
-				else
-				{
-					Scenario = ECoverWeaponAlign::Idle;
-				}
-			}
+
 			Weapon->UpdateCoverAlign(Scenario, DeltaSeconds, CoverAlignBlendSpeed);
 			DiagCoverScenario = static_cast<int32>(Scenario);
 		}
@@ -616,8 +649,9 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		LogWeaponAlignWriters(Weapon, bFireAlignWriting, bPatrolAlignWriting, DiagCoverScenario, DeltaSeconds);
 
 		// --- Left-Hand IK (socket transform — cheap once validity is cached) ---
-		// Disabled during reloads so the left hand follows the reload montage (mag grab).
-		if (bGripSocketValid && CachedGripMesh.IsValid() && !bIsReloading)
+		// Disabled while a reload pose is active (weapon state or montage tail) so the left
+		// hand follows the reload montage (mag grab). Shared bReloadPose with cover-align above.
+		if (bGripSocketValid && CachedGripMesh.IsValid() && !bReloadPose)
 		{
 			LeftHandIKTarget = CachedGripMesh->GetSocketTransform(CachedGripSocketName, RTS_World);
 			bHasLeftHandIK = true;
@@ -1091,9 +1125,11 @@ void UCompanionAnimInstance::RequestWeaponAlignRebake()
 	AlignRebakeStableTime = 0.f;
 	AlignRebakeWaitTime = 0.f;
 	bAlignRebakePoseRefSampled = false;
+	AlignRebakeGatedWallTime = 0.f;
+	bAlignRebakeStarvationLogged = false;
 
 	UE_LOG(LogCompanionDiag, Log,
-		TEXT("%s: ALIGN-REBAKE requested — deferring until the bake's pose reference holds still for %.2fs"),
+		TEXT("%s: ALIGN-REBAKE requested -- deferring until the bake's pose reference holds still for %.2fs"),
 		*GetNameSafe(OwningCompanion.Get()), AlignRebakeSettleSeconds);
 }
 
@@ -1129,41 +1165,82 @@ bool UCompanionAnimInstance::IsAlignRebakePoseSettled(const AWeaponBase* Weapon,
 	return AlignRebakeStableTime >= AlignRebakeSettleSeconds;
 }
 
+bool UCompanionAnimInstance::IsAlignRebakeBlocked(const AWeaponBase* Weapon)
+{
+	// In cover: the skeleton holds a cover-specific pose and cover-align writes cover-specific
+	// offsets. A rebake here would snap CoverAlignCurrent to rest (visible pop). Blocks the
+	// in-cover reload case as well, but does NOT subsume IsCoverAlignWriting -- peek montages
+	// clear bInCover (BTTask_CompanionCombat calls ExitCoverPose before PlayPeekFire), so
+	// IsCoverAlignWriting is the only thing blocking a rebake mid-peek.
+	if (bInCover)
+	{
+		AlignRebakeStableTime = 0.f;
+		bAlignRebakePoseRefSampled = false;
+		return true;
+	}
+
+	// Out-of-cover reload: weapon is in the reload pose, not at rest. Reset settle so the
+	// window re-measures after the montage blend-out rather than inheriting stale stability
+	// from before the reload and passing instantly on the first open frame.
+	if (IsReloadPoseActive())
+	{
+		AlignRebakeStableTime = 0.f;
+		bAlignRebakePoseRefSampled = false;
+		return true;
+	}
+
+	// Cover-align still easing back to rest after a peek or after exiting cover. Load-bearing
+	// for peeks: bInCover is false during the peek montage (ExitCoverPose runs first), so this
+	// guard is the only thing preventing a rebake while the weapon is mid-peek offset.
+	if (IsValid(Weapon) && Weapon->IsCoverAlignWriting()) return true;
+
+	return false;
+}
+
 bool UCompanionAnimInstance::TryConsumeAlignRebake(AWeaponBase* Weapon, float DeltaSeconds)
 {
-	if (!bAlignRebakePending) return false;
-	if (!IsValid(Weapon)) return false;
-
-	// Never fire while cover-align owns the weapon mesh: SetupCoverAlign resets CoverAlignCurrent
-	// and clears bCoverAlignWriting, which would snap the gun out of a peek pose. Placed above the
-	// wait-time accumulator so neither the settle measurement nor the ceiling can advance while the
-	// gun is mid-peek -- a request outstanding during a peek can never reach the timeout.
-	if (Weapon->IsCoverAlignWriting()) return false;
+	// INVARIANT: rebake only when weapon mesh is at pristine rest and pose has been stable.
+	if (!bAlignRebakePending || !IsValid(Weapon)) return false;
+	if (IsAlignRebakeBlocked(Weapon))
+	{
+		// Starvation: AlignRebakeWaitTime freezes while gated so the forced-rebake Warning
+		// can never fire for a VIP that lives in cover. Emit once on wall-clock timeout.
+		AlignRebakeGatedWallTime += DeltaSeconds;
+		const bool bStarved = !bAlignRebakeStarvationLogged && AlignRebakeMaxWaitSeconds > 0.f
+			&& AlignRebakeGatedWallTime >= AlignRebakeMaxWaitSeconds;
+		if (bStarved)
+		{
+			bAlignRebakeStarvationLogged = true;
+			UE_LOG(LogCompanionDiag, Warning,
+				TEXT("%s: ALIGN-REBAKE starved -- pending %.2fs (inCover=%d reload=%d coverAlignWrite=%d)"),
+				*GetNameSafe(OwningCompanion.Get()), AlignRebakeGatedWallTime, (int32)bInCover,
+				(int32)IsReloadPoseActive(), IsValid(Weapon) ? (int32)Weapon->IsCoverAlignWriting() : 0);
+		}
+		return false;
+	}
 
 	AlignRebakeWaitTime += DeltaSeconds;
-
 	const bool bSettled = IsAlignRebakePoseSettled(Weapon, DeltaSeconds);
 	const bool bTimedOut = AlignRebakeMaxWaitSeconds > 0.f && AlignRebakeWaitTime >= AlignRebakeMaxWaitSeconds;
 	if (!bSettled && !bTimedOut) return false;
 
+	// Braces are load-bearing: UE_LOG expands to a braced block, so a braceless if/else here
+	// orphans the else on the trailing semicolon (C2181).
 	if (bSettled)
 	{
-		UE_LOG(LogCompanionDiag, Log, TEXT("%s: ALIGN-REBAKE firing — bake pose settled after %.2fs"),
-			*GetNameSafe(OwningCompanion.Get()), AlignRebakeWaitTime);
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: ALIGN-REBAKE firing after %.2fs"), *GetNameSafe(OwningCompanion.Get()), AlignRebakeWaitTime);
 	}
 	else
 	{
-		// Visible failure beats a silent one: a forced re-bake may have baked a moving pose, which is
-		// the exact way this fix could reintroduce the bug it exists to remove.
-		UE_LOG(LogCompanionDiag, Warning,
-			TEXT("%s: ALIGN-REBAKE forced after %.2fs — bake pose never held still for %.2fs (transTol=%.3fcm rotTol=%.1fdeg); baseline may be mid-transition"),
-			*GetNameSafe(OwningCompanion.Get()), AlignRebakeWaitTime, AlignRebakeSettleSeconds, AlignRebakeTranslationTolerance, AlignRebakeRotationTolerance);
+		UE_LOG(LogCompanionDiag, Warning, TEXT("%s: ALIGN-REBAKE forced after %.2fs"), *GetNameSafe(OwningCompanion.Get()), AlignRebakeWaitTime);
 	}
 
 	bAlignRebakePending = false;
 	AlignRebakeStableTime = 0.f;
 	AlignRebakeWaitTime = 0.f;
 	bAlignRebakePoseRefSampled = false;
+	AlignRebakeGatedWallTime = 0.f;
+	bAlignRebakeStarvationLogged = false;
 	return true;
 }
 
@@ -1188,12 +1265,12 @@ void UCompanionAnimInstance::LogWeaponAlignWriters(const AWeaponBase* Weapon, bo
 	const FTransform Rel = IsValid(WeaponMesh) ? WeaponMesh->GetRelativeTransform() : FTransform::Identity;
 
 	UE_LOG(LogCompanionDiag, Log,
-		TEXT("[ALIGN] %s winner=%s | fire(a=%.2f w=%d sock='%s') patrol(a=%.2f w=%d) cover(scen=%d w=%d) | peek=%d inCover=%d aiming=%d | rel loc=%s rotDeg=%s"),
+		TEXT("[ALIGN] %s winner=%s | fire(a=%.2f w=%d sock='%s') patrol(a=%.2f w=%d) cover(scen=%d w=%d) | peek=%d inCover=%d aiming=%d reloading=%d | rel loc=%s rotDeg=%s"),
 		*GetNameSafe(OwningCompanion.Get()), Winner,
 		FireAlignAlpha, (int32)bFireWriting, *FireAlignSocketName.ToString(),
 		PatrolAlignAlpha, (int32)bPatrolWriting,
 		CoverScenario, (int32)bCoverWriting,
-		(int32)IsAnyCoverPeekMontagePlaying(), (int32)bInCover, (int32)bIsAiming,
+		(int32)IsAnyCoverPeekMontagePlaying(), (int32)bInCover, (int32)bIsAiming, (int32)bIsReloading,
 		*Rel.GetLocation().ToString(), *Rel.Rotator().ToString());
 }
 

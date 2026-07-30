@@ -47,4 +47,21 @@ void UExtractionGameInstance::ClearCheckpoint()
 	LastCheckpointStep = ELevelObjectiveStep::Inactive;
 	StepCheckpointLevelName = NAME_None;
 	LastCheckpointStepId = NAME_None;
+	LoadoutSnapshotLevelName = NAME_None;
+	LoadoutSnapshot = FCheckpointLoadoutSnapshot();
+}
+
+void UExtractionGameInstance::SetLoadoutSnapshot(FName LevelName, const FCheckpointLoadoutSnapshot& Snapshot)
+{
+	LoadoutSnapshotLevelName = LevelName;
+	LoadoutSnapshot = Snapshot;
+}
+
+const FCheckpointLoadoutSnapshot& UExtractionGameInstance::GetLoadoutSnapshotForLevel(FName LevelName) const
+{
+	if (LevelName != NAME_None && LevelName == LoadoutSnapshotLevelName)
+		return LoadoutSnapshot;
+
+	static const FCheckpointLoadoutSnapshot InvalidSnapshot;
+	return InvalidSnapshot;
 }

@@ -27,6 +27,7 @@
 #include "Companion/CompanionCharacter.h"
 #include "Extractee/ExtracteeCompanion.h"
 #include "Extractee/ExtracteeCharacter.h"
+#include "Animation/CompanionAnimInstance.h"
 #include "EngineUtils.h"
 #include "Engine/World.h"
 #include "WeaponComponent.h"
@@ -50,6 +51,7 @@
 #include "Audio/SurfaceAudioBank.h"
 #include "World/WorldInteractable.h"
 #include "Game/ExtractionGameMode.h"
+#include "Game/ExtractionGameInstance.h"
 
 AExtractionPlayer::AExtractionPlayer(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UExtractionPlayerMovement>(
@@ -200,6 +202,40 @@ void AExtractionPlayer::BeginPlay()
 		if (IsValid(ExistingWeapon))
 			OnWeaponEquipped(ExistingWeapon);
 	}
+
+	// Checkpoint loadout restore: cache the snapshot and schedule for the NEXT TICK so it
+	// lands after the character BP's BeginPlay spine (Load/SwapWeapon) has finished.
+	if (HasAuthority())
+	{
+		const UExtractionGameInstance* GameInstance = GetGameInstance<UExtractionGameInstance>();
+		if (GameInstance)
+		{
+			const FName LevelName(*UGameplayStatics::GetCurrentLevelName(this, true));
+			const FCheckpointLoadoutSnapshot& Snapshot = GameInstance->GetLoadoutSnapshotForLevel(LevelName);
+			if (Snapshot.bValid)
+			{
+				CachedRestoreSnapshot = Snapshot;
+				if (const UWorld* World = GetWorld())
+				{
+					World->GetTimerManager().SetTimer(LoadoutRestoreTimerHandle, this,
+						&AExtractionPlayer::DeferredRestoreLoadout, KINDA_SMALL_NUMBER, false);
+				}
+			}
+			else
+			{
+				// No snapshot to restore -- settle immediately so captures are allowed.
+				bLoadoutRestoreSettled = true;
+			}
+		}
+		else
+		{
+			bLoadoutRestoreSettled = true;
+		}
+	}
+	else
+	{
+		bLoadoutRestoreSettled = true;
+	}
 }
 
 void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -226,6 +262,9 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (const UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+		World->GetTimerManager().ClearTimer(LoadoutRestoreTimerHandle);
+		World->GetTimerManager().ClearTimer(LoadoutVerifyTimerHandle);
+		World->GetTimerManager().ClearTimer(AudioSuppressionFailsafeHandle);
 
 		if (ActorSpawnedHandle.IsValid())
 			World->RemoveOnActorSpawnedHandler(ActorSpawnedHandle);
@@ -461,8 +500,6 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	if (IA_CompanionModeCombat)
 		EnhancedInput->BindAction(IA_CompanionModeCombat, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeSelectCombatInput);
 
-	// Temp debug: H key applies 25 damage
-	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionPlayer::DebugApplyDamage);
 }
 
 void AExtractionPlayer::PawnClientRestart()
@@ -2442,17 +2479,6 @@ void AExtractionPlayer::OnRep_IsDBNO()
 	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
 }
 
-void AExtractionPlayer::DebugApplyDamage()
-{
-	if (!HasAuthority()) return;
-	if (!IsValid(HealthComponent)) return;
-
-	HealthComponent->TakeDamage(25.f);
-	UE_LOG(LogExtraction, Verbose, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
-		HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
-		HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
-}
-
 // ---- Revive ----
 
 AActor* AExtractionPlayer::FindReviveTarget() const
@@ -2712,6 +2738,82 @@ void AExtractionPlayer::VipReload()
 	UE_LOG(LogCompanion, Log, TEXT("VipReload triggered on %s"), *Vip->GetName());
 }
 
+void AExtractionPlayer::VipRescue()
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipRescue: no extraction VIP found")); return; }
+
+	AExtracteeCompanion* Extractee = Cast<AExtracteeCompanion>(Vip);
+	if (!IsValid(Extractee)) { UE_LOG(LogCompanion, Warning, TEXT("VipRescue: cast to ExtracteeCompanion failed")); return; }
+	if (!Extractee->IsCaptive()) { UE_LOG(LogCompanion, Warning, TEXT("VipRescue: already freed (armed=%d)"), Extractee->IsArmed()); return; }
+
+	Extractee->ForceRescue();
+	UE_LOG(LogCompanion, Log, TEXT("VipRescue: forced rescue on %s"), *Extractee->GetName());
+}
+
+void AExtractionPlayer::VipDebug(bool bFreeze)
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipDebug: no extraction VIP found")); return; }
+
+	AAIController* AIC = Cast<AAIController>(Vip->GetController());
+	UBrainComponent* Brain = AIC ? AIC->GetBrainComponent() : nullptr;
+	if (!Brain) { UE_LOG(LogCompanion, Warning, TEXT("VipDebug: no brain component")); return; }
+
+	if (bFreeze) Brain->StopLogic(TEXT("VipDebug"));
+	else Brain->RestartLogic();
+
+	UE_LOG(LogCompanion, Log, TEXT("VipDebug freeze -> %d"), bFreeze);
+}
+
+void AExtractionPlayer::VipCover(bool bEnable, bool bStand, bool bLeft)
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipCover: no extraction VIP found")); return; }
+
+	USkeletalMeshComponent* MeshComp = Vip->GetMesh();
+	UCompanionAnimInstance* AnimInst = IsValid(MeshComp) ? Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()) : nullptr;
+	if (!AnimInst) { UE_LOG(LogCompanion, Warning, TEXT("VipCover: no CompanionAnimInstance")); return; }
+
+	if (bEnable)
+	{
+		// Match the capsule to the cover height so bIsCrouched agrees with LatchedCoverHeight --
+		// otherwise reload picks the wrong montage and peek takes the wrong align branch.
+		bStand ? Vip->UnCrouch() : Vip->Crouch();
+
+		// EnterCoverPose syncs the CoverPoseComponent (SetInCover/SetLean), so the per-frame
+		// bInCover mirror in NativeUpdateAnimation reads back the forced state as long as the
+		// brain is stopped (VipDebug 1).
+		const EPeekSide Side = bLeft ? EPeekSide::Left : EPeekSide::Right;
+		const ECoverHeight Height = bStand ? ECoverHeight::Stand : ECoverHeight::Crouch;
+		AnimInst->EnterCoverPose(Side, Height, true);
+		UE_LOG(LogCompanion, Log, TEXT("VipCover: entered cover (Stand=%d, Left=%d)"), bStand, bLeft);
+	}
+	else
+	{
+		Vip->UnCrouch();
+		AnimInst->ExitCoverPose();
+		UE_LOG(LogCompanion, Log, TEXT("VipCover: exited cover"));
+	}
+}
+
+void AExtractionPlayer::VipPeek()
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipPeek: no extraction VIP found")); return; }
+
+	USkeletalMeshComponent* MeshComp = Vip->GetMesh();
+	UCompanionAnimInstance* AnimInst = IsValid(MeshComp) ? Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()) : nullptr;
+	if (!AnimInst) { UE_LOG(LogCompanion, Warning, TEXT("VipPeek: no CompanionAnimInstance")); return; }
+	if (!AnimInst->IsInCover()) { UE_LOG(LogCompanion, Warning, TEXT("VipPeek: VIP is not in cover")); return; }
+
+	// Use the anim instance's active peek side -- matches the side passed to EnterCoverPose.
+	UAnimMontage* Montage = AnimInst->PlayPeekFire(AnimInst->GetActivePeekSide());
+	if (!IsValid(Montage)) { UE_LOG(LogCompanion, Warning, TEXT("VipPeek: peek montage unassigned in ABP")); return; }
+
+	UE_LOG(LogCompanion, Log, TEXT("VipPeek: playing %s"), *Montage->GetName());
+}
+
 // --- Single-reviver claim ---
 
 bool AExtractionPlayer::TryClaimRevive(AActor* Claimant)
@@ -2734,4 +2836,230 @@ void AExtractionPlayer::ReleaseReviveClaim(AActor* Claimant)
 	// Holder-only: a losing bidder releasing must never free the winner's hold.
 	if (ReviveClaimant.Get() != Claimant) return;
 	ReviveClaimant.Reset();
+}
+
+// ------------------------------------------------------------------
+// Checkpoint loadout snapshot
+// ------------------------------------------------------------------
+
+void AExtractionPlayer::RequestLoadoutCapture()
+{
+	if (!HasAuthority()) return;
+
+	// Block captures until the deferred restore has completed (or was skipped). Without
+	// this, the resume-activated checkpoint step calls RecordCheckpoint -> here before the
+	// restore has fired, overwriting the good snapshot with the freshly-spawned defaults.
+	if (!bLoadoutRestoreSettled)
+	{
+		UE_LOG(LogExtraction, Verbose,
+			TEXT("RequestLoadoutCapture skipped -- loadout restore has not settled yet"));
+		return;
+	}
+
+	bLoadoutCommitReceived = false;
+	OnCaptureLoadoutRequested();
+
+	if (!bLoadoutCommitReceived)
+	{
+		UE_LOG(LogExtraction, Warning,
+			TEXT("OnCaptureLoadoutRequested fired but CommitLoadoutSnapshot was never called "
+				 "-- is the BP graph wired?"));
+	}
+}
+
+void AExtractionPlayer::CommitLoadoutSnapshot(const FCheckpointLoadoutSnapshot& Snapshot)
+{
+	if (!HasAuthority()) return;
+
+	bLoadoutCommitReceived = true;
+
+	UExtractionGameInstance* GameInstance = GetGameInstance<UExtractionGameInstance>();
+	if (!GameInstance) return;
+
+	// Copy the BP-built snapshot so we can overwrite the live ammo from weapon actors.
+	FCheckpointLoadoutSnapshot Final = Snapshot;
+
+	// Gun slots: the slot records hold pickup-time ammo that goes stale as the player
+	// shoots. Read the live truth from the AWeaponBase actors.
+	if (IsValid(WeaponComponent))
+	{
+		if (AWeaponBase* Primary = WeaponComponent->GetPrimaryWeapon(); IsValid(Primary))
+		{
+			Final.PrimarySlot.Ammo = Primary->GetCurrentAmmo();
+			Final.PrimarySlot.ReserveAmmo = Primary->GetReserveAmmo();
+		}
+		if (AWeaponBase* Secondary = WeaponComponent->GetSecondaryWeapon(); IsValid(Secondary))
+		{
+			Final.SecondarySlot.Ammo = Secondary->GetCurrentAmmo();
+			Final.SecondarySlot.ReserveAmmo = Secondary->GetReserveAmmo();
+		}
+	}
+
+	// Active weapon slot from C++ (immune to the kit mirror desync). A held throwable leaves
+	// CurrentWeapon pointing at the gun, so GetActiveWeaponSlot would report Primary/Secondary
+	// while the grenade is out -- report None there so the restore falls back to ActiveSlotIndex.
+	if (IsValid(WeaponComponent))
+	{
+		Final.ActiveWeaponSlot = WeaponComponent->IsThrowableEquipped()
+			? EWeaponSlot::None
+			: WeaponComponent->GetActiveWeaponSlot();
+	}
+
+	// Stim count from the live consumable inventory.
+	if (IsValid(ConsumableInventoryComponent))
+		Final.StimCount = ConsumableInventoryComponent->GetStimCount();
+
+	// Derive validity from slot content rather than stamping unconditionally, so an
+	// unimplemented or half-wired BP capture cannot commit an empty snapshot.
+	Final.bValid = Final.PrimarySlot.bValid || Final.SecondarySlot.bValid
+		|| Final.ThrowableSlot.bValid || Final.MeleeSlot.bValid;
+
+	if (!Final.bValid)
+	{
+		UE_LOG(LogExtraction, Warning,
+			TEXT("CommitLoadoutSnapshot: all four slot snapshots are invalid -- snapshot not stored"));
+		return;
+	}
+
+	const FName LevelName(*UGameplayStatics::GetCurrentLevelName(this, true));
+	GameInstance->SetLoadoutSnapshot(LevelName, Final);
+
+	UE_LOG(LogExtraction, Log, TEXT("Loadout snapshot committed for level '%s'"), *LevelName.ToString());
+}
+
+void AExtractionPlayer::DeferredRestoreLoadout()
+{
+	if (!CachedRestoreSnapshot.bValid)
+	{
+		bLoadoutRestoreSettled = true;
+		return;
+	}
+
+	// Restore stim count: the component's BeginPlay already granted StartingStims,
+	// so we must SET the count rather than add to it.
+	if (IsValid(ConsumableInventoryComponent))
+		ConsumableInventoryComponent->SetStimCount(CachedRestoreSnapshot.StimCount);
+
+	// C++ owns the audio suppression bracket so a BP early-out cannot strand it.
+	if (IsValid(WeaponComponent))
+		WeaponComponent->BeginAudioSuppression();
+
+	UE_LOG(LogExtraction, Log, TEXT("Restoring loadout from checkpoint"));
+
+	// Hand the cached snapshot to BP for slot-record writes and weapon replacement.
+	OnRestoreLoadoutRequested(CachedRestoreSnapshot);
+
+	// Re-select the gun that was in hand. Driven from C++ rather than BP because the kit's
+	// SwapWeapon event is dead (its exec pin is unconnected), and doing it here keeps the
+	// switch inside the audio suppression bracket so the restore stays silent.
+	if (IsValid(WeaponComponent))
+		WeaponComponent->ActivateSlot(CachedRestoreSnapshot.ActiveWeaponSlot);
+
+	// Deliberately NOT settling here -- the verify poll below can keep re-firing the restore.
+	// A capture arriving inside that window would snapshot the still-unrestored default loadout
+	// and make a transient failure permanent. VerifyLoadoutRestore settles on its terminal paths
+	// instead, so the latch tracks "restore chain finished", not "first attempt fired".
+
+	// Arm a failsafe that force-zeroes the audio suppression depth after 1s in case
+	// the BP restore chain early-outs before calling EndAudioSuppression.
+	if (const UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(AudioSuppressionFailsafeHandle, this,
+			&AExtractionPlayer::ReleaseAudioSuppressionFailsafe, 1.f, false);
+	}
+
+	// Start the verify poll to catch async BP spines that re-equip the default gun.
+	LoadoutVerifyRetries = 0;
+	if (const UWorld* World = GetWorld())
+	{
+		static constexpr float VerifyPollSeconds = 0.25f;
+		World->GetTimerManager().SetTimer(LoadoutVerifyTimerHandle, this,
+			&AExtractionPlayer::VerifyLoadoutRestore, VerifyPollSeconds, true);
+	}
+	else
+	{
+		// No world means the poll can never run and settle the latch, which would block
+		// captures for the rest of the level. Settle here instead.
+		bLoadoutRestoreSettled = true;
+	}
+}
+
+namespace
+{
+	/** A slot counts as restored when it was empty at capture, when it carries no gameplay class
+	 *  to compare against (nothing to verify -- comparing would burn every retry), or when the
+	 *  live weapon's class matches what was captured. */
+	bool IsSlotRestored(const FCheckpointSlotSnapshot& Slot, AWeaponBase* Live)
+	{
+		if (!Slot.bValid || !Slot.WeaponClass) return true;
+		return IsValid(Live) && Live->GetClass() == Slot.WeaponClass;
+	}
+}
+
+void AExtractionPlayer::VerifyLoadoutRestore()
+{
+	static constexpr int32 MaxVerifyRetries = 8;
+
+	if (!CachedRestoreSnapshot.bValid || !IsValid(WeaponComponent))
+	{
+		if (const UWorld* World = GetWorld())
+			World->GetTimerManager().ClearTimer(LoadoutVerifyTimerHandle);
+		bLoadoutRestoreSettled = true;
+		return;
+	}
+
+	// Both gun slots must match -- a snapshot with only a secondary would otherwise report
+	// restored on the first tick and stop polling.
+	const bool bMismatch =
+		!IsSlotRestored(CachedRestoreSnapshot.PrimarySlot, WeaponComponent->GetPrimaryWeapon()) ||
+		!IsSlotRestored(CachedRestoreSnapshot.SecondarySlot, WeaponComponent->GetSecondaryWeapon());
+
+	if (bMismatch && LoadoutVerifyRetries < MaxVerifyRetries)
+	{
+		++LoadoutVerifyRetries;
+		UE_LOG(LogExtraction, Log,
+			TEXT("VerifyLoadoutRestore: weapon mismatch, re-firing restore (attempt %d/%d)"),
+			LoadoutVerifyRetries, MaxVerifyRetries);
+
+		if (IsValid(WeaponComponent))
+			WeaponComponent->BeginAudioSuppression();
+
+		OnRestoreLoadoutRequested(CachedRestoreSnapshot);
+
+		if (IsValid(WeaponComponent))
+			WeaponComponent->ActivateSlot(CachedRestoreSnapshot.ActiveWeaponSlot);
+
+		if (const UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().SetTimer(AudioSuppressionFailsafeHandle, this,
+				&AExtractionPlayer::ReleaseAudioSuppressionFailsafe, 1.f, false);
+		}
+		return;
+	}
+
+	// Match confirmed or retries exhausted -- the restore chain is finished, so stop polling
+	// and settle the latch: captures are only safe now that nothing will re-fire the restore.
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(LoadoutVerifyTimerHandle);
+
+	bLoadoutRestoreSettled = true;
+
+	if (bMismatch)
+	{
+		UE_LOG(LogExtraction, Warning,
+			TEXT("VerifyLoadoutRestore: weapon still mismatched after %d retries -- giving up"),
+			MaxVerifyRetries);
+	}
+}
+
+void AExtractionPlayer::ReleaseAudioSuppressionFailsafe()
+{
+	if (!IsValid(WeaponComponent)) return;
+	if (WeaponComponent->IsAudioSuppressed())
+	{
+		UE_LOG(LogExtraction, Verbose,
+			TEXT("Audio suppression failsafe: force-clearing suppression depth"));
+		while (WeaponComponent->IsAudioSuppressed())
+			WeaponComponent->EndAudioSuppression();
+	}
 }

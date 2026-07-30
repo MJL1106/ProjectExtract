@@ -578,6 +578,8 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 	bIsFiringBurst = false;
 	// Fix 5: the burst is over — clear the muzzle-withhold latch so the next burst starts un-held.
 	bStandBurstFireHeld = false;
+	bBurstCommitSpeculative = false;
+	bSpeculativeAimVerified = false;
 	StandBurstMuzzleCheckTimer = 0.f;
 	LastStandBurstResumeFireTime = 0.f;
 
@@ -1174,6 +1176,7 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 				const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 				const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 					ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
+				if (bCanFire) bSpeculativeAimVerified = true;
 				if (!bCornerPeekReturning && bCanFire && !bCornerPeekFiring && PeekFireDelayRemaining <= 0.f)
 				{
 					Companion->StartWeaponFire();
@@ -1240,6 +1243,7 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 			const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 			const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 				ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
+			if (bCanFire) bSpeculativeAimVerified = true;
 			if (bCanFire && !bCornerPeekFiring && PeekFireDelayRemaining <= 0.f)
 			{
 				Companion->StartWeaponFire();
@@ -1520,6 +1524,10 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 			ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
 	}
 	const bool bBlocked = (bMuzzleBlocked && MuzzleHit.GetActor() != Target) || bOutOfCone;
+
+	// Speculative aim hand-back: the muzzle gate just proved the line is clear — aim returns
+	// to the live target this instant so the shot stays accurate.
+	if (!bBlocked) bSpeculativeAimVerified = true;
 
 	if (bBlocked && !bStandBurstFireHeld)
 	{
@@ -2637,6 +2645,8 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	BurstTimer = 0.f;
 	// Fix 5: clear the muzzle-withhold latch so a stale held state can't leak into the next engagement.
 	bStandBurstFireHeld = false;
+	bBurstCommitSpeculative = false;
+	bSpeculativeAimVerified = false;
 	StandBurstMuzzleCheckTimer = 0.f;
 	LastStandBurstResumeFireTime = 0.f;
 	TimeInCoverIdle = 0.f;
@@ -3158,7 +3168,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		return FinishLatentTask(OwnerComp, bTargetDead ? EBTNodeResult::Succeeded : EBTNodeResult::Failed);
 	}
 
-	Ctx.Companion->SetAimTarget(Ctx.Target);
+	// Speculative peek: while the burst was committed with no verified peek line, aim at nothing
+	// (same treatment cover-idle uses) so the companion does not visibly track through the wall.
+	// Aim hands back to the live target the instant the muzzle gate verifies a clear line.
+	const bool bSpeculativeAimHeld = bIsFiringBurst && bBurstCommitSpeculative && !bSpeculativeAimVerified;
+	Ctx.Companion->SetAimTarget(bSpeculativeAimHeld ? nullptr : Ctx.Target);
 
 	if (bWaitingForFinalApproach)
 	{
@@ -4490,6 +4504,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
 			AmmoAtBurstStart = Ctx.Companion->GetCurrentAmmo();
 			bIsFiringBurst = true;
+			bBurstCommitSpeculative = (TickTuning && TickTuning->bSpeculativePeekAimsPeekDirection) && !bLosFromCover;
+			bSpeculativeAimVerified = false;
 			if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
 				AIC->StopMovement();
 			if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
@@ -4566,6 +4582,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			AmmoAtBurstStart = Ctx.Companion->GetCurrentAmmo();
 			PeekFireDelayRemaining = PeekFireDelaySeconds;
 			bIsFiringBurst = true;
+			bBurstCommitSpeculative = (TickTuning && TickTuning->bSpeculativePeekAimsPeekDirection) && !bLosFromCover;
+			bSpeculativeAimVerified = false;
 			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
 			if (Cover.IsValid())
 				CompanionSnapToCoverFacing(Ctx.Companion, Cover.Data);
@@ -4653,6 +4671,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			bStandBurstFireHeld = true;
 		}
 		bIsFiringBurst = true;
+		bBurstCommitSpeculative = (TickTuning && TickTuning->bSpeculativePeekAimsPeekDirection) && !bLosFromCover;
+		bSpeculativeAimVerified = false;
 		DebugBurstLosCheckTimer = 0.f;
 		TimeInCoverIdle = 0.f;
 		TimeAtCurrentCover = 0.f;
@@ -4740,10 +4760,18 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			const bool bUseSlotForward = (CurrentBurstAction == EPeekAction::StandUpAndReposition
 				&& bStandUpRepositionWalking && Cover.IsValid());
+			// Speculative peek: face the cover fire-arc forward instead of tracking the target
+			// through the wall. Same principle as bUseSlotForward but for the stationary case.
+			const bool bUseSpeculativeForward = bSpeculativeAimHeld && Cover.IsValid() && !bUseSlotForward;
 			const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
-			const FRotator DesiredRot = bUseSlotForward
-				? FRotator(0.f, CachedSlotForwardYaw, 0.f)
-				: FRotator(0.f, LookAtRot.Yaw, 0.f);
+			float DesiredYaw;
+			if (bUseSlotForward)
+				DesiredYaw = CachedSlotForwardYaw;
+			else if (bUseSpeculativeForward)
+				DesiredYaw = UCoverGeometryStatics::GetFireArcForward(Cover.Data).Rotation().Yaw;
+			else
+				DesiredYaw = LookAtRot.Yaw;
+			const FRotator DesiredRot(0.f, DesiredYaw, 0.f);
 			Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
 				DesiredRot, DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
 		}

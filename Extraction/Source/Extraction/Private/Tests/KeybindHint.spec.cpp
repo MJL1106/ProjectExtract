@@ -1,6 +1,8 @@
 // Automation coverage for the keybind-hint fallbacks and the multi-binding arbitration rule, plus the
-// objective-label substitution that sits on top of them. IA_CompanionBreach is bound to both B and I,
-// so "which key wins" is a real answer the HUD depends on rather than a hypothetical.
+// objective-label substitution that sits on top of them. Multi-binding is not hypothetical in this
+// project: IA_CompanionBreach shipped with both B and I mapped (B removed 30/07 on the director's
+// call, leaving I), and IMC_Default still carries the same action in BOTH the legacy Mappings array
+// and the nested DefaultKeyMappings one — so "which key wins" is a real answer the HUD depends on.
 
 #include "Misc/AutomationTest.h"
 

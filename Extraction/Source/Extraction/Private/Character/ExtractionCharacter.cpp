@@ -393,8 +393,6 @@ void AExtractionCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		EnhancedInput->BindAction(ADSAction, ETriggerEvent::Completed, this, &AExtractionCharacter::ADSStop);
 	}
 
-	// Temp debug: H key applies 25 damage
-	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionCharacter::DebugApplyDamage);
 }
 
 // ---- Core Input Handlers ----
@@ -1329,17 +1327,6 @@ void AExtractionCharacter::OnRep_IsDBNO()
 		BleedoutTimeRemaining = BleedoutDuration;
 
 	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
-}
-
-void AExtractionCharacter::DebugApplyDamage()
-{
-	if (!HasAuthority()) return;
-	if (!IsValid(HealthComponent)) return;
-
-	HealthComponent->TakeDamage(25.f);
-	UE_LOG(LogExtraction, Verbose, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
-		HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
-		HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
 }
 
 // ---- Interaction / Revive ----

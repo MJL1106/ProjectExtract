@@ -113,6 +113,26 @@ enum class EObjectiveSideEffectType : uint8
 	 *  a checkpoint resume before the defend re-locks the doors, and one after it re-unlocks them,
 	 *  restoring the world the player left behind. */
 	SetDoorsLocked,
+	/** Stand down another objective step: call Deactivate() on the ActivateTarget. The beat drops its
+	 *  marker and unbinds, but is NOT completed and the chain does NOT advance — a deactivated step
+	 *  can be reactivated later if needed. Idempotent (Deactivate already is), and safe on a step
+	 *  that was never activated or is already completed.
+	 *
+	 *  Intended for OFF-CHAIN optional beats (NextStep = None). Aimed at a live main-chain step it is
+	 *  a permanent soft-lock: Deactivate clears bActive but never bCompleted, so CompleteStep refuses
+	 *  on the deactivated step and the chain stalls. A warning logs when the target is active and has
+	 *  a non-null NextStep, which is the mis-wire signature.
+	 *
+	 *  Deactivate() also tears down wave retries and pending wave requests ABOVE its bActive guard, so
+	 *  pointing this at a step that queued a wave from its own OnComplete would silently kill that wave.
+	 *  Not the intended use case, but worth knowing.
+	 *
+	 *  The motivating shape: an optional tutorial beat sits off the main chain, is stood up by an
+	 *  ActivateActor on the parent step, and must be stood back down when the parent completes —
+	 *  otherwise the player stares at a stale objective for a beat that is no longer relevant. The
+	 *  parent's OnComplete carries both: ActivateActor for the next main-chain beat, and
+	 *  DeactivateActor for the optional beat it stood up on activation. */
+	DeactivateActor,
 };
 
 /** One scripted consequence of a step activating or completing. */
@@ -143,8 +163,12 @@ struct EXTRACTION_API FObjectiveSideEffect
 		meta = (EditCondition = "Type == EObjectiveSideEffectType::SetCompanionMode", EditConditionHides))
 	ECompanionMode CompanionMode = ECompanionMode::Normal;
 
+	/** ActivateActor / DeactivateActor: the actor to turn on or off. For ActivateActor this dispatches
+	 *  on what it was handed (extraction target, interaction volume, objective step); for
+	 *  DeactivateActor only an objective step is meaningful — anything else logs a warning and is
+	 *  skipped. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Side Effect",
-		meta = (EditCondition = "Type == EObjectiveSideEffectType::ActivateActor", EditConditionHides))
+		meta = (EditCondition = "Type == EObjectiveSideEffectType::ActivateActor || Type == EObjectiveSideEffectType::DeactivateActor", EditConditionHides))
 	TObjectPtr<AActor> ActivateTarget;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Side Effect",
