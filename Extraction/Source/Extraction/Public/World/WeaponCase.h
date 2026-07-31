@@ -44,6 +44,22 @@ public:
 	UFUNCTION()
 	TArray<FString> GetSlotIdOptions() const;
 
+	/** Tries to seat an already-spawned pickup back into a free cutout whose PickupClass
+	 *  matches the actor's class.  Returns true on success, false when no matching free
+	 *  cutout exists -- the caller falls back to its existing spawn-at-crosshair path.
+	 *  The returned item is tracked identically to an originally-spawned one: added to
+	 *  SpawnedItems, bound to HandleItemDestroyed, seated via SeatItemInSlot, and the
+	 *  loot marker refreshed (the case is no longer picked clean). */
+	UFUNCTION(BlueprintCallable, Category = "Case")
+	bool TryReturnItemToCase(AActor* Item);
+
+	/** Resolves the AWeaponCase that owns a pickup by walking the actor's attach-parent
+	 *  chain.  SeatItemInSlot attaches items under a UWeaponCaseSlotComponent owned by the
+	 *  case, so any seated pickup has the case as an immediate attach ancestor.
+	 *  Returns nullptr if the actor is not seated in any weapon case. */
+	UFUNCTION(BlueprintPure, Category = "Case")
+	static AWeaponCase* FindOwningWeaponCase(const AActor* Item);
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
@@ -102,6 +118,12 @@ protected:
 private:
 	/** Weak: pickups destroy themselves when collected. */
 	TArray<TWeakObjectPtr<AActor>> SpawnedItems;
+
+	/** Maps each slot component to its current occupant.  Populated during SpawnSlotItems,
+	 *  updated by TryReturnItemToCase, cleaned up by HandleItemDestroyed.  A slot is vacant
+	 *  when it has no entry or IsOccupantGone returns true for its occupant -- the same
+	 *  vacancy convention IsEmpty uses (stale, or hidden with collision disabled). */
+	TMap<TObjectPtr<UWeaponCaseSlotComponent>, TWeakObjectPtr<AActor>> SlotOccupancy;
 
 	/** Bound to every spawned item's OnDestroyed so the marker clears the moment the last one is
 	 *  collected. Drops the dying actor from SpawnedItems explicitly -- see the implementation for
@@ -177,4 +199,13 @@ private:
 	 *  Current weapon skeletal meshes have no PhysicsAsset (so nothing actually simulates),
 	 *  but this prevents future PhysicsAsset additions from breaking the foam-seat attach. */
 	static void DisableItemPhysics(AActor& Item);
+
+	/** True when a tracked occupant is gone: stale/invalid, or hidden with actor collision
+	 *  disabled.  This IS the single vacancy definition -- IsEmpty and slot-free checks both
+	 *  use it so two definitions cannot disagree and double-seat a cutout. */
+	static bool IsOccupantGone(const TWeakObjectPtr<AActor>& Occupant);
+
+	/** Returns the first slot whose PickupClass matches ItemClass and whose current occupant
+	 *  is gone (per IsOccupantGone), or nullptr when every matching slot is occupied. */
+	UWeaponCaseSlotComponent* FindFreeSlotForClass(const UClass* ItemClass) const;
 };

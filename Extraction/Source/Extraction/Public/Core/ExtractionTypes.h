@@ -94,6 +94,42 @@ enum class EAttachmentSlot : uint8
 };
 
 /**
+ * The kit Blueprint's ENUM_AttachmentSlot byte values, which are NOT in the same order as
+ * EAttachmentSlot above. Kit 2 is Muzzle where C++ 2 is Laser, so casting one to the other
+ * silently reads the WRONG slot -- world attachment pickups carry the KIT byte, so every
+ * kit-facing entry point translates through ToAttachmentSlot and NOWHERE ELSE.
+ *
+ * REORDERING ENUM_AttachmentSlot IN THE KIT BLUEPRINT SILENTLY BREAKS THIS TABLE: the stat
+ * preview would quote another slot's numbers and the pickup would fit into the wrong slot,
+ * with no error anywhere. If a slot is added or moved there, this table moves with it.
+ */
+namespace KitAttachmentSlots
+{
+	inline constexpr uint8 Sights     = 0;
+	inline constexpr uint8 Laser      = 1;
+	inline constexpr uint8 Muzzle     = 2;
+	inline constexpr uint8 LeftHand   = 3;
+	inline constexpr uint8 Handguards = 4;
+	inline constexpr uint8 Barrels    = 5;
+
+	/** Translates a raw kit slot byte to its C++ slot. False when the byte carries no gameplay
+	 *  slot at all -- kit Barrels (no stat array on UWeaponDataAsset and no field on
+	 *  FWeaponAttachmentSelection), or an unknown byte. Callers read false as "cosmetic only". */
+	inline bool ToAttachmentSlot(uint8 KitSlotByte, EAttachmentSlot& OutSlot)
+	{
+		switch (KitSlotByte)
+		{
+		case Sights:     OutSlot = EAttachmentSlot::Sight;     return true;
+		case Laser:      OutSlot = EAttachmentSlot::Laser;     return true;
+		case Muzzle:     OutSlot = EAttachmentSlot::Muzzle;    return true;
+		case LeftHand:   OutSlot = EAttachmentSlot::Grip;      return true;
+		case Handguards: OutSlot = EAttachmentSlot::Handguard; return true;
+		default:         return false;
+		}
+	}
+}
+
+/**
  * Per-slot attachment selection for a weapon — raw kit enum bytes as written into
  * ST_Attachments by the loadout UI / attachment pickups. 0 = the slot's first kit
  * enum value (typically empty/ironsight), which resolves to no stat modifiers.

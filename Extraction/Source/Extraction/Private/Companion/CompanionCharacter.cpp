@@ -706,8 +706,11 @@ void ACompanionCharacter::TickCoveringFire(float DeltaSeconds, bool bReloadHeld)
 		return;
 	}
 
-	// Clock only ticks while not reloading.
-	if (!bReloadHeld)
+	// Clock only ticks while the companion is actually working the window. It stops for a reload,
+	// and for idle time sat in cover not peeking: during covering fire the companion is only meant
+	// to break into cover to reload, so hunker time is not window time. Without this the window
+	// could burn its last seconds behind a wall doing nothing.
+	if (!bReloadHeld && !bCoveringFireCoverIdle)
 	{
 		CoveringFireRemaining -= DeltaSeconds;
 	}
@@ -744,6 +747,7 @@ void ACompanionCharacter::ClearCoveringFire()
 	CoveringFireArmTime = -1e9f;
 	CoveringFireStartTime = -1e9f;
 	bCoveringFireReloadHeld = false;
+	bCoveringFireCoverIdle = false;
 	CoveringFireLastBroadcast = -1.f;
 	bCoveringFireLastBroadcastPaused = false;
 	ClearAimLocationOverride();

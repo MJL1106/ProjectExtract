@@ -72,16 +72,25 @@ namespace
 		}
 	}
 
+	/** True while BB_CompanionCommand still names this branch (TakeCover, or None once the branch
+	 *  has cleared it). False the instant a foreign command — Breach, Loot, Explore, Takedown —
+	 *  supersedes the hold. Null BB reads as "not ours": every caller's safe direction is to treat
+	 *  the hold as over. */
+	bool IsCommandStillOurs(const UBlackboardComponent* BB)
+	{
+		if (!BB) return false;
+		const uint8 Cmd = BB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand);
+		return Cmd == static_cast<uint8>(ECompanionCommand::TakeCover)
+			|| Cmd == static_cast<uint8>(ECompanionCommand::None);
+	}
+
 	/** True when combat is genuinely inheriting the hold (live target AND the command is still
 	 *  TakeCover or cleared to None). A new command (Breach, Loot, etc.) must exit the pose
 	 *  even with a live combat target. Used by both TickTask and AbortTask. */
 	bool IsCombatTakingOver(const UBlackboardComponent* BB, const FBlackboardKeySelector& CombatTargetKey)
 	{
 		if (!BB) return false;
-		const uint8 Cmd = BB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand);
-		const bool bCmdStillOurs = Cmd == static_cast<uint8>(ECompanionCommand::TakeCover)
-			|| Cmd == static_cast<uint8>(ECompanionCommand::None);
-		return bCmdStillOurs
+		return IsCommandStillOurs(BB)
 			&& IsValid(Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName)));
 	}
 }
@@ -212,12 +221,21 @@ void UBTTask_CompanionHoldCover::TickTask(UBehaviorTreeComponent& OwnerComp, uin
 	// Hold released -- exit cleanly.
 	if (!Companion->IsCommandedCoverHoldActive())
 	{
+		const UBlackboardComponent* HoldBB = OwnerComp.GetBlackboardComponent();
+
 		// Exit cover pose unless combat is genuinely inheriting the hold (live target AND the
 		// command is still ours). A new command clears the hold via the service, and the pose
 		// must not leak into the new action.
-		if (!IsCombatTakingOver(OwnerComp.GetBlackboardComponent(), CombatTargetKey))
+		if (!IsCombatTakingOver(HoldBB, CombatTargetKey))
 			ExitCoverCleanly(Companion);
 		ReleaseHoldFocus(OwnerComp);
+
+		// ALWAYS succeed, including when a foreign command released the hold. BR_TakeCover is the
+		// LAST child of the BR_ExecuteCommand selector, so failing here fails that selector, and
+		// its decorator ("CompanionCommand != None", abort Both) only re-enters on a None -> set
+		// edge. A TakeCover -> Breach change never passes through None, so a failure here strands
+		// the new command permanently. The downstream Clear Companion Command node is guarded to
+		// ExpectedCommand == TakeCover and will not touch a foreign command.
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
 

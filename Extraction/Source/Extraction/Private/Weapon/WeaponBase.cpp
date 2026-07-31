@@ -141,6 +141,14 @@ static TAutoConsoleVariable<int32> CVarPlayerTraceDebug(
 	TEXT("If non-zero, log player weapon hitscan trace details (start, end, hit actor, component, distance, health check)."),
 	ECVF_Cheat);
 
+static TAutoConsoleVariable<int32> CVarAttachmentDebug(
+	TEXT("weapon.AttachmentDebug"),
+	0,
+	TEXT("If non-zero, log every attachment selection change: the per-slot kit bytes, which attachment assets resolved, ")
+	TEXT("and the resulting effective stats (damage, recoil, ADS time, hip spread, noise, falloff, ADS FOV). ")
+	TEXT("2 or higher also prints to screen. Proves whether a picked-up attachment actually reached the weapon."),
+	ECVF_Cheat);
+
 static TAutoConsoleVariable<int32> CVarFireAlignDebug(
 	TEXT("weapon.FireAlignDebug"),
 	0,
@@ -358,6 +366,37 @@ void AWeaponBase::SetAttachmentSelection(uint8 Sight, uint8 Muzzle, uint8 Laser,
 		Server_SetAttachmentSelection(NewSelection);
 }
 
+void AWeaponBase::SetAttachmentSlotOption(uint8 KitSlotByte, uint8 OptionByte)
+{
+	EAttachmentSlot Slot;
+	if (!KitAttachmentSlots::ToAttachmentSlot(KitSlotByte, Slot))
+	{
+		// Distinguishes "the pickup never called this" from "it called with a slot that carries no
+		// stats" — kit Barrels, or a byte from a reordered kit enum.
+		UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s: kit slot byte %u has no gameplay slot (Barrels or unknown) — option %u ignored."),
+			*GetName(), KitSlotByte, OptionByte);
+		return;
+	}
+
+	if (CVarAttachmentDebug.GetValueOnAnyThread() > 0)
+		UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s: kit slot %u -> %s, option byte %u"),
+			*GetName(), KitSlotByte, *UEnum::GetValueAsString(Slot), OptionByte);
+
+	// Read-modify-write: the pickup only knows its own slot, so the other four must survive.
+	FWeaponAttachmentSelection NewSelection = AttachmentSelection;
+	switch (Slot)
+	{
+	case EAttachmentSlot::Sight:     NewSelection.Sight = OptionByte;     break;
+	case EAttachmentSlot::Muzzle:    NewSelection.Muzzle = OptionByte;    break;
+	case EAttachmentSlot::Laser:     NewSelection.Laser = OptionByte;     break;
+	case EAttachmentSlot::Grip:      NewSelection.Grip = OptionByte;      break;
+	case EAttachmentSlot::Handguard: NewSelection.Handguard = OptionByte; break;
+	}
+
+	SetAttachmentSelection(NewSelection.Sight, NewSelection.Muzzle, NewSelection.Laser,
+		NewSelection.Grip, NewSelection.Handguard);
+}
+
 void AWeaponBase::Server_SetAttachmentSelection_Implementation(FWeaponAttachmentSelection NewSelection)
 {
 	ApplySelectionInternal(NewSelection);
@@ -416,6 +455,8 @@ void AWeaponBase::RecalculateAttachmentEffects()
 		Accumulate(WeaponData->HandguardAttachments, AttachmentSelection.Handguard);
 	}
 
+	LogAttachmentDebug();
+
 	// Flash FX changed — drop the pooled components so the next shot rebuilds with the new system.
 	if (GetEffectiveMuzzleFlashFX() != OldFlash)
 	{
@@ -429,6 +470,56 @@ void AWeaponBase::RecalculateAttachmentEffects()
 			FirstPersonMuzzleFlashComponent->DestroyComponent();
 			FirstPersonMuzzleFlashComponent = nullptr;
 		}
+	}
+}
+
+void AWeaponBase::LogAttachmentDebug() const
+{
+	const int32 DebugLevel = CVarAttachmentDebug.GetValueOnAnyThread();
+	if (DebugLevel <= 0) return;
+
+	if (!IsValid(WeaponData))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s has NO WeaponData — no attachment can have any effect."), *GetName());
+		return;
+	}
+
+	// Re-resolve per slot so the log names the actual asset, not just the byte. A byte that
+	// resolves to "(none)" while the mesh visibly changed is the signature of a pickup whose
+	// option index has no entry in the weapon's stat array — cosmetic fit, no stats.
+	auto SlotLine = [](const TCHAR* Label, const TArray<TObjectPtr<UWeaponAttachmentDataAsset>>& Options, uint8 Byte)
+	{
+		const UWeaponAttachmentDataAsset* A = Options.IsValidIndex(Byte) ? Options[Byte].Get() : nullptr;
+		return FString::Printf(TEXT("%s=%u:%s"), Label, Byte, IsValid(A) ? *A->GetName() : TEXT("(none)"));
+	};
+
+	const FString Slots = FString::Printf(TEXT("%s %s %s %s %s"),
+		*SlotLine(TEXT("Sight"), WeaponData->SightAttachments, AttachmentSelection.Sight),
+		*SlotLine(TEXT("Muzzle"), WeaponData->MuzzleAttachments, AttachmentSelection.Muzzle),
+		*SlotLine(TEXT("Laser"), WeaponData->LaserAttachments, AttachmentSelection.Laser),
+		*SlotLine(TEXT("Grip"), WeaponData->GripAttachments, AttachmentSelection.Grip),
+		*SlotLine(TEXT("Handguard"), WeaponData->HandguardAttachments, AttachmentSelection.Handguard));
+
+	// Base -> effective for every stat an attachment can move, so a change is self-evidently
+	// attributable: identical pairs mean the modifier layer did nothing.
+	const FString Stats = FString::Printf(
+		TEXT("Dmg %.1f->%.1f | ADSTime %.3f->%.3f | ADSMove %.0f->%.0f | HipSpread %.2f->%.2f | ")
+		TEXT("Falloff %.0f->%.0f | ADSFOV %.1f->%.1f | RecoilMult P%.2f Y%.2f | Suppressed %s"),
+		WeaponData->BaseDamage, GetEffectiveDamage(),
+		WeaponData->ADSTransitionTime, GetEffectiveADSTransitionTime(),
+		WeaponData->ADSMovementSpeed, GetEffectiveADSMovementSpeed(),
+		WeaponData->HipFireSpreadDeg, GetEffectiveHipFireSpreadDeg(),
+		WeaponData->DamageFalloffStartRange, WeaponData->DamageFalloffStartRange * CombinedModifiers.FalloffStartMult,
+		WeaponData->ADSFOV, GetEffectiveADSFOV(),
+		CombinedModifiers.RecoilPitchMult, CombinedModifiers.RecoilYawMult,
+		IsSuppressedEffective() ? TEXT("YES") : TEXT("no"));
+
+	UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s | %s | %s"), *GetName(), *Slots, *Stats);
+
+	if (DebugLevel >= 2 && GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Cyan, FString::Printf(TEXT("[Attach] %s"), *Slots));
+		GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Yellow, FString::Printf(TEXT("[Attach] %s"), *Stats));
 	}
 }
 

@@ -1402,7 +1402,21 @@ void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
 			Awareness->ForceEngage(PlayerPawn);
 			if (UEnemyMoraleComponent* Morale = Member->GetMoraleComponent())
 				Morale->RallyToConfident();
-			UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: rallying stale member %s"),
+
+			// ForceEngage on its own only re-points the survivor at a stale LastKnownLocation, so he
+			// re-camps cover a room away and the rally re-fires every StaleCombatRallySeconds forever
+			// (the holdout who runs upstairs and is never found). Latching the hunt here is deliberately
+			// independent of TryArmLastManHunt's alive-count threshold and scope volumes: a fight that
+			// has gone silent with every squad spawned IS the holdout case regardless of how many are
+			// left, and the runner has usually fled outside the scope volume by then. RefreshLastManLatched
+			// then holds live contact at 1 Hz and CombatFire's no-contact test releases him to pursue.
+			if (!Awareness->IsLastManHunting())
+			{
+				Awareness->SetLastManHunting(true);
+				LastManLatched.Add(Member);
+			}
+
+			UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: rallying stale member %s (hunting)"),
 				*ActiveWaveRequest.WaveId.ToString(), *Member->GetName());
 		}
 	}

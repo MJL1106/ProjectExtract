@@ -231,6 +231,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
 	FWeaponAttachmentSelection GetAttachmentSelection() const { return AttachmentSelection; }
 
+	/**
+	 * Sets ONE slot from a RAW KIT ENUM_AttachmentSlot byte, preserving the other four.
+	 * This is what world attachment pickups call: they carry a kit slot byte and an option byte
+	 * and nothing else, and the kit enum order differs from EAttachmentSlot (see
+	 * KitAttachmentSlots in ExtractionTypes.h). Keeping the translation here means the Blueprint
+	 * never has to know the mapping and so cannot drift from it.
+	 * Kit byte 5 (Barrels) and unknown bytes are a no-op — those carry no gameplay modifiers.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Attachments")
+	void SetAttachmentSlotOption(uint8 KitSlotByte, uint8 OptionByte);
+
 	/** BaseDamage scaled by mounted attachments. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
 	float GetEffectiveDamage() const;
@@ -761,6 +772,12 @@ private:
 	/** Recombines CombinedModifiers/suppressed/flash-override from the current selection.
 	 *  Drops the pooled muzzle-flash components when the effective flash FX changed. */
 	void RecalculateAttachmentEffects();
+
+	/** Dumps the current selection, the attachment assets it resolved to, and the resulting
+	 *  effective stats. Gated on weapon.AttachmentDebug — the whole point is to prove whether a
+	 *  picked-up attachment actually reached the weapon, so it re-resolves rather than trusting
+	 *  the cached modifiers. Costs nothing while the CVar is 0. */
+	void LogAttachmentDebug() const;
 
 	/** Product/sum of all mounted attachments' modifiers. Neutral defaults when nothing mounted. */
 	FWeaponStatModifiers CombinedModifiers;

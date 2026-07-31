@@ -14,6 +14,7 @@ class ACompanionCharacter;
 class ACompanionAIController;
 class AEnemyCharacter;
 class UCameraComponent;
+class UHealthComponent;
 class UInputMappingContext;
 class USoundBase;
 
@@ -82,9 +83,11 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Mode")
 	int32 ModeSelectContextPriority = 10;
 
-	/** Seconds the picker stays open with no input before auto-closing. <= 0 disables the timeout. */
+	/** Seconds the picker stays open with no input before auto-closing. <= 0 disables the timeout.
+	 *  Kept generous: the timer is one-shot and never reset by input, so a player who opens the
+	 *  picker mid-firefight and hesitates gets a completely silent no-op on the follow-up press. */
 	UPROPERTY(EditAnywhere, Category = "Companion|Mode")
-	float ModeMenuTimeout = 3.0f;
+	float ModeMenuTimeout = 6.0f;
 
 	// ---- Actions ----
 
@@ -206,6 +209,10 @@ private:
 	/** Lazily resolved on first ping; avoids FindComponentByClass every press. */
 	TWeakObjectPtr<UCameraComponent> CachedCamera;
 
+	/** Lazily resolved; avoids FindComponentByClass per EvaluateCoverMe call (runs every tick
+	 *  while the picker is open). Used for the player-damage recency combat signal. */
+	TWeakObjectPtr<UHealthComponent> CachedOwnerHealth;
+
 	ACompanionAIController* GetCompanionController();
 	ACompanionCharacter* ResolveCompanion();
 
@@ -239,7 +246,7 @@ private:
 
 	/** Single gate for Cover Me so IsCoverMeAvailable and TriggerCoverMe can never disagree. */
 	enum class ECoverMeGate : uint8 { Ready, NoCompanion, NoCombat, AlreadyActive, OnCooldown };
-	ECoverMeGate EvaluateCoverMe(AActor** OutCombatTarget = nullptr);
+	ECoverMeGate EvaluateCoverMe(AActor** OutCombatTarget = nullptr, ACompanionCharacter** OutCompanion = nullptr);
 
 	/** Test if the companion's current cover can peek-shoot a given target. */
 	bool CanPeekShootTarget(ACompanionCharacter* Companion, AActor* Target);

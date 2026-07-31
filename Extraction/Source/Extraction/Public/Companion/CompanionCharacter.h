@@ -340,6 +340,11 @@ public:
 	 *  Same no-BB-plumbing pattern as SetHasTargetLOS / SetPeekCyclesAtCurrentCover. */
 	void SetCoveringFireReloadHeld(bool bHeld) { bCoveringFireReloadHeld = bHeld; }
 
+	/** Mirror written once per combat-task tick: true while the companion is sitting in cover
+	 *  NOT peeking. During a covering-fire window the companion is only meant to break off into
+	 *  cover to reload, so idle-hunker time must not burn the window's clock. */
+	void SetCoveringFireCoverIdle(bool bIdle) { bCoveringFireCoverIdle = bIdle; }
+
 	/** Broadcast while the covering-fire window is active. Carries remaining seconds and whether
 	 *  the clock is paused (companion reloading). Fires on the pause edges even when the number
 	 *  has not changed, so the HUD can show a distinct paused state. */
@@ -1179,6 +1184,9 @@ private:
 
 	/** Mirror of the combat task's pre-peek reload gate. Written per combat-task tick. */
 	bool bCoveringFireReloadHeld = false;
+
+	/** Mirror of the combat task's in-cover-idle (not peeking) state. Written per combat-task tick. */
+	bool bCoveringFireCoverIdle = false;
 
 	/** Cached remaining for the broadcast throttle (avoids per-frame multicast). */
 	float CoveringFireLastBroadcast = -1.f;

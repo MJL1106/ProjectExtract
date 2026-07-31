@@ -14,6 +14,7 @@
 #include "Enemy/EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
 #include "Components/HealthComponent.h"
+#include "Audio/MusicSubsystem.h"
 #include "Character/ExtractionPlayer.h"
 #include "AI/CompanionAIController.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -670,7 +671,8 @@ bool UCompanionCommandComponent::IsCoverMeAvailable()
 	return EvaluateCoverMe() == ECoverMeGate::Ready;
 }
 
-UCompanionCommandComponent::ECoverMeGate UCompanionCommandComponent::EvaluateCoverMe(AActor** OutCombatTarget)
+UCompanionCommandComponent::ECoverMeGate UCompanionCommandComponent::EvaluateCoverMe(
+	AActor** OutCombatTarget, ACompanionCharacter** OutCompanion)
 {
 	ACompanionCharacter* Companion = ResolveCompanion();
 	if (!IsValid(Companion)) return ECoverMeGate::NoCompanion;
@@ -686,20 +688,21 @@ UCompanionCommandComponent::ECoverMeGate UCompanionCommandComponent::EvaluateCov
 	const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
 	if (!BB) return ECoverMeGate::NoCompanion;
 
-	// Live blackboard target — immediate readiness.
+	// Companion passed all validity gates — write it out so callers skip re-resolve.
+	if (OutCompanion) *OutCompanion = Companion;
+
+	// Populate the live blackboard target when there is one — it selects the immediate-start
+	// path in TriggerCoverMe. Its absence is NOT a reason to refuse.
 	AActor* BBTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
-	if (IsValid(BBTarget))
-	{
-		if (OutCombatTarget) *OutCombatTarget = BBTarget;
-		return ECoverMeGate::Ready;
-	}
+	if (IsValid(BBTarget) && OutCombatTarget) *OutCombatTarget = BBTarget;
 
-	// Recency fallback — companion saw a target recently enough that the player's "Cover Me"
-	// is still contextually valid, even though the BB has been cleared.
-	if (Companion->GetTimeSinceCombatTarget() <= CoverMeCombatRecencyWindow)
-		return ECoverMeGate::Ready; // OutCombatTarget intentionally left null
-
-	return ECoverMeGate::NoCombat;
+	// No combat gate. Every "is a fight happening" signal tried here was a proxy that goes false
+	// during the exact moments the player wants this: the companion's blackboard target needs
+	// current sight perception, player-damage recency needs to be actively taking rounds, and the
+	// music state needs shots fired inside a window — so a lull in cover silently revoked the
+	// command and the row vanished mid-fight. Availability is now purely mechanical: alive, not
+	// already covering, off cooldown. Spending it with no enemies around is the player's call.
+	return ECoverMeGate::Ready;
 }
 
 bool UCompanionCommandComponent::CanPeekShootTarget(ACompanionCharacter* Companion, AActor* Target)
@@ -720,40 +723,55 @@ bool UCompanionCommandComponent::CanPeekShootTarget(ACompanionCharacter* Compani
 
 void UCompanionCommandComponent::TriggerCoverMe()
 {
-	if (!bModeMenuOpen) return;
+	// Silent no-op if the picker already auto-closed. Logged because it is indistinguishable
+	// from a broken command in play: the press makes no sound and nothing moves.
+	if (!bModeMenuOpen)
+	{
+		UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] ignored — picker not open (timed out?)"));
+		return;
+	}
 
 	AActor* CombatTarget = nullptr;
-	const ECoverMeGate Gate = EvaluateCoverMe(&CombatTarget);
+	ACompanionCharacter* Companion = nullptr;
+	const ECoverMeGate Gate = EvaluateCoverMe(&CombatTarget, &Companion);
 	if (Gate != ECoverMeGate::Ready)
 	{
 		PlayPingFeedback(false);
 		CloseModeMenu();
-		UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] rejected (gate=%d)"), static_cast<int32>(Gate));
+		const TCHAR* Reason =
+			Gate == ECoverMeGate::NoCompanion  ? TEXT("no companion")  :
+			Gate == ECoverMeGate::NoCombat     ? TEXT("no combat")     :
+			Gate == ECoverMeGate::AlreadyActive? TEXT("already active"):
+			Gate == ECoverMeGate::OnCooldown   ? TEXT("on cooldown")   : TEXT("unknown");
+		UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] rejected — %s"), Reason);
 		return;
 	}
 
 	// Close the menu WITHOUT writing ECompanionMode — this differs from SelectCompanionMode.
 	CloseModeMenu();
-
-	ACompanionCharacter* Companion = ResolveCompanion();
-
-	// When CombatTarget is null (recency path — no live BB target), skip the peek-shoot test
-	// and always grant cover commit so the normal cover machinery runs.
-	const bool bCanStartNow = IsValid(CombatTarget) && CanPeekShootTarget(Companion, CombatTarget);
+	if (!IsValid(Companion)) return; // guard: CloseModeMenu broadcasts, weak ref may go stale
 
 	Companion->ArmCoveringFire(CoveringFireDuration);
 
-	if (bCanStartNow)
+	// When CombatTarget is null (recency path — no live BB target), the combat task cannot run
+	// (it requires BB_CombatTarget) so MoveToCoverPoint will never call StartCoveringFire.
+	// Start immediately so the countdown appears on the press and the window is honest.
+	if (!IsValid(CombatTarget))
+	{
+		Companion->StartCoveringFire();
+		Companion->Bark(ECompanionBarkType::Suppressing);
+	}
+	else if (CanPeekShootTarget(Companion, CombatTarget))
 	{
 		Companion->StartCoveringFire();
 		Companion->Bark(ECompanionBarkType::Suppressing);
 	}
 	else
 	{
-		// Not in usable cover (or no live target for the peek test): grant commit so the
-		// normal cover machinery runs.
+		// Live target but not in usable cover: grant commit so the normal cover machinery runs.
 		Companion->SetCoverCommitGrant(true);
 	}
 
-	UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] armed (%.1fs), startNow=%d"), CoveringFireDuration, bCanStartNow);
+	UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] armed (%.1fs), hasTarget=%d"),
+		CoveringFireDuration, IsValid(CombatTarget));
 }

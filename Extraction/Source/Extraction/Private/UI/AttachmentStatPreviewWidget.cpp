@@ -14,31 +14,6 @@
 
 namespace
 {
-	// -----------------------------------------------------------------------------------------
-	// KIT SLOT BYTES -- the kit Blueprint's ENUM_AttachmentSlot, which is NOT the C++
-	// EAttachmentSlot order. Kit 2 is Muzzle where C++ 2 is Laser, so casting one to the other
-	// silently reads the WRONG stat array. Every kit byte is translated in ResolveKitSlot below
-	// and NOWHERE ELSE.
-	//
-	//   kit 0 Sights     -> SightAttachments      / Selection.Sight
-	//   kit 1 Laser      -> LaserAttachments      / Selection.Laser
-	//   kit 2 Muzzle     -> MuzzleAttachments     / Selection.Muzzle
-	//   kit 3 LeftHand   -> GripAttachments       / Selection.Grip
-	//   kit 4 Handguards -> HandguardAttachments  / Selection.Handguard
-	//   kit 5 Barrels    -> no stat array at all (cosmetic only)
-	//
-	// REORDERING ENUM_AttachmentSlot IN THE KIT BLUEPRINT SILENTLY BREAKS THIS TABLE -- the
-	// preview would then quote another slot's numbers with no error anywhere. If a slot is added
-	// or moved there, this table moves with it.
-	// -----------------------------------------------------------------------------------------
-
-	constexpr uint8 KitSlotSights = 0;
-	constexpr uint8 KitSlotLaser = 1;
-	constexpr uint8 KitSlotMuzzle = 2;
-	constexpr uint8 KitSlotLeftHand = 3;
-	constexpr uint8 KitSlotHandguards = 4;
-	constexpr uint8 KitSlotBarrels = 5;
-
 	/** Below this an "already fitted" multiplier carries no meaningful ratio -- a percentage against
 	 *  ~0 is either infinite or meaningless, so the row reports no change rather than a garbage number. */
 	constexpr float MinComparableMultiplier = 1.e-4f;
@@ -62,19 +37,26 @@ namespace
 	 * currently fitted there. Returns false when the slot carries no gameplay options -- kit
 	 * Barrels, an unknown byte, or a slot this weapon never authored -- which the caller reads as
 	 * "cosmetic fit, no numbers to show".
+	 *
+	 * The kit-byte translation itself lives in KitAttachmentSlots (ExtractionTypes.h) so the
+	 * preview and AWeaponBase::SetAttachmentSlotOption cannot disagree about which slot a byte
+	 * means -- if they ever did, the panel would quote one slot's numbers while the pickup fitted
+	 * into another.
 	 */
 	bool ResolveKitSlot(const UWeaponDataAsset& Data, const FWeaponAttachmentSelection& Selection,
 		uint8 KitSlotByte, const FAttachmentOptions*& OutOptions, uint8& OutFittedByte)
 	{
-		switch (KitSlotByte)
+		EAttachmentSlot Slot;
+		if (!KitAttachmentSlots::ToAttachmentSlot(KitSlotByte, Slot)) return false;
+
+		switch (Slot)
 		{
-		case KitSlotSights:     OutOptions = &Data.SightAttachments;     OutFittedByte = Selection.Sight;     break;
-		case KitSlotLaser:      OutOptions = &Data.LaserAttachments;     OutFittedByte = Selection.Laser;     break;
-		case KitSlotMuzzle:     OutOptions = &Data.MuzzleAttachments;    OutFittedByte = Selection.Muzzle;    break;
-		case KitSlotLeftHand:   OutOptions = &Data.GripAttachments;      OutFittedByte = Selection.Grip;      break;
-		case KitSlotHandguards: OutOptions = &Data.HandguardAttachments; OutFittedByte = Selection.Handguard; break;
-		case KitSlotBarrels:    return false;
-		default:                return false;
+		case EAttachmentSlot::Sight:     OutOptions = &Data.SightAttachments;     OutFittedByte = Selection.Sight;     break;
+		case EAttachmentSlot::Muzzle:    OutOptions = &Data.MuzzleAttachments;    OutFittedByte = Selection.Muzzle;    break;
+		case EAttachmentSlot::Laser:     OutOptions = &Data.LaserAttachments;     OutFittedByte = Selection.Laser;     break;
+		case EAttachmentSlot::Grip:      OutOptions = &Data.GripAttachments;      OutFittedByte = Selection.Grip;      break;
+		case EAttachmentSlot::Handguard: OutOptions = &Data.HandguardAttachments; OutFittedByte = Selection.Handguard; break;
+		default:                         return false;
 		}
 
 		return OutOptions->Num() > 0;
@@ -189,6 +171,7 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 	{
 		ShowMessageOnly(IncompatibleMessage);
 		CachedWeapon = Weapon;
+		CachedCandidateData.Reset();
 		CachedSelection = Weapon->GetAttachmentSelection();
 		CachedKitSlotByte = KitSlotByte;
 		CachedOptionByte = OptionByte;
@@ -197,7 +180,16 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 		return;
 	}
 
-	const TArray<FAttachmentStatDelta> Deltas = BuildStatDeltas(Weapon, KitSlotByte, OptionByte);
+	// BuildStatDeltas is static and so labels from the CDO. Swap in this instance's designer text
+	// here, where "index N is EAttachmentStatRow N" is guaranteed by that builder emitting every
+	// row in enum order.
+	TArray<FAttachmentStatDelta> Deltas = BuildStatDeltas(Weapon, KitSlotByte, OptionByte);
+	for (int32 Index = 0; Index < Deltas.Num(); ++Index)
+	{
+		const FText& Override = GetRowLabel(static_cast<EAttachmentStatRow>(Index));
+		if (!Override.IsEmpty()) Deltas[Index].Label = Override;
+	}
+
 	if (Deltas.Num() == 0)
 	{
 		ShowMessageOnly(CosmeticOnlyMessage);
@@ -213,11 +205,102 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 
 	// Cache after every path so the next frame skips the rebuild.
 	CachedWeapon = Weapon;
+	CachedCandidateData.Reset();
 	CachedSelection = Weapon->GetAttachmentSelection();
 	CachedKitSlotByte = KitSlotByte;
 	CachedOptionByte = OptionByte;
 	bCachedCompatible = bCompatible;
 	bCacheValid = true;
+}
+
+void UAttachmentStatPreviewWidget::ShowForWeapon(UWeaponDataAsset* CandidateData)
+{
+	AWeaponBase* Held = ResolveHeldWeapon();
+	const UWeaponDataAsset* HeldData = IsValid(Held) ? Held->GetWeaponData() : nullptr;
+
+	// Nothing in hand, or an unauthored pickup, leaves no honest comparison to draw.
+	if (!IsValid(CandidateData) || !IsValid(HeldData))
+	{
+		HidePreview();
+		return;
+	}
+
+	const bool bCacheHit = bCacheValid && CachedCandidateData.Get() == CandidateData && CachedWeapon.Get() == Held;
+	UE_LOG(LogTemp, Warning, TEXT("[WpnCmp] held=%s (%s) candidate=%s cacheHit=%s"),
+		*GetNameSafe(Held), *GetNameSafe(HeldData), *GetNameSafe(CandidateData), bCacheHit ? TEXT("YES") : TEXT("no"));
+	if (bCacheHit) return;
+
+	SetVisibility(ESlateVisibility::HitTestInvisible);
+
+	if (CandidateData == HeldData)
+	{
+		ShowMessageOnly(SameWeaponMessage);
+	}
+	else
+	{
+		const TArray<FAttachmentStatDelta> Deltas = BuildWeaponDeltas(*HeldData, *CandidateData);
+		if (PopulateRows(Deltas) == 0)
+		{
+			ShowMessageOnly(NoChangeMessage);
+		}
+		else if (IsValid(MessageText))
+		{
+			MessageText->SetVisibility(ESlateVisibility::Collapsed);
+		}
+	}
+
+	// Slot bytes back to 0xFF so a later ShowForAttachment cannot hit this entry.
+	CachedWeapon = Held;
+	CachedCandidateData = CandidateData;
+	CachedKitSlotByte = 0xFF;
+	CachedOptionByte = 0xFF;
+	bCacheValid = true;
+}
+
+TArray<FAttachmentStatDelta> UAttachmentStatPreviewWidget::BuildWeaponDeltas(
+	const UWeaponDataAsset& Held, const UWeaponDataAsset& Candidate) const
+{
+	// Mean magnitude across the pattern's points. A recoil curve has no single scalar, but the
+	// average kick per shot is what the player actually feels over a burst, and it stays
+	// comparable between a 3-point and a 30-point pattern.
+	auto MeanRecoil = [](const UWeaponDataAsset& Data)
+	{
+		const TArray<FVector2D>& Points = Data.RecoilPattern.Points;
+		if (Points.Num() == 0) return 0.f;
+
+		float Total = 0.f;
+		for (const FVector2D& P : Points) Total += P.Size();
+		return Total / Points.Num();
+	};
+
+	// Damage per second including pellets, so a shotgun's per-trigger-pull output is not
+	// understated against an automatic rifle's.
+	auto DPS = [](const UWeaponDataAsset& Data)
+	{
+		return Data.BaseDamage * Data.FireRate * FMath::Max(1, Data.PelletCount);
+	};
+
+	TArray<FAttachmentStatDelta> Deltas;
+	Deltas.Reserve(6);
+
+	auto Add = [&Deltas](const FText& Label, float Old, float New, bool bHigherIsBetter)
+	{
+		if (Old <= KINDA_SMALL_NUMBER) return;
+
+		FAttachmentStatDelta& Delta = Deltas.AddDefaulted_GetRef();
+		Delta.Label = Label;
+		Delta.PercentDelta = (New / Old - 1.f) * 100.f;
+		Delta.bIsImprovement = bHigherIsBetter ? (Delta.PercentDelta > 0.f) : (Delta.PercentDelta < 0.f);
+	};
+
+	Add(DamageLabel, Held.BaseDamage, Candidate.BaseDamage, true);
+	Add(FireRateLabel, Held.FireRate, Candidate.FireRate, true);
+	Add(DPSLabel, DPS(Held), DPS(Candidate), true);
+	Add(MagazineLabel, Held.MagazineSize, Candidate.MagazineSize, true);
+	Add(ADSTimeLabel, Held.ADSTransitionTime, Candidate.ADSTransitionTime, false);
+	Add(WeaponRecoilLabel, MeanRecoil(Held), MeanRecoil(Candidate), false);
+
+	return Deltas;
 }
 
 void UAttachmentStatPreviewWidget::HidePreview()
@@ -317,13 +400,10 @@ int32 UAttachmentStatPreviewWidget::PopulateRows(const TArray<FAttachmentStatDel
 		UAttachmentStatRowWidget* RowWidget = GetOrCreateRow(RowIndex);
 		if (!IsValid(RowWidget)) break;
 
-		// Index is the EAttachmentStatRow ordinal: BuildStatDeltas emits every row in enum order,
-		// which is what lets a designer's label be matched to a row without storing an id per row.
-		FAttachmentStatDelta Displayed = Deltas[Index];
-		const FText& Override = GetRowLabel(static_cast<EAttachmentStatRow>(Index));
-		if (!Override.IsEmpty()) Displayed.Label = Override;
-
-		RowWidget->SetStatDelta(Displayed, BetterColour, WorseColour);
+		// Renders whatever labels it is handed. The attachment path relabels by row ordinal before
+		// calling here (only valid for its fixed row set); the weapon path builds with this
+		// instance's labels directly. Doing it here would apply attachment labels to weapon rows.
+		RowWidget->SetStatDelta(Deltas[Index], BetterColour, WorseColour);
 		RowWidget->SetVisibility(ESlateVisibility::HitTestInvisible);
 		++RowIndex;
 	}
@@ -383,6 +463,8 @@ bool UAttachmentStatPreviewWidget::IsCacheCurrent(AWeaponBase* Weapon, uint8 Kit
 	if (!bCacheValid) return false;
 	if (!CachedWeapon.IsValid()) return false;
 	if (CachedWeapon.Get() != Weapon) return false;
+	// A live candidate means the last show was a weapon comparison, so this entry is not ours.
+	if (CachedCandidateData.IsValid()) return false;
 	if (CachedKitSlotByte != KitSlotByte) return false;
 	if (CachedOptionByte != OptionByte) return false;
 	if (bCachedCompatible != bCompatible) return false;
@@ -397,4 +479,5 @@ void UAttachmentStatPreviewWidget::InvalidateCache()
 {
 	bCacheValid = false;
 	CachedWeapon.Reset();
+	CachedCandidateData.Reset();
 }

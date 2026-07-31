@@ -24,6 +24,7 @@ class AWeaponBase;
 class UAttachmentStatRowWidget;
 class UPanelWidget;
 class UTextBlock;
+class UWeaponDataAsset;
 
 UCLASS(Abstract, Blueprintable)
 class EXTRACTION_API UAttachmentStatPreviewWidget : public UUserWidget
@@ -41,6 +42,16 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "UI|Attachments")
 	void ShowForAttachment(uint8 KitSlotByte, uint8 OptionByte, bool bCompatible);
+
+	/**
+	 * Points the panel at a candidate WEAPON and rebuilds its rows as a comparison against the
+	 * weapon currently held — damage, fire rate, DPS, magazine, ADS time and recoil.
+	 * Same panel, same row widgets; only the source of the numbers differs.
+	 * Pass the candidate's UWeaponDataAsset (the weapon pickup knows its own data asset).
+	 * Holding nothing, or looking at the weapon already held, collapses the panel.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "UI|Weapons")
+	void ShowForWeapon(UWeaponDataAsset* CandidateData);
 
 	/** Collapses the panel and every row. Call when the crosshair leaves the pickup. */
 	UFUNCTION(BlueprintCallable, Category = "UI|Attachments")
@@ -134,6 +145,26 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Attachments|Labels")
 	FText ZoomLabel = NSLOCTEXT("AttachmentStats", "Zoom", "Zoom");
 
+	// --- Weapon-vs-weapon comparison (ShowForWeapon) ---
+
+	/** Shown when the candidate weapon IS the weapon already held — nothing to compare. */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Messages")
+	FText SameWeaponMessage = NSLOCTEXT("WeaponCompare", "SameWeapon", "Already equipped");
+
+	UPROPERTY(EditAnywhere, Category = "Weapons|Labels")
+	FText FireRateLabel = NSLOCTEXT("WeaponCompare", "FireRate", "Fire Rate");
+
+	/** Damage x fire rate x pellets — the headline number when comparing two guns. */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Labels")
+	FText DPSLabel = NSLOCTEXT("WeaponCompare", "DPS", "DPS");
+
+	UPROPERTY(EditAnywhere, Category = "Weapons|Labels")
+	FText MagazineLabel = NSLOCTEXT("WeaponCompare", "Magazine", "Magazine");
+
+	/** Mean magnitude of the recoil pattern's points — one comparable number out of a curve. */
+	UPROPERTY(EditAnywhere, Category = "Weapons|Labels")
+	FText WeaponRecoilLabel = NSLOCTEXT("WeaponCompare", "Recoil", "Recoil");
+
 private:
 
 	/** The player's held weapon, or null when nothing is in hand (nothing to compare against). */
@@ -151,6 +182,11 @@ private:
 
 	/** Shows a single state message with no rows. */
 	void ShowMessageOnly(const FText& Message);
+
+	/** Builds the six weapon-vs-weapon rows. A member rather than a static because it reads this
+	 *  instance's designer labels directly — the attachment path's static builder has to fix labels
+	 *  up afterwards by row ordinal, which only works for one fixed row set. */
+	TArray<FAttachmentStatDelta> BuildWeaponDeltas(const UWeaponDataAsset& Held, const UWeaponDataAsset& Candidate) const;
 
 	/** Row widgets created into StatContainer, in creation order. Reused across shows as the
 	 *  crosshair sweeps between pickups; surplus entries are collapsed, never destroyed. */
@@ -172,6 +208,11 @@ private:
 	/** The weapon's attachment selection at the time the cache was built. If the player fits
 	 *  something while a pickup is still under the crosshair, this mismatches and forces a rebuild. */
 	FWeaponAttachmentSelection CachedSelection;
+
+	/** Candidate weapon data for the last ShowForWeapon. Doubles as the mode discriminator: the
+	 *  attachment path clears it and the weapon path sets the slot bytes to 0xFF, so switching
+	 *  between looking at an attachment and looking at a gun always misses the cache. */
+	TWeakObjectPtr<const UWeaponDataAsset> CachedCandidateData;
 
 	uint8 CachedKitSlotByte = 0xFF;
 	uint8 CachedOptionByte = 0xFF;

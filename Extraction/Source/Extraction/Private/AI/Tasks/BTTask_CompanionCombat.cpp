@@ -3511,6 +3511,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// Covering-fire reload-held mirror (Tick reads this; same pattern as SetPeekCyclesAtCurrentCover).
 	Ctx.Companion->SetCoveringFireReloadHeld(bReloadGateActive);
 
+	// Cover-idle mirror defaults false every tick; the in-cover idle branch below re-asserts it.
+	// Written here rather than only at the branch so a tick that never reaches cover clears it.
+	Ctx.Companion->SetCoveringFireCoverIdle(false);
+
 	// Covering-fire end-of-window cleanup: the clock runs in ACompanionCharacter::Tick (which
 	// runs before the BT tick in the same frame). If the window expired this frame, bCoveringFire
 	// (cached at the top of this tick from the now-cleared state) is already false, so the
@@ -3834,6 +3838,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 
 		TimeInCoverIdle += DeltaSeconds;
+
+		// Sat in cover, not peeking — freeze the covering-fire clock (see SetCoveringFireCoverIdle).
+		Ctx.Companion->SetCoveringFireCoverIdle(true);
 
 		// --- Pressure signal + point-blank threat check (throttled ~5 Hz, one shared gather) ---
 		PeekImpulseCooldownRemaining = FMath::Max(0.f, PeekImpulseCooldownRemaining - DeltaSeconds);
@@ -5441,6 +5448,7 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 		// The reload-pause mirror IS task-owned though: a stale true would freeze the clock
 		// until the hard ceiling, so it must be reset here.
 		Companion->SetCoveringFireReloadHeld(false);
+		Companion->SetCoveringFireCoverIdle(false);
 		// The aim-location override is also task-owned (set per combat-task tick). A stale
 		// override after task restart would aim at the dead previous target's last-seen location.
 		Companion->ClearAimLocationOverride();

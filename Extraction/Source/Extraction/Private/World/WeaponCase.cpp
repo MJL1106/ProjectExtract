@@ -136,21 +136,20 @@ bool AWeaponCase::IsEmpty() const
 
 	for (const TWeakObjectPtr<AActor>& WeakItem : SpawnedItems)
 	{
-		const AActor* Item = WeakItem.Get();
-		if (!IsValid(Item)) continue;
-
-		// Destruction is NOT this project's loot convention: ALootPickup hides itself, disables
-		// collision, then SetLifeSpan(2.f), and a kit BP pickup may only hide itself and never die
-		// at all. A hidden or fully collision-disabled item has been taken -- counting it as still
-		// present leaves the case marker lit for two seconds, or forever.
-		// Both conditions, not either: a seated case item can legitimately spawn with actor collision
-		// off (it is parented into foam and must not block the case), and treating that alone as
-		// "collected" would leave every case reading empty and its marker permanently dark.
-		if (Item->IsHidden() && !Item->GetActorEnableCollision()) continue;
-
-		return false;
+		if (!IsOccupantGone(WeakItem)) return false;
 	}
 	return true;
+}
+
+bool AWeaponCase::IsOccupantGone(const TWeakObjectPtr<AActor>& Occupant)
+{
+	const AActor* Item = Occupant.Get();
+	if (!IsValid(Item)) return true;
+
+	// Matches the original IsEmpty convention exactly: hidden AND collision disabled means
+	// collected.  Both conditions required -- a seated item can legitimately have collision
+	// off (parented into foam), and hidden alone could be a temporary state.
+	return Item->IsHidden() && !Item->GetActorEnableCollision();
 }
 
 TArray<FString> AWeaponCase::GetSlotIdOptions() const
@@ -272,6 +271,7 @@ void AWeaponCase::SpawnSlotItems()
 	if (Slots.IsEmpty()) return;
 
 	SpawnedItems.Reserve(Slots.Num());
+	SlotOccupancy.Reserve(Slots.Num());
 
 	for (UWeaponCaseSlotComponent* SlotComp : Slots)
 	{
@@ -305,6 +305,7 @@ void AWeaponCase::SpawnSlotItems()
 		SeatItemInSlot(*Item, *SlotComp);
 
 		SpawnedItems.Add(Item);
+		SlotOccupancy.Add(SlotComp, Item);
 
 		// Pickups Destroy() themselves on collect, so their own destruction is the only "case was
 		// looted" signal there is. Authority-only, matching the spawn itself.
@@ -325,6 +326,12 @@ void AWeaponCase::HandleItemDestroyed(AActor* DestroyedActor)
 	{
 		return !Item.IsValid() || Item.Get() == DestroyedActor;
 	});
+
+	// Free the slot so TryReturnItemToCase can reuse it.  Sweep stale entries too.
+	for (auto It = SlotOccupancy.CreateIterator(); It; ++It)
+	{
+		if (!It.Value().IsValid() || It.Value().Get() == DestroyedActor) It.RemoveCurrent();
+	}
 
 	RefreshLootMarker();
 }
@@ -550,6 +557,69 @@ UMeshComponent* AWeaponCase::FindItemDisplayMesh(AActor& Item) const
 		}
 	}
 
+	return nullptr;
+}
+
+UWeaponCaseSlotComponent* AWeaponCase::FindFreeSlotForClass(const UClass* ItemClass) const
+{
+	if (!ItemClass) return nullptr;
+
+	TInlineComponentArray<UWeaponCaseSlotComponent*> AllSlots(this);
+	for (UWeaponCaseSlotComponent* SlotComp : AllSlots)
+	{
+		if (!IsValid(SlotComp)) continue;
+		if (!IsValid(SlotComp->PickupClass.Get())) continue;
+		if (!ItemClass->IsChildOf(SlotComp->PickupClass)) continue;
+
+		const TWeakObjectPtr<AActor>* Occupant = SlotOccupancy.Find(SlotComp);
+		if (Occupant && !IsOccupantGone(*Occupant)) continue;
+
+		return SlotComp;
+	}
+	return nullptr;
+}
+
+bool AWeaponCase::TryReturnItemToCase(AActor* Item)
+{
+	if (!IsValid(Item) || !HasAuthority()) return false;
+
+	UWeaponCaseSlotComponent* FreeSlot = FindFreeSlotForClass(Item->GetClass());
+	if (!FreeSlot) return false;
+
+	SeatItemInSlot(*Item, *FreeSlot);
+	SlotOccupancy.Add(FreeSlot, Item);
+
+	// Track identically to a spawned item, guarding against double-tracking (possible if
+	// an item collected via hide+disable-collision is returned to its original case).
+	const bool bAlreadyTracked = SpawnedItems.ContainsByPredicate(
+		[Item](const TWeakObjectPtr<AActor>& W) { return W.Get() == Item; });
+	if (!bAlreadyTracked)
+	{
+		SpawnedItems.Add(Item);
+		Item->OnDestroyed.AddDynamic(this, &AWeaponCase::HandleItemDestroyed);
+	}
+
+	// Fire the post-seat hook so the BP can shrink the interaction collider (foam sockets
+	// sit ~11 cm apart) exactly as it does for initially-spawned items.
+	OnCaseItemSpawned(Item, FreeSlot->SlotId);
+	RefreshLootMarker();
+	return true;
+}
+
+AWeaponCase* AWeaponCase::FindOwningWeaponCase(const AActor* Item)
+{
+	if (!IsValid(Item)) return nullptr;
+
+	// SeatItemInSlot attaches pickups under a UWeaponCaseSlotComponent owned by the case,
+	// so GetAttachParentActor returns the AWeaponCase in one hop.  The loop is defensive
+	// against future nesting.
+	AActor* Parent = Item->GetAttachParentActor();
+	constexpr int32 MaxHops = 8;
+	for (int32 Hop = 0; Hop < MaxHops && IsValid(Parent); ++Hop)
+	{
+		if (AWeaponCase* Case = Cast<AWeaponCase>(Parent)) return Case;
+		Parent = Parent->GetAttachParentActor();
+	}
 	return nullptr;
 }
 

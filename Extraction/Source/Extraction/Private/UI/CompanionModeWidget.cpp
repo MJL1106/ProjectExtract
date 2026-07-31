@@ -56,9 +56,9 @@ void UCompanionModeWidget::NativeTick(const FGeometry& MyGeometry, float InDelta
 		return;
 	}
 
-	// Retry covering-fire delegate binding until the companion pawn spawns. The command
-	// component may bind successfully before the companion exists in the world.
-	if (!bCoveringFireDelegateBound)
+	// Retry covering-fire delegate binding until the companion pawn spawns, and rebind if the
+	// companion was destroyed and replaced (BoundCompanionForCoveringFire goes stale).
+	if (!bCoveringFireDelegateBound || !BoundCompanionForCoveringFire.IsValid())
 	{
 		TimeSinceBindAttempt += InDeltaTime;
 		if (TimeSinceBindAttempt >= BindRetryInterval)
@@ -96,11 +96,18 @@ bool UCompanionModeWidget::TryBindToCommandComponent()
 
 bool UCompanionModeWidget::TryBindCoveringFireDelegate()
 {
-	if (bCoveringFireDelegateBound) return true;
 	if (!BoundCommandComponent.IsValid()) return false;
 
 	ACompanionCharacter* Companion = BoundCommandComponent->GetCompanion();
 	if (!IsValid(Companion)) return false;
+
+	// If already bound to this exact companion, nothing to do.
+	if (bCoveringFireDelegateBound && BoundCompanionForCoveringFire.Get() == Companion)
+		return true;
+
+	// Unbind from a stale companion before rebinding to the replacement.
+	if (ACompanionCharacter* OldComp = BoundCompanionForCoveringFire.Get())
+		OldComp->OnCoveringFireTick.RemoveDynamic(this, &UCompanionModeWidget::HandleCoveringFireTick);
 
 	if (!Companion->OnCoveringFireTick.IsAlreadyBound(this, &UCompanionModeWidget::HandleCoveringFireTick))
 		Companion->OnCoveringFireTick.AddDynamic(this, &UCompanionModeWidget::HandleCoveringFireTick);
