@@ -318,6 +318,15 @@ public:
 	/** True while the cooldown is active (covers just ended, not yet ready again). */
 	bool IsCoveringFireOnCooldown() const;
 
+	/** Record that the companion currently holds a live combat target. Called per service tick
+	 *  while BB_CombatTarget is valid; the stamp stays fresh for as long as a target is held.
+	 *  Not reset anywhere — liveness is gated separately by callers. */
+	void StampCombatTargetSeen();
+
+	/** Seconds since the last StampCombatTargetSeen call. Returns a large value if never stamped
+	 *  or if no world is available, so callers can compare against a recency window directly. */
+	float GetTimeSinceCombatTarget() const;
+
 	// --- Aim location override (covering-fire suppressive fire at last-seen position) ---
 	// Mirrors AEnemyCharacter::SetAimLocationOverride. When set, GetAimPointForTarget returns
 	// this location instead of the target's sight point. AimTarget stays valid (focus, inaccuracy
@@ -1175,6 +1184,10 @@ private:
 	float CoveringFireLastBroadcast = -1.f;
 	/** Cached paused state for the broadcast edge detect. */
 	bool bCoveringFireLastBroadcastPaused = false;
+
+	/** World time the companion last held a valid BB_CombatTarget. Stamped per service tick
+	 *  while a target is set; never cleared (callers compare against a recency window). */
+	float LastCombatTargetSeenTime = -1e9f;
 
 	/** Mirror of the combat service's eye→target LOS trace (enemy bHasTargetLOS parity). Transient, not replicated. */
 	bool bHasTargetLOS = false;

@@ -7,6 +7,7 @@
 #include "Companion/CompanionTypes.h"
 #include "CompanionModeWidget.generated.h"
 
+class ACompanionCharacter;
 class UTextBlock;
 class UImage;
 class UPanelWidget;
@@ -114,7 +115,21 @@ private:
 	UFUNCTION()
 	void HandleCoveringFireTick(float Remaining, bool bPaused);
 
+	/** Compute and broadcast covering-fire row-4 availability. Forced broadcast skips the
+	 *  edge-detect so the first open after a state change never shows a stale row. */
+	void BroadcastCoverMeAvailability(bool bForce);
+
+	/** Retry the covering-fire delegate bind from the companion (separate from command-component
+	 *  binding because the companion pawn may spawn later than the HUD widget). */
+	bool TryBindCoveringFireDelegate();
+
 	TWeakObjectPtr<UCompanionCommandComponent> BoundCommandComponent;
+
+	/** The companion we bound OnCoveringFireTick on. Tracked separately from the command
+	 *  component's GetCompanion() because the companion pawn may be destroyed and re-spawned
+	 *  (the old pointer would be stale but GetCompanion would return the new one). */
+	TWeakObjectPtr<ACompanionCharacter> BoundCompanionForCoveringFire;
+	bool bCoveringFireDelegateBound = false;
 
 	/** Latest commanded mode, cached so the picker-open event can highlight the active row. */
 	ECompanionMode CurrentMode = ECompanionMode::Normal;

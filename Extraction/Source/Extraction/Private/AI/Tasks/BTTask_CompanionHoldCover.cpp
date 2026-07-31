@@ -71,6 +71,19 @@ namespace
 			PoseComp->ResetCoverPose();
 		}
 	}
+
+	/** True when combat is genuinely inheriting the hold (live target AND the command is still
+	 *  TakeCover or cleared to None). A new command (Breach, Loot, etc.) must exit the pose
+	 *  even with a live combat target. Used by both TickTask and AbortTask. */
+	bool IsCombatTakingOver(const UBlackboardComponent* BB, const FBlackboardKeySelector& CombatTargetKey)
+	{
+		if (!BB) return false;
+		const uint8 Cmd = BB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand);
+		const bool bCmdStillOurs = Cmd == static_cast<uint8>(ECompanionCommand::TakeCover)
+			|| Cmd == static_cast<uint8>(ECompanionCommand::None);
+		return bCmdStillOurs
+			&& IsValid(Cast<AActor>(BB->GetValueAsObject(CombatTargetKey.SelectedKeyName)));
+	}
 }
 
 UBTTask_CompanionHoldCover::UBTTask_CompanionHoldCover()
@@ -199,12 +212,10 @@ void UBTTask_CompanionHoldCover::TickTask(UBehaviorTreeComponent& OwnerComp, uin
 	// Hold released -- exit cleanly.
 	if (!Companion->IsCommandedCoverHoldActive())
 	{
-		// Exit cover pose only when no combat target exists (true release). When a target is
-		// live, combat takes over and calls EnterCoverPose with its own resolved side.
-		UBlackboardComponent* ReleaseBB = OwnerComp.GetBlackboardComponent();
-		const bool bCombatTakingOver = ReleaseBB
-			&& IsValid(Cast<AActor>(ReleaseBB->GetValueAsObject(CombatTargetKey.SelectedKeyName)));
-		if (!bCombatTakingOver)
+		// Exit cover pose unless combat is genuinely inheriting the hold (live target AND the
+		// command is still ours). A new command clears the hold via the service, and the pose
+		// must not leak into the new action.
+		if (!IsCombatTakingOver(OwnerComp.GetBlackboardComponent(), CombatTargetKey))
 			ExitCoverCleanly(Companion);
 		ReleaseHoldFocus(OwnerComp);
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
@@ -270,12 +281,9 @@ void UBTTask_CompanionHoldCover::TickTask(UBehaviorTreeComponent& OwnerComp, uin
 
 EBTNodeResult::Type UBTTask_CompanionHoldCover::AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* /*NodeMemory*/)
 {
-	// Exit cover pose when no combat target exists (new command taking over). Keep it when a
-	// target is live so combat inherits the pose.
-	UBlackboardComponent* AbortBB = OwnerComp.GetBlackboardComponent();
-	const bool bCombatTakingOver = AbortBB
-		&& IsValid(Cast<AActor>(AbortBB->GetValueAsObject(CombatTargetKey.SelectedKeyName)));
-	if (!bCombatTakingOver)
+	// Exit cover pose unless combat is genuinely inheriting the hold (symmetric with TickTask's
+	// hold-released path). A new command must exit the pose even with a live combat target.
+	if (!IsCombatTakingOver(OwnerComp.GetBlackboardComponent(), CombatTargetKey))
 	{
 		if (AAIController* C = OwnerComp.GetAIOwner())
 			if (ACompanionCharacter* Comp = Cast<ACompanionCharacter>(C->GetPawn()))

@@ -5435,9 +5435,15 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 
 	if (Companion)
 	{
-		// End any active covering-fire window — task exit means target death, branch abort, or
-		// new command; all are termination triggers.
-		Companion->ClearCoveringFire();
+		// The covering-fire window is owned by ACompanionCharacter and its clock ticks in Tick,
+		// so a task exit (target death, branch abort, new command) must NOT cancel it — killing
+		// one enemy mid-firefight was ending the window and the player's on-screen countdown.
+		// The reload-pause mirror IS task-owned though: a stale true would freeze the clock
+		// until the hard ceiling, so it must be reset here.
+		Companion->SetCoveringFireReloadHeld(false);
+		// The aim-location override is also task-owned (set per combat-task tick). A stale
+		// override after task restart would aim at the dead previous target's last-seen location.
+		Companion->ClearAimLocationOverride();
 
 		// Cancel an in-flight grenade wind-up (enemy-task parity) — no-op unless telegraphing;
 		// the cancel broadcast stops the throw montage.

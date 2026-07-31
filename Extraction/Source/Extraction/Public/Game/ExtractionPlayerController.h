@@ -22,6 +22,7 @@ class ULevelCompleteWidget;
 class ULevelFailedWidget;
 class URevivePromptWidget;
 class UConsumableWidget;
+class UAttachmentStatPreviewWidget;
 class UTutorialBriefingWidget;
 
 /** Fired on the local player controller when the player's weapon deals damage. One event per
@@ -80,6 +81,11 @@ public:
 	/** Called by the briefing screen's confirm button — the only way out of the gate. Unpauses,
 	 *  hands input back to the game, tears the screen down and records that it has been seen. */
 	void DismissTutorialBriefing();
+
+	/** Active attachment stat preview panel, or null before RestoreHUD runs. The pickup BP calls
+	 *  ShowForAttachment / HidePreview on this widget to drive the HUD panel. */
+	UFUNCTION(BlueprintPure, Category = "UI|Attachments")
+	UAttachmentStatPreviewWidget* GetAttachmentStatPreview() const { return AttachmentStatPreviewWidget; }
 
 	/** Broadcast on the local controller for HUD hit feedback (hitmarker, damage numbers). */
 	UPROPERTY(BlueprintAssignable, Category = "UI|Events")
@@ -207,6 +213,14 @@ protected:
 	/** Active consumable HUD instance */
 	UPROPERTY()
 	TObjectPtr<UConsumableWidget> ConsumableWidget;
+
+	/** Attachment stat preview panel class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UAttachmentStatPreviewWidget> AttachmentStatPreviewWidgetClass;
+
+	/** Active attachment stat preview panel instance */
+	UPROPERTY()
+	TObjectPtr<UAttachmentStatPreviewWidget> AttachmentStatPreviewWidget;
 
 	/** Controls briefing screen class (assigned in BP defaults — no C++ asset path). */
 	UPROPERTY(EditDefaultsOnly, Category = "UI|Tutorial")

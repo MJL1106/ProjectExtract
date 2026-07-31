@@ -13,6 +13,7 @@
 #include "World/WorldInteractable.h"
 #include "Enemy/EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
+#include "Components/HealthComponent.h"
 #include "Character/ExtractionPlayer.h"
 #include "AI/CompanionAIController.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -316,6 +317,16 @@ void UCompanionCommandComponent::ClearPending()
 	OnPingChanged.Broadcast(ECompanionCommand::None, nullptr);
 }
 
+void UCompanionCommandComponent::ClearCommandedCoverIfActive()
+{
+	ACompanionCharacter* Companion = ResolveCompanion();
+	if (IsValid(Companion) && Companion->IsCommandedCoverHoldActive())
+		Companion->ClearCommandedCoverHold();
+
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(CoverReissueTimerHandle);
+}
+
 void UCompanionCommandComponent::SetPromptContextRegistered(bool bRegister)
 {
 	if (bRegister == bPromptContextRegistered) return;
@@ -350,6 +361,7 @@ void UCompanionCommandComponent::ConfirmTakedown(ETakedownMethod Method)
 		return;
 	}
 
+	ClearCommandedCoverIfActive();
 	UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] -> IssueCommand Takedown on %s via %s"), *GetNameSafe(Target), *GetNameSafe(Controller));
 	Controller->IssueCommand(ECompanionCommand::Takedown, Method, Target, Target->GetActorLocation());
 	ClearPending();
@@ -517,6 +529,7 @@ void UCompanionCommandComponent::ConfirmBreach()
 	}
 	Controller->SetBreachType(BreachType);
 
+	ClearCommandedCoverIfActive();
 	Controller->IssueCommand(ECompanionCommand::Breach, ETakedownMethod::Knife, Target, Target->GetActorLocation());
 	ClearPending();
 }
@@ -534,6 +547,7 @@ void UCompanionCommandComponent::ConfirmLoot()
 		return;
 	}
 
+	ClearCommandedCoverIfActive();
 	Controller->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife, Target, Target->GetActorLocation());
 	ClearPending();
 }
@@ -570,6 +584,7 @@ void UCompanionCommandComponent::ConfirmExplore()
 	}
 	Controller->SetBreachType(BreachType);
 
+	ClearCommandedCoverIfActive();
 	Controller->IssueCommand(ECompanionCommand::Explore, ETakedownMethod::Knife, Target, Target->GetActorLocation());
 	ClearPending();
 }
@@ -652,61 +667,79 @@ void UCompanionCommandComponent::ConfirmTakeCover()
 
 bool UCompanionCommandComponent::IsCoverMeAvailable()
 {
+	return EvaluateCoverMe() == ECoverMeGate::Ready;
+}
+
+UCompanionCommandComponent::ECoverMeGate UCompanionCommandComponent::EvaluateCoverMe(AActor** OutCombatTarget)
+{
 	ACompanionCharacter* Companion = ResolveCompanion();
-	if (!IsValid(Companion)) return false;
-	if (Companion->IsCoveringFireActive() || Companion->IsCoveringFirePending()) return false;
-	if (Companion->IsCoveringFireOnCooldown()) return false;
+	if (!IsValid(Companion)) return ECoverMeGate::NoCompanion;
+	if (Companion->GetIsCompanionDBNO()) return ECoverMeGate::NoCompanion;
+	const UHealthComponent* HC = Companion->GetHealthComponent();
+	if (IsValid(HC) && HC->IsDead()) return ECoverMeGate::NoCompanion;
+
+	if (Companion->IsCoveringFireActive() || Companion->IsCoveringFirePending()) return ECoverMeGate::AlreadyActive;
+	if (Companion->IsCoveringFireOnCooldown()) return ECoverMeGate::OnCooldown;
+
+	ACompanionAIController* Controller = GetCompanionController();
+	if (!IsValid(Controller)) return ECoverMeGate::NoCompanion;
+	const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
+	if (!BB) return ECoverMeGate::NoCompanion;
+
+	// Live blackboard target — immediate readiness.
+	AActor* BBTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+	if (IsValid(BBTarget))
+	{
+		if (OutCombatTarget) *OutCombatTarget = BBTarget;
+		return ECoverMeGate::Ready;
+	}
+
+	// Recency fallback — companion saw a target recently enough that the player's "Cover Me"
+	// is still contextually valid, even though the BB has been cleared.
+	if (Companion->GetTimeSinceCombatTarget() <= CoverMeCombatRecencyWindow)
+		return ECoverMeGate::Ready; // OutCombatTarget intentionally left null
+
+	return ECoverMeGate::NoCombat;
+}
+
+bool UCompanionCommandComponent::CanPeekShootTarget(ACompanionCharacter* Companion, AActor* Target)
+{
 	ACompanionAIController* Controller = GetCompanionController();
 	if (!IsValid(Controller)) return false;
 	const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
 	if (!BB) return false;
-	return IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
+	const FBlackboard::FKey CoverKeyID = BB->GetKeyID(TEXT("CoverTarget"));
+	if (CoverKeyID == FBlackboard::InvalidKey) return false;
+	const FCover CurrentCover = BB->GetValue<UBlackboardKeyType_Cover>(CoverKeyID);
+	if (!CurrentCover.IsValid()) return false;
+	const bool bCrouched = UCoverGeometryStatics::GetCoverHeight(CurrentCover.Data) == ECoverHeight::Crouch;
+	return UCoverGeometryStatics::CanPeekShoot(
+		Companion->GetWorld(), CurrentCover.Data, bCrouched,
+		Target->GetActorLocation(), 140.f, Target, Companion);
 }
 
 void UCompanionCommandComponent::TriggerCoverMe()
 {
 	if (!bModeMenuOpen) return;
 
-	ACompanionCharacter* Companion = ResolveCompanion();
-	ACompanionAIController* Controller = GetCompanionController();
-	if (!IsValid(Companion) || !IsValid(Controller)) return;
-
-	const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
-	if (!BB) return;
-	AActor* CombatTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
-	if (!IsValid(CombatTarget))
-	{
-		UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] rejected — no combat target"));
-		return;
-	}
-
-	// Already covering? Don't stack. Check before closing the menu so the player gets feedback.
-	if (Companion->IsCoveringFireActive() || Companion->IsCoveringFirePending())
+	AActor* CombatTarget = nullptr;
+	const ECoverMeGate Gate = EvaluateCoverMe(&CombatTarget);
+	if (Gate != ECoverMeGate::Ready)
 	{
 		PlayPingFeedback(false);
 		CloseModeMenu();
+		UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] rejected (gate=%d)"), static_cast<int32>(Gate));
 		return;
 	}
 
 	// Close the menu WITHOUT writing ECompanionMode — this differs from SelectCompanionMode.
 	CloseModeMenu();
 
-	// Check if the companion currently holds cover that can peek-shoot the target.
-	bool bCanStartNow = false;
-	{
-		const FBlackboard::FKey CoverKeyID = BB->GetKeyID(TEXT("CoverTarget"));
-		if (CoverKeyID != FBlackboard::InvalidKey)
-		{
-			const FCover CurrentCover = BB->GetValue<UBlackboardKeyType_Cover>(CoverKeyID);
-			if (CurrentCover.IsValid())
-			{
-				const bool bCrouched = UCoverGeometryStatics::GetCoverHeight(CurrentCover.Data) == ECoverHeight::Crouch;
-				bCanStartNow = UCoverGeometryStatics::CanPeekShoot(
-					Companion->GetWorld(), CurrentCover.Data, bCrouched,
-					CombatTarget->GetActorLocation(), 140.f, CombatTarget, Companion);
-			}
-		}
-	}
+	ACompanionCharacter* Companion = ResolveCompanion();
+
+	// When CombatTarget is null (recency path — no live BB target), skip the peek-shoot test
+	// and always grant cover commit so the normal cover machinery runs.
+	const bool bCanStartNow = IsValid(CombatTarget) && CanPeekShootTarget(Companion, CombatTarget);
 
 	Companion->ArmCoveringFire(CoveringFireDuration);
 
@@ -717,7 +750,8 @@ void UCompanionCommandComponent::TriggerCoverMe()
 	}
 	else
 	{
-		// Not in usable cover: grant commit so the normal cover machinery runs.
+		// Not in usable cover (or no live target for the peek test): grant commit so the
+		// normal cover machinery runs.
 		Companion->SetCoverCommitGrant(true);
 	}
 

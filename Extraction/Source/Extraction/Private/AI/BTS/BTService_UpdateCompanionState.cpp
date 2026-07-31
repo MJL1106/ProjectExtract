@@ -1002,6 +1002,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		}
 
 		BB->SetValueAsObject(CombatTargetKey.SelectedKeyName, BestTarget);
+		Companion->StampCombatTargetSeen();
 
 		// Log first-acquisition (null -> valid) for diag.
 		if (!PrevCombatTarget.IsValid() && UE_LOG_ACTIVE(LogCompanionDiag, Log))

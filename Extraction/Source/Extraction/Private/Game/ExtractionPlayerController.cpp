@@ -20,6 +20,7 @@
 #include "RevivePromptWidget.h"
 #include "HitmarkerWidget.h"
 #include "DamageNumberWidget.h"
+#include "AttachmentStatPreviewWidget.h"
 #include "ConsumableWidget.h"
 #include "TutorialBriefingWidget.h"
 #include "ExtractionGameMode.h"
@@ -246,6 +247,7 @@ void AExtractionPlayerController::RestoreHUD()
 	EnsureOnPlayerScreen(this, HitmarkerWidget, HitmarkerWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, DamageNumberWidget, DamageNumberWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, ConsumableWidget, ConsumableWidgetClass, HUDLayerZOrder);
+	EnsureOnPlayerScreen(this, AttachmentStatPreviewWidget, AttachmentStatPreviewWidgetClass, HUDLayerZOrder);
 }
 
 void AExtractionPlayerController::NotifyDamageDealt(AActor* Victim, float Damage, float HeadshotDamage, bool bKilled, const FVector& WorldLocation)

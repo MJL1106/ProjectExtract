@@ -226,6 +226,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Attachments")
 	void SetAttachmentSelection(uint8 Sight, uint8 Muzzle, uint8 Laser, uint8 Grip, uint8 Handguard);
 
+	/** Current per-slot selection (raw kit ST_Attachments bytes). By value — the read-only view the
+	 *  attachment stat preview needs to compare a candidate option against what is already fitted. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	FWeaponAttachmentSelection GetAttachmentSelection() const { return AttachmentSelection; }
+
 	/** BaseDamage scaled by mounted attachments. */
 	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
 	float GetEffectiveDamage() const;

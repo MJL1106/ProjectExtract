@@ -2,6 +2,7 @@
 
 #include "UI/TutorialBriefingWidget.h"
 
+#include "Blueprint/WidgetBlueprintLibrary.h"
 #include "Components/Button.h"
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
@@ -47,10 +48,12 @@ void UTutorialBriefingWidget::NativeConstruct()
 
 	ApplyHeaderCopy();
 	SyncColumns();
+	HideOtherWidgets();
 }
 
 void UTutorialBriefingWidget::NativeDestruct()
 {
+	RestoreHiddenWidgets();
 	if (IsValid(ConfirmButton))
 		ConfirmButton->OnClicked.RemoveDynamic(this, &UTutorialBriefingWidget::HandleConfirmClicked);
 
@@ -127,6 +130,44 @@ void UTutorialBriefingWidget::CreateColumnRows(UVerticalBox* Box, int32 RowCount
 		Box->AddChildToVerticalBox(RowWidget);
 		RowWidgets.Add(RowWidget);
 	}
+}
+
+void UTutorialBriefingWidget::HideOtherWidgets()
+{
+	TArray<UUserWidget*> AllWidgets;
+	UWidgetBlueprintLibrary::GetAllWidgetsOfClass(this, AllWidgets, UUserWidget::StaticClass(), true);
+
+	// Restore rather than discard: a second capture without an intervening restore would scan a HUD
+	// this function had already collapsed, record nothing, and leave every widget hidden for good.
+	RestoreHiddenWidgets();
+	HiddenWidgets.Reserve(AllWidgets.Num());
+
+	for (UUserWidget* Widget : AllWidgets)
+	{
+		if (!IsValid(Widget)) continue;
+		if (Widget == this) continue;
+
+		const ESlateVisibility Current = Widget->GetVisibility();
+		// Already hidden for its own reasons — leave it alone, and do not record it so restore
+		// cannot wrongly make it visible afterwards.
+		if (Current == ESlateVisibility::Collapsed || Current == ESlateVisibility::Hidden) continue;
+
+		HiddenWidgets.Add({ Widget, Current });
+		Widget->SetVisibility(ESlateVisibility::Collapsed);
+	}
+}
+
+void UTutorialBriefingWidget::RestoreHiddenWidgets()
+{
+	for (const FHiddenWidgetRecord& Record : HiddenWidgets)
+	{
+		UUserWidget* Widget = Record.Widget.Get();
+		if (!IsValid(Widget)) continue;
+
+		Widget->SetVisibility(Record.PriorVisibility);
+	}
+
+	HiddenWidgets.Reset();
 }
 
 void UTutorialBriefingWidget::HandleConfirmClicked()

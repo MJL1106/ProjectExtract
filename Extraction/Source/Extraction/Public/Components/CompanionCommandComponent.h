@@ -48,6 +48,12 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoveringFire", meta = (ClampMin = "1.0"))
 	float CoveringFireDuration = 5.f;
 
+	/** Seconds after the companion last held a combat target that Cover Me still counts as
+	 *  "in combat". The blackboard target only exists while the companion currently SEES an
+	 *  enemy, which is far stricter than the player's sense of being in a firefight. */
+	UPROPERTY(EditAnywhere, Category = "Companion|CoveringFire", meta = (ClampMin = "0.0"))
+	float CoverMeCombatRecencyWindow = 10.f;
+
 	/** Registered at TakedownPromptContextPriority ONLY while a takedown ping is pending. Maps the
 	 *  G/V confirm keys so they consume — the kit's grenade (G) and melee (V) can't fire while the
 	 *  takedown prompt is on screen. Assign IMC_CompanionTakedownPrompt in BP. */
@@ -217,6 +223,11 @@ private:
 	UFUNCTION()
 	void HandleCompanionModeChanged(ECompanionMode NewMode);
 
+	/** Clears commanded cover hold and any pending cover reissue timer. Called before
+	 *  IssueCommand for commands that break cover (Breach, Explore, Loot, Takedown) so
+	 *  BTService_UpdateCompanionState's UnCrouch gate sees the hold cleared. */
+	void ClearCommandedCoverIfActive();
+
 	/** Adds/removes TakedownPromptContext on the local player. Idempotent. */
 	void SetPromptContextRegistered(bool bRegister);
 
@@ -225,6 +236,13 @@ private:
 
 	/** Auto-close timer callback — closes the picker after ModeMenuTimeout of no input. */
 	void OnModeMenuTimeout();
+
+	/** Single gate for Cover Me so IsCoverMeAvailable and TriggerCoverMe can never disagree. */
+	enum class ECoverMeGate : uint8 { Ready, NoCompanion, NoCombat, AlreadyActive, OnCooldown };
+	ECoverMeGate EvaluateCoverMe(AActor** OutCombatTarget = nullptr);
+
+	/** Test if the companion's current cover can peek-shoot a given target. */
+	bool CanPeekShootTarget(ACompanionCharacter* Companion, AActor* Target);
 
 	bool bPromptContextRegistered = false;
 	bool bModeSelectContextRegistered = false;

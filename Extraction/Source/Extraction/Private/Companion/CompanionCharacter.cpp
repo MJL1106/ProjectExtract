@@ -594,12 +594,13 @@ void ACompanionCharacter::SetCoverCommitGrant(bool bPending)
 
 bool ACompanionCharacter::ConsumeCoverCommitGrant()
 {
-	// One BT loop from the combat task finishing to MoveToCoverPoint running is well under a
-	// second; anything older is a stale grant from a path that never reached the commit gate.
-	constexpr float GrantLifetime = 3.f;
+	// The grant must outlive the covering-fire arm timeout: a slow cover commit should not
+	// silently expire while the pending window waits for cover arrival. Both share
+	// CoveringFireArmTimeout so they cannot drift. Other callers (cover switch, take-cover
+	// command, combat cover commit) consume within one BT tick, well under this threshold.
 	const float Stamp = CoverCommitGrantStamp;
 	CoverCommitGrantStamp = -1e9f;
-	return GetWorld() && (GetWorld()->GetTimeSeconds() - Stamp) <= GrantLifetime;
+	return GetWorld() && (GetWorld()->GetTimeSeconds() - Stamp) <= CoveringFireArmTimeout;
 }
 
 void ACompanionCharacter::SetCommandedCoverTarget(const FCover& Cover)
@@ -667,7 +668,10 @@ void ACompanionCharacter::ArmCoveringFire(float Duration)
 
 void ACompanionCharacter::StartCoveringFire()
 {
-	if (!bCoveringFirePending && !bCoveringFireActive) return;
+	// Already running — do not re-stamp CoveringFireStartTime or the hard ceiling pushes out,
+	// leaking the 0.4x damage-resistance window.
+	if (bCoveringFireActive) return;
+	if (!bCoveringFirePending) return;
 	bCoveringFirePending = false;
 	bCoveringFireActive = true;
 	CoveringFireStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
@@ -680,29 +684,15 @@ void ACompanionCharacter::TickCoveringFire(float DeltaSeconds, bool bReloadHeld)
 	const UWorld* World = GetWorld();
 	const float Now = World ? World->GetTimeSeconds() : 0.f;
 
-	// Arm timeout: cover was never reached. Fall back to firing from where we stand — but only if
-	// there is still something to shoot. The combat task clears the window on its own teardown, so
-	// the gap this closes is the target dying while the order was still pending: without the check
-	// the window would start anyway and burn its full duration at reduced damage doing nothing.
+	// Arm timeout: cover was never reached — start the window from where we stand.
+	// The player pressed the button and must always get the countdown and the behaviour; a
+	// window that silently evaporates on target death while pending is the exact confusion
+	// being fixed. The window self-limits at its own duration and the hard ceiling below.
 	if (bCoveringFirePending)
 	{
 		if ((Now - CoveringFireArmTime) <= CoveringFireArmTimeout)
 		{
 			return; // still pending, no clock to tick
-		}
-
-		AActor* PendingTarget = nullptr;
-		if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController()))
-		{
-			if (const UBlackboardComponent* BB = CompAIC->GetBlackboardComponent())
-				PendingTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
-		}
-		const UHealthComponent* PendingTargetHealth =
-			IsValid(PendingTarget) ? PendingTarget->FindComponentByClass<UHealthComponent>() : nullptr;
-		if (!IsValid(PendingTarget) || (PendingTargetHealth && PendingTargetHealth->IsDead()))
-		{
-			ClearCoveringFire();
-			return;
 		}
 
 		StartCoveringFire();
@@ -711,13 +701,6 @@ void ACompanionCharacter::TickCoveringFire(float DeltaSeconds, bool bReloadHeld)
 
 	// Hard wall-clock ceiling — force-clears regardless of pause state.
 	if ((Now - CoveringFireStartTime) > (CoveringFireDuration + CoveringFireCeilingSlack))
-	{
-		ClearCoveringFire();
-		return;
-	}
-
-	// Empty mag with no reload possible — window ends immediately.
-	if (GetCurrentAmmo() == 0 && !CanReload())
 	{
 		ClearCoveringFire();
 		return;
@@ -780,6 +763,21 @@ float ACompanionCharacter::GetCoveringFireCooldownRemaining() const
 bool ACompanionCharacter::IsCoveringFireOnCooldown() const
 {
 	return GetCoveringFireCooldownRemaining() > 0.f;
+}
+
+void ACompanionCharacter::StampCombatTargetSeen()
+{
+	const UWorld* World = GetWorld();
+	if (World)
+		LastCombatTargetSeenTime = World->GetTimeSeconds();
+}
+
+float ACompanionCharacter::GetTimeSinceCombatTarget() const
+{
+	const UWorld* World = GetWorld();
+	if (!World || LastCombatTargetSeenTime <= -1e8f)
+		return TNumericLimits<float>::Max();
+	return World->GetTimeSeconds() - LastCombatTargetSeenTime;
 }
 
 float ACompanionCharacter::GetHealthFraction() const

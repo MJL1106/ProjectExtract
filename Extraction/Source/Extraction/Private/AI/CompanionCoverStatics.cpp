@@ -466,6 +466,11 @@ void StopCoverApproachFire(ACompanionCharacter* Companion, AAIController* Contro
 	State.Reset();
 }
 
+// Vertical half-extent for the ping cover search column. Cover points sit on the ground plane,
+// but PingImpact can be metres above them on a tall wall. A cube of half-extent SearchRadius
+// centred on the impact misses candidates below the impact. 1000cm covers ~2 storeys.
+static constexpr float PingVerticalSearchHalfHeight = 1000.f;
+
 bool FindCoverOnPingedWall(UWorld* World, const FVector& PingImpact, const FVector& PingNormal,
 	float SearchRadius, const AController* Querier, const APawn* QuerierPawn,
 	AActor* CombatTarget, FCover& OutCover)
@@ -477,10 +482,13 @@ bool FindCoverOnPingedWall(UWorld* World, const FVector& PingImpact, const FVect
 
 	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
 
-	// Gather candidates in a bounding box around the ping impact.
+	// Gather candidates in a tall vertical column around the ping impact. XY half-extent is the
+	// search radius; Z is generous so a ping high on a wall still reaches ground-level points.
+	// The AICS octree query uses only GetBox() (box extent), not the sphere radius.
 	TArray<FCover> Candidates;
 	Candidates.Reserve(32);
-	const FBoxSphereBounds SearchBounds(PingImpact, FVector(SearchRadius), SearchRadius);
+	const FVector ColumnExtent(SearchRadius, SearchRadius, PingVerticalSearchHalfHeight);
+	const FBoxSphereBounds SearchBounds(PingImpact, ColumnExtent, ColumnExtent.Size());
 	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
 
 	// Hostile anchors for claim-collision rejection (same rule as the EQS CoverIntent filter).
@@ -492,10 +500,11 @@ bool FindCoverOnPingedWall(UWorld* World, const FVector& PingImpact, const FVect
 	if (bRejectHostileAdjacent)
 		UCoverScoringStatics::GatherHostileAnchors(World, QuerierPawn, Querier, PingHostileAnchors);
 
-	// Standoff for body-protection traces.
+	// Standoff for body-protection traces and corner-apex peek resolution.
 	const ACharacter* QuerierChar = Cast<const ACharacter>(QuerierPawn);
 	const UCapsuleComponent* Cap = QuerierChar ? QuerierChar->GetCapsuleComponent() : nullptr;
-	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : 34.f) + 10.f;
+	const float CapRadius = Cap ? Cap->GetScaledCapsuleRadius() : 34.f;
+	const float Standoff = CapRadius + 10.f;
 
 	// Wall match threshold: cos(20 deg) = 0.9397. PingNormal points away from the surface, and
 	// DirectionToWall points toward the wall. The matching dot is -PingNormal vs DirectionToWall:
@@ -505,10 +514,12 @@ bool FindCoverOnPingedWall(UWorld* World, const FVector& PingImpact, const FVect
 	static constexpr float BodyProtectChestHeight = 60.f;
 	const float SearchRadiusSq = SearchRadius * SearchRadius;
 
-	// No distance or Z-delta gates for player-commanded cover. The ping trace range is the limit;
-	// if the player can see it and hit it, it is a legal order. The companion either paths there or
-	// the 12-second unreached-hold timeout releases gracefully. Autonomous cover selection keeps
-	// every gate exactly as it is via BTTask_MoveToCoverPoint's commit block.
+	// The search radius is lateral-only: cover points sit on the ground plane, so a ping high
+	// on a tall wall has a vertical gap that would exhaust a 3D budget. The bounds query uses a
+	// tall column (PingVerticalSearchHalfHeight Z) and the per-candidate check is DistSquared2D.
+	// The ping trace range is the only hard distance limit; if the player can see it and hit it,
+	// it is a legal order. The companion either paths there or the 12-second unreached-hold
+	// timeout releases gracefully.
 	const FVector PawnLoc = QuerierPawn->GetActorLocation();
 
 	// ThreatLoc = actor location for body-protection traces (IsThreatCovered, ScoreCandidate).
@@ -547,10 +558,19 @@ bool FindCoverOnPingedWall(UWorld* World, const FVector& PingImpact, const FVect
 		static constexpr float WallPlaneToleranceCm = 150.f;
 		if (FMath::Abs(FVector::DotProduct(Data.Location - PingImpact, PingNormal)) > WallPlaneToleranceCm) continue;
 
-		// True distance check (bounds query is a box, so diagonal candidates can exceed radius).
-		if (FVector::DistSquared(PingImpact, Data.Location) > SearchRadiusSq) continue;
+		// Lateral-only radius check: cover points sit on the ground plane and the ping impact can
+		// be metres above them on a tall wall. 3D distance would eat the lateral allowance.
+		if (FVector::DistSquared2D(PingImpact, Data.Location) > SearchRadiusSq) continue;
 
-		++DbgWallMatch; // survived wall + plane + radius — this point is on the pinged wall
+		// Vertical gate: the column is symmetric but the intent is one-directional -- cover sits
+		// below the impact (player pings wall above the point). A stacked same-facing wall one or
+		// two storeys up must not admit points from the wrong floor.
+		static constexpr float PingCoverMaxAboveImpact = 150.f;
+		static constexpr float PingCoverMaxBelowImpact = PingVerticalSearchHalfHeight;
+		const float ZBelowImpact = PingImpact.Z - Data.Location.Z;
+		if (ZBelowImpact < -PingCoverMaxAboveImpact || ZBelowImpact > PingCoverMaxBelowImpact) continue;
+
+		++DbgWallMatch; // survived wall + plane + radius + Z -- this point is on the pinged wall
 
 		// Occupancy gates.
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
@@ -567,9 +587,22 @@ bool FindCoverOnPingedWall(UWorld* World, const FVector& PingImpact, const FVect
 		if (IsValid(CombatTarget))
 		{
 			// With a combat target: hard-require peek-shootability and body protection.
-			const bool bCrouched = UCoverGeometryStatics::GetCoverHeight(Data) == ECoverHeight::Crouch;
+			const ECoverHeight Height = UCoverGeometryStatics::GetCoverHeight(Data);
+			const bool bCrouched = Height == ECoverHeight::Crouch;
+			// Stand-height candidates: the fixed lateral offset from GetLeanPeekPosition lands
+			// behind the wall -- the trace hits the cover wall itself and reports blocked. Use
+			// the reach-bounded corner-marched apex instead (TryGetCornerPeekApex), which sits
+			// past the wall's actual end. Falls back to the fixed offset when no reachable corner
+			// exists (mid-wall on a long wall), correctly rejecting those points.
+			const bool bNeedCornerApex = Height == ECoverHeight::Stand;
+			const float MaxCornerReachCm = Tuning
+				? Tuning->CrouchPeekMaxCornerReachCm
+				: UCoverGeometryStatics::PeekApexMaxReachCm;
 			if (!UCoverGeometryStatics::CanPeekShoot(World, Data, bCrouched,
-				ThreatSightLoc, StandFireEyeHeight, CombatTarget, QuerierPawn))
+				ThreatSightLoc, StandFireEyeHeight, CombatTarget, QuerierPawn,
+				UCoverGeometryStatics::PeekLeanOffset, bNeedCornerApex,
+				Standoff, CapRadius, UCoverGeometryStatics::PeekApexClearanceMargin,
+				MaxCornerReachCm))
 			{ ++DbgCombat; continue; }
 			if (!UCoverGeometryStatics::IsThreatCovered(World, Data, ThreatLoc,
 				Standoff, BodyProtectChestHeight, CombatTarget, QuerierPawn))

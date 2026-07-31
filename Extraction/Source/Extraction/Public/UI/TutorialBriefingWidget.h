@@ -95,4 +95,21 @@ private:
 	/** Non-owning — the subsystem outlives the widget in practice, but the widget must be able to
 	 *  unsubscribe from whatever it actually subscribed to without assuming it is still there. */
 	TWeakObjectPtr<UEnhancedInputLocalPlayerSubsystem> BoundInputSubsystem;
+
+	/** One entry per widget hidden by the briefing. Captures the prior visibility so the exact
+	 *  value is restored on dismiss — widgets already hidden for their own reasons stay hidden. */
+	struct FHiddenWidgetRecord
+	{
+		TWeakObjectPtr<UUserWidget> Widget;
+		ESlateVisibility PriorVisibility;
+	};
+
+	/** The set of widgets this briefing hid. Populated on construct, drained on destruct. */
+	TArray<FHiddenWidgetRecord> HiddenWidgets;
+
+	/** Hides every visible top-level user widget except this one and its generated row children. */
+	void HideOtherWidgets();
+
+	/** Restores the prior visibility of every widget this briefing hid. Stale entries are skipped. */
+	void RestoreHiddenWidgets();
 };
