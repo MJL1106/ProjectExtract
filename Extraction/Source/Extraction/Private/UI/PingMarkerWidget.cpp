@@ -41,6 +41,17 @@ void UPingMarkerWidget::NativeDestruct()
 
 void UPingMarkerWidget::HandlePingChanged(ECompanionCommand PendingCommand, AActor* PingedTarget)
 {
+	// TakeCover has no target actor -- track the resolved cover location instead.
+	if (PendingCommand == ECompanionCommand::TakeCover && CachedCommandComp.IsValid())
+	{
+		TrackedTarget.Reset();
+		TrackedLocation = CachedCommandComp->GetPendingCoverLocation();
+		bTrackingLocation = true;
+		SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+		return;
+	}
+
+	bTrackingLocation = false;
 	if (PendingCommand == ECompanionCommand::None || !IsValid(PingedTarget))
 	{
 		TrackedTarget.Reset();
@@ -57,7 +68,7 @@ void UPingMarkerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
 	// Skip projection work when no target is active.
-	if (!TrackedTarget.IsValid())
+	if (!TrackedTarget.IsValid() && !bTrackingLocation)
 	{
 		if (GetVisibility() != ESlateVisibility::Collapsed)
 		{
@@ -69,8 +80,9 @@ void UPingMarkerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 	APlayerController* PC = GetOwningPlayer();
 	if (!IsValid(PC)) return;
 
+	const FVector WorldLoc = bTrackingLocation ? TrackedLocation : TrackedTarget->GetActorLocation();
 	FVector2D ScreenPos;
-	const bool bOnScreen = PC->ProjectWorldLocationToScreen(TrackedTarget->GetActorLocation(), ScreenPos, true);
+	const bool bOnScreen = PC->ProjectWorldLocationToScreen(WorldLoc, ScreenPos, true);
 
 	if (!bOnScreen)
 	{

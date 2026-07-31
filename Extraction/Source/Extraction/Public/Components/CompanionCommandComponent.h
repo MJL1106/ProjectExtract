@@ -40,6 +40,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Command")
 	float PingTraceRange = 6000.f;
 
+	/** Search radius (cm) around the ping impact for cover-point candidates. */
+	UPROPERTY(EditAnywhere, Category = "Companion|Command")
+	float CoverPingRadius = 400.f;
+
+	/** Duration (seconds) of the covering-fire sustained-peek window. */
+	UPROPERTY(EditAnywhere, Category = "Companion|CoveringFire", meta = (ClampMin = "1.0"))
+	float CoveringFireDuration = 5.f;
+
 	/** Registered at TakedownPromptContextPriority ONLY while a takedown ping is pending. Maps the
 	 *  G/V confirm keys so they consume — the kit's grenade (G) and melee (V) can't fire while the
 	 *  takedown prompt is on screen. Assign IMC_CompanionTakedownPrompt in BP. */
@@ -98,6 +106,10 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Companion|Command")
 	void ConfirmExplore();
 
+	/** Confirm a queued TakeCover command (rides the same confirm key as Breach). */
+	UFUNCTION(BlueprintCallable, Category = "Companion|Command")
+	void ConfirmTakeCover();
+
 	/** Cycle the companion's mode Normal -> Combat -> Stealth -> Normal. Retained for gamepad/debug use;
 	 *  X now opens the picker instead. */
 	UFUNCTION(BlueprintCallable, Category = "Companion|Mode")
@@ -120,6 +132,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Companion|Mode")
 	void SelectCompanionMode(ECompanionMode Mode);
 
+	/** Trigger a covering-fire window. Requires the picker to be open and a live combat target.
+	 *  Closes the menu WITHOUT changing the persistent ECompanionMode. */
+	UFUNCTION(BlueprintCallable, Category = "Companion|CoveringFire")
+	void TriggerCoverMe();
+
+	/** True while the companion has a live combat target and covering fire can be activated. */
+	UFUNCTION(BlueprintPure, Category = "Companion|CoveringFire")
+	bool IsCoverMeAvailable();
+
 	/** True while the mode picker is open. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Mode")
 	bool IsModeMenuOpen() const { return bModeMenuOpen; }
@@ -135,6 +156,11 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Companion|Command")
 	ECompanionCommand GetPendingCommand() const { return PendingCommand; }
+
+	/** World location of the pending cover point (TakeCover only). Used by the ping marker
+	 *  when there is no target actor to track. Valid while PendingCommand == TakeCover. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Command")
+	FVector GetPendingCoverLocation() const { return PendingCoverLocation; }
 
 	/** Returns the resolved companion, or null if not yet spawned. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Command")
@@ -160,6 +186,13 @@ private:
 	ECompanionCommand PendingCommand = ECompanionCommand::None;
 
 	TWeakObjectPtr<AActor> PendingTarget;
+
+	/** Cached ping impact for TakeCover re-resolve at confirm time. */
+	FVector PendingCoverPingImpact = FVector::ZeroVector;
+	FVector PendingCoverPingNormal = FVector::ZeroVector;
+
+	/** Resolved cover point location for the ping marker (TakeCover). */
+	FVector PendingCoverLocation = FVector::ZeroVector;
 
 	/** Lazily resolved on first use; valid for the lifetime of the level. */
 	TWeakObjectPtr<ACompanionCharacter> CachedCompanion;
@@ -197,4 +230,9 @@ private:
 	bool bModeSelectContextRegistered = false;
 	bool bModeMenuOpen = false;
 	FTimerHandle ModeMenuTimeoutHandle;
+
+	/** Deferred re-issue timer for re-pinging cover while a hold is active. The clear (frame N)
+	 *  and the re-issue (frame N+1) must be in separate frames so the BT decorator sees a
+	 *  genuine None->TakeCover edge. Cleared in EndPlay. */
+	FTimerHandle CoverReissueTimerHandle;
 };

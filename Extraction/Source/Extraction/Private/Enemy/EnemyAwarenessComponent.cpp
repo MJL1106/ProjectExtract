@@ -585,6 +585,57 @@ void UEnemyAwarenessComponent::DebugForceEngage(AActor* Target)
 	bDebugForcedCombat = false;
 }
 
+void UEnemyAwarenessComponent::SetLastManHunting(bool bHunting)
+{
+	if (bLastManHunting == bHunting) return;
+	bLastManHunting = bHunting;
+
+	// Latching preserves whatever no-sight dwell has already accrued — a survivor who has been
+	// hiding for a minute should not owe a fresh dwell before he starts hunting.
+	if (!bHunting)
+	{
+		TimeWithoutSight = 0.f;
+		return;
+	}
+
+	// The seed's approach-point contract is over the moment this enemy is the wave's last man:
+	// its arrival quit runs off DirectorSeedArrivalAccum, a path the 1 Hz contact refresh cannot
+	// intercept, and would drop him to Searching (which nulls the combat target) despite the latch.
+	bDirectorSeeded = false;
+}
+
+void UEnemyAwarenessComponent::RefreshLastManContact(AActor* Target)
+{
+	if (bStopped) return;
+	if (!IsValid(Target)) return;
+	if (!IsActorAlive(Target)) return;
+	if (Target == FindDownedPlayerPawn(this)) return;
+
+	// Do not steal an existing combat lock on a different target (e.g. the companion).
+	// ScoreAndSelectTarget runs at 0.15s; the director at 1s — overwriting would cause 1 Hz snap.
+	// Only hold the lost-contact clock if real LOS to the other target is active; otherwise let the
+	// grace expire — Searching nulls the target and the next refresh re-points at the player.
+	if (CombatTarget.IsValid() && CombatTarget.Get() != Target)
+	{
+		if (bHadLOS) TimeSinceLOSLost = 0.f;
+		return;
+	}
+
+	LastKnownLocation = Target->GetActorLocation();
+	TimeSinceLOSLost = 0.f;
+
+	if (CombatTarget.Get() != Target) SetCombatTarget(Target);
+	else WriteBBVectors();
+
+	const bool bWasCombat = (CurrentState == EEnemyAwarenessState::Combat);
+	SetState(EEnemyAwarenessState::Combat);
+
+	// Combat entry from a non-Combat state bypasses EnterCombat's SeedCompanionSightTracks (line
+	// 1515). Without the seed a companion in direct view is sight-blind to this enemy.
+	if (!bWasCombat && CurrentState == EEnemyAwarenessState::Combat)
+		SeedCompanionSightTracks();
+}
+
 void UEnemyAwarenessComponent::ForceEngage(AActor* Target)
 {
 	if (bStopped) return;
@@ -765,6 +816,7 @@ void UEnemyAwarenessComponent::HandlePawnDeath()
 {
 	bStopped = true;
 	ClearInvestigateBody();
+	SetLastManHunting(false);
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(UpdateTimerHandle);
@@ -1177,12 +1229,17 @@ void UEnemyAwarenessComponent::UpdateCombat()
 
 	if (bHadLOS && CombatTarget.IsValid())
 	{
+		TimeWithoutSight = 0.f;
 		LastKnownLocation = CombatTarget->GetActorLocation();
 		WriteBBVectors();
 		BroadcastSightingToSquad();
 	}
 	else
 	{
+		// No perceived sight this tick. Zeroed again below if geometric LOS turns out to be clear —
+		// contact held via recent damage or suppression is not sight and keeps the clock running.
+		TimeWithoutSight += UpdateInterval;
+
 		// Contact-hold evaluation: multiple signals can keep Combat alive when perception drops LOS.
 		bool bHoldContact = false;
 		bool bHoldViaFOVLOS = false;
@@ -1249,6 +1306,7 @@ void UEnemyAwarenessComponent::UpdateCombat()
 				// Geometric LOS is the honest "we can see them" signal — clear the seed
 				// so normal combat behaviour takes over (even beyond SightRadius where
 				// perception never delivers a stimulus edge).
+				TimeWithoutSight = 0.f;
 				bDirectorSeeded = false;
 				LastKnownLocation = CombatTarget->GetActorLocation();
 				WriteBBVectors();
@@ -1264,7 +1322,9 @@ void UEnemyAwarenessComponent::UpdateCombat()
 			// at ForceEngage), NOT LastKnownLocation (which is live-refreshed by
 			// EnterCombat / squad relay and would track the player). Require a brief grace
 			// so a momentary LOS break at close range doesn't read as "arrived and nobody".
-			if (bDirectorSeeded && IsValid(MyPawn) && IsValid(ArchetypeData))
+			// The wave's last man is exempt: the seed quit nulls his combat target on a path the
+			// director's contact refresh cannot intercept, which would eject the latch from Combat.
+			if (bDirectorSeeded && !bLastManHunting && IsValid(MyPawn) && IsValid(ArchetypeData))
 			{
 				const float DistToSeed = FVector::Dist(MyPawn->GetActorLocation(), DirectorSeedLocation);
 				if (DistToSeed < ArchetypeData->DirectorSeedArrivalRadius)
@@ -1494,6 +1554,9 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 	LastKnownLocation = IsValid(Target) ? Target->GetActorLocation() : LastKnownLocation;
 	bHadLOS = bConfirmedVisual;
 	TimeSinceLOSLost = 0.f;
+	// Only a confirmed visual is sight. A blind acquisition (ForceEngage, hearing, near-miss) must
+	// not reset the no-sight dwell, or the last man's hunt gate could never mature.
+	if (bConfirmedVisual) TimeWithoutSight = 0.f;
 
 	for (auto& Pair : SuspicionTracks)
 		Pair.Value.Suspicion = 0.f;
@@ -1529,6 +1592,8 @@ void UEnemyAwarenessComponent::TransitionToSearching(bool bContactLost)
 
 	if (bContactLost)
 		Bark(EBarkType::LostTarget);
+
+	TimeWithoutSight = 0.f;
 
 	if (const UWorld* World = GetWorld())
 		LastCombatExitWorldTime = World->GetTimeSeconds();

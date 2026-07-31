@@ -1,4 +1,5 @@
 // Battlefield-style hitmarker X at the crosshair. White = body hit, deep red = headshot hit,
+// blue = headshot on an armoured-head enemy (heavies) that did not kill,
 // kill = expand + fade (bright red, or deep red on a headshot kill).
 
 #pragma once
@@ -22,9 +23,10 @@ class EXTRACTION_API UHitmarkerWidget : public UUserWidget
 	GENERATED_BODY()
 
 public:
-	/** Plays the marker for a hit. Kill overrides headshot styling for the expand animation. */
+	/** Plays the marker for a hit. Kill overrides headshot styling for the expand animation.
+	 *  bArmoredHead = true renders blue for a non-lethal headshot on heavies. */
 	UFUNCTION(BlueprintCallable, Category = "Hitmarker")
-	void ShowHit(bool bHeadshot, bool bKilled);
+	void ShowHit(bool bHeadshot, bool bKilled, bool bArmoredHead = false);
 
 protected:
 	virtual void NativeOnInitialized() override;
@@ -75,6 +77,10 @@ protected:
 	/** Kill-confirm marker color when the killing hit was a headshot. */
 	UPROPERTY(EditDefaultsOnly, Category = "Hitmarker|Colors")
 	FLinearColor HeadshotKillColor = FLinearColor(0.9f, 0.3f, 0.22f);
+
+	/** Headshot on an enemy whose head does not one-tap (heavies), when the hit did not kill. */
+	UPROPERTY(EditDefaultsOnly, Category = "Hitmarker|Colors")
+	FLinearColor ArmoredHeadshotColor = FLinearColor(0.15f, 0.55f, 1.0f);
 
 	/** Seconds a normal hit marker stays up (including fade). */
 	UPROPERTY(EditDefaultsOnly, Category = "Hitmarker|Timing", meta = (ClampMin = "0.05"))

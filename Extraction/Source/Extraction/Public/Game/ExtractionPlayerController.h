@@ -22,6 +22,7 @@ class ULevelCompleteWidget;
 class ULevelFailedWidget;
 class URevivePromptWidget;
 class UConsumableWidget;
+class UTutorialBriefingWidget;
 
 /** Fired on the local player controller when the player's weapon deals damage. One event per
  *  trigger pull per victim (shotgun pellets aggregated). HeadshotDamage > 0 marks a headshot;
@@ -75,6 +76,10 @@ public:
 	 *  mode chip, objective layer, loot toast and revive prompt for the rest of the session. */
 	UFUNCTION(BlueprintCallable, Category = "UI")
 	void RestoreHUD();
+
+	/** Called by the briefing screen's confirm button — the only way out of the gate. Unpauses,
+	 *  hands input back to the game, tears the screen down and records that it has been seen. */
+	void DismissTutorialBriefing();
 
 	/** Broadcast on the local controller for HUD hit feedback (hitmarker, damage numbers). */
 	UPROPERTY(BlueprintAssignable, Category = "UI|Events")
@@ -203,6 +208,19 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UConsumableWidget> ConsumableWidget;
 
+	/** Controls briefing screen class (assigned in BP defaults — no C++ asset path). */
+	UPROPERTY(EditDefaultsOnly, Category = "UI|Tutorial")
+	TSubclassOf<UTutorialBriefingWidget> TutorialBriefingWidgetClass;
+
+	/** Active controls briefing instance */
+	UPROPERTY()
+	TObjectPtr<UTutorialBriefingWidget> TutorialBriefingWidget;
+
+	/** Maps that open with the controls briefing. Designer assigns them — C++ names no level, so
+	 *  adding a second tutorial map is a defaults change, not a code change. */
+	UPROPERTY(EditDefaultsOnly, Category = "UI|Tutorial")
+	TArray<TSoftObjectPtr<UWorld>> TutorialMaps;
+
 	/** If true, the player will use UMG touch controls even if not playing on mobile platforms */
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")
 	bool bForceTouchControls = false;
@@ -210,9 +228,25 @@ protected:
 	/** Gameplay initialization */
 	virtual void BeginPlay() override;
 
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+
 	/** Input mapping context setup */
 	virtual void SetupInputComponent() override;
 
 	/** Returns true if the player should use UMG touch controls */
 	bool ShouldUseTouchControls() const;
+
+private:
+	/** Queues the briefing for next tick when this map is a tutorial map and it has not been seen. */
+	void ArmTutorialBriefing();
+
+	/** True when the current world's package matches one of TutorialMaps. */
+	bool IsCurrentMapATutorialMap() const;
+
+	/** The current world's package name with any PIE prefix stripped. Used to level-key the seen
+	 *  flag and to match against TutorialMaps. */
+	FName GetCurrentLevelName() const;
+
+	/** Puts the briefing on screen, takes input UI-only and pauses the game. */
+	void ShowTutorialBriefing();
 };

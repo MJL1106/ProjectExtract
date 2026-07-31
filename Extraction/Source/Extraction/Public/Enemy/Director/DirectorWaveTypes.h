@@ -64,6 +64,13 @@ struct EXTRACTION_API FDirectorWaveRequest
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave", meta = (ClampMin = "0.0"))
 	float FirstSquadDelaySeconds = 2.f;
 
+	/** Once every squad has spawned and the wave is down to this many living members or fewer, each
+	 *  survivor is latched into last-man hunt mode: morale pinned Confident and the player's live
+	 *  position re-stamped every director tick, so the tail of the wave comes to the player instead
+	 *  of camping cover in a cleared room. 0 = disabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave", meta = (ClampMin = "0"))
+	int32 LastManHuntThreshold = 1;
+
 	/** Compositions pinned to specific squad slots. Guaranteed squads bypass both the weighted roll
 	 *  and the MaxAlive fit filter — guaranteed means guaranteed. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave")

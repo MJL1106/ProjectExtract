@@ -3,6 +3,7 @@
 #include "UI/HitmarkerWidget.h"
 #include "ExtractionPlayerController.h"
 #include "Components/Image.h"
+#include "Enemy/EnemyCharacter.h"
 
 void UHitmarkerWidget::NativeOnInitialized()
 {
@@ -35,10 +36,16 @@ void UHitmarkerWidget::NativeDestruct()
 
 void UHitmarkerWidget::HandleDamageDealt(AActor* Victim, float Damage, float HeadshotDamage, bool bKilled, FVector WorldLocation)
 {
-	ShowHit(HeadshotDamage > 0.f, bKilled);
+	const bool bArmoredHead = [Victim]()
+	{
+		const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Victim);
+		return IsValid(Enemy) && Enemy->HasArmoredHead();
+	}();
+
+	ShowHit(HeadshotDamage > 0.f, bKilled, bArmoredHead);
 }
 
-void UHitmarkerWidget::ShowHit(bool bHeadshot, bool bKilled)
+void UHitmarkerWidget::ShowHit(bool bHeadshot, bool bKilled, bool bArmoredHead)
 {
 	if (!MarkerRoot) return;
 
@@ -46,10 +53,19 @@ void UHitmarkerWidget::ShowHit(bool bHeadshot, bool bKilled)
 	ActiveDuration = bKilled ? KillDuration : HitDuration;
 	TimeRemaining = ActiveDuration;
 
-	if (bKilled)
-		SetTickColor(bHeadshot ? HeadshotKillColor : KillColor);
+	// Priority: headshot kill > kill > armoured headshot > headshot > body hit.
+	FLinearColor Color;
+	if (bKilled && bHeadshot)
+		Color = HeadshotKillColor;
+	else if (bKilled)
+		Color = KillColor;
+	else if (bHeadshot && bArmoredHead)
+		Color = ArmoredHeadshotColor;
+	else if (bHeadshot)
+		Color = HeadshotColor;
 	else
-		SetTickColor(bHeadshot ? HeadshotColor : HitColor);
+		Color = HitColor;
+	SetTickColor(Color);
 
 	// Battlefield style: headshots double every arm.
 	const ESlateVisibility DoubleVis = bHeadshot ? ESlateVisibility::SelfHitTestInvisible : ESlateVisibility::Collapsed;

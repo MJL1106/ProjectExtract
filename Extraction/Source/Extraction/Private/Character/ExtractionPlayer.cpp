@@ -500,6 +500,9 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	if (IA_CompanionModeCombat)
 		EnhancedInput->BindAction(IA_CompanionModeCombat, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeSelectCombatInput);
 
+	if (IA_CompanionCoverMe)
+		EnhancedInput->BindAction(IA_CompanionCoverMe, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionCoverMeInput);
+
 }
 
 void AExtractionPlayer::PawnClientRestart()
@@ -1604,9 +1607,10 @@ void AExtractionPlayer::CompanionConfirmBreachInput(const FInputActionValue& /*V
 	// One confirm key — routes to whatever the ping prompt is showing.
 	switch (CompanionCommandComponent->GetPendingCommand())
 	{
-	case ECompanionCommand::Loot:    CompanionCommandComponent->ConfirmLoot();    break;
-	case ECompanionCommand::Explore: CompanionCommandComponent->ConfirmExplore(); break;
-	default:                         CompanionCommandComponent->ConfirmBreach();  break;
+	case ECompanionCommand::Loot:      CompanionCommandComponent->ConfirmLoot();      break;
+	case ECompanionCommand::Explore:   CompanionCommandComponent->ConfirmExplore();   break;
+	case ECompanionCommand::TakeCover: CompanionCommandComponent->ConfirmTakeCover(); break;
+	default:                           CompanionCommandComponent->ConfirmBreach();    break;
 	}
 }
 
@@ -1632,6 +1636,12 @@ void AExtractionPlayer::CompanionModeSelectCombatInput(const FInputActionValue& 
 {
 	if (!IsValid(CompanionCommandComponent)) return;
 	CompanionCommandComponent->SelectCompanionMode(ECompanionMode::Combat);
+}
+
+void AExtractionPlayer::CompanionCoverMeInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->TriggerCoverMe();
 }
 
 void AExtractionPlayer::UseStimInput(const FInputActionValue& /*Value*/)

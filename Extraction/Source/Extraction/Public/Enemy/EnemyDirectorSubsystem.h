@@ -256,6 +256,9 @@ private:
 	int32 RecentKills = 0;
 	int32 LastSweepSearchingCount = 0;
 	int32 LastSweepCombatCount = 0;
+	/** Living, in-scope enemies counted by this tick's SweepEnemies pass — wave members and
+	 *  pre-placed level actors alike. Consumed by the last-man latch so it does not re-sweep. */
+	int32 LastSweepAliveCount = 0;
 	float CachedPlayerHealthLastTick = -1.f;
 	TWeakObjectPtr<UHealthComponent> CachedPlayerHealth;
 
@@ -327,6 +330,7 @@ private:
 
 	bool bLoggedNoComposition = false;
 	bool bLoggedNoZone = false;
+	bool bLoggedNoScopeVolumes = false;
 
 	/** Per-filter tally from the last PickSpawnZone sweep — turns "no eligible spawn zone" from a
 	 *  dead end into a named cause. Diagnostic only; rewritten every sweep. */
@@ -359,6 +363,23 @@ private:
 	/** Auto-engage waves only: re-seed Combat on any live wave member that decayed to Unaware
 	 *  (gave up and returned to a guard post) — a passive holdout stalls the kill-all wave. */
 	void ReassertWaveMemberEngagement();
+
+	/** Last-man ARMING: when a wave has all squads spawned and the in-scope alive count is at or
+	 *  below threshold, populate LastManLatched with every living in-scope enemy. Called from
+	 *  ReassertWaveMemberEngagement. Does NOT refresh already-latched entries — that is
+	 *  RefreshLastManLatched's job. */
+	void TryArmLastManHunt();
+
+	/** Per-tick refresh + prune for every entry in LastManLatched. Runs directly in DirectorTick
+	 *  (not inside ReassertWaveMemberEngagement) so it survives wave completion. */
+	void RefreshLastManLatched();
+
+	/** Unlatch every living entry and empty the set. */
+	void UnlatchAllLastMan();
+
+	/** Enemies currently latched for last-man hunt. Outlives wave completion — prune + refresh run
+	 *  directly from DirectorTick, and the set is only cleared on a new StartWave or Deinitialize. */
+	TSet<TWeakObjectPtr<AEnemyCharacter>> LastManLatched;
 
 	UPROPERTY()
 	FDirectorWaveRequest ActiveWaveRequest;

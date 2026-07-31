@@ -1,6 +1,11 @@
 // Player-owned component that handles camera-trace pinging and command confirmation.
 
 #include "CompanionCommandComponent.h"
+#include "AI/CompanionCoverStatics.h"
+#include "Companion/CompanionBarkTypes.h"
+#include "CoverSystemPublicData.h"
+#include "CoverGeometryStatics.h"
+#include "AI/BlackboardKeyType_Cover.h"
 #include "World/Breachable.h"
 #include "World/DoorBase.h"
 #include "World/BreachableDoor.h"
@@ -38,6 +43,9 @@ void UCompanionCommandComponent::EndPlay(const EEndPlayReason::Type EndPlayReaso
 {
 	CloseModeMenu(); // clears the auto-close timer + unregisters ModeSelectContext
 	SetPromptContextRegistered(false);
+
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(CoverReissueTimerHandle);
 
 	if (ACompanionCharacter* Companion = CachedCompanion.Get())
 		Companion->OnModeChanged.RemoveDynamic(this, &UCompanionCommandComponent::HandleCompanionModeChanged);
@@ -253,6 +261,36 @@ void UCompanionCommandComponent::IssuePing()
 		PlayPingFeedback(false);
 		ClearPending();
 		return;
+	}
+
+	// Priority 4: Cover — wall/crate with legal positions for the companion.
+	// Route test runs before the octree query so a scripted-route ping does not pay the search cost.
+	if (!IsCompanionRouteActive())
+	{
+		ACompanionCharacter* Companion = ResolveCompanion();
+		ACompanionAIController* CoverController = GetCompanionController();
+		if (IsValid(Companion) && IsValid(CoverController))
+		{
+			AActor* CombatTarget = nullptr;
+			if (const UBlackboardComponent* BB = CoverController->GetBlackboardComponent())
+				CombatTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+
+			FCover FoundCover;
+			if (CompanionCover::FindCoverOnPingedWall(World, Hit.ImpactPoint, Hit.ImpactNormal,
+				CoverPingRadius, CoverController, Companion, CombatTarget, FoundCover))
+			{
+				PendingCommand = ECompanionCommand::TakeCover;
+				PendingTarget.Reset(); // location-only command, no target actor
+				PendingCoverPingImpact = Hit.ImpactPoint;
+				PendingCoverPingNormal = Hit.ImpactNormal;
+				PendingCoverLocation = FoundCover.Data.Location;
+				SetPromptContextRegistered(false);
+				OnPingChanged.Broadcast(PendingCommand, nullptr);
+				PlayPingFeedback(true);
+				UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> TAKECOVER at %s (broadcast)"), *FoundCover.Data.Location.ToString());
+				return;
+			}
+		}
 	}
 
 	// No open-ground fallback: searches are door-targeted — pinging ground offers nothing.
@@ -534,4 +572,154 @@ void UCompanionCommandComponent::ConfirmExplore()
 
 	Controller->IssueCommand(ECompanionCommand::Explore, ETakedownMethod::Knife, Target, Target->GetActorLocation());
 	ClearPending();
+}
+
+void UCompanionCommandComponent::ConfirmTakeCover()
+{
+	if (PendingCommand != ECompanionCommand::TakeCover) return;
+
+	// Route suppression backstop (same as ConfirmBreach / ConfirmExplore).
+	if (IsCompanionRouteActive())
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] TakeCover rejected — route active"));
+		ClearPending();
+		return;
+	}
+
+	ACompanionCharacter* Companion = ResolveCompanion();
+	ACompanionAIController* Controller = GetCompanionController();
+	if (!IsValid(Companion) || !IsValid(Controller))
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("ConfirmTakeCover: companion controller not found"));
+		ClearPending();
+		return;
+	}
+
+	// Re-resolve the cover at confirm time (state may have changed since ping).
+	AActor* CombatTarget = nullptr;
+	if (const UBlackboardComponent* BB = Controller->GetBlackboardComponent())
+		CombatTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+
+	FCover ResolvedCover;
+	if (!CompanionCover::FindCoverOnPingedWall(GetWorld(), PendingCoverPingImpact, PendingCoverPingNormal,
+		CoverPingRadius, Controller, Companion, CombatTarget, ResolvedCover))
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] TakeCover re-resolve failed — no legal cover left"));
+		PlayPingFeedback(false);
+		ClearPending();
+		return;
+	}
+
+	// Re-ping while already holding: the clear and the re-issue must be in SEPARATE FRAMES.
+	// Frame N: key -> None (abort processes, ClearCommandIfStillActive sees None, does not wipe).
+	// Frame N+1: None -> TakeCover (genuine false->true decorator edge on a settled tree).
+	// SetTimerForNextTick returns an FTimerHandle in UE5, satisfying the timer-cleanup rule.
+	if (Companion->IsCommandedCoverHoldActive())
+	{
+		Companion->ClearCommandedCoverHold();
+		Controller->ClearActiveCommand(); // frame N: key -> None
+
+		// Cancel any pending deferral from a rapid double-confirm.
+		if (UWorld* World = GetWorld())
+			World->GetTimerManager().ClearTimer(CoverReissueTimerHandle);
+
+		TWeakObjectPtr<ACompanionCharacter> WeakComp = Companion;
+		TWeakObjectPtr<ACompanionAIController> WeakCtrl = Controller;
+		const FCover Pending = ResolvedCover;
+		if (UWorld* World = GetWorld())
+		{
+			CoverReissueTimerHandle = World->GetTimerManager().SetTimerForNextTick(
+				FTimerDelegate::CreateLambda([WeakComp, WeakCtrl, Pending]()
+				{
+					if (!WeakComp.IsValid() || !WeakCtrl.IsValid()) return;
+					WeakComp->SetCommandedCoverTarget(Pending);
+					WeakCtrl->IssueCommand(ECompanionCommand::TakeCover, ETakedownMethod::Knife,
+						nullptr, Pending.Data.Location);
+				}));
+		}
+		ClearPending();
+		return;
+	}
+
+	// First-time order: straight through, no deferral.
+	Companion->SetCommandedCoverTarget(ResolvedCover);
+
+	// IssueCommand barks TakingCover internally -- no duplicate bark here.
+	Controller->IssueCommand(ECompanionCommand::TakeCover, ETakedownMethod::Knife, nullptr, ResolvedCover.Data.Location);
+
+	ClearPending();
+}
+
+bool UCompanionCommandComponent::IsCoverMeAvailable()
+{
+	ACompanionCharacter* Companion = ResolveCompanion();
+	if (!IsValid(Companion)) return false;
+	if (Companion->IsCoveringFireActive() || Companion->IsCoveringFirePending()) return false;
+	if (Companion->IsCoveringFireOnCooldown()) return false;
+	ACompanionAIController* Controller = GetCompanionController();
+	if (!IsValid(Controller)) return false;
+	const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
+	if (!BB) return false;
+	return IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
+}
+
+void UCompanionCommandComponent::TriggerCoverMe()
+{
+	if (!bModeMenuOpen) return;
+
+	ACompanionCharacter* Companion = ResolveCompanion();
+	ACompanionAIController* Controller = GetCompanionController();
+	if (!IsValid(Companion) || !IsValid(Controller)) return;
+
+	const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
+	if (!BB) return;
+	AActor* CombatTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+	if (!IsValid(CombatTarget))
+	{
+		UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] rejected — no combat target"));
+		return;
+	}
+
+	// Already covering? Don't stack. Check before closing the menu so the player gets feedback.
+	if (Companion->IsCoveringFireActive() || Companion->IsCoveringFirePending())
+	{
+		PlayPingFeedback(false);
+		CloseModeMenu();
+		return;
+	}
+
+	// Close the menu WITHOUT writing ECompanionMode — this differs from SelectCompanionMode.
+	CloseModeMenu();
+
+	// Check if the companion currently holds cover that can peek-shoot the target.
+	bool bCanStartNow = false;
+	{
+		const FBlackboard::FKey CoverKeyID = BB->GetKeyID(TEXT("CoverTarget"));
+		if (CoverKeyID != FBlackboard::InvalidKey)
+		{
+			const FCover CurrentCover = BB->GetValue<UBlackboardKeyType_Cover>(CoverKeyID);
+			if (CurrentCover.IsValid())
+			{
+				const bool bCrouched = UCoverGeometryStatics::GetCoverHeight(CurrentCover.Data) == ECoverHeight::Crouch;
+				bCanStartNow = UCoverGeometryStatics::CanPeekShoot(
+					Companion->GetWorld(), CurrentCover.Data, bCrouched,
+					CombatTarget->GetActorLocation(), 140.f, CombatTarget, Companion);
+			}
+		}
+	}
+
+	Companion->ArmCoveringFire(CoveringFireDuration);
+
+	if (bCanStartNow)
+	{
+		Companion->StartCoveringFire();
+		Companion->Bark(ECompanionBarkType::Suppressing);
+	}
+	else
+	{
+		// Not in usable cover: grant commit so the normal cover machinery runs.
+		Companion->SetCoverCommitGrant(true);
+	}
+
+	UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] armed (%.1fs), startNow=%d"), CoveringFireDuration, bCanStartNow);
 }

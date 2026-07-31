@@ -66,6 +66,12 @@ private:
 	 *  Without it the hold would re-issue StopMovement every tick for the length of the wave. */
 	bool bHoldingForWave = false;
 
+	/** Edge guard for the commanded cover hold's one-shot StopMovement — mirrors bHoldingForWave
+	 *  for ACompanionCharacter::IsCommandedCoverHoldActive. Separate because the wave hold clears
+	 *  bHoldingForWave every tick it is inactive, which would re-trigger the commanded hold's
+	 *  StopMovement if they shared the flag. */
+	bool bHoldingForCoverCommand = false;
+
 	/** ~1Hz throttle for the sprint-mode rescue-approach diagnostic log. */
 	float SprintLogAccumulator = 0.f;
 

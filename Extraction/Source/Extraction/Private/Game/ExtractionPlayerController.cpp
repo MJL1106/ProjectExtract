@@ -21,8 +21,13 @@
 #include "HitmarkerWidget.h"
 #include "DamageNumberWidget.h"
 #include "ConsumableWidget.h"
+#include "TutorialBriefingWidget.h"
 #include "ExtractionGameMode.h"
+#include "ExtractionGameInstance.h"
 #include "Extraction.h"
+#include "Engine/World.h"
+#include "TimerManager.h"
+#include "Kismet/GameplayStatics.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 #include "Widgets/SWidget.h"
 
@@ -30,6 +35,9 @@ namespace
 {
 	// Above every HUD layer so the completion/failure screen popup sits on top.
 	constexpr int32 LevelEndPopupZOrder = 50;
+
+	// Above the completion/failure popup: the briefing gates the start of play, nothing outranks it.
+	constexpr int32 TutorialBriefingZOrder = 100;
 
 	// Every widget the controller owns shares the base layer; add order decides the stack.
 	constexpr int32 HUDLayerZOrder = 0;
@@ -103,6 +111,8 @@ void AExtractionPlayerController::BeginPlay()
 
 	if (!IsLocalPlayerController()) return;
 
+	ArmTutorialBriefing();
+
 	// Supply world-space marker display class to the objective subsystem. Deliberately NOT part of
 	// RestoreHUD: the subsystem keeps the class for the level's lifetime, and re-supplying it on
 	// every rebuild would be redundant work on a path that must stay side-effect free.
@@ -115,6 +125,102 @@ void AExtractionPlayerController::BeginPlay()
 
 	if (UObjectiveSubsystem* Objectives = GetWorld()->GetSubsystem<UObjectiveSubsystem>())
 		Objectives->SetMarkerDisplayClass(MarkerDisplayClass);
+}
+
+void AExtractionPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	// The briefing is armed with SetTimerForNextTick, which hands back no FTimerHandle to clear — so
+	// the object-scoped clear is the one that covers it. Nothing else on this controller uses timers.
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearAllTimersForObject(this);
+
+	Super::EndPlay(EndPlayReason);
+}
+
+void AExtractionPlayerController::ArmTutorialBriefing()
+{
+	if (!IsLocalPlayerController()) return;
+	if (!IsCurrentMapATutorialMap()) return;
+
+	const FName LevelName = GetCurrentLevelName();
+	const UExtractionGameInstance* GI = GetGameInstance<UExtractionGameInstance>();
+	if (IsValid(GI) && GI->HasSeenTutorialBriefing(LevelName)) return;
+
+	// Deliberately not shown inline: BP_ExtractionCharacter's BeginPlay graph ends with an
+	// unconditional Set Input Mode Game Only, and pawn-vs-controller BeginPlay order is not
+	// guaranteed, so an inline show gets stomped roughly half the time. Next tick is after both.
+	GetWorldTimerManager().SetTimerForNextTick(this, &AExtractionPlayerController::ShowTutorialBriefing);
+}
+
+FName AExtractionPlayerController::GetCurrentLevelName() const
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return NAME_None;
+
+	// PIE renames the world package (UEDPIE_0_<Map>), so the raw name never matches designer-
+	// assigned soft refs — strip the prefix so both sides compare the same string.
+	return FName(*UWorld::RemovePIEPrefix(World->GetOutermost()->GetName()));
+}
+
+bool AExtractionPlayerController::IsCurrentMapATutorialMap() const
+{
+	if (TutorialMaps.IsEmpty()) return false;
+
+	const FString CurrentPackage = GetCurrentLevelName().ToString();
+	if (CurrentPackage.IsEmpty()) return false;
+
+	for (const TSoftObjectPtr<UWorld>& Map : TutorialMaps)
+	{
+		if (Map.IsNull()) continue;
+		if (Map.GetLongPackageName() == CurrentPackage) return true;
+	}
+
+	return false;
+}
+
+void AExtractionPlayerController::ShowTutorialBriefing()
+{
+	// A null class here means a paused game with no way to unpause — a soft-lock, not a cosmetic miss.
+	if (!ensureMsgf(TutorialBriefingWidgetClass, TEXT("TutorialBriefingWidgetClass not assigned on %s — briefing skipped."), *GetName()))
+		return;
+
+	if (!IsValid(TutorialBriefingWidget))
+		TutorialBriefingWidget = CreateWidget<UTutorialBriefingWidget>(this, TutorialBriefingWidgetClass);
+	if (!IsValid(TutorialBriefingWidget)) return;
+
+	if (!TutorialBriefingWidget->IsInViewport())
+		TutorialBriefingWidget->AddToPlayerScreen(TutorialBriefingZOrder);
+
+	FInputModeUIOnly InputMode;
+	InputMode.SetWidgetToFocus(TutorialBriefingWidget->TakeWidget());
+	SetInputMode(InputMode);
+	SetShowMouseCursor(true);
+
+	UGameplayStatics::SetGamePaused(this, true);
+}
+
+void AExtractionPlayerController::DismissTutorialBriefing()
+{
+	// Idempotency gate. A double-click on confirm fires this twice; without the gate the second pass
+	// would force-unpause and force game input on whatever came up in between (a pause menu, the
+	// level-complete screen), and RestoreHUD would run for no reason.
+	if (!IsValid(TutorialBriefingWidget)) return;
+
+	UGameplayStatics::SetGamePaused(this, false);
+
+	SetInputMode(FInputModeGameOnly());
+	SetShowMouseCursor(false);
+
+	if (IsValid(TutorialBriefingWidget))
+		TutorialBriefingWidget->RemoveFromParent();
+	TutorialBriefingWidget = nullptr;
+
+	// Idempotent: leaves a HUD that survived the briefing untouched, re-adds anything that was torn
+	// off underneath it.
+	RestoreHUD();
+
+	if (UExtractionGameInstance* GI = GetGameInstance<UExtractionGameInstance>())
+		GI->SetTutorialBriefingSeen(GetCurrentLevelName());
 }
 
 void AExtractionPlayerController::RestoreHUD()

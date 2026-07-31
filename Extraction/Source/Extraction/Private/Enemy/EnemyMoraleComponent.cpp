@@ -78,6 +78,7 @@ void UEnemyMoraleComponent::DeactivateForDeath()
 	}
 
 	RallyFloorRaise = 0.f;
+	bMoralePinnedConfident = false;
 
 	if (CachedSuppressionComp.IsValid())
 		CachedSuppressionComp->OnSuppressedStateChanged.RemoveDynamic(this, &UEnemyMoraleComponent::HandleSuppressedStateChanged);
@@ -186,6 +187,16 @@ void UEnemyMoraleComponent::RallyToConfident()
 	EvaluateState();
 }
 
+void UEnemyMoraleComponent::SetMoralePinnedConfident(bool bPinned)
+{
+	if (bMoralePinnedConfident == bPinned) return;
+	bMoralePinnedConfident = bPinned;
+
+	// EvaluateState owns the transition broadcast, and BB_MoraleState is written only from that
+	// broadcast — going straight to CurrentState here would desync the blackboard from GetMoraleState().
+	EvaluateState();
+}
+
 void UEnemyMoraleComponent::ClearRallyFloor()
 {
 	RallyFloorRaise = 0.f;
@@ -284,6 +295,10 @@ void UEnemyMoraleComponent::MoraleTick()
 
 void UEnemyMoraleComponent::ApplyMoraleDelta(float Delta, bool bIsContinuousDrain)
 {
+	// Last-man pin: losses are swallowed outright (gains still apply) so nothing — suppression,
+	// flanking, low health — can drag the wave's final survivor back out of Confident mid-pursue.
+	if (bMoralePinnedConfident && Delta < 0.f) return;
+
 	const float ScaledDelta = (Delta < 0.f) ? (Delta / MoraleEventResistance) : Delta;
 	const float OldMorale = CurrentMorale;
 	CurrentMorale = FMath::Clamp(CurrentMorale + ScaledDelta, GetEffectiveMoraleFloor(), 100.f);
@@ -300,7 +315,11 @@ void UEnemyMoraleComponent::ApplyMoraleDelta(float Delta, bool bIsContinuousDrai
 void UEnemyMoraleComponent::EvaluateState()
 {
 	EMoraleState NewState;
-	if (CurrentMorale <= BrokenThreshold)
+	if (bMoralePinnedConfident)
+	{
+		NewState = EMoraleState::Confident;
+	}
+	else if (CurrentMorale <= BrokenThreshold)
 	{
 		NewState = EMoraleState::Broken;
 	}

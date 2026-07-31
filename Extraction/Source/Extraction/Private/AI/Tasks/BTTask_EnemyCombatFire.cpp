@@ -162,6 +162,30 @@ static FVector GetPerceivedThreatLoc(const AController* Controller, const AActor
 	return UCoverScoringStatics::GetPerceivedThreatLocation(Target, Awareness, bSighted);
 }
 
+/** The awareness component of the owning enemy controller, or null. */
+static const UEnemyAwarenessComponent* GetAwareness(const AController* Controller)
+{
+	const AEnemyAIController* EnemyController = Cast<AEnemyAIController>(Controller);
+	return EnemyController ? EnemyController->GetAwarenessComponent() : nullptr;
+}
+
+/** No usable contact with the target, so cover is pointless and the enemy should close.
+ *  Normally that means no LOS AND out of engage range — an enemy inside EngageRangeMax is expected
+ *  to hold cover and wait for a peek. The wave's last man drops the range half once he has gone
+ *  LastManHuntNoLosSeconds without sight: with nobody left to hold the room with him, the range
+ *  test alone is what kept him camped one room over waiting for a LOS that never arrives. */
+static bool ShouldLeaveCoverForNoContact(const AController* Controller, const UEnemyArchetypeData* DA,
+	bool bHasLOS, bool bInRange)
+{
+	if (bHasLOS) return false;
+	if (!bInRange) return true;
+	if (!IsValid(DA) || DA->LastManHuntNoLosSeconds <= 0.f) return false;
+
+	const UEnemyAwarenessComponent* Awareness = GetAwareness(Controller);
+	if (!IsValid(Awareness) || !Awareness->IsLastManHunting()) return false;
+	return Awareness->GetTimeWithoutSight() >= DA->LastManHuntNoLosSeconds;
+}
+
 /** True while the grenadier component is winding up a throw (non-grenadiers return false). */
 static bool IsGrenadeTelegraphing(const AEnemyCharacter* Enemy)
 {
@@ -1043,13 +1067,13 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 
 	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
 	const bool bInRange = BB->GetValueAsBool(AEnemyAIController::BB_TargetInRange);
-	if (!bInRange && !bHasLOS)
+	if (ShouldLeaveCoverForNoContact(Controller, DA, bHasLOS, bInRange))
 	{
 		if (Awareness == EEnemyAwarenessState::Combat)
 		{
 			if (bAggressive)
 			{
-				// Out of range/LOS but combat — pursue.
+				// Out of contact but combat — pursue.
 				// Clear any pose latched by MoveToCoverPoint's arrival (montage-slide + wall-facing yaw).
 				if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
 				DropCoverClaimForPursue(BB);
@@ -1565,9 +1589,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		return;
 	}
 
-	// Bug 2 fix: no LOS + out of range while still in Combat — pursue instead of failing.
+	// Bug 2 fix: no usable contact while still in Combat — pursue instead of failing.
 	// Skip this guard for phases that are already handling movement (avoids path churn / slot release).
-	if (!bInRange && !bHasLOS
+	if (ShouldLeaveCoverForNoContact(Controller, DA, bHasLOS, bInRange)
 		&& Mem->Phase != EFireTaskPhase::Fire
 		&& Mem->Phase != EFireTaskPhase::Pursuing
 		&& Mem->Phase != EFireTaskPhase::SeekingCover)

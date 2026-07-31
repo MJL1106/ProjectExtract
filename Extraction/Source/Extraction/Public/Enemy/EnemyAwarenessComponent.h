@@ -56,6 +56,29 @@ public:
 	 *  Used by UEnemySquad::ForceEngage to seed Director wave squads into the fight on spawn. */
 	void ForceEngage(AActor* Target);
 
+	/** Director last-man latch: refresh the combat lock on Target without re-running EnterCombat.
+	 *  EnterCombat wipes every suspicion track and re-fires barks, squad broadcast and director
+	 *  seeding — far too heavy for a 1 Hz re-assert. Sets the target, re-stamps LastKnownLocation to
+	 *  the live position so the existing pursue walks toward where the player really is, and pulls
+	 *  the state back to Combat if the lost-contact grace dropped it. */
+	void RefreshLastManContact(AActor* Target);
+
+	/** Latched by the director once this enemy is the last living member of an auto-engage wave.
+	 *  One-way in practice — the wave's living count can never climb back up. Latching also disarms
+	 *  the director-seed arrival quit, which drops to Searching on a path the contact refresh
+	 *  cannot reach and would otherwise eject the latch from Combat. */
+	void SetLastManHunting(bool bHunting);
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	bool IsLastManHunting() const { return bLastManHunting; }
+
+	/** Continuous seconds in Combat without genuine sight of the combat target. Deliberately NOT the
+	 *  private lost-contact clock, which RefreshLastManContact zeroes every director tick to hold the
+	 *  Combat lock; this one only resets when sight actually returns. Lives here rather than in BT
+	 *  node memory because ExecuteTask wipes node memory on every task re-entry. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	float GetTimeWithoutSight() const { return TimeWithoutSight; }
+
 	/** Called by AWeaponBase::ReportNearMisses when a near-miss bullet passes close to this enemy.
 	 *  ShotOrigin is the bullet trace start (eye/muzzle of the shooter) — sent as the investigate
 	 *  point when LOS is blocked so the enemy advances toward the shot corner, not through walls.
@@ -326,6 +349,10 @@ private:
 	// LOS tracking for Combat→Searching transition
 	bool bHadLOS = false;
 	float TimeSinceLOSLost = 0.f;
+
+	// Director last-man latch (see SetLastManHunting) and its independent no-sight accumulator.
+	bool bLastManHunting = false;
+	float TimeWithoutSight = 0.f;
 
 	// Director-seeded pursuit: set AFTER EnterCombat in ForceEngage (only when freshly
 	// entering combat), cleared unconditionally at the TOP of EnterCombat (so any non-director

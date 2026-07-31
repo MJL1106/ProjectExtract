@@ -70,6 +70,11 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
 	float CombatTargetLosGraceSeconds = 3.0f;
 
+	/** Seconds after combat starts during which the commanded cover hold is honoured. After this
+	 *  the hold releases so the normal cover behaviour resumes. 0 disables. */
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
+	float CommandedCoverCombatGraceSeconds = 8.f;
+
 private:
 	float OutOfCombatTimer = 0.f;
 	/** True once the weapon has been lowered since the last target/threat was lost — edge guard for
@@ -84,8 +89,17 @@ private:
 	/** One-time guard so the ReviveWindowOpen-key-unresolved warning fires at most once per instance. */
 	bool bLoggedReviveKeyResolveFail = false;
 
+	/** Accumulated seconds the commanded cover hold has been active without the companion reaching
+	 *  the anchor. Releases the hold on timeout so the companion is never frozen in the open. */
+	float CommandedCoverHoldUnreachedTime = 0.f;
+
 	/** Accumulated safe-seconds (no nearby threats) while the player is DBNO. Resets on threat detection. */
 	float ReviveSafeAccumulator = 0.f;
+
+	/** Accumulated seconds of sustained body heat while the revive window is open. Bounds the latch:
+	 *  past ReviveAbortHotSeconds the window closes. Unwinds in real time rather than snapping to zero
+	 *  so a ring-straddling enemy cannot re-zero it every other tick. */
+	float ReviveHotAccumulator = 0.f;
 
 	/** Edge-detect for the window open/close diagnostic log. */
 	bool bLastReviveWindowOpen = false;

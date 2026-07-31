@@ -41,6 +41,18 @@ protected:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Companion|Mode")
 	void OnModeMenuOpenChangedBP(bool bOpen, ECompanionMode ActiveMode);
 
+	/** Designer hook — covering-fire row 4 availability changed. bAvailable reflects whether the
+	 *  companion currently has a live combat target and the cooldown has expired. CooldownRemaining
+	 *  is >0 while the post-use cooldown is active. Called every NativeTick while the picker is open. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Companion|CoveringFire")
+	void OnCoverMeAvailabilityChangedBP(bool bAvailable, float CooldownRemaining);
+
+	/** Designer hook — covering-fire countdown tick. Remaining is the seconds left in the window;
+	 *  0 means the window just ended. bPaused is true while the companion is reloading and the
+	 *  clock is held. Fires on pause edges even when the number has not changed. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Companion|CoveringFire")
+	void OnCoveringFireCountdownBP(float Remaining, bool bPaused);
+
 	// --- Bound widgets ---
 
 	UPROPERTY(meta = (BindWidget))
@@ -99,10 +111,16 @@ private:
 	/** Finds the command component on the owning pawn and subscribes. True once bound. */
 	bool TryBindToCommandComponent();
 
+	UFUNCTION()
+	void HandleCoveringFireTick(float Remaining, bool bPaused);
+
 	TWeakObjectPtr<UCompanionCommandComponent> BoundCommandComponent;
 
 	/** Latest commanded mode, cached so the picker-open event can highlight the active row. */
 	ECompanionMode CurrentMode = ECompanionMode::Normal;
+
+	/** Cached availability to detect edges for the BP hook. */
+	bool bLastCoverMeAvailable = false;
 
 	/** Throttle for the lazy bind attempts in NativeTick. */
 	float TimeSinceBindAttempt = 0.f;

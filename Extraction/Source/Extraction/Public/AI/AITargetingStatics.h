@@ -4,8 +4,10 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "CollisionQueryParams.h"
 
 class AActor;
+class UWorld;
 
 namespace AITargeting
 {
@@ -36,4 +38,27 @@ namespace AITargeting
 	 * Crouch/prone targets and all non-sniper enemies always return false.
 	 */
 	EXTRACTION_API bool ShouldIncludeHeadForObserver(const AActor* Observer, const AActor* Target);
+
+	/**
+	 * Traces ECC_Visibility from Start to End, but a hit APawn is stepped over instead of counted as
+	 * a blocker: the pawn joins a local ignore set and the trace re-fires from the same Start. A hit
+	 * with no actor, or a hit on a non-pawn actor, is real world geometry and reports blocked
+	 * (OutBlocker, if given, is written with it). No hit at all is clear.
+	 *
+	 * Built for the commanded-takedown line-of-sight gate: in a double takedown the companion's
+	 * victim, the second eligible enemy, and the player all end up shoulder-to-shoulder in the same
+	 * small volume, and AExtractionPlayer/AEnemyCharacter meshes both explicitly block
+	 * ECC_Visibility. Without this, those bodies read as permanent world cover exactly like a wall —
+	 * the anchor search rejects otherwise-good firing spots and a moving body keeps re-breaking a
+	 * line that was never really obstructed, since the kill itself is registered directly and the
+	 * shot is cosmetic.
+	 *
+	 * QueryParams is taken BY VALUE: pawns stepped over are added to the local copy only, so the
+	 * caller's own ignore set (self / victim / held weapon) is never mutated.
+	 *
+	 * Caps the pawn-skip loop at a small iteration limit so a pathological stack of bodies cannot
+	 * spin the trace forever; exceeding the cap reports blocked rather than clear.
+	 */
+	EXTRACTION_API bool HasClearLineIgnoringPawns(const UWorld* World, const FVector& Start, const FVector& End,
+		FCollisionQueryParams QueryParams, AActor** OutBlocker = nullptr);
 }

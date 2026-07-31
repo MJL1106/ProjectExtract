@@ -76,9 +76,15 @@ private:
 		// Stall detection
 		float StallBestDist = TNumericLimits<float>::Max();
 		float StallAccum = 0.f;
+		// Companion displacement-based stall: last pawn location for per-tick displacement calc.
+		FVector LastPawnLoc = FVector::ZeroVector;
+		bool bHasLastPawnLoc = false;
 
 		// Mid-move claim revalidation (destination stolen while en route)
 		float ClaimCheckAccum = 0.f;
+
+		// Cached from ExecuteTask so TickTask can read it.
+		bool bIsCommandedCover = false;
 
 		void Reset()
 		{
@@ -95,7 +101,10 @@ private:
 			ApproachFire.Reset();
 			StallBestDist = TNumericLimits<float>::Max();
 			StallAccum = 0.f;
+			LastPawnLoc = FVector::ZeroVector;
+			bHasLastPawnLoc = false;
 			ClaimCheckAccum = 0.f;
+			bIsCommandedCover = false;
 		}
 	};
 

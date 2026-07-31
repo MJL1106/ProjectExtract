@@ -48,6 +48,17 @@ public:
 	/** Returns the snapshot for LevelName, or an invalid (bValid=false) snapshot when none exists. */
 	const FCheckpointLoadoutSnapshot& GetLoadoutSnapshotForLevel(FName LevelName) const;
 
+	// ---- Tutorial briefing ----
+
+	/** True once the player has confirmed the controls briefing for LevelName. Level-keyed so
+	 *  multiple tutorial maps each show their own briefing independently. Lives here rather than on
+	 *  the controller so a death restart or checkpoint reload does not replay it, and dies with the
+	 *  session so a fresh boot shows it again. Deliberately untouched by ClearCheckpoint. */
+	bool HasSeenTutorialBriefing(FName LevelName) const { return SeenBriefingLevels.Contains(LevelName); }
+
+	/** Records that the briefing for LevelName has been confirmed for the rest of this session. */
+	void SetTutorialBriefingSeen(FName LevelName) { if (LevelName != NAME_None) SeenBriefingLevels.Add(LevelName); }
+
 private:
 	FName CheckpointLevelName;
 	ELevelObjectiveStep LastCheckpointStep = ELevelObjectiveStep::Inactive;
@@ -61,4 +72,7 @@ private:
 	/** Loadout captured at the last checkpoint. UPROPERTY because it holds TSubclassOf<> refs. */
 	UPROPERTY()
 	FCheckpointLoadoutSnapshot LoadoutSnapshot;
+
+	/** Level names whose controls briefing has been confirmed this session. */
+	TSet<FName> SeenBriefingLevels;
 };

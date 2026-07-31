@@ -20,6 +20,7 @@
 #include "CompanionAIController.h"
 #include "CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
+#include "Companion/CompanionBarkTypes.h"
 #include "EnemyCharacter.h"
 #include "EnemyAIController.h"        // angle-seek: who is this enemy targeting
 #include "EnemyAwarenessComponent.h"  // angle-seek: GetCombatTarget
@@ -631,6 +632,9 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 	if (bSuppressed) CooldownMult *= SuppressionCooldownMultiplier;
 	if (bLowHealth)  CooldownMult *= LowHealthCooldownMultiplier;
 	PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown) * CooldownMult;
+	// Covering fire: floor the cooldown so bursts chain without the 0.8-2.2s pause.
+	if (IsValid(Companion) && Companion->IsCoveringFireActive())
+		PeekCooldown = FMath::Min(PeekCooldown, 0.1f);
 	TimeInCoverIdle = 0.f;
 }
 
@@ -1004,6 +1008,9 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 	if (!bStandUpRepositionWalking)
 	{
 		bStandUpRepositionWalking = true;
+		// Phase B fires unconditionally every tick with no muzzle-withhold — the speculative gate
+		// must not hold aim null through a walking burst. Verify now so aim tracks the target.
+		bSpeculativeAimVerified = true;
 
 		// Stop any lingering peek montage so cover-align inference doesn't stay
 		// pinned to OverTop/StandPeek while walking.
@@ -1176,7 +1183,11 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 				const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 				const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 					ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
-				if (bCanFire) bSpeculativeAimVerified = true;
+				if (bCanFire && !bSpeculativeAimVerified)
+				{
+					bSpeculativeAimVerified = true;
+					if (bBurstCommitSpeculative) Companion->SetAimTarget(Target);
+				}
 				if (!bCornerPeekReturning && bCanFire && !bCornerPeekFiring && PeekFireDelayRemaining <= 0.f)
 				{
 					Companion->StartWeaponFire();
@@ -1243,7 +1254,11 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 			const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 			const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 				ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
-			if (bCanFire) bSpeculativeAimVerified = true;
+			if (bCanFire && !bSpeculativeAimVerified)
+			{
+				bSpeculativeAimVerified = true;
+				if (bBurstCommitSpeculative) Companion->SetAimTarget(Target);
+			}
 			if (bCanFire && !bCornerPeekFiring && PeekFireDelayRemaining <= 0.f)
 			{
 				Companion->StartWeaponFire();
@@ -1526,8 +1541,17 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 	const bool bBlocked = (bMuzzleBlocked && MuzzleHit.GetActor() != Target) || bOutOfCone;
 
 	// Speculative aim hand-back: the muzzle gate just proved the line is clear — aim returns
-	// to the live target this instant so the shot stays accurate.
-	if (!bBlocked) bSpeculativeAimVerified = true;
+	// to the live target this instant so the shot stays accurate. Must reassert SetAimTarget
+	// before StartWeaponFire runs (same tick), or the opening round fires with stale null aim.
+	if (!bBlocked && !bSpeculativeAimVerified && bBurstCommitSpeculative)
+	{
+		bSpeculativeAimVerified = true;
+		Companion->SetAimTarget(Target);
+	}
+	else if (!bBlocked)
+	{
+		bSpeculativeAimVerified = true;
+	}
 
 	if (bBlocked && !bStandBurstFireHeld)
 	{
@@ -2928,6 +2952,9 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	// Full state reset without releasing the cover we're about to occupy.
 	// Don't reset posture — preserves anticipatory crouch from MoveToCoverPoint.
 	ResetTaskState(Companion, BB, FCoverHandle(), false, false);
+	bWasCoveringFireLastTick = false;
+	bHasCoveringFireLastSeen = false;
+	CoveringFireLastSeenLoc = FVector::ZeroVector;
 
 	Companion->SetAimTarget(Target);
 	PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
@@ -3472,9 +3499,55 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	const bool bSuppressedRaw = Ctx.Companion->IsSuppressed(SuppressionWindowSeconds);
 	const bool bSuppressed = (TickTuning && TickTuning->bIgnoreSuppressionInCover) ? false : bSuppressedRaw;
 	const bool bLowHp = Ctx.Companion->GetHealthFraction() < LowHealthFraction;
+	const bool bCoveringFire = Ctx.Companion->IsCoveringFireActive();
+	// Covering fire ignores the low-HP weight tables so the companion keeps aggressive weights
+	// while hurt. Used ONLY at the weight-table sites below — every ReturnToCover call and both
+	// cooldown computations must still read the true bLowHp.
+	const bool bLowHpForWeights = bLowHp && !bCoveringFire;
 
 	// Mirror for the switch monitor's commit gate (G5) — one int copy per tick.
 	Ctx.Companion->SetPeekCyclesAtCurrentCover(PeekCyclesAtCover);
+
+	// Covering-fire reload-held mirror (Tick reads this; same pattern as SetPeekCyclesAtCurrentCover).
+	Ctx.Companion->SetCoveringFireReloadHeld(bReloadGateActive);
+
+	// Covering-fire end-of-window cleanup: the clock runs in ACompanionCharacter::Tick (which
+	// runs before the BT tick in the same frame). If the window expired this frame, bCoveringFire
+	// (cached at the top of this tick from the now-cleared state) is already false, so the
+	// combat-task injections are inactive.
+	// Do NOT set bIsFiringBurst = false here -- BRANCH 1 needs to run one more tick with
+	// bCoveringFire false so BurstTimer <= 0 fires ReturnToCover, which handles StopWeaponFire,
+	// the smooth-snap back to the hunker, EnterCoverPose, PeekCooldown and all the state
+	// ReturnToCover writes. Only settle muzzle-withhold and aim override state.
+	if (bWasCoveringFireLastTick && !bCoveringFire)
+	{
+		bStandBurstFireHeld = false;
+		PeekFireDelayRemaining = 0.f;
+		Ctx.Companion->ClearAimLocationOverride();
+	}
+	bWasCoveringFireLastTick = bCoveringFire;
+
+	// Covering-fire last-seen tracking + aim override. While the window is active, record the
+	// target's position whenever we have LoS; when LoS is lost, aim at that last-seen location
+	// so rounds go downrange instead of holding fire on a hidden target.
+	if (bCoveringFire)
+	{
+		if (Ctx.Companion->HasTargetLOS())
+		{
+			CoveringFireLastSeenLoc = Ctx.Target->GetActorLocation();
+			bHasCoveringFireLastSeen = true;
+			Ctx.Companion->ClearAimLocationOverride();
+		}
+		else if (bHasCoveringFireLastSeen)
+		{
+			Ctx.Companion->SetAimLocationOverride(CoveringFireLastSeenLoc);
+		}
+	}
+	else if (bHasCoveringFireLastSeen)
+	{
+		bHasCoveringFireLastSeen = false;
+		Ctx.Companion->ClearAimLocationOverride();
+	}
 
 	// Slot-loss guard: cover dropped mid-task while companion was in cover branch.
 	// Prevents falling through to open-engage with stale crouch / firing state.
@@ -3922,8 +3995,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				(int32)CurrentLean, Ctx.Companion->GetCurrentAmmo(), Ctx.Companion->GetHealthFraction());
 		}
 
-		// Gate 1: suppression.
-		if (bSuppressed)
+		// Gate 1: suppression. Covering fire bypasses the stay-down.
+		if (bSuppressed && !bCoveringFire)
 		{
 			float CooldownMult = SuppressionCooldownMultiplier;
 			if (bLowHp) CooldownMult *= LowHealthCooldownMultiplier;
@@ -4109,6 +4182,18 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
+		// --- Covering-fire window start (clock ticks in ACompanionCharacter::Tick) ---
+		if (Ctx.Companion->IsCoveringFirePending())
+		{
+			const bool bCrouched = UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch;
+			if (UCoverGeometryStatics::CanPeekShoot(Ctx.Companion->GetWorld(), Cover.Data,
+				bCrouched, TargetSightLoc, StandFireEyeHeight, Ctx.Target, Ctx.Companion))
+			{
+				Ctx.Companion->StartCoveringFire();
+				Ctx.Companion->Bark(ECompanionBarkType::Suppressing);
+			}
+		}
+
 		// Pre-peek ammo gate: never expose without enough ammo for a useful burst.
 		if (TryPrePeekReloadGate(Ctx.Companion, Cover.Data))
 		{
@@ -4223,7 +4308,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			ScoreParams.MaxCornerReachCm = TickTuning->CrouchPeekMaxCornerReachCm;
 			ScoreParams.LowHpCornerBaseScore = TickTuning->LowHpCrouchPeekCornerBaseScore;
 			ScoreParams.LowHpOverTopBaseScore = TickTuning->LowHpCrouchPeekOverTopBaseScore;
-			ScoreParams.bLowHp = bLowHp;
+			ScoreParams.bLowHp = bLowHpForWeights;
 			ScoreParams.bSpeculative = !bLosFromCover;
 			ScoreParams.bStandEyeClear = bStandEyeClear;
 
@@ -4244,15 +4329,15 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			const bool bAnyCornerViable = Scores.bCornerLeftViable || Scores.bCornerRightViable;
 
 			// Split over-top score between Stand and Quick by existing weight ratio.
-			const float StandBaseW = bLowHp ? LowHpStandWeight : StandWeight;
-			const float QuickBaseW = bLowHp ? LowHpQuickWeight : QuickWeight;
+			const float StandBaseW = bLowHpForWeights ? LowHpStandWeight : StandWeight;
+			const float QuickBaseW = bLowHpForWeights ? LowHpQuickWeight : QuickWeight;
 			const float OverTopTotal = StandBaseW + QuickBaseW;
 			const float StandFrac = (OverTopTotal > 0.f) ? (StandBaseW / OverTopTotal) : 0.5f;
 
-			const float EffHoldWeight = (bLowHp ? LowHpHoldWeight : HoldWeight) * PressureHoldScale;
-			const float RepoW = bRepoEligible ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f;
+			const float EffHoldWeight = (bLowHpForWeights ? LowHpHoldWeight : HoldWeight) * PressureHoldScale;
+			const float RepoW = bRepoEligible ? (bLowHpForWeights ? LowHpRepositionWeight : RepositionWeight) : 0.f;
 			const float StandUpRepoW = (bRepoEligible && bStandEyeClear)
-				? (bLowHp ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
+				? (bLowHpForWeights ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
 
 			const TPair<EPeekAction, float> ScoredWeights[] = {
 				{ EPeekAction::CornerPeek,           BestCornerScore },
@@ -4328,11 +4413,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			// Stand cover (or legacy crouch path): verified side gap, corner peek primary.
 			const TPair<EPeekAction, float> SideGapWeights[] = {
-				{ EPeekAction::CornerPeek, bLowHp ? LowHpCornerPeekWeight : CornerPeekWeight },
+				{ EPeekAction::CornerPeek, bLowHpForWeights ? LowHpCornerPeekWeight : CornerPeekWeight },
 				{ EPeekAction::Reposition, bRepoEligible
-					? (bIsCrouchCover ? (bLowHp ? LowHpRepositionWeight : RepositionWeight)
-					                  : (bLowHp ? LowHpRepositionWeightStand : RepositionWeightStand)) : 0.f },
-				{ EPeekAction::Hold,       (bLowHp ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
+					? (bIsCrouchCover ? (bLowHpForWeights ? LowHpRepositionWeight : RepositionWeight)
+					                  : (bLowHpForWeights ? LowHpRepositionWeightStand : RepositionWeightStand)) : 0.f },
+				{ EPeekAction::Hold,       (bLowHpForWeights ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(SideGapWeights));
 
@@ -4347,19 +4432,29 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		else if (bIsCrouchCover)
 		{
 			// Crouch cover, no side gap, wallhack disabled: legacy Front over-top roll.
-			const float RepoW        = bRepoEligible ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f;
-			const float StandUpRepoW = (bRepoEligible && bStandEyeClear) ? (bLowHp ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
-			const float StandW = bStandEyeClear ? (bLowHp ? LowHpStandWeight : StandWeight) : 0.f;
-			const float QuickW = bStandEyeClear ? (bLowHp ? LowHpQuickWeight : QuickWeight) : 0.f;
+			const float RepoW        = bRepoEligible ? (bLowHpForWeights ? LowHpRepositionWeight : RepositionWeight) : 0.f;
+			const float StandUpRepoW = (bRepoEligible && bStandEyeClear) ? (bLowHpForWeights ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
+			const float StandW = bStandEyeClear ? (bLowHpForWeights ? LowHpStandWeight : StandWeight) : 0.f;
+			const float QuickW = bStandEyeClear ? (bLowHpForWeights ? LowHpQuickWeight : QuickWeight) : 0.f;
 			const TPair<EPeekAction, float> FrontWeights[] = {
 				{ EPeekAction::Stand,                StandW },
 				{ EPeekAction::Quick,                QuickW },
-				{ EPeekAction::Hold,                 (bLowHp ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
+				{ EPeekAction::Hold,                 (bLowHpForWeights ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
 				{ EPeekAction::Reposition,           RepoW },
 				{ EPeekAction::StandUpAndReposition, StandUpRepoW },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(FrontWeights));
 		}
+
+		// Covering fire: never hold or reposition. Promote through the hold-cap ladder below so the
+		// forced action is one this cover can actually shoot from AND CurrentLean is written to match.
+		if (bCoveringFire && Action != EPeekAction::Stand && Action != EPeekAction::Quick
+			&& Action != EPeekAction::CornerPeek)
+		{
+			Action = EPeekAction::Hold;
+			ConsecutiveHolds = GetEffectiveMaxHolds(Ctx.Companion); // skip the hold budget, force promotion
+		}
+		if (bCoveringFire && Action == EPeekAction::Quick && bStandEyeClear) Action = EPeekAction::Stand;
 
 		if (Action == EPeekAction::Hold)
 		{
@@ -4794,8 +4889,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
-		// Suppression abort — duck back down immediately.
-		if (bSuppressed)
+		// Suppression abort — duck back down immediately. Covering fire bypasses this so the
+		// sustained-fire window continues through incoming fire.
+		if (bSuppressed && !bCoveringFire)
 		{
 			if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=suppressed-mid-burst"), *Ctx.Companion->GetName());
 			ReturnToCover(Ctx.Companion, Anim, Cover.Data, true, bLowHp);
@@ -4846,8 +4942,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// unchanged. Throttled to 10 Hz; uses the muzzle (where rounds originate), not the head eye.
 		TickStandBurstMuzzleWithhold(Ctx.Companion, Ctx.Target, TickFireTraceIgnored, DeltaSeconds, Cover.IsValid() ? &Cover.Data : nullptr);
 
-		// Burst elapsed — return to cover.
-		if (BurstTimer <= 0.f)
+		// Burst elapsed — return to cover. Covering fire holds the peek for the whole window.
+		if (BurstTimer <= 0.f && !bCoveringFire)
 		{
 			if (bDebugLogging)
 			{
@@ -5339,6 +5435,10 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 
 	if (Companion)
 	{
+		// End any active covering-fire window — task exit means target death, branch abort, or
+		// new command; all are termination triggers.
+		Companion->ClearCoveringFire();
+
 		// Cancel an in-flight grenade wind-up (enemy-task parity) — no-op unless telegraphing;
 		// the cancel broadcast stops the throw montage.
 		if (UEnemyGrenadierComponent* GrenComp = Companion->GetGrenadierComponent())

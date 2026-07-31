@@ -13,6 +13,7 @@
 #include "Companion/CompanionCommandTypes.h"
 #include "AIShooterInterface.h"
 #include "Character/ExtractionPlayerInterface.h"
+#include "CoverSystemPublicData.h"
 #include "CompanionCharacter.generated.h"
 
 enum class ECompanionBarkType : uint8;
@@ -250,6 +251,92 @@ public:
 
 	void SetCoverCommitGrant(bool bPending);
 	bool ConsumeCoverCommitGrant();
+
+	/** Stamps a one-shot flag that tells BTTask_MoveToCoverPoint to skip the multi-threat re-rank
+	 *  swap (ValidateAndRerankCover) on the next commit. The bNoEyesOn decline still fires -- this
+	 *  only prevents replacing the commanded handle with a different cover. Cleared on every read.
+	 *  Enemy pawns never set this, so their path is byte-identical. */
+	void SetCommandedCoverSkipRerank(bool bSkip) { bCommandedCoverSkipRerank = bSkip; }
+	bool ConsumeCommandedCoverSkipRerank() { const bool V = bCommandedCoverSkipRerank; bCommandedCoverSkipRerank = false; return V; }
+
+	/** One-shot: bypass BTTask_MoveToCoverPoint's autonomy gates (CommitDist > OuterCap and
+	 *  bOffLevel) for a player-issued cover order. bPointBlankThreat stays enforced. Same
+	 *  lifetime discipline as the re-rank skip. */
+	void SetCommandedCoverBypass(bool bBypass) { bCommandedCoverBypass = bBypass; }
+	bool ConsumeCommandedCoverBypass() { const bool V = bCommandedCoverBypass; bCommandedCoverBypass = false; return V; }
+
+	// --- Commanded cover target (CompanionCommandComponent -> BTTask_CompanionTakeCover one-shot) ---
+	// Stores the resolved cover point from the TakeCover command so the BT task can consume it
+	// without changing IssueCommand's signature. Time-stamped, cleared on every read (same
+	// anti-stale contract as the cover commit grant above).
+
+	void SetCommandedCoverTarget(const FCover& Cover);
+	bool ConsumeCommandedCoverTarget(FCover& OutCover);
+
+	// --- Commanded cover hold (companion stays at the commanded cover until released) ---
+	// Modelled on SetWaveHoldActive/IsWaveHoldActive: Follow task holds position, posture decay
+	// suspends, cover seat retained. Released when the player moves beyond the leash, companion
+	// goes DBNO, or a different command is issued.
+
+	void SetCommandedCoverHold(const FVector& AnchorLocation, float LeashRadius);
+	void ClearCommandedCoverHold();
+	bool IsCommandedCoverHoldActive() const { return bCommandedCoverHoldActive; }
+	FVector GetCommandedCoverHoldAnchor() const { return CommandedCoverHoldAnchor; }
+	float GetCommandedCoverHoldLeash() const { return CommandedCoverHoldLeashRadius; }
+
+	/** Stamp the combat-start time for the hold release. Called once on first BB_CombatTarget while
+	 *  the hold is active. Does not re-stamp on target flicker. */
+	void StampCommandedCoverCombatStart();
+	/** World time combat was first seen during this hold. -1e9 = no combat yet. */
+	float GetCommandedCoverCombatStartTime() const { return CommandedCoverCombatStartTime; }
+	/** True once combat was seen during this hold. When combat ends with this true, the hold
+	 *  releases so the companion does not freeze at stale cover post-fight. */
+	bool IsCommandedCoverCombatGraceArmed() const { return bCommandedCoverCombatGraceArmed; }
+
+	// --- Covering Fire (commanded sustained-fire window, see Slice 2 plan) ---
+	// Arm -> Start -> Tick -> Clear. Pending = armed but not yet firing (waiting for cover arrival).
+	// Active = clock running. Hard ceiling force-clears regardless of pause state.
+
+	/** Arm a covering-fire window. Does NOT start the clock. */
+	void ArmCoveringFire(float Duration);
+	/** Start the countdown (call on first valid peek from cover). */
+	void StartCoveringFire();
+	/** Tick the countdown. Clock pauses while bReloadHeld is true. */
+	void TickCoveringFire(float DeltaSeconds, bool bReloadHeld);
+	/** True while the countdown is running (armed AND started). */
+	bool IsCoveringFireActive() const { return bCoveringFireActive; }
+	/** True while armed but not yet started (waiting for cover arrival). */
+	bool IsCoveringFirePending() const { return bCoveringFirePending; }
+	/** Remaining window seconds. 0 when inactive. */
+	float GetCoveringFireRemaining() const { return CoveringFireRemaining; }
+	/** Tear down everything. Safe to call when inactive. */
+	void ClearCoveringFire();
+
+	/** Seconds remaining on the covering-fire cooldown. 0 when ready. */
+	float GetCoveringFireCooldownRemaining() const;
+
+	/** True while the cooldown is active (covers just ended, not yet ready again). */
+	bool IsCoveringFireOnCooldown() const;
+
+	// --- Aim location override (covering-fire suppressive fire at last-seen position) ---
+	// Mirrors AEnemyCharacter::SetAimLocationOverride. When set, GetAimPointForTarget returns
+	// this location instead of the target's sight point. AimTarget stays valid (focus, inaccuracy
+	// ramp, anim aim pose all untouched). WeaponBase is untouched.
+
+	void SetAimLocationOverride(const FVector& Location) { AimLocationOverride = Location; bHasAimLocationOverride = true; }
+	void ClearAimLocationOverride() { bHasAimLocationOverride = false; AimLocationOverride = FVector::ZeroVector; }
+	bool HasAimLocationOverride() const { return bHasAimLocationOverride; }
+
+	/** Mirror written once per combat-task tick with the pre-peek reload gate's latched state.
+	 *  Same no-BB-plumbing pattern as SetHasTargetLOS / SetPeekCyclesAtCurrentCover. */
+	void SetCoveringFireReloadHeld(bool bHeld) { bCoveringFireReloadHeld = bHeld; }
+
+	/** Broadcast while the covering-fire window is active. Carries remaining seconds and whether
+	 *  the clock is paused (companion reloading). Fires on the pause edges even when the number
+	 *  has not changed, so the HUD can show a distinct paused state. */
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnCoveringFireTick, float, Remaining, bool, bPaused);
+	UPROPERTY(BlueprintAssignable, Category = "Companion|CoveringFire")
+	FOnCoveringFireTick OnCoveringFireTick;
 
 	// --- Revive Flag (set by BTTask_RevivePlayer while actively reviving) ---
 
@@ -562,6 +649,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
 	bool IsCommandedTakedownExecuting() const { return bTakedownExecuting; }
 
+	/** True once the player has committed to a synced takedown (fired their weapon or issued the
+	 *  explicit commit signal — see OnPlayerFiredWeaponHandler / OnPlayerTakedownCommittedHandler).
+	 *  BT task uses this to decide whether it still owes the player a firing position (patience is
+	 *  conditional on the player, not on a clock) or whether the short abort budgets should apply. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Takedown")
+	bool IsCommandedTakedownPlayerCommitted() const { return bTakedownPlayerCommitted; }
+
 	/** Autonomous (no player sync) execution trigger — used when the companion is
 	 *  commanded to solo a lone target (no paired takedown partner). */
 	UFUNCTION(BlueprintCallable, Category = "Companion|Takedown")
@@ -774,7 +868,33 @@ public:
 
 	/** Seconds of continuous no-threat before the revive window opens. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
-	float ReviveSafeGraceSeconds = 1.0f;
+	float ReviveSafeGraceSeconds = 3.0f;
+
+	/** Distance (cm) from the companion to its own combat target that qualifies as "pinned in a fight"
+	 *  for the revive entry gate. Below max engage range on purpose. 0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveSelfEngageRadius = 2000.f;
+
+	/** Recent-attacker window (seconds) for the revive entry gate. Separate from the bail window so
+	 *  entry hysteresis is not coupled to bail hysteresis. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveContactWindow = 3.f;
+
+	/** Suppression level (0-1) at which the companion counts itself as under pressure for the revive
+	 *  entry gate. 0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float ReviveSuppressionThreshold = 0.25f;
+
+	/** Fight-live term only blocks revive above this many bleedout seconds remaining. Must exceed
+	 *  ReviveSprintBleedoutThreshold (DA, 25) to avoid a jogging mid-band rescue. 0 removes the
+	 *  release band -- fight-live then blocks at every bleedout value. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveFightLiveBleedoutFloor = 35.f;
+
+	/** Sustained seconds of body heat that closes a committed revive window. The bounded latch:
+	 *  unwinds in real time rather than snapping to zero. 0 restores the old unbounded latch. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveAbortHotSeconds = 2.5f;
 
 	/** Bleedout seconds remaining at which the companion commits to revive regardless of threats. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "1.0"))
@@ -788,6 +908,11 @@ public:
 	 *  the hold) — the sprint to the body has to be survivable under ring fire. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.01", ClampMax = "1.0"))
 	float RescueApproachDamageMultiplier = 0.5f;
+
+	/** Incoming damage multiplier during a commanded covering-fire window. Sits between revive
+	 *  (0.35) and rescue approach (0.5) in strength. Does not stack with either. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|CoveringFire", meta = (ClampMin = "0.01", ClampMax = "1.0"))
+	float CoveringFireDamageMultiplier = 0.4f;
 
 	/** Health fraction below which a committed rescue bails back to combat while threats are hot.
 	 *  Desperation bleedout overrides the bail (last-ditch attempt beats a guaranteed bleedout). */
@@ -998,6 +1123,59 @@ private:
 	/** See IsWaveHoldActive. Written by BTService_UpdateCompanionState. Transient, not replicated. */
 	bool bWaveHoldActive = false;
 
+	/** Commanded cover hold backing state. Written by BTTask_CompanionTakeCover, released by
+	 *  BTService_UpdateCompanionState. Transient, not replicated. */
+	bool bCommandedCoverHoldActive = false;
+	FVector CommandedCoverHoldAnchor = FVector::ZeroVector;
+	float CommandedCoverHoldLeashRadius = 0.f;
+	/** World time the first BB_CombatTarget was seen during this hold. -1e9 = no combat yet.
+	 *  Stamped once, never re-stamped on target flicker. */
+	float CommandedCoverCombatStartTime = -1e9f;
+	/** True once combat was seen during this hold. When combat ends with this flag true, the
+	 *  hold releases -- a post-fight companion must not freeze at stale cover. */
+	bool bCommandedCoverCombatGraceArmed = false;
+
+	/** One-shot commanded cover target. Written by CompanionCommandComponent::ConfirmTakeCover,
+	 *  consumed by BTTask_CompanionTakeCover. Cleared on every read. */
+	FCover CommandedCoverTarget;
+	float CommandedCoverTargetStamp = -1e9f;
+
+	/** Covering-fire backing state. Transient, not replicated. */
+	bool bCoveringFirePending = false;
+	bool bCoveringFireActive = false;
+	float CoveringFireRemaining = 0.f;
+	float CoveringFireDuration = 0.f;
+	/** World time the arm was stamped. Arm timeout forces start if cover is never reached. */
+	float CoveringFireArmTime = -1e9f;
+	/** World time start was called. Hard ceiling = start + duration + CoveringFireCeilingSlack. */
+	float CoveringFireStartTime = -1e9f;
+
+	/** Seconds of slack beyond the nominal duration before the hard ceiling force-clears. Without
+	 *  it a reload that can never complete leaves the companion permanently damage-resistant. */
+	static constexpr float CoveringFireCeilingSlack = 8.f;
+
+	/** Seconds a pending arm waits for cover before starting the window anyway. */
+	static constexpr float CoveringFireArmTimeout = 6.f;
+
+	/** Cooldown (seconds) after a covering-fire window completes before another can be triggered. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|CoveringFire", meta = (ClampMin = "0.0"))
+	float CoveringFireCooldown = 10.f;
+
+	/** Aim location override for suppressive fire. See SetAimLocationOverride. */
+	FVector AimLocationOverride = FVector::ZeroVector;
+	bool bHasAimLocationOverride = false;
+
+	/** World time the last window ended. -1e9 = never. Stamped only when a window actually ran. */
+	float CoveringFireEndTime = -1e9f;
+
+	/** Mirror of the combat task's pre-peek reload gate. Written per combat-task tick. */
+	bool bCoveringFireReloadHeld = false;
+
+	/** Cached remaining for the broadcast throttle (avoids per-frame multicast). */
+	float CoveringFireLastBroadcast = -1.f;
+	/** Cached paused state for the broadcast edge detect. */
+	bool bCoveringFireLastBroadcastPaused = false;
+
 	/** Mirror of the combat service's eye→target LOS trace (enemy bHasTargetLOS parity). Transient, not replicated. */
 	bool bHasTargetLOS = false;
 
@@ -1135,6 +1313,12 @@ private:
 
 	/** World time the purposeful cover-commit grant was stamped; -1e9 = none. See SetCoverCommitGrant. */
 	float CoverCommitGrantStamp = -1e9f;
+
+	/** One-shot skip-rerank flag. See SetCommandedCoverSkipRerank. */
+	bool bCommandedCoverSkipRerank = false;
+
+	/** One-shot commanded-cover bypass flag. See SetCommandedCoverBypass. */
+	bool bCommandedCoverBypass = false;
 
 	EStealthCatchup StealthCatchupStage = EStealthCatchup::None;
 

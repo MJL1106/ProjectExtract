@@ -842,6 +842,15 @@ private:
 	/** True while a reload triggered by TryPrePeekReloadGate is in flight. */
 	bool bReloadGateActive = false;
 
+	/** Edge detect for covering-fire window expiry — set to IsCoveringFireActive() at the end of
+	 *  each tick; compared at the start of the next to detect the falling edge. */
+	bool bWasCoveringFireLastTick = false;
+
+	/** Last-seen target position while covering fire is active. Drives the aim override when
+	 *  the target goes behind cover. Reset on task entry and window end. */
+	FVector CoveringFireLastSeenLoc = FVector::ZeroVector;
+	bool bHasCoveringFireLastSeen = false;
+
 	/** World time when the reload gate was activated. */
 	float ReloadGateStartTime = 0.f;
 

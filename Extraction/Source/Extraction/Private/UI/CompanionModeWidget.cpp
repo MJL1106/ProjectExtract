@@ -2,6 +2,7 @@
 
 #include "UI/CompanionModeWidget.h"
 #include "Components/CompanionCommandComponent.h"
+#include "Companion/CompanionCharacter.h"
 #include "Components/TextBlock.h"
 #include "Components/Image.h"
 #include "Components/PanelWidget.h"
@@ -28,6 +29,8 @@ void UCompanionModeWidget::NativeDestruct()
 	{
 		CmdComp->OnCompanionModeChanged.RemoveDynamic(this, &UCompanionModeWidget::HandleModeChanged);
 		CmdComp->OnModeMenuChanged.RemoveDynamic(this, &UCompanionModeWidget::HandleModeMenuChanged);
+		if (ACompanionCharacter* Companion = CmdComp->GetCompanion())
+			Companion->OnCoveringFireTick.RemoveDynamic(this, &UCompanionModeWidget::HandleCoveringFireTick);
 	}
 	BoundCommandComponent.Reset();
 
@@ -38,14 +41,31 @@ void UCompanionModeWidget::NativeTick(const FGeometry& MyGeometry, float InDelta
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
-	if (BoundCommandComponent.IsValid()) return;
+	if (!BoundCommandComponent.IsValid())
+	{
+		TimeSinceBindAttempt += InDeltaTime;
+		if (TimeSinceBindAttempt < BindRetryInterval) return;
+		TimeSinceBindAttempt = 0.f;
 
-	TimeSinceBindAttempt += InDeltaTime;
-	if (TimeSinceBindAttempt < BindRetryInterval) return;
-	TimeSinceBindAttempt = 0.f;
+		if (TryBindToCommandComponent())
+			ApplyMode(BoundCommandComponent->GetCompanionMode(), /*bFromChange=*/ false);
+		return;
+	}
 
-	if (TryBindToCommandComponent())
-		ApplyMode(BoundCommandComponent->GetCompanionMode(), /*bFromChange=*/ false);
+	// Poll covering-fire row-4 availability while the picker is open.
+	if (BoundCommandComponent->IsModeMenuOpen())
+	{
+		const bool bAvail = BoundCommandComponent->IsCoverMeAvailable();
+		float CooldownRemaining = 0.f;
+		if (ACompanionCharacter* Comp = BoundCommandComponent->GetCompanion())
+			CooldownRemaining = Comp->GetCoveringFireCooldownRemaining();
+		// Always broadcast while open so the cooldown countdown updates continuously.
+		if (bAvail != bLastCoverMeAvailable || CooldownRemaining > 0.f)
+		{
+			bLastCoverMeAvailable = bAvail;
+			OnCoverMeAvailabilityChangedBP(bAvail, CooldownRemaining);
+		}
+	}
 }
 
 bool UCompanionModeWidget::TryBindToCommandComponent()
@@ -62,6 +82,13 @@ bool UCompanionModeWidget::TryBindToCommandComponent()
 	CmdComp->OnCompanionModeChanged.AddDynamic(this, &UCompanionModeWidget::HandleModeChanged);
 	CmdComp->OnModeMenuChanged.AddDynamic(this, &UCompanionModeWidget::HandleModeMenuChanged);
 	HandleModeMenuChanged(CmdComp->IsModeMenuOpen()); // seed list/chip state if bound while already open
+
+	// Bind the covering-fire countdown delegate from the companion itself.
+	if (ACompanionCharacter* Companion = CmdComp->GetCompanion())
+	{
+		if (!Companion->OnCoveringFireTick.IsAlreadyBound(this, &UCompanionModeWidget::HandleCoveringFireTick))
+			Companion->OnCoveringFireTick.AddDynamic(this, &UCompanionModeWidget::HandleCoveringFireTick);
+	}
 	return true;
 }
 
@@ -103,4 +130,9 @@ void UCompanionModeWidget::ApplyMode(ECompanionMode NewMode, bool bFromChange)
 
 	if (bFromChange)
 		OnModeChangedBP(NewMode);
+}
+
+void UCompanionModeWidget::HandleCoveringFireTick(float Remaining, bool bPaused)
+{
+	OnCoveringFireCountdownBP(Remaining, bPaused);
 }

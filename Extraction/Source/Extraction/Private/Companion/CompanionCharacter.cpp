@@ -211,6 +211,10 @@ void ACompanionCharacter::UnPossessed()
 	// No BT task can survive losing the controller -- release any speed override so the pawn
 	// is not pinned at a stale task speed if it is ever re-possessed.
 	ClearTaskSpeedOverride();
+	ClearCommandedCoverHold();
+	ClearCoveringFire();
+	CommandedCoverTarget = FCover();
+	CommandedCoverTargetStamp = -1e9f;
 
 	Super::UnPossessed();
 }
@@ -335,6 +339,10 @@ void ACompanionCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	DisarmCommandedTakedown();
 	EndSearchRoomExposure();
+	ClearCommandedCoverHold();
+	ClearCoveringFire();
+	CommandedCoverTarget = FCover();
+	CommandedCoverTargetStamp = -1e9f;
 
 	if (const UWorld* World = GetWorld())
 	{
@@ -376,6 +384,11 @@ void ACompanionCharacter::Tick(float DeltaTime)
 		bLastStrafingForFocus = bStrafingNow;
 		ApplyMovementSpeeds();
 	}
+
+	// Covering-fire clock runs unconditionally in Tick so it is not gated by any combat-task
+	// branch. The reload-held mirror is written once per combat-task tick.
+	if (bCoveringFireActive || bCoveringFirePending)
+		TickCoveringFire(DeltaTime, bCoveringFireReloadHeld || IsReloading());
 
 	TickPlayerSoftSeparation();
 	TickAllySoftSeparation();
@@ -432,6 +445,7 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 	if (bIsDBNO) return 0.f;
 	if (bIsRevivingPlayer) DamageAmount *= ReviveDamageMultiplier;
 	else if (bRescueCommitted) DamageAmount *= RescueApproachDamageMultiplier;
+	else if (bCoveringFireActive) DamageAmount *= CoveringFireDamageMultiplier;
 	const float ActualDamage = Super::TakeDamage(DamageAmount, DamageEvent, EventInstigator, DamageCauser);
 	if (IsValid(HealthComponent))
 	{
@@ -586,6 +600,186 @@ bool ACompanionCharacter::ConsumeCoverCommitGrant()
 	const float Stamp = CoverCommitGrantStamp;
 	CoverCommitGrantStamp = -1e9f;
 	return GetWorld() && (GetWorld()->GetTimeSeconds() - Stamp) <= GrantLifetime;
+}
+
+void ACompanionCharacter::SetCommandedCoverTarget(const FCover& Cover)
+{
+	CommandedCoverTarget = Cover;
+	CommandedCoverTargetStamp = GetWorld() ? GetWorld()->GetTimeSeconds() : -1e9f;
+}
+
+bool ACompanionCharacter::ConsumeCommandedCoverTarget(FCover& OutCover)
+{
+	// Same one-shot anti-stale contract as ConsumeCoverCommitGrant.
+	constexpr float TargetLifetime = 5.f;
+	const FCover Stored = CommandedCoverTarget;
+	const float Stamp = CommandedCoverTargetStamp;
+	CommandedCoverTarget = FCover();
+	CommandedCoverTargetStamp = -1e9f;
+	if (!Stored.IsValid()) return false;
+	if (!GetWorld() || (GetWorld()->GetTimeSeconds() - Stamp) > TargetLifetime) return false;
+	OutCover = Stored;
+	return true;
+}
+
+void ACompanionCharacter::SetCommandedCoverHold(const FVector& AnchorLocation, float LeashRadius)
+{
+	bCommandedCoverHoldActive = true;
+	CommandedCoverHoldAnchor = AnchorLocation;
+	CommandedCoverHoldLeashRadius = LeashRadius;
+	CommandedCoverCombatStartTime = -1e9f; // re-arm: a fresh hold has no combat clock
+	bCommandedCoverCombatGraceArmed = false;
+}
+
+void ACompanionCharacter::StampCommandedCoverCombatStart()
+{
+	// Stamp once. Target flicker must not re-stamp.
+	if (CommandedCoverCombatStartTime < 0.f && GetWorld())
+		CommandedCoverCombatStartTime = GetWorld()->GetTimeSeconds();
+	bCommandedCoverCombatGraceArmed = true;
+}
+
+void ACompanionCharacter::ClearCommandedCoverHold()
+{
+	if (bCommandedCoverHoldActive)
+	{
+		bCommandedCoverHoldActive = false;
+		CommandedCoverHoldAnchor = FVector::ZeroVector;
+		CommandedCoverHoldLeashRadius = 0.f;
+		CommandedCoverCombatStartTime = -1e9f;
+		bCommandedCoverCombatGraceArmed = false;
+	}
+	// Unconditional, and outside the active guard: these one-shots are armed by the same task that
+	// latches the hold, so every teardown that drops the hold must also disarm them. Leaving them
+	// set would suppress the multi-threat re-rank or the distance/Z gate on the next autonomous commit.
+	bCommandedCoverSkipRerank = false;
+	bCommandedCoverBypass = false;
+}
+
+void ACompanionCharacter::ArmCoveringFire(float Duration)
+{
+	ClearCoveringFire();
+	bCoveringFirePending = true;
+	CoveringFireDuration = Duration;
+	CoveringFireRemaining = Duration;
+	CoveringFireArmTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+}
+
+void ACompanionCharacter::StartCoveringFire()
+{
+	if (!bCoveringFirePending && !bCoveringFireActive) return;
+	bCoveringFirePending = false;
+	bCoveringFireActive = true;
+	CoveringFireStartTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+}
+
+void ACompanionCharacter::TickCoveringFire(float DeltaSeconds, bool bReloadHeld)
+{
+	if (!bCoveringFireActive && !bCoveringFirePending) return;
+
+	const UWorld* World = GetWorld();
+	const float Now = World ? World->GetTimeSeconds() : 0.f;
+
+	// Arm timeout: cover was never reached. Fall back to firing from where we stand — but only if
+	// there is still something to shoot. The combat task clears the window on its own teardown, so
+	// the gap this closes is the target dying while the order was still pending: without the check
+	// the window would start anyway and burn its full duration at reduced damage doing nothing.
+	if (bCoveringFirePending)
+	{
+		if ((Now - CoveringFireArmTime) <= CoveringFireArmTimeout)
+		{
+			return; // still pending, no clock to tick
+		}
+
+		AActor* PendingTarget = nullptr;
+		if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController()))
+		{
+			if (const UBlackboardComponent* BB = CompAIC->GetBlackboardComponent())
+				PendingTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+		}
+		const UHealthComponent* PendingTargetHealth =
+			IsValid(PendingTarget) ? PendingTarget->FindComponentByClass<UHealthComponent>() : nullptr;
+		if (!IsValid(PendingTarget) || (PendingTargetHealth && PendingTargetHealth->IsDead()))
+		{
+			ClearCoveringFire();
+			return;
+		}
+
+		StartCoveringFire();
+		Bark(ECompanionBarkType::Suppressing);
+	}
+
+	// Hard wall-clock ceiling — force-clears regardless of pause state.
+	if ((Now - CoveringFireStartTime) > (CoveringFireDuration + CoveringFireCeilingSlack))
+	{
+		ClearCoveringFire();
+		return;
+	}
+
+	// Empty mag with no reload possible — window ends immediately.
+	if (GetCurrentAmmo() == 0 && !CanReload())
+	{
+		ClearCoveringFire();
+		return;
+	}
+
+	// Clock only ticks while not reloading.
+	if (!bReloadHeld)
+	{
+		CoveringFireRemaining -= DeltaSeconds;
+	}
+
+	if (CoveringFireRemaining <= 0.f)
+	{
+		CoveringFireRemaining = 0.f;
+		ClearCoveringFire();
+		return;
+	}
+
+	// Throttle the multicast to ~10 Hz while counting, but fire immediately on pause edges
+	// so the HUD can show a distinct paused state.
+	const float Quantized = FMath::FloorToFloat(CoveringFireRemaining * 10.f) * 0.1f;
+	const bool bPausedStateChanged = (bReloadHeld != bCoveringFireLastBroadcastPaused);
+	if (Quantized != CoveringFireLastBroadcast || bPausedStateChanged)
+	{
+		CoveringFireLastBroadcast = Quantized;
+		bCoveringFireLastBroadcastPaused = bReloadHeld;
+		OnCoveringFireTick.Broadcast(CoveringFireRemaining, bReloadHeld);
+	}
+}
+
+void ACompanionCharacter::ClearCoveringFire()
+{
+	const bool bWasActive = bCoveringFireActive || bCoveringFirePending;
+	// Stamp cooldown only when a window actually ran (not on arm, not on teardown clears).
+	if (bCoveringFireActive && GetWorld())
+		CoveringFireEndTime = GetWorld()->GetTimeSeconds();
+	bCoveringFirePending = false;
+	bCoveringFireActive = false;
+	CoveringFireRemaining = 0.f;
+	CoveringFireDuration = 0.f;
+	CoveringFireArmTime = -1e9f;
+	CoveringFireStartTime = -1e9f;
+	bCoveringFireReloadHeld = false;
+	CoveringFireLastBroadcast = -1.f;
+	bCoveringFireLastBroadcastPaused = false;
+	ClearAimLocationOverride();
+
+	if (bWasActive)
+		OnCoveringFireTick.Broadcast(0.f, false);
+}
+
+float ACompanionCharacter::GetCoveringFireCooldownRemaining() const
+{
+	if (CoveringFireCooldown <= 0.f || CoveringFireEndTime < 0.f) return 0.f;
+	const UWorld* World = GetWorld();
+	if (!World) return 0.f;
+	return FMath::Max(0.f, CoveringFireCooldown - (World->GetTimeSeconds() - CoveringFireEndTime));
+}
+
+bool ACompanionCharacter::IsCoveringFireOnCooldown() const
+{
+	return GetCoveringFireCooldownRemaining() > 0.f;
 }
 
 float ACompanionCharacter::GetHealthFraction() const
@@ -1302,7 +1496,9 @@ void ACompanionCharacter::ReloadWeapon()
 			*GetName(), Vel, (int32)bIsMoving, (int32)bAlreadyReloading);
 	}
 	if (IsValid(CurrentWeapon) && CurrentWeapon->CanReload() && !CurrentWeapon->IsReloading())
-		Bark(CurrentWeapon->GetCurrentAmmo() == 0 ? ECompanionBarkType::LowAmmo : ECompanionBarkType::Reloading);
+		// Always the plain reload line. An empty magazine is a routine reload, not a supply problem:
+		// the companion's reserve never runs out, so LowAmmo lines ("last mag") are always a lie.
+		Bark(ECompanionBarkType::Reloading);
 
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->Reload();
@@ -1376,6 +1572,9 @@ float ACompanionCharacter::GetCurrentInaccuracy() const
 
 FVector ACompanionCharacter::GetAimPointForTarget(const AActor* Target) const
 {
+	// Only honour the override while covering fire is running. Other callers (commanded
+	// takedown LoS trace, etc.) must get the real sight location.
+	if (bHasAimLocationOverride && bCoveringFireActive) return AimLocationOverride;
 	return AITargeting::GetSightLocation(Target);
 }
 
@@ -1397,6 +1596,10 @@ void ACompanionCharacter::EnterDBNO()
 	DisarmCommandedTakedown();
 	ClearPostBreachEngagement();
 	EndSearchRoomExposure();
+	ClearCommandedCoverHold();
+	ClearCoveringFire();
+	CommandedCoverTarget = FCover();
+	CommandedCoverTargetStamp = -1e9f;
 	if (ACompanionAIController* CompAIC = Cast<ACompanionAIController>(GetController()))
 		CompAIC->ClearActiveCommand();
 
@@ -2144,15 +2347,21 @@ void ACompanionCharacter::ExecuteCommandedTakedown()
 		FRotator EyesRot;
 		GetActorEyesViewPoint(EyesLoc, EyesRot);
 
-		FHitResult Hit;
 		FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(CompanionShootTakedown), false, this);
 		TraceParams.AddIgnoredActor(Victim);
 		if (IsValid(CurrentWeapon)) TraceParams.AddIgnoredActor(CurrentWeapon);
 
+		// Routed through AITargeting::HasClearLineIgnoringPawns — reproduced byte-for-byte by the BT
+		// task's own approval trace (HasShootTakedownLosFromEye) so a line the task approves can never
+		// be rejected here. A body in the path (the double takedown's second enemy, or the player
+		// lining up their own shot) is stepped over rather than counted as cover: the kill is
+		// registered directly and this shot is cosmetic, so a pawn standing in the way was never a
+		// real obstruction to it.
 		const FVector TraceEnd = GetAimPointForTarget(Victim);
-		if (World->LineTraceSingleByChannel(Hit, EyesLoc, TraceEnd, ECC_Visibility, TraceParams))
+		AActor* Blocker = nullptr;
+		if (!AITargeting::HasClearLineIgnoringPawns(World, EyesLoc, TraceEnd, TraceParams, &Blocker))
 		{
-			UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot aborted — LoS blocked by %s"), *GetNameSafe(Hit.GetActor()));
+			UE_LOG(LogCompanion, Warning, TEXT("Takedown: shoot aborted — LoS blocked by %s"), *GetNameSafe(Blocker));
 			FinishCommandedTakedown();
 			return;
 		}

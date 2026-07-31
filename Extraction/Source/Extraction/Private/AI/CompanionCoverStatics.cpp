@@ -1,6 +1,7 @@
 // Companion-only cover helpers — see header for the sharing contract.
 
 #include "AI/CompanionCoverStatics.h"
+#include "AI/AITargetingStatics.h"
 #include "AI/CompanionAIController.h"
 #include "AI/CompanionTuningDataAsset.h"
 #include "Companion/CompanionCharacter.h"
@@ -10,11 +11,14 @@
 #include "CoverSystem.h"
 #include "CoverGeometryStatics.h"
 #include "CoverReservationSubsystem.h"
+#include "AI/Cover/CoverScoringStatics.h"
 #include "World/DoorRegistrySubsystem.h"
 #include "ExtractionTypes.h"
 #include "WeaponBase.h"
 #include "AIController.h"
+#include "BehaviorTree/BehaviorTreeComponent.h"
 #include "BehaviorTree/BlackboardComponent.h"
+#include "Companion/CompanionCommandTypes.h"
 #include "GameplayTagAssetInterface.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
@@ -460,6 +464,172 @@ void StopCoverApproachFire(ACompanionCharacter* Companion, AAIController* Contro
 			Controller->ClearFocus(EAIFocusPriority::Gameplay);
 	}
 	State.Reset();
+}
+
+bool FindCoverOnPingedWall(UWorld* World, const FVector& PingImpact, const FVector& PingNormal,
+	float SearchRadius, const AController* Querier, const APawn* QuerierPawn,
+	AActor* CombatTarget, FCover& OutCover)
+{
+	if (!World || !IsValid(QuerierPawn)) return false;
+
+	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(World);
+	if (!CoverSys) return false;
+
+	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
+
+	// Gather candidates in a bounding box around the ping impact.
+	TArray<FCover> Candidates;
+	Candidates.Reserve(32);
+	const FBoxSphereBounds SearchBounds(PingImpact, FVector(SearchRadius), SearchRadius);
+	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
+
+	// Hostile anchors for claim-collision rejection (same rule as the EQS CoverIntent filter).
+	FHostileAnchors PingHostileAnchors;
+	const ACompanionAIController* CompAIC = Cast<ACompanionAIController>(Querier);
+	const UCompanionTuningDataAsset* Tuning = CompAIC ? CompAIC->GetTuning() : nullptr;
+	const bool bRejectHostileAdjacent = Tuning
+		&& (Tuning->MinHostileCoverDistance > 0.f || Tuning->MinHostilePawnDistance > 0.f);
+	if (bRejectHostileAdjacent)
+		UCoverScoringStatics::GatherHostileAnchors(World, QuerierPawn, Querier, PingHostileAnchors);
+
+	// Standoff for body-protection traces.
+	const ACharacter* QuerierChar = Cast<const ACharacter>(QuerierPawn);
+	const UCapsuleComponent* Cap = QuerierChar ? QuerierChar->GetCapsuleComponent() : nullptr;
+	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : 34.f) + 10.f;
+
+	// Wall match threshold: cos(20 deg) = 0.9397. PingNormal points away from the surface, and
+	// DirectionToWall points toward the wall. The matching dot is -PingNormal vs DirectionToWall:
+	// a cover point "belongs to" the pinged face when its wall direction aligns with the face
+	// within 20 degrees.
+	static constexpr float WallMatchCosThreshold = 0.9397f;
+	static constexpr float BodyProtectChestHeight = 60.f;
+	const float SearchRadiusSq = SearchRadius * SearchRadius;
+
+	// No distance or Z-delta gates for player-commanded cover. The ping trace range is the limit;
+	// if the player can see it and hit it, it is a legal order. The companion either paths there or
+	// the 12-second unreached-hold timeout releases gracefully. Autonomous cover selection keeps
+	// every gate exactly as it is via BTTask_MoveToCoverPoint's commit block.
+	const FVector PawnLoc = QuerierPawn->GetActorLocation();
+
+	// ThreatLoc = actor location for body-protection traces (IsThreatCovered, ScoreCandidate).
+	// ThreatSightLoc = head-height for peek LoS traces (CanPeekShoot) — centre-mass traces reject
+	// candidates that could in fact shoot a standing enemy over its cover.
+	const FVector ThreatLoc = IsValid(CombatTarget) ? CombatTarget->GetActorLocation() : FVector::ZeroVector;
+	const FVector ThreatSightLoc = IsValid(CombatTarget) ? AITargeting::GetSightLocation(CombatTarget) : FVector::ZeroVector;
+	static constexpr float StandFireEyeHeight = 140.f;
+
+	// Scoring params for ScoreCandidate. Companion queriers get neutral defaults where
+	// SideFlagWeight is 0 and ScoreCandidate's wall-end term is skipped entirely. This selector's
+	// whole purpose is the end of the wall with an angle, so force it on.
+	FCoverScoreParams ScoreParams = UCoverScoringStatics::GetParamsForQuerier(QuerierPawn);
+	if (ScoreParams.SideFlagWeight <= 0.f) ScoreParams.SideFlagWeight = 2.f;
+
+	// Hoisted outside the loop: the face direction from the ping does not change per candidate.
+	const FVector FaceDir = (-PingNormal).GetSafeNormal2D();
+
+	FCover BestCover;
+	float BestScore = -FLT_MAX;
+	int32 DbgWallMatch = 0, DbgOccupied = 0, DbgHostile = 0, DbgCombat = 0;
+
+	for (const FCover& Candidate : Candidates)
+	{
+		if (!Candidate.IsValid()) continue;
+
+		const FCoverData& Data = Candidate.Data;
+
+		// Wall match: only keep candidates facing the same wall as the pinged surface.
+		const FVector WallDir = Data.DirectionToWall.GetSafeNormal2D();
+		if (FVector::DotProduct(FaceDir, WallDir) < WallMatchCosThreshold) continue;
+
+		// Same-plane test: the angular check alone admits any parallel same-facing surface inside
+		// the search sphere. Perpendicular offset from the pinged face must sit inside the bake's
+		// standoff band (AICS TraceLength 100 + slack).
+		static constexpr float WallPlaneToleranceCm = 150.f;
+		if (FMath::Abs(FVector::DotProduct(Data.Location - PingImpact, PingNormal)) > WallPlaneToleranceCm) continue;
+
+		// True distance check (bounds query is a box, so diagonal candidates can exceed radius).
+		if (FVector::DistSquared(PingImpact, Data.Location) > SearchRadiusSq) continue;
+
+		++DbgWallMatch; // survived wall + plane + radius — this point is on the pinged wall
+
+		// Occupancy gates.
+		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
+		if (Occupant && Occupant != Querier) { ++DbgOccupied; continue; }
+		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Querier)) { ++DbgOccupied; continue; }
+		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Querier,
+			Tuning ? Tuning->CoverSwitchPostVacateCooldown : 0.f)) { ++DbgOccupied; continue; }
+
+		// Hostile adjacency rejection.
+		if (bRejectHostileAdjacent && UCoverScoringStatics::IsNearHostileAnchor(
+			Data.Location, PingHostileAnchors, Tuning->MinHostileCoverDistance, Tuning->MinHostilePawnDistance))
+		{ ++DbgHostile; continue; }
+
+		if (IsValid(CombatTarget))
+		{
+			// With a combat target: hard-require peek-shootability and body protection.
+			const bool bCrouched = UCoverGeometryStatics::GetCoverHeight(Data) == ECoverHeight::Crouch;
+			if (!UCoverGeometryStatics::CanPeekShoot(World, Data, bCrouched,
+				ThreatSightLoc, StandFireEyeHeight, CombatTarget, QuerierPawn))
+			{ ++DbgCombat; continue; }
+			if (!UCoverGeometryStatics::IsThreatCovered(World, Data, ThreatLoc,
+				Standoff, BodyProtectChestHeight, CombatTarget, QuerierPawn))
+			{ ++DbgCombat; continue; }
+
+			// Rank by the shared cover scorer with body-protection = true.
+			const float Score = UCoverScoringStatics::ScoreCandidate(
+				World, Data, PawnLoc, ThreatLoc, /*bBodyProtected*/ true, ScoreParams);
+			if (Score > BestScore)
+			{
+				BestScore = Score;
+				BestCover = Candidate;
+			}
+		}
+		else
+		{
+			// No combat target: rank by proximity to ping impact, with a bonus for candidates
+			// that have any usable lean flag so the companion never parks somewhere it can never
+			// shoot from.
+			const float DistSq = FVector::DistSquared(PingImpact, Data.Location);
+			const bool bHasLean = Data.bLeftCoverCrouched || Data.bRightCoverCrouched
+				|| Data.bLeftCoverStanding || Data.bRightCoverStanding;
+			// Invert distance so higher = better. Lean bonus of 1e6 ensures lean-flagged candidates
+			// always win over unflagged ones at any comparable distance.
+			const float Score = -DistSq + (bHasLean ? 1e6f : 0.f);
+			if (Score > BestScore)
+			{
+				BestScore = Score;
+				BestCover = Candidate;
+			}
+		}
+	}
+
+	// Diagnostic: log rejection reasons when wall-matched candidates existed but all were rejected.
+	if (!BestCover.IsValid() && DbgWallMatch > 0)
+	{
+		const float PawnToPing = FVector::Dist(PawnLoc, PingImpact);
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("FindCoverOnPingedWall: %d wall-matched candidates ALL rejected — occ=%d hostile=%d combat=%d (pawnToPing=%.0fcm searchRadius=%.0f)"),
+			DbgWallMatch, DbgOccupied, DbgHostile, DbgCombat, PawnToPing, SearchRadius);
+	}
+
+	if (BestCover.IsValid())
+	{
+		OutCover = BestCover;
+		return true;
+	}
+	return false;
+}
+
+void ClearCommandIfStillActive(UBehaviorTreeComponent& OwnerComp, ECompanionCommand ExpectedCommand)
+{
+	ACompanionAIController* AIC = Cast<ACompanionAIController>(OwnerComp.GetAIOwner());
+	if (!IsValid(AIC)) return;
+	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	if (!BB) return;
+	const ECompanionCommand Active = static_cast<ECompanionCommand>(
+		BB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand));
+	if (Active == ExpectedCommand)
+		AIC->ClearActiveCommand();
 }
 
 } // namespace CompanionCover

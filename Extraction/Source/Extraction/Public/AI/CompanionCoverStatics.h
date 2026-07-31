@@ -12,9 +12,12 @@ class AAIController;
 class AController;
 class APawn;
 class ACompanionCharacter;
+class UBehaviorTreeComponent;
 class UBlackboardComponent;
 class UCompanionTuningDataAsset;
 class UWorld;
+enum class ECompanionCommand : uint8;
+struct FCover;
 struct FCoverData;
 
 namespace CompanionCover
@@ -145,4 +148,21 @@ namespace CompanionCover
 	 *  endpoint covers resolve Front: over-top peeks only, no corner peeks, coin-flip idle side.
 	 *  Falls back to the plain hunker when no tuning is reachable. */
 	FVector CompanionHunkerPosition(const ACompanionCharacter& Companion, const FCoverData& Data, float Standoff);
+
+	/** Selects the best legal cover point on the wall the player pinged. Returns false if no usable
+	 *  candidate survives. Wall matching uses the trace's ImpactNormal to keep only points whose
+	 *  DirectionToWall opposes the pinged face within a tight angular threshold.
+	 *
+	 *  With a valid CombatTarget: hard-requires CanPeekShoot + IsThreatCovered, ranks by ScoreCandidate
+	 *  (body-protected). Without: ranks by proximity to PingImpact, preferring points with any usable
+	 *  lean flag so the companion never parks somewhere it can never shoot from. */
+	bool FindCoverOnPingedWall(UWorld* World, const FVector& PingImpact, const FVector& PingNormal,
+		float SearchRadius, const AController* Querier, const APawn* QuerierPawn,
+		AActor* CombatTarget, FCover& OutCover);
+
+	/** Guarded clear of BB_CompanionCommand: clears only if the active key still holds
+	 *  ExpectedCommand. Used by every failure/completion path in the TakeCover branch so no exit
+	 *  can leave the key stuck. Shared implementation for BTTask_CompanionTakeCover,
+	 *  BTTask_CompanionHoldCover and BTTask_CompanionClearCommand. */
+	void ClearCommandIfStillActive(UBehaviorTreeComponent& OwnerComp, ECompanionCommand ExpectedCommand);
 }

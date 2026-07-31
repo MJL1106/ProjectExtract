@@ -499,6 +499,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input|Companion")
 	TObjectPtr<UInputAction> IA_CompanionModeCombat;
 
+	/** Mode picker — trigger covering fire (4). */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionCoverMe;
+
 	// ---- Takedown Config ----
 
 	/** Player-side finisher montage. Assign in the BP child class.
@@ -560,7 +564,7 @@ protected:
 	float DBNOFreeLookPitchMax = 60.f;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
-	float BleedoutDuration = 90.f;
+	float BleedoutDuration = 60.f;
 
 	/** 2.0 matches the companion's revive hold (BP_Companion.ReviveDuration) — both directions
 	 *  of the pair play the same clips at the same pace. */
@@ -845,6 +849,7 @@ private:
 	void CompanionModeSelectStealthInput(const FInputActionValue& Value);
 	void CompanionModeSelectNormalInput(const FInputActionValue& Value);
 	void CompanionModeSelectCombatInput(const FInputActionValue& Value);
+	void CompanionCoverMeInput(const FInputActionValue& Value);
 
 	UFUNCTION()
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);

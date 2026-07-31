@@ -602,6 +602,18 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
 	float CoverPickMaxZDelta = 250.f;
 
+	// Stall detection for companion cover moves. Displacement-based (per-tick speed check),
+	// not closing-distance, so nav detours around buildings do not false-fire. Six seconds of
+	// genuinely zero movement is an unambiguous wedge.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.5"))
+	float CoverMoveStallTimeout = 6.f;
+
+	// Minimum speed (cm/s) to count as making progress. Below this for StallTimeout seconds
+	// and the move is abandoned. 10 cm/s is well below any walk speed and catches only a
+	// genuinely stuck pawn.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1.0"))
+	float CoverMoveStallMinProgressSpeed = 10.f;
+
 	// --- Combat leash (decoupled from the follow-task SprintDistanceThreshold) ---
 
 	// Max distance from the player the companion positions freely during a fight in COMBAT mode

@@ -664,10 +664,11 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 	{
 		switch (Command)
 		{
-		case ECompanionCommand::Breach:   Comp->Bark(ECompanionBarkType::AckBreach); break;
-		case ECompanionCommand::Takedown: Comp->Bark(ECompanionBarkType::AckTakedown); break;
-		case ECompanionCommand::Loot:     Comp->Bark(ECompanionBarkType::AckLoot); break;
-		case ECompanionCommand::Explore:  Comp->Bark(ECompanionBarkType::AckExplore); break;
+		case ECompanionCommand::Breach:    Comp->Bark(ECompanionBarkType::AckBreach); break;
+		case ECompanionCommand::Takedown:  Comp->Bark(ECompanionBarkType::AckTakedown); break;
+		case ECompanionCommand::Loot:      Comp->Bark(ECompanionBarkType::AckLoot); break;
+		case ECompanionCommand::Explore:   Comp->Bark(ECompanionBarkType::AckExplore); break;
+		case ECompanionCommand::TakeCover: Comp->Bark(ECompanionBarkType::TakingCover); break;
 		default: break;
 		}
 	}

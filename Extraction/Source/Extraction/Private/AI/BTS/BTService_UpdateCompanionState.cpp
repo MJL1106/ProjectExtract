@@ -58,6 +58,13 @@ static TAutoConsoleVariable<int32> CVarCompanionRouteFacingDebug(
 	TEXT("1 = draw the companion's applied route-facing heading (cyan = route, magenta = backtracking)."),
 	ECVF_Cheat);
 
+// companion.ReviveLog 1 — per-tick revive-window state (body heat, fight-live, hot-dwell, bleedout).
+// Read via GetValueOnGameThread() at the point of use, never through a cached IConsoleVariable*:
+// a Live Coding patch left exactly that cached pointer dangling (see comment above).
+static TAutoConsoleVariable<int32> CVarCompanionReviveLog(
+	TEXT("companion.ReviveLog"), 0,
+	TEXT("1 = log companion revive-window gating state each tick."));
+
 // companion.FireDebug is registered once in WeaponBase.cpp — re-query by name here to avoid a
 // duplicate CVar registration across translation units.
 static bool IsCompanionFireDebugEnabled()
@@ -1021,15 +1028,17 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			// the cover slot becomes available for the next engagement. Cover is cleared only when
 			// no target remains (combat ending); a live-but-temporarily-unperceived target retains
 			// both the BB target and the cover slot so the CoverSwitchMonitor stays active.
-			BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
-			// CoverTarget must also clear here. The combat task only clears it under
-			// bReleaseSlot && CoverHandle.IsValid(), and the CoverSwitchMonitor can write it
-			// independently. Any teardown where the monitor wrote the key but the task never
-			// claimed a handle leaves CoverTarget valid with no owner -- the stance backstop's
-			// bCoverHeld veto then reads it as "cover is held" permanently, and the companion
-			// stays crouched for the rest of the level.
-			if (CoverTargetKey.SelectedKeyType != nullptr)
-				BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
+			//
+			// Exception: a commanded cover hold IS "holding cover with no combat target" by
+			// definition. Clearing the cover keys here would wipe the order's own state within a
+			// quarter second of it being issued, causing MoveToCoverPoint to read invalid cover
+			// and the entire TakeCover branch to silently fail.
+			if (!Companion->IsCommandedCoverHoldActive())
+			{
+				BB->SetValueAsBool(HasCoverPositionKey.SelectedKeyName, false);
+				if (CoverTargetKey.SelectedKeyType != nullptr)
+					BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
+			}
 		}
 	}
 
@@ -1075,6 +1084,85 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	// UpdateWaveHold ORs it with bHasTarget anyway, so nothing is lost by using the honest one.
 	const bool bWaveHold = UpdateWaveHold(
 		*Companion, PlayerPawn, RangeTuning, bHasTarget, bReadyOnlyThreat, DeltaSeconds);
+
+	// --- Commanded cover hold release ---
+	// Release when: (a) player moves beyond the leash from the cover anchor, (b) companion
+	// goes DBNO, or (c) a different command is issued (the BB write already happened above).
+	// Modelled on the wave-hold leash above.
+	if (Companion->IsCommandedCoverHoldActive())
+	{
+		bool bReleaseCoverHold = false;
+
+		// (a) Player leash break.
+		if (IsValid(PlayerPawn))
+		{
+			const float LeashSq = FMath::Square(Companion->GetCommandedCoverHoldLeash());
+			const float DistSq = FVector::DistSquared(
+				PlayerPawn->GetActorLocation(), Companion->GetCommandedCoverHoldAnchor());
+			if (DistSq > LeashSq) bReleaseCoverHold = true;
+		}
+
+		// (b) Companion DBNO — unreachable here (TickNode early-returns at :160 on DBNO), but
+		// kept as a backstop. The primary DBNO release is in EnterDBNO()'s teardown block.
+		if (Companion->GetIsCompanionDBNO()) bReleaseCoverHold = true;
+
+		// (c) Different command issued (the command BB key will be something other than TakeCover
+		// or None when a new command has been sent).
+		{
+			const uint8 CurrentCmd = BB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand);
+			const bool bCmdIsTakeCover = CurrentCmd == static_cast<uint8>(ECompanionCommand::TakeCover);
+			const bool bCmdIsNone = CurrentCmd == static_cast<uint8>(ECompanionCommand::None);
+			if (!bCmdIsTakeCover && !bCmdIsNone) bReleaseCoverHold = true;
+		}
+
+		// (d) Never reached the cover — the hold must not park the companion in the open.
+		// MoveToCoverPoint can decline/fail on several paths the commit grant does not bypass.
+		{
+			static constexpr float HoldArriveRadius = 250.f;
+			static constexpr float HoldArriveTimeout = 12.f;
+			if (FVector::DistSquared2D(Companion->GetActorLocation(), Companion->GetCommandedCoverHoldAnchor())
+				> FMath::Square(HoldArriveRadius))
+			{
+				CommandedCoverHoldUnreachedTime += DeltaSeconds;
+				if (CommandedCoverHoldUnreachedTime > HoldArriveTimeout) bReleaseCoverHold = true;
+			}
+			else
+			{
+				CommandedCoverHoldUnreachedTime = 0.f;
+			}
+		}
+
+		// (e) Combat grace: once a fight starts the hold is honoured for N seconds then released.
+		// Also releases when combat ends after the grace was armed (target appeared then died) --
+		// without this, a post-fight companion freezes at stale cover with no release path.
+		if (bHasTarget)
+		{
+			Companion->StampCommandedCoverCombatStart();
+			if (CommandedCoverCombatGraceSeconds > 0.f)
+			{
+				const float CombatStart = Companion->GetCommandedCoverCombatStartTime();
+				if (CombatStart > 0.f && GetWorld()
+					&& (GetWorld()->GetTimeSeconds() - CombatStart) > CommandedCoverCombatGraceSeconds)
+				{
+					bReleaseCoverHold = true;
+				}
+			}
+		}
+		else if (Companion->IsCommandedCoverCombatGraceArmed())
+		{
+			// Combat was seen during this hold and has now ended. Release unconditionally --
+			// no task is maintaining the pose, and none of the other release conditions can fire.
+			bReleaseCoverHold = true;
+		}
+
+		if (bReleaseCoverHold)
+		{
+			Companion->ClearCommandedCoverHold();
+			CommandedCoverHoldUnreachedTime = 0.f;
+			if (bDebugLogging)
+				UE_LOG(LogCompanionAI, Log, TEXT("%s: commanded cover hold RELEASED"), *Companion->GetName());
+		}
+	}
 
 	// --- Fight threat memory (feeds the post-combat overwatch aim pick) ---
 	// First-contact records once per fight (flag survives mid-fight target churn and LoS gaps —
@@ -1630,6 +1718,13 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		// not measured this tick. Filled from the sweep below rather than a second enemy scan.
 		float NearestThreatDist = -1.f;
 
+		// Heat terms for diagnostics -- declared outer so the transition log can read them.
+		// All-false on the mid-revive latch path (no sweep runs there); reads correctly as "no
+		// threat evaluated" alongside NearestThreatDist's -1.
+		bool bBodyHot = false;
+		bool bFightLive = false;
+		bool bDesperation = false;
+
 		// Latch: once the companion is mid-revive, hold the key true so the BT hold is uninterruptible.
 		if (Companion->IsRevivingPlayer())
 		{
@@ -1638,7 +1733,6 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		else
 		{
 			// Check for nearby threats around the downed player via a dedicated overlap.
-			bool bHot = false;
 			const FVector PlayerLoc = PlayerPawn->GetActorLocation();
 			const float ThreatRadius = Companion->ReviveThreatRadius;
 
@@ -1699,13 +1793,23 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 				if (EnemyDistSq <= HardRadiusSq)
 				{
-					bHot = true;
+					bBodyHot = true;
 					break;
 				}
 
 				const AEnemyAIController* RingAIC = Cast<AEnemyAIController>(Enemy->GetController());
 				const UEnemyAwarenessComponent* RingAwareness = RingAIC ? RingAIC->GetAwarenessComponent() : nullptr;
-				if (!RingAwareness || RingAwareness->GetAwarenessState() != EEnemyAwarenessState::Combat) continue;
+				if (!RingAwareness) continue;
+				if (RingAwareness->GetAwarenessState() != EEnemyAwarenessState::Combat) continue;
+
+				// DBNO handoff clause. When the player drops, UpdateCombat hands surviving shooters to an
+				// ally (EnemyAwarenessComponent.cpp:1187-1208): they stay in Combat but their eye-lines move
+				// OFF the body, so the trace below answers "no" for an enemy 8m from the body that is actively
+				// fighting. Safe below the strict-Combat filter: only Combat-state enemies reach this point,
+				// so a post-fight wanderer (Searching/Suspicious/Unaware) with a stale combat-target pointer
+				// is already filtered out. Matches any ally, not just this companion, because the handoff
+				// can target the armed VIP.
+				if (Cast<ACompanionCharacter>(RingAwareness->GetCombatTarget())) { bBodyHot = true; break; }
 
 				FHitResult RingLosHit;
 				FCollisionQueryParams RingLosParams(SCENE_QUERY_STAT(ReviveWindowRingLoS), true);
@@ -1715,7 +1819,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 					RingLosHit, Enemy->GetPawnViewLocation(), PlayerLoc, ECC_Visibility, RingLosParams);
 				if (!bRingLosBlocked || RingLosHit.GetActor() == PlayerPawn)
 				{
-					bHot = true;
+					bBodyHot = true;
 					break;
 				}
 			}
@@ -1724,7 +1828,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			// actively IN COMBAT within ReviveLoSThreatRadius. Searching enemies parked on the
 			// DBNO standoff ring keep an eye-line to the body indefinitely in open maps; counting
 			// them held the window shut until desperation every single time.
-			if (!bHot)
+			if (!bBodyHot)
 			{
 				const float LoSThreatRadiusSq = FMath::Square(Companion->ReviveLoSThreatRadius);
 				for (AActor* Actor : PerceivedActors)
@@ -1747,50 +1851,99 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 						RevLosHit, Enemy->GetPawnViewLocation(), PlayerLoc, ECC_Visibility, RevLosParams);
 					if (!bLosBlocked || RevLosHit.GetActor() == PlayerPawn)
 					{
-						bHot = true;
+						bBodyHot = true;
 						break;
 					}
 				}
 			}
 
-			if (bHot)
+			// --- Companion-centric fight term (ENTRY gate only) ---
+			// Every term above measures the BODY. The enemy side deliberately moves the fight off the body
+			// when the player drops (EnemyAwarenessComponent::UpdateCombat, :1178-1218), so a firefight
+			// raging on the companion 25m away reads the body as cold and the window opens mid-engagement.
+			//
+			// Bleedout-floored: unqualified, a director wave feeding continuous handoffs pins this true and
+			// the ONLY opening arm left is desperation -- a sprint across open ground into a live wave with a
+			// few seconds of slack. The floor releases the term while there is still budget to spend.
+			// Ordering invariant: ReviveFightLiveBleedoutFloor > ReviveSprintBleedoutThreshold (DA, 25) >
+			// DesperationBleedoutThreshold (12). Below the sprint threshold you get a jogging rescue.
+			const float BleedoutRemaining = PlayerIface->GetBleedoutTimeRemaining();
+			bFightLive = false;
+			if (Companion->ReviveFightLiveBleedoutFloor <= 0.f
+				|| BleedoutRemaining <= 0.f
+				|| BleedoutRemaining > Companion->ReviveFightLiveBleedoutFloor)
 			{
-				ReviveSafeAccumulator = 0.f;
+				// TargetAfterUpdate, NOT BestTarget: BestTarget is nulled by the stealth veto (:781) and the
+				// LoS-grace clear (:915) while the BB key -- what BR_Combat's decorator actually reads --
+				// survives (:1013-1033). BestDistSq is never reassigned on either path, so it is stale
+				// whenever BestTarget is null; recomputed here from the cached MyLocation (:265).
+				// No LoS term: HasTargetLOS() is false through cover occlusion (which :862-870 explicitly
+				// treats as a live fight), so requiring it would flicker this at peek cadence.
+				const float SelfEngageSq = FMath::Square(Companion->ReviveSelfEngageRadius);
+				bFightLive =
+					(Companion->ReviveSelfEngageRadius > 0.f && IsValid(TargetAfterUpdate)
+						&& FVector::DistSquared(MyLocation, TargetAfterUpdate->GetActorLocation()) <= SelfEngageSq)
+					|| IsValid(Companion->GetRecentAttacker(Companion->ReviveContactWindow))
+					|| (Companion->ReviveSuppressionThreshold > 0.f
+						&& Companion->GetSuppression01() >= Companion->ReviveSuppressionThreshold);
+			}
+
+			// ENTRY and EXIT heat are deliberately different signals.
+			const bool bEntryHot = bBodyHot || bFightLive;
+
+			if (bEntryHot) ReviveSafeAccumulator = 0.f;
+			else           ReviveSafeAccumulator += DeltaSeconds;
+
+			// Bounded latch. Only BODY heat can shut a committed window: breaking cover and sprinting into
+			// the open is GUARANTEED to draw fire, so letting bFightLive close it makes the approach cancel
+			// itself -- open, sprint, get shot, shut in the open (losing RescueApproachDamageMultiplier at the
+			// worst possible moment), fight, re-open. Being shot mid-approach is not new information; it is
+			// the cost of the commitment. What legitimately aborts a rescue is the DESTINATION going hot.
+			//
+			// Unwinds in real time instead of snapping to zero: a ring-straddling enemy would otherwise
+			// re-zero the dwell every other tick and the latch could never release. Same idiom and reason as
+			// UpdateWaveHoldQuietTimer (:2297-2305).
+			if (bLastReviveWindowOpen)
+			{
+				if (bBodyHot) ReviveHotAccumulator += DeltaSeconds;
+				else          ReviveHotAccumulator = FMath::Max(0.f, ReviveHotAccumulator - DeltaSeconds);
 			}
 			else
 			{
-				ReviveSafeAccumulator += DeltaSeconds;
+				ReviveHotAccumulator = 0.f; // fresh commit gets a fresh dwell
 			}
 
-			const bool bDesperation =
-				PlayerIface->GetBleedoutTimeRemaining() <= Companion->DesperationBleedoutThreshold;
+			bDesperation = BleedoutRemaining <= Companion->DesperationBleedoutThreshold;
 
-			// Committed rescue: once open, the window stays LATCHED — ring enemies flipping back to
-			// Combat as the companion breaks off must not yank it out mid-approach (the open/shut
-			// flicker aborted every rescue ~4s in). The latch drops only on bail: threats hot AND
-			// companion critically low, and desperation overrides even that (a last-ditch attempt
-			// beats a guaranteed bleedout).
 			const UHealthComponent* CompanionHealth = Companion->GetHealthComponent();
 			const float CompanionHealthFrac = IsValid(CompanionHealth) ? CompanionHealth->GetHealthPercent() : 1.f;
-			// Under-fire requirement: low HP alone must not abort a committed rescue — only bail while
-			// actually being shot (recent attacker inside the window). 0 disables the requirement.
 			const bool bUnderFire = Companion->RescueBailUnderFireWindow <= 0.f
 				|| IsValid(Companion->GetRecentAttacker(Companion->RescueBailUnderFireWindow));
-			const bool bBail = bLastReviveWindowOpen && bHot && !bDesperation && bUnderFire
+
+			// Fast exit: critically low AND actually being shot.
+			const bool bBail = bLastReviveWindowOpen && bBodyHot && !bDesperation && bUnderFire
 				&& CompanionHealthFrac < Companion->RescueBailHealthFraction;
 
-			if (bBail)
+			// Slow exit: the body has been hot for a sustained window. This is what bounds the latch.
+			const bool bHotDwellAbort = bLastReviveWindowOpen && !bDesperation
+				&& Companion->ReviveAbortHotSeconds > 0.f
+				&& ReviveHotAccumulator >= Companion->ReviveAbortHotSeconds;
+
+			if (bBail || bHotDwellAbort)
 			{
-				if (bDebugLogging)
-					UE_LOG(LogCompanionAI, Log, TEXT("%s: RESCUE BAIL hp=%.0f%% — re-fighting until safer"),
-						*Companion->GetName(), CompanionHealthFrac * 100.f);
+				if (bDebugLogging || CVarCompanionReviveLog.GetValueOnGameThread() != 0)
+					UE_LOG(LogCompanionAI, Log, TEXT("%s: RESCUE %s hp=%.0f%% hotDwell=%.2fs -- re-fighting until safer"),
+						*Companion->GetName(), bBail ? TEXT("BAIL") : TEXT("HOT-ABORT"),
+						CompanionHealthFrac * 100.f, ReviveHotAccumulator);
+				// Re-arm the full entry grace: a window that just closed must not re-open on safe time banked
+				// before the abort. Removes the need for a separate re-open cooldown.
+				ReviveHotAccumulator = 0.f;
+				ReviveSafeAccumulator = 0.f;
 			}
 			else if (bLastReviveWindowOpen)
 				bReviveWindowOpen = true;
-			// Desperation override: bleedout nearly out
 			else if (bDesperation)
 				bReviveWindowOpen = true;
-			// Grace period elapsed
 			else if (ReviveSafeAccumulator >= Companion->ReviveSafeGraceSeconds)
 				bReviveWindowOpen = true;
 		}
@@ -1824,10 +1977,12 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			PlayerIface->ReleaseReviveClaim(Companion);
 		}
 
-		if (bDebugLogging && bReviveWindowOpen != bLastReviveWindowOpen)
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: REVIVE WINDOW %s (latched=%d bleedout=%.1fs safeAccum=%.2fs)"),
+		if ((bDebugLogging || CVarCompanionReviveLog.GetValueOnGameThread() != 0) && bReviveWindowOpen != bLastReviveWindowOpen)
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: REVIVE WINDOW %s (latched=%d bleedout=%.1fs safeAccum=%.2fs hotDwell=%.2fs bodyHot=%d fightLive=%d desp=%d)"),
 				*Companion->GetName(), bReviveWindowOpen ? TEXT("OPEN") : TEXT("SHUT"),
-				(int32)Companion->IsRevivingPlayer(), PlayerIface->GetBleedoutTimeRemaining(), ReviveSafeAccumulator);
+				(int32)Companion->IsRevivingPlayer(), PlayerIface->GetBleedoutTimeRemaining(),
+				ReviveSafeAccumulator, ReviveHotAccumulator,
+				(int32)bBodyHot, (int32)bFightLive, (int32)bDesperation);
 		bLastReviveWindowOpen = bReviveWindowOpen;
 
 		// Approach damage resist rides the committed rescue (hold-phase resist is bIsRevivingPlayer).
@@ -1843,6 +1998,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	{
 		BB->SetValueAsBool(ReviveWindowOpenKey.SelectedKeyName, false);
 		ReviveSafeAccumulator = 0.f;
+		ReviveHotAccumulator = 0.f;
 		bLastReviveWindowOpen = false;
 		bLastReviveClaimRefused = false;
 		Companion->SetRescueCommitted(false);
@@ -2172,7 +2328,9 @@ bool UBTService_UpdateCompanionState::UpdateWaveHold(
 	// Stand up on release. The hold parks the ally wherever the combat teardown left it, which after
 	// a cover engagement is crouched. Nothing downstream un-crouches a companion that is merely
 	// following, so without this it walks the rest of the level in a permanent crouch.
-	if (!bHold && bLastWaveHold) Companion.UnCrouch();
+	// Skip if a commanded cover hold is still active -- popping the crouch would pull the companion
+	// out of its commanded cover position.
+	if (!bHold && bLastWaveHold && !Companion.IsCommandedCoverHoldActive()) Companion.UnCrouch();
 
 	bLastWaveHold = bHold;
 

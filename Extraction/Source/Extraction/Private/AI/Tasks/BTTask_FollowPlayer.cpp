@@ -265,6 +265,24 @@ void UBTTask_FollowPlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 	}
 	bHoldingForWave = false;
 
+	// --- Commanded cover hold: hold position at the cover the player ordered, same treatment as
+	// the wave hold above. The service's leash/DBNO/new-command release clears the flag. ---
+	if (Companion->IsCommandedCoverHoldActive())
+	{
+		if (!bHoldingForCoverCommand)
+		{
+			bHoldingForCoverCommand = true;
+			Controller->StopMovement();
+			Companion->SetSprinting(false);
+			Companion->SetFollowCatchupPace(false);
+			bFormationSprinting = false;
+			LastMoveTarget = FVector::ZeroVector;
+			bIsIdling = false;
+		}
+		return;
+	}
+	bHoldingForCoverCommand = false;
+
 	// --- Formation (non-sprint) mode: stay near the player indefinitely ---
 
 	// Clamp the three follow distances to a sensible ordering at read time so mistuning can't

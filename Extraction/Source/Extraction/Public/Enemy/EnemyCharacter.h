@@ -354,6 +354,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Data")
 	const UEnemyArchetypeData* GetArchetypeData() const { return ArchetypeData; }
 
+	/** Headshots do not drop this enemy outright (heavies) -- drives the armoured-head hitmarker. */
+	bool HasArmoredHead() const;
+
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
 	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
 

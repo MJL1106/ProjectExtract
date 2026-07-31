@@ -45,6 +45,7 @@ void UEnemyDirectorSubsystem::Deinitialize()
 
 	OnEnemyDied.RemoveDynamic(this, &UEnemyDirectorSubsystem::HandleEnemyKilled);
 
+	UnlatchAllLastMan();
 	SpawnZones.Empty();
 	ScopeVolumes.Empty();
 	Corpses.Empty();
@@ -357,6 +358,7 @@ void UEnemyDirectorSubsystem::DirectorTick()
 	const FEnemySweepResult Sweep = SweepEnemies();
 	LastSweepSearchingCount = Sweep.SearchingCount;
 	LastSweepCombatCount = Sweep.CombatCount;
+	LastSweepAliveCount = Sweep.AliveCount;
 
 	if (AlertLevel != EGlobalAlertLevel::Loud) return;
 
@@ -433,6 +435,10 @@ void UEnemyDirectorSubsystem::DirectorTick()
 			}
 		}
 	}
+
+	// Last-man refresh runs AFTER wave completion: latched survivors outlive the wave and keep
+	// getting their contact refresh until they die or a new wave clears the set.
+	RefreshLastManLatched();
 
 	TimeSinceLastSpawn += DirectorTickInterval;
 }
@@ -1270,6 +1276,10 @@ bool UEnemyDirectorSubsystem::StartWave(const FDirectorWaveRequest& Request)
 	if (WaveProgress.IsActive()) return false;
 	if (Request.TargetSquads < 1) return false;
 
+	// A new wave supersedes any surviving last-man latch from the previous wave. Unlatch before
+	// overwriting ActiveWaveRequest so SetMoralePinnedConfident(false) fires with the old state.
+	UnlatchAllLastMan();
+
 	ActiveWaveRequest = Request;
 	WaveProgress.Begin(Request.TargetSquads);
 	WaveBlockedTime = 0.f;
@@ -1280,6 +1290,7 @@ bool UEnemyDirectorSubsystem::StartWave(const FDirectorWaveRequest& Request)
 	// a wave that spawns nothing for its whole life with not one line in the log.
 	bLoggedNoComposition = false;
 	bLoggedNoZone = false;
+	bLoggedNoScopeVolumes = false;
 
 	TripAlarm();
 
@@ -1397,6 +1408,112 @@ void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
 	}
 
 	if (bCombatStale) LastRallyWorldTime = Now;
+
+	// Arming only: populate LastManLatched when the wave qualifies. Refresh runs separately in
+	// DirectorTick so it survives wave completion.
+	TryArmLastManHunt();
+}
+
+void UEnemyDirectorSubsystem::TryArmLastManHunt()
+{
+	if (!WaveProgress.IsActive()) return;
+	const bool bAllSquadsSpawned = WaveProgress.SpawnedSquads >= WaveProgress.TargetSquads;
+	if (!bAllSquadsSpawned) return;
+
+	const int32 Threshold = ActiveWaveRequest.LastManHuntThreshold;
+	if (Threshold <= 0) return;
+
+	if (LastSweepAliveCount <= 0 || LastSweepAliveCount > Threshold) return;
+
+	if (!HasActiveScopeVolumes())
+	{
+		if (!bLoggedNoScopeVolumes)
+		{
+			bLoggedNoScopeVolumes = true;
+			UE_LOG(LogEnemyAI, Warning,
+				TEXT("Director wave %s: last-man hunt would arm (alive=%d, threshold=%d) but no scope volumes are active"),
+				*ActiveWaveRequest.WaveId.ToString(), LastSweepAliveCount, Threshold);
+		}
+		return;
+	}
+
+	// Already armed — RefreshLastManLatched handles the ongoing work.
+	if (LastManLatched.Num() > 0) return;
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	for (TActorIterator<AEnemyCharacter> It(World); It; ++It)
+	{
+		AEnemyCharacter* Enemy = *It;
+		if (!IsValid(Enemy)) continue;
+		if (!IsActorInsideAnyScope(Enemy)) continue;
+
+		const UHealthComponent* HC = Enemy->GetHealthComponent();
+		if (!IsValid(HC) || HC->IsDead()) continue;
+
+		AEnemyAIController* AIC = Cast<AEnemyAIController>(Enemy->GetController());
+		UEnemyAwarenessComponent* Awareness = IsValid(AIC) ? AIC->GetAwarenessComponent() : nullptr;
+		if (!IsValid(Awareness)) continue;
+
+		Awareness->SetLastManHunting(true);
+		LastManLatched.Add(Enemy);
+		UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: last-man hunt latched on %s (%d alive in scope)"),
+			*ActiveWaveRequest.WaveId.ToString(), *Enemy->GetName(), LastSweepAliveCount);
+	}
+}
+
+void UEnemyDirectorSubsystem::RefreshLastManLatched()
+{
+	if (LastManLatched.Num() == 0) return;
+
+	UWorld* World = GetWorld();
+	APawn* PlayerPawn = IsValid(World) ? UGameplayStatics::GetPlayerPawn(World, 0) : nullptr;
+
+	for (auto It = LastManLatched.CreateIterator(); It; ++It)
+	{
+		AEnemyCharacter* Enemy = It->Get();
+		if (!IsValid(Enemy))
+		{
+			It.RemoveCurrent();
+			continue;
+		}
+
+		const UHealthComponent* HC = Enemy->GetHealthComponent();
+		if (IsValid(HC) && HC->IsDead())
+		{
+			// Death path already called SetLastManHunting(false) + DeactivateForDeath.
+			It.RemoveCurrent();
+			continue;
+		}
+
+		if (!IsValid(PlayerPawn)) continue;
+
+		AEnemyAIController* AIC = Cast<AEnemyAIController>(Enemy->GetController());
+		UEnemyAwarenessComponent* Awareness = IsValid(AIC) ? AIC->GetAwarenessComponent() : nullptr;
+		if (!IsValid(Awareness)) continue;
+
+		Awareness->RefreshLastManContact(PlayerPawn);
+		if (UEnemyMoraleComponent* Morale = Enemy->GetMoraleComponent())
+			Morale->SetMoralePinnedConfident(true);
+	}
+}
+
+void UEnemyDirectorSubsystem::UnlatchAllLastMan()
+{
+	for (const TWeakObjectPtr<AEnemyCharacter>& WeakEnemy : LastManLatched)
+	{
+		AEnemyCharacter* Enemy = WeakEnemy.Get();
+		if (!IsValid(Enemy)) continue;
+
+		AEnemyAIController* AIC = Cast<AEnemyAIController>(Enemy->GetController());
+		UEnemyAwarenessComponent* Awareness = IsValid(AIC) ? AIC->GetAwarenessComponent() : nullptr;
+		if (IsValid(Awareness)) Awareness->SetLastManHunting(false);
+
+		if (UEnemyMoraleComponent* Morale = Enemy->GetMoraleComponent())
+			Morale->SetMoralePinnedConfident(false);
+	}
+	LastManLatched.Empty();
 }
 
 void UEnemyDirectorSubsystem::AccrueWaveBlockedTime()

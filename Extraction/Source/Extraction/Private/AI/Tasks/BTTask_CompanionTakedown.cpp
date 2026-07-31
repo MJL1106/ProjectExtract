@@ -17,6 +17,8 @@
 #include "NavigationSystem.h"
 #include "HealthComponent.h"
 #include "EngineUtils.h"
+#include "AI/AITargetingStatics.h"
+#include "Character/ExtractionPlayer.h"
 
 namespace
 {
@@ -40,7 +42,16 @@ namespace
 	 *  reproduced exactly: same ECC_Visibility channel, same ignore set (self, victim, held weapon)
 	 *  and the same GetAimPointForTarget endpoint. Kept identical on purpose — a task that approved
 	 *  a line the executor then rejected is what let a blocked shoot stand still and silently
-	 *  abort at trigger time. Every line test in this task goes through here. */
+	 *  abort at trigger time. Every line test in this task goes through here.
+	 *
+	 *  Routed through AITargeting::HasClearLineIgnoringPawns so a body standing in the line — the
+	 *  victim's takedown partner in a double takedown, or the player lining up their own shot right
+	 *  beside it — is stepped over instead of read as permanent cover. Both AExtractionPlayer and
+	 *  AEnemyCharacter meshes explicitly block ECC_Visibility, so without this a double takedown's
+	 *  own second enemy (guaranteed to stand beside the victim by construction) and the player
+	 *  himself could each fail the anchor search and the armed-phase re-test. Pawns are safe to
+	 *  step over here specifically because the kill is registered directly and the shot is
+	 *  cosmetic — a body in the path was never a real obstruction to it. */
 	bool HasShootTakedownLosFromEye(const ACompanionCharacter* Companion, const FVector& EyeLocation,
 		const AActor* Victim, AActor** OutBlocker = nullptr)
 	{
@@ -49,7 +60,6 @@ namespace
 		const UWorld* World = Companion->GetWorld();
 		if (!World) return false;
 
-		FHitResult Hit;
 		FCollisionQueryParams TraceParams(SCENE_QUERY_STAT(CompanionShootTakedownAnchor), false, Companion);
 		TraceParams.AddIgnoredActor(Victim);
 
@@ -57,9 +67,7 @@ namespace
 		if (IsValid(HeldWeapon)) TraceParams.AddIgnoredActor(HeldWeapon);
 
 		const FVector TraceEnd = Companion->GetAimPointForTarget(Victim);
-		const bool bBlocked = World->LineTraceSingleByChannel(Hit, EyeLocation, TraceEnd, ECC_Visibility, TraceParams);
-		if (bBlocked && OutBlocker) *OutBlocker = Hit.GetActor();
-		return !bBlocked;
+		return AITargeting::HasClearLineIgnoringPawns(World, EyeLocation, TraceEnd, TraceParams, OutBlocker);
 	}
 
 	/** Line test from where the companion is standing right now — byte-for-byte the executor's own
@@ -132,6 +140,12 @@ EBTNodeResult::Type UBTTask_CompanionTakedown::ExecuteTask(UBehaviorTreeComponen
 	ShootLosRecheckElapsed = 0.f;
 	bShootReanchorUsed = false;
 	ArmedReanchorCount = 0;
+	TaskElapsed = 0.f;
+	// Seeded to the cooldown's own threshold (not 0) so ConsumePatientReanchorCooldown's < check
+	// passes immediately — the FIRST patient re-anchor fires the moment the line breaks; only
+	// repeats afterward are throttled by the cooldown.
+	PatientReanchorCooldownElapsed = PatientReanchorCooldown;
+	bWasApproachPatient = false;
 
 	// Decide autonomous vs synced: union eligible enemies across all volumes containing this
 	// victim. 2+ eligible sharing a volume = synced double-takedown; lone = autonomous solo.
@@ -204,11 +218,38 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
+	// Overall safety-valve accumulator (see OverallTakedownTimeout) — ticks for the whole task
+	// lifetime regardless of phase, since it's the one budget that survives IsPlayerStillDeciding
+	// standing every other one down. Shares the same "tick every frame" lifetime with the patient
+	// re-anchor cooldown, used by both the approach dead-settle and the armed re-break.
+	TaskElapsed += DeltaSeconds;
+	PatientReanchorCooldownElapsed += DeltaSeconds;
+
 	// Eligibility + timeout only checked pre-execution (Approaching / Armed).
 	// Once Executing, the kill is committed — don't re-validate or timeout.
 	if ((Phase == EPhase::Approaching || Phase == EPhase::Armed)
 		&& !Companion->IsCommandedTakedownExecuting())
 	{
+		// Disarmed but not yet Executing: character-side teardown (ExecuteCommandedTakedown's own
+		// early-outs — no weapon, ExecuteTakedown rejected — or the companion's own EnterDBNO) calls
+		// DisarmCommandedTakedown, which resets bTakedownPlayerCommitted to false. That flips
+		// IsPlayerStillDeciding back to true, so without this check the task would re-enter the
+		// patient loop against a takedown that no longer exists — re-anchoring and calling
+		// SetTakedownInPosition on a companion that isn't armed — and stall for up to
+		// OverallTakedownTimeout. IsTakedownEligibleFor below doesn't catch this on its own: a
+		// Searching (not yet Combat) victim stays eligible. Bail the instant we're disarmed.
+		if (!Companion->IsCommandedTakedownArmed())
+		{
+			UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: companion disarmed externally (phase=%d) — ending task"), (int32)Phase);
+			// Evaluated BEFORE CleanupTask, not after: CleanupTask resets CachedVictim, and
+			// CompletionResult() reads it — called after teardown it would always see null and report
+			// Succeeded unconditionally, even for the "no weapon" / "ExecuteTakedown rejected" disarm
+			// paths where the victim was never touched. Latch the real result first.
+			const EBTNodeResult::Type Result = CompletionResult();
+			CleanupTask(Companion);
+			return FinishLatentTask(OwnerComp, Result);
+		}
+
 		// Instigator-aware: the victim is reserved to us from ArmCommandedTakedown, so a drift to
 		// Searching (the alert ratchet waking the level off the player's missed shot) no longer
 		// invalidates a takedown already lined up. Only the victim reaching Combat does.
@@ -298,30 +339,23 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 				ShootLosRecheckElapsed = 0.f;
 				if (!HasShootTakedownLosInPlace(Companion, Victim))
 				{
-					// Cap armed-phase re-anchors: a victim patrolling across a pillar edge
-					// flickers the trace indefinitely, each cycle costing a full ComputeShootAnchor
-					// (worst-case 18 nav projections + 18 line traces) plus visible stutter-stop.
-					++ArmedReanchorCount;
-					if (ArmedReanchorCount > MaxArmedReanchors)
-					{
-						UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: armed shoot line lost %d times on %s — falling back to gunfire"), ArmedReanchorCount, *GetNameSafe(Victim));
-						CleanupTask(Companion);
-						return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-					}
-
-					// The world moved since the anchor was picked, so the approach earns a fresh
-					// re-anchor budget instead of inheriting the last approach's spent one.
-					bShootReanchorUsed = false;
-					if (!BeginShootApproach(Companion, AIC, Victim))
-					{
-						UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: armed shoot line lost on %s, no anchor left — falling back to gunfire"), *GetNameSafe(Victim));
-						CleanupTask(Companion);
-						return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
-					}
-
-					UE_LOG(LogCompanion, Log, TEXT("CompanionTakedown: armed shoot line lost on %s — repositioning (%d/%d)"), *GetNameSafe(Victim), ArmedReanchorCount, MaxArmedReanchors);
+					if (HandleArmedShootLosBreak(OwnerComp, AIC, Companion, Victim, IsPlayerStillDeciding(Companion)))
+						return;
 					break;
 				}
+
+				// Line recovered while still Armed. A prior re-break (HandleArmedShootLosBreak)
+				// unconditionally clears bTakedownInPosition, and while patient the cooldown gate can
+				// hold Phase at Armed with no reposition ever issued — the only other writer of true,
+				// ArmShootInPlace, is unreachable without transitioning through Approaching. Left
+				// uncleared, the companion stands in a valid firing position reporting "not in
+				// position": a player commit lands in OnPlayerTakedownCommittedHandler's "will execute
+				// on arrival" branch and the arrival never comes, burning the full
+				// OverallTakedownTimeout before degrading to gunfire. Safe unconditionally here —
+				// IsCommandedTakedownExecuting() already returned above, and ExecuteCommandedTakedown
+				// carries its own re-entry guard.
+				Companion->SetTakedownInPosition(true);
+				UE_LOG(LogCompanion, Log, TEXT("CompanionTakedown: armed shoot line recovered on %s — back in position"), *GetNameSafe(Victim));
 			}
 		}
 
@@ -356,9 +390,15 @@ void UBTTask_CompanionTakedown::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 
 		// --- Synced path: wait for player commit (existing behaviour) ---
 		ArmedHoldElapsed += DeltaSeconds;
-		if (ArmedHoldElapsed > ArmedHoldTimeout)
+
+		// Stands down while the player is still deciding (Fix 2) — OverallTakedownTimeout (shared
+		// with the shoot approach) replaces it, so a patient player is never the reason the hold
+		// gives up. Keeps its original meaning the instant the player commits.
+		const bool bPatientHold = IsPlayerStillDeciding(Companion);
+		const bool bHoldTimedOut = bPatientHold ? (TaskElapsed > OverallTakedownTimeout) : (ArmedHoldElapsed > ArmedHoldTimeout);
+		if (bHoldTimedOut)
 		{
-			UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: armed hold timed out (%.1fs)"), ArmedHoldElapsed);
+			UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: armed hold timed out (%.1fs)"), bPatientHold ? TaskElapsed : ArmedHoldElapsed);
 			CleanupTask(Companion);
 			return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 		}
@@ -462,6 +502,11 @@ void UBTTask_CompanionTakedown::CleanupTask(ACompanionCharacter* Companion)
 	ShootLosRecheckElapsed = 0.f;
 	bShootReanchorUsed = false;
 	ArmedReanchorCount = 0;
+	TaskElapsed = 0.f;
+	// See ExecuteTask: seeded to the cooldown's own threshold so the next task run's first patient
+	// re-anchor isn't delayed a full PatientReanchorCooldown.
+	PatientReanchorCooldownElapsed = PatientReanchorCooldown;
+	bWasApproachPatient = false;
 }
 
 bool UBTTask_CompanionTakedown::BeginShootTakedown(ACompanionCharacter* Companion, AAIController* AIC, AActor* Victim)
@@ -545,11 +590,36 @@ bool UBTTask_CompanionTakedown::TickShootApproach(UBehaviorTreeComponent& OwnerC
 	ApproachElapsed += DeltaSeconds;
 	ShootMoveIssuedElapsed += DeltaSeconds;
 
-	// Cumulative across every re-approach on purpose: a victim that keeps breaking the line degrades
-	// to normal gunfire (CleanupTask latches it) instead of looping approach->armed->approach.
-	if (ApproachElapsed > ShootApproachTimeout)
+	// Cumulative across every re-approach — but only once the player has already committed (or
+	// this is an autonomous solo run). While the player is still deciding (Fix 2),
+	// ShootApproachTimeout stands down and OverallTakedownTimeout (the shared safety valve) takes
+	// over instead, so the approach isn't punished for the player taking their time.
+	const bool bPatient = IsPlayerStillDeciding(Companion);
+
+	// Patient->non-patient edge (player commits, or execution starts, mid-approach): zero
+	// ApproachElapsed so the resumed approach gets a FULL fresh ShootApproachTimeout window from the
+	// commit frame. Without this, ApproachElapsed keeps accumulating through the entire patient
+	// wait, and a player who waits 30s then commits with the companion one step from its anchor gets
+	// an immediate abort-to-gunfire below — ApproachElapsed blew past ShootApproachTimeout (8s)
+	// ~22s ago. That would make the deferred-commit path (CommitTakedownNow / SetTakedownInPosition
+	// firing the takedown on arrival) unreachable after any long patient wait.
+	// ArmedReanchorCount gets the same reset for the same reason: it keeps incrementing through a
+	// patient flicker (uncapped, can reach ~60 over a 45s OverallTakedownTimeout at the 0.75s
+	// cooldown's cadence) and MaxArmedReanchors re-applies the instant patience ends — without
+	// zeroing it here, the very next armed break after a long patient wait would inherit an
+	// already-spent budget and abort to gunfire instead of getting its full post-commit allowance.
+	if (bWasApproachPatient && !bPatient)
 	{
-		UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: shoot approach timed out (%.1fs) — falling back to gunfire"), ApproachElapsed);
+		ApproachElapsed = 0.f;
+		ArmedReanchorCount = 0;
+	}
+	bWasApproachPatient = bPatient;
+
+	const float TimeoutElapsed = bPatient ? TaskElapsed : ApproachElapsed;
+	const float Timeout = bPatient ? OverallTakedownTimeout : ShootApproachTimeout;
+	if (TimeoutElapsed > Timeout)
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: shoot approach timed out (%.1fs) — falling back to gunfire"), TimeoutElapsed);
 		CleanupTask(Companion);
 		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 		return true;
@@ -565,23 +635,127 @@ bool UBTTask_CompanionTakedown::TickShootApproach(UBehaviorTreeComponent& OwnerC
 	}
 
 	// Move finished (reached or stalled) with the line still blocked — the anchor was stale or
-	// unreachable. Re-anchor once; a second dead settle means no reachable firing spot exists.
+	// unreachable. See HandleShootApproachDeadSettle for the patient/non-patient re-anchor split.
 	const bool bMoveSettled = bMoveRequestSent
 		&& AIC->GetMoveStatus() == EPathFollowingStatus::Idle
 		&& ShootMoveIssuedElapsed > ShootMoveSettleGrace;
 	if (!bMoveSettled) return false;
 
-	if (!bShootReanchorUsed && BeginShootApproach(Companion, AIC, Victim))
+	return HandleShootApproachDeadSettle(OwnerComp, AIC, Companion, Victim, bPatient);
+}
+
+bool UBTTask_CompanionTakedown::IsPlayerStillDeciding(const ACompanionCharacter* Companion) const
+{
+	if (bAutonomous) return false;
+	if (!IsValid(Companion)) return false;
+	if (Companion->IsCommandedTakedownPlayerCommitted()) return false;
+	if (Companion->IsCommandedTakedownExecuting()) return false;
+
+	// A downed player cannot commit. Without this, a DBNO player still reads as "deciding" and holds
+	// the companion in the patient loop (ArmedHoldTimeout stood down too) for up to
+	// OverallTakedownTimeout with no path to ever firing — starving combat/revive instead. Same
+	// controller->player lookup ArmCommandedTakedown already uses to find the player in the first
+	// place.
+	const ACompanionAIController* CompAIC = Cast<ACompanionAIController>(Companion->GetController());
+	const APawn* PlayerPawn = IsValid(CompAIC) ? CompAIC->GetPlayerCharacter() : nullptr;
+	const AExtractionPlayer* Player = Cast<AExtractionPlayer>(PlayerPawn);
+	if (IsValid(Player) && Player->GetIsDBNO()) return false;
+
+	return true;
+}
+
+bool UBTTask_CompanionTakedown::ConsumePatientReanchorCooldown()
+{
+	if (PatientReanchorCooldownElapsed < PatientReanchorCooldown) return false;
+	PatientReanchorCooldownElapsed = 0.f;
+	return true;
+}
+
+bool UBTTask_CompanionTakedown::HandleShootApproachDeadSettle(UBehaviorTreeComponent& OwnerComp, AAIController* AIC,
+	ACompanionCharacter* Companion, AActor* Victim, bool bPatient)
+{
+	// Non-patient: original single-shot cap. A second dead settle with the budget already spent
+	// means no reachable firing spot exists, so this degrades to gunfire instead of looping.
+	if (!bPatient && bShootReanchorUsed)
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: shoot reposition dead-ended on %s — falling back to gunfire"), *GetNameSafe(Victim));
+		CleanupTask(Companion);
+		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		return true;
+	}
+
+	// Patient: unbounded re-anchoring, cooldown-gated instead of single-shot — hold the blocked
+	// line until the throttle clears rather than spinning ComputeShootAnchor every tick.
+	if (bPatient && !ConsumePatientReanchorCooldown()) return false;
+
+	if (BeginShootApproach(Companion, AIC, Victim))
 	{
 		bShootReanchorUsed = true;
 		UE_LOG(LogCompanion, Log, TEXT("CompanionTakedown: shoot anchor dead — re-anchoring on %s"), *GetNameSafe(Victim));
 		return false;
 	}
 
-	UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: shoot reposition dead-ended on %s — falling back to gunfire"), *GetNameSafe(Victim));
+	// Hard fail regardless of patience: ComputeShootAnchor found no reachable navmesh point
+	// ANYWHERE with a line to the victim — there is genuinely no firing position left to look for.
+	UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: shoot reposition dead-ended on %s, no anchor left — falling back to gunfire"), *GetNameSafe(Victim));
 	CleanupTask(Companion);
 	FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	return true;
+}
+
+bool UBTTask_CompanionTakedown::HandleArmedShootLosBreak(UBehaviorTreeComponent& OwnerComp, AAIController* AIC,
+	ACompanionCharacter* Companion, AActor* Victim, bool bPatient)
+{
+	// CRITICAL fix: clear "in position" immediately and unconditionally, before any branching below
+	// (including the patient cooldown gate). The line just broke — bTakedownInPosition reading true
+	// against a KNOWN-blocked line is exactly the silent-whiff bug this task exists to eliminate.
+	// Only BeginShootApproach otherwise clears this flag, and the patient cooldown gate below can
+	// return without ever reaching it, leaving a window (PatientReanchorCooldown + the 0.25s
+	// ShootLosRecheckInterval detection latency, ~1s) where a player commit landing here would sail
+	// through OnPlayerTakedownCommittedHandler/OnPlayerFiredWeaponHandler, straight into
+	// ExecuteCommandedTakedown's own LoS gate re-tracing the same blocked line, and whiff silently.
+	// Safe unconditionally: every path below either aborts (CleanupTask disarms) or calls
+	// BeginShootApproach, which sets this false anyway once the reposition move is issued.
+	Companion->SetTakedownInPosition(false);
+
+	// Patient: cooldown-gated instead of capped — hold the broken line until the throttle clears.
+	// Placed BEFORE the ArmedReanchorCount increment (moved below, see next comment) so a patient
+	// flicker sitting on the 0.25s LoS-recheck cadence doesn't inflate the count every re-test when
+	// only 1-in-3 actually re-anchors (PatientReanchorCooldown 0.75s / ShootLosRecheckInterval
+	// 0.25s). Non-patient falls through here immediately (short-circuits on bPatient), so its
+	// counting/capping cadence below is unchanged from before this split.
+	if (bPatient && !ConsumePatientReanchorCooldown()) return false;
+
+	// A victim patrolling across a pillar edge can flicker the aim-point trace indefinitely — keep
+	// counting for the log line and the non-patient cap below. Only reached once per actual
+	// re-anchor attempt now (post-cooldown for the patient path), so the count reflects real
+	// attempts rather than every throttled re-test.
+	++ArmedReanchorCount;
+
+	// Non-patient: original hard cap, each cycle costing a full ComputeShootAnchor (worst-case 18
+	// nav projections + 18 line traces) plus visible stutter-stop.
+	if (!bPatient && ArmedReanchorCount > MaxArmedReanchors)
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: armed shoot line lost %d times on %s — falling back to gunfire"), ArmedReanchorCount, *GetNameSafe(Victim));
+		CleanupTask(Companion);
+		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		return true;
+	}
+
+	// The world moved since the anchor was picked, so the approach earns a fresh re-anchor budget
+	// instead of inheriting the last approach's spent one.
+	bShootReanchorUsed = false;
+	if (!BeginShootApproach(Companion, AIC, Victim))
+	{
+		// Hard fail regardless of patience: no reachable firing spot exists anywhere.
+		UE_LOG(LogCompanion, Warning, TEXT("CompanionTakedown: armed shoot line lost on %s, no anchor left — falling back to gunfire"), *GetNameSafe(Victim));
+		CleanupTask(Companion);
+		FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
+		return true;
+	}
+
+	UE_LOG(LogCompanion, Log, TEXT("CompanionTakedown: armed shoot line lost on %s — repositioning (%d/%d)"), *GetNameSafe(Victim), ArmedReanchorCount, MaxArmedReanchors);
+	return false;
 }
 
 // FIX 6: Try +angle, -angle, 0 behind the victim; pick the first nav-reachable anchor

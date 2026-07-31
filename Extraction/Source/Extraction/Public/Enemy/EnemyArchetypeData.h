@@ -1204,6 +1204,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
 	float DBNOStandoffRadius = 1800.f;
 
+	/** Only read while the enemy director has latched this enemy as the last living member of its
+	 *  wave (see FDirectorWaveRequest::LastManHuntThreshold). Every other enemy ignores it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0",
+		ToolTip = "How long the wave's last man may go without line of sight to the player before he abandons cover and closes on them. A last man still trading fire behaves exactly as any other enemy; only one that has gone quiet starts hunting. 0 = never close."))
+	float LastManHuntNoLosSeconds = 6.f;
+
 	// --- Rusher (three-phase: cover approach → circle-strafe standoff → triggered charge) ---
 
 	/** Ring radius (cm) the rusher orbits the target at while circle-strafing. */

@@ -697,6 +697,11 @@ void AEnemyCharacter::SetWeaponHandSocket(bool bUsePatrolHand, bool bImmediate)
 
 // --- Archetype ---
 
+bool AEnemyCharacter::HasArmoredHead() const
+{
+	return IsValid(ArchetypeData) && !ArchetypeData->bHeadshotOneTap;
+}
+
 void AEnemyCharacter::ApplyArchetypeData()
 {
 	if (!IsValid(ArchetypeData))

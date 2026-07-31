@@ -33,6 +33,11 @@
 static constexpr float CoverArrivalAcceptRadius = 25.f;
 static constexpr float CoverArrivalTickRadius   = 30.f;
 static constexpr float CoverArrivalIdleRadius   = 45.f;
+/** Vertical tolerance (cm) for commanded cross-floor cover arrival. Must clear the capsule
+ *  stance delta (standing 88 - crouched 40 = 48cm) plus any nav-offset residual, while still
+ *  rejecting a wrong floor (~300cm). 120cm meets both with margin. The autonomous path stays
+ *  pure 2D and never evaluates this. */
+static constexpr float CommandedCoverArrivalZBand = 120.f;
 // Prefixed (vs the plain DefaultCapsuleRadius in BTTask_EnemyCombatFire.cpp) — unity builds can
 // merge the two TUs into one chunk, where file-scope statics with the same name collide.
 static constexpr float MoveToCoverDefaultCapsuleRadius = 34.f;
@@ -89,14 +94,29 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	AAIController* Controller = OwnerComp.GetAIOwner();
 	APawn* Pawn = Controller ? Controller->GetPawn() : nullptr;
-	if (!BB || !Controller || !Pawn) return EBTNodeResult::Failed;
+	if (!BB || !Controller || !Pawn)
+	{
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("MoveToCoverPoint: ExecuteTask FAILED reason=null-precondition BB=%d Controller=%d Pawn=%d"),
+			BB != nullptr, Controller != nullptr, Pawn != nullptr);
+		return EBTNodeResult::Failed;
+	}
 
 	// Purposeful commit grant (angle-seek / Combat advance hop): consume UP FRONT — above the
 	// EQS-empty return and the claim-guard decline — so no path through this task can leave a
 	// stale grant. Time-stamped; expired reads false.
+	// The commanded-cover re-rank skip rides the same rule for the same reason: every decline path
+	// below returns early, so consuming at the use site would leak the flag onto the next ordinary
+	// cover commit and silently suppress its multi-threat re-rank.
 	bool bCommitGrant = false;
+	bool bSkipRerank = false;
+	bool bCommandedCoverBypass = false;
 	if (ACompanionCharacter* GrantCompanion = Cast<ACompanionCharacter>(Pawn))
+	{
 		bCommitGrant = GrantCompanion->ConsumeCoverCommitGrant();
+		bSkipRerank = GrantCompanion->ConsumeCommandedCoverSkipRerank();
+		bCommandedCoverBypass = GrantCompanion->ConsumeCommandedCoverBypass();
+	}
 
 	// Set HasCover false at start (mirror old task's ReleaseClaim semantics)
 	if (HasCoverKey.SelectedKeyName != NAME_None)
@@ -105,7 +125,14 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	// Read the cover from the BB via the typed key accessor (avoids GetOuter null for non-instanced
 	// nodes). Non-const: the companion's multi-threat re-rank below may override the EQS pick.
 	FCover Cover = BB->GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID());
-	if (!Cover.IsValid()) return EBTNodeResult::Failed;
+	if (!Cover.IsValid())
+	{
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("%s: MoveToCoverPoint FAILED reason=cover-invalid key=%s keyID=%d"),
+			*GetNameSafe(Pawn), *CoverTargetKey.SelectedKeyName.ToString(),
+			(CoverTargetKey.GetSelectedKeyID() == FBlackboard::InvalidKey) ? -1 : (int32)CoverTargetKey.GetSelectedKeyID());
+		return EBTNodeResult::Failed;
+	}
 
 	// Companion: a switch-monitor commit writes CoverTarget + stamps intent, then the combat task
 	// finishes — but the BT loop's EQS task re-picks and overwrites CoverTarget before this task
@@ -204,17 +231,16 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 					&& Controller->LineOfSightTo(PbTarget);
 			}
 
-			// Wrong-floor pick: cover only shields on the floor you stand on, and the EQS/scans can
-			// hand back a slot one storey up (baked multi-floor cover set). Committing to it sends
-			// the companion crouch-walking into the open toward an unreachable hunker. Overrides
-			// grants too — no trigger justifies a cross-floor duck spot.
-			const bool bOffLevel = Tuning->CoverPickMaxZDelta > 0.f
+			// Wrong-floor pick: autonomous cover should stay on the same floor. Player-commanded
+			// orders bypass this -- the player's decision overrides the policy.
+			const bool bOffLevel = !bCommandedCoverBypass && Tuning->CoverPickMaxZDelta > 0.f
 				&& FMath::Abs(Pawn->GetActorLocation().Z - Cover.Data.Location.Z) > Tuning->CoverPickMaxZDelta;
 
-			// CoverCommitMaxDistance is now an outer sanity cap (never trek across the map for a
-			// duck spot), not the old decline-happy 6.5m radius.
+			// CoverCommitMaxDistance is an outer sanity cap for autonomous picks (never trek across
+			// the map for a duck spot). Player-commanded orders bypass it (bCommandedCoverBypass).
 			const float OuterCap = FMath::Max(Tuning->CoverCommitMaxDistance, Tuning->CoverSearchRadius);
-			if (CommitDist > OuterCap || (!Triggers.Any() && !bCommitGrant) || bRecommitBlocked || !bDashAllowed
+			const bool bDistTooFar = CommitDist > OuterCap && !bCommandedCoverBypass;
+			if (bDistTooFar || (!Triggers.Any() && !bCommitGrant) || bRecommitBlocked || !bDashAllowed
 				|| bPointBlankThreat || bOffLevel)
 			{
 				UE_LOG(LogCompanionAI, Log,
@@ -233,6 +259,9 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 			// Eyes-on validation + multi-threat re-rank: the EQS winner must have a usable peek line
 			// to the combat target AND shield against extra threats. If the pick is blind and no nearby
 			// candidate passes, decline the commit (routes to open-engage / turn-and-fight via ForceSuccess).
+			// Commanded cover: the player picked this exact position — bSkipRerank (consumed up-front)
+			// skips the re-rank swap but keeps the bNoEyesOn decline. Enemy pawns never set the flag,
+			// so it reads false and this path stays byte-identical for them.
 			bool bNoEyesOn = false;
 			const FCover Reranked = ValidateAndRerankCover(OwnerComp, Controller, Pawn, *Tuning, Cover, bNoEyesOn);
 			if (bNoEyesOn)
@@ -248,7 +277,7 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 				BB->ClearValue(CoverTargetKey.GetSelectedKeyID());
 				return EBTNodeResult::Failed;
 			}
-			if (Reranked.IsValid() && Reranked.Handle != Cover.Handle)
+			if (!bSkipRerank && Reranked.IsValid() && Reranked.Handle != Cover.Handle)
 			{
 				Cover = Reranked;
 				BB->SetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID(), Cover);
@@ -358,17 +387,31 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	else if (const ACompanionCharacter* ArrCompanion = Cast<ACompanionCharacter>(Pawn))
 	{
 		ArrivalPos = CompanionCover::CompanionHunkerPosition(*ArrCompanion, Cover.Data, Standoff);
-		ArrivalPos.Z = PawnLoc.Z;
+		// Commanded cross-floor: store the cover's own Z. The arrival check uses a separate
+		// Z band (CommandedCoverArrivalZBand) rather than a single 3D radius, so the exact Z
+		// offset between navmesh and capsule centre does not eat the tight XY radii, and
+		// stance changes mid-approach cannot shift the arrival target.
+		// Autonomous: pawn Z, for the pure 2D arrival the existing path expects.
+		ArrivalPos.Z = bCommandedCoverBypass ? Cover.Data.Location.Z : PawnLoc.Z;
 	}
 	else
 	{
 		ArrivalPos = UCoverGeometryStatics::GetApproachPosition(Cover.Data, PawnLoc, Standoff);
+		ArrivalPos.Z = PawnLoc.Z;
 	}
-	ArrivalPos.Z = PawnLoc.Z;
+	// Enemy path: Z from pawn (nav height). Companion and generic paths set Z in their own branches.
+	if (IsValid(DA))
+		ArrivalPos.Z = PawnLoc.Z;
 	Mem->ArrivalPos = ArrivalPos;
+	Mem->bIsCommandedCover = bCommandedCoverBypass;
 
-	// Already at destination? (2D — ArrivalPos is on the cover Z plane, see arrival check below)
-	if (FVector::Dist2D(PawnLoc, ArrivalPos) <= CoverArrivalAcceptRadius)
+	// Already at destination? XY tight, Z checked as a separate band for commanded cross-floor
+	// orders. Autonomous path: bCommandedCoverBypass is false, bArrivedZ is true (short-circuit),
+	// so this reduces to the original pure-2D check.
+	const bool bEarlyXY = FVector::Dist2D(PawnLoc, ArrivalPos) <= CoverArrivalAcceptRadius;
+	const bool bEarlyZ = !bCommandedCoverBypass
+		|| FMath::Abs(PawnLoc.Z - ArrivalPos.Z) <= CommandedCoverArrivalZBand;
+	if (bEarlyXY && bEarlyZ)
 	{
 		HandleArrival(OwnerComp, Mem, BB, Pawn, Cover.Data);
 		return EBTNodeResult::Succeeded;
@@ -467,12 +510,15 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 	}
 
 	const FVector PawnLoc = Pawn->GetActorLocation();
-	// 2D — ArrivalPos sits on the cover's Z plane, not at capsule-centre height; with the
-	// tightened radii a 3D check would eat most of the budget in vertical offset.
-	const float Dist = FVector::Dist2D(PawnLoc, Mem->ArrivalPos);
+	// XY tight, Z as a separate band for commanded cross-floor orders. Autonomous path:
+	// bIsCommandedCover is false, bArrivedZ is true (short-circuit), so this reduces to
+	// the original pure-2D check with no Z cost.
+	const float DistXY = FVector::Dist2D(PawnLoc, Mem->ArrivalPos);
+	const bool bArrivedZ = !Mem->bIsCommandedCover
+		|| FMath::Abs(PawnLoc.Z - Mem->ArrivalPos.Z) <= CommandedCoverArrivalZBand;
 	const EPathFollowingStatus::Type Status = PF->GetStatus();
-	const bool bArrived = (Dist <= CoverArrivalTickRadius) ||
-		(Status == EPathFollowingStatus::Idle && Dist <= CoverArrivalIdleRadius);
+	const bool bArrived = (DistXY <= CoverArrivalTickRadius && bArrivedZ) ||
+		(Status == EPathFollowingStatus::Idle && DistXY <= CoverArrivalIdleRadius && bArrivedZ);
 
 	AEnemyCharacter* Enemy = Mem->CachedEnemy.Get();
 	const UEnemyArchetypeData* DA = Mem->CachedDA.Get();
@@ -570,18 +616,43 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 	}
 
 	// --- Stall detection ---
+	// Enemy path: closing-distance (2D) metric from archetype data.
+	// Companion path: displacement-based speed metric from companion tuning.
 	bool bStalled = false;
 	if (!bArrived && IsValid(DA))
 	{
-		if (Dist + DA->CoverMoveStallProgressEpsilon < Mem->StallBestDist)
+		if (DistXY + DA->CoverMoveStallProgressEpsilon < Mem->StallBestDist)
 		{
-			Mem->StallBestDist = Dist;
+			Mem->StallBestDist = DistXY;
 			Mem->StallAccum = 0.f;
 		}
 		else
 		{
 			Mem->StallAccum += DeltaSeconds;
 			bStalled = (Mem->StallAccum >= DA->CoverMoveStallTimeout);
+		}
+	}
+	else if (!bArrived && !IsValid(DA))
+	{
+		// Companion path: displacement-based stall detection. Immune to nav detours (which hold
+		// or increase straight-line distance for well over the timeout). Six seconds of genuinely
+		// zero movement is an unambiguous wedge.
+		const ACompanionAIController* StallCtrl = Cast<ACompanionAIController>(Controller);
+		const UCompanionTuningDataAsset* StallTuning = StallCtrl ? StallCtrl->GetTuning() : nullptr;
+		if (StallTuning)
+		{
+			if (Mem->bHasLastPawnLoc && DeltaSeconds > KINDA_SMALL_NUMBER)
+			{
+				const float Displacement = FVector::Dist2D(PawnLoc, Mem->LastPawnLoc);
+				const float Speed = Displacement / DeltaSeconds;
+				if (Speed >= StallTuning->CoverMoveStallMinProgressSpeed)
+					Mem->StallAccum = 0.f;
+				else
+					Mem->StallAccum += DeltaSeconds;
+				bStalled = (Mem->StallAccum >= StallTuning->CoverMoveStallTimeout);
+			}
+			Mem->LastPawnLoc = PawnLoc;
+			Mem->bHasLastPawnLoc = true;
 		}
 	}
 
@@ -754,11 +825,14 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
 	}
 
-	// Path failed or stalled
+	// Path failed or stalled. For a commanded cover order: HandleFailure clears CoverTargetKey,
+	// ForceSuccess advances the sequence to BTTask_CompanionHoldCover, whose ExecuteTask reads
+	// invalid cover and calls ClearCommandedCoverHold(). That is the release path for the hold
+	// latch when the companion cannot reach the ordered cover.
 	if (bStalled)
 	{
 		UE_LOG(LogEnemyAI, Log, TEXT("[COVER-AICS] %s stalled advancing to cover (dist=%.0f) — abandoning"),
-			*Pawn->GetName(), Dist);
+			*Pawn->GetName(), DistXY);
 	}
 
 	StopAdvanceFire(OwnerComp, Mem, false);
