@@ -12,6 +12,17 @@
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnLootNotify, const FText&, Message);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnKeycardRecorded, FName, KeycardId);
 
+/** Severity for the OnToastNotify channel -- drives HUD toast duration/colour/sound. */
+UENUM(BlueprintType)
+enum class EToastSeverity : uint8
+{
+	Info,      // loot, objectives -- the existing look
+	Warning,   // player is drifting into trouble
+	Alert,     // the bad thing has happened
+};
+
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnToastNotify, const FText&, Message, EToastSeverity, Severity);
+
 DECLARE_LOG_CATEGORY_EXTERN(LogMissionInventory, Log, All);
 
 UCLASS()
@@ -41,6 +52,12 @@ public:
 	/** HUD toast subscribes here — one channel for every acquisition message. */
 	UPROPERTY(BlueprintAssignable, Category = "Loot")
 	FOnLootNotify OnLootNotify;
+
+	/** Second HUD toast channel for messages that need emphasis (stealth discipline etc).
+	 *  OnLootNotify remains the plain acquisition channel -- this one carries a severity so
+	 *  the toast can hold longer, tint distinctly and play a sting. */
+	UPROPERTY(BlueprintAssignable, Category = "Loot")
+	FOnToastNotify OnToastNotify;
 
 	/** Fired once per NEWLY acquired keycard (not on duplicates). Objective markers with an
 	 *  item criterion listen here. */

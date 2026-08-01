@@ -3,6 +3,7 @@
 #include "World/StealthDisciplineVolume.h"
 #include "Character/ExtractionPlayer.h"
 #include "Components/BoxComponent.h"
+#include "Kismet/GameplayStatics.h"
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
 #include "Audio/MusicSubsystem.h"
@@ -43,6 +44,25 @@ void AStealthDisciplineVolume::BeginPlay()
 			return;
 		}
 		Director->OnDirectorWaveStarted.AddDynamic(this, &AStealthDisciplineVolume::OnWaveStarted);
+	}
+
+	ObjectiveFlow = Cast<ALevelObjectiveFlow>(
+		UGameplayStatics::GetActorOfClass(GetWorld(), ALevelObjectiveFlow::StaticClass()));
+
+	// Fail open: a level with no objective flow (or gating switched off) must behave exactly as it
+	// did before the gate existed rather than silently disabling the volume for the whole run.
+	if (!bGateOnObjectiveStep || !ObjectiveFlow.IsValid())
+	{
+		bArmed = true;
+		UE_LOG(LogExtraction, Log, TEXT("StealthDisciplineVolume '%s': objective gate inactive (%s) -- armed immediately"),
+			*GetNameSafe(this),
+			bGateOnObjectiveStep ? TEXT("no ALevelObjectiveFlow in level") : TEXT("bGateOnObjectiveStep is false"));
+	}
+	else
+	{
+		// Early-out only -- the SampleTick poll is what actually guarantees arming, since actor
+		// BeginPlay order isn't deterministic and the flow may not have activated yet.
+		UpdateArmedState();
 	}
 
 	BoxComponent->OnComponentBeginOverlap.AddDynamic(this, &AStealthDisciplineVolume::OnBeginOverlap);
@@ -183,6 +203,8 @@ void AStealthDisciplineVolume::StopSampling()
 
 void AStealthDisciplineVolume::SampleTick()
 {
+	UpdateArmedState();
+
 	AExtractionPlayer* Player = TrackedPlayer.Get();
 	if (!IsValid(Player))
 	{
@@ -228,6 +250,29 @@ void AStealthDisciplineVolume::SampleTickOutside()
 
 void AStealthDisciplineVolume::SampleTickInside(AExtractionPlayer* Player)
 {
+	// Unarmed: overlap tracking, the shot relay and the stealth music all keep running, but nothing
+	// is scored. Pending shots are dropped so an unarmed burst can't bank up and land in one lump
+	// the instant the gate opens.
+	if (!bArmed)
+	{
+		PendingNormalShots = 0;
+		PendingSuppressedShots = 0;
+
+		if (!bLoggedUnarmedEntry)
+		{
+			bLoggedUnarmedEntry = true;
+			const ALevelObjectiveFlow* Flow = ObjectiveFlow.Get();
+			UE_LOG(LogExtraction, Warning, TEXT("StealthDisciplineVolume '%s': player inside but NOT armed -- objective flow %s, arms after step %d"),
+				*GetNameSafe(this),
+				IsValid(Flow)
+					? *FString::Printf(TEXT("is at step %d"), static_cast<int32>(Flow->GetCurrentStep()))
+					: TEXT("reference is stale/destroyed -- volume can never arm"),
+				static_cast<int32>(ArmAfterStep));
+		}
+
+		return;
+	}
+
 	const UCharacterMovementComponent* MoveComp = Player->GetCharacterMovement();
 	const float HorizontalSpeed = IsValid(MoveComp) ? MoveComp->Velocity.Size2D() : 0.f;
 	const bool bSprinting = HorizontalSpeed >= Settings.SprintSpeedThreshold;
@@ -244,10 +289,28 @@ void AStealthDisciplineVolume::SampleTickInside(AExtractionPlayer* Player)
 		HandlePressureTransition(Result);
 }
 
-void AStealthDisciplineVolume::BroadcastToast(UWorld* World, const FText& Message)
+// ---- Objective gate ----
+
+void AStealthDisciplineVolume::UpdateArmedState()
+{
+	if (bArmed) return;
+
+	const ALevelObjectiveFlow* Flow = ObjectiveFlow.Get();
+	if (!IsValid(Flow)) return;
+
+	const ELevelObjectiveStep CurrentStep = Flow->GetCurrentStep();
+	if (static_cast<uint8>(CurrentStep) <= static_cast<uint8>(ArmAfterStep)) return;
+
+	bArmed = true;
+
+	UE_LOG(LogExtraction, Log, TEXT("StealthDisciplineVolume '%s': armed -- objective flow advanced past step %d (now %d)"),
+		*GetNameSafe(this), static_cast<int32>(ArmAfterStep), static_cast<int32>(CurrentStep));
+}
+
+void AStealthDisciplineVolume::BroadcastToast(UWorld* World, const FText& Message, EToastSeverity Severity)
 {
 	if (UMissionInventorySubsystem* Inventory = World->GetSubsystem<UMissionInventorySubsystem>())
-		Inventory->OnLootNotify.Broadcast(Message);
+		Inventory->OnToastNotify.Broadcast(Message, Severity);
 }
 
 void AStealthDisciplineVolume::HandlePressureTransition(EStealthPressureTransition Result)
@@ -263,7 +326,8 @@ void AStealthDisciplineVolume::HandlePressureTransition(EStealthPressureTransiti
 		BroadcastToast(World,
 			WarningText.IsEmpty()
 				? NSLOCTEXT("StealthDiscipline", "DefaultWarning", "Discipline slipping")
-				: WarningText);
+				: WarningText,
+			EToastSeverity::Warning);
 		return;
 	}
 
@@ -280,7 +344,8 @@ void AStealthDisciplineVolume::HandlePressureTransition(EStealthPressureTransiti
 	BroadcastToast(World,
 		EscalationText.IsEmpty()
 			? NSLOCTEXT("StealthDiscipline", "DefaultEscalation", "Alerted nearby enemies")
-			: EscalationText);
+			: EscalationText,
+		EToastSeverity::Alert);
 
 	if (Director)
 	{
