@@ -234,6 +234,14 @@ public:
 	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it; only the companion BT service calls it. */
 	bool HasDetectedPlayer() const;
 
+	/** HasDetectedPlayer plus an activity qualifier: Combat state AND genuine contact with its target
+	 *  within WindowSeconds (sight, geometric FOV LOS, recent damage, or suppression). WindowSeconds
+	 *  <= 0 reproduces HasDetectedPlayer exactly. Combat state alone is unbounded — an aggro'd enemy
+	 *  that breaks LOS and idles stays in Combat for its whole LostContactGrace and re-arms it on any
+	 *  fleeting contact, which is what pinned the friendlies' target retention forever. Reads
+	 *  awareness state only, no traces. Plain C++ (no UFUNCTION), matching HasDetectedPlayer. */
+	bool HasActiveCombatContact(float WindowSeconds) const;
+
 	/** True when this enemy has engaged the COMPANION itself: it is targeting the companion now, has
 	 *  damaged it within MemorySeconds, or holds live suspicion/search knowledge of it. The companion
 	 *  side of HasDetectedPlayer — together they answer "is this enemy part of a fight we are in".

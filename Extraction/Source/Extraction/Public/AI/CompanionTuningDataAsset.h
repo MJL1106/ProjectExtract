@@ -960,6 +960,40 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat")
 	bool bRetainPlayerThreatTargetsWhileLosBlocked = true;
 
+	// An LoS-blocked combat target is only retained while the enemy has had contact with the party
+	// inside this window. Both keeps below the block (cover-active and player-pressure) read Combat
+	// awareness state, which is unbounded — one aggro'd enemy idling behind a wall held the target
+	// forever, so the Combat decorator never aborted and the companion never went back to following.
+	// Stale targets fall through to the normal grace-accrual clear (drop ~= window + LoS grace).
+	// 0 = legacy unbounded retention.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
+	float BlockedTargetActivityWindowSeconds = 10.f;
+
+	// --- Commanded-cover wake ---
+	// Every acquisition path traces from the companion's HUNKERED eye position, and tall cover blocks
+	// that by design (only the lean/peek position has a line). Ordered onto a tall wall the companion
+	// therefore never acquires, never peeks, and never fires. The wake re-asks the question from the
+	// peek position it would actually fight from, and ONLY while the player's cover order is held.
+
+	// Master switch / regression lever. Off = the commanded hold behaves exactly as before.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverWake")
+	bool bCoverWakeOccludedAcquisition = true;
+
+	// The wake needs evidence a fight is actually happening — heard gunfire, covering fire ordered,
+	// the companion or the player taking hits, a director combat report, or an enemy focused on the
+	// player. This is the recency window for the timestamped sources.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverWake", meta = (ClampMin = "0.0"))
+	float CoverWakeLiveFightWindowSeconds = 3.f;
+
+	// Wake candidates are pooled within this range (further clamped by MaxEngageRange) — a peek line
+	// to something on the far side of the level is not a reason to open fire from ordered cover.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverWake", meta = (ClampMin = "0.0"))
+	float CoverWakeMaxAcquireDistance = 2500.f;
+
+	// Pool size and hard cap on the peek-line validation traces the wake may fire per tick.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverWake", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 CoverWakeMaxCandidates = 3;
+
 	// Companion avoids standing in the player's ADS firing line during combat.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat")
 	bool bAvoidPlayerADSCone = true;

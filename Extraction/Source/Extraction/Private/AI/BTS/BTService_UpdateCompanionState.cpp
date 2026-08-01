@@ -30,6 +30,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "AI/BlackboardKeyType_Cover.h" // new-system Cover-typed BB key read (replaces AAICoverSlot)
 #include "CoverSystem.h"                // FCover / FCoverData for the cover-active LoS-block branch
+#include "CoverGeometryStatics.h"       // CanPeekShoot — commanded-cover wake validates from the peek position
 #include "CoverReservationSubsystem.h"  // intended-cover check for the approach-window cover-active branch (Fix 4)
 #include "Engine/OverlapResult.h" // FOverlapResult full definition for the proximity overlap scan
 #include "EnemyDirectorSubsystem.h" // last combat report stamp as an out-of-envelope stealth-break event
@@ -340,10 +341,71 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		? FMath::Square(Companion->ReviveThreatRadius) : 0.f;
 	const FVector DBNOPlayerLoc = IsValid(PlayerPawn) ? PlayerPawn->GetActorLocation() : FVector::ZeroVector;
 
+	// --- Commanded-cover wake pool ---
+	// Ordered onto tall cover the companion can never acquire from the hunkered pose: every path here
+	// traces from the eye position, and only the lean/peek position has a line. Pool the nearest few
+	// candidates UNTRACED so the wake pass below can re-ask the question from the peek position it
+	// would actually fight from. Confined to an active commanded hold — autonomous cover self-clears
+	// within a tick when targetless, so roaming play never collects.
+	const bool bStealthHolding = (Mode == ECompanionMode::Stealth) && !Companion->IsStealthBroken();
+	const bool bWakePoolCollect = RangeTuning && RangeTuning->bCoverWakeOccludedAcquisition
+		&& Companion->IsCommandedCoverHoldActive()
+		&& BB->GetValueAsBool(HasCoverPositionKey.SelectedKeyName)
+		&& !bStealthHolding;
+	const float WakePoolRangeSq = bWakePoolCollect
+		? FMath::Square(FMath::Min(RangeTuning->CoverWakeMaxAcquireDistance, MaxEngageRange))
+		: 0.f;
+	const int32 WakePoolMax = bWakePoolCollect
+		? FMath::Clamp(RangeTuning->CoverWakeMaxCandidates, 1, CoverWakePoolCapacity)
+		: 0;
+	// +1: a full pool inserts the new entry before evicting the tail, momentarily holding Capacity+1.
+	TArray<TPair<float, AActor*>, TInlineAllocator<CoverWakePoolCapacity + 1>> WakePool;
+
+	// Nearest-first insert, capped at WakePoolMax. The scan channels overlap (a perceived enemy near
+	// the player runs both the sight and the player-threat pass), so duplicates must be rejected or
+	// one enemy eats every trace slot.
+	auto InsertWakeCandidate = [&](AActor* Candidate, float DistSq)
+	{
+		for (const TPair<float, AActor*>& Entry : WakePool)
+			if (Entry.Value == Candidate) return;
+
+		int32 InsertAt = 0;
+		while (InsertAt < WakePool.Num() && WakePool[InsertAt].Key <= DistSq) ++InsertAt;
+		if (InsertAt >= WakePoolMax) return;
+		WakePool.Insert(TPair<float, AActor*>(DistSq, Candidate), InsertAt);
+		if (WakePool.Num() > WakePoolMax) WakePool.RemoveAt(WakePool.Num() - 1);
+	};
+
+	// Heard enemy (hearing sense) — stealth-break event AND wake evidence, so it is resolved once per
+	// tick ahead of the scan passes instead of inside the stealth block. Still queried only where a
+	// consumer exists: roaming Normal/Combat play without a commanded hold pays nothing.
+	bool bHeardEnemy = false;
+	if (Mode == ECompanionMode::Stealth || bWakePoolCollect)
+	{
+		TArray<AActor*> HeardActors;
+		Perception->GetCurrentlyPerceivedActors(UAISense_Hearing::StaticClass(), HeardActors);
+		for (AActor* Heard : HeardActors)
+		{
+			const AEnemyCharacter* HeardEnemy = Cast<AEnemyCharacter>(Heard);
+			if (!IsValid(HeardEnemy)) continue;
+			const UHealthComponent* HeardHealth = HeardEnemy->GetHealthComponent();
+			if (HeardHealth && HeardHealth->IsDead()) continue;
+			bHeardEnemy = true;
+			break;
+		}
+	}
+
 	auto ConsiderCandidate = [&](AActor* Candidate, float DistSq, bool bAllowOccludedAny = true)
 	{
 		if (!IsValid(Candidate)) return;
 		if (DistSq > AcquireRangeSq) return;
+
+		// Wake pool collection sits BEFORE the eye-line trace and both tiers so occluded candidates
+		// are captured, and inside this lambda so it inherits every alive / mode / no-first-shot gate
+		// the call sites already applied. Raw distance, not the DBNO-biased score — the pool is a
+		// proximity list, not a selection ranking.
+		if (bWakePoolCollect && DistSq <= WakePoolRangeSq)
+			InsertWakeCandidate(Candidate, DistSq);
 
 		// Apply defend-the-body scoring bias while DBNO: enemies within the revive threat
 		// radius of the player have their effective distance halved for selection purposes.
@@ -732,19 +794,6 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			? PlayerPawn->FindComponentByClass<UHealthComponent>() : nullptr;
 		const float PlayerDamageTime = PlayerHealth ? PlayerHealth->GetLastDamageWorldTime() : -1e9f;
 
-		bool bHeardEnemy = false;
-		TArray<AActor*> HeardActors;
-		Perception->GetCurrentlyPerceivedActors(UAISense_Hearing::StaticClass(), HeardActors);
-		for (AActor* Heard : HeardActors)
-		{
-			const AEnemyCharacter* HeardEnemy = Cast<AEnemyCharacter>(Heard);
-			if (!IsValid(HeardEnemy)) continue;
-			const UHealthComponent* HeardHealth = HeardEnemy->GetHealthComponent();
-			if (HeardHealth && HeardHealth->IsDead()) continue;
-			bHeardEnemy = true;
-			break;
-		}
-
 		const float PinAge = StealthNow - StealthPinTime;
 		const bool bCompanionHitSincePin = IsValid(Companion->GetRecentAttacker(PinAge));
 
@@ -805,6 +854,26 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	if (bHasAlertedThreat)
 		Controller->NoteAlertedThreat(AlertedThreatLocation);
 
+	// Commanded-cover wake: the scan found nothing because every path it walks needs a clear line from
+	// the HUNKERED eye position. Ask again from the peek position, against the untraced pool. Placed
+	// before the fresh-identity grace reset below so a woken target gets the same clean grace window
+	// as any other new pick, and after the stealth veto so unbroken stealth can never wake.
+	if (!BestTarget && bWakePoolCollect)
+	{
+		if (AActor* WakeTarget = TryWakeCommandedCoverTarget(
+			*Companion, *BB, RangeTuning, PlayerPawn, WakePool, bHeardEnemy))
+		{
+			// Edged on the committed pick: a wake that fires every tick is churn worth seeing.
+			if (PrevCombatTarget.Get() != WakeTarget)
+				UE_LOG(LogCompanionAI, Log,
+					TEXT("%s: commanded-cover wake -> %s (peek line from ordered cover, %d pooled)"),
+					*Companion->GetName(), *WakeTarget->GetName(), WakePool.Num());
+
+			BestTarget = WakeTarget;
+			BestDistSq = FVector::DistSquared(MyLocation, WakeTarget->GetActorLocation());
+		}
+	}
+
 	// Fix 4b: a fresh target identity gets a fresh grace window. Without this reset, an occluded new pick
 	// inherits OpenLosBlockedTime accrued against the previous target and can be cleared instantly (or far
 	// too early) on its first blocked tick. PrevCombatTarget holds last tick's committed pick.
@@ -845,6 +914,18 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			// an occluded final approach lasting longer than the 3s grace would clear the target and abort the
 			// move. Treat cover-active as: a valid CoverTarget key AND (HasCoverPosition OR this controller has
 			// an intended cover stamped in the reservation subsystem — i.e. it is en route to a claimed point).
+			//
+			// Activity qualifier (shared by BOTH keeps below): Combat awareness state on its own is
+			// unbounded — an enemy that aggro'd, broke LoS and idled in a side room stayed in Combat
+			// for its whole LostContactGrace and re-armed it on any fleeting contact, so both keeps
+			// reset the drop timer forever and the target could never clear. Bound them to genuine
+			// recent contact. Non-AEnemyCharacter targets keep the legacy unbounded retain, and
+			// window 0 disables the qualifier entirely (exact legacy behaviour).
+			const float ActivityWindow = RangeTuning ? RangeTuning->BlockedTargetActivityWindowSeconds : 10.f;
+			const AEnemyCharacter* BlockedEnemy = Cast<AEnemyCharacter>(BestTarget);
+			const bool bBlockedEnemyInCombat = BlockedEnemy && BlockedEnemy->HasActiveCombatContact(ActivityWindow);
+			const bool bBlockedTargetActive = ActivityWindow <= 0.f || !BlockedEnemy || bBlockedEnemyInCombat;
+
 			bool bCoverSlotActive = false;
 			if (CoverTargetKey.SelectedKeyType == nullptr && !bLoggedCoverKeyResolveFail)
 			{
@@ -866,7 +947,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				bCoverSlotActive = ActiveCover.IsValid() && (bHasCoverPos || bHasIntendedCover);
 			}
 
-			if (bCoverSlotActive)
+			if (bCoverSlotActive && bBlockedTargetActive)
 			{
 				if (bDebugLogging && !bWasLosBlocked)
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: combat target LOS blocked but cover slot active — keeping target"),
@@ -879,16 +960,15 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			{
 				// Player-pressure keep: if the enemy is actively threatening the player, hold
 				// the target through LoS blocks so the combat task's reposition hunts for an angle.
+				// "Actively" is the activity-qualified Combat state, not raw Combat awareness — the
+				// radius and the toggle are unchanged.
 				bool bPlayerPressureKeep = false;
 				const bool bRetainLosBlock = RangeTuning ? RangeTuning->bRetainPlayerThreatTargetsWhileLosBlocked : true;
-				if (bRetainLosBlock && IsValid(PlayerPawn))
+				if (bRetainLosBlock && IsValid(PlayerPawn) && bBlockedEnemyInCombat)
 				{
 					const float PlayerThreatRadius = RangeTuning ? RangeTuning->PlayerThreatAwarenessRadius : 3500.f;
-					if (const AEnemyCharacter* BlockedEnemy = Cast<AEnemyCharacter>(BestTarget))
-					{
-						bPlayerPressureKeep = BlockedEnemy->HasDetectedPlayer()
-							&& FVector::DistSquared(PlayerPawn->GetActorLocation(), BlockedEnemy->GetActorLocation()) <= FMath::Square(PlayerThreatRadius);
-					}
+					bPlayerPressureKeep =
+						FVector::DistSquared(PlayerPawn->GetActorLocation(), BlockedEnemy->GetActorLocation()) <= FMath::Square(PlayerThreatRadius);
 				}
 
 				if (bPlayerPressureKeep)
@@ -944,6 +1024,20 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		{
 			bWasLosBlocked = false;
 			OpenLosBlockedTime = 0.f;
+
+			// The one place the companion is PROVEN to be looking at an enemy rather than merely holding
+			// a pointer to one: the eye→target trace came back clear (or hit the target itself). Every
+			// other "am I in a fight" signal on this class is state that the cover-active and
+			// player-pressure keeps above deliberately hold true through walls for as long as the enemy
+			// pressures the player — which, once the player is DBNO, is forever. The revive gate reads
+			// the freshness of this stamp to tell those two cases apart.
+			//
+			// Liveness re-tested rather than inherited from selection: the retain path at :236-255 can
+			// still be carrying a target for the tick in which it dies, and stamping on a corpse would
+			// hand the gate exactly the unbounded signal it is trying to escape.
+			const UHealthComponent* ContactHealth = BestTarget->FindComponentByClass<UHealthComponent>();
+			if (!ContactHealth || !ContactHealth->IsDead())
+				Companion->StampCombatContact();
 		}
 	}
 
@@ -977,7 +1071,18 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			const bool bForcedBlocked = Companion->GetWorld()->LineTraceSingleByChannel(
 				ForcedLosHit, Companion->GetPawnViewLocation(),
 				AITargeting::GetSightLocation(ForcedTarget), ECC_Visibility, ForcedLosParams);
-			Companion->SetHasTargetLOS(!bForcedBlocked || ForcedLosHit.GetActor() == ForcedTarget);
+			const bool bForcedLosClear = !bForcedBlocked || ForcedLosHit.GetActor() == ForcedTarget;
+			Companion->SetHasTargetLOS(bForcedLosClear);
+
+			// This override skips the main LoS filter entirely, so without a stamp here a companion
+			// finishing a commanded takedown reads as out-of-contact to the revive gate while it is
+			// visibly closing on a live victim. Same proof and same liveness re-test as the main path.
+			if (bForcedLosClear)
+			{
+				const UHealthComponent* ForcedHealth = ForcedTarget->FindComponentByClass<UHealthComponent>();
+				if (!ForcedHealth || !ForcedHealth->IsDead())
+					Companion->StampCombatContact();
+			}
 		}
 	}
 
@@ -1725,6 +1830,9 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		bool bBodyHot = false;
 		bool bFightLive = false;
 		bool bDesperation = false;
+		// Area-clear opener (see below). Outer-scoped for the transition log like the heat terms, and
+		// false on the mid-revive latch path for the same reason: no sweep runs there to measure it.
+		bool bAreaClear = false;
 
 		// Latch: once the companion is mid-revive, hold the key true so the BT hold is uninterruptible.
 		if (Companion->IsRevivingPlayer())
@@ -1737,25 +1845,58 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			const FVector PlayerLoc = PlayerPawn->GetActorLocation();
 			const float ThreatRadius = Companion->ReviveThreatRadius;
 
+			// Contact freshness — needed by both the ring loop and the fight-live term below, so it is
+			// computed once up here.
+			//
+			// Two of the blockers below carry no eye-line test of their own (the ring's DBNO-handoff
+			// shortcut and the self-engage fight-live clause) and both read state that is unbounded
+			// once the player goes down: Combat awareness persists long past the last exchange, and the
+			// player-pressure keep (:964-980) retains the BB combat target THROUGH WALLS for as long as
+			// that enemy is in Combat near the player. So any Combat-state enemy in the area pinned both
+			// true permanently, re-zeroed ReviveSafeAccumulator every tick, and left desperation as the
+			// only way a window ever opened. Requiring a RECENT proven eye-line of our own bounds them in
+			// time. Deliberately a recency window and not an instantaneous LoS test: instantaneous would
+			// flicker at peek cadence, which is what made the original terms avoid LoS in the first place.
+			const bool bContactFresh = Companion->ReviveFightContactWindow > 0.f
+				&& Companion->GetTimeSinceCombatContact() <= Companion->ReviveFightContactWindow;
+
+			// Any LIVING hostile within ReviveLoSThreatRadius of the body, irrespective of awareness state
+			// or eye-line. GEOMETRIC — filled from the overlap sweep below, which is sized to reach that
+			// far precisely so this cannot depend on what the companion currently perceives. Feeds the
+			// area-clear bypass only; no heat term reads it.
+			bool bAnyLiveThreatNear = false;
+
 			TArray<FOverlapResult> ReviveOverlaps;
-			ReviveOverlaps.Reserve(8);
+			// Sized for the widened sweep (ReviveLoSThreatRadius, ~2.8x the area of the old bound) so the
+			// common case lands in the single existing allocation instead of growing into a second one.
+			ReviveOverlaps.Reserve(16);
 			FCollisionObjectQueryParams RevObjParams(ECC_Pawn);
 			FCollisionQueryParams RevParams(SCENE_QUERY_STAT(ReviveWindowThreat), false);
 			RevParams.AddIgnoredActor(Companion);
 			RevParams.AddIgnoredActor(PlayerPawn);
 
-			// One sweep, two consumers: the two-ring safety test below and the rescue approach's
-			// urgency read. Sized to cover whichever reaches further so neither under-samples -- the
-			// ring loop re-tests ThreatRadius per candidate (below), so a wider sphere cannot widen
-			// the safety rings. The rescue sprint gate's release band is SprintThreatRadius x 1.25
-			// (RescueSprintThreatReleaseScale), so the sweep must cover the release-scaled value or
-			// the hysteresis band falls outside the sweep and the threat gate releases early.
+			// One sweep, three consumers: the two-ring safety test below, the rescue approach's urgency
+			// read, and the area-clear tally. Sized to cover whichever reaches furthest so none
+			// under-samples -- every consumer re-tests its own radius per candidate (below), so a wider
+			// sphere cannot widen any of them. The rescue sprint gate's release band is
+			// SprintThreatRadius x 1.25 (RescueSprintThreatReleaseScale), so the sweep must cover the
+			// release-scaled value or the hysteresis band falls outside the sweep and the threat gate
+			// releases early.
+			//
+			// ReviveLoSThreatRadius (2500) joins the max because the area-clear tally must be geometric
+			// out to the widest ring any revive term uses. It was previously fed by the perceived-actors
+			// pass, which only sees what the companion can currently SEE -- so a live enemy at 18m that
+			// the companion had no eye-line on was tallied by nothing, bAreaClear went true and the window
+			// opened with zero grace. That is precisely the in-cover, contact-stale scenario the bypass is
+			// most likely to be evaluated in, so the tally cannot be perception-gated.
 			const float SprintThreatRadius = RangeTuning ? RangeTuning->ReviveSprintThreatRadius : 0.f;
 			constexpr float SprintThreatReleaseScale = 1.25f;
 			const float SprintReleaseBand = SprintThreatRadius * SprintThreatReleaseScale;
+			const float UrgencyRadius = FMath::Max(ThreatRadius, SprintReleaseBand);
 			Companion->GetWorld()->OverlapMultiByObjectType(
 				ReviveOverlaps, PlayerLoc, FQuat::Identity,
-				RevObjParams, FCollisionShape::MakeSphere(FMath::Max(ThreatRadius, SprintReleaseBand)), RevParams);
+				RevObjParams,
+				FCollisionShape::MakeSphere(FMath::Max(UrgencyRadius, Companion->ReviveLoSThreatRadius)), RevParams);
 
 			// Nearest living hostile to the body. Alert state is deliberately NOT filtered here (the
 			// safety rings below do filter it): an unaware enemy standing over the body is every
@@ -1769,6 +1910,17 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				if (NearHP && NearHP->IsDead()) continue;
 
 				const float NearDist = FVector::Dist(Enemy->GetActorLocation(), PlayerLoc);
+
+				// Area-clear tally, scoped to the widest revive ring. Same unfiltered liveness this pass
+				// already applies — awareness state and eye-line are deliberately not consulted.
+				if (NearDist <= Companion->ReviveLoSThreatRadius) bAnyLiveThreatNear = true;
+
+				// LOAD-BEARING re-test, do not fold into the tally above. NearestThreatDist is published
+				// to BTTask_FollowPlayer for the rescue sprint-vs-jog decision and MUST stay scoped to the
+				// original urgency radius; the sphere is now wider than that only to serve the tally, and
+				// letting the extra 15m-25m band reach this min would make the companion sprint approaches
+				// it should jog.
+				if (NearDist > UrgencyRadius) continue;
 				if (NearestThreatDist < 0.f || NearDist < NearestThreatDist) NearestThreatDist = NearDist;
 			}
 
@@ -1787,8 +1939,9 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				const UHealthComponent* EHP = Enemy->GetHealthComponent();
 				if (EHP && EHP->IsDead()) continue;
 
-				// The sphere may reach past ReviveThreatRadius when the sprint radius is the larger of
-				// the two — re-test here so the safety rings stay exactly the size they were authored.
+				// The sphere is sized for the widest of its three consumers and normally reaches well
+				// past ReviveThreatRadius — re-test here so the safety rings stay exactly the size they
+				// were authored, whatever the sweep grows to.
 				const float EnemyDistSq = FVector::DistSquared(Enemy->GetActorLocation(), PlayerLoc);
 				if (EnemyDistSq > ThreatRadiusSq) continue;
 
@@ -1810,7 +1963,14 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				// so a post-fight wanderer (Searching/Suspicious/Unaware) with a stale combat-target pointer
 				// is already filtered out. Matches any ally, not just this companion, because the handoff
 				// can target the armed VIP.
-				if (Cast<ACompanionCharacter>(RingAwareness->GetCombatTarget())) { bBodyHot = true; break; }
+				//
+				// Contact-gated: the handoff pointer is as unbounded as everything else on the enemy side
+				// — it survives the whole LostContactGrace and is re-armed by any fleeting contact — so on
+				// its own this clause never releases and holds the window shut behind a wall forever. Take
+				// the no-trace shortcut only while we have had a real eye-line ourselves recently; when
+				// contact is stale, fall THROUGH to the trace below rather than skipping the candidate, so
+				// a handoff enemy that is genuinely looking at the body is still caught.
+				if (bContactFresh && Cast<ACompanionCharacter>(RingAwareness->GetCombatTarget())) { bBodyHot = true; break; }
 
 				FHitResult RingLosHit;
 				FCollisionQueryParams RingLosParams(SCENE_QUERY_STAT(ReviveWindowRingLoS), true);
@@ -1838,11 +1998,13 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 					if (!IsValid(Enemy)) continue;
 					const UHealthComponent* EHP = Enemy->GetHealthComponent();
 					if (EHP && EHP->IsDead()) continue;
+					// Distance hoisted above the awareness lookup: both are independent `continue` guards,
+					// so the order is semantics-neutral and the cheaper test goes first.
+					if (FVector::DistSquared(Enemy->GetActorLocation(), PlayerLoc) > LoSThreatRadiusSq) continue;
 
 					const AEnemyAIController* LosAIC = Cast<AEnemyAIController>(Enemy->GetController());
 					const UEnemyAwarenessComponent* LosAwareness = LosAIC ? LosAIC->GetAwarenessComponent() : nullptr;
 					if (!LosAwareness || LosAwareness->GetAwarenessState() != EEnemyAwarenessState::Combat) continue;
-					if (FVector::DistSquared(Enemy->GetActorLocation(), PlayerLoc) > LoSThreatRadiusSq) continue;
 
 					FHitResult RevLosHit;
 					FCollisionQueryParams RevLosParams(SCENE_QUERY_STAT(ReviveWindowLoS), true);
@@ -1880,9 +2042,16 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				// whenever BestTarget is null; recomputed here from the cached MyLocation (:265).
 				// No LoS term: HasTargetLOS() is false through cover occlusion (which :862-870 explicitly
 				// treats as a live fight), so requiring it would flicker this at peek cadence.
+				//
+				// Contact-gated instead. Distance-to-BB-target alone is not evidence of a fight: the
+				// player-pressure keep holds that target through walls indefinitely once the player is
+				// down, so ANY Combat-state enemy inside ReviveSelfEngageRadius pinned this term true
+				// forever and re-zeroed the safe accumulator every tick — the reported symptom. The
+				// recency window keeps a peeking firefight true while letting a genuinely broken-off one
+				// expire. The other two clauses are left alone: both are already time-bounded.
 				const float SelfEngageSq = FMath::Square(Companion->ReviveSelfEngageRadius);
 				bFightLive =
-					(Companion->ReviveSelfEngageRadius > 0.f && IsValid(TargetAfterUpdate)
+					(Companion->ReviveSelfEngageRadius > 0.f && bContactFresh && IsValid(TargetAfterUpdate)
 						&& FVector::DistSquared(MyLocation, TargetAfterUpdate->GetActorLocation()) <= SelfEngageSq)
 					|| IsValid(Companion->GetRecentAttacker(Companion->ReviveContactWindow))
 					|| (Companion->ReviveSuppressionThreshold > 0.f
@@ -1891,6 +2060,20 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 			// ENTRY and EXIT heat are deliberately different signals.
 			const bool bEntryHot = bBodyHot || bFightLive;
+
+			// Area-clear bypass of the safe grace. The grace exists to prove a lull is real before
+			// breaking cover; when nothing is alive anywhere inside ReviveLoSThreatRadius of the body and
+			// the companion holds no target of its own, there is no lull to prove and nothing for the
+			// grace to protect against — charging the full 3s anyway is exactly why the companion stands
+			// around after the last enemy dies.
+			//
+			// Deliberately keyed on bAnyLiveThreatNear (liveness only) rather than on !bEntryHot alone.
+			// Being strictly stronger than the heat terms is the whole point: heat is trace-based and
+			// blinks off for a tick at peek cadence, and a bypass that could blink true with it would
+			// re-open a window the instant after a bail or hot-abort — defeating the deliberate
+			// ReviveSafeAccumulator re-arm at the abort site, whose only job is to stop a closed window
+			// re-opening on banked safe time.
+			bAreaClear = !bEntryHot && !bAnyLiveThreatNear && !IsValid(TargetAfterUpdate);
 
 			if (bEntryHot) ReviveSafeAccumulator = 0.f;
 			else           ReviveSafeAccumulator += DeltaSeconds;
@@ -1945,6 +2128,8 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 				bReviveWindowOpen = true;
 			else if (bDesperation)
 				bReviveWindowOpen = true;
+			else if (bAreaClear)
+				bReviveWindowOpen = true;
 			else if (ReviveSafeAccumulator >= Companion->ReviveSafeGraceSeconds)
 				bReviveWindowOpen = true;
 		}
@@ -1978,12 +2163,16 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			PlayerIface->ReleaseReviveClaim(Companion);
 		}
 
+		// Never-stamped contact reads as TNumericLimits<float>::Max(); clamped for the log so the line
+		// stays a readable age instead of a sentinel-sized float.
+		constexpr float ContactAgeLogCap = 999.f;
 		if ((bDebugLogging || CVarCompanionReviveLog.GetValueOnGameThread() != 0) && bReviveWindowOpen != bLastReviveWindowOpen)
-			UE_LOG(LogCompanionAI, Log, TEXT("%s: REVIVE WINDOW %s (latched=%d bleedout=%.1fs safeAccum=%.2fs hotDwell=%.2fs bodyHot=%d fightLive=%d desp=%d)"),
+			UE_LOG(LogCompanionAI, Log, TEXT("%s: REVIVE WINDOW %s (latched=%d bleedout=%.1fs safeAccum=%.2fs hotDwell=%.2fs bodyHot=%d fightLive=%d desp=%d contactAge=%.1fs areaClear=%d)"),
 				*Companion->GetName(), bReviveWindowOpen ? TEXT("OPEN") : TEXT("SHUT"),
 				(int32)Companion->IsRevivingPlayer(), PlayerIface->GetBleedoutTimeRemaining(),
 				ReviveSafeAccumulator, ReviveHotAccumulator,
-				(int32)bBodyHot, (int32)bFightLive, (int32)bDesperation);
+				(int32)bBodyHot, (int32)bFightLive, (int32)bDesperation,
+				FMath::Min(Companion->GetTimeSinceCombatContact(), ContactAgeLogCap), (int32)bAreaClear);
 		bLastReviveWindowOpen = bReviveWindowOpen;
 
 		// Approach damage resist rides the committed rescue (hold-phase resist is bIsRevivingPlayer).
@@ -2029,6 +2218,80 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 FString UBTService_UpdateCompanionState::GetStaticDescription() const
 {
 	return TEXT("Updates companion BB: player DBNO, combat target from perception");
+}
+
+// ---------------------------------------------------------------------------
+// Commanded-cover wake — peek-validated acquisition while the player's cover order is held
+// ---------------------------------------------------------------------------
+
+AActor* UBTService_UpdateCompanionState::TryWakeCommandedCoverTarget(
+	ACompanionCharacter& Companion, const UBlackboardComponent& BB,
+	const UCompanionTuningDataAsset* Tuning, const APawn* PlayerPawn,
+	TArrayView<const TPair<float, AActor*>> WakePool, bool bHeardEnemy) const
+{
+	if (WakePool.Num() == 0) return nullptr;
+
+	UWorld* World = Companion.GetWorld();
+	if (!World) return nullptr;
+
+	const float Now = World->GetTimeSeconds();
+	const float FightWindow = Tuning ? Tuning->CoverWakeLiveFightWindowSeconds : 3.f;
+
+	// Live-fight evidence. Ordered cheapest-first; covering fire is the explicit one — "cover me"
+	// arms it on the press, so the command wakes the companion with no plumbing of its own.
+	bool bLiveFight = bHeardEnemy
+		|| Companion.IsCoveringFireActive()
+		|| Companion.IsCoveringFirePending()
+		|| Companion.GetPlayerFocusedEnemyCount() > 0
+		|| IsValid(Companion.GetRecentAttacker(FightWindow));
+
+	if (!bLiveFight && IsValid(PlayerPawn))
+	{
+		const UHealthComponent* PlayerHealth = PlayerPawn->FindComponentByClass<UHealthComponent>();
+		bLiveFight = PlayerHealth && (Now - PlayerHealth->GetLastDamageWorldTime()) < FightWindow;
+	}
+	if (!bLiveFight)
+	{
+		if (const UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
+			bLiveFight = (Now - Director->GetLastCombatReportTime()) < FightWindow;
+	}
+	if (!bLiveFight) return nullptr;
+
+	// The cover the order put us on. The BB key is authoritative (it is what the combat/hold tasks
+	// fight from); the hold's retained copy covers the tick the key has not been written yet.
+	FCover HoldCover;
+	if (CoverTargetKey.SelectedKeyType != nullptr)
+		HoldCover = BB.GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID());
+	if (!HoldCover.IsValid())
+		HoldCover = Companion.GetCommandedCoverHoldCover();
+	if (!HoldCover.IsValid()) return nullptr;
+
+	const bool bCrouched = UCoverGeometryStatics::GetCoverHeight(HoldCover.Data) == ECoverHeight::Crouch;
+	const float PeekEyeHeight = Tuning ? Tuning->CoverEyesOnPeekEyeHeight : 150.f;
+	const float ActivityWindow = Tuning ? Tuning->BlockedTargetActivityWindowSeconds : 10.f;
+	const int32 MaxValidations = FMath::Clamp(Tuning ? Tuning->CoverWakeMaxCandidates : 3, 1, WakePool.Num());
+
+	for (int32 i = 0; i < MaxValidations; ++i)
+	{
+		AActor* Candidate = WakePool[i].Value;
+		if (!IsValid(Candidate)) continue;
+
+		// Only wake onto a target the blocked-LoS retention will actually keep: a stale enemy woken
+		// here would be dropped by the activity-bounded keep a few seconds later and re-woken on the
+		// next tick, thrashing the target at grace cadence. Non-enemy actors keep legacy retention.
+		if (const AEnemyCharacter* WakeEnemy = Cast<AEnemyCharacter>(Candidate))
+		{
+			if (!WakeEnemy->HasActiveCombatContact(ActivityWindow)) continue;
+		}
+
+		if (!UCoverGeometryStatics::CanPeekShoot(World, HoldCover.Data, bCrouched,
+			AITargeting::GetSightLocation(Candidate), PeekEyeHeight, Candidate, &Companion))
+			continue;
+
+		return Candidate;
+	}
+
+	return nullptr;
 }
 
 // ---------------------------------------------------------------------------

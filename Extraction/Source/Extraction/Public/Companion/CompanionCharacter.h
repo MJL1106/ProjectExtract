@@ -333,6 +333,18 @@ public:
 	 *  or if no world is available, so callers can compare against a recency window directly. */
 	float GetTimeSinceCombatTarget() const;
 
+	/** Record that the companion had a CLEAR eye-line to a live combat target this tick. Stamped only
+	 *  from the state service's LoS-clear branch — deliberately NOT the same signal as
+	 *  StampCombatTargetSeen, which stamps on mere target PRESENCE and so stays fresh forever while a
+	 *  target is retained through a wall by the cover / player-pressure keeps. Callers that need
+	 *  "is this companion actually in a fight right now" must use this one; the revive gate turns on
+	 *  exactly that distinction. */
+	void StampCombatContact();
+
+	/** Seconds since the last StampCombatContact call. Returns a large value if never stamped or if
+	 *  no world is available, so callers can compare against a recency window directly. */
+	float GetTimeSinceCombatContact() const;
+
 	// --- Aim location override (covering-fire suppressive fire at last-seen position) ---
 	// Mirrors AEnemyCharacter::SetAimLocationOverride. When set, GetAimPointForTarget returns
 	// this location instead of the target's sight point. AimTarget stays valid (focus, inaccuracy
@@ -900,6 +912,14 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
 	float ReviveContactWindow = 3.f;
 
+	/** How recently (seconds) the companion must have had an ACTUAL eye-line on a live enemy for the
+	 *  revive blockers that carry no line-of-sight test of their own to still count — the self-engage
+	 *  fight-live term and the ring's DBNO-handoff shortcut. Both read state that survives through
+	 *  walls indefinitely once the player drops, so without this they never release and desperation
+	 *  becomes the only opener. 0 disables those two blockers entirely. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveFightContactWindow = 4.f;
+
 	/** Suppression level (0-1) at which the companion counts itself as under pressure for the revive
 	 *  entry gate. 0 disables. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Companion|Revive", meta = (ClampMin = "0.0", ClampMax = "1.0"))
@@ -1212,6 +1232,10 @@ private:
 	/** World time the companion last held a valid BB_CombatTarget. Stamped per service tick
 	 *  while a target is set; never cleared (callers compare against a recency window). */
 	float LastCombatTargetSeenTime = -1e9f;
+
+	/** World time the companion last had a CLEAR eye-line to a live combat target. Stamped only from
+	 *  the service's LoS-clear branch; never cleared (callers compare against a recency window). */
+	float LastCombatContactTime = -1e9f;
 
 	/** Mirror of the combat service's eye→target LOS trace (enemy bHasTargetLOS parity). Transient, not replicated. */
 	bool bHasTargetLOS = false;

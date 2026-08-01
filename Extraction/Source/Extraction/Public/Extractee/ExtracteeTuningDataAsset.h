@@ -63,6 +63,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Extractee|Combat", meta = (ClampMin = "0.0"))
 	float CombatRelevanceRadius = 3000.f;
 
+	// An enemy counts as fighting only while it has had contact with the party inside this window.
+	// Combat awareness alone is unbounded: an aggro'd enemy that breaks line of sight and idles in a
+	// side room re-stamped the combat signal every scan, so the extractee never left cower. Combined
+	// with CombatQuietExit the cower exit lands ~this + 6s after the last real activity.
+	// 0 = legacy (Combat awareness state alone, no activity qualifier).
+	UPROPERTY(EditAnywhere, Category = "Extractee|Combat", meta = (ClampMin = "0.0"))
+	float CombatContactWindowSeconds = 8.f;
+
 	// Cover slots are only considered within this radius; none in range -> cower in place.
 	UPROPERTY(EditAnywhere, Category = "Extractee|Combat", meta = (ClampMin = "0.0"))
 	float CoverSearchRadius = 800.f;

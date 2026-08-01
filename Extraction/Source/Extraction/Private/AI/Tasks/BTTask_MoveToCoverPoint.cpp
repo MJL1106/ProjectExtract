@@ -621,7 +621,9 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 		// --- En-route hostile re-validation (same throttle) ---
 		// The pick-time anchor reject sampled hostile positions once; a hostile who moves onto the
 		// destination during a multi-second run must invalidate it. Same radii as pick time, so a
-		// cover legal at pick only fails if a hostile actually closed in.
+		// cover legal at pick only fails if a hostile actually closed in. Commanded orders are exempt:
+		// they bypassed the pick-time reject too, so "legal at pick" never held — a hostile parked
+		// near the pinged spot since before the order would spuriously abort the player's command.
 		float HostileCoverDist = 0.f;
 		float HostilePawnDist = 0.f;
 		if (IsValid(DA))
@@ -638,7 +640,7 @@ void UBTTask_MoveToCoverPoint::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 			}
 		}
 
-		if (HostileCoverDist > 0.f || HostilePawnDist > 0.f)
+		if ((HostileCoverDist > 0.f || HostilePawnDist > 0.f) && !Mem->bIsCommandedCover)
 		{
 			FHostileAnchors HostileAnchors;
 			// Enemy movers: perception-honest anchors — an observable abort must not react to a

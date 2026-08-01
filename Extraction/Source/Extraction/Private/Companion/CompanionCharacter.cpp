@@ -775,6 +775,21 @@ float ACompanionCharacter::GetTimeSinceCombatTarget() const
 	return World->GetTimeSeconds() - LastCombatTargetSeenTime;
 }
 
+void ACompanionCharacter::StampCombatContact()
+{
+	const UWorld* World = GetWorld();
+	if (World)
+		LastCombatContactTime = World->GetTimeSeconds();
+}
+
+float ACompanionCharacter::GetTimeSinceCombatContact() const
+{
+	const UWorld* World = GetWorld();
+	if (!World || LastCombatContactTime <= -1e8f)
+		return TNumericLimits<float>::Max();
+	return World->GetTimeSeconds() - LastCombatContactTime;
+}
+
 float ACompanionCharacter::GetHealthFraction() const
 {
 	if (!IsValid(HealthComponent)) return 1.f;

@@ -93,6 +93,29 @@ private:
 	 *  the anchor. Releases the hold on timeout so the companion is never frozen in the open. */
 	float CommandedCoverHoldUnreachedTime = 0.f;
 
+	// --- Commanded-cover wake (see TryWakeCommandedCoverTarget) ---
+
+	/** Inline capacity of the per-tick wake pool. Upper bound of CoverWakeMaxCandidates, which the
+	 *  collection clamps to it — the pool must never heap-allocate on a service tick. */
+	static constexpr int32 CoverWakePoolCapacity = 8;
+
+	/** Peek-validated acquisition for a companion holding player-ordered cover, run ONLY when the
+	 *  normal scan found nothing. Every acquisition path traces from the hunkered eye position, which
+	 *  tall commanded cover blocks by design, so the companion sat there while the fight ran.
+	 *
+	 *  Two gates keep this from being a wallhack. It is confined to an active commanded cover hold
+	 *  (autonomous cover self-clears within a tick when targetless), and it requires live-fight
+	 *  evidence — heard gunfire, an armed/active covering-fire order, the companion or the player
+	 *  taking recent hits, a director combat report, or an enemy focused on the player. Each pooled
+	 *  candidate is then validated with CanPeekShoot from the ordered cover's own lean/peek position:
+	 *  knowledge one lean away, not knowledge through a wall.
+	 *
+	 *  WakePool is nearest-first and already capped at CoverWakeMaxCandidates, so at most that many
+	 *  traces run. Returns the first candidate with a peek line, or nullptr. */
+	AActor* TryWakeCommandedCoverTarget(ACompanionCharacter& Companion, const UBlackboardComponent& BB,
+		const UCompanionTuningDataAsset* Tuning, const APawn* PlayerPawn,
+		TArrayView<const TPair<float, AActor*>> WakePool, bool bHeardEnemy) const;
+
 	/** Accumulated safe-seconds (no nearby threats) while the player is DBNO. Resets on threat detection. */
 	float ReviveSafeAccumulator = 0.f;
 

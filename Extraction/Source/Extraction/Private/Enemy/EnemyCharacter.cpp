@@ -1436,6 +1436,20 @@ bool AEnemyCharacter::HasDetectedPlayer() const
 	return Awareness->GetAwarenessState() == EEnemyAwarenessState::Combat;
 }
 
+bool AEnemyCharacter::HasActiveCombatContact(float WindowSeconds) const
+{
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return false;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return false;
+
+	if (Awareness->GetAwarenessState() != EEnemyAwarenessState::Combat) return false;
+	if (WindowSeconds <= 0.f) return true;
+
+	return Awareness->GetTimeSinceCombatContact() <= WindowSeconds;
+}
+
 bool AEnemyCharacter::HasEngagedCompanion(const AActor* Companion, float MemorySeconds) const
 {
 	if (!IsValid(Companion)) return false;

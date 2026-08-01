@@ -69,6 +69,17 @@ struct EXTRACTION_API FCoverScoreParams
 	/** Sign-aware multiplicative penalty applied to in-ring candidates (see ApplyScorePenalty). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Scoring")
 	float DBNOAvoidPenalty = 0.25f;
+
+	/** Threat standoff floor: candidates within this 2D distance of the threat are score-penalised so
+	 *  a Pressing enemy closes range without relocating onto the player, while the best in-floor cover
+	 *  still wins when nothing lies outside. Set from the archetype's PressMinThreatDistance while
+	 *  Pressing. 0 = off. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Scoring")
+	float MinThreatDistance = 0.f;
+
+	/** Sign-aware multiplicative penalty applied to in-floor candidates (see ApplyScorePenalty). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Cover|Scoring")
+	float MinThreatDistancePenalty = 0.25f;
 };
 
 /** Positions cover candidates must keep distance from: covers hostiles are moving to (declared

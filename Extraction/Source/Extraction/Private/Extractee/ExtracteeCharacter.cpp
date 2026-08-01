@@ -520,6 +520,7 @@ AEnemyCharacter* AExtracteeCharacter::FindNearestCombatEnemy(float MaxRange) con
 	AEnemyCharacter* Nearest = nullptr;
 	float NearestDistSq = FMath::Square(MaxRange);
 	const FVector MyLoc = GetActorLocation();
+	const float ContactWindow = GetTuning()->CombatContactWindowSeconds;
 
 	for (TActorIterator<AEnemyCharacter> It(World); It; ++It)
 	{
@@ -527,7 +528,9 @@ AEnemyCharacter* AExtracteeCharacter::FindNearestCombatEnemy(float MaxRange) con
 		if (!IsValid(Enemy)) continue;
 		const UHealthComponent* Health = Enemy->GetHealthComponent();
 		if (Health && Health->IsDead()) continue;
-		if (!Enemy->HasDetectedPlayer()) continue;	// Combat awareness state only
+		// Combat awareness PLUS recent contact — a hidden enemy that idles out of contact is not a
+		// fight, and counting it re-stamped the combat signal forever (never left cower).
+		if (!Enemy->HasActiveCombatContact(ContactWindow)) continue;
 
 		const float DistSq = FVector::DistSquared(MyLoc, Enemy->GetActorLocation());
 		if (DistSq >= NearestDistSq) continue;

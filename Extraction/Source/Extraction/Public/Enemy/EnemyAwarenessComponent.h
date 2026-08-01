@@ -79,6 +79,18 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	float GetTimeWithoutSight() const { return TimeWithoutSight; }
 
+	/** Seconds since this enemy last had genuine contact with its combat target — 0 while contact is
+	 *  held (perceived sight, geometric FOV LOS, recent damage, suppression), else the lost-contact
+	 *  clock. BIG_NUMBER outside Combat: no target, no contact. Reads existing state only, no traces
+	 *  and no new tracking. bHadLOS is load-bearing on top of the clock: the perceived-sight branch
+	 *  FREEZES TimeSinceLOSLost rather than zeroing it, so a continuously-sighted target would
+	 *  otherwise report whatever the clock held when sight returned. Plain C++, C++-only consumers. */
+	float GetTimeSinceCombatContact() const
+	{
+		if (CurrentState != EEnemyAwarenessState::Combat) return BIG_NUMBER;
+		return bHadLOS ? 0.f : TimeSinceLOSLost;
+	}
+
 	/** Called by AWeaponBase::ReportNearMisses when a near-miss bullet passes close to this enemy.
 	 *  ShotOrigin is the bullet trace start (eye/muzzle of the shooter) — sent as the investigate
 	 *  point when LOS is blocked so the enemy advances toward the shot corner, not through walls.
