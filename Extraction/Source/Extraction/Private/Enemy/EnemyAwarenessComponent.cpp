@@ -215,8 +215,11 @@ void UEnemyAwarenessComponent::UpdateProximityBodyNotice()
 	// An enemy the companion has armed a takedown on must stay asleep until that takedown resolves.
 	// Waking it here would re-create the exact bug this delay exists to avoid: the second pocket
 	// enemy alerting off its mate's corpse and turning the pending kill into a visible whiff.
+	// Both clauses are needed: the reservation only ever covers the VICTIM and clears the instant the
+	// kill resolves, while the window covers its PARTNER too and trails a beat past the kill — which is
+	// the frame the partner would otherwise notice the fresh corpse in a same-instant double takedown.
 	if (const AEnemyCharacter* MyChar = Cast<AEnemyCharacter>(MyPawn))
-		if (MyChar->IsReservedForTakedown()) return;
+		if (MyChar->IsReservedForTakedown() || MyChar->IsInTakedownWindow()) return;
 
 	const UEnemyDirectorSubsystem* Dir = Director.Get();
 	UWorld* World = GetWorld();
@@ -362,11 +365,16 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 	if (!Stimulus.WasSuccessfullySensed()) return;
 	if (!IsValid(ArchetypeData)) return;
 
-	// Takedown-volume muffle: a pocket enemy ignores gunfire, walking and reloads so taking one down
-	// doesn't cascade to its neighbours. A sprint is blatant enough to wake it (the player's own fault);
-	// a level-wide Loud alert still wakes it via HandleGlobalAlertChanged.
+	// Armed-takedown hush: while the companion is lined up on this enemy's pocket it ignores gunfire,
+	// walking and reloads, so the player taking their half of the synced kill doesn't make the partner
+	// turn round mid-takedown. Gated on the ARMED window, not on volume overlap — an un-pinged pocket
+	// hears an unsuppressed shot beside it like anyone else, which is what makes the ping+confirm
+	// mechanic worth using. A sprint is blatant enough to pierce it (the player's own fault); a
+	// level-wide Loud alert still wakes it via HandleGlobalAlertChanged.
+	static const FName WeaponFireTag(TEXT("WeaponFire"));
+	static const FName JogFootstepTag(TEXT("FootstepWalk"));
 	static const FName SprintFootstepTag(TEXT("FootstepSprint"));
-	if (IsOwnerTakedownMuffled() && Stimulus.Tag != SprintFootstepTag) return;
+	if (IsOwnerTakedownHushed() && Stimulus.Tag != SprintFootstepTag) return;
 
 	// Acoustic occlusion: walls/floors/locked doors silence the noise entirely — before the
 	// track stamp, so a blocked shot leaves no memory at all. A closed-but-openable door lets
@@ -384,12 +392,54 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 	// During Combat, only update track bookkeeping (location) — suspicion gain is irrelevant
 	if (CurrentState == EEnemyAwarenessState::Combat) return;
 
+	// Close-range Combat slam. A gunshot or a sprint heard from right beside you is not "something to
+	// look into" — it is a fight already happening, so skip the meter and turn onto the source. Sits
+	// below the Combat return above by design: an enemy already fighting has nothing left to slam.
+	// The range scales with the noise's own strength AND the acoustic multiplier, so it degrades the
+	// same way the noise does — a suppressor (~0.3) shrinks the 8 m gunshot slam to ~2.4 m, a closed
+	// door (0.6) to ~4.8 m, and a fully occluded noise never reaches this line (returned above).
+	// Hostility is re-tested cheaply here even though the perception handler already filtered it,
+	// because slamming Combat onto a squadmate would be unrecoverable.
+	const float SlamRange = Stimulus.Tag == WeaponFireTag
+		? ArchetypeData->GunshotCombatSlamRange
+		: (Stimulus.Tag == SprintFootstepTag ? ArchetypeData->SprintCombatSlamRange : 0.f);
+	if (SlamRange > 0.f && IsHostile(Actor))
+	{
+		const AAIController* MyController = Cast<AAIController>(GetOwner());
+		const APawn* MyPawn = MyController ? MyController->GetPawn() : nullptr;
+		const float EffectiveSlam = SlamRange * Stimulus.Strength * AcousticMult;
+		if (IsValid(MyPawn)
+			&& FVector::DistSquared(MyPawn->GetActorLocation(), Stimulus.StimulusLocation) <= FMath::Square(EffectiveSlam))
+		{
+			EnterCombat(Actor, /*bConfirmedVisual=*/false);
+			// EnterCombat can refuse (stealth-cloaked companion, DBNO player) — a refused slam must
+			// fall through to the normal suspicion pipeline, not swallow the stimulus.
+			if (CurrentState == EEnemyAwarenessState::Combat) return;
+		}
+	}
+
 	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain * AcousticMult;
 	if (!TryApplyBreachSearchRoomStartle(Actor, Stimulus, Gain, Track))
 		Track.Suspicion = FMath::Min(Track.Suspicion + Gain, NoiseSuspicionCap);
 
-	static const FName WeaponFireTag(TEXT("WeaponFire"));
-	if (Stimulus.Tag == WeaponFireTag && Track.Suspicion >= ArchetypeData->SuspiciousThreshold)
+	// Movement-noise floors: loudness-scaled gain alone barely registers a footstep, so each audible
+	// tier declares the minimum it is worth. Occlusion-scaled, so a door still kills it. Deliberately
+	// a floor and not a state change — ApplySuspicionState picks it up on the next update, which reads
+	// as a head-turn and a bark rather than a snap. Quiet/slow-walk steps have no floor at all: that
+	// is the stealth tool, and it stays worth using.
+	const float TierFloor = Stimulus.Tag == JogFootstepTag
+		? ArchetypeData->JogFootstepSuspicionFloor
+		: (Stimulus.Tag == SprintFootstepTag ? ArchetypeData->SprintFootstepSuspicionFloor : 0.f);
+	if (TierFloor > 0.f)
+		Track.Suspicion = FMath::Min(FMath::Max(Track.Suspicion, TierFloor * AcousticMult), NoiseSuspicionCap);
+
+	// Investigate jump. Unsuppressed gunfire has always done this; a sprint joins it on a stricter
+	// gate — gunfire is worth walking to from Suspicious upward, while a sprint has to have earned
+	// SearchingThreshold through its own floor. An unoccluded sprint does (80); the same sprint heard
+	// through a door does not (48), and stays a turn-and-look. A jog never gets here at all.
+	const bool bFireInvestigate = Stimulus.Tag == WeaponFireTag && Track.Suspicion >= ArchetypeData->SuspiciousThreshold;
+	const bool bSprintInvestigate = Stimulus.Tag == SprintFootstepTag && Track.Suspicion >= ArchetypeData->SearchingThreshold;
+	if (bFireInvestigate || bSprintInvestigate)
 	{
 		Track.Suspicion = FMath::Max(Track.Suspicion, ArchetypeData->SearchingThreshold);
 		SetInvestigateLocation(Stimulus.StimulusLocation);
@@ -436,7 +486,7 @@ void UEnemyAwarenessComponent::HandleAllyGunfireHeard(AEnemyCharacter* Shooter, 
 	if (IsOwnerIsolatedEncounter()) return;
 	if (!Stimulus.WasSuccessfullySensed()) return;
 	if (!IsValid(ArchetypeData)) return;
-	if (IsOwnerTakedownMuffled()) return;
+	if (IsOwnerTakedownHushed()) return;
 	if (!IsActorAlive(Shooter)) return;
 	if (CurrentState == EEnemyAwarenessState::Combat) return;
 
@@ -1186,20 +1236,28 @@ void UEnemyAwarenessComponent::UpdateCombat()
 		// interface, and a DBNO companion dropping out of Combat must not trigger this path.
 		const bool bDroppedDBNOPlayer = CombatTarget.IsValid()
 			&& CombatTarget.Get() == FindDownedPlayerPawn(this);
-		if (bDroppedDBNOPlayer)
-			SeedCompanionSightTracks();
 
 		// Companion-DBNO mirror: a downed companion also reads as dead — hand the fight to the
 		// player when normal selection has no track on them (player in cover the whole fight).
 		const ACompanionCharacter* DroppedCompanion = Cast<ACompanionCharacter>(CombatTarget.Get());
 		const bool bDroppedDBNOCompanion = IsValid(DroppedCompanion) && DroppedCompanion->GetIsCompanionDBNO();
 
+		// Seed on EITHER drop, not just the player's: whoever is left standing on the player's side
+		// is a companion either way — the primary once the player is down, the armed extraction VIP
+		// once the primary is down too. Perception only fires on edges, so a companion in plain view
+		// can hold no sighted track at all and normal selection would skip straight past him.
+		if (bDroppedDBNOPlayer || bDroppedDBNOCompanion)
+			SeedCompanionSightTracks();
+
 		// Target died — try to immediately acquire a sighted candidate before dropping to Searching
 		AActor* NextTarget = ScoreAndSelectTarget();
-		if (!IsValid(NextTarget) && bDroppedDBNOPlayer)
-			NextTarget = FindDBNOHandoffCompanion();
 		if (!IsValid(NextTarget) && bDroppedDBNOCompanion)
 			NextTarget = FindDBNOHandoffPlayer();
+		// Nearest live companion, on either drop. Alive-gated inside, so the companion that just
+		// went down can never be re-acquired here — with the player and the primary both DBNO this
+		// is what puts the fight onto the armed VIP instead of standing the shooters down.
+		if (!IsValid(NextTarget) && (bDroppedDBNOPlayer || bDroppedDBNOCompanion))
+			NextTarget = FindDBNOHandoffCompanion();
 
 		if (IsValid(NextTarget))
 		{
@@ -1209,10 +1267,13 @@ void UEnemyAwarenessComponent::UpdateCombat()
 		else
 		{
 			// DBNO overwatch: the search timeout holds while the player stays down, so the
-			// shooter never decays to Unaware mid-revive-window. Set-only — a later non-player
+			// shooter never decays to Unaware mid-revive-window. Gated on a downed player
+			// EXISTING, not on the player being the target that dropped — an enemy that only
+			// ever fought the companion has no player lock to lose, and would otherwise stand
+			// all the way down while the player lies bleeding. Set-only — a later non-player
 			// target drop (e.g. handoff companion killed) must not wipe the hold; the Searching
 			// tick clears it when the player revives or dies.
-			if (bDroppedDBNOPlayer)
+			if (FindDownedPlayerPawn(this))
 				bSearchHoldForDBNOPlayer = true;
 			TransitionToSearching(false);
 		}
@@ -1373,7 +1434,8 @@ void UEnemyAwarenessComponent::UpdateSuspicion()
 	const float AutoCombatRangeSq = FMath::Square(ArchetypeData->AutoCombatRange);
 	// Takedown-pocket enemies keep the pre-buff sneak-up profile: no point-blank auto-combat here
 	// (and no near-fill boost, gated in ComputeSightFillRate) — the pocket exists to be crept on.
-	const bool bTakedownMuffled = IsOwnerTakedownMuffled();
+	// Volume overlap, NOT the armed-takedown hush: creeping up must work on an un-pinged pocket too.
+	const bool bTakedownPocket = IsOwnerTakedownPocket();
 	float MaxSuspicion = 0.f;
 	FVector MaxLocation = FVector::ZeroVector;
 
@@ -1395,7 +1457,7 @@ void UEnemyAwarenessComponent::UpdateSuspicion()
 			Track.Suspicion += ComputeSightFillRate(MyPawn, Actor) * UpdateInterval;
 			StampTrack(Track, Actor->GetActorLocation());
 
-			const bool bPointBlank = !bTakedownMuffled
+			const bool bPointBlank = !bTakedownPocket
 				&& FVector::DistSquared(MyPawn->GetActorLocation(), Actor->GetActorLocation()) <= AutoCombatRangeSq;
 			if (Track.Suspicion >= SuspicionMax || bPointBlank)
 			{
@@ -1473,7 +1535,7 @@ float UEnemyAwarenessComponent::ComputeSightFillRate(const APawn* MyPawn, const 
 	// NearFillBoostRange is tuned past FullFillRange. Point-blank staring fills fast; long sight
 	// lines keep the slow burn (which also self-scales tight maps vs open ones).
 	// Takedown-pocket enemies are exempt — the boost made sneaking up on them impossible.
-	if (!IsOwnerTakedownMuffled()
+	if (!IsOwnerTakedownPocket()
 		&& ArchetypeData->NearFillBoostRange > 0.f && Dist < ArchetypeData->NearFillBoostRange)
 		DistFactor *= FMath::Lerp(ArchetypeData->NearFillBoostMax, 1.f, Dist / ArchetypeData->NearFillBoostRange);
 
@@ -1931,11 +1993,18 @@ bool UEnemyAwarenessComponent::IsOwnerIsolatedEncounter() const
 	return E && E->IsIsolatedEncounter();
 }
 
-bool UEnemyAwarenessComponent::IsOwnerTakedownMuffled() const
+bool UEnemyAwarenessComponent::IsOwnerTakedownPocket() const
 {
 	const AAIController* C = Cast<AAIController>(GetOwner());
 	const AEnemyCharacter* E = C ? Cast<AEnemyCharacter>(C->GetPawn()) : nullptr;
 	return E && E->IsInTakedownVolume();
+}
+
+bool UEnemyAwarenessComponent::IsOwnerTakedownHushed() const
+{
+	const AAIController* C = Cast<AAIController>(GetOwner());
+	const AEnemyCharacter* E = C ? Cast<AEnemyCharacter>(C->GetPawn()) : nullptr;
+	return E && E->IsInTakedownWindow();
 }
 
 bool UEnemyAwarenessComponent::IsHostile(AActor* Actor) const
@@ -2067,27 +2136,39 @@ AActor* UEnemyAwarenessComponent::FindDBNOHandoffCompanion()
 	// Respect the DA lever: 0 = companion deprioritised out of selection entirely.
 	if (ArchetypeData->CompanionThreatScoreMultiplier <= 0.f) return nullptr;
 
-	const float SightRadiusSq = FMath::Square(ArchetypeData->SightRadius);
+	// Nearest, not first-iterated: with the primary companion and the armed extraction VIP both
+	// live candidates, actor-iteration order would otherwise decide whether the shooter turns on
+	// the one at his feet or the one across the room.
+	const FVector MyLoc = MyPawn->GetActorLocation();
+	ACompanionCharacter* Nearest = nullptr;
+	float NearestDistSq = FMath::Square(ArchetypeData->SightRadius);
+
 	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
 	{
 		ACompanionCharacter* Companion = *It;
 		if (!IsValid(Companion) || !IsActorAlive(Companion)) continue;
 		if (!IsHostile(Companion)) continue;
 		if (IsCompanionSightCloaked(Companion)) continue;
-		if (FVector::DistSquared(MyPawn->GetActorLocation(), Companion->GetActorLocation()) > SightRadiusSq) continue;
 
-		// Unsighted handoff: stamp the track at the companion's current position so EnterCombat's
-		// last-known/contact-hold machinery drives the hunt (bSighted stays false until perception
-		// genuinely sees it).
-		FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Companion);
-		StampTrack(Track, Companion->GetActorLocation());
+		const float DistSq = FVector::DistSquared(MyLoc, Companion->GetActorLocation());
+		if (DistSq > NearestDistSq) continue;
 
-		UE_LOG(LogEnemyAI, Log, TEXT("[AWARENESS] %s DBNO handoff -> %s (dist=%.0f sighted=%d)"),
-			*MyPawn->GetName(), *Companion->GetName(),
-			FVector::Dist(MyPawn->GetActorLocation(), Companion->GetActorLocation()), (int32)Track.bSighted);
-		return Companion;
+		Nearest = Companion;
+		NearestDistSq = DistSq;
 	}
-	return nullptr;
+
+	if (!Nearest) return nullptr;
+
+	// Unsighted handoff: stamp the track at the companion's current position so EnterCombat's
+	// last-known/contact-hold machinery drives the hunt (bSighted stays false until perception
+	// genuinely sees it).
+	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Nearest);
+	StampTrack(Track, Nearest->GetActorLocation());
+
+	UE_LOG(LogEnemyAI, Log, TEXT("[AWARENESS] %s DBNO handoff -> %s (dist=%.0f sighted=%d)"),
+		*MyPawn->GetName(), *Nearest->GetName(),
+		FMath::Sqrt(NearestDistSq), (int32)Track.bSighted);
+	return Nearest;
 }
 
 AActor* UEnemyAwarenessComponent::FindDBNOHandoffPlayer()
@@ -2329,9 +2410,11 @@ void UEnemyAwarenessComponent::ReportSquadSighting(AActor* Target, const FVector
 	if (bStopped) return;
 	if (!IsValid(Target)) return;
 	if (ShouldIgnoreCompanionStimulus(Target)) return;
-	// A takedown-volume enemy ignores squad chatter too — a squadmate merely Searching must not wake a
-	// pocket target. A real firefight raises the Loud alert, which still wakes it via HandleGlobalAlertChanged.
-	if (IsOwnerTakedownMuffled()) return;
+	// A hushed enemy ignores squad chatter too — a squadmate merely Searching must not wake the target
+	// the companion is mid-takedown on. Only for the duration of the armed window: outside it a pocket
+	// takes squad relay like anyone else. A real firefight raises the Loud alert, which still wakes it
+	// via HandleGlobalAlertChanged.
+	if (IsOwnerTakedownHushed()) return;
 
 	// Guard: set flag to prevent re-broadcast from any combat-entry path this call triggers
 	TGuardValue<bool> RelayGuard(bInSquadSightingRelay, true);

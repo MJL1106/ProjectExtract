@@ -10,6 +10,7 @@
 #include "CoverGeometryStatics.h"
 #include "CoverReservationSubsystem.h"
 #include "CoverPoseComponent.h"
+#include "Animation/CompanionAnimInstance.h"
 #include "CompanionCharacter.h"
 #include "CompanionAIController.h"
 #include "CompanionTuningDataAsset.h"
@@ -170,6 +171,30 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 		}
 	}
 
+	// Commanded cover hold: the player pointed at this wall and the hold has not released yet, so
+	// combat's own EQS pick must not walk the companion off it. Restore the held cover over whatever
+	// was written, and re-assert the one-shot commanded flags this run consumed above — the initial
+	// walk had them and a hold re-entry is the same order, not a fresh autonomous commit. Outranks
+	// the monitor-intent restore (deliberately below it) because the player's choice outranks a
+	// scoring preference. The switch monitor still owns the exit: a compromise break releases the
+	// hold before it relocates, so a genuinely flanked point is never restored back.
+	bool bCommandedHoldRestore = false;
+	if (const ACompanionCharacter* HoldCompanion = Cast<ACompanionCharacter>(Pawn))
+	{
+		const FCover& HeldCover = HoldCompanion->GetCommandedCoverHoldCover();
+		if (HoldCompanion->IsCommandedCoverHoldActive() && HeldCover.IsValid() && HeldCover.Handle != Cover.Handle)
+		{
+			Cover = HeldCover;
+			BB->SetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID(), Cover);
+			bCommandedHoldRestore = true;
+			bCommitGrant = true;
+			bSkipRerank = true;
+			bCommandedCoverBypass = true;
+			UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s restored commanded-hold cover over combat re-pick loc=%s"),
+				*Pawn->GetName(), *Cover.Data.Location.ToCompactString());
+		}
+	}
+
 	// Claim guard at pick time: the EQS result can be stale by the time this task runs, and the
 	// plugin's OccupyCover fails SILENTLY for the loser — never start toward an occupied cover.
 	if (ACoverSystem* ClaimCoverSys = ACoverSystem::GetCoverSystem(OwnerComp.GetWorld()))
@@ -262,8 +287,12 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 			// Commanded cover: the player picked this exact position — bSkipRerank (consumed up-front)
 			// skips the re-rank swap but keeps the bNoEyesOn decline. Enemy pawns never set the flag,
 			// so it reads false and this path stays byte-identical for them.
+			// A commanded-hold restore skips the decline outright: the player picked this exact wall
+			// and "no peek line right now" is not the companion's call to overrule. Losing the angle
+			// is the switch monitor's compromise break, which releases the hold first.
 			bool bNoEyesOn = false;
 			const FCover Reranked = ValidateAndRerankCover(OwnerComp, Controller, Pawn, *Tuning, Cover, bNoEyesOn);
+			if (bNoEyesOn && bCommandedHoldRestore) bNoEyesOn = false;
 			if (bNoEyesOn)
 			{
 				UE_LOG(LogCompanionAI, Log,
@@ -432,6 +461,23 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s MOVE(to-cover) posed=%d"),
 			*GetNameSafe(Pawn), (IsValid(PoseDbg) && PoseDbg->bInCover) ? 1 : 0);
 	}
+	// Companion counterpart of the enemy pose reset at pick time: a pose latched at a previous cover
+	// plays the full-body cover montage for the whole transit and the montage suppresses locomotion,
+	// so the companion floor-slides in the crouched idle instead of walking. Deliberately down here,
+	// past the early-arrival return, because a companion already AT its cover must keep the pose it
+	// is holding — only an actual walk pops it. Goes through the anim instance, not the pose
+	// component: ResetCoverPose clears the flag but leaves the montage (and so the slide) playing.
+	if (ACompanionCharacter* PoseCompanion = Cast<ACompanionCharacter>(Pawn))
+	{
+		USkeletalMeshComponent* PoseMesh = PoseCompanion->GetMesh();
+		UCompanionAnimInstance* PoseAnim = IsValid(PoseMesh)
+			? Cast<UCompanionAnimInstance>(PoseMesh->GetAnimInstance()) : nullptr;
+		if (PoseAnim)
+			PoseAnim->ExitCoverPose();
+		else if (UCoverPoseComponent* PoseComp = PoseCompanion->GetCoverPoseComponent())
+			PoseComp->ResetCoverPose();
+	}
+
 	const EPathFollowingRequestResult::Type MoveResult = Controller->MoveToLocation(
 		ArrivalPos, CoverArrivalAcceptRadius, false, true, true, true);
 	Mem->bMoveIssued = true;

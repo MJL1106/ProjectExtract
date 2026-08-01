@@ -244,18 +244,10 @@ void AStealthDisciplineVolume::SampleTickInside(AExtractionPlayer* Player)
 		HandlePressureTransition(Result);
 }
 
-void AStealthDisciplineVolume::BroadcastWarningToast(UWorld* World)
+void AStealthDisciplineVolume::BroadcastToast(UWorld* World, const FText& Message)
 {
-	if (bWarningSent) return;
-
-	bWarningSent = true;
 	if (UMissionInventorySubsystem* Inventory = World->GetSubsystem<UMissionInventorySubsystem>())
-	{
-		Inventory->OnLootNotify.Broadcast(
-			WarningText.IsEmpty()
-				? NSLOCTEXT("StealthDiscipline", "DefaultWarning", "You are being too loud")
-				: WarningText);
-	}
+		Inventory->OnLootNotify.Broadcast(Message);
 }
 
 void AStealthDisciplineVolume::HandlePressureTransition(EStealthPressureTransition Result)
@@ -265,11 +257,18 @@ void AStealthDisciplineVolume::HandlePressureTransition(EStealthPressureTransiti
 
 	if (Result == EStealthPressureTransition::Warned)
 	{
-		BroadcastWarningToast(World);
+		if (bWarningSent) return;
+		bWarningSent = true;
+
+		BroadcastToast(World,
+			WarningText.IsEmpty()
+				? NSLOCTEXT("StealthDiscipline", "DefaultWarning", "Discipline slipping")
+				: WarningText);
 		return;
 	}
 
-	// Escalated: show warning if never sent, then activate punishment.
+	// Escalated: activate punishment. Fires unconditionally, even if the warning
+	// threshold was skipped entirely (e.g. a burst of unsuppressed shots in one tick).
 	UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>();
 
 	if (Director && Director->IsWaveActive())
@@ -278,7 +277,10 @@ void AStealthDisciplineVolume::HandlePressureTransition(EStealthPressureTransiti
 		return;
 	}
 
-	BroadcastWarningToast(World);
+	BroadcastToast(World,
+		EscalationText.IsEmpty()
+			? NSLOCTEXT("StealthDiscipline", "DefaultEscalation", "Alerted nearby enemies")
+			: EscalationText);
 
 	if (Director)
 	{

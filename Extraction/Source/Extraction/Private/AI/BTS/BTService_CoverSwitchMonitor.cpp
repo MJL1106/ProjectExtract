@@ -296,6 +296,23 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		Mem.CompromiseConsecutiveCount = 0;
 	}
 
+	// Commanded cover hold: the player put the companion on this wall, so neither the score-based
+	// switch below nor the exit-on-trigger-clear may move it off. A compromise break is the one
+	// exception — the enemy has the angle, which voids the order — so it releases the hold and then
+	// takes the ordinary relocate path. Releasing here (rather than leaving the hold latched and
+	// special-casing downstream) is also what stops MoveToCoverPoint's hold restore from dragging
+	// the companion straight back onto the broken point.
+	if (ACompanionCharacter* HoldCompanion = Cast<ACompanionCharacter>(Pawn))
+	{
+		if (HoldCompanion->IsCommandedCoverHoldActive())
+		{
+			if (!bCompromiseBreak) return;
+			HoldCompanion->ClearCommandedCoverHold();
+			UE_LOG(LogCompanionAI, Log,
+				TEXT("[COVMOVE] %s commanded-hold released by compromise break — relocating"), *GetNameSafe(Pawn));
+		}
+	}
+
 	if (!bCompromiseBreak)
 	{
 		if (Mem.TimeSinceArrival < Tuning->CoverSwitchMinDwell) return;

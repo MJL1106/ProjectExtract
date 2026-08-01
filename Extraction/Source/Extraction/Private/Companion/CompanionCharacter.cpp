@@ -25,6 +25,7 @@
 #include "Character/ExtractionPlayer.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "EnemyCharacter.h"
+#include "TakedownVolume.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -142,7 +143,7 @@ ACompanionCharacter::ACompanionCharacter()
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
 	FootstepAudioComponent = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepAudioComponent"));
 	FootstepAudioComponent->SetEmitAINoise(false); // companion steps are flavour, not stimuli
-	FootstepAudioComponent->SetAudioVolume(0.55f); // trails the player constantly — parity reads as doubled player steps
+	FootstepAudioComponent->SetAudioVolume(0.08f); // trails the player constantly — even 0.55 read as loud doubled player steps; near-silent is right
 	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
 	CoverPoseComponent = CreateDefaultSubobject<UCoverPoseComponent>(TEXT("CoverPoseComponent"));
 	TraversalComponent = CreateDefaultSubobject<UTraversalComponent>(TEXT("TraversalComponent"));
@@ -390,6 +391,12 @@ void ACompanionCharacter::Tick(float DeltaTime)
 	if (bCoveringFireActive || bCoveringFirePending)
 		TickCoveringFire(DeltaTime, bCoveringFireReloadHeld || IsReloading());
 
+	// Takedown hush heartbeat. Deliberately driven from Tick and nowhere else: dying, being downed,
+	// having the BT abort the task or the level tearing down all stop Tick, so the pocket wakes on its
+	// own without a single teardown call site to forget.
+	if (bTakedownArmed || bTakedownExecuting || bTakedownMontagePlaying)
+		RefreshTakedownWindow();
+
 	TickPlayerSoftSeparation();
 	TickAllySoftSeparation();
 
@@ -594,10 +601,9 @@ void ACompanionCharacter::SetCoverCommitGrant(bool bPending)
 
 bool ACompanionCharacter::ConsumeCoverCommitGrant()
 {
-	// The grant must outlive the covering-fire arm timeout: a slow cover commit should not
-	// silently expire while the pending window waits for cover arrival. Both share
-	// CoveringFireArmTimeout so they cannot drift. Other callers (cover switch, take-cover
-	// command, combat cover commit) consume within one BT tick, well under this threshold.
+	// Generous lifetime: a Cover Me grant must survive a slow cover commit, since the window is
+	// already counting down while the companion repositions. Other callers (cover switch,
+	// take-cover command, combat cover commit) consume within one BT tick, well under this.
 	const float Stamp = CoverCommitGrantStamp;
 	CoverCommitGrantStamp = -1e9f;
 	return GetWorld() && (GetWorld()->GetTimeSeconds() - Stamp) <= CoveringFireArmTimeout;
@@ -623,11 +629,12 @@ bool ACompanionCharacter::ConsumeCommandedCoverTarget(FCover& OutCover)
 	return true;
 }
 
-void ACompanionCharacter::SetCommandedCoverHold(const FVector& AnchorLocation, float LeashRadius)
+void ACompanionCharacter::SetCommandedCoverHold(const FVector& AnchorLocation, float LeashRadius, const FCover& HoldCover)
 {
 	bCommandedCoverHoldActive = true;
 	CommandedCoverHoldAnchor = AnchorLocation;
 	CommandedCoverHoldLeashRadius = LeashRadius;
+	CommandedCoverHoldCover = HoldCover;
 	CommandedCoverCombatStartTime = -1e9f; // re-arm: a fresh hold has no combat clock
 	bCommandedCoverCombatGraceArmed = false;
 }
@@ -647,6 +654,7 @@ void ACompanionCharacter::ClearCommandedCoverHold()
 		bCommandedCoverHoldActive = false;
 		CommandedCoverHoldAnchor = FVector::ZeroVector;
 		CommandedCoverHoldLeashRadius = 0.f;
+		CommandedCoverHoldCover = FCover();
 		CommandedCoverCombatStartTime = -1e9f;
 		bCommandedCoverCombatGraceArmed = false;
 	}
@@ -663,7 +671,6 @@ void ACompanionCharacter::ArmCoveringFire(float Duration)
 	bCoveringFirePending = true;
 	CoveringFireDuration = Duration;
 	CoveringFireRemaining = Duration;
-	CoveringFireArmTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
 }
 
 void ACompanionCharacter::StartCoveringFire()
@@ -679,25 +686,10 @@ void ACompanionCharacter::StartCoveringFire()
 
 void ACompanionCharacter::TickCoveringFire(float DeltaSeconds, bool bReloadHeld)
 {
-	if (!bCoveringFireActive && !bCoveringFirePending) return;
+	if (!bCoveringFireActive) return;
 
 	const UWorld* World = GetWorld();
 	const float Now = World ? World->GetTimeSeconds() : 0.f;
-
-	// Arm timeout: cover was never reached — start the window from where we stand.
-	// The player pressed the button and must always get the countdown and the behaviour; a
-	// window that silently evaporates on target death while pending is the exact confusion
-	// being fixed. The window self-limits at its own duration and the hard ceiling below.
-	if (bCoveringFirePending)
-	{
-		if ((Now - CoveringFireArmTime) <= CoveringFireArmTimeout)
-		{
-			return; // still pending, no clock to tick
-		}
-
-		StartCoveringFire();
-		Bark(ECompanionBarkType::Suppressing);
-	}
 
 	// Hard wall-clock ceiling — force-clears regardless of pause state.
 	if ((Now - CoveringFireStartTime) > (CoveringFireDuration + CoveringFireCeilingSlack))
@@ -744,7 +736,6 @@ void ACompanionCharacter::ClearCoveringFire()
 	bCoveringFireActive = false;
 	CoveringFireRemaining = 0.f;
 	CoveringFireDuration = 0.f;
-	CoveringFireArmTime = -1e9f;
 	CoveringFireStartTime = -1e9f;
 	bCoveringFireReloadHeld = false;
 	bCoveringFireCoverIdle = false;
@@ -2011,11 +2002,32 @@ void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod M
 	bTakedownExecuting = false;
 	bTakedownMontagePlaying = false;
 
-	// Grandfather the victim against the global alert ratchet for as long as we stay armed on it —
-	// one missed player shot escalates the level to Loud, which wakes every Unaware enemy and would
-	// otherwise invalidate a takedown we are already lined up on.
+	TakedownWindowEnemies.Reset();
 	if (AEnemyCharacter* ReservedVictim = Cast<AEnemyCharacter>(Victim))
+	{
+		// Grandfather the victim against the global alert ratchet for as long as we stay armed on it —
+		// one missed player shot escalates the level to Loud, which wakes every Unaware enemy and would
+		// otherwise invalidate a takedown we are already lined up on.
 		ReservedVictim->ReserveForTakedown(this);
+
+		// The hush covers the whole pocket, not just the victim: the partner is the one that turns
+		// round when the player takes their half of the synced kill. Same union the BT task syncs on
+		// (GatherEligiblePeers), so the pair we hush can never disagree with the pair we co-ordinate.
+		TSet<AEnemyCharacter*> Pocket;
+		ATakedownVolume::GatherEligiblePeers(ReservedVictim, Pocket);
+
+		TakedownWindowEnemies.Reserve(Pocket.Num() + 1);
+		for (AEnemyCharacter* PocketEnemy : Pocket)
+			TakedownWindowEnemies.Add(PocketEnemy);
+
+		// Backstop: the victim itself may already have dropped out of IsTakedownEligible (the alert
+		// ratchet drifting it to Searching) and so be absent from the union — it still gets hushed.
+		TakedownWindowEnemies.AddUnique(ReservedVictim);
+
+		// Stamp now rather than waiting for the next Tick: a knife arm can execute on the very next
+		// frame, and an unstamped frame is a frame the partner can hear the player's shot in.
+		RefreshTakedownWindow();
+	}
 
 	// Aim at the victim — and mark LOS clear so the anim-side fade does not relax the spine
 	// while the companion holds the armed aim (the service pins HasTargetLOS false in stealth).
@@ -2054,6 +2066,23 @@ void ACompanionCharacter::ArmCommandedTakedown(AActor* Victim, ETakedownMethod M
 
 	UE_LOG(LogCompanion, Log, TEXT("Takedown armed: victim=%s method=%s"),
 		*GetNameSafe(Victim), Method == ETakedownMethod::Knife ? TEXT("Knife") : TEXT("Shoot"));
+}
+
+void ACompanionCharacter::RefreshTakedownWindow()
+{
+	// Prune as we stamp: a dead enemy stays IsValid (and keeps getting stamped, harmlessly — its
+	// awareness is already stopped) until corpse cleanup destroys the actor, at which point the
+	// weak ptr goes stale and drops out here instead of accumulating across a session.
+	for (int32 i = TakedownWindowEnemies.Num() - 1; i >= 0; --i)
+	{
+		AEnemyCharacter* Enemy = TakedownWindowEnemies[i].Get();
+		if (!IsValid(Enemy))
+		{
+			TakedownWindowEnemies.RemoveAtSwap(i);
+			continue;
+		}
+		Enemy->BeginTakedownWindow(TakedownWindowRefreshSeconds);
+	}
 }
 
 void ACompanionCharacter::DisarmCommandedTakedown()
@@ -2096,6 +2125,9 @@ void ACompanionCharacter::DisarmCommandedTakedown()
 	// Release the alert-ratchet grandfather — we no longer have a claim on this victim.
 	if (AEnemyCharacter* ReservedVictim = Cast<AEnemyCharacter>(TakedownVictim.Get()))
 		ReservedVictim->ClearTakedownReservation(this);
+
+	// Stop the heartbeat; the already-stamped expiry runs out on its own (TakedownWindowRefreshSeconds).
+	TakedownWindowEnemies.Reset();
 
 	TakedownVictim.Reset();
 	TakedownPlayerRef.Reset();
@@ -2558,6 +2590,19 @@ void ACompanionCharacter::FinishCommandedTakedown()
 			if (UCapsuleComponent* VictimCapsule = VictimChar->GetCapsuleComponent())
 				VictimCapsule->IgnoreActorWhenMoving(this, false);
 	}
+
+	// Release the grandfather here too. The success path never routed through Disarm's release (the
+	// task's CleanupTask calls Disarm afterwards, but Disarm early-outs once Finish has cleared the
+	// armed flags), so the claim outlived the takedown. Benign while the victim is a corpse, but a
+	// stale reservation is exactly what keeps a survivor asleep if the kill ever fails to register.
+	if (AEnemyCharacter* ReservedVictim = Cast<AEnemyCharacter>(TakedownVictim.Get()))
+		ReservedVictim->ClearTakedownReservation(this);
+
+	// Stop the heartbeat. Must be done HERE and not left to Disarm for the same reason as above —
+	// Disarm's early-out makes its own Reset unreachable on this path. The last stamp's
+	// TakedownWindowRefreshSeconds is the deliberate grace tail: the player's synced shot broadcasts
+	// its commit before the hitscan, so its noise can arrive after we have already finished.
+	TakedownWindowEnemies.Reset();
 
 	TakedownVictim.Reset();
 	TakedownPlayerRef.Reset();

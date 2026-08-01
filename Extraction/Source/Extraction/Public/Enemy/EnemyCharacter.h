@@ -279,6 +279,21 @@ public:
 	 *  counter so overlapping more than one volume is handled correctly. */
 	void SetInTakedownVolume(bool bInVolume);
 
+	/** Opens (or extends) this enemy's takedown window: the short hush an ARMED companion takedown
+	 *  holds over its victim and that victim's pocket partners, so the player's own synced shot doesn't
+	 *  make the partner spin round mid-kill.
+	 *
+	 *  Heartbeat, not a flag: the companion re-stamps this every Tick while it stays armed, and expiry
+	 *  only ever moves forward (Max), so two overlapping windows compose. Teardown is simply the
+	 *  stamping STOPPING — companion death, BT abort, EndPlay and the finish path all let it lapse
+	 *  within one refresh interval. Nothing to clear, so nothing can leak a permanently deaf enemy,
+	 *  which is exactly what an unconditional volume flag was doing before. */
+	void BeginTakedownWindow(float Seconds);
+
+	/** True while a companion takedown is armed on this enemy's pocket (see BeginTakedownWindow).
+	 *  Drives the hearing hush; sight is unaffected (that is IsInTakedownVolume's job). */
+	bool IsInTakedownWindow() const;
+
 
 	/**
 	 * Phase 1 of a montage-deferred takedown: validates CanBeTakenDown, sets pending-death flag,
@@ -436,9 +451,11 @@ public:
 
 	bool IsIsolatedEncounter() const { return bIsolatedEncounter; }
 
-	/** True while standing inside at least one ATakedownVolume. Drives awareness "muffling": a pocket
-	 *  enemy ignores gunfire, walking and reload noise so taking one down doesn't cascade to its
-	 *  neighbours — but a sprint footstep and a level-wide Loud alert still wake it. Distinct from the
+	/** True while standing inside at least one ATakedownVolume. Marks this enemy as designer-authored
+	 *  takedown bait: it is pingable (IsTakedownEligible) and keeps the pre-buff sneak-up sight profile
+	 *  — no point-blank auto-combat, no near-fill boost — because the pocket exists to be crept on.
+	 *  Hearing is NOT affected: that hush is the armed-takedown window (IsInTakedownWindow), so an
+	 *  un-pinged pocket hears an unsuppressed shot beside it like anyone else. Distinct from the
 	 *  bIsolatedEncounter test flag, which is fully deaf. */
 	bool IsInTakedownVolume() const { return TakedownVolumeRefCount > 0; }
 
@@ -587,6 +604,10 @@ private:
 
 	/** Number of ATakedownVolumes currently containing this enemy. Positive = in at least one volume. */
 	int32 TakedownVolumeRefCount = 0;
+
+	/** World time the takedown hush lapses (see BeginTakedownWindow). Large negative sentinel so a
+	 *  never-stamped enemy is out of window from frame one, including before the world clock starts. */
+	float TakedownWindowExpiry = -1e9f;
 
 	/** Who has claimed this enemy as an in-flight takedown victim (weak — the instigator can die
 	 *  mid-approach). Drives the grandfather exemption in IsTakedownEligibleFor / CanBeTakenDown. */

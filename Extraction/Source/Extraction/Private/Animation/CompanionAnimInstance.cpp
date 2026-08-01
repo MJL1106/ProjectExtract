@@ -16,6 +16,29 @@
 #include "Enemy/Debug/EnemyDebug.h"
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
 
+#if !UE_BUILD_SHIPPING
+// Locomotion blendspace probe: drive the Speed/Direction inputs directly so any cell can be
+// eyeballed without steering the AI into it. The companion animates in place — this overrides the
+// blend inputs, not the movement component, so the feet run while the capsule stands still.
+static TAutoConsoleVariable<float> CVarCompanionDebugLocoSpeed(
+	TEXT("companion.DebugLocoSpeed"),
+	0.f,
+	TEXT("Force the companion locomotion blendspace Speed input (cm/s). 0 = off. 275 = run row, 850 = sprint row."),
+	ECVF_Cheat);
+
+static TAutoConsoleVariable<float> CVarCompanionDebugLocoDirection(
+	TEXT("companion.DebugLocoDirection"),
+	0.f,
+	TEXT("Force the companion locomotion blendspace Direction input (deg, -180..180). Needs companion.DebugLocoSpeed > 0. Ignored while DebugLocoSweep is on."),
+	ECVF_Cheat);
+
+static TAutoConsoleVariable<float> CVarCompanionDebugLocoSweep(
+	TEXT("companion.DebugLocoSweep"),
+	0.f,
+	TEXT("Seconds per full -180..180 Direction sweep, so one command walks every column of the blendspace. 0 = off (hold DebugLocoDirection)."),
+	ECVF_Cheat);
+#endif
+
 namespace CompanionAnimConstants
 {
 	static constexpr float DirectionInterpSpeed = 15.0f;
@@ -218,6 +241,22 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		? MovementComponent->MaxWalkSpeedCrouched
 		: MovementComponent->MaxWalkSpeed;
 	NormalizedSpeed = MaxSpeed > 0.f ? Speed / MaxSpeed : 0.f;
+
+#if !UE_BUILD_SHIPPING
+	// Blendspace probe (see the companion.DebugLoco* cvars). Applied after the real inputs are
+	// resolved, so clearing DebugLocoSpeed hands control straight back with no state to unwind.
+	if (const float DebugLocoSpeed = CVarCompanionDebugLocoSpeed.GetValueOnGameThread(); DebugLocoSpeed > 0.f)
+	{
+		Speed = DebugLocoSpeed;
+		bHasVelocity = true;
+		const float SweepSeconds = CVarCompanionDebugLocoSweep.GetValueOnGameThread();
+		const UWorld* ProbeWorld = GetWorld();
+		Direction = (SweepSeconds > 0.f && ProbeWorld)
+			? FMath::UnwindDegrees(FMath::Fmod(ProbeWorld->GetTimeSeconds() / SweepSeconds, 1.f) * 360.f - 180.f)
+			: FMath::UnwindDegrees(CVarCompanionDebugLocoDirection.GetValueOnGameThread());
+		NormalizedSpeed = MaxSpeed > 0.f ? Speed / MaxSpeed : 0.f;
+	}
+#endif
 
 	// Throttled speed diag — only logs while actually moving (>20) so it's not idle spam.
 	if (Speed > 20.f)

@@ -2,6 +2,7 @@
 
 #include "TakedownVolume.h"
 #include "Components/BoxComponent.h"
+#include "EngineUtils.h"
 #include "EnemyCharacter.h"
 
 ATakedownVolume::ATakedownVolume()
@@ -89,5 +90,21 @@ void ATakedownVolume::AppendEligibleEnemies(TSet<AEnemyCharacter*>& Out) const
 	{
 		if (WeakEnemy.IsValid() && WeakEnemy->IsTakedownEligible())
 			Out.Add(WeakEnemy.Get());
+	}
+}
+
+void ATakedownVolume::GatherEligiblePeers(const AEnemyCharacter* Enemy, TSet<AEnemyCharacter*>& Out)
+{
+	if (!IsValid(Enemy)) return;
+
+	UWorld* World = Enemy->GetWorld();
+	if (!IsValid(World)) return;
+
+	// Volumes are hand-placed and few, and this only runs on a takedown command / while one is armed,
+	// so the level iteration is cheap enough to keep the union authoritative rather than cached.
+	for (TActorIterator<ATakedownVolume> It(World); It; ++It)
+	{
+		if (It->ContainsEnemy(Enemy))
+			It->AppendEligibleEnemies(Out);
 	}
 }

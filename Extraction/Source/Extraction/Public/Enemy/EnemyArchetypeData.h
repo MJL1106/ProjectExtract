@@ -214,6 +214,36 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0", ClampMax = "99.0"))
 	float BreachStartleSuspicionFloor = 75.f;
 
+	/** Minimum suspicion after hearing a JOG footstep ("FootstepWalk"), scaled by acoustic occlusion.
+	 *  45 vs SuspicionDecayRate 15/s holds the enemy Suspicious for ~1 s — longer than the ~0.85 s jog
+	 *  step cadence — so sustained jogging ratchets past SearchingThreshold and gets investigated,
+	 *  while one or two steps only earn a head-turn. A jog heard through a closed door
+	 *  (ThroughDoorNoiseMultiplier 0.6 -> 27) stays under SuspiciousThreshold and is ignored.
+	 *  Never slams state on its own — ApplySuspicionState picks it up on the next update. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0", ClampMax = "99.0"))
+	float JogFootstepSuspicionFloor = 45.f;
+
+	/** Minimum suspicion after hearing a SPRINT footstep ("FootstepSprint"), scaled by acoustic
+	 *  occlusion. 80 clears SearchingThreshold (65) outright, so an unoccluded sprint in earshot sends
+	 *  the enemy to investigate immediately — sprinting is not a stealth option. Through a door
+	 *  (x0.6 -> 48) it drops to a turn-and-look. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0", ClampMax = "99.0"))
+	float SprintFootstepSuspicionFloor = 80.f;
+
+	/** Distance (cm) inside which an unsuppressed gunshot is instant Combat on the shooter, no meter,
+	 *  no investigate walk. 800 = ~8 m: a shot fired that close is unmistakably AT you. The range is
+	 *  scaled by noise strength x acoustic multiplier, so a suppressor (~0.3) shrinks it to ~2.4 m and
+	 *  a closed door (0.6) to ~4.8 m — suppressed play is untouched by this. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
+	float GunshotCombatSlamRange = 800.f;
+
+	/** Distance (cm) inside which a heard SPRINT footstep is instant Combat on the runner. 600 = ~6 m,
+	 *  deliberately shorter than the gunshot slam — someone sprinting past at that range is on top of
+	 *  you. Scaled the same way (strength x acoustics), so a sprint through a wall never slams.
+	 *  0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
+	float SprintCombatSlamRange = 600.f;
+
 	/** Fill multiplier at the edge of the view cone (1 at centre). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.05", ClampMax = "1.0"))
 	float AngleEdgeFillFactor = 0.35f;

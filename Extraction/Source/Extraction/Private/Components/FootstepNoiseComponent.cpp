@@ -241,9 +241,13 @@ UFootstepNoiseComponent::EStepTier UFootstepNoiseComponent::PickTier() const
 
 void UFootstepNoiseComponent::EmitAINoise(const FVector& Location, EStepTier Tier) const
 {
-	// A takedown-volume enemy muffles quiet noise but still reacts to a sprint (see
-	// UEnemyAwarenessComponent::HandleHearingStimulus), so sprint steps carry a distinct tag.
-	static const FName WalkTag(TEXT("Footstep"));
+	// One tag per REACTION tier, because the listener keys its response off the tag (see
+	// UEnemyAwarenessComponent::HandleHearingStimulus): a jog gets a suspicion floor, a sprint gets an
+	// immediate investigate and a close-range Combat slam, and both pierce the armed-takedown hush that
+	// swallows ordinary noise. Quiet and SlowWalk deliberately SHARE the plain "Footstep" tag — they
+	// are the stealth tool and get no floor at all, only the normal loudness-scaled gain.
+	static const FName QuietTag(TEXT("Footstep"));
+	static const FName WalkTag(TEXT("FootstepWalk"));
 	static const FName SprintTag(TEXT("FootstepSprint"));
 
 	float Loudness = WalkLoudness;
@@ -252,8 +256,8 @@ void UFootstepNoiseComponent::EmitAINoise(const FVector& Location, EStepTier Tie
 
 	switch (Tier)
 	{
-	case EStepTier::Quiet:    Loudness = QuietLoudness;    Range = QuietRange;    break;
-	case EStepTier::SlowWalk: Loudness = SlowWalkLoudness; Range = SlowWalkRange; break;
+	case EStepTier::Quiet:    Loudness = QuietLoudness;    Range = QuietRange;    Tag = QuietTag; break;
+	case EStepTier::SlowWalk: Loudness = SlowWalkLoudness; Range = SlowWalkRange; Tag = QuietTag; break;
 	case EStepTier::Sprint:   Loudness = SprintLoudness;   Range = SprintRange;   Tag = SprintTag; break;
 	case EStepTier::Walk: break;
 	}

@@ -691,8 +691,8 @@ UCompanionCommandComponent::ECoverMeGate UCompanionCommandComponent::EvaluateCov
 	// Companion passed all validity gates — write it out so callers skip re-resolve.
 	if (OutCompanion) *OutCompanion = Companion;
 
-	// Populate the live blackboard target when there is one — it selects the immediate-start
-	// path in TriggerCoverMe. Its absence is NOT a reason to refuse.
+	// Populate the live blackboard target when there is one — TriggerCoverMe uses it to decide
+	// whether to grant a cover commit. Its absence is NOT a reason to refuse.
 	AActor* BBTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
 	if (IsValid(BBTarget) && OutCombatTarget) *OutCombatTarget = BBTarget;
 
@@ -751,27 +751,19 @@ void UCompanionCommandComponent::TriggerCoverMe()
 	CloseModeMenu();
 	if (!IsValid(Companion)) return; // guard: CloseModeMenu broadcasts, weak ref may go stale
 
+	// The window ALWAYS starts on the press — bark and countdown are immediate, never deferred to
+	// cover arrival. Waiting for the cover machinery meant the common mid-fight case (live target,
+	// no shot from the current spot) gave no feedback at all and rejected every re-press as
+	// "already active" until a fallback fired seconds later. The clock now runs while he moves.
 	Companion->ArmCoveringFire(CoveringFireDuration);
+	Companion->StartCoveringFire();
+	Companion->Bark(ECompanionBarkType::Suppressing);
 
-	// When CombatTarget is null (recency path — no live BB target), the combat task cannot run
-	// (it requires BB_CombatTarget) so MoveToCoverPoint will never call StartCoveringFire.
-	// Start immediately so the countdown appears on the press and the window is honest.
-	if (!IsValid(CombatTarget))
-	{
-		Companion->StartCoveringFire();
-		Companion->Bark(ECompanionBarkType::Suppressing);
-	}
-	else if (CanPeekShootTarget(Companion, CombatTarget))
-	{
-		Companion->StartCoveringFire();
-		Companion->Bark(ECompanionBarkType::Suppressing);
-	}
-	else
-	{
-		// Live target but not in usable cover: grant commit so the normal cover machinery runs.
+	// Live target he cannot shoot from here: grant commit so the cover machinery still repositions
+	// him — now during the already-running window instead of before it.
+	if (IsValid(CombatTarget) && !CanPeekShootTarget(Companion, CombatTarget))
 		Companion->SetCoverCommitGrant(true);
-	}
 
-	UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] armed (%.1fs), hasTarget=%d"),
+	UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] started (%.1fs), hasTarget=%d"),
 		CoveringFireDuration, IsValid(CombatTarget));
 }

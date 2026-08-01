@@ -38,9 +38,13 @@ private:
 	UPROPERTY(EditAnywhere, Category = "StealthDiscipline|Settings")
 	FStealthDisciplineSettings Settings;
 
-	/** Text shown to the player on Warning / Escalation (via the existing HUD toast channel). */
+	/** Text shown to the player on Warning (via the existing HUD toast channel). */
 	UPROPERTY(EditAnywhere, Category = "StealthDiscipline|Settings")
 	FText WarningText;
+
+	/** Shown on escalation, when the alarm trips and the Director starts fielding reinforcements. */
+	UPROPERTY(EditAnywhere, Category = "StealthDiscipline|Settings")
+	FText EscalationText;
 
 	/** Director config activated on escalation. Assign in the placed instance. */
 	UPROPERTY(EditAnywhere, Category = "StealthDiscipline|Punishment")
@@ -93,7 +97,7 @@ private:
 	void SampleTickOutside();
 	void SampleTickInside(AExtractionPlayer* Player);
 	void HandlePressureTransition(EStealthPressureTransition Result);
-	void BroadcastWarningToast(UWorld* World);
+	void BroadcastToast(UWorld* World, const FText& Message);
 
 	// ---- Shot relay binding ----
 

@@ -1487,6 +1487,24 @@ void AEnemyCharacter::SetInTakedownVolume(bool bInVolume)
 	TakedownVolumeRefCount = FMath::Max(0, TakedownVolumeRefCount + (bInVolume ? 1 : -1));
 }
 
+void AEnemyCharacter::BeginTakedownWindow(float Seconds)
+{
+	if (Seconds <= 0.f) return;
+
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	// Max, never assign: a second companion (or a second overlapping pocket) stamping a shorter window
+	// must not shorten one already running.
+	TakedownWindowExpiry = FMath::Max(TakedownWindowExpiry, World->GetTimeSeconds() + Seconds);
+}
+
+bool AEnemyCharacter::IsInTakedownWindow() const
+{
+	const UWorld* World = GetWorld();
+	return IsValid(World) && World->GetTimeSeconds() <= TakedownWindowExpiry;
+}
+
 bool AEnemyCharacter::BeginTakedownHold(AActor* TakedownInstigator, FVector SnapLocation, float SnapYaw, float WatchdogTimeout, bool bIgnoreRangeAndArc)
 {
 	if (!CanBeTakenDown(TakedownInstigator, bIgnoreRangeAndArc)) return false;

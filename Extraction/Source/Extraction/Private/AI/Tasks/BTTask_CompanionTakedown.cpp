@@ -16,7 +16,6 @@
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
 #include "HealthComponent.h"
-#include "EngineUtils.h"
 #include "AI/AITargetingStatics.h"
 #include "Character/ExtractionPlayer.h"
 
@@ -149,13 +148,12 @@ EBTNodeResult::Type UBTTask_CompanionTakedown::ExecuteTask(UBehaviorTreeComponen
 
 	// Decide autonomous vs synced: union eligible enemies across all volumes containing this
 	// victim. 2+ eligible sharing a volume = synced double-takedown; lone = autonomous solo.
+	// Same helper ArmCommandedTakedown uses to pick who the takedown hush covers, so the pair we
+	// co-ordinate with the player is always the pair that stays deaf during it.
 	bAutonomous = true;
 	{
 		TSet<AEnemyCharacter*> EligibleShared;
-		if (UWorld* W = Companion->GetWorld())
-			for (TActorIterator<ATakedownVolume> It(W); It; ++It)
-				if (It->ContainsEnemy(Enemy))
-					It->AppendEligibleEnemies(EligibleShared);
+		ATakedownVolume::GatherEligiblePeers(Enemy, EligibleShared);
 		if (EligibleShared.Num() >= 2)
 			bAutonomous = false;
 	}

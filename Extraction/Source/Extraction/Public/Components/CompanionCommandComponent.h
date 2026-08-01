@@ -47,7 +47,7 @@ public:
 
 	/** Duration (seconds) of the covering-fire sustained-peek window. */
 	UPROPERTY(EditAnywhere, Category = "Companion|CoveringFire", meta = (ClampMin = "1.0"))
-	float CoveringFireDuration = 5.f;
+	float CoveringFireDuration = 7.f;
 
 	/** Seconds after the companion last held a combat target that Cover Me still counts as
 	 *  "in combat". The blackboard target only exists while the companion currently SEES an

@@ -31,6 +31,7 @@ class UUserWidget;
 class AExtractionPlayer;
 class UCompanionTuningDataAsset;
 class UEnemyGrenadierComponent;
+class AEnemyCharacter;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
 
@@ -278,11 +279,15 @@ public:
 	// suspends, cover seat retained. Released when the player moves beyond the leash, companion
 	// goes DBNO, or a different command is issued.
 
-	void SetCommandedCoverHold(const FVector& AnchorLocation, float LeashRadius);
+	void SetCommandedCoverHold(const FVector& AnchorLocation, float LeashRadius, const FCover& HoldCover);
 	void ClearCommandedCoverHold();
 	bool IsCommandedCoverHoldActive() const { return bCommandedCoverHoldActive; }
 	FVector GetCommandedCoverHoldAnchor() const { return CommandedCoverHoldAnchor; }
 	float GetCommandedCoverHoldLeash() const { return CommandedCoverHoldLeashRadius; }
+	/** The exact cover the player pointed at, retained for the hold's lifetime (unlike the one-shot
+	 *  CommandedCoverTarget, which BTTask_CompanionTakeCover consumes). Combat inherits the hold and
+	 *  runs its own EQS pick; without this the pick walks the companion off the player's wall. */
+	const FCover& GetCommandedCoverHoldCover() const { return CommandedCoverHoldCover; }
 
 	/** Stamp the combat-start time for the hold release. Called once on first BB_CombatTarget while
 	 *  the hold is active. Does not re-stamp on target flicker. */
@@ -294,18 +299,19 @@ public:
 	bool IsCommandedCoverCombatGraceArmed() const { return bCommandedCoverCombatGraceArmed; }
 
 	// --- Covering Fire (commanded sustained-fire window, see Slice 2 plan) ---
-	// Arm -> Start -> Tick -> Clear. Pending = armed but not yet firing (waiting for cover arrival).
-	// Active = clock running. Hard ceiling force-clears regardless of pause state.
+	// Arm -> Start -> Tick -> Clear. Arm and Start are a same-frame handshake driven by the player's
+	// press; pending never outlives that frame. Active = clock running. Hard ceiling force-clears
+	// regardless of pause state.
 
-	/** Arm a covering-fire window. Does NOT start the clock. */
+	/** Arm a covering-fire window. Does NOT start the clock — call StartCoveringFire straight after. */
 	void ArmCoveringFire(float Duration);
-	/** Start the countdown (call on first valid peek from cover). */
+	/** Start the countdown. No-op unless armed. */
 	void StartCoveringFire();
 	/** Tick the countdown. Clock pauses while bReloadHeld is true. */
 	void TickCoveringFire(float DeltaSeconds, bool bReloadHeld);
 	/** True while the countdown is running (armed AND started). */
 	bool IsCoveringFireActive() const { return bCoveringFireActive; }
-	/** True while armed but not yet started (waiting for cover arrival). */
+	/** True while armed but not yet started — only ever within the arming frame. */
 	bool IsCoveringFirePending() const { return bCoveringFirePending; }
 	/** Remaining window seconds. 0 when inactive. */
 	float GetCoveringFireRemaining() const { return CoveringFireRemaining; }
@@ -1116,6 +1122,16 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
 	float ShootCommandedKillDelay = 0.1f;
 
+	/** How far ahead each Tick stamps the victim's/partners' takedown hush (AEnemyCharacter::
+	 *  BeginTakedownWindow). Doubles as the teardown latency: once the heartbeat stops, the pocket
+	 *  wakes this many seconds later at worst. Also the grace tail that swallows the player's synced
+	 *  shot — OnPlayerFiredWeapon broadcasts before the hitscan and its noise report, so the shot's
+	 *  stimulus can land a few frames AFTER the companion has already finished and stopped stamping.
+	 *  0.75 s is long enough to cover that, short enough that a missed shot still wakes the pocket
+	 *  inside a second (the punishment for whiffing). */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|Takedown", meta = (ClampMin = "0.0"))
+	float TakedownWindowRefreshSeconds = 0.75f;
+
 private:
 	UPROPERTY(ReplicatedUsing = OnRep_LowReadyAim)
 	bool bLowReadyAim = false;
@@ -1142,6 +1158,8 @@ private:
 	bool bCommandedCoverHoldActive = false;
 	FVector CommandedCoverHoldAnchor = FVector::ZeroVector;
 	float CommandedCoverHoldLeashRadius = 0.f;
+	/** The cover the hold is anchored to. See GetCommandedCoverHoldCover. */
+	FCover CommandedCoverHoldCover;
 	/** World time the first BB_CombatTarget was seen during this hold. -1e9 = no combat yet.
 	 *  Stamped once, never re-stamped on target flicker. */
 	float CommandedCoverCombatStartTime = -1e9f;
@@ -1159,8 +1177,6 @@ private:
 	bool bCoveringFireActive = false;
 	float CoveringFireRemaining = 0.f;
 	float CoveringFireDuration = 0.f;
-	/** World time the arm was stamped. Arm timeout forces start if cover is never reached. */
-	float CoveringFireArmTime = -1e9f;
 	/** World time start was called. Hard ceiling = start + duration + CoveringFireCeilingSlack. */
 	float CoveringFireStartTime = -1e9f;
 
@@ -1168,7 +1184,7 @@ private:
 	 *  it a reload that can never complete leaves the companion permanently damage-resistant. */
 	static constexpr float CoveringFireCeilingSlack = 8.f;
 
-	/** Seconds a pending arm waits for cover before starting the window anyway. */
+	/** Lifetime (seconds) of a cover-commit grant before it is treated as stale. */
 	static constexpr float CoveringFireArmTimeout = 6.f;
 
 	/** Cooldown (seconds) after a covering-fire window completes before another can be triggered. */
@@ -1403,6 +1419,10 @@ private:
 	void ExecuteCommandedTakedown();
 	void FinishCommandedTakedown();
 
+	/** Re-stamps the takedown hush on every enemy in TakedownWindowEnemies. Called every Tick while a
+	 *  commanded takedown is armed/executing — see TakedownWindowRefreshSeconds. */
+	void RefreshTakedownWindow();
+
 	/** Cosmetic fire: plays the fire montage + weapon muzzle FX with no hitscan/damage/alert. */
 	void FireCosmeticShotAt(const FVector& AimEndPoint);
 
@@ -1420,6 +1440,12 @@ private:
 	/** World time the forced-target commitment lapses. */
 	float ForcedCombatTargetExpiry = 0.f;
 	TWeakObjectPtr<AExtractionPlayer> TakedownPlayerRef;
+
+	/** The victim plus every takedown-eligible enemy sharing a volume with it — the pocket the armed
+	 *  takedown hushes. Weak: any of them can die (that is the point) while the window is open, and a
+	 *  dead entry simply stops being stamped. Emptied on disarm/finish, which IS the teardown. */
+	TArray<TWeakObjectPtr<AEnemyCharacter>> TakedownWindowEnemies;
+
 	ETakedownMethod TakedownActiveMethod = ETakedownMethod::Knife;
 	FTimerHandle ShootDelayTimerHandle;
 

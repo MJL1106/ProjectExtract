@@ -20,10 +20,10 @@ struct EXTRACTION_API FStealthDisciplineSettings
 	GENERATED_BODY()
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float SprintGraceSeconds = 1.5f;
+	float SprintGraceSeconds = 0.75f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float SprintPressurePerSecond = 18.f;
+	float SprintPressurePerSecond = 25.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float PressurePerShot = 15.f;
@@ -34,7 +34,12 @@ struct EXTRACTION_API FStealthDisciplineSettings
 	float SuppressedPressurePerShot = 3.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
-	float DecayPerSecond = 5.f;
+	float DecayPerSecond = 4.f;
+
+	/** Seconds of no pressure gain before decay begins. Stops corner-stops and brief pauses
+	 *  from immediately refunding sprint pressure. Zero restores the old instant-decay behaviour. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", UIMax = "10.0"))
+	float DecayDelaySeconds = 3.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0"))
 	float WarningThreshold = 25.f;
@@ -48,7 +53,7 @@ struct EXTRACTION_API FStealthDisciplineSettings
 	/** How long a dip below SprintSpeedThreshold is tolerated before the sprint streak resets.
 	 *  Zero disables lapse tolerance (old hard-reset behaviour). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, meta = (ClampMin = "0.0", ClampMax = "5.0", UIMax = "5.0"))
-	float SprintLapseGraceSeconds = 0.75f;
+	float SprintLapseGraceSeconds = 2.f;
 
 	static constexpr float MaxSprintLapseGraceSeconds = 5.f;
 };
@@ -59,6 +64,7 @@ struct EXTRACTION_API FStealthPressureAccumulator
 	float Pressure = 0.f;
 	float ContinuousSprintSeconds = 0.f;
 	float SecondsSinceSprint = 0.f;
+	float SecondsSincePressureGain = 0.f;
 	bool bWarned = false;
 	bool bEscalated = false;
 
@@ -94,8 +100,17 @@ struct EXTRACTION_API FStealthPressureAccumulator
 		if (NormalShots > 0) Pressure += Settings.PressurePerShot * static_cast<float>(NormalShots);
 		if (SuppressedShots > 0) Pressure += Settings.SuppressedPressurePerShot * static_cast<float>(SuppressedShots);
 
+		// Delay window: any tick that actually gained pressure resets it; otherwise it accrues,
+		// gating decay below so a corner-stop doesn't instantly refund a sprint burst.
+		const bool bGainedPressure = bSprintPressure || NormalShots > 0 || SuppressedShots > 0;
+		if (bGainedPressure)
+			SecondsSincePressureGain = 0.f;
+		else
+			SecondsSincePressureGain += DeltaSeconds;
+
 		const int32 TotalShots = NormalShots + SuppressedShots;
-		if (!bSprinting && TotalShots <= 0)
+		const bool bDecayDelayElapsed = SecondsSincePressureGain > FMath::Max(0.f, Settings.DecayDelaySeconds);
+		if (!bSprinting && TotalShots <= 0 && bDecayDelayElapsed)
 			Pressure -= Settings.DecayPerSecond * DeltaSeconds;
 
 		Pressure = FMath::Clamp(Pressure, 0.f, Settings.EscalationThreshold);
@@ -121,6 +136,7 @@ struct EXTRACTION_API FStealthPressureAccumulator
 		Pressure = 0.f;
 		ContinuousSprintSeconds = 0.f;
 		SecondsSinceSprint = 0.f;
+		SecondsSincePressureGain = 0.f;
 		bWarned = false;
 		bEscalated = false;
 	}

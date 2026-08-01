@@ -267,10 +267,18 @@ private:
 	/** True when the controlled pawn has bIsolatedEncounter set (sight-only, no global alert). */
 	bool IsOwnerIsolatedEncounter() const;
 
-	/** True when the controlled pawn is inside a takedown volume — awareness is "muffled": gunfire,
-	 *  walking and reload noise is dropped so taking one enemy down doesn't cascade to its pocket
-	 *  neighbours. A sprint footstep and the global Loud alert still wake it (both bypass the muffle). */
-	bool IsOwnerTakedownMuffled() const;
+	/** True when the controlled pawn stands in a designer-placed ATakedownVolume. SIGHT ONLY: the
+	 *  pocket keeps the pre-buff sneak-up profile (no point-blank auto-combat, no near-fill boost) so
+	 *  the player can creep into rear-arc melee range. Hearing is deliberately NOT gated on this —
+	 *  see IsOwnerTakedownHushed. */
+	bool IsOwnerTakedownPocket() const;
+
+	/** True while a companion takedown is ARMED on this pawn's pocket. HEARING ONLY: gunfire, walking
+	 *  and squad chatter are dropped for the duration so the player's half of a synced double kill
+	 *  doesn't make the partner spin round mid-takedown. A sprint footstep and the global Loud alert
+	 *  still pierce it. Un-pinged pockets hear normally — the hush is the reward for using the
+	 *  ping+confirm mechanic, not a permanent property of the volume. */
+	bool IsOwnerTakedownHushed() const;
 
 	bool IsHostile(AActor* Actor) const;
 

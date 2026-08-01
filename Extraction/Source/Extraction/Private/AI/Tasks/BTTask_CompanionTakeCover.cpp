@@ -76,8 +76,10 @@ EBTNodeResult::Type UBTTask_CompanionTakeCover::ExecuteTask(UBehaviorTreeCompone
 	// Bypass the autonomous distance and floor gates so the companion walks wherever the player pointed.
 	Companion->SetCommandedCoverBypass(true);
 
-	// Latch the commanded hold so Follow holds position and cover is retained.
-	Companion->SetCommandedCoverHold(Cover.Data.Location, LeashRadius);
+	// Latch the commanded hold so Follow holds position and cover is retained. The cover itself
+	// rides along: combat inherits the hold and runs its own pick, and MoveToCoverPoint restores
+	// this one over that pick so the companion fights from the wall the player pointed at.
+	Companion->SetCommandedCoverHold(Cover.Data.Location, LeashRadius, Cover);
 
 	return EBTNodeResult::Succeeded;
 }

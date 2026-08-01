@@ -44,6 +44,7 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 	Settings.PressurePerShot = 15.f;
 	Settings.SuppressedPressurePerShot = 3.f;
 	Settings.DecayPerSecond = 5.f;
+	Settings.DecayDelaySeconds = 0.f;
 	Settings.WarningThreshold = 25.f;
 	Settings.EscalationThreshold = 75.f;
 
@@ -85,10 +86,12 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 
 	FStealthPressureAccumulator ResetAcc;
 	ResetAcc.Advance(5.f, true, 3, 0, Settings);
+	ResetAcc.Advance(0.5f, false, 0, 0, Settings);
 	ResetAcc.Reset();
 	TestEqual(TEXT("reset zeroes pressure"), ResetAcc.Pressure, 0.f);
 	TestEqual(TEXT("reset zeroes continuous sprint time"), ResetAcc.ContinuousSprintSeconds, 0.f);
 	TestEqual(TEXT("reset zeroes seconds-since-sprint"), ResetAcc.SecondsSinceSprint, 0.f);
+	TestEqual(TEXT("reset zeroes seconds-since-pressure-gain"), ResetAcc.SecondsSincePressureGain, 0.f);
 	TestFalse(TEXT("reset clears the warned latch"), ResetAcc.bWarned);
 	TestFalse(TEXT("reset clears the escalated latch"), ResetAcc.bEscalated);
 
@@ -150,6 +153,7 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 		LapseSettings.PressurePerShot = 15.f;
 		LapseSettings.SuppressedPressurePerShot = 3.f;
 		LapseSettings.DecayPerSecond = 5.f;
+		LapseSettings.DecayDelaySeconds = 0.f;
 		LapseSettings.WarningThreshold = 25.f;
 		LapseSettings.EscalationThreshold = 75.f;
 		LapseSettings.SprintLapseGraceSeconds = 0.75f;
@@ -180,6 +184,7 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 		LapseSettings.PressurePerShot = 15.f;
 		LapseSettings.SuppressedPressurePerShot = 3.f;
 		LapseSettings.DecayPerSecond = 5.f;
+		LapseSettings.DecayDelaySeconds = 0.f;
 		LapseSettings.WarningThreshold = 25.f;
 		LapseSettings.EscalationThreshold = 75.f;
 		LapseSettings.SprintLapseGraceSeconds = 0.75f;
@@ -202,6 +207,7 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 		LapseSettings.PressurePerShot = 15.f;
 		LapseSettings.SuppressedPressurePerShot = 3.f;
 		LapseSettings.DecayPerSecond = 5.f;
+		LapseSettings.DecayDelaySeconds = 0.f;
 		LapseSettings.WarningThreshold = 25.f;
 		LapseSettings.EscalationThreshold = 75.f;
 		LapseSettings.SprintLapseGraceSeconds = 0.75f;
@@ -237,6 +243,7 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 		ZeroGraceSettings.PressurePerShot = 15.f;
 		ZeroGraceSettings.SuppressedPressurePerShot = 3.f;
 		ZeroGraceSettings.DecayPerSecond = 5.f;
+		ZeroGraceSettings.DecayDelaySeconds = 0.f;
 		ZeroGraceSettings.WarningThreshold = 25.f;
 		ZeroGraceSettings.EscalationThreshold = 75.f;
 		ZeroGraceSettings.SprintLapseGraceSeconds = 0.f;
@@ -259,6 +266,7 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 		ShotLapseSettings.PressurePerShot = 15.f;
 		ShotLapseSettings.SuppressedPressurePerShot = 3.f;
 		ShotLapseSettings.DecayPerSecond = 5.f;
+		ShotLapseSettings.DecayDelaySeconds = 0.f;
 		ShotLapseSettings.WarningThreshold = 25.f;
 		ShotLapseSettings.EscalationThreshold = 75.f;
 		ShotLapseSettings.SprintLapseGraceSeconds = 0.75f;
@@ -277,6 +285,64 @@ bool FStealthPressureAccumulatorTest::RunTest(const FString& Parameters)
 		const EStealthPressureTransition EscResult = ShotLapseAcc.Advance(0.25f, false, 1, 0, ShotLapseSettings);
 		TestEqual(TEXT("shot-lapse: escalation fires during tolerated lapse"),
 			EscResult, EStealthPressureTransition::Escalated);
+	}
+
+	// -- Decay delay: idle tick shortly after a gain does not decay; decay resumes once the delay elapses --
+	{
+		FStealthDisciplineSettings DelaySettings;
+		DelaySettings.SprintGraceSeconds = 1.5f;
+		DelaySettings.SprintPressurePerSecond = 18.f;
+		DelaySettings.PressurePerShot = 15.f;
+		DelaySettings.SuppressedPressurePerShot = 3.f;
+		DelaySettings.DecayPerSecond = 5.f;
+		DelaySettings.DecayDelaySeconds = 3.f;
+		DelaySettings.WarningThreshold = 25.f;
+		DelaySettings.EscalationThreshold = 75.f;
+		DelaySettings.SprintLapseGraceSeconds = 0.75f;
+
+		FStealthPressureAccumulator DelayAcc;
+		DelayAcc.Advance(0.25f, false, 1, 0, DelaySettings);
+		const float PressureAfterShot = DelayAcc.Pressure;
+
+		// Well under the 3s delay: must not decay yet.
+		DelayAcc.Advance(1.f, false, 0, 0, DelaySettings);
+		TestEqual(TEXT("decay-delay: idle tick inside the delay window does not decay"),
+			DelayAcc.Pressure, PressureAfterShot);
+
+		// Cumulative idle time now exceeds the delay: decay resumes.
+		DelayAcc.Advance(2.5f, false, 0, 0, DelaySettings);
+		TestTrue(TEXT("decay-delay: decay resumes once cumulative idle time exceeds the delay"),
+			DelayAcc.Pressure < PressureAfterShot);
+	}
+
+	// -- Decay delay: a tick that adds shot pressure resets the delay window --
+	{
+		FStealthDisciplineSettings DelaySettings;
+		DelaySettings.SprintGraceSeconds = 1.5f;
+		DelaySettings.SprintPressurePerSecond = 18.f;
+		DelaySettings.PressurePerShot = 15.f;
+		DelaySettings.SuppressedPressurePerShot = 3.f;
+		DelaySettings.DecayPerSecond = 5.f;
+		DelaySettings.DecayDelaySeconds = 3.f;
+		DelaySettings.WarningThreshold = 25.f;
+		DelaySettings.EscalationThreshold = 75.f;
+		DelaySettings.SprintLapseGraceSeconds = 0.75f;
+
+		FStealthPressureAccumulator ResetWindowAcc;
+		ResetWindowAcc.Advance(0.25f, false, 1, 0, DelaySettings);
+		ResetWindowAcc.Advance(2.9f, false, 0, 0, DelaySettings);
+
+		// Second shot should reset the delay window, not just add pressure.
+		ResetWindowAcc.Advance(0.25f, false, 1, 0, DelaySettings);
+		const float PressureAfterSecondShot = ResetWindowAcc.Pressure;
+		TestEqual(TEXT("decay-delay: second shot adds pressure on top of the first"),
+			PressureAfterSecondShot, DelaySettings.PressurePerShot * 2.f);
+
+		// Idle time that would have exceeded the ORIGINAL window (2.9 + 2.9 > 3) must not decay,
+		// because the second shot reset the window.
+		ResetWindowAcc.Advance(2.9f, false, 0, 0, DelaySettings);
+		TestEqual(TEXT("decay-delay: a pressure-gaining tick resets the delay window"),
+			ResetWindowAcc.Pressure, PressureAfterSecondShot);
 	}
 
 	return true;

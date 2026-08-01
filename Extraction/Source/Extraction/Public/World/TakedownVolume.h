@@ -30,6 +30,13 @@ public:
 	 *  drives the lone-vs-sync takedown decision. */
 	void AppendEligibleEnemies(TSet<AEnemyCharacter*>& Out) const;
 
+	/** Unions the takedown-eligible enemies of every volume that contains Enemy into Out. This is the
+	 *  one definition of "who is in this pocket": the companion BT task uses it to decide synced-vs-
+	 *  autonomous, and ACompanionCharacter uses it to pick who the takedown window hushes. Kept as one
+	 *  shared helper on purpose — two copies of the union would let the pair the task syncs on and the
+	 *  pair the window covers drift apart, and the partner left out is the one that turns around. */
+	static void GatherEligiblePeers(const AEnemyCharacter* Enemy, TSet<AEnemyCharacter*>& Out);
+
 private:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Takedown|Volume", meta = (AllowPrivateAccess))
 	TObjectPtr<UBoxComponent> OverlapBox;

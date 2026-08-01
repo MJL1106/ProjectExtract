@@ -4189,18 +4189,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
-		// --- Covering-fire window start (clock ticks in ACompanionCharacter::Tick) ---
-		if (Ctx.Companion->IsCoveringFirePending())
-		{
-			const bool bCrouched = UCoverGeometryStatics::GetCoverHeight(Cover.Data) == ECoverHeight::Crouch;
-			if (UCoverGeometryStatics::CanPeekShoot(Ctx.Companion->GetWorld(), Cover.Data,
-				bCrouched, TargetSightLoc, StandFireEyeHeight, Ctx.Target, Ctx.Companion))
-			{
-				Ctx.Companion->StartCoveringFire();
-				Ctx.Companion->Bark(ECompanionBarkType::Suppressing);
-			}
-		}
-
 		// Pre-peek ammo gate: never expose without enough ammo for a useful burst.
 		if (TryPrePeekReloadGate(Ctx.Companion, Cover.Data))
 		{
