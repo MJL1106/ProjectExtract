@@ -1,16 +1,19 @@
-import { writable, derived } from 'svelte/store';
+import { writable } from 'svelte/store';
+import { toast } from 'svelte-sonner';
 import {
 	pasteClipboardImage,
 	openImagePicker,
-	addImageFromBase64,
-	addFileFromBase64,
 	removeAttachment,
+	getAttachments,
 	onAttachmentsChanged,
+	onAttachmentError,
 	type AttachmentInfo
 } from '$lib/bridge.js';
+import { isSessionDisposed, onSessionDisposed } from '$lib/stores/sessionLifecycle.js';
+import { beginPerformanceSpan, endPerformanceSpan } from '$lib/performanceTelemetry.js';
+import { clearSessionAttachments, setSessionAttachments } from '$lib/attachmentState.js';
 
-export const attachments = writable<AttachmentInfo[]>([]);
-export const hasAttachments = derived(attachments, ($a) => $a.length > 0);
+export const attachmentsBySession = writable<Record<string, AttachmentInfo[]>>({});
 
 // ── Binding ──────────────────────────────────────────────────────────
 
@@ -21,63 +24,52 @@ export function bindAttachmentsListener(): void {
 	if (bound) return;
 	bound = true;
 
-	onAttachmentsChanged((list) => {
-		attachments.set(list);
+	onAttachmentsChanged((sessionId, list) => {
+		if (isSessionDisposed(sessionId)) return;
+		attachmentsBySession.update((current) => setSessionAttachments(current, sessionId, list));
 	});
+	onAttachmentError((_sessionId, message) => toast.error(message));
+}
+
+/** Hydrate one pane in case native attachments predate the WebUI listener. */
+export async function loadAttachments(sessionId: string): Promise<void> {
+	if (!sessionId || isSessionDisposed(sessionId)) return;
+	const list = await getAttachments(sessionId);
+	if (isSessionDisposed(sessionId)) return;
+	attachmentsBySession.update((current) => setSessionAttachments(current, sessionId, list));
 }
 
 // ── Actions ──────────────────────────────────────────────────────────
 
 /** Paste image from system clipboard */
-export async function pasteImage(): Promise<boolean> {
-	const result = await pasteClipboardImage();
+export async function pasteImage(sessionId: string): Promise<boolean> {
+	const span = beginPerformanceSpan('attachment_mutation', { action: 'paste', sessionId });
+	const result = await pasteClipboardImage(sessionId);
+	endPerformanceSpan(span, { success: result.success });
+	if (!result.success && result.error) toast.error(result.error);
 	return result.success;
 }
 
 /** Open native file picker for attachments (images + common docs) */
-export async function pickAttachments(): Promise<void> {
-	await openImagePicker();
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-	const bytes = new Uint8Array(buffer);
-	let binary = '';
-	const chunkSize = 0x8000;
-
-	for (let i = 0; i < bytes.length; i += chunkSize) {
-		const chunk = bytes.subarray(i, i + chunkSize);
-		binary += String.fromCharCode(...chunk);
-	}
-
-	return btoa(binary);
-}
-
-/** Add a dropped file (image or document) */
-export async function addDroppedFile(file: File): Promise<void> {
-	if (file.type.startsWith('image/')) {
-		const reader = new FileReader();
-		reader.onload = async () => {
-			const dataUrl = reader.result as string;
-			const commaIdx = dataUrl.indexOf(',');
-			if (commaIdx < 0) return;
-			const base64 = dataUrl.slice(commaIdx + 1);
-
-			const img = new Image();
-			img.onload = async () => {
-				await addImageFromBase64(base64, file.type || 'image/png', img.width, img.height, file.name);
-			};
-			img.src = dataUrl;
-		};
-		reader.readAsDataURL(file);
-		return;
-	}
-
-	const buffer = await file.arrayBuffer();
-	const base64 = arrayBufferToBase64(buffer);
-	await addFileFromBase64(base64, file.type || 'application/octet-stream', file.name);
+export async function pickAttachments(sessionId: string): Promise<void> {
+	const result = await openImagePicker(sessionId);
+	if (result.error) toast.error(result.error);
 }
 
 /** Remove an attachment by ID */
-export async function removeItem(id: string): Promise<void> {
-	await removeAttachment(id);
+export async function removeItem(sessionId: string, id: string): Promise<void> {
+	const span = beginPerformanceSpan('attachment_mutation', { action: 'remove', sessionId });
+	try {
+		await removeAttachment(sessionId, id);
+		endPerformanceSpan(span, { success: true });
+	} catch (error) {
+		endPerformanceSpan(span, { success: false });
+		throw error;
+	}
 }
+
+export function cleanupAttachmentsForSession(sessionId: string): void {
+	attachmentsBySession.update((current) => clearSessionAttachments(current, sessionId));
+}
+
+onSessionDisposed(cleanupAttachmentsForSession);

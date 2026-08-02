@@ -1,8 +1,10 @@
 <script lang="ts">
 	import Icon from '$lib/components/Icon.svelte';
+	import ToolCallBlock from '$lib/components/ToolCallBlock.svelte';
 	import AssetReadBlock from '$lib/components/AssetReadBlock.svelte';
 	import ScreenshotBlock from '$lib/components/ScreenshotBlock.svelte';
-	import GenerateAssetBlock from '$lib/components/GenerateAssetBlock.svelte';
+	import ToolResultImage from '$lib/components/ToolResultImage.svelte';
+	import { createBoundedTextView } from '$lib/textBudget.js';
 	import {
 		ArrowDown01Icon,
 		ArrowUp01Icon,
@@ -13,42 +15,38 @@
 		File01Icon
 	} from '@hugeicons/core-free-icons';
 	import type { ContentBlock } from '$lib/bridge.js';
-	import { copyToClipboard } from '$lib/bridge.js';
+	import { openPath } from '$lib/bridge.js';
 	import { toolCallDensity } from '$lib/stores/settings.js';
 
 	let {
 		block,
 		resultBlock,
 		childBlocks = [],
-		allBlocks = [],
+		toolIndex,
 		depth = 0
 	}: {
 		block: ContentBlock;
 		resultBlock?: ContentBlock;
 		childBlocks?: ContentBlock[];
-		allBlocks?: ContentBlock[];
+		toolIndex: {
+			resultByCallId: Record<string, ContentBlock>;
+			toolCallById: Record<string, ContentBlock>;
+			parentToChildren: Record<string, string[]>;
+		};
 		depth?: number;
 	} = $props();
 
 	// In Detailed density, tool blocks expand by default. In Compact (the
 	// historical default), they collapse and reveal on click. The effect
 	// resyncs when the user flips the density preference.
-	let expanded = $state($toolCallDensity === 'detailed');
-	$effect(() => {
-		expanded = $toolCallDensity === 'detailed';
-	});
+	let expanded = $derived($toolCallDensity === 'detailed');
 
 	/** Stripped tool name — removes MCP prefix like mcp__neostack__read_asset → read_asset */
-	let toolName = $derived(
-		block.toolName?.replace(/^mcp__[^_]+__/, '') ?? 'tool'
-	);
+	let toolName = $derived(block.toolName?.replace(/^mcp__[^_]+__/, '') ?? 'tool');
 
 	let isTask = $derived(block.toolName === 'Task');
 	let isBash = $derived(block.toolName === 'Bash');
 	let isScreenshot = $derived(toolName === 'screenshot');
-	let isGenerateAsset = $derived(
-		toolName === 'generate_asset' || toolName === 'generate_3d_model' || toolName === 'generate_image'
-	);
 	let isAssetRead = $derived(toolName === 'read_asset');
 	let isReadLike = $derived(
 		toolName === 'Read' || toolName === 'read_file' || toolName === 'ReadFile'
@@ -56,7 +54,9 @@
 
 	let status = $derived(
 		!resultBlock
-			? (block.isStreaming === false ? 'cancelled' : 'running')
+			? block.isStreaming === false
+				? 'cancelled'
+				: 'running'
 			: resultBlock.toolSuccess !== false
 				? 'success'
 				: 'error'
@@ -127,21 +127,8 @@
 	let bashCommand = $derived(bashArgs?.command ?? '');
 	let bashDescription = $derived(bashArgs?.description ?? '');
 	let bashOutput = $derived(resultBlock?.toolResult ?? '');
-	let bashOutputLines = $derived(bashOutput ? bashOutput.split('\n') : []);
-	let bashOutputLineCount = $derived(bashOutputLines.length);
-
 	const BASH_PREVIEW_LINES = 4;
-	let bashPreview = $derived(
-		bashOutputLines.length > BASH_PREVIEW_LINES
-			? bashOutputLines.slice(0, BASH_PREVIEW_LINES).join('\n')
-			: bashOutput
-	);
-	let bashHasMoreLines = $derived(bashOutputLines.length > BASH_PREVIEW_LINES);
-	let bashRemainingLines = $derived(Math.max(0, bashOutputLines.length - BASH_PREVIEW_LINES));
-	let bashAccentColor = $derived(
-		status === 'error' ? '#ef4444' : status === 'running' ? '#3b82f6' : status === 'cancelled' ? '#71717a' : '#10b981'
-	);
-
+	let bashOutputView = $derived(createBoundedTextView(bashOutput, BASH_PREVIEW_LINES));
 	// ── Read-specific parsed fields ─────────────────────────────────
 
 	let readArgs = $derived.by(() => {
@@ -195,28 +182,10 @@
 		raw = raw.replace(/^\.\.\.\n?/, '').replace(/\n?\.\.\.$/, '');
 		return raw;
 	});
-	let readOutputLines = $derived(readOutput ? readOutput.split('\n') : []);
-	let readOutputLineCount = $derived(readOutputLines.length);
-
 	const READ_PREVIEW_LINES = 6;
-	let readPreview = $derived(
-		readOutputLines.length > READ_PREVIEW_LINES
-			? readOutputLines.slice(0, READ_PREVIEW_LINES).join('\n')
-			: readOutput
-	);
-	let readHasMoreLines = $derived(readOutputLines.length > READ_PREVIEW_LINES);
-	let readRemainingLines = $derived(Math.max(0, readOutputLines.length - READ_PREVIEW_LINES));
+	let readOutputView = $derived(createBoundedTextView(readOutput, READ_PREVIEW_LINES));
 
-	/** Guess language from file extension for potential future syntax highlighting */
-	let readFileExt = $derived.by(() => {
-		const name = readFileName;
-		const dot = name.lastIndexOf('.');
-		return dot >= 0 ? name.substring(dot + 1).toLowerCase() : '';
-	});
-
-	let hasImages = $derived(
-		(resultBlock?.images && resultBlock.images.length > 0) ?? false
-	);
+	let hasImages = $derived((resultBlock?.images && resultBlock.images.length > 0) ?? false);
 
 	let hasChildren = $derived(childBlocks.length > 0);
 
@@ -262,48 +231,63 @@
 		}
 
 		// Clean up leftover whitespace
-		const content = text.trim();
+		const content = createBoundedTextView(text.trim(), 8).full;
 
 		return { content, tokens, tools, duration, agentId };
 	});
 
 	function findChildResult(toolCallId: string | undefined): ContentBlock | undefined {
 		if (!toolCallId) return undefined;
-		return allBlocks.find(
-			(b) => b.type === 'tool_result' && b.toolCallId === toolCallId
-		);
+		return toolIndex.resultByCallId[toolCallId];
 	}
 
 	function getGrandchildren(childToolCallId: string | undefined): ContentBlock[] {
 		if (!childToolCallId) return [];
-		return allBlocks.filter(
-			(b) => b.type === 'tool_call' && b.parentToolCallId === childToolCallId
-		);
+		return (toolIndex.parentToChildren[childToolCallId] ?? [])
+			.map((id) => toolIndex.toolCallById[id])
+			.filter((child): child is ContentBlock => Boolean(child));
 	}
 
 	function formatArgs(args: string | undefined): string {
 		if (!args) return '';
+		const bounded = createBoundedTextView(args, 8, 64_000);
+		if (bounded.truncated) return `${bounded.full}\n… ${bounded.omittedChars} characters omitted`;
 		try {
-			return JSON.stringify(JSON.parse(args), null, 2);
+			return JSON.stringify(JSON.parse(bounded.full), null, 2);
 		} catch {
-			return args;
+			return bounded.full;
 		}
 	}
 
-	function imageDataUrl(base64: string, mimeType: string): string {
-		return `data:${mimeType};base64,${base64}`;
-	}
+	let genericResultView = $derived(createBoundedTextView(resultBlock?.toolResult ?? '', 8));
 </script>
+
+{#snippet locationLinks()}
+	{#if block.locations?.length}
+		<div class="border-border/20 flex flex-wrap gap-1.5 border-t px-3 py-2">
+			{#each block.locations as location (`${location.path}:${location.line ?? 0}`)}
+				<button
+					class="border-border/50 bg-secondary/40 min-h-10 max-w-full truncate rounded-md border px-2 py-2 font-mono text-[11px] text-blue-400 transition-colors hover:bg-secondary hover:text-blue-300"
+					onclick={() => openPath(location.path, location.line ?? 0)}
+					title={location.path}
+				>
+					{location.path}{location.line ? `:${location.line}` : ''}
+				</button>
+			{/each}
+		</div>
+	{/if}
+{/snippet}
 
 {#if isTask}
 	<!-- ════════════════════════════════════════════════════════════════
 	     Task / Subagent block
 	     ════════════════════════════════════════════════════════════════ -->
-	<div class="my-1.5 w-full rounded-lg border border-border bg-card/40">
+	<div class="bg-card/40 my-1.5 w-full rounded-lg border border-border">
 		<!-- Header: status · heading · model badge · tool count · chevron -->
 		<button
-			class="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-accent/30"
+			class="hover:bg-accent/30 flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors"
 			onclick={() => (expanded = !expanded)}
+			aria-expanded={expanded}
 		>
 			<span class="flex h-4 w-4 shrink-0 items-center justify-center {statusColor}">
 				<Icon
@@ -313,50 +297,59 @@
 					class={status === 'running' ? 'animate-spin' : ''}
 				/>
 			</span>
-			<span class="flex-1 min-w-0 truncate font-medium text-foreground/80">
+			<span class="text-foreground/80 min-w-0 flex-1 truncate font-medium">
 				{taskHeading}
 			</span>
 			{#if taskModel}
-				<span class="shrink-0 rounded bg-secondary/60 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground/60">
+				<span
+					class="bg-secondary/60 text-muted-foreground/60 shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium"
+				>
 					{taskModel}
 				</span>
 			{/if}
 			{#if hasChildren}
-				<span class="shrink-0 text-[11px] tabular-nums text-muted-foreground/50">
+				<span class="text-muted-foreground/50 shrink-0 text-[11px] tabular-nums">
 					{childBlocks.length} tool{childBlocks.length !== 1 ? 's' : ''}
 				</span>
 			{/if}
-			<span class="shrink-0 text-muted-foreground/50">
+			<span class="text-muted-foreground/50 shrink-0">
 				<Icon icon={expanded ? ArrowUp01Icon : ArrowDown01Icon} size={12} strokeWidth={1.5} />
 			</span>
 		</button>
 
 		<!-- Usage stats bar (always visible when done) -->
 		{#if status !== 'running' && (taskResultParsed.tokens || taskResultParsed.duration || taskResultParsed.tools)}
-			<div class="flex items-center gap-2 border-t border-border/15 px-3 py-1">
+			<div class="border-border/15 flex items-center gap-2 border-t px-3 py-1">
 				{#if taskResultParsed.tokens}
-					<span class="text-[10px] text-muted-foreground/55">{taskResultParsed.tokens} tokens</span>
+					<span class="text-muted-foreground/55 text-[10px]">{taskResultParsed.tokens} tokens</span>
 				{/if}
 				{#if taskResultParsed.tools && taskResultParsed.tools !== '0'}
-					<span class="text-[10px] text-muted-foreground/45">·</span>
-					<span class="text-[10px] text-muted-foreground/55">{taskResultParsed.tools} tool uses</span>
+					<span class="text-muted-foreground/45 text-[10px]">·</span>
+					<span class="text-muted-foreground/55 text-[10px]"
+						>{taskResultParsed.tools} tool uses</span
+					>
 				{/if}
 				{#if taskResultParsed.duration}
-					<span class="text-[10px] text-muted-foreground/45">·</span>
-					<span class="text-[10px] text-muted-foreground/55">{taskResultParsed.duration}</span>
+					<span class="text-muted-foreground/45 text-[10px]">·</span>
+					<span class="text-muted-foreground/55 text-[10px]">{taskResultParsed.duration}</span>
 				{/if}
 			</div>
 		{/if}
 
 		<!-- Expanded content -->
 		{#if expanded}
+			{@render locationLinks()}
 			<!-- Prompt -->
 			{#if taskPrompt}
-				<div class="border-t border-border/20 px-3 py-2">
-					<div class="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/55">
+				<div class="border-border/20 border-t px-3 py-2">
+					<div
+						class="text-muted-foreground/55 mb-1 text-[10px] font-medium uppercase tracking-wider"
+					>
 						Prompt
 					</div>
-					<div class="text-[12px] leading-relaxed text-muted-foreground/70 whitespace-pre-wrap break-words">
+					<div
+						class="text-muted-foreground/70 whitespace-pre-wrap break-words text-[12px] leading-relaxed"
+					>
 						{taskPrompt}
 					</div>
 				</div>
@@ -364,23 +357,26 @@
 
 			<!-- Clean result content -->
 			{#if taskResultParsed.content}
-				<div class="border-t border-border/20 px-3 py-2">
-					<div class="mb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/55">
+				<div class="border-border/20 border-t px-3 py-2">
+					<div
+						class="text-muted-foreground/55 mb-1 text-[10px] font-medium uppercase tracking-wider"
+					>
 						Result
 					</div>
-					<pre class="max-h-[300px] overflow-auto rounded bg-secondary/50 p-2 font-mono text-[11px] leading-relaxed text-foreground/70">{taskResultParsed.content}</pre>
+					<pre
+						class="bg-secondary/50 text-foreground/70 max-h-[300px] overflow-auto rounded p-2 font-mono text-[11px] leading-relaxed">{taskResultParsed.content}</pre>
 				</div>
 			{/if}
 
 			<!-- Nested child tool calls -->
 			{#if hasChildren}
-				<div class="border-t border-border/20 pl-3 pr-1 py-1">
+				<div class="border-border/20 border-t py-1 pl-3 pr-1">
 					{#each childBlocks as child (child.toolCallId)}
-						<svelte:self
+						<ToolCallBlock
 							block={child}
 							resultBlock={findChildResult(child.toolCallId)}
 							childBlocks={getGrandchildren(child.toolCallId)}
-							{allBlocks}
+							{toolIndex}
 							depth={depth + 1}
 						/>
 					{/each}
@@ -388,16 +384,16 @@
 			{/if}
 		{/if}
 	</div>
-
 {:else if isBash}
 	<!-- ════════════════════════════════════════════════════════════════
 	     Bash / Terminal block
 	     ════════════════════════════════════════════════════════════════ -->
-	<div class="my-1 w-full overflow-hidden rounded-lg border border-border bg-card/40">
+	<div class="bg-card/40 my-1 w-full overflow-hidden rounded-lg border border-border">
 		<!-- Header -->
 		<button
-			class="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-accent/30"
+			class="hover:bg-accent/30 flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors"
 			onclick={() => (expanded = !expanded)}
+			aria-expanded={expanded}
 		>
 			<span class="flex h-4 w-4 shrink-0 items-center justify-center {statusColor}">
 				{#if status === 'running'}
@@ -407,42 +403,65 @@
 				{/if}
 			</span>
 
-			<span class="flex-1 min-w-0 flex items-center gap-1.5 truncate">
-				<span class="shrink-0 font-medium text-foreground/80">Bash</span>
+			<span class="flex min-w-0 flex-1 items-center gap-1.5 truncate">
+				<span class="text-foreground/80 shrink-0 font-medium">Bash</span>
 				{#if bashDescription}
 					<span class="text-muted-foreground/50">&middot;</span>
-					<span class="truncate text-muted-foreground/60">{bashDescription}</span>
+					<span class="text-muted-foreground/60 truncate">{bashDescription}</span>
 				{/if}
 			</span>
 
 			{#if status === 'error'}
-				<span class="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-400/80">
+				<span
+					class="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-400/80"
+				>
 					failed
 				</span>
 			{/if}
-			<span class="shrink-0 text-muted-foreground/50">
+			<span class="text-muted-foreground/50 shrink-0">
 				<Icon icon={expanded ? ArrowUp01Icon : ArrowDown01Icon} size={12} strokeWidth={1.5} />
 			</span>
 		</button>
 
 		<!-- Command line (always visible) -->
-		<div class="border-t border-border/50 px-3 py-1.5">
-			<pre class="max-w-full overflow-x-auto font-mono text-[11px] leading-relaxed text-foreground/50"><span class="text-emerald-500/50 select-none">$</span> {bashCommand}</pre>
+		<div class="border-border/50 border-t px-3 py-1.5">
+			<pre
+				class="text-foreground/50 max-w-full overflow-x-auto font-mono text-[11px] leading-relaxed"><span
+					class="select-none text-emerald-500/50">$</span
+				> {bashCommand}</pre>
 		</div>
+		{@render locationLinks()}
 
 		<!-- Output preview / full output -->
 		{#if bashOutput}
-			<div class="border-t border-border/50">
+			<div class="border-border/50 border-t">
 				{#if expanded}
-					<pre class="max-h-[400px] overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed {status === 'error' ? 'text-red-400/70' : 'text-muted-foreground/60'}">{bashOutput}</pre>
+					<pre
+						class="max-h-[400px] overflow-auto px-3 py-2 font-mono text-[11px] leading-relaxed {status ===
+						'error'
+							? 'text-red-400/70'
+							: 'text-muted-foreground/60'}">{bashOutputView.full}</pre>
+					{#if bashOutputView.truncated}
+						<div class="border-border/30 border-t px-3 py-1 text-[10px] text-amber-400/70">
+							Output capped; {bashOutputView.omittedChars.toLocaleString()} characters omitted.
+						</div>
+					{/if}
 				{:else}
 					<!-- Preview: first few lines with fade -->
 					<div class="relative">
-						<pre class="px-3 py-2 font-mono text-[11px] leading-relaxed {status === 'error' ? 'text-red-400/70' : 'text-muted-foreground/60'}">{bashPreview}</pre>
-						{#if bashHasMoreLines}
-							<div class="absolute inset-x-0 bottom-0 flex h-8 items-end justify-center" style="background: linear-gradient(to top, hsl(var(--card)) 30%, transparent);">
-								<span class="pb-1 text-[10px] text-muted-foreground/55">
-									{bashRemainingLines} more line{bashRemainingLines !== 1 ? 's' : ''}
+						<pre
+							class="px-3 py-2 font-mono text-[11px] leading-relaxed {status === 'error'
+								? 'text-red-400/70'
+								: 'text-muted-foreground/60'}">{bashOutputView.preview}</pre>
+						{#if bashOutputView.hasMore}
+							<div
+								class="absolute inset-x-0 bottom-0 flex h-8 items-end justify-center"
+								style="background: linear-gradient(to top, hsl(var(--card)) 30%, transparent);"
+							>
+								<span class="text-muted-foreground/55 pb-1 text-[10px]">
+									{bashOutputView.truncated
+										? 'Large output — open to view capped result'
+										: `${bashOutputView.remainingLines} more line${bashOutputView.remainingLines !== 1 ? 's' : ''}`}
 								</span>
 							</div>
 						{/if}
@@ -450,21 +469,21 @@
 				{/if}
 			</div>
 		{:else if status === 'running'}
-			<div class="border-t border-border/50 px-3 py-2">
-				<span class="font-mono text-[11px] text-muted-foreground/55 animate-pulse">Running...</span>
+			<div class="border-border/50 border-t px-3 py-2">
+				<span class="text-muted-foreground/55 animate-pulse font-mono text-[11px]">Running...</span>
 			</div>
 		{/if}
 	</div>
-
 {:else if isRead}
 	<!-- ════════════════════════════════════════════════════════════════
 	     Read / File block
 	     ════════════════════════════════════════════════════════════════ -->
-	<div class="my-1 w-full overflow-hidden rounded-lg border border-border bg-card/40">
+	<div class="bg-card/40 my-1 w-full overflow-hidden rounded-lg border border-border">
 		<!-- Header: file icon + filename -->
 		<button
-			class="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-accent/30"
+			class="hover:bg-accent/30 flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors"
 			onclick={() => (expanded = !expanded)}
+			aria-expanded={expanded}
 		>
 			<span class="flex h-4 w-4 shrink-0 items-center justify-center {statusColor}">
 				{#if status === 'running'}
@@ -474,48 +493,65 @@
 				{/if}
 			</span>
 
-			<span class="flex-1 min-w-0 flex items-center gap-1.5 truncate">
-				<span class="shrink-0 font-medium text-foreground/80">Read</span>
+			<span class="flex min-w-0 flex-1 items-center gap-1.5 truncate">
+				<span class="text-foreground/80 shrink-0 font-medium">Read</span>
 				<span class="text-muted-foreground/50">&middot;</span>
-				<span class="truncate text-muted-foreground/60">{readFileName}</span>
+				<span class="text-muted-foreground/60 truncate">{readFileName}</span>
 			</span>
 
 			{#if readLineRange}
-				<span class="shrink-0 text-[10px] text-muted-foreground/55">
+				<span class="text-muted-foreground/55 shrink-0 text-[10px]">
 					{readLineRange}
 				</span>
-			{:else if status !== 'running' && readOutputLineCount > 0}
-				<span class="shrink-0 text-[10px] tabular-nums text-muted-foreground/55">
-					{readOutputLineCount} line{readOutputLineCount !== 1 ? 's' : ''}
+			{:else if status !== 'running' && readOutputView.lineCount > 0}
+				<span class="text-muted-foreground/55 shrink-0 text-[10px] tabular-nums">
+					{readOutputView.lineCount} line{readOutputView.lineCount !== 1 ? 's' : ''}
 				</span>
 			{/if}
 			{#if status === 'error'}
-				<span class="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-400/80">
+				<span
+					class="shrink-0 rounded bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-400/80"
+				>
 					failed
 				</span>
 			{/if}
-			<span class="shrink-0 text-muted-foreground/50">
+			<span class="text-muted-foreground/50 shrink-0">
 				<Icon icon={expanded ? ArrowUp01Icon : ArrowDown01Icon} size={12} strokeWidth={1.5} />
 			</span>
 		</button>
 
 		<!-- Path (always visible, muted) -->
-		<div class="border-t border-border/50 px-3 py-1">
-			<span class="block truncate font-mono text-[10px] text-muted-foreground/50">{readDirPath}/</span>
+		<div class="border-border/50 border-t px-3 py-1">
+			<span class="text-muted-foreground/50 block truncate font-mono text-[10px]"
+				>{readDirPath}/</span
+			>
 		</div>
+		{@render locationLinks()}
 
 		<!-- Content preview / full content -->
 		{#if readOutput}
-			<div class="border-t border-border/50">
+			<div class="border-border/50 border-t">
 				{#if expanded}
-					<pre class="max-h-[400px] overflow-auto px-2 py-1.5 font-mono text-[11px] leading-snug text-muted-foreground/60">{readOutput}</pre>
+					<pre
+						class="text-muted-foreground/60 max-h-[400px] overflow-auto px-2 py-1.5 font-mono text-[11px] leading-snug">{readOutputView.full}</pre>
+					{#if readOutputView.truncated}
+						<div class="border-border/30 border-t px-3 py-1 text-[10px] text-amber-400/70">
+							Output capped; {readOutputView.omittedChars.toLocaleString()} characters omitted.
+						</div>
+					{/if}
 				{:else}
 					<div class="relative">
-						<pre class="px-2 py-1.5 font-mono text-[11px] leading-snug text-muted-foreground/60">{readPreview}</pre>
-						{#if readHasMoreLines}
-							<div class="absolute inset-x-0 bottom-0 flex h-8 items-end justify-center" style="background: linear-gradient(to top, hsl(var(--card)) 30%, transparent);">
-								<span class="pb-1 text-[10px] text-muted-foreground/55">
-									{readRemainingLines} more line{readRemainingLines !== 1 ? 's' : ''}
+						<pre
+							class="text-muted-foreground/60 px-2 py-1.5 font-mono text-[11px] leading-snug">{readOutputView.preview}</pre>
+						{#if readOutputView.hasMore}
+							<div
+								class="absolute inset-x-0 bottom-0 flex h-8 items-end justify-center"
+								style="background: linear-gradient(to top, hsl(var(--card)) 30%, transparent);"
+							>
+								<span class="text-muted-foreground/55 pb-1 text-[10px]">
+									{readOutputView.truncated
+										? 'Large file — open to view capped result'
+										: `${readOutputView.remainingLines} more line${readOutputView.remainingLines !== 1 ? 's' : ''}`}
 								</span>
 							</div>
 						{/if}
@@ -523,42 +559,36 @@
 				{/if}
 			</div>
 		{:else if status === 'running'}
-			<div class="border-t border-border/50 px-3 py-2">
-				<span class="font-mono text-[11px] text-muted-foreground/55 animate-pulse">Reading...</span>
+			<div class="border-border/50 border-t px-3 py-2">
+				<span class="text-muted-foreground/55 animate-pulse font-mono text-[11px]">Reading...</span>
 			</div>
 		{:else if status === 'error'}
-			<div class="border-t border-border/50 px-3 py-1.5">
-				<pre class="font-mono text-[11px] leading-relaxed text-red-400/70">{resultBlock?.toolResult ?? 'File not found'}</pre>
+			<div class="border-border/50 border-t px-3 py-1.5">
+				<pre
+					class="font-mono text-[11px] leading-relaxed text-red-400/70">{resultBlock?.toolResult ??
+						'File not found'}</pre>
 			</div>
 		{/if}
 	</div>
-
 {:else if isScreenshot}
 	<!-- ════════════════════════════════════════════════════════════════
 	     Screenshot block
 	     ════════════════════════════════════════════════════════════════ -->
 	<ScreenshotBlock {block} {resultBlock} />
-
-{:else if isGenerateAsset}
-	<!-- ════════════════════════════════════════════════════════════════
-	     Generate Asset block (3D model / image generation)
-	     ════════════════════════════════════════════════════════════════ -->
-	<GenerateAssetBlock {block} {resultBlock} />
-
 {:else if isAssetRead}
 	<!-- ════════════════════════════════════════════════════════════════
 	     Asset Read block (read_asset)
 	     ════════════════════════════════════════════════════════════════ -->
 	<AssetReadBlock {block} {resultBlock} />
-
 {:else}
 	<!-- ════════════════════════════════════════════════════════════════
 	     Regular tool call block (non-Task)
 	     ════════════════════════════════════════════════════════════════ -->
-	<div class="my-1 w-full rounded-lg border border-border bg-card/40">
+	<div class="bg-card/40 my-1 w-full rounded-lg border border-border">
 		<button
-			class="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors hover:bg-accent/30"
+			class="hover:bg-accent/30 flex min-h-10 w-full items-center gap-2 px-3 py-2 text-left text-[13px] transition-colors"
 			onclick={() => (expanded = !expanded)}
+			aria-expanded={expanded}
 		>
 			<span class="flex h-4 w-4 shrink-0 items-center justify-center {statusColor}">
 				<Icon
@@ -568,54 +598,56 @@
 					class={status === 'running' ? 'animate-spin' : ''}
 				/>
 			</span>
-			<span class="flex-1 truncate font-medium text-foreground/80">{toolName}</span>
+			<span class="text-foreground/80 flex-1 truncate font-medium">{toolName}</span>
 			<span class="text-muted-foreground/50">
 				<Icon icon={expanded ? ArrowUp01Icon : ArrowDown01Icon} size={12} strokeWidth={1.5} />
 			</span>
 		</button>
+		{@render locationLinks()}
 
 		<!-- Inline image preview when collapsed -->
 		{#if !expanded && hasImages && resultBlock?.images}
-			<div class="flex gap-2 overflow-x-auto border-t border-border/50 px-3 py-2">
-				{#each resultBlock.images as img}
-					<button class="shrink-0 overflow-hidden rounded-md border border-border/50" onclick={() => (expanded = true)}>
-						<img
-							src={imageDataUrl(img.base64, img.mimeType)}
-							alt="Tool result"
-							class="h-20 w-auto object-contain"
-							style="max-width: 160px;"
-						/>
-					</button>
-				{/each}
-			</div>
+			<button
+				class="border-border/50 hover:bg-accent/20 min-h-10 w-full border-t px-3 py-2 text-left text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+				onclick={() => (expanded = true)}
+			>
+				{resultBlock.images.length} image{resultBlock.images.length === 1 ? '' : 's'} — open to load
+			</button>
 		{/if}
 
 		{#if expanded}
-			<div class="border-t border-border/50 px-3 py-2 text-[12px]">
+			<div class="border-border/50 border-t px-3 py-2 text-[12px]">
 				{#if block.toolArguments}
 					<div class="mb-2">
-						<div class="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/50">
+						<div
+							class="text-muted-foreground/50 mb-1 text-[11px] font-medium uppercase tracking-wider"
+						>
 							Arguments
 						</div>
 						<pre
-							class="max-h-[200px] overflow-auto rounded bg-secondary/50 p-2 font-mono text-[11px] leading-relaxed text-foreground/70">{formatArgs(block.toolArguments)}</pre>
+							class="bg-secondary/50 text-foreground/70 max-h-[200px] overflow-auto rounded p-2 font-mono text-[11px] leading-relaxed">{formatArgs(
+								block.toolArguments
+							)}</pre>
 					</div>
 				{/if}
 				{#if hasImages && resultBlock?.images}
 					<div class="mb-2">
-						<div class="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/50">
+						<div
+							class="text-muted-foreground/50 mb-1 text-[11px] font-medium uppercase tracking-wider"
+						>
 							Images
 						</div>
 						<div class="flex flex-wrap gap-2">
-							{#each resultBlock.images as img}
-								<div class="overflow-hidden rounded-md border border-border/50 bg-black/20">
-									<img
-										src={imageDataUrl(img.base64, img.mimeType)}
-										alt="Tool result"
-										class="max-h-[400px] w-auto max-w-full object-contain"
+							{#each resultBlock.images as img, imageIndex (`${img.mimeType}:${img.width}:${img.height}:${imageIndex}`)}
+								<div class="border-border/50 overflow-hidden rounded-md border bg-black/20">
+									<ToolResultImage
+										base64={img.base64}
+										mimeType={img.mimeType}
+										width={img.width}
+										height={img.height}
 									/>
 									{#if img.width > 0 && img.height > 0}
-										<div class="px-2 py-1 text-[10px] text-muted-foreground/55">
+										<div class="text-muted-foreground/55 px-2 py-1 text-[10px]">
 											{img.width}&times;{img.height}
 										</div>
 									{/if}
@@ -626,11 +658,18 @@
 				{/if}
 				{#if resultBlock?.toolResult}
 					<div>
-						<div class="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/50">
+						<div
+							class="text-muted-foreground/50 mb-1 text-[11px] font-medium uppercase tracking-wider"
+						>
 							Result
 						</div>
 						<pre
-							class="max-h-[300px] overflow-auto rounded bg-secondary/50 p-2 font-mono text-[11px] leading-relaxed text-foreground/70">{resultBlock.toolResult}</pre>
+							class="bg-secondary/50 text-foreground/70 max-h-[300px] overflow-auto rounded p-2 font-mono text-[11px] leading-relaxed">{genericResultView.full}</pre>
+						{#if genericResultView.truncated}
+							<div class="mt-1 text-[10px] text-amber-400/70">
+								Output capped; {genericResultView.omittedChars.toLocaleString()} characters omitted.
+							</div>
+						{/if}
 					</div>
 				{/if}
 			</div>

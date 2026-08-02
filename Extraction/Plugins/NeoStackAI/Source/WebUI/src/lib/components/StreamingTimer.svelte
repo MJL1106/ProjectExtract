@@ -24,4 +24,4 @@
 	});
 </script>
 
-<span class="tabular-nums text-muted-foreground/30">{display}</span>
+<span class="text-muted-foreground/30 tabular-nums">{display}</span>

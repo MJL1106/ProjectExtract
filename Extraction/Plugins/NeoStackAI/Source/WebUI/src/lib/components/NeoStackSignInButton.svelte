@@ -1,11 +1,7 @@
 <script lang="ts">
 	import Icon from '$lib/components/Icon.svelte';
-	import { Login01Icon, CheckmarkCircle02Icon } from '@hugeicons/core-free-icons';
-	import {
-		deviceAuthState,
-		isActiveStatus,
-		startDeviceAuth
-	} from '$lib/stores/deviceAuth.js';
+	import { Login01Icon, CheckmarkCircle02Icon, AlertCircleIcon } from '@hugeicons/core-free-icons';
+	import { neostackAuth, retrySignIn, signOut, startSignIn } from '$lib/stores/neostackAuth.js';
 
 	// Caller props.
 	let {
@@ -18,35 +14,83 @@
 		onsuccess?: () => void;
 	} = $props();
 
-	// Read state from the singleton store. The dialog lives in +layout.svelte;
-	// each button only renders its own trigger plus an optional "Connected"
-	// pill when the latest flow succeeded.
-	const state = $derived($deviceAuthState);
+	// Read state from the singleton store — one global listener feeds it, so
+	// every sign-in entry point stays in sync. The component covers the whole
+	// lifecycle: signed out → button, signing in → waiting + retry, signed
+	// in → account line + sign out.
+	const auth = $derived($neostackAuth);
+	const planName = $derived(auth.entitlement?.planName || auth.entitlement?.plan || '');
 
 	async function handleClick() {
-		const terminal = await startDeviceAuth();
-		if (terminal.status === 'success') {
+		const terminal = await startSignIn();
+		if (terminal.status === 'signedIn') {
+			onsuccess?.();
+		}
+	}
+
+	async function handleRetry() {
+		const terminal = await retrySignIn();
+		if (terminal.status === 'signedIn') {
 			onsuccess?.();
 		}
 	}
 </script>
 
-<button
-	type="button"
-	onclick={handleClick}
-	disabled={isActiveStatus(state.status)}
-	class="group flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-[14px] font-medium transition-all disabled:cursor-not-allowed disabled:opacity-50 {variant ===
-	'primary'
-		? 'bg-[var(--ue-accent)] text-white hover:opacity-90'
-		: 'border border-border bg-card text-foreground hover:bg-card/70'}"
->
-	<Icon icon={Login01Icon} size={16} strokeWidth={2} />
-	{state.status === 'success' ? 'Connected' : label}
-</button>
-
-{#if state.status === 'success'}
-	<div class="mt-2 flex items-center gap-1.5 text-[12px] text-emerald-500">
-		<Icon icon={CheckmarkCircle02Icon} size={14} strokeWidth={2} />
-		<span>{state.message || 'Connected to NeoStack.'}</span>
+{#if auth.status === 'signedIn'}
+	<div class="flex items-center gap-2.5">
+		<Icon
+			icon={CheckmarkCircle02Icon}
+			size={16}
+			strokeWidth={2}
+			class="shrink-0 text-emerald-500"
+		/>
+		<div class="min-w-0 leading-tight">
+			<p class="truncate text-[13px] font-medium text-foreground">
+				{auth.user?.email || auth.user?.name || 'Signed in'}
+			</p>
+			{#if planName}
+				<p class="text-muted-foreground/60 truncate text-[11px]">{planName}</p>
+			{/if}
+		</div>
+		<button
+			type="button"
+			onclick={() => signOut()}
+			class="hover:bg-card/70 shrink-0 rounded-md border border-border bg-card px-2.5 py-1 text-[12px] font-medium text-foreground"
+		>
+			Sign out
+		</button>
 	</div>
+{:else if auth.status === 'signingIn'}
+	<div class="flex items-center gap-2.5">
+		<div
+			class="border-muted-foreground/20 border-t-muted-foreground/70 h-4 w-4 shrink-0 animate-spin rounded-full border-2"
+		></div>
+		<span class="text-muted-foreground/70 text-[13px]">Waiting for browser…</span>
+		<button
+			type="button"
+			onclick={handleRetry}
+			class="text-[12px] text-[var(--ue-accent)] underline-offset-2 hover:underline"
+		>
+			Retry
+		</button>
+	</div>
+{:else}
+	<button
+		type="button"
+		onclick={handleClick}
+		class="group flex items-center justify-center gap-2 rounded-xl px-5 py-2.5 text-[14px] font-medium transition-all {variant ===
+		'primary'
+			? 'bg-[var(--ue-accent)] text-white hover:opacity-90'
+			: 'hover:bg-card/70 border border-border bg-card text-foreground'}"
+	>
+		<Icon icon={Login01Icon} size={16} strokeWidth={2} />
+		{label}
+	</button>
+
+	{#if auth.error}
+		<div class="mt-2 flex items-center gap-1.5 text-[12px] text-destructive">
+			<Icon icon={AlertCircleIcon} size={14} strokeWidth={2} />
+			<span>{auth.error}</span>
+		</div>
+	{/if}
 {/if}

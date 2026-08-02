@@ -1,6 +1,7 @@
-import { writable, derived, get } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 import { onCommandsAvailable, type SlashCommand } from '$lib/bridge.js';
 import { currentSessionId } from '$lib/stores/sessions.js';
+import { isSessionDisposed, onSessionDisposed } from '$lib/stores/sessionLifecycle.js';
 
 /** Per-session command lists (cached so they survive session switches) */
 export const commandsBySession = writable<Record<string, SlashCommand[]>>({});
@@ -8,7 +9,7 @@ export const commandsBySession = writable<Record<string, SlashCommand[]>>({});
 /** Current session's available commands (derived) */
 export const availableCommands = derived(
 	[commandsBySession, currentSessionId],
-	([$bySession, $sid]) => $sid ? ($bySession[$sid] ?? []) : []
+	([$bySession, $sid]) => ($sid ? ($bySession[$sid] ?? []) : [])
 );
 
 let commandsBound = false;
@@ -19,10 +20,13 @@ export function bindCommandsListener(): void {
 	commandsBound = true;
 
 	onCommandsAvailable((sessionId, commands) => {
+		if (isSessionDisposed(sessionId)) return;
 		// Store for ALL sessions — fixes lost commands for background sessions
 		commandsBySession.update((all) => ({ ...all, [sessionId]: commands }));
 	});
 }
+
+onSessionDisposed(cleanupCommandsForSession);
 
 /** Clean up command data for deleted sessions */
 export function cleanupCommandsForSession(sessionId: string): void {

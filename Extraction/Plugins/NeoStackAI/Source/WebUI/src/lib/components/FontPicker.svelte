@@ -39,7 +39,13 @@
 	);
 
 	const bundledSans = ['Geist', 'Inter', 'Roboto'];
-	const bundledMono = ['Geist Mono', 'JetBrains Mono', 'Fira Code', 'Source Code Pro', 'IBM Plex Mono'];
+	const bundledMono = [
+		'Geist Mono',
+		'JetBrains Mono',
+		'Fira Code',
+		'Source Code Pro',
+		'IBM Plex Mono'
+	];
 
 	let systemFonts = $state<SystemFontInfo[]>([]);
 	let isLoadingFonts = $state(false);
@@ -65,7 +71,10 @@
 	}
 
 	function fontLooksAvailable(family: string): boolean {
-		if (typeof document !== 'undefined' && document.fonts?.check?.(`12px ${quoteFontFamily(family)}`)) {
+		if (
+			typeof document !== 'undefined' &&
+			document.fonts?.check?.(`12px ${quoteFontFamily(family)}`)
+		) {
 			return true;
 		}
 		if (typeof document === 'undefined') return true;
@@ -95,7 +104,7 @@
 
 	const bundledOptions = $derived(
 		(() => {
-			fontCheckVersion;
+			if (fontCheckVersion < 0) return [];
 			return (kind === 'mono' ? bundledMono : bundledSans).map((family) =>
 				optionForFamily(family, 'bundled', kind === 'mono')
 			);
@@ -119,8 +128,12 @@
 	const allOptions = $derived([defaultOption, ...bundledOptions, ...systemOptions]);
 	const selectedOption = $derived.by(() => {
 		const normalized = normalizeFontStack(value, fallbackStack);
-		return allOptions.find((o) => o.value === value || o.value === normalized || o.family === value) ??
-			(value ? { ...optionForFamily(value, 'system', kind === 'mono'), value: normalized } : defaultOption);
+		return (
+			allOptions.find((o) => o.value === value || o.value === normalized || o.family === value) ??
+			(value
+				? { ...optionForFamily(value, 'system', kind === 'mono'), value: normalized }
+				: defaultOption)
+		);
 	});
 	const selectedStack = $derived(selectedOption.value || fallbackStack);
 
@@ -173,15 +186,15 @@
 <div bind:this={containerEl} class="relative" onkeydown={handleKeydown}>
 	<button
 		type="button"
-		class="flex w-56 items-center gap-2 rounded-md border border-border/60 bg-transparent px-2 py-1 text-left text-[12.5px] text-foreground transition-colors hover:border-foreground/20 focus:border-foreground/30 focus:outline-none"
+		class="border-border/60 hover:border-foreground/20 focus:border-foreground/30 flex w-56 items-center gap-2 rounded-md border bg-transparent px-2 py-1 text-left text-[12.5px] text-foreground transition-colors focus:outline-none"
 		onclick={toggle}
 		aria-haspopup="listbox"
 		aria-expanded={open}
 	>
 		<span
-			class="flex h-6 w-6 shrink-0 items-center justify-center rounded border border-border/50 bg-muted/30 text-[12px] text-foreground"
-			style="font-family: {selectedStack}; line-height: 1;"
-		>Aa</span>
+			class="border-border/50 bg-muted/30 flex h-6 w-6 shrink-0 items-center justify-center rounded border text-[12px] text-foreground"
+			style="font-family: {selectedStack}; line-height: 1;">Aa</span
+		>
 		<span class="min-w-0 flex-1 truncate" style="font-family: {selectedStack};">
 			{selectedOption.label}
 		</span>
@@ -192,28 +205,33 @@
 
 	{#if open}
 		<div
-			class="absolute right-0 top-full z-50 mt-1 w-[360px] overflow-hidden rounded-md border border-border/60 bg-popover shadow-xl"
+			class="border-border/60 absolute right-0 top-full z-50 mt-1 w-[360px] overflow-hidden rounded-md border bg-popover shadow-xl"
 			role="listbox"
 		>
-			<div class="border-b border-border/40 p-2">
+			<div class="border-border/40 border-b p-2">
 				<input
 					bind:this={searchInputEl}
 					type="text"
 					placeholder="Search installed fonts..."
 					bind:value={query}
-					class="w-full rounded-md border border-border/60 bg-transparent px-2 py-1 text-[12px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none"
+					class="border-border/60 placeholder:text-muted-foreground/40 focus:border-foreground/30 w-full rounded-md border bg-transparent px-2 py-1 text-[12px] text-foreground focus:outline-none"
 				/>
 			</div>
 			<div class="max-h-[420px] overflow-y-auto py-1.5">
 				{#snippet group(title: string, items: FontOption[])}
-					<div class="px-3 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/55">
+					<div
+						class="text-muted-foreground/55 px-3 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider"
+					>
 						{title}
 					</div>
-					{#each items as opt}
-						{@const isSelected = opt.value === value || opt.value === normalizeFontStack(value, fallbackStack)}
+					{#each items as opt (opt.value)}
+						{@const isSelected =
+							opt.value === value || opt.value === normalizeFontStack(value, fallbackStack)}
 						<button
 							type="button"
-							class="flex w-full items-start gap-3 px-3 py-2 text-left transition-colors hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-45 {isSelected ? 'bg-[var(--ue-accent)]/10' : ''}"
+							class="hover:bg-foreground/5 flex w-full items-start gap-3 px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 {isSelected
+								? 'bg-[var(--ue-accent)]/10'
+								: ''}"
 							role="option"
 							aria-selected={isSelected}
 							disabled={opt.isAvailable === false}
@@ -221,26 +239,40 @@
 						>
 							<div class="min-w-0 flex-1">
 								<div class="flex items-center gap-2">
-									<span class="truncate text-[14px] text-foreground" style="font-family: {opt.value || fallbackStack};">
+									<span
+										class="truncate text-[14px] text-foreground"
+										style="font-family: {opt.value || fallbackStack};"
+									>
 										{opt.label}
 									</span>
 									{#if opt.source === 'bundled'}
-										<span class="shrink-0 rounded bg-[var(--ue-accent)]/15 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-[var(--ue-accent)]/75">
+										<span
+											class="bg-[var(--ue-accent)]/15 text-[var(--ue-accent)]/75 shrink-0 rounded px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider"
+										>
 											Bundled
 										</span>
 									{:else if opt.source === 'system'}
-										<span class="shrink-0 rounded bg-muted-foreground/15 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground/70">
+										<span
+											class="bg-muted-foreground/15 text-muted-foreground/70 shrink-0 rounded px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider"
+										>
 											System
 										</span>
 									{/if}
 									{#if opt.isAvailable === false}
-										<span class="shrink-0 rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-red-300/80">
+										<span
+											class="shrink-0 rounded bg-red-500/15 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wider text-red-300/80"
+										>
 											Missing
 										</span>
 									{/if}
 								</div>
-								<div class="mt-0.5 truncate text-[12px] text-muted-foreground/65" style="font-family: {opt.value || fallbackStack};">
-									{opt.source === 'default' ? `Use the platform's ${kind === 'mono' ? 'monospace' : 'system'} font` : sample}
+								<div
+									class="text-muted-foreground/65 mt-0.5 truncate text-[12px]"
+									style="font-family: {opt.value || fallbackStack};"
+								>
+									{opt.source === 'default'
+										? `Use the platform's ${kind === 'mono' ? 'monospace' : 'system'} font`
+										: sample}
 								</div>
 							</div>
 							{#if isSelected}
@@ -255,16 +287,23 @@
 				{#if !query.trim()}
 					{@render group('Default', [defaultOption])}
 					{@render group('Bundled fonts', bundledOptions)}
-					<div class="my-1 mx-3 h-px bg-border/40"></div>
+					<div class="bg-border/40 mx-3 my-1 h-px"></div>
 				{/if}
 
 				{#if isLoadingFonts}
-					<div class="px-3 py-4 text-center text-[12px] text-muted-foreground/50">Loading installed fonts…</div>
+					<div class="text-muted-foreground/50 px-3 py-4 text-center text-[12px]">
+						Loading installed fonts…
+					</div>
 				{:else if filteredSystemOptions.length}
-					{@render group(query.trim() ? 'Installed matches' : 'Installed on this system', filteredSystemOptions)}
+					{@render group(
+						query.trim() ? 'Installed matches' : 'Installed on this system',
+						filteredSystemOptions
+					)}
 				{:else}
-					<div class="px-3 py-4 text-center text-[12px] text-muted-foreground/50">
-						{query.trim() ? 'No installed font matches' : 'No installed fonts reported by the editor'}
+					<div class="text-muted-foreground/50 px-3 py-4 text-center text-[12px]">
+						{query.trim()
+							? 'No installed font matches'
+							: 'No installed fonts reported by the editor'}
 					</div>
 				{/if}
 			</div>

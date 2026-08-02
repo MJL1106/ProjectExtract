@@ -1,14 +1,14 @@
-import { writable, derived, get } from 'svelte/store';
+import { writable, derived } from 'svelte/store';
 import { onPlanUpdate, type PlanUpdate } from '$lib/bridge.js';
 import { currentSessionId } from '$lib/stores/sessions.js';
+import { isSessionDisposed, onSessionDisposed } from '$lib/stores/sessionLifecycle.js';
 
 /** Per-session plan data (persisted across session switches) */
 export const planBySession = writable<Record<string, PlanUpdate>>({});
 
 /** Current plan (derived from per-session store) */
-export const currentPlan = derived(
-	[planBySession, currentSessionId],
-	([$bySession, $sid]) => $sid ? ($bySession[$sid] ?? null) : null
+export const currentPlan = derived([planBySession, currentSessionId], ([$bySession, $sid]) =>
+	$sid ? ($bySession[$sid] ?? null) : null
 );
 
 export const hasPlan = derived(currentPlan, ($plan) => $plan !== null && $plan.entries.length > 0);
@@ -26,10 +26,13 @@ export function bindPlanListener(): void {
 	planBound = true;
 
 	onPlanUpdate((sessionId, plan) => {
+		if (isSessionDisposed(sessionId)) return;
 		// Store for ALL sessions, not just active — fixes lost plans for background sessions
 		planBySession.update((all) => ({ ...all, [sessionId]: plan }));
 	});
 }
+
+onSessionDisposed(cleanupPlanForSession);
 
 /** Clear plan state for a specific session (e.g., on session delete) */
 export function clearPlan(sessionId?: string): void {

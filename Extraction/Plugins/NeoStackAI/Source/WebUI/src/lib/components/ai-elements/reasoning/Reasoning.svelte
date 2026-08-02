@@ -1,8 +1,9 @@
 <script lang="ts">
-	import { cn } from "$lib/utils";
-	import { watch } from "runed";
-	import { Collapsible } from "$lib/components/ui/collapsible/index.js";
-	import { ReasoningContext, setReasoningContext } from "./reasoning-context.svelte";
+	import { untrack } from 'svelte';
+	import { cn } from '$lib/utils';
+	import { watch } from 'runed';
+	import { Collapsible } from '$lib/components/ui/collapsible/index.js';
+	import { ReasoningContext, setReasoningContext } from './reasoning-context.svelte';
 
 	interface Props {
 		class?: string;
@@ -11,11 +12,11 @@
 		defaultOpen?: boolean;
 		onOpenChange?: (open: boolean) => void;
 		duration?: number;
-		children?: import("svelte").Snippet;
+		children?: import('svelte').Snippet;
 	}
 
 	let {
-		class: className = "",
+		class: className = '',
 		isStreaming = false,
 		open = $bindable(),
 		defaultOpen = true,
@@ -28,16 +29,23 @@
 	let AUTO_CLOSE_DELAY = 1000;
 	let MS_IN_S = 1000;
 
+	// defaultOpen is an initial-state prop (callers may pass a live value such
+	// as the block's isStreaming). Capture it once so the auto-close watch
+	// below still fires after the prop flips false when streaming ends.
+	const openedByDefault = untrack(() => defaultOpen);
+	const initialIsStreaming = untrack(() => isStreaming);
+	const initialOpen = untrack(() => open ?? defaultOpen);
+	const initialDuration = untrack(() => duration ?? 0);
+
 	// Create the reasoning context
 	let reasoningContext = new ReasoningContext({
-		isStreaming,
-		isOpen: open ?? defaultOpen,
-		duration: duration ?? 0,
+		isStreaming: initialIsStreaming,
+		isOpen: initialOpen,
+		duration: initialDuration
 	});
 
 	// Set up controllable state for open
-	let isOpen = $state(open ?? defaultOpen);
-	let currentDuration = $state(duration ?? 0);
+	let isOpen = $state(initialOpen);
 	let hasAutoClosed = $state(false);
 	let startTime = $state<number | null>(null);
 
@@ -55,7 +63,6 @@
 
 	$effect(() => {
 		if (duration !== undefined) {
-			currentDuration = duration;
 			reasoningContext.duration = duration;
 		}
 	});
@@ -70,7 +77,6 @@
 				}
 			} else if (startTime !== null) {
 				let newDuration = Math.ceil((Date.now() - startTime) / MS_IN_S);
-				currentDuration = newDuration;
 				reasoningContext.duration = newDuration;
 				if (duration !== undefined) {
 					duration = newDuration;
@@ -80,11 +86,12 @@
 		}
 	);
 
-	// Auto-open when streaming starts, auto-close when streaming ends (once only)
+	// Auto-close when streaming ends (once only) — only for blocks that
+	// mounted open (openedByDefault), i.e. live-streamed ones.
 	watch(
-		() => [isStreaming, isOpen, defaultOpen, hasAutoClosed] as const,
-		([isStreamingValue, isOpenValue, defaultOpenValue, hasAutoClosedValue]) => {
-			if (defaultOpenValue && !isStreamingValue && isOpenValue && !hasAutoClosedValue) {
+		() => [isStreaming, isOpen, hasAutoClosed] as const,
+		([isStreamingValue, isOpenValue, hasAutoClosedValue]) => {
+			if (openedByDefault && !isStreamingValue && isOpenValue && !hasAutoClosedValue) {
 				// Add a small delay before closing to allow user to see the content
 				let timer = setTimeout(() => {
 					handleOpenChange(false);
@@ -112,7 +119,7 @@
 </script>
 
 <Collapsible
-	class={cn("not-prose mb-4", className)}
+	class={cn('not-prose mb-4', className)}
 	bind:open={isOpen}
 	onOpenChange={handleOpenChange}
 	{...props}

@@ -1,6 +1,8 @@
 import { writable, derived, get } from 'svelte/store';
 import { onStateChanged, onMcpStatus } from '$lib/bridge.js';
 import { toast } from 'svelte-sonner';
+import { paneManager } from '$lib/stores/panes.svelte.js';
+import { isSessionDisposed, onSessionDisposed } from '$lib/stores/sessionLifecycle.js';
 
 export type AgentConnectionState =
 	| 'disconnected'
@@ -40,42 +42,41 @@ const prevSessionStates: Record<string, AgentConnectionState> = {};
 const finishedTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
 /** Derived: state of the currently active session */
-export const currentState = derived(
-	[sessionStates, activeSessionId],
-	([$states, $activeId]) => {
-		if (!$activeId) return null;
-		return $states[$activeId] ?? null;
-	}
-);
+export const currentState = derived([sessionStates, activeSessionId], ([$states, $activeId]) => {
+	if (!$activeId) return null;
+	return $states[$activeId] ?? null;
+});
 
 /** Derived: MCP tools status for the currently active session */
-export const currentMcpStatus = derived(
-	[mcpStatusMap, activeSessionId],
-	([$map, $activeId]) => {
-		if (!$activeId) return 'none' as McpToolsStatus;
-		return $map[$activeId] ?? 'none';
-	}
-);
+export const currentMcpStatus = derived([mcpStatusMap, activeSessionId], ([$map, $activeId]) => {
+	if (!$activeId) return 'none' as McpToolsStatus;
+	return $map[$activeId] ?? 'none';
+});
 
 /** Display info for each state */
-export const stateDisplay: Record<AgentConnectionState, { label: string; dotClass: string; pulse: boolean }> = {
-	disconnected:  { label: 'Disconnected', dotClass: 'bg-zinc-500',    pulse: false },
-	connecting:    { label: 'Connecting',   dotClass: 'bg-amber-500',   pulse: true },
-	initializing:  { label: 'Initializing', dotClass: 'bg-amber-500',   pulse: true },
-	ready:         { label: 'Ready',        dotClass: 'bg-emerald-500', pulse: false },
-	in_session:    { label: 'Connected',    dotClass: 'bg-emerald-500', pulse: false },
-	prompting:     { label: 'Working',      dotClass: 'bg-blue-500',    pulse: true },
+export const stateDisplay: Record<
+	AgentConnectionState,
+	{ label: string; dotClass: string; pulse: boolean }
+> = {
+	disconnected: { label: 'Disconnected', dotClass: 'bg-zinc-500', pulse: false },
+	connecting: { label: 'Connecting', dotClass: 'bg-amber-500', pulse: true },
+	initializing: { label: 'Initializing', dotClass: 'bg-amber-500', pulse: true },
+	ready: { label: 'Ready', dotClass: 'bg-emerald-500', pulse: false },
+	in_session: { label: 'Connected', dotClass: 'bg-emerald-500', pulse: false },
+	prompting: { label: 'Working', dotClass: 'bg-blue-500', pulse: true },
 	prompting_streaming: { label: 'Streaming', dotClass: 'bg-blue-500', pulse: true },
 	prompting_executing_tool: { label: 'Running tool', dotClass: 'bg-blue-500', pulse: true },
 	prompting_queued_tool: { label: 'Queued', dotClass: 'bg-amber-500', pulse: true },
-	error:         { label: 'Error',        dotClass: 'bg-red-500',     pulse: false }
+	error: { label: 'Error', dotClass: 'bg-red-500', pulse: false }
 };
 
 export function isPromptingState(state: AgentConnectionState | undefined): boolean {
-	return state === 'prompting'
-		|| state === 'prompting_streaming'
-		|| state === 'prompting_executing_tool'
-		|| state === 'prompting_queued_tool';
+	return (
+		state === 'prompting' ||
+		state === 'prompting_streaming' ||
+		state === 'prompting_executing_tool' ||
+		state === 'prompting_queued_tool'
+	);
 }
 
 /** Get sidebar status for a session: 'working', 'finished', or 'idle' */
@@ -97,13 +98,17 @@ export function getSessionSidebarStatus(
  */
 export type SessionSidebarKind = 'needs_attention' | 'working' | 'finished';
 
-export function getSessionSidebarDotStyle(
-	kind: SessionSidebarKind
-): { dotClass: string; pulse: boolean } {
+export function getSessionSidebarDotStyle(kind: SessionSidebarKind): {
+	dotClass: string;
+	pulse: boolean;
+} {
 	switch (kind) {
-		case 'needs_attention': return { dotClass: 'bg-amber-500',   pulse: true };
-		case 'working':         return { dotClass: 'bg-blue-500',    pulse: true };
-		case 'finished':        return { dotClass: 'bg-emerald-500', pulse: false };
+		case 'needs_attention':
+			return { dotClass: 'bg-amber-500', pulse: true };
+		case 'working':
+			return { dotClass: 'bg-blue-500', pulse: true };
+		case 'finished':
+			return { dotClass: 'bg-emerald-500', pulse: false };
 	}
 }
 
@@ -115,16 +120,19 @@ export function bindAgentStateListener(): void {
 	bound = true;
 
 	onStateChanged((sessionId, agentName, state, message) => {
+		if (isSessionDisposed(sessionId)) return;
 		const newState = state as AgentConnectionState;
 		const prevState = prevSessionStates[sessionId];
 
 		// Toast for background session events
-		const isBackground = sessionId !== get(activeSessionId);
+		const isBackground = !paneManager.panes.some((pane) => pane.sessionId === sessionId);
 		if (isBackground) {
 			if (isPromptingState(prevState) && (newState === 'ready' || newState === 'in_session')) {
 				toast.success(`${agentName} finished`, { description: 'Background session completed' });
 			} else if (newState === 'error') {
-				toast.error(`${agentName} error`, { description: message || 'Background session encountered an error' });
+				toast.error(`${agentName} error`, {
+					description: message || 'Background session encountered an error'
+				});
 			}
 		}
 
@@ -136,7 +144,7 @@ export function bindAgentStateListener(): void {
 			}
 
 			// Add to recently finished
-			recentlyFinished.update(set => {
+			recentlyFinished.update((set) => {
 				const next = new Set(set);
 				next.add(sessionId);
 				return next;
@@ -144,7 +152,7 @@ export function bindAgentStateListener(): void {
 
 			// Auto-clear after 5 seconds
 			finishedTimers[sessionId] = setTimeout(() => {
-				recentlyFinished.update(set => {
+				recentlyFinished.update((set) => {
 					const next = new Set(set);
 					next.delete(sessionId);
 					return next;
@@ -156,7 +164,7 @@ export function bindAgentStateListener(): void {
 		// Track state for next transition
 		prevSessionStates[sessionId] = newState;
 
-		sessionStates.update(states => ({
+		sessionStates.update((states) => ({
 			...states,
 			[sessionId]: {
 				agentName,
@@ -167,9 +175,37 @@ export function bindAgentStateListener(): void {
 	});
 
 	onMcpStatus((sessionId, status) => {
-		mcpStatusMap.update(map => ({
+		if (isSessionDisposed(sessionId)) return;
+		mcpStatusMap.update((map) => ({
 			...map,
 			[sessionId]: status as McpToolsStatus
 		}));
 	});
 }
+
+export function cleanupAgentStateForSession(sessionId: string): void {
+	delete prevSessionStates[sessionId];
+	if (finishedTimers[sessionId]) {
+		clearTimeout(finishedTimers[sessionId]);
+		delete finishedTimers[sessionId];
+	}
+	sessionStates.update((states) => {
+		const next = { ...states };
+		delete next[sessionId];
+		return next;
+	});
+	mcpStatusMap.update((statuses) => {
+		const next = { ...statuses };
+		delete next[sessionId];
+		return next;
+	});
+	recentlyFinished.update((finished) => {
+		if (!finished.has(sessionId)) return finished;
+		const next = new Set(finished);
+		next.delete(sessionId);
+		return next;
+	});
+	if (get(activeSessionId) === sessionId) activeSessionId.set(null);
+}
+
+onSessionDisposed(cleanupAgentStateForSession);

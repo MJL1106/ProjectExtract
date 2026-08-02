@@ -23,8 +23,7 @@
 		alternativeAgentIds,
 		subscriptionOptions,
 		toggleSubscription,
-		isLanguageOnlyFlow,
-		type SubscriptionId
+		isLanguageOnlyFlow
 	} from '$lib/stores/onboarding.js';
 	import {
 		locale,
@@ -63,18 +62,27 @@
 	const agentDisplayNames: Record<string, string> = {
 		'claude-acp': 'Claude Code',
 		'codex-acp': 'OpenAI Codex',
-		'gemini': 'Gemini',
+		gemini: 'Gemini',
 		'github-copilot-cli': 'GitHub Copilot CLI',
-		'cursor': 'Cursor Agent'
+		cursor: 'Cursor Agent'
 	};
 
 	function displayName(registryId: string): string {
 		return agentDisplayNames[registryId] || registryId;
 	}
 
+	let installing = $state(false);
+
 	async function handleGetStarted() {
+		if (installing) return;
 		const id = $recommendedAgentId;
-		if (id) await completeOnboarding(id);
+		if (!id) return;
+		installing = true;
+		try {
+			await completeOnboarding(id);
+		} finally {
+			installing = false;
+		}
 	}
 
 	// ── Progress indicator ──────────────────────────────────────────
@@ -87,14 +95,14 @@
 	<!-- Progress dots (hidden in language-only flow) -->
 	{#if !$isLanguageOnlyFlow}
 		<div class="mb-8 flex items-center gap-1.5">
-			{#each stepOrder as _step, idx}
+			{#each stepOrder as step, idx (step)}
 				{@const state =
 					idx === currentStepIndex ? 'current' : idx < currentStepIndex ? 'done' : 'pending'}
 				<div
 					class="h-1.5 rounded-full transition-all duration-300 {state === 'current'
-						? 'w-6 bg-foreground/80'
+						? 'bg-foreground/80 w-6'
 						: state === 'done'
-							? 'w-1.5 bg-foreground/40'
+							? 'bg-foreground/40 w-1.5'
 							: 'w-1.5 bg-border'}"
 				></div>
 			{/each}
@@ -105,17 +113,21 @@
 		<!-- ─────────────────── Step 1: Language ─────────────────── -->
 		<div class="flex w-full max-w-2xl flex-col items-center gap-8">
 			<div class="relative flex items-center justify-center">
-				<div class="absolute h-24 w-24 rounded-full bg-gradient-to-br from-sky-500/8 to-violet-500/8 blur-xl"></div>
-				<div class="relative flex h-20 w-20 items-center justify-center rounded-2xl border border-border/30 bg-card/40 shadow-lg shadow-black/20 backdrop-blur-sm">
+				<div
+					class="from-sky-500/8 to-violet-500/8 absolute h-24 w-24 rounded-full bg-gradient-to-br blur-xl"
+				></div>
+				<div
+					class="border-border/30 bg-card/40 relative flex h-20 w-20 items-center justify-center rounded-2xl border shadow-lg shadow-black/20 backdrop-blur-sm"
+				>
 					<Icon icon={Globe02Icon} size={36} strokeWidth={1.2} class="text-foreground/50" />
 				</div>
 			</div>
 
 			<div class="flex flex-col items-center gap-3 text-center">
-				<h1 class="text-[22px] font-semibold tracking-tight text-foreground/90">
+				<h1 class="text-foreground/90 text-[22px] font-semibold tracking-tight">
 					Choose your language
 				</h1>
-				<p class="max-w-md text-[13.5px] leading-relaxed text-muted-foreground/60">
+				<p class="text-muted-foreground/60 max-w-md text-[13.5px] leading-relaxed">
 					{#if detectedLocale}
 						We detected your system language. You can change it any time in Settings.
 					{:else}
@@ -126,15 +138,15 @@
 
 			<!-- Locale grid -->
 			<div class="grid w-full grid-cols-2 gap-2 sm:grid-cols-3">
-				{#each locales as loc}
+				{#each locales as loc (loc)}
 					{@const isPicked = pickedLocale === loc}
 					{@const isDetected = detectedLocale === loc}
 					<button
 						type="button"
 						onclick={() => handleLocaleClick(loc)}
-						class="group relative flex items-center justify-between rounded-xl border bg-card/40 px-4 py-3 text-left text-[13.5px] text-foreground/80 transition-all {isPicked
+						class="bg-card/40 text-foreground/80 group relative flex items-center justify-between rounded-xl border px-4 py-3 text-left text-[13.5px] transition-all {isPicked
 							? 'border-[var(--ue-accent)] bg-card text-foreground'
-							: 'border-border hover:border-[var(--ue-accent-muted)] hover:bg-card/70'}"
+							: 'hover:bg-card/70 border-border hover:border-[var(--ue-accent-muted)]'}"
 					>
 						<span class="font-medium">{localeNames[loc]}</span>
 						{#if isPicked}
@@ -145,7 +157,9 @@
 								class="text-[var(--ue-accent)]"
 							/>
 						{:else if isDetected}
-							<span class="rounded-md bg-[var(--ue-accent)]/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--ue-accent)]">
+							<span
+								class="bg-[var(--ue-accent)]/15 rounded-md px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[var(--ue-accent)]"
+							>
 								Detected
 							</span>
 						{/if}
@@ -168,7 +182,7 @@
 				</button>
 				{#if $isLanguageOnlyFlow}
 					<button
-						class="text-[12px] text-muted-foreground/40 transition-colors hover:text-muted-foreground/70"
+						class="text-muted-foreground/40 hover:text-muted-foreground/70 text-[12px] transition-colors"
 						onclick={skipOnboarding}
 					>
 						Skip
@@ -180,18 +194,23 @@
 		<!-- ─────────────────── Step 2: Welcome ─────────────────── -->
 		<div class="flex w-full max-w-3xl flex-col items-center gap-8">
 			<div class="relative flex items-center justify-center">
-				<div class="absolute h-24 w-24 rounded-full bg-gradient-to-br from-violet-500/8 to-amber-500/8 blur-xl"></div>
-				<div class="relative flex h-20 w-20 items-center justify-center rounded-2xl border border-border/30 bg-card/40 shadow-lg shadow-black/20 backdrop-blur-sm">
+				<div
+					class="from-violet-500/8 to-amber-500/8 absolute h-24 w-24 rounded-full bg-gradient-to-br blur-xl"
+				></div>
+				<div
+					class="border-border/30 bg-card/40 relative flex h-20 w-20 items-center justify-center rounded-2xl border shadow-lg shadow-black/20 backdrop-blur-sm"
+				>
 					<Icon icon={SparklesIcon} size={36} strokeWidth={1.2} class="text-foreground/50" />
 				</div>
 			</div>
 
 			<div class="flex flex-col items-center gap-3 text-center">
-				<h1 class="text-[22px] font-semibold tracking-tight text-foreground/90">
+				<h1 class="text-foreground/90 text-[22px] font-semibold tracking-tight">
 					Welcome to NeoStack AI
 				</h1>
-				<p class="max-w-xs text-[13.5px] leading-relaxed text-muted-foreground/60">
-					Connect AI coding agents to Unreal Engine. We'll guide you through the few checks needed for a first successful chat.
+				<p class="text-muted-foreground/60 max-w-xs text-[13.5px] leading-relaxed">
+					Connect AI coding agents to Unreal Engine. We'll guide you through the few checks needed
+					for a first successful chat.
 				</p>
 			</div>
 
@@ -214,7 +233,7 @@
 					/>
 				</button>
 				<button
-					class="text-[12px] text-muted-foreground/40 transition-colors hover:text-muted-foreground/70"
+					class="text-muted-foreground/40 hover:text-muted-foreground/70 text-[12px] transition-colors"
 					onclick={skipOnboarding}
 				>
 					Skip for now
@@ -225,51 +244,60 @@
 		<!-- ─────────────── Step 3: Subscriptions ─────────────── -->
 		<div class="flex w-full max-w-2xl flex-col items-center gap-8">
 			<div class="relative flex items-center justify-center">
-				<div class="absolute h-24 w-24 rounded-full bg-gradient-to-br from-emerald-500/8 to-sky-500/8 blur-xl"></div>
-				<div class="relative flex h-20 w-20 items-center justify-center rounded-2xl border border-border/30 bg-card/40 shadow-lg shadow-black/20 backdrop-blur-sm">
-					<Icon icon={MessageMultiple01Icon} size={36} strokeWidth={1.2} class="text-foreground/50" />
+				<div
+					class="from-emerald-500/8 to-sky-500/8 absolute h-24 w-24 rounded-full bg-gradient-to-br blur-xl"
+				></div>
+				<div
+					class="border-border/30 bg-card/40 relative flex h-20 w-20 items-center justify-center rounded-2xl border shadow-lg shadow-black/20 backdrop-blur-sm"
+				>
+					<Icon
+						icon={MessageMultiple01Icon}
+						size={36}
+						strokeWidth={1.2}
+						class="text-foreground/50"
+					/>
 				</div>
 			</div>
 
 			<div class="flex flex-col items-center gap-3 text-center">
-				<h1 class="text-[22px] font-semibold tracking-tight text-foreground/90">
+				<h1 class="text-foreground/90 text-[22px] font-semibold tracking-tight">
 					What AI services do you have?
 				</h1>
-				<p class="max-w-md text-[13.5px] leading-relaxed text-muted-foreground/60">
-					Select all that apply. We'll recommend the agent that fits best — you can always add more later.
+				<p class="text-muted-foreground/60 max-w-md text-[13.5px] leading-relaxed">
+					Select all that apply. We'll recommend the agent that fits best — you can always add more
+					later.
 				</p>
 			</div>
 
-			<!-- Quickest path: sign in with NeoStack and skip the API-key paste dance. -->
-			<div class="flex w-full flex-col items-center gap-3 rounded-2xl border border-border/40 bg-card/30 p-5">
+			<!-- Quickest path: sign in with NeoStack in the browser. -->
+			<div
+				class="border-border/40 bg-card/30 flex w-full flex-col items-center gap-3 rounded-2xl border p-5"
+			>
 				<div class="flex flex-col items-center gap-1 text-center">
-					<span class="text-[13.5px] font-medium text-foreground/90">
+					<span class="text-foreground/90 text-[13.5px] font-medium">
 						Quickest start: sign in with NeoStack
 					</span>
-					<span class="text-[12px] text-muted-foreground/70">
-						One click, pick a workspace, and a key lands in your editor. You can still pick services below or skip ahead.
+					<span class="text-muted-foreground/70 text-[12px]">
+						One click — sign in with your browser and the editor connects to your account. You can
+						still pick services below or skip ahead.
 					</span>
 				</div>
-				<NeoStackSignInButton
-					label="Sign in with NeoStack"
-					variant="primary"
-					onsuccess={goNext}
-				/>
+				<NeoStackSignInButton label="Sign in with NeoStack" variant="primary" onsuccess={goNext} />
 			</div>
 
 			<div class="grid w-full grid-cols-1 gap-2 sm:grid-cols-2">
-				{#each subscriptionOptions as opt}
+				{#each subscriptionOptions as opt (opt.id)}
 					{@const isSelected = $selectedSubscriptions.has(opt.id)}
 					<button
 						type="button"
 						onclick={() => toggleSubscription(opt.id)}
-						class="group flex items-start justify-between gap-3 rounded-xl border bg-card/40 px-4 py-3 text-left transition-all {isSelected
+						class="bg-card/40 group flex items-start justify-between gap-3 rounded-xl border px-4 py-3 text-left transition-all {isSelected
 							? 'border-[var(--ue-accent)] bg-card'
-							: 'border-border hover:border-[var(--ue-accent-muted)] hover:bg-card/70'}"
+							: 'hover:bg-card/70 border-border hover:border-[var(--ue-accent-muted)]'}"
 					>
 						<div class="flex flex-col gap-0.5">
 							<span class="text-[13.5px] font-medium text-foreground">{opt.label}</span>
-							<span class="text-[12px] text-muted-foreground/60">{opt.sublabel}</span>
+							<span class="text-muted-foreground/60 text-[12px]">{opt.sublabel}</span>
 						</div>
 						{#if isSelected}
 							<Icon
@@ -285,7 +313,7 @@
 
 			<div class="flex items-center gap-3">
 				<button
-					class="text-[13px] text-muted-foreground/60 transition-colors hover:text-foreground"
+					class="text-muted-foreground/60 text-[13px] transition-colors hover:text-foreground"
 					onclick={goBack}
 				>
 					Back
@@ -309,20 +337,30 @@
 		<!-- ────────────── Step 4: Recommendation ────────────── -->
 		<div class="flex w-full max-w-md flex-col items-center gap-8">
 			<div class="relative flex items-center justify-center">
-				<div class="absolute h-24 w-24 rounded-full bg-gradient-to-br from-amber-500/8 to-emerald-500/8 blur-xl"></div>
-				<div class="relative flex h-20 w-20 items-center justify-center rounded-2xl border border-border/30 bg-card/40 shadow-lg shadow-black/20 backdrop-blur-sm">
-					<Icon icon={CheckmarkCircle02Icon} size={36} strokeWidth={1.2} class="text-foreground/50" />
+				<div
+					class="from-amber-500/8 to-emerald-500/8 absolute h-24 w-24 rounded-full bg-gradient-to-br blur-xl"
+				></div>
+				<div
+					class="border-border/30 bg-card/40 relative flex h-20 w-20 items-center justify-center rounded-2xl border shadow-lg shadow-black/20 backdrop-blur-sm"
+				>
+					<Icon
+						icon={CheckmarkCircle02Icon}
+						size={36}
+						strokeWidth={1.2}
+						class="text-foreground/50"
+					/>
 				</div>
 			</div>
 
 			<div class="flex flex-col items-center gap-3 text-center">
-				<p class="text-[12px] uppercase tracking-wider text-muted-foreground/50">We recommend</p>
+				<p class="text-muted-foreground/50 text-[12px] uppercase tracking-wider">We recommend</p>
 				<h1 class="text-[26px] font-semibold tracking-tight text-foreground">
 					{displayName($recommendedAgentId)}
 				</h1>
-				<p class="max-w-xs text-[13.5px] leading-relaxed text-muted-foreground/60">
+				<p class="text-muted-foreground/60 max-w-xs text-[13.5px] leading-relaxed">
 					{#if $alternativeAgentIds.length > 0}
-						We'll also install {$alternativeAgentIds.map(displayName).join(', ')} so you can switch any time.
+						We'll also install {$alternativeAgentIds.map(displayName).join(', ')} so you can switch any
+						time.
 					{:else}
 						Best fit for what you've selected. You can install more agents later from Settings.
 					{/if}
@@ -331,16 +369,17 @@
 
 			<div class="flex items-center gap-3">
 				<button
-					class="text-[13px] text-muted-foreground/60 transition-colors hover:text-foreground"
+					class="text-muted-foreground/60 text-[13px] transition-colors hover:text-foreground"
 					onclick={goBack}
 				>
 					Back
 				</button>
 				<button
-					class="group flex items-center gap-2 rounded-xl bg-[var(--ue-accent)] px-7 py-2.5 text-[14px] font-medium text-white transition-all hover:opacity-90"
+					class="group flex items-center gap-2 rounded-xl bg-[var(--ue-accent)] px-7 py-2.5 text-[14px] font-medium text-white transition-all hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+					disabled={installing}
 					onclick={handleGetStarted}
 				>
-					Install &amp; Get Started
+					{installing ? 'Installing…' : 'Install & Get Started'}
 					<Icon
 						icon={ArrowRight01Icon}
 						size={16}

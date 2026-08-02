@@ -1,4 +1,5 @@
 <script lang="ts">
+	/* eslint-disable svelte/no-at-html-tags -- HugeIcons data is imported code, never user content. */
 	type IconElement = readonly [string, Readonly<Record<string, string | number>>];
 	type IconData = readonly IconElement[];
 
@@ -27,9 +28,7 @@
 	}
 
 	function buildSvgContent(elements: IconData): string {
-		return elements
-			.map(([tag, attrs]) => `<${tag} ${processAttrs(attrs)}/>`)
-			.join('');
+		return elements.map(([tag, attrs]) => `<${tag} ${processAttrs(attrs)}/>`).join('');
 	}
 </script>
 

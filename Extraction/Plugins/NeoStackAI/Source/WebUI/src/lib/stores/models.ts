@@ -9,10 +9,33 @@ import {
 	type ModelInfo
 } from '$lib/bridge.js';
 import { selectedAgent } from '$lib/stores/agents.js';
-import { currentSessionId } from '$lib/stores/sessions.js';
+import { createOperationVersionTracker } from '$lib/operationVersions.js';
 
 export type ReasoningLevel = 'none' | 'low' | 'medium' | 'high' | 'max';
 
+export type AgentModelState = {
+	models: ModelInfo[];
+	currentModelId: string;
+	isLoading: boolean;
+	reasoningLevel: ReasoningLevel;
+	isLoadingReasoning: boolean;
+	reasoningLoaded: boolean;
+};
+
+const createDefaultAgentModelState = (): AgentModelState => ({
+	models: [],
+	currentModelId: '',
+	isLoading: false,
+	reasoningLevel: 'high',
+	isLoadingReasoning: false,
+	reasoningLoaded: false
+});
+
+/** Authoritative model/reasoning state keyed by agent for every visible pane. */
+export const modelStatesByAgent = writable<Record<string, AgentModelState>>({});
+
+// Legacy focused-agent stores are retained for the route-level model browser.
+// Chat panes must read modelStatesByAgent using their own session agent.
 export const models = writable<ModelInfo[]>([]);
 export const currentModelId = writable<string>('');
 export const isLoadingModels = writable(false);
@@ -21,126 +44,121 @@ export const modelBrowserOpen = writable(false);
 export const allModels = writable<ModelInfo[]>([]);
 export const isLoadingAllModels = writable(false);
 
-/** Per-agent model cache — stores async model pushes for all agents, not just the current one */
-type CachedModelState = { models: ModelInfo[]; currentModelId: string };
-const modelCache = new Map<string, CachedModelState>();
 const fullModelCache = new Map<string, ModelInfo[]>();
-let lastModelLoadRequestId = 0;
+const modelLoadVersions = createOperationVersionTracker();
+const reasoningLoadVersions = createOperationVersionTracker();
+const modelMutationVersions = createOperationVersionTracker();
+const reasoningMutationVersions = createOperationVersionTracker();
 
-/** Apply a model state to the active stores */
-function applyModelState(state: CachedModelState): void {
-	models.set(state.models);
-	if (state.currentModelId) {
-		currentModelId.set(state.currentModelId);
-	} else if (state.models.length > 0) {
-		currentModelId.set(state.models[0].id);
-	}
+function getAgentModelState(agentName: string): AgentModelState {
+	return get(modelStatesByAgent)[agentName] ?? createDefaultAgentModelState();
 }
 
-/** Load models for the given agent from the backend */
-export async function loadModelsForAgent(agentName: string): Promise<void> {
-	const requestId = ++lastModelLoadRequestId;
-	const isStillActiveTarget = () => {
-		const activeAgent = get(selectedAgent);
-		const activeSession = get(currentSessionId);
-		return !!activeSession && !!activeAgent && activeAgent.name === agentName;
-	};
+function syncFocusedAgentStores(agentName: string, state: AgentModelState): void {
+	if (get(selectedAgent)?.name !== agentName) return;
+	models.set(state.models);
+	currentModelId.set(state.currentModelId);
+	isLoadingModels.set(state.isLoading);
+	reasoningLevel.set(state.reasoningLevel);
+}
 
-	// Check cache first — if models arrived via async push while we were on another agent
-	const cached = modelCache.get(agentName);
-	if (cached && cached.models.length > 0) {
-		if (isStillActiveTarget()) {
-			applyModelState(cached);
-		}
-		if (requestId === lastModelLoadRequestId) {
-			isLoadingModels.set(false);
-		}
+function updateAgentModelState(
+	agentName: string,
+	update: Partial<AgentModelState> | ((state: AgentModelState) => AgentModelState)
+): AgentModelState {
+	let nextState = createDefaultAgentModelState();
+	modelStatesByAgent.update((states) => {
+		const current = states[agentName] ?? createDefaultAgentModelState();
+		nextState = typeof update === 'function' ? update(current) : { ...current, ...update };
+		return { ...states, [agentName]: nextState };
+	});
+	syncFocusedAgentStores(agentName, nextState);
+	return nextState;
+}
+
+/** Load models for an agent without changing another pane's visible state. */
+export async function loadModelsForAgent(agentName: string): Promise<void> {
+	if (!agentName) return;
+	const existing = getAgentModelState(agentName);
+	if (existing.isLoading) return;
+	if (existing.models.length > 0 && !existing.isLoading) {
+		syncFocusedAgentStores(agentName, existing);
 		return;
 	}
 
-	isLoadingModels.set(true);
+	const requestVersion = modelLoadVersions.begin(agentName);
+	updateAgentModelState(agentName, { isLoading: true });
 	try {
 		const state = await getModels(agentName);
-		modelCache.set(agentName, { models: state.models, currentModelId: state.currentModelId });
-		if (requestId !== lastModelLoadRequestId) return;
-
-		if (state.models.length > 0) {
-			if (isStillActiveTarget()) {
-				applyModelState({ models: state.models, currentModelId: state.currentModelId });
-			}
-		} else {
-			// Backend returned empty — models may arrive later via async push.
-			// Only clear UI if this load still targets the active session/agent.
-			if (isStillActiveTarget()) {
-				models.set([]);
-				currentModelId.set('');
-			}
-		}
-	} catch (e) {
-		if (requestId !== lastModelLoadRequestId) return;
-		console.warn('Failed to load models:', e);
-		if (isStillActiveTarget()) {
-			models.set([]);
-			currentModelId.set('');
-		}
-	} finally {
-		if (requestId === lastModelLoadRequestId) {
-			isLoadingModels.set(false);
-		}
+		if (!modelLoadVersions.isCurrent(agentName, requestVersion)) return;
+		const nextModels = state.models ?? [];
+		const currentId = state.currentModelId || nextModels[0]?.id || '';
+		updateAgentModelState(agentName, {
+			models: nextModels,
+			currentModelId: currentId,
+			isLoading: false
+		});
+	} catch (error) {
+		if (!modelLoadVersions.isCurrent(agentName, requestVersion)) return;
+		console.warn(`Failed to load models for ${agentName}:`, error);
+		updateAgentModelState(agentName, { models: [], currentModelId: '', isLoading: false });
 	}
 }
 
-/** Load the current reasoning level from the backend */
+/** Load an agent's reasoning level with per-agent stale-response protection. */
 export async function loadReasoningLevel(agentName: string): Promise<void> {
-	try {
-		const level = await getReasoningLevel(agentName);
-		if (level) {
-			reasoningLevel.set(level as ReasoningLevel);
-		}
-	} catch (e) {
-		console.warn('Failed to load reasoning level:', e);
-	}
-}
-
-/** Change the active model for an agent */
-export async function changeModel(agentName: string, modelId: string): Promise<void> {
-	const previousModelId = get(currentModelId);
-	const nextModelId = modelId;
-	if (!nextModelId) {
+	if (!agentName) return;
+	const existing = getAgentModelState(agentName);
+	if (existing.isLoadingReasoning) return;
+	if (existing.reasoningLoaded && !existing.isLoadingReasoning) {
+		syncFocusedAgentStores(agentName, existing);
 		return;
 	}
 
-	currentModelId.set(nextModelId);
-
-	// Update cache
-	const cached = modelCache.get(agentName);
-	if (cached) {
-		cached.currentModelId = nextModelId;
+	const requestVersion = reasoningLoadVersions.begin(agentName);
+	updateAgentModelState(agentName, { isLoadingReasoning: true });
+	try {
+		const level = await getReasoningLevel(agentName);
+		if (!reasoningLoadVersions.isCurrent(agentName, requestVersion)) return;
+		updateAgentModelState(agentName, {
+			reasoningLevel: (level || 'high') as ReasoningLevel,
+			isLoadingReasoning: false,
+			reasoningLoaded: true
+		});
+	} catch (error) {
+		if (!reasoningLoadVersions.isCurrent(agentName, requestVersion)) return;
+		console.warn(`Failed to load reasoning level for ${agentName}:`, error);
+		updateAgentModelState(agentName, { isLoadingReasoning: false });
 	}
+}
+
+/** Change an agent's active model without allowing an old failure to roll back a newer choice. */
+export async function changeModel(agentName: string, modelId: string): Promise<void> {
+	if (!agentName || !modelId) return;
+	const previousState = getAgentModelState(agentName);
+	const mutationVersion = modelMutationVersions.begin(agentName);
+	updateAgentModelState(agentName, { currentModelId: modelId });
 
 	try {
-		await bridgeSetModel(agentName, nextModelId);
+		await bridgeSetModel(agentName, modelId);
+		if (!modelMutationVersions.isCurrent(agentName, mutationVersion)) return;
 
-		// If the user picked a model from the full catalog that isn't yet in the
-		// curated list, splice it in for immediate UX feedback.
-		const curated = get(models);
-		if (!curated.some(m => m.id === nextModelId)) {
-			const knownFromFull = get(allModels).find(m => m.id === nextModelId);
+		const current = getAgentModelState(agentName);
+		if (!current.models.some((model) => model.id === modelId)) {
+			const knownFromFull = fullModelCache.get(agentName)?.find((model) => model.id === modelId);
 			if (knownFromFull) {
-				const nextCurated = [knownFromFull, ...curated];
-				models.set(nextCurated);
-				const cachedCurated = modelCache.get(agentName);
-				if (cachedCurated) {
-					cachedCurated.models = nextCurated;
-					cachedCurated.currentModelId = nextModelId;
-				}
+				updateAgentModelState(agentName, {
+					models: [knownFromFull, ...current.models],
+					currentModelId: modelId
+				});
 			}
 		}
 	} catch (error) {
-		// Restore UI state if backend update fails
-		currentModelId.set(previousModelId);
-		if (cached) {
-			cached.currentModelId = previousModelId;
+		if (modelMutationVersions.isCurrent(agentName, mutationVersion)) {
+			updateAgentModelState(agentName, {
+				models: previousState.models,
+				currentModelId: previousState.currentModelId
+			});
 		}
 		throw error;
 	}
@@ -160,7 +178,7 @@ export async function openModelBrowser(agentName: string): Promise<void> {
 	try {
 		const state = await getAllModels(agentName);
 		const list = state.models
-			.filter(m => m.id)
+			.filter((model) => model.id)
 			.sort((a, b) => a.name.localeCompare(b.name));
 		fullModelCache.set(agentName, list);
 		allModels.set(list);
@@ -176,17 +194,28 @@ export function closeModelBrowser(): void {
 	modelBrowserOpen.set(false);
 }
 
-/** Change the reasoning effort level */
-export async function changeReasoningLevel(level: ReasoningLevel, agentName?: string): Promise<void> {
-	const agent = get(selectedAgent);
-	const targetAgentName = agentName || agent?.name;
+/** Change reasoning effort without allowing an old failure to roll back a newer choice. */
+export async function changeReasoningLevel(
+	level: ReasoningLevel,
+	agentName?: string
+): Promise<void> {
+	const targetAgentName = agentName || get(selectedAgent)?.name;
 	if (!targetAgentName) return;
 
-	reasoningLevel.set(level);
-	await bridgeSetReasoningLevel(targetAgentName, level);
+	const previousLevel = getAgentModelState(targetAgentName).reasoningLevel;
+	const mutationVersion = reasoningMutationVersions.begin(targetAgentName);
+	updateAgentModelState(targetAgentName, { reasoningLevel: level, reasoningLoaded: true });
+	try {
+		await bridgeSetReasoningLevel(targetAgentName, level);
+	} catch (error) {
+		if (reasoningMutationVersions.isCurrent(targetAgentName, mutationVersion)) {
+			updateAgentModelState(targetAgentName, { reasoningLevel: previousLevel });
+		}
+		throw error;
+	}
 }
 
-/** Display labels for reasoning levels */
+/** Display labels for reasoning levels. */
 export const reasoningLabels: Record<ReasoningLevel, string> = {
 	none: 'Off',
 	low: 'Low',
@@ -195,27 +224,19 @@ export const reasoningLabels: Record<ReasoningLevel, string> = {
 	max: 'Max'
 };
 
-// ── Binding ──────────────────────────────────────────────────────────
-
 let bound = false;
 
-/** Wire up model availability callbacks. Call once on mount.
- *  Caches models per-agent so switching agents shows models immediately. */
+/** Cache model pushes by agent; panes select only their own agent's state. */
 export function bindModelsListener(): void {
 	if (bound) return;
 	bound = true;
 
 	onModelsAvailable((agentName, modelState) => {
-		// Always cache, regardless of which agent is currently selected
-		modelCache.set(agentName, {
-			models: modelState.models,
-			currentModelId: modelState.currentModelId
+		const nextModels = modelState.models ?? [];
+		updateAgentModelState(agentName, {
+			models: nextModels,
+			currentModelId: modelState.currentModelId || nextModels[0]?.id || '',
+			isLoading: false
 		});
-
-		// Only update active stores if this is for the currently selected agent
-		const agent = get(selectedAgent);
-		if (agent && agentName === agent.name) {
-			applyModelState(modelState);
-		}
 	});
 }

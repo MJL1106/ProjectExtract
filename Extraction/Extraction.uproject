@@ -47,6 +47,10 @@
 		},
 		{
 			"Name": "VibeUE",
+			"Enabled": false
+		},
+		{
+			"Name": "PythonScriptPlugin",
 			"Enabled": true
 		},
 		{

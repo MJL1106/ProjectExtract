@@ -26,7 +26,13 @@
 		installed: boolean;
 	};
 
-	export type ExtensionCardStatus = 'active' | 'restart' | 'unavailable' | 'failed' | 'disabled' | 'idle';
+	export type ExtensionCardStatus =
+		| 'active'
+		| 'restart'
+		| 'unavailable'
+		| 'failed'
+		| 'disabled'
+		| 'idle';
 
 	type DetailRow = {
 		label: string;
@@ -76,7 +82,9 @@
 	}: Props = $props();
 
 	let displaySummary = $derived(summary || description);
-	let needsAttention = $derived(status === 'restart' || status === 'unavailable' || status === 'failed');
+	let needsAttention = $derived(
+		status === 'restart' || status === 'unavailable' || status === 'failed'
+	);
 
 	function statusDotClass(s: ExtensionCardStatus): string {
 		switch (s) {
@@ -125,15 +133,18 @@
 			<div class="flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
 				<div class="min-w-0">
 					<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-						<span class="h-1.5 w-1.5 shrink-0 rounded-full {statusDotClass(status)}" aria-hidden="true"></span>
+						<span
+							class="h-1.5 w-1.5 shrink-0 rounded-full {statusDotClass(status)}"
+							aria-hidden="true"
+						></span>
 						<h3 class="text-[14px] font-medium leading-5 text-foreground">{name}</h3>
 						{#if version}
-							<span class="text-[11px] tabular-nums text-muted-foreground/50">v{version}</span>
+							<span class="text-muted-foreground/50 text-[11px] tabular-nums">v{version}</span>
 						{/if}
 					</div>
 
 					{#if vendor}
-						<div class="mt-0.5 text-[11px] text-muted-foreground/45">
+						<div class="text-muted-foreground/45 mt-0.5 text-[11px]">
 							<span>{vendor}</span>
 						</div>
 					{/if}
@@ -150,12 +161,16 @@
 							</span>
 						{/if}
 						{#if statusLabel && needsAttention}
-							<span class="rounded-full border border-amber-400/25 px-2 py-0.5 text-[10.5px] text-amber-100/85">
+							<span
+								class="rounded-full border border-amber-400/25 px-2 py-0.5 text-[10.5px] text-amber-100/85"
+							>
 								{statusLabel}
 							</span>
 						{/if}
 						{#if updateLabel}
-							<span class="rounded-full border border-border/45 px-2 py-0.5 text-[10.5px] text-muted-foreground/65">
+							<span
+								class="border-border/45 text-muted-foreground/65 rounded-full border px-2 py-0.5 text-[10.5px]"
+							>
 								{updateLabel}
 							</span>
 						{/if}
@@ -164,7 +179,7 @@
 			</div>
 
 			{#if displaySummary}
-				<p class="mt-2 max-w-[58rem] text-[12.5px] leading-relaxed text-foreground/82">
+				<p class="text-foreground/82 mt-2 max-w-[58rem] text-[12.5px] leading-relaxed">
 					{displaySummary}
 				</p>
 			{/if}
@@ -174,16 +189,20 @@
 			{/if}
 
 			{#if changelog}
-				<p class="mt-2 text-[11px] leading-relaxed text-muted-foreground/55">{changelog}</p>
+				<p class="text-muted-foreground/55 mt-2 text-[11px] leading-relaxed">{changelog}</p>
 			{/if}
 
 			{#if dependencies.length > 0}
 				<div class="mt-3">
-					<p class="text-[10px] uppercase tracking-wide text-muted-foreground/40">Unreal Engine plugins</p>
+					<p class="text-muted-foreground/40 text-[10px] uppercase tracking-wide">
+						Unreal Engine plugins
+					</p>
 					<ul class="mt-1 flex flex-wrap gap-1.5">
-						{#each dependencies as dep}
+						{#each dependencies as dep (dep.name)}
 							<li
-								class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] {depClass(dep)}"
+								class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] {depClass(
+									dep
+								)}"
 								title={!dep.installed
 									? `${dep.name} is not installed`
 									: !dep.enabled && !dep.optional
@@ -193,7 +212,9 @@
 											: dep.name}
 							>
 								<span class="font-mono">{dep.name}</span>
-								<span class="text-muted-foreground/45">{dep.optional ? 'optional' : 'required'}</span>
+								<span class="text-muted-foreground/45"
+									>{dep.optional ? 'optional' : 'required'}</span
+								>
 							</li>
 						{/each}
 					</ul>
@@ -201,23 +222,30 @@
 			{/if}
 
 			<details class="group mt-3 text-[11px]">
-				<summary class="inline-flex cursor-pointer select-none items-center gap-1.5 text-muted-foreground/45 hover:text-muted-foreground/75">
+				<summary
+					class="text-muted-foreground/45 hover:text-muted-foreground/75 inline-flex cursor-pointer select-none items-center gap-1.5"
+				>
 					<Icon icon={InformationCircleIcon} size={12} strokeWidth={1.6} />
 					<span>Technical details</span>
 				</summary>
-				<div class="mt-2 grid gap-3 text-muted-foreground/55">
+				<div class="text-muted-foreground/55 mt-2 grid gap-3">
 					{#if enablesAgentTo.length > 0}
 						<div>
-							<div class="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/45">
+							<div
+								class="text-muted-foreground/45 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide"
+							>
 								<Icon icon={CheckmarkCircle02Icon} size={12} strokeWidth={1.7} />
 								<span>Adds</span>
 							</div>
 							<ul class="mt-1 grid gap-1.5 sm:grid-cols-2">
-								{#each enablesAgentTo as item}
+								{#each enablesAgentTo as item (item)}
 									<li
-										class="flex min-w-0 items-start gap-1.5 rounded-md border border-border/35 bg-foreground/[0.018] px-2 py-1.5 text-[11.5px] leading-snug text-muted-foreground/78"
+										class="border-border/35 bg-foreground/[0.018] text-muted-foreground/78 flex min-w-0 items-start gap-1.5 rounded-md border px-2 py-1.5 text-[11.5px] leading-snug"
 									>
-										<span class="mt-[0.35rem] h-1 w-1 shrink-0 rounded-full bg-foreground/45" aria-hidden="true"></span>
+										<span
+											class="bg-foreground/45 mt-[0.35rem] h-1 w-1 shrink-0 rounded-full"
+											aria-hidden="true"
+										></span>
 										<span>{item}</span>
 									</li>
 								{/each}
@@ -226,28 +254,32 @@
 					{/if}
 
 					{#if whenToEnable}
-						<div class="border-l border-foreground/18 pl-3">
-							<div class="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/45">
+						<div class="border-foreground/18 border-l pl-3">
+							<div
+								class="text-muted-foreground/45 flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide"
+							>
 								<Icon icon={BulbIcon} size={12} strokeWidth={1.7} />
 								<span>Best for</span>
 							</div>
-							<p class="mt-1 text-[11.5px] leading-relaxed text-muted-foreground/76">{whenToEnable}</p>
+							<p class="text-muted-foreground/76 mt-1 text-[11.5px] leading-relaxed">
+								{whenToEnable}
+							</p>
 						</div>
 					{/if}
 
 					<div class="grid gap-1">
-					<div class="flex gap-2">
-						<span class="w-20 shrink-0 text-muted-foreground/40">Plugin</span>
-						<span class="truncate font-mono text-muted-foreground/65">{pluginName}</span>
-					</div>
-					{#each details as row}
-						{#if row.value}
-							<div class="flex gap-2">
-								<span class="w-20 shrink-0 text-muted-foreground/40">{row.label}</span>
-								<span class="truncate">{row.value}</span>
-							</div>
-						{/if}
-					{/each}
+						<div class="flex gap-2">
+							<span class="text-muted-foreground/40 w-20 shrink-0">Plugin</span>
+							<span class="text-muted-foreground/65 truncate font-mono">{pluginName}</span>
+						</div>
+						{#each details as row (row.label)}
+							{#if row.value}
+								<div class="flex gap-2">
+									<span class="text-muted-foreground/40 w-20 shrink-0">{row.label}</span>
+									<span class="truncate">{row.value}</span>
+								</div>
+							{/if}
+						{/each}
 					</div>
 				</div>
 			</details>
@@ -255,9 +287,11 @@
 
 		{#if actions.length > 0}
 			<div class="flex shrink-0 flex-col items-end gap-1.5">
-				{#each actions as action}
+				{#each actions as action (action.label)}
 					<button
-						class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 {actionClass(action)}"
+						class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11.5px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 {actionClass(
+							action
+						)}"
 						onclick={action.onclick}
 						disabled={action.disabled}
 						title={action.title}

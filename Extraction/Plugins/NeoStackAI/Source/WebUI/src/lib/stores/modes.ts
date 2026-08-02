@@ -1,105 +1,128 @@
 import { writable, get } from 'svelte/store';
-import {
-	getModes,
-	setMode,
-	onModesAvailable,
-	onModeChanged,
-	type ModeInfo,
-	type ModeState
-} from '$lib/bridge.js';
+import { getModes, setMode, onModesAvailable, onModeChanged, type ModeInfo } from '$lib/bridge.js';
 import { selectedAgent } from '$lib/stores/agents.js';
-import { currentSessionId } from '$lib/stores/sessions.js';
+import { createOperationVersionTracker } from '$lib/operationVersions.js';
 
-/** Available modes for the current agent */
+export type AgentModeState = {
+	modes: ModeInfo[];
+	currentModeId: string;
+	isLoading: boolean;
+	loaded: boolean;
+};
+
+const createDefaultAgentModeState = (): AgentModeState => ({
+	modes: [],
+	currentModeId: '',
+	isLoading: false,
+	loaded: false
+});
+
+/** Authoritative mode state keyed by agent for every visible pane. */
+export const modeStatesByAgent = writable<Record<string, AgentModeState>>({});
+
+// Legacy focused-agent stores remain for route-level UI. ChatPane reads the map.
 export const availableModes = writable<ModeInfo[]>([]);
-
-/** Currently selected mode ID */
 export const currentModeId = writable<string>('');
-let lastModeLoadRequestId = 0;
 
-// Cache of last-received modes per agent — push callbacks may arrive before
-// selectedAgent is set (e.g. during session/load). We store them here and
-// replay when the agent becomes active.
-const pendingModesByAgent = new Map<string, ModeState>();
+const modeLoadVersions = createOperationVersionTracker();
+const modeMutationVersions = createOperationVersionTracker();
 
-/** Load modes for an agent (called when agent changes) */
+function getAgentModeState(agentName: string): AgentModeState {
+	return get(modeStatesByAgent)[agentName] ?? createDefaultAgentModeState();
+}
+
+function syncFocusedAgentStores(agentName: string, state: AgentModeState): void {
+	if (get(selectedAgent)?.name !== agentName) return;
+	availableModes.set(state.modes);
+	currentModeId.set(state.currentModeId);
+}
+
+function updateAgentModeState(
+	agentName: string,
+	update: Partial<AgentModeState> | ((state: AgentModeState) => AgentModeState)
+): AgentModeState {
+	let nextState = createDefaultAgentModeState();
+	modeStatesByAgent.update((states) => {
+		const current = states[agentName] ?? createDefaultAgentModeState();
+		nextState = typeof update === 'function' ? update(current) : { ...current, ...update };
+		return { ...states, [agentName]: nextState };
+	});
+	syncFocusedAgentStores(agentName, nextState);
+	return nextState;
+}
+
+/** Load modes for an agent without changing another pane's controls. */
 export async function loadModesForAgent(agentName: string): Promise<void> {
-	const requestId = ++lastModeLoadRequestId;
-	const isStillActiveTarget = () => {
-		const activeAgent = get(selectedAgent);
-		const activeSession = get(currentSessionId);
-		return !!activeSession && !!activeAgent && activeAgent.name === agentName;
-	};
-
-	// Check if we already have modes cached from a push that arrived early
-	const cached = pendingModesByAgent.get(agentName);
-	if (cached && cached.modes.length > 0) {
-		pendingModesByAgent.delete(agentName);
-		availableModes.set(cached.modes);
-		currentModeId.set(cached.currentModeId);
+	if (!agentName) return;
+	const existing = getAgentModeState(agentName);
+	if (existing.isLoading) return;
+	if (existing.loaded && !existing.isLoading) {
+		syncFocusedAgentStores(agentName, existing);
 		return;
 	}
 
+	const requestVersion = modeLoadVersions.begin(agentName);
+	updateAgentModeState(agentName, { isLoading: true });
 	try {
 		const state = await getModes(agentName);
-		if (requestId !== lastModeLoadRequestId) return;
-		if (!isStillActiveTarget()) return;
-		if (state.modes.length > 0) {
-			availableModes.set(state.modes);
-			currentModeId.set(state.currentModeId);
-		}
-		// If pull returned empty, modes may not have arrived yet from ACP.
-		// The push callback will handle it when they do.
-	} catch (e) {
-		if (requestId !== lastModeLoadRequestId) return;
-		console.warn('Failed to load modes:', e);
-		if (isStillActiveTarget()) {
-			availableModes.set([]);
-			currentModeId.set('');
-		}
+		if (!modeLoadVersions.isCurrent(agentName, requestVersion)) return;
+		updateAgentModeState(agentName, {
+			modes: state.modes ?? [],
+			currentModeId: state.currentModeId || state.modes?.[0]?.id || '',
+			isLoading: false,
+			loaded: true
+		});
+	} catch (error) {
+		if (!modeLoadVersions.isCurrent(agentName, requestVersion)) return;
+		console.warn(`Failed to load modes for ${agentName}:`, error);
+		updateAgentModeState(agentName, {
+			modes: [],
+			currentModeId: '',
+			isLoading: false,
+			loaded: false
+		});
 	}
 }
 
-/** Change the active mode */
+/** Change mode without allowing an old failure to roll back a newer choice. */
 export async function changeMode(agentName: string, modeId: string): Promise<void> {
-	currentModeId.set(modeId);
-	await setMode(agentName, modeId);
+	if (!agentName || !modeId) return;
+	const previousModeId = getAgentModeState(agentName).currentModeId;
+	const mutationVersion = modeMutationVersions.begin(agentName);
+	updateAgentModeState(agentName, { currentModeId: modeId, loaded: true });
+	try {
+		await setMode(agentName, modeId);
+	} catch (error) {
+		if (modeMutationVersions.isCurrent(agentName, mutationVersion)) {
+			updateAgentModeState(agentName, { currentModeId: previousModeId });
+		}
+		throw error;
+	}
 }
 
-/** Check if currently in plan mode */
+/** Check if currently in plan mode. */
 export function isInPlanMode(modeId: string): boolean {
 	const lower = modeId.toLowerCase();
 	return lower === 'plan' || lower === 'architect' || lower.includes('plan');
 }
 
-// ── Binding ──────────────────────────────────────────────────────────
-
 let bound = false;
 
-/** Wire up mode callbacks. Call once on mount. */
+/** Cache mode callbacks by agent; panes select only their own agent's state. */
 export function bindModeListener(): void {
 	if (bound) return;
 	bound = true;
 
 	onModesAvailable((agentName, modeState) => {
-		const agent = get(selectedAgent);
-		if (agent && agentName === agent.name) {
-			// Agent is currently selected — apply immediately
-			availableModes.set(modeState.modes);
-			if (modeState.currentModeId) {
-				currentModeId.set(modeState.currentModeId);
-			}
-		} else {
-			// Agent not selected yet (modes arrived before selectedAgent was set,
-			// e.g. during session/load). Cache for when the agent becomes active.
-			pendingModesByAgent.set(agentName, modeState);
-		}
+		updateAgentModeState(agentName, {
+			modes: modeState.modes ?? [],
+			currentModeId: modeState.currentModeId || modeState.modes?.[0]?.id || '',
+			isLoading: false,
+			loaded: true
+		});
 	});
 
 	onModeChanged((agentName, modeId) => {
-		const agent = get(selectedAgent);
-		if (agent && agentName === agent.name) {
-			currentModeId.set(modeId);
-		}
+		updateAgentModeState(agentName, { currentModeId: modeId, loaded: true });
 	});
 }

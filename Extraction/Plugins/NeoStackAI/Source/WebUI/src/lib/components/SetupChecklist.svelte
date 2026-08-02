@@ -19,6 +19,7 @@
 		type PrerequisiteStatus,
 		type ProviderSettings
 	} from '$lib/bridge.js';
+	import { neostackAuth } from '$lib/stores/neostackAuth.js';
 
 	type ChecklistState = 'ready' | 'warning' | 'action' | 'loading';
 	type ChecklistItem = {
@@ -35,10 +36,11 @@
 	let isLoading = $state(false);
 	let loadError = $state('');
 
-	const neostackProvider = $derived(providers?.providers.find((provider) => provider.id === 'neostack'));
-	const hasNeoStackKey = $derived(!!neostackProvider?.hasApiKey);
+	const neostackSignedIn = $derived($neostackAuth.status === 'signedIn');
 	const configuredProviders = $derived(
-		providers?.providers.filter((provider) => provider.configured || provider.hasApiKey || !provider.requiresApiKey) ?? []
+		providers?.providers.filter(
+			(provider) => provider.configured || provider.hasApiKey || !provider.requiresApiKey
+		) ?? []
 	);
 	const hasChatRuntime = $derived(configuredProviders.length > 0);
 	const hasNodeRuntime = $derived(!!prerequisites?.node?.found || !!prerequisites?.npx?.found);
@@ -46,13 +48,19 @@
 	const checklist = $derived.by((): ChecklistItem[] => [
 		{
 			title: 'Connect NeoStack',
-			description: 'Used for subscription checks, NeoStack Cloud chat, extensions, and remote access.',
-			state: hasNeoStackKey || entitlement?.entitled ? 'ready' : entitlement?.status === 'unknown' ? 'loading' : 'action',
-			detail: hasNeoStackKey
-				? 'NeoStack Cloud key is configured.'
+			description:
+				'Used for subscription checks, NeoStack Cloud chat, extensions, and remote access.',
+			state:
+				neostackSignedIn || entitlement?.entitled
+					? 'ready'
+					: entitlement?.status === 'unknown'
+						? 'loading'
+						: 'action',
+			detail: neostackSignedIn
+				? 'Signed in to NeoStack.'
 				: entitlement?.status === 'network'
 					? 'Could not reach NeoStack Cloud. Check your connection, then retry.'
-					: 'Sign in or paste a NeoStack Cloud key to unlock the easiest path.'
+					: 'Sign in with NeoStack to unlock the easiest path.'
 		},
 		{
 			title: 'Choose how chat runs',
@@ -72,7 +80,8 @@
 		},
 		{
 			title: 'Check local prerequisites',
-			description: 'Needed only for external ACP agents such as Claude Code, Codex, or Copilot CLI.',
+			description:
+				'Needed only for external ACP agents such as Claude Code, Codex, or Copilot CLI.',
 			state: hasNodeRuntime ? 'ready' : prerequisites ? 'warning' : 'loading',
 			detail: hasNodeRuntime
 				? 'Node.js/npx is available for adapter-based agents.'
@@ -124,19 +133,20 @@
 	});
 </script>
 
-<div class="rounded-2xl border border-border/60 bg-card/70 p-5">
+<div class="border-border/60 bg-card/70 rounded-2xl border p-5">
 	<div class="flex flex-wrap items-start justify-between gap-4">
 		<div>
 			<div class="flex items-center gap-2">
 				<Icon icon={UserIcon} size={17} strokeWidth={1.6} class="text-[var(--ue-accent)]" />
 				<h2 class="text-[16px] font-medium text-foreground">Setup Checklist</h2>
 			</div>
-			<p class="mt-1 max-w-2xl text-[12.5px] leading-relaxed text-muted-foreground/65">
-				Get to a first successful chat by connecting NeoStack AI, choosing a chat runtime, and verifying project tools.
+			<p class="text-muted-foreground/65 mt-1 max-w-2xl text-[12.5px] leading-relaxed">
+				Get to a first successful chat by connecting NeoStack AI, choosing a chat runtime, and
+				verifying project tools.
 			</p>
 		</div>
 		<button
-			class="inline-flex items-center gap-1.5 rounded-md border border-border/60 px-2.5 py-1.5 text-[12px] text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+			class="border-border/60 inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[12px] text-foreground transition-colors hover:bg-accent disabled:opacity-50"
 			onclick={refresh}
 			disabled={isLoading}
 		>
@@ -146,27 +156,43 @@
 	</div>
 
 	{#if loadError}
-		<div class="mt-4 rounded-md border border-red-500/25 bg-red-500/[0.05] px-3 py-2 text-[12px] text-red-300">
+		<div
+			class="mt-4 rounded-md border border-red-500/25 bg-red-500/[0.05] px-3 py-2 text-[12px] text-red-300"
+		>
 			{loadError}
 		</div>
 	{/if}
 
 	<div class="mt-4 grid gap-3 md:grid-cols-2">
-		{#each checklist as item}
+		{#each checklist as item (item.title)}
 			<div class={`rounded-xl border p-3 ${stateClass(item.state)}`}>
 				<div class="flex items-start gap-3">
 					{#if item.state === 'ready'}
-						<Icon icon={CheckmarkCircle02Icon} size={17} strokeWidth={1.7} class={`mt-0.5 ${iconClass(item.state)}`} />
+						<Icon
+							icon={CheckmarkCircle02Icon}
+							size={17}
+							strokeWidth={1.7}
+							class={`mt-0.5 ${iconClass(item.state)}`}
+						/>
 					{:else if item.state === 'loading'}
-						<span class="mt-1 inline-block h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/25 border-t-muted-foreground/70"></span>
+						<span
+							class="border-muted-foreground/25 border-t-muted-foreground/70 mt-1 inline-block h-4 w-4 animate-spin rounded-full border-2"
+						></span>
 					{:else}
-						<Icon icon={AlertCircleIcon} size={17} strokeWidth={1.7} class={`mt-0.5 ${iconClass(item.state)}`} />
+						<Icon
+							icon={AlertCircleIcon}
+							size={17}
+							strokeWidth={1.7}
+							class={`mt-0.5 ${iconClass(item.state)}`}
+						/>
 					{/if}
 					<div class="min-w-0">
 						<h3 class="text-[13px] font-medium text-foreground">{item.title}</h3>
-						<p class="mt-1 text-[11.5px] leading-relaxed text-muted-foreground/60">{item.description}</p>
+						<p class="text-muted-foreground/60 mt-1 text-[11.5px] leading-relaxed">
+							{item.description}
+						</p>
 						{#if item.detail}
-							<p class="mt-2 text-[11px] leading-relaxed text-muted-foreground/50">{item.detail}</p>
+							<p class="text-muted-foreground/50 mt-2 text-[11px] leading-relaxed">{item.detail}</p>
 						{/if}
 					</div>
 				</div>
@@ -174,12 +200,18 @@
 		{/each}
 	</div>
 
-	<div class="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-border/50 pt-4">
-		<div class="flex items-center gap-2 text-[12px] {allReady ? 'text-emerald-300/90' : 'text-muted-foreground/65'}">
+	<div
+		class="border-border/50 mt-4 flex flex-wrap items-center justify-between gap-3 border-t pt-4"
+	>
+		<div
+			class="flex items-center gap-2 text-[12px] {allReady
+				? 'text-emerald-300/90'
+				: 'text-muted-foreground/65'}"
+		>
 			<Icon icon={allReady ? CheckmarkCircle02Icon : Link01Icon} size={15} strokeWidth={1.6} />
 			{allReady ? 'Ready to chat.' : 'Finish the action items above, then start a new chat.'}
 		</div>
-		{#if !hasNeoStackKey}
+		{#if !neostackSignedIn}
 			<NeoStackSignInButton label="Connect NeoStack" variant="secondary" onsuccess={refresh} />
 		{/if}
 	</div>

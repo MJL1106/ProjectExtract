@@ -35,5 +35,24 @@ export default defineConfig(
 				svelteConfig
 			}
 		}
+	},
+	{
+		files: ['src/lib/bridge.ts', 'src/lib/relay.ts'],
+		rules: {
+			// UE generates its bridge surface at runtime and relay payloads arrive as
+			// untyped JSON. Keep the dynamic type at these transport boundaries.
+			'@typescript-eslint/no-explicit-any': 'off'
+		}
+	},
+	{
+		files: [
+			'src/lib/components/AgentRegistry.svelte',
+			'src/lib/components/ui/button/button.svelte'
+		],
+		rules: {
+			// Both components intentionally accept external URLs; Svelte's resolve()
+			// helper is only appropriate for app-relative navigation.
+			'svelte/no-navigation-without-resolve': 'off'
+		}
 	}
 );

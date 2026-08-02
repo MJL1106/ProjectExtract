@@ -4,7 +4,6 @@
 		ArrowDown01Icon,
 		ArrowUp01Icon,
 		CheckmarkCircle02Icon,
-		Cancel01Icon,
 		Loading03Icon,
 		Layers01Icon,
 		Copy01Icon
@@ -24,11 +23,7 @@
 	let copied = $state(false);
 
 	let status = $derived(
-		!resultBlock
-			? 'running'
-			: resultBlock.toolSuccess !== false
-				? 'success'
-				: 'error'
+		!resultBlock ? 'running' : resultBlock.toolSuccess !== false ? 'success' : 'error'
 	);
 
 	let statusColor = $derived(
@@ -65,13 +60,11 @@
 
 	/** Full asset path for opening — if name is already a /Game/ path use it, otherwise combine path + name */
 	let openAssetPath = $derived(
-		assetName.startsWith('/') ? assetName : (assetPath ? `${assetPath}/${assetName}` : assetName)
+		assetName.startsWith('/') ? assetName : assetPath ? `${assetPath}/${assetName}` : assetName
 	);
 
 	/** Full path for display */
-	let fullPath = $derived(
-		assetPath ? `${assetPath}/${assetName}` : assetName
-	);
+	let fullPath = $derived(assetPath ? `${assetPath}/${assetName}` : assetName);
 
 	/** Short display name — just the last part */
 	let displayName = $derived(() => {
@@ -99,7 +92,11 @@
 		WIDGET_BLUEPRINT: { label: 'Widget BP', color: 'text-teal-400', bg: 'bg-teal-500/15' },
 		NIAGARA_SYSTEM: { label: 'Niagara', color: 'text-orange-400', bg: 'bg-orange-500/15' },
 		MATERIAL: { label: 'Material', color: 'text-emerald-400', bg: 'bg-emerald-500/15' },
-		MATERIAL_INSTANCE: { label: 'Mat Instance', color: 'text-emerald-400', bg: 'bg-emerald-500/15' },
+		MATERIAL_INSTANCE: {
+			label: 'Mat Instance',
+			color: 'text-emerald-400',
+			bg: 'bg-emerald-500/15'
+		},
 		STATIC_MESH: { label: 'Static Mesh', color: 'text-cyan-400', bg: 'bg-cyan-500/15' },
 		SKELETON: { label: 'Skeleton', color: 'text-amber-400', bg: 'bg-amber-500/15' },
 		BEHAVIOR_TREE: { label: 'BT', color: 'text-rose-400', bg: 'bg-rose-500/15' },
@@ -120,7 +117,11 @@
 	};
 
 	let typeInfo = $derived(
-		ASSET_TYPE_MAP[assetType] ?? { label: assetType || 'Asset', color: 'text-muted-foreground', bg: 'bg-secondary/50' }
+		ASSET_TYPE_MAP[assetType] ?? {
+			label: assetType || 'Asset',
+			color: 'text-muted-foreground',
+			bg: 'bg-secondary/50'
+		}
 	);
 
 	/** Parse result into sections for structured display */
@@ -150,9 +151,7 @@
 	let resultLines = $derived(resultText ? resultText.split('\n') : []);
 	let totalLines = $derived(resultLines.length);
 	let previewText = $derived(
-		resultLines.length > PREVIEW_LINES
-			? resultLines.slice(0, PREVIEW_LINES).join('\n')
-			: resultText
+		resultLines.length > PREVIEW_LINES ? resultLines.slice(0, PREVIEW_LINES).join('\n') : resultText
 	);
 	let hasMoreLines = $derived(resultLines.length > PREVIEW_LINES);
 	let remainingLines = $derived(Math.max(0, resultLines.length - PREVIEW_LINES));
@@ -164,15 +163,15 @@
 		return '';
 	});
 
-	let hasImages = $derived(
-		(resultBlock?.images && resultBlock.images.length > 0) ?? false
-	);
+	let hasImages = $derived((resultBlock?.images && resultBlock.images.length > 0) ?? false);
 
 	function handleCopy() {
 		if (resultText) {
 			copyToClipboard(resultText);
 			copied = true;
-			setTimeout(() => { copied = false; }, 1500);
+			setTimeout(() => {
+				copied = false;
+			}, 1500);
 		}
 	}
 
@@ -181,7 +180,7 @@
 	}
 </script>
 
-<div class="my-2.5 w-full overflow-hidden rounded-xl border border-border bg-card/50">
+<div class="bg-card/50 my-2.5 w-full overflow-hidden rounded-xl border border-border">
 	<!-- Header -->
 	<div class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-[13px]">
 		<!-- Status icon -->
@@ -196,41 +195,47 @@
 
 		<!-- Asset name (clickable — opens in editor) -->
 		<button
-			class="flex-1 min-w-0 truncate text-left font-medium text-foreground underline decoration-foreground/20 underline-offset-2 transition-colors hover:text-blue-400 hover:decoration-blue-400/40"
+			class="decoration-foreground/20 min-w-0 flex-1 truncate text-left font-medium text-foreground underline underline-offset-2 transition-colors hover:text-blue-400 hover:decoration-blue-400/40"
 			onclick={() => openPath(openAssetPath)}
-			title="Open in editor"
-		>{displayName()}</button>
+			title="Open in editor">{displayName()}</button
+		>
 
 		<!-- Context badge (graph or component) -->
 		{#if contextBadge}
-			<span class="shrink-0 rounded-md bg-secondary/60 px-1.5 py-0.5 text-[10px] font-mono text-muted-foreground">
+			<span
+				class="bg-secondary/60 shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground"
+			>
 				{contextBadge}
 			</span>
 		{/if}
 
 		<!-- Asset type badge -->
 		{#if assetType}
-			<span class="shrink-0 rounded-md px-2 py-0.5 text-[10px] font-medium {typeInfo.color} {typeInfo.bg}">
+			<span
+				class="shrink-0 rounded-md px-2 py-0.5 text-[10px] font-medium {typeInfo.color} {typeInfo.bg}"
+			>
 				{typeInfo.label}
 			</span>
 		{/if}
 
 		<!-- Status badges -->
 		{#if status === 'error'}
-			<span class="shrink-0 rounded-md bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-400">
+			<span
+				class="shrink-0 rounded-md bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-400"
+			>
 				failed
 			</span>
 		{/if}
 
 		{#if status !== 'running' && totalLines > 0}
-			<span class="shrink-0 text-[10px] tabular-nums text-muted-foreground/60">
+			<span class="text-muted-foreground/60 shrink-0 text-[10px] tabular-nums">
 				{totalLines}L
 			</span>
 		{/if}
 
 		<!-- Expand/collapse toggle -->
 		<button
-			class="shrink-0 rounded p-1 text-muted-foreground/60 transition-colors hover:bg-accent/30 hover:text-foreground"
+			class="text-muted-foreground/60 hover:bg-accent/30 shrink-0 rounded p-1 transition-colors hover:text-foreground"
 			onclick={() => (expanded = !expanded)}
 			title={expanded ? 'Collapse' : 'Expand'}
 		>
@@ -239,16 +244,22 @@
 	</div>
 
 	<!-- Asset path (always visible) -->
-	<div class="flex items-center gap-2 border-t border-border/50 px-3.5 py-1.5">
+	<div class="border-border/50 flex items-center gap-2 border-t px-3.5 py-1.5">
 		<button
-			class="flex-1 min-w-0 truncate text-left font-mono text-[10px] text-muted-foreground/60 transition-colors hover:text-blue-400"
-			onclick={(e: MouseEvent) => { e.stopPropagation(); openPath(openAssetPath); }}
-			title="Open {fullPath}"
-		>{fullPath}</button>
+			class="text-muted-foreground/60 min-w-0 flex-1 truncate text-left font-mono text-[10px] transition-colors hover:text-blue-400"
+			onclick={(e: MouseEvent) => {
+				e.stopPropagation();
+				openPath(openAssetPath);
+			}}
+			title="Open {fullPath}">{fullPath}</button
+		>
 		{#if status !== 'running' && resultText}
 			<button
-				class="shrink-0 rounded p-0.5 text-muted-foreground/50 transition-colors hover:text-foreground"
-				onclick={(e: MouseEvent) => { e.stopPropagation(); handleCopy(); }}
+				class="text-muted-foreground/50 shrink-0 rounded p-0.5 transition-colors hover:text-foreground"
+				onclick={(e: MouseEvent) => {
+					e.stopPropagation();
+					handleCopy();
+				}}
 				title="Copy result"
 			>
 				{#if copied}
@@ -262,9 +273,12 @@
 
 	<!-- Inline image preview when collapsed -->
 	{#if !expanded && hasImages && resultBlock?.images}
-		<div class="flex gap-2 overflow-x-auto border-t border-border/50 px-3.5 py-2">
-			{#each resultBlock.images as img}
-				<button class="shrink-0 overflow-hidden rounded-lg border border-border/50" onclick={() => (expanded = true)}>
+		<div class="border-border/50 flex gap-2 overflow-x-auto border-t px-3.5 py-2">
+			{#each resultBlock.images as img, imageIndex (`${img.mimeType}:${imageIndex}`)}
+				<button
+					class="border-border/50 shrink-0 overflow-hidden rounded-lg border"
+					onclick={() => (expanded = true)}
+				>
 					<img
 						src={imageDataUrl(img.base64, img.mimeType)}
 						alt="Asset preview"
@@ -278,38 +292,43 @@
 
 	<!-- Result content -->
 	{#if resultText}
-		<div class="border-t border-border/50">
+		<div class="border-border/50 border-t">
 			{#if expanded}
 				<!-- Full structured view -->
 				<div class="max-h-[500px] overflow-auto px-3.5 py-2.5">
-					{#each sections as section, i}
+					{#each sections as section, i (`${section.header}:${i}`)}
 						{#if section.header}
 							<div class="flex items-center gap-2 {i > 0 ? 'mt-3' : ''} mb-1">
 								{#if section.level === 1}
-									<span class="text-[11px] font-semibold uppercase tracking-wider {typeInfo.color}">{section.header}</span>
+									<span class="text-[11px] font-semibold uppercase tracking-wider {typeInfo.color}"
+										>{section.header}</span
+									>
 								{:else if section.level === 2}
-									<span class="text-[11px] font-medium text-foreground/70">{section.header}</span>
+									<span class="text-foreground/70 text-[11px] font-medium">{section.header}</span>
 								{:else}
-									<span class="text-[11px] text-foreground/55">{section.header}</span>
+									<span class="text-foreground/55 text-[11px]">{section.header}</span>
 								{/if}
 							</div>
 						{/if}
 						{#if section.lines.length > 0}
-							<pre class="font-mono text-[11px] leading-relaxed text-foreground/60">{section.lines.join('\n')}</pre>
+							<pre
+								class="text-foreground/60 font-mono text-[11px] leading-relaxed">{section.lines.join(
+									'\n'
+								)}</pre>
 						{/if}
 					{/each}
 
 					{#if hasImages && resultBlock?.images}
 						<div class="mt-3 flex flex-wrap gap-2">
-							{#each resultBlock.images as img}
-								<div class="overflow-hidden rounded-lg border border-border/50 bg-black/20">
+							{#each resultBlock.images as img, imageIndex (`${img.mimeType}:${imageIndex}`)}
+								<div class="border-border/50 overflow-hidden rounded-lg border bg-black/20">
 									<img
 										src={imageDataUrl(img.base64, img.mimeType)}
 										alt="Asset preview"
 										class="max-h-[400px] w-auto max-w-full object-contain"
 									/>
 									{#if img.width > 0 && img.height > 0}
-										<div class="px-2 py-1 text-[10px] text-muted-foreground/60">
+										<div class="text-muted-foreground/60 px-2 py-1 text-[10px]">
 											{img.width}&times;{img.height}
 										</div>
 									{/if}
@@ -321,10 +340,14 @@
 			{:else}
 				<!-- Collapsed preview -->
 				<div class="relative">
-					<pre class="px-3.5 py-2 font-mono text-[11px] leading-relaxed text-foreground/60">{previewText}</pre>
+					<pre
+						class="text-foreground/60 px-3.5 py-2 font-mono text-[11px] leading-relaxed">{previewText}</pre>
 					{#if hasMoreLines}
-						<div class="absolute inset-x-0 bottom-0 flex h-8 items-end justify-center" style="background: linear-gradient(to top, #353535 20%, transparent);">
-							<span class="pb-1 text-[10px] text-muted-foreground/60">
+						<div
+							class="absolute inset-x-0 bottom-0 flex h-8 items-end justify-center"
+							style="background: linear-gradient(to top, #353535 20%, transparent);"
+						>
+							<span class="text-muted-foreground/60 pb-1 text-[10px]">
 								{remainingLines} more line{remainingLines !== 1 ? 's' : ''}
 							</span>
 						</div>
@@ -333,12 +356,14 @@
 			{/if}
 		</div>
 	{:else if status === 'running'}
-		<div class="border-t border-border/50 px-3.5 py-2.5">
-			<span class="font-mono text-[11px] text-muted-foreground animate-pulse">Reading asset...</span>
+		<div class="border-border/50 border-t px-3.5 py-2.5">
+			<span class="animate-pulse font-mono text-[11px] text-muted-foreground">Reading asset...</span
+			>
 		</div>
 	{:else if status === 'error'}
-		<div class="border-t border-border/50 px-3.5 py-2">
-			<pre class="font-mono text-[11px] leading-relaxed text-red-400/80">{resultBlock?.toolResult ?? 'Asset not found'}</pre>
+		<div class="border-border/50 border-t px-3.5 py-2">
+			<pre class="font-mono text-[11px] leading-relaxed text-red-400/80">{resultBlock?.toolResult ??
+					'Asset not found'}</pre>
 		</div>
 	{/if}
 </div>

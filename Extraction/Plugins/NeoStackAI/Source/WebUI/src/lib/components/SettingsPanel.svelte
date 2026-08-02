@@ -1,5 +1,6 @@
 <script lang="ts">
 	import Icon from '$lib/components/Icon.svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import {
 		Settings02Icon,
 		ArrowLeft02Icon,
@@ -29,7 +30,7 @@
 	import { refreshCloudAccount, cloudAccount, formatTierLabel } from '$lib/stores/cloudAccount.js';
 	import PrerequisitesPanel from '$lib/components/PrerequisitesPanel.svelte';
 	import SetupChecklist from '$lib/components/SetupChecklist.svelte';
-	import { locale, localeNames, locales, setLocale, t, type Locale } from '$lib/i18n.js';
+	import { locale, localeNames, releasedLocales, setLocale, t, type Locale } from '$lib/i18n.js';
 	import {
 		settingsTab,
 		closeSettings,
@@ -53,7 +54,6 @@
 	import {
 		checkForPluginUpdate,
 		getProviderSettings,
-		setProviderPriority,
 		addProvider,
 		removeProvider,
 		setProviderApiKey,
@@ -69,20 +69,14 @@
 		setCustomProviderRequiresApiKey,
 		getAgentExecutionSettings,
 		setAgentExecutionSetting,
-		getGenerationSettings,
-		setGenerationSetting,
 		type AgentExecutionSettings,
-		type GenerationSettings,
-		type GenerationSettingKey,
 		type ProviderSettings,
 		type ProviderConfig,
-		type CustomProviderModel,
 		getAllModels,
 		getEnabledModels,
 		setModelEnabled,
 		setEnabledModels,
 		type ModelInfo,
-		type EnabledModelsState,
 		getCrashHistory,
 		reportCrash,
 		type CrashRecord,
@@ -130,7 +124,9 @@
 			if (result.success) {
 				await loadCrashHistory();
 			}
-		} catch { /* ignore */ }
+		} catch {
+			/* ignore */
+		}
 		reportingCrashId = '';
 	}
 
@@ -171,20 +167,11 @@
 		agentResponseTimeout: 0
 	});
 	let isLoadingAgentExecution = $state(false);
-	let agentExecutionSaveTimer: ReturnType<typeof setTimeout> | undefined;
-
-	// ── Generation Settings ─────────────────────────────────────────
-	let generationSettings = $state<GenerationSettings>({
-		imageModel: '',
-		meshyArtStyle: 'realistic',
-		meshyApiKey: '',
-		tripoApiKey: '',
-		elevenLabsApiKey: '',
-		falApiKey: '',
-		openAIApiKey: ''
-	});
-	let isLoadingGeneration = $state(false);
-	let generationSaveTimers: Partial<Record<GenerationSettingKey, ReturnType<typeof setTimeout>>> = {};
+	type AgentExecutionSettingKey = 'systemPromptAppend' | 'toolTimeout' | 'agentResponseTimeout';
+	// Per-key timers — a shared timer would let editing field B cancel field A's pending save.
+	let agentExecutionSaveTimers: Partial<
+		Record<AgentExecutionSettingKey, ReturnType<typeof setTimeout>>
+	> = {};
 
 	// ── Provider Settings ────────────────────────────────────────────
 	let providerSettings = $state<ProviderSettings>({ priority: [], providers: [] });
@@ -194,17 +181,17 @@
 	let providerActionError = $state('');
 	let providerSaveTimeout: ReturnType<typeof setTimeout> | undefined;
 
-	let selectedProvider = $derived(providerSettings.providers.find(p => p.id === selectedProviderId));
+	let selectedProvider = $derived(
+		providerSettings.providers.find((p) => p.id === selectedProviderId)
+	);
 	// Providers in priority order (configured ones)
 	let priorityProviders = $derived(
 		providerSettings.priority
-			.map(id => providerSettings.providers.find(p => p.id === id))
+			.map((id) => providerSettings.providers.find((p) => p.id === id))
 			.filter((p): p is ProviderConfig => !!p)
 	);
 	// Providers not yet in priority list
-	let availableToAdd = $derived(
-		providerSettings.providers.filter(p => !p.inPriorityList)
-	);
+	let availableToAdd = $derived(providerSettings.providers.filter((p) => !p.inPriorityList));
 
 	async function onNeoStackCloudChanged() {
 		await refreshCloudAccount();
@@ -223,7 +210,8 @@
 			providerApiKeyInput = '';
 		} catch (e) {
 			console.warn('Failed to load provider settings:', e);
-			providerActionError = 'Could not load chat providers. Reopen Settings or restart the editor if this keeps happening.';
+			providerActionError =
+				'Could not load chat providers. Reopen Settings or restart the editor if this keeps happening.';
 		} finally {
 			isLoadingProviders = false;
 		}
@@ -245,7 +233,7 @@
 		try {
 			providerActionError = '';
 			// For custom providers, fully delete (removes config + models + priority)
-			const prov = providerSettings.providers.find(p => p.id === providerId);
+			const prov = providerSettings.providers.find((p) => p.id === providerId);
 			if (prov?.isUserDefined) {
 				await deleteCustomProvider(providerId);
 			} else {
@@ -259,15 +247,6 @@
 			console.warn('Failed to remove provider:', e);
 			providerActionError = 'Could not remove this chat provider.';
 		}
-	}
-
-	// Provider priority was a legacy concept where the chat layer would route
-	// requests through the first provider that could serve a given model. The
-	// new chat layer assigns each model to exactly one owning provider, so
-	// priority is no longer used. The handler is kept as a no-op to keep
-	// existing template wiring compiling; it can be removed in a UI cleanup pass.
-	async function handleMoveProvider(_providerId: string, _direction: 'up' | 'down') {
-		// no-op
 	}
 
 	async function handleProviderApiKeySave(providerId: string, key: string) {
@@ -316,15 +295,16 @@
 	let customProviderUpdateTimeout: ReturnType<typeof setTimeout> | undefined;
 
 	// Only show built-in providers in the "available to add" buttons (not custom ones)
-	let builtinAvailableToAdd = $derived(
-		availableToAdd.filter(p => !p.isUserDefined)
-	);
+	let builtinAvailableToAdd = $derived(availableToAdd.filter((p) => !p.isUserDefined));
 
 	async function handleCreateCustomProvider() {
 		if (!newCustomProviderName.trim()) return;
 		try {
 			providerActionError = '';
-			const result = await createCustomProvider(newCustomProviderName.trim(), newCustomProviderUrl.trim());
+			const result = await createCustomProvider(
+				newCustomProviderName.trim(),
+				newCustomProviderUrl.trim()
+			);
 			providerSettings = await getProviderSettings();
 			selectedProviderId = result.providerId;
 			newCustomProviderName = '';
@@ -369,7 +349,12 @@
 		if (!newModelId.trim()) return;
 		try {
 			providerActionError = '';
-			await addCustomProviderModel(providerId, newModelId.trim(), newModelName.trim(), newModelDesc.trim());
+			await addCustomProviderModel(
+				providerId,
+				newModelId.trim(),
+				newModelName.trim(),
+				newModelDesc.trim()
+			);
 			providerSettings = await getProviderSettings();
 			newModelId = '';
 			newModelName = '';
@@ -435,19 +420,65 @@
 
 	// ── Model Enable/Disable ────────────────────────────────────
 	let settingsModels = $state<ModelInfo[]>([]);
-	let enabledModelIds = $state<Set<string>>(new Set());
+	const enabledModelIds = new SvelteSet<string>();
 	let hasCustomModelSelection = $state(false);
 	let isLoadingModels = $state(false);
 	let modelSearchQuery = $state('');
+	let debouncedModelSearchQuery = $state('');
+	let settingsModelListEl = $state<HTMLDivElement | undefined>();
+	let settingsModelScrollTop = $state(0);
+	let settingsModelViewportHeight = $state(400);
+	const SETTINGS_MODEL_ROW_HEIGHT = 56;
+	const SETTINGS_MODEL_OVERSCAN = 6;
+
+	$effect(() => {
+		const query = modelSearchQuery.trim().toLowerCase();
+		const timer = setTimeout(() => {
+			debouncedModelSearchQuery = query;
+			settingsModelScrollTop = 0;
+			if (settingsModelListEl) settingsModelListEl.scrollTop = 0;
+		}, 120);
+		return () => clearTimeout(timer);
+	});
+
 	let filteredSettingsModels = $derived(
-		modelSearchQuery.trim()
-			? settingsModels.filter(m =>
-				m.name.toLowerCase().includes(modelSearchQuery.toLowerCase()) ||
-				m.id.toLowerCase().includes(modelSearchQuery.toLowerCase())
-			)
+		debouncedModelSearchQuery
+			? settingsModels.filter(
+					(m) =>
+						m.name.toLowerCase().includes(debouncedModelSearchQuery) ||
+						m.id.toLowerCase().includes(debouncedModelSearchQuery)
+				)
 			: settingsModels
 	);
-	let enabledModelCount = $derived(hasCustomModelSelection ? enabledModelIds.size : settingsModels.length);
+	let settingsModelWindowStart = $derived(
+		Math.max(
+			0,
+			Math.floor(settingsModelScrollTop / SETTINGS_MODEL_ROW_HEIGHT) - SETTINGS_MODEL_OVERSCAN
+		)
+	);
+	let settingsModelWindowEnd = $derived(
+		Math.min(
+			filteredSettingsModels.length,
+			Math.ceil(
+				(settingsModelScrollTop + settingsModelViewportHeight) / SETTINGS_MODEL_ROW_HEIGHT
+			) + SETTINGS_MODEL_OVERSCAN
+		)
+	);
+	let visibleSettingsModels = $derived(
+		filteredSettingsModels.slice(settingsModelWindowStart, settingsModelWindowEnd)
+	);
+
+	function handleSettingsModelScroll(): void {
+		if (settingsModelListEl) settingsModelScrollTop = settingsModelListEl.scrollTop;
+	}
+
+	function replaceEnabledModelIds(ids: Iterable<string>): void {
+		enabledModelIds.clear();
+		for (const id of ids) enabledModelIds.add(id);
+	}
+	let enabledModelCount = $derived(
+		hasCustomModelSelection ? enabledModelIds.size : settingsModels.length
+	);
 
 	async function loadModelsForSettings() {
 		if (isLoadingModels) return;
@@ -457,10 +488,10 @@
 				getAllModels('Local & BYOK Chat'),
 				getEnabledModels()
 			]);
-			settingsModels = allModelsState.models.filter(m => m.id);
+			settingsModels = allModelsState.models.filter((m) => m.id);
 			settingsModels.sort((a, b) => a.name.localeCompare(b.name));
 			hasCustomModelSelection = enabledState.hasCustomSelection;
-			enabledModelIds = new Set(enabledState.enabledModels);
+			replaceEnabledModelIds(enabledState.enabledModels);
 		} catch (e) {
 			console.warn('Failed to load models for settings:', e);
 		} finally {
@@ -469,30 +500,35 @@
 	}
 
 	async function handleToggleModel(modelId: string, enabled: boolean) {
+		const prevIds = [...enabledModelIds];
+		const prevHasCustom = hasCustomModelSelection;
 		if (!hasCustomModelSelection) {
 			// First toggle: initialize enabled set with all models, then apply the change
-			const allIds = new Set(settingsModels.map(m => m.id));
+			const allIds = new SvelteSet(settingsModels.map((m) => m.id));
 			if (!enabled) allIds.delete(modelId);
-			enabledModelIds = allIds;
+			replaceEnabledModelIds(allIds);
 			hasCustomModelSelection = true;
 			try {
 				await setEnabledModels([...allIds]);
 			} catch (e) {
 				console.warn('Failed to initialize model selection:', e);
+				replaceEnabledModelIds(prevIds);
+				hasCustomModelSelection = prevHasCustom;
 			}
 			return;
 		}
-		const next = new Set(enabledModelIds);
+		const next = new SvelteSet(enabledModelIds);
 		if (enabled) {
 			next.add(modelId);
 		} else {
 			next.delete(modelId);
 		}
-		enabledModelIds = next;
+		replaceEnabledModelIds(next);
 		try {
 			await setModelEnabled(modelId, enabled);
 		} catch (e) {
 			console.warn('Failed to toggle model:', e);
+			replaceEnabledModelIds(prevIds);
 		}
 	}
 
@@ -502,33 +538,45 @@
 	}
 
 	async function handleEnableAllModels() {
-		const allIds = new Set(settingsModels.map(m => m.id));
-		enabledModelIds = allIds;
+		const prevIds = [...enabledModelIds];
+		const prevHasCustom = hasCustomModelSelection;
+		const allIds = new SvelteSet(settingsModels.map((m) => m.id));
+		replaceEnabledModelIds(allIds);
 		hasCustomModelSelection = true;
 		try {
 			await setEnabledModels([...allIds]);
 		} catch (e) {
 			console.warn('Failed to enable all models:', e);
+			replaceEnabledModelIds(prevIds);
+			hasCustomModelSelection = prevHasCustom;
 		}
 	}
 
 	async function handleDisableAllModels() {
-		enabledModelIds = new Set();
+		const prevIds = [...enabledModelIds];
+		const prevHasCustom = hasCustomModelSelection;
+		replaceEnabledModelIds([]);
 		hasCustomModelSelection = true;
 		try {
 			await setEnabledModels([]);
 		} catch (e) {
 			console.warn('Failed to disable all models:', e);
+			replaceEnabledModelIds(prevIds);
+			hasCustomModelSelection = prevHasCustom;
 		}
 	}
 
 	async function handleShowAllModels() {
-		enabledModelIds = new Set();
+		const prevIds = [...enabledModelIds];
+		const prevHasCustom = hasCustomModelSelection;
+		replaceEnabledModelIds([]);
 		hasCustomModelSelection = false;
 		try {
 			await setEnabledModels([]);
 		} catch (e) {
 			console.warn('Failed to reset model selection:', e);
+			replaceEnabledModelIds(prevIds);
+			hasCustomModelSelection = prevHasCustom;
 		}
 	}
 
@@ -546,8 +594,6 @@
 				void loadProviderSettings();
 				void loadModelsForSettings();
 				void loadAgentExecutionSettings();
-			} else if (tab === 'generation') {
-				void loadGenerationSettings();
 			} else if (tab === 'notifications') {
 				void notifPanel?.load();
 			} else if (tab === 'indexing') {
@@ -559,7 +605,6 @@
 			}
 		});
 	});
-
 
 	async function loadAgentExecutionSettings() {
 		if (isLoadingAgentExecution) return;
@@ -573,40 +618,16 @@
 		}
 	}
 
-	function scheduleAgentExecutionSave(key: 'systemPromptAppend' | 'toolTimeout' | 'agentResponseTimeout', value: string) {
-		if (agentExecutionSaveTimer) clearTimeout(agentExecutionSaveTimer);
-		agentExecutionSaveTimer = setTimeout(async () => {
+	function scheduleAgentExecutionSave(key: AgentExecutionSettingKey, value: string) {
+		if (agentExecutionSaveTimers[key]) clearTimeout(agentExecutionSaveTimers[key]);
+		agentExecutionSaveTimers[key] = setTimeout(async () => {
 			try {
 				await setAgentExecutionSetting(key, value);
 			} catch (e) {
-				console.warn('Failed to save agent execution setting:', e);
+				console.warn(`Failed to save agent execution setting '${key}':`, e);
 			}
 		}, 400);
 	}
-
-	async function loadGenerationSettings() {
-		if (isLoadingGeneration) return;
-		isLoadingGeneration = true;
-		try {
-			generationSettings = await getGenerationSettings();
-		} catch (e) {
-			console.warn('Failed to load generation settings:', e);
-		} finally {
-			isLoadingGeneration = false;
-		}
-	}
-
-	function scheduleGenerationSave(key: GenerationSettingKey, value: string) {
-		if (generationSaveTimers[key]) clearTimeout(generationSaveTimers[key]);
-		generationSaveTimers[key] = setTimeout(async () => {
-			try {
-				await setGenerationSetting(key, value);
-			} catch (e) {
-				console.warn(`Failed to save generation setting '${key}':`, e);
-			}
-		}, 400);
-	}
-
 
 	async function handleCheckForUpdates() {
 		if (isCheckingForUpdates) return;
@@ -626,17 +647,37 @@
 	function handleLocaleChange(nextLocale: Locale) {
 		setLocale(nextLocale);
 	}
-
 </script>
 
-<div class="flex h-full w-full">
+<div class="settings-shell flex h-full w-full">
+	<div
+		class="settings-mobile-header hidden shrink-0 items-center gap-2 border-b border-border bg-sidebar px-3 py-2"
+	>
+		<button
+			class="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+			onclick={closeSettings}
+			aria-label={$t('back_to_chat')}
+		>
+			<Icon icon={ArrowLeft02Icon} size={16} strokeWidth={1.5} />
+		</button>
+		<div class="min-w-0 flex-1 [&_[role=combobox]>button]:h-10">
+			<CustomSelect
+				id="settings-mobile-tab"
+				ariaLabel={$t('settings')}
+				options={tabs.map((tab) => ({ value: tab.id, label: tab.label }))}
+				value={$settingsTab}
+				onchange={(value) => settingsTab.set(value)}
+			/>
+		</div>
+	</div>
 	<!-- Left tab nav -->
-	<nav class="flex w-[200px] shrink-0 flex-col border-r border-border bg-sidebar">
-		<div class="flex items-center gap-2 px-4 pt-4 pb-3">
+	<nav class="settings-sidebar flex w-[200px] shrink-0 flex-col border-r border-border bg-sidebar">
+		<div class="flex items-center gap-2 px-4 pb-3 pt-4">
 			<button
-				class="rounded p-1 text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
+				class="focus-ring flex h-10 w-10 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground"
 				onclick={closeSettings}
 				title={$t('back_to_chat')}
+				aria-label={$t('back_to_chat')}
 			>
 				<Icon icon={ArrowLeft02Icon} size={16} strokeWidth={1.5} />
 			</button>
@@ -644,11 +685,12 @@
 		</div>
 
 		<div class="flex flex-col gap-0.5 px-2">
-			{#each tabs as tab}
+			{#each tabs as tab (tab.id)}
 				<button
-					class="flex items-center gap-2.5 rounded-md px-3 py-2 text-[13px] transition-colors {$settingsTab === tab.id
+					class="flex items-center gap-2.5 rounded-md px-3 py-2 text-[13px] transition-colors {$settingsTab ===
+					tab.id
 						? 'bg-sidebar-accent text-foreground'
-						: 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground'}"
+						: 'hover:bg-sidebar-accent/60 text-muted-foreground hover:text-foreground'}"
 					onclick={() => settingsTab.set(tab.id)}
 				>
 					<Icon icon={tab.icon} size={15} strokeWidth={1.5} />
@@ -659,163 +701,229 @@
 	</nav>
 
 	<!-- Right content area -->
-	<div class="flex-1 overflow-y-auto p-8">
+	<div class="settings-content min-w-0 flex-1 overflow-y-auto p-8">
 		<div class="mx-auto max-w-3xl">
 			{#if $settingsTab === 'general'}
 				<div class="mb-6">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">{$t('general_heading')}</h2>
 				</div>
 
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<h3 class="mb-1 text-[14px] font-medium text-foreground">{$t('language_heading')}</h3>
-						<p class="mb-3 text-[12px] text-muted-foreground/60">{$t('language_desc')}</p>
-						<div class="flex flex-wrap gap-2">
-							{#each locales as currentLocale}
-								<button
-									class="rounded-md border px-3 py-1.5 text-[13px] transition-colors {$locale === currentLocale
-										? 'border-[var(--ue-accent)] bg-[var(--ue-accent)]/10 text-foreground'
-										: 'border-border/60 text-muted-foreground hover:border-border hover:text-foreground'}"
-									onclick={() => handleLocaleChange(currentLocale)}
-								>
-									{localeNames[currentLocale]}
-								</button>
-							{/each}
-						</div>
-					</div>
-
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<div class="flex items-center justify-between">
-							<div>
-								<h3 class="text-[14px] font-medium text-foreground">Enter to send</h3>
-								<p class="mt-0.5 text-[12px] text-muted-foreground/60">
-									{$enterToSend
-										? 'Enter sends message, Shift+Enter for new line'
-										: 'Enter for new line, Cmd/Ctrl+Enter sends message'}
-								</p>
-							</div>
+				<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
+					<h3 class="mb-1 text-[14px] font-medium text-foreground">{$t('language_heading')}</h3>
+					<p class="text-muted-foreground/60 mb-3 text-[12px]">{$t('language_desc')}</p>
+					<div class="flex flex-wrap gap-2">
+						{#each releasedLocales as currentLocale (currentLocale)}
 							<button
-								role="switch"
-								aria-checked={$enterToSend}
-								aria-label="Enter to send"
-								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$enterToSend ? 'bg-[var(--ue-accent)]' : 'bg-muted-foreground/30'}"
-								onclick={() => enterToSend.set(!$enterToSend)}
+								class="rounded-md border px-3 py-1.5 text-[13px] transition-colors {$locale ===
+								currentLocale
+									? 'bg-[var(--ue-accent)]/10 border-[var(--ue-accent)] text-foreground'
+									: 'border-border/60 text-muted-foreground hover:border-border hover:text-foreground'}"
+								onclick={() => handleLocaleChange(currentLocale)}
 							>
-								<span class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$enterToSend ? 'translate-x-[18px]' : 'translate-x-[3px]'}"></span>
+								{localeNames[currentLocale]}
 							</button>
-						</div>
+						{/each}
 					</div>
+				</div>
 
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<div class="mb-3">
-							<h3 class="text-[14px] font-medium text-foreground">Top Navigation Tabs</h3>
-							<p class="mt-0.5 text-[12px] text-muted-foreground/60">
-								Show or hide the top-bar tabs. Chat is always visible.
+				<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
+					<div class="flex items-center justify-between">
+						<div>
+							<h3 class="text-[14px] font-medium text-foreground">Enter to send</h3>
+							<p class="text-muted-foreground/60 mt-0.5 text-[12px]">
+								{$enterToSend
+									? 'Enter sends message, Shift+Enter for new line'
+									: 'Enter for new line, Cmd/Ctrl+Enter sends message'}
 							</p>
 						</div>
+						<button
+							role="switch"
+							aria-checked={$enterToSend}
+							aria-label="Enter to send"
+							class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$enterToSend
+								? 'bg-[var(--ue-accent)]'
+								: 'bg-muted-foreground/30'}"
+							onclick={() => enterToSend.set(!$enterToSend)}
+						>
+							<span
+								class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$enterToSend
+									? 'translate-x-[18px]'
+									: 'translate-x-[3px]'}"
+							></span>
+						</button>
+					</div>
+				</div>
 
-						<div class="flex items-center justify-between py-2">
-							<div>
-								<p class="text-[13px] text-foreground">Studio</p>
-								<p class="mt-0.5 text-[11px] text-muted-foreground/50">AI image and 3D generation workspace.</p>
-							</div>
-							<button
-								role="switch"
-								aria-label="Toggle Studio tab"
-								aria-checked={$studioEnabled}
-								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$studioEnabled ? 'bg-[var(--ue-accent)]' : 'bg-muted-foreground/30'}"
-								onclick={() => studioEnabled.set(!$studioEnabled)}
-							>
-								<span class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$studioEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'}"></span>
-							</button>
-						</div>
-
-						<div class="flex items-center justify-between py-2">
-							<div>
-								<p class="text-[13px] text-foreground">Terminal</p>
-								<p class="mt-0.5 text-[11px] text-muted-foreground/50">Integrated terminal for running CLI tools. Disabling stops the PTY.</p>
-							</div>
-							<button
-								role="switch"
-								aria-label="Toggle Terminal tab"
-								aria-checked={$terminalEnabled}
-								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$terminalEnabled ? 'bg-[var(--ue-accent)]' : 'bg-muted-foreground/30'}"
-								onclick={() => terminalEnabled.set(!$terminalEnabled)}
-							>
-								<span class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$terminalEnabled ? 'translate-x-[18px]' : 'translate-x-[3px]'}"></span>
-							</button>
-						</div>
+				<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
+					<div class="mb-3">
+						<h3 class="text-[14px] font-medium text-foreground">Top Navigation Tabs</h3>
+						<p class="text-muted-foreground/60 mt-0.5 text-[12px]">
+							Show or hide the top-bar tabs. Chat is always visible.
+						</p>
 					</div>
 
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<div class="flex items-center justify-between">
-							<div class="pr-4">
-								<h3 class="text-[14px] font-medium text-foreground">Agent Issue Reports</h3>
-								<p class="mt-0.5 text-[12px] text-muted-foreground/60">
-									Lets agents flag missing bindings, wrong tool results, or other shortcomings to neostack.dev so we can improve them. Reports include only what the agent describes — no asset paths or script traces are auto-attached.
+					<div class="flex items-center justify-between py-2">
+						<div>
+							<p class="text-[13px] text-foreground">Studio</p>
+							<p class="text-muted-foreground/50 mt-0.5 text-[11px]">
+								AI image and 3D generation workspace.
+							</p>
+						</div>
+						<button
+							role="switch"
+							aria-label="Toggle Studio tab"
+							aria-checked={$studioEnabled}
+							class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$studioEnabled
+								? 'bg-[var(--ue-accent)]'
+								: 'bg-muted-foreground/30'}"
+							onclick={() => studioEnabled.set(!$studioEnabled)}
+						>
+							<span
+								class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$studioEnabled
+									? 'translate-x-[18px]'
+									: 'translate-x-[3px]'}"
+							></span>
+						</button>
+					</div>
+
+					<div class="flex items-center justify-between py-2">
+						<div>
+							<p class="text-[13px] text-foreground">Terminal</p>
+							<p class="text-muted-foreground/50 mt-0.5 text-[11px]">
+								Integrated terminal for running CLI tools. Disabling stops the PTY.
+							</p>
+						</div>
+						<button
+							role="switch"
+							aria-label="Toggle Terminal tab"
+							aria-checked={$terminalEnabled}
+							class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$terminalEnabled
+								? 'bg-[var(--ue-accent)]'
+								: 'bg-muted-foreground/30'}"
+							onclick={() => terminalEnabled.set(!$terminalEnabled)}
+						>
+							<span
+								class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$terminalEnabled
+									? 'translate-x-[18px]'
+									: 'translate-x-[3px]'}"
+							></span>
+						</button>
+					</div>
+				</div>
+
+				<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
+					<div class="flex items-center justify-between">
+						<div class="pr-4">
+							<h3 class="text-[14px] font-medium text-foreground">Agent Issue Reports</h3>
+							<p class="text-muted-foreground/60 mt-0.5 text-[12px]">
+								Lets agents flag missing bindings, wrong tool results, or other shortcomings to
+								neostack.dev so we can improve them. Reports include only what the agent describes —
+								no asset paths or script traces are auto-attached.
+							</p>
+							{#if issueReportSettings.disabled}
+								<p class="text-muted-foreground/50 mt-1.5 text-[11px]">
+									Disabled — <code class="bg-muted/50 rounded px-1">report_issue()</code> short-circuits
+									before any HTTP call.
 								</p>
-								{#if issueReportSettings.disabled}
-									<p class="mt-1.5 text-[11px] text-muted-foreground/50">
-										Disabled — <code class="rounded bg-muted/50 px-1">report_issue()</code> short-circuits before any HTTP call.
-									</p>
-								{/if}
-							</div>
-							<button
-								role="switch"
-								aria-label="Allow agent issue reports"
-								aria-checked={!issueReportSettings.disabled}
-								disabled={isSavingIssueReport}
-								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 {!issueReportSettings.disabled ? 'bg-[var(--ue-accent)]' : 'bg-muted-foreground/30'}"
-								onclick={handleToggleIssueReports}
-							>
-								<span class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {!issueReportSettings.disabled ? 'translate-x-[18px]' : 'translate-x-[3px]'}"></span>
-							</button>
+							{/if}
 						</div>
+						<button
+							role="switch"
+							aria-label="Allow agent issue reports"
+							aria-checked={!issueReportSettings.disabled}
+							disabled={isSavingIssueReport}
+							class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors disabled:opacity-50 {!issueReportSettings.disabled
+								? 'bg-[var(--ue-accent)]'
+								: 'bg-muted-foreground/30'}"
+							onclick={handleToggleIssueReports}
+						>
+							<span
+								class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {!issueReportSettings.disabled
+									? 'translate-x-[18px]'
+									: 'translate-x-[3px]'}"
+							></span>
+						</button>
 					</div>
-
+				</div>
 			{:else if $settingsTab === 'appearance'}
 				{@const accentColor = `hsl(${$accentHue} ${$accentIntensity * 0.8}% 55%)`}
 				{@const accentMuted = `hsl(${$accentHue} ${$accentIntensity * 0.8}% 42%)`}
-				{@const hueGradient = 'linear-gradient(to right, hsl(0 80% 55%), hsl(60 80% 55%), hsl(120 80% 55%), hsl(180 80% 55%), hsl(240 80% 55%), hsl(300 80% 55%), hsl(360 80% 55%))'}
+				{@const hueGradient =
+					'linear-gradient(to right, hsl(0 80% 55%), hsl(60 80% 55%), hsl(120 80% 55%), hsl(180 80% 55%), hsl(240 80% 55%), hsl(300 80% 55%), hsl(360 80% 55%))'}
 
 				<div class="mb-8">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">{$t('appearance_heading')}</h2>
-					<p class="text-[13px] text-muted-foreground/60">{$t('appearance_desc')}</p>
+					<p class="text-muted-foreground/60 text-[13px]">{$t('appearance_desc')}</p>
 				</div>
 
 				<!-- THEME — visual tiles -->
 				<section class="mb-8">
-					<div class="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/55">{$t('appearance_theme')}</div>
+					<div
+						class="text-muted-foreground/55 mb-3 text-[11px] font-medium uppercase tracking-wider"
+					>
+						{$t('appearance_theme')}
+					</div>
 					<div class="grid grid-cols-3 gap-3">
-						{#each [
-							{ id: 'dark', label: $t('appearance_theme_dark'), bg: '#1e1e1e', surface: '#2d2d2d', text: '#c8c8c8', dim: '#444' },
-							{ id: 'light', label: $t('appearance_theme_light'), bg: '#f7f8fa', surface: '#ffffff', text: '#1a1c20', dim: '#d4d8df' },
-							{ id: 'high-contrast', label: $t('appearance_theme_high_contrast'), bg: '#000000', surface: '#0a0a0a', text: '#ffffff', dim: '#ffffff' }
-						] as opt}
+						{#each [{ id: 'dark', label: $t('appearance_theme_dark'), bg: '#1e1e1e', surface: '#2d2d2d', text: '#c8c8c8', dim: '#444' }, { id: 'light', label: $t('appearance_theme_light'), bg: '#f7f8fa', surface: '#ffffff', text: '#1a1c20', dim: '#d4d8df' }, { id: 'high-contrast', label: $t('appearance_theme_high_contrast'), bg: '#000000', surface: '#0a0a0a', text: '#ffffff', dim: '#ffffff' }] as opt (opt.id)}
 							{@const selected = $themeChoice === opt.id}
 							<button
-								class="group relative overflow-hidden rounded-lg border-2 text-left transition-all {selected ? 'border-[var(--ue-accent)] shadow-[0_0_0_3px_var(--ue-accent)]/15' : 'border-border/60 hover:border-border'}"
+								class="group relative overflow-hidden rounded-lg border-2 text-left transition-all {selected
+									? 'shadow-[0_0_0_3px_var(--ue-accent)]/15 border-[var(--ue-accent)]'
+									: 'border-border/60 hover:border-border'}"
 								onclick={() => themeChoice.set(opt.id as 'dark' | 'light' | 'high-contrast')}
 								aria-pressed={selected}
 							>
 								<!-- Mini theme preview -->
 								<div class="flex h-[68px] w-full" style="background: {opt.bg};">
 									<div class="flex w-1/3 flex-col gap-1.5 p-2" style="background: {opt.surface};">
-										<div class="h-1 w-3/4 rounded-full" style="background: {opt.dim}; opacity: 0.7"></div>
-										<div class="h-1 w-1/2 rounded-full" style="background: {opt.dim}; opacity: 0.5"></div>
-										<div class="h-1 w-2/3 rounded-full" style="background: {opt.dim}; opacity: 0.5"></div>
-										<div class="mt-auto h-1.5 w-1/2 rounded-full" style="background: {accentColor};"></div>
+										<div
+											class="h-1 w-3/4 rounded-full"
+											style="background: {opt.dim}; opacity: 0.7"
+										></div>
+										<div
+											class="h-1 w-1/2 rounded-full"
+											style="background: {opt.dim}; opacity: 0.5"
+										></div>
+										<div
+											class="h-1 w-2/3 rounded-full"
+											style="background: {opt.dim}; opacity: 0.5"
+										></div>
+										<div
+											class="mt-auto h-1.5 w-1/2 rounded-full"
+											style="background: {accentColor};"
+										></div>
 									</div>
 									<div class="flex flex-1 flex-col gap-1.5 p-2">
-										<div class="h-1.5 w-2/5 rounded-full" style="background: {opt.text}; opacity: 0.8"></div>
-										<div class="h-1 w-full rounded-full" style="background: {opt.text}; opacity: 0.3"></div>
-										<div class="h-1 w-3/4 rounded-full" style="background: {opt.text}; opacity: 0.3"></div>
+										<div
+											class="h-1.5 w-2/5 rounded-full"
+											style="background: {opt.text}; opacity: 0.8"
+										></div>
+										<div
+											class="h-1 w-full rounded-full"
+											style="background: {opt.text}; opacity: 0.3"
+										></div>
+										<div
+											class="h-1 w-3/4 rounded-full"
+											style="background: {opt.text}; opacity: 0.3"
+										></div>
 									</div>
 								</div>
-								<div class="flex items-center justify-between border-t border-border/40 bg-card px-3 py-2">
-									<span class="text-[12.5px] font-medium {selected ? 'text-foreground' : 'text-muted-foreground'}">{opt.label}</span>
+								<div
+									class="border-border/40 flex items-center justify-between border-t bg-card px-3 py-2"
+								>
+									<span
+										class="text-[12.5px] font-medium {selected
+											? 'text-foreground'
+											: 'text-muted-foreground'}">{opt.label}</span
+									>
 									{#if selected}
-										<span class="flex h-4 w-4 items-center justify-center rounded-full" style="background: {accentColor}">
-											<svg viewBox="0 0 16 16" class="h-3 w-3 text-white"><path fill="currentColor" d="M6.5 10.6 4 8.1l-1 1 3.5 3.4 7-7-1-1z"/></svg>
+										<span
+											class="flex h-4 w-4 items-center justify-center rounded-full"
+											style="background: {accentColor}"
+										>
+											<svg viewBox="0 0 16 16" class="h-3 w-3 text-white"
+												><path fill="currentColor" d="M6.5 10.6 4 8.1l-1 1 3.5 3.4 7-7-1-1z" /></svg
+											>
 										</span>
 									{/if}
 								</div>
@@ -827,33 +935,40 @@
 				<!-- ACCENT — gradient slider + presets + intensity -->
 				<section class="mb-8">
 					<div class="mb-3 flex items-center justify-between">
-						<div class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/55">{$t('appearance_colors')}</div>
+						<div class="text-muted-foreground/55 text-[11px] font-medium uppercase tracking-wider">
+							{$t('appearance_colors')}
+						</div>
 						<button
-							class="text-[11px] text-muted-foreground/55 underline-offset-2 hover:text-foreground hover:underline"
-							onclick={() => { accentHue.set(209); accentIntensity.set(100); }}
-						>{$t('appearance_reset_colors')}</button>
+							class="text-muted-foreground/55 text-[11px] underline-offset-2 hover:text-foreground hover:underline"
+							onclick={() => {
+								accentHue.set(209);
+								accentIntensity.set(100);
+							}}>{$t('appearance_reset_colors')}</button
+						>
 					</div>
 
-					<div class="rounded-lg border border-border/60 bg-card">
+					<div class="border-border/60 rounded-lg border bg-card">
 						<!-- Accent preview row -->
 						<div class="flex items-center gap-3 px-4 py-3">
-							<div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full ring-2 ring-border/40" style="background: {accentColor}">
+							<div
+								class="ring-border/40 flex h-10 w-10 shrink-0 items-center justify-center rounded-full ring-2"
+								style="background: {accentColor}"
+							>
 								<span class="block h-5 w-5 rounded-full" style="background: {accentMuted}"></span>
 							</div>
 							<div class="min-w-0 flex-1">
 								<p class="text-[12.5px] text-foreground">{$t('appearance_hue')}</p>
-								<p class="mt-0.5 font-mono text-[10.5px] text-muted-foreground/55">H {$accentHue}° · S {$accentIntensity}%</p>
+								<p class="text-muted-foreground/55 mt-0.5 font-mono text-[10.5px]">
+									H {$accentHue}° · S {$accentIntensity}%
+								</p>
 							</div>
 							<div class="flex flex-wrap items-center gap-1.5">
-								{#each [
-									{ hue: 209, label: 'Blue' },
-									{ hue: 265, label: 'Violet' },
-									{ hue: 145, label: 'Green' },
-									{ hue: 25, label: 'Orange' },
-									{ hue: 350, label: 'Pink' }
-								] as p}
+								{#each [{ hue: 209, label: 'Blue' }, { hue: 265, label: 'Violet' }, { hue: 145, label: 'Green' }, { hue: 25, label: 'Orange' }, { hue: 350, label: 'Pink' }] as p (p.hue)}
 									<button
-										class="h-5 w-5 rounded-full ring-2 transition-all hover:scale-110 {$accentHue === p.hue ? 'ring-foreground' : 'ring-transparent'}"
+										class="h-5 w-5 rounded-full ring-2 transition-all hover:scale-110 {$accentHue ===
+										p.hue
+											? 'ring-foreground'
+											: 'ring-transparent'}"
 										style="background: hsl({p.hue} 80% 55%)"
 										onclick={() => accentHue.set(p.hue)}
 										title={p.label}
@@ -863,7 +978,7 @@
 							</div>
 						</div>
 
-						<div class="border-t border-border/40 px-4 py-3">
+						<div class="border-border/40 border-t px-4 py-3">
 							<label for="appearance-hue" class="sr-only">Hue</label>
 							<input
 								id="appearance-hue"
@@ -877,10 +992,14 @@
 							/>
 						</div>
 
-						<div class="border-t border-border/40 px-4 py-3">
+						<div class="border-border/40 border-t px-4 py-3">
 							<div class="mb-1.5 flex items-center justify-between gap-3">
-								<label for="appearance-intensity" class="text-[12.5px] text-foreground">{$t('appearance_intensity')}</label>
-								<span class="tabular-nums text-[11px] text-muted-foreground/55">{$accentIntensity}%</span>
+								<label for="appearance-intensity" class="text-[12.5px] text-foreground"
+									>{$t('appearance_intensity')}</label
+								>
+								<span class="text-muted-foreground/55 text-[11px] tabular-nums"
+									>{$accentIntensity}%</span
+								>
 							</div>
 							<input
 								id="appearance-intensity"
@@ -893,19 +1012,29 @@
 							/>
 						</div>
 
-						<div class="flex items-center justify-between gap-4 border-t border-border/40 px-4 py-3">
+						<div
+							class="border-border/40 flex items-center justify-between gap-4 border-t px-4 py-3"
+						>
 							<div class="min-w-0">
 								<p class="text-[12.5px] text-foreground">{$t('appearance_reduce_transparency')}</p>
-								<p class="mt-0.5 text-[11.5px] text-muted-foreground/55">{$t('appearance_reduce_transparency_desc')}</p>
+								<p class="text-muted-foreground/55 mt-0.5 text-[11.5px]">
+									{$t('appearance_reduce_transparency_desc')}
+								</p>
 							</div>
 							<button
 								role="switch"
 								aria-checked={$reduceTransparency}
 								aria-label={$t('appearance_reduce_transparency')}
-								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$reduceTransparency ? 'bg-[var(--ue-accent)]' : 'bg-muted-foreground/30'}"
+								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$reduceTransparency
+									? 'bg-[var(--ue-accent)]'
+									: 'bg-muted-foreground/30'}"
 								onclick={() => reduceTransparency.set(!$reduceTransparency)}
 							>
-								<span class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$reduceTransparency ? 'translate-x-[18px]' : 'translate-x-[3px]'}"></span>
+								<span
+									class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$reduceTransparency
+										? 'translate-x-[18px]'
+										: 'translate-x-[3px]'}"
+								></span>
 							</button>
 						</div>
 					</div>
@@ -913,25 +1042,33 @@
 
 				<!-- CHAT — density segmented control -->
 				<section class="mb-8">
-					<div class="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/55">{$t('appearance_chat')}</div>
-					<div class="rounded-lg border border-border/60 bg-card">
+					<div
+						class="text-muted-foreground/55 mb-3 text-[11px] font-medium uppercase tracking-wider"
+					>
+						{$t('appearance_chat')}
+					</div>
+					<div class="border-border/60 rounded-lg border bg-card">
 						<div class="flex items-center justify-between gap-4 px-4 py-3">
 							<div class="min-w-0">
 								<p class="text-[12.5px] text-foreground">{$t('appearance_density')}</p>
-								<p class="mt-0.5 text-[11.5px] text-muted-foreground/55">{$t('appearance_density_desc')}</p>
+								<p class="text-muted-foreground/55 mt-0.5 text-[11.5px]">
+									{$t('appearance_density_desc')}
+								</p>
 							</div>
-							<div class="relative flex shrink-0 rounded-md bg-muted/40 p-0.5">
-								{#each [
-									{ id: 'compact', label: $t('appearance_density_compact') },
-									{ id: 'detailed', label: $t('appearance_density_detailed') }
-								] as opt}
+							<div class="bg-muted/40 relative flex shrink-0 rounded-md p-0.5">
+								{#each [{ id: 'compact', label: $t('appearance_density_compact') }, { id: 'detailed', label: $t('appearance_density_detailed') }] as opt (opt.id)}
 									<button
-										class="relative z-10 rounded px-3 py-1 text-[11.5px] font-medium transition-colors {$toolCallDensity === opt.id ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}"
+										class="relative z-10 rounded px-3 py-1 text-[11.5px] font-medium transition-colors {$toolCallDensity ===
+										opt.id
+											? 'text-foreground'
+											: 'text-muted-foreground hover:text-foreground'}"
 										onclick={() => toolCallDensity.set(opt.id as 'compact' | 'detailed')}
 										aria-pressed={$toolCallDensity === opt.id}
 									>
 										{#if $toolCallDensity === opt.id}
-											<span class="absolute inset-0 -z-10 rounded bg-background shadow-sm ring-1 ring-border/60"></span>
+											<span
+												class="ring-border/60 absolute inset-0 -z-10 rounded bg-background shadow-sm ring-1"
+											></span>
 										{/if}
 										{opt.label}
 									</button>
@@ -943,89 +1080,126 @@
 
 				<!-- TYPOGRAPHY -->
 				<section class="mb-8">
-					<div class="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/55">{$t('appearance_typography')}</div>
-					<div class="rounded-lg border border-border/60 bg-card">
+					<div
+						class="text-muted-foreground/55 mb-3 text-[11px] font-medium uppercase tracking-wider"
+					>
+						{$t('appearance_typography')}
+					</div>
+					<div class="border-border/60 rounded-lg border bg-card">
 						<!-- Sizes row -->
 						<div class="grid grid-cols-2 gap-6 px-4 py-3">
 							<div class="flex items-center justify-between gap-3">
-								<label for="appearance-ui-size" class="text-[12.5px] text-foreground">{$t('appearance_ui_font_size')}</label>
-								<div class="flex items-center rounded-md border border-border/60">
+								<label for="appearance-ui-size" class="text-[12.5px] text-foreground"
+									>{$t('appearance_ui_font_size')}</label
+								>
+								<div class="border-border/60 flex items-center rounded-md border">
 									<button
 										class="flex h-7 w-7 items-center justify-center text-muted-foreground hover:bg-accent hover:text-foreground"
 										aria-label="Decrease UI font size"
-										onclick={() => uiFontSize.set(Math.max(11, $uiFontSize - 1))}
-									>−</button>
+										onclick={() => uiFontSize.set(Math.max(11, $uiFontSize - 1))}>−</button
+									>
 									<input
 										id="appearance-ui-size"
 										type="number"
 										min="11"
 										max="18"
 										bind:value={$uiFontSize}
-										class="w-9 border-x border-border/60 bg-transparent py-1 text-center text-[12.5px] tabular-nums text-foreground focus:outline-none [-moz-appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+										class="border-border/60 w-9 border-x bg-transparent py-1 text-center text-[12.5px] tabular-nums text-foreground [-moz-appearance:textfield] focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 									/>
 									<button
 										class="flex h-7 w-7 items-center justify-center text-muted-foreground hover:bg-accent hover:text-foreground"
 										aria-label="Increase UI font size"
-										onclick={() => uiFontSize.set(Math.min(18, $uiFontSize + 1))}
-									>+</button>
+										onclick={() => uiFontSize.set(Math.min(18, $uiFontSize + 1))}>+</button
+									>
 								</div>
 							</div>
 							<div class="flex items-center justify-between gap-3">
-								<label for="appearance-code-size" class="text-[12.5px] text-foreground">{$t('appearance_code_font_size')}</label>
-								<div class="flex items-center rounded-md border border-border/60">
+								<label for="appearance-code-size" class="text-[12.5px] text-foreground"
+									>{$t('appearance_code_font_size')}</label
+								>
+								<div class="border-border/60 flex items-center rounded-md border">
 									<button
 										class="flex h-7 w-7 items-center justify-center text-muted-foreground hover:bg-accent hover:text-foreground"
 										aria-label="Decrease code font size"
-										onclick={() => codeFontSize.set(Math.max(10, $codeFontSize - 1))}
-									>−</button>
+										onclick={() => codeFontSize.set(Math.max(10, $codeFontSize - 1))}>−</button
+									>
 									<input
 										id="appearance-code-size"
 										type="number"
 										min="10"
 										max="18"
 										bind:value={$codeFontSize}
-										class="w-9 border-x border-border/60 bg-transparent py-1 text-center text-[12.5px] tabular-nums text-foreground focus:outline-none [-moz-appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+										class="border-border/60 w-9 border-x bg-transparent py-1 text-center text-[12.5px] tabular-nums text-foreground [-moz-appearance:textfield] focus:outline-none [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
 									/>
 									<button
 										class="flex h-7 w-7 items-center justify-center text-muted-foreground hover:bg-accent hover:text-foreground"
 										aria-label="Increase code font size"
-										onclick={() => codeFontSize.set(Math.min(18, $codeFontSize + 1))}
-									>+</button>
+										onclick={() => codeFontSize.set(Math.min(18, $codeFontSize + 1))}>+</button
+									>
 								</div>
 							</div>
 						</div>
 
 						<!-- UI family row -->
-						<div class="flex items-center justify-between gap-4 border-t border-border/40 px-4 py-3">
+						<div
+							class="border-border/40 flex items-center justify-between gap-4 border-t px-4 py-3"
+						>
 							<span class="text-[12.5px] text-foreground">{$t('appearance_ui_font_family')}</span>
 							<FontPicker kind="sans" bind:value={$uiFontFamily} />
 						</div>
 
 						<!-- Code family + live preview -->
-						<div class="flex items-center justify-between gap-4 border-t border-border/40 px-4 py-3">
+						<div
+							class="border-border/40 flex items-center justify-between gap-4 border-t px-4 py-3"
+						>
 							<span class="text-[12.5px] text-foreground">{$t('appearance_code_font_family')}</span>
 							<FontPicker kind="mono" bind:value={$codeFontFamily} />
 						</div>
-						<div class="border-t border-border/40 bg-background/30 px-4 py-3">
-							<pre class="overflow-x-auto leading-relaxed text-foreground/80" style="font-size: {$codeFontSize}px; font-family: {normalizeFontStack($codeFontFamily, DEFAULT_CODE_FONT_STACK)}"><code><span class="text-purple-400">function</span> <span class="text-blue-400">greet</span><span class="text-muted-foreground/70">(</span><span class="text-orange-300">name</span><span class="text-muted-foreground/70">)</span> <span class="text-muted-foreground/70">{`{`}</span>
-  <span class="text-purple-400">return</span> <span class="text-green-400">{'`Hello, ${name}!`'}</span><span class="text-muted-foreground/70">;</span>
-<span class="text-muted-foreground/70">{`}`}</span></code></pre>
+						<div class="border-border/40 bg-background/30 border-t px-4 py-3">
+							<pre
+								class="text-foreground/80 overflow-x-auto leading-relaxed"
+								style="font-size: {$codeFontSize}px; font-family: {normalizeFontStack(
+									$codeFontFamily,
+									DEFAULT_CODE_FONT_STACK
+								)}"><code
+									><span class="text-purple-400">function</span> <span class="text-blue-400"
+										>greet</span
+									><span class="text-muted-foreground/70">(</span><span class="text-orange-300"
+										>name</span
+									><span class="text-muted-foreground/70">)</span> <span
+										class="text-muted-foreground/70">&#123;</span
+									>
+  <span class="text-purple-400">return</span> <span class="text-green-400"
+										>{'`Hello, ${name}!`'}</span
+									><span class="text-muted-foreground/70">;</span>
+<span class="text-muted-foreground/70">&#125;</span></code
+								></pre>
 						</div>
 
 						<!-- Smoothing -->
-						<div class="flex items-center justify-between gap-4 border-t border-border/40 px-4 py-3">
+						<div
+							class="border-border/40 flex items-center justify-between gap-4 border-t px-4 py-3"
+						>
 							<div class="min-w-0">
 								<p class="text-[12.5px] text-foreground">{$t('appearance_font_smoothing')}</p>
-								<p class="mt-0.5 text-[11.5px] text-muted-foreground/55">{$t('appearance_font_smoothing_desc')}</p>
+								<p class="text-muted-foreground/55 mt-0.5 text-[11.5px]">
+									{$t('appearance_font_smoothing_desc')}
+								</p>
 							</div>
 							<button
 								role="switch"
 								aria-checked={$fontSmoothing}
 								aria-label={$t('appearance_font_smoothing')}
-								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$fontSmoothing ? 'bg-[var(--ue-accent)]' : 'bg-muted-foreground/30'}"
+								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$fontSmoothing
+									? 'bg-[var(--ue-accent)]'
+									: 'bg-muted-foreground/30'}"
 								onclick={() => fontSmoothing.set(!$fontSmoothing)}
 							>
-								<span class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$fontSmoothing ? 'translate-x-[18px]' : 'translate-x-[3px]'}"></span>
+								<span
+									class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$fontSmoothing
+										? 'translate-x-[18px]'
+										: 'translate-x-[3px]'}"
+								></span>
 							</button>
 						</div>
 					</div>
@@ -1033,33 +1207,45 @@
 
 				<!-- PRIVACY -->
 				<section class="mb-8">
-					<div class="mb-3 text-[11px] font-medium uppercase tracking-wider text-muted-foreground/55">{$t('appearance_privacy')}</div>
-					<div class="rounded-lg border border-border/60 bg-card">
+					<div
+						class="text-muted-foreground/55 mb-3 text-[11px] font-medium uppercase tracking-wider"
+					>
+						{$t('appearance_privacy')}
+					</div>
+					<div class="border-border/60 rounded-lg border bg-card">
 						<div class="flex items-center justify-between gap-4 px-4 py-3">
 							<div class="min-w-0">
 								<p class="text-[12.5px] text-foreground">{$t('appearance_hide_email')}</p>
-								<p class="mt-0.5 text-[11.5px] text-muted-foreground/55">{$t('appearance_hide_email_desc')}</p>
+								<p class="text-muted-foreground/55 mt-0.5 text-[11.5px]">
+									{$t('appearance_hide_email_desc')}
+								</p>
 							</div>
 							<button
 								role="switch"
 								aria-checked={$hideEmail}
 								aria-label={$t('appearance_hide_email')}
-								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$hideEmail ? 'bg-[var(--ue-accent)]' : 'bg-muted-foreground/30'}"
+								class="relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full transition-colors {$hideEmail
+									? 'bg-[var(--ue-accent)]'
+									: 'bg-muted-foreground/30'}"
 								onclick={() => hideEmail.set(!$hideEmail)}
 							>
-								<span class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$hideEmail ? 'translate-x-[18px]' : 'translate-x-[3px]'}"></span>
+								<span
+									class="pointer-events-none inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform {$hideEmail
+										? 'translate-x-[18px]'
+										: 'translate-x-[3px]'}"
+								></span>
 							</button>
 						</div>
 					</div>
 				</section>
-
 			{:else if $settingsTab === 'indexing'}
 				<ProjectIndexPanel bind:this={indexPanel} />
 			{:else if $settingsTab === 'setup'}
 				<div class="mb-6">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">Setup</h2>
-					<p class="text-[13px] text-muted-foreground/60">
-						Start here if NeoStack AI is not ready to chat yet. Advanced MCP and agent controls stay in their own tabs.
+					<p class="text-muted-foreground/60 text-[13px]">
+						Start here if NeoStack AI is not ready to chat yet. Advanced MCP and agent controls stay
+						in their own tabs.
 					</p>
 				</div>
 				<div class="mb-6">
@@ -1076,23 +1262,25 @@
 			{:else if $settingsTab === 'mcp'}
 				<div class="mb-6">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">MCP Connections</h2>
-					<p class="text-[13px] text-muted-foreground/60">Connect external MCP clients (Claude Code, Gemini, Codex, etc.) to this editor instance.</p>
+					<p class="text-muted-foreground/60 text-[13px]">
+						Connect external MCP clients (Claude Code, Gemini, Codex, etc.) to this editor instance.
+					</p>
 				</div>
 				<McpConnectionsPanel />
 			{:else if $settingsTab === 'about'}
 				<div class="mb-6">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">{$t('about_heading')}</h2>
-					<p class="text-[13px] text-muted-foreground/60">{$t('about_desc')}</p>
+					<p class="text-muted-foreground/60 text-[13px]">{$t('about_desc')}</p>
 				</div>
 
-				<div class="rounded-lg border border-border/60 bg-card p-4">
+				<div class="border-border/60 rounded-lg border bg-card p-4">
 					<div class="mb-3">
 						<h3 class="text-[14px] font-medium text-foreground">{$t('updates_heading')}</h3>
-						<p class="mt-1 text-[12px] text-muted-foreground/60">{$t('updates_desc')}</p>
+						<p class="text-muted-foreground/60 mt-1 text-[12px]">{$t('updates_desc')}</p>
 					</div>
 
 					<button
-						class="rounded-md border border-border/60 px-3 py-2 text-[13px] text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+						class="border-border/60 rounded-md border px-3 py-2 text-[13px] text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
 						onclick={handleCheckForUpdates}
 						disabled={isCheckingForUpdates}
 					>
@@ -1100,20 +1288,21 @@
 					</button>
 
 					{#if updateCheckMessage}
-						<p class="mt-2 text-[12px] text-muted-foreground/70">{updateCheckMessage}</p>
+						<p class="text-muted-foreground/70 mt-2 text-[12px]">{updateCheckMessage}</p>
 					{/if}
 				</div>
 
-				<div class="mt-4 rounded-lg border border-border/60 bg-card p-4">
+				<div class="border-border/60 mt-4 rounded-lg border bg-card p-4">
 					<div class="mb-3">
 						<h3 class="text-[14px] font-medium text-foreground">Project Settings (Recovery)</h3>
-						<p class="mt-1 text-[12px] text-muted-foreground/60">
-							Bootstrap options — auto-update, MCP port, API tokens, custom agents — live in Unreal's Project Settings. Use this if the web UI is unreachable or misconfigured.
+						<p class="text-muted-foreground/60 mt-1 text-[12px]">
+							Bootstrap options — auto-update, MCP port, API tokens, custom agents — live in
+							Unreal's Project Settings. Use this if the web UI is unreachable or misconfigured.
 						</p>
 					</div>
 
 					<button
-						class="rounded-md border border-border/60 px-3 py-2 text-[13px] text-foreground transition-colors hover:bg-accent"
+						class="border-border/60 rounded-md border px-3 py-2 text-[13px] text-foreground transition-colors hover:bg-accent"
 						onclick={() => openPluginSettings()}
 					>
 						Open Project Settings
@@ -1122,25 +1311,32 @@
 			{:else if $settingsTab === 'agents'}
 				<div class="mb-6">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">Chat Providers & Agents</h2>
-					<p class="text-[13px] text-muted-foreground/60">
+					<p class="text-muted-foreground/60 text-[13px]">
 						Configure NeoStack Cloud, local/BYOK providers, and advanced ACP agent execution.
 					</p>
 				</div>
 
 				<NeoStackAccountCard variant="settings" />
 
-				<div class="mb-6 rounded-lg border border-border/60 bg-card p-4">
+				<div class="border-border/60 mb-6 rounded-lg border bg-card p-4">
 					<div class="mb-3">
 						<h3 class="text-[14px] font-medium text-foreground">Recommended first step</h3>
-						<p class="mt-1 text-[12px] text-muted-foreground/60">
-							Use NeoStack Cloud for the simplest setup. Local/BYOK providers and ACP agents remain available below.
+						<p class="text-muted-foreground/60 mt-1 text-[12px]">
+							Use NeoStack Cloud for the simplest setup. Local/BYOK providers and ACP agents remain
+							available below.
 						</p>
 					</div>
-					<NeoStackSignInButton label="Connect NeoStack Cloud" variant="primary" onsuccess={() => onNeoStackCloudChanged()} />
+					<NeoStackSignInButton
+						label="Connect NeoStack Cloud"
+						variant="primary"
+						onsuccess={() => onNeoStackCloudChanged()}
+					/>
 				</div>
 
 				{#if providerActionError}
-					<div class="mb-4 rounded-md border border-red-500/25 bg-red-500/[0.05] px-3 py-2 text-[12px] text-red-300">
+					<div
+						class="mb-4 rounded-md border border-red-500/25 bg-red-500/[0.05] px-3 py-2 text-[12px] text-red-300"
+					>
 						{providerActionError}
 					</div>
 				{/if}
@@ -1150,21 +1346,24 @@
 				</div>
 
 				<!-- Agent Execution Settings -->
-				<div class="border-t border-border/40 pt-6 mb-6">
+				<div class="border-border/40 mb-6 border-t pt-6">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">Agent Execution</h2>
-					<p class="text-[13px] text-muted-foreground/60">System prompt and tool timeout used across all ACP-based agents.</p>
+					<p class="text-muted-foreground/60 text-[13px]">
+						System prompt and tool timeout used across all ACP-based agents.
+					</p>
 				</div>
 
-				<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
+				<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
 					<div class="mb-3">
 						<h3 class="text-[14px] font-medium text-foreground">Custom System Prompt</h3>
-						<p class="mt-1 text-[12px] text-muted-foreground/60">
-							Extra instructions appended to the system prompt for ACP agents (Claude Code, Gemini CLI, Codex, OpenCode, Cursor Agent).
+						<p class="text-muted-foreground/60 mt-1 text-[12px]">
+							Extra instructions appended to the system prompt for ACP agents (Claude Code, Gemini
+							CLI, Codex, OpenCode, Cursor Agent).
 						</p>
 					</div>
 					<textarea
 						rows="14"
-						class="w-full rounded-md border border-border/60 bg-transparent px-3 py-2 font-mono text-[12px] text-foreground focus:border-foreground/30 focus:outline-none"
+						class="border-border/60 focus:border-foreground/30 w-full rounded-md border bg-transparent px-3 py-2 font-mono text-[12px] text-foreground focus:outline-none"
 						value={agentExecutionSettings.systemPromptAppend}
 						oninput={(e) => {
 							const v = (e.currentTarget as HTMLTextAreaElement).value;
@@ -1174,11 +1373,12 @@
 					></textarea>
 				</div>
 
-				<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
+				<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
 					<div class="mb-3">
 						<h3 class="text-[14px] font-medium text-foreground">Tool Execution Timeout</h3>
-						<p class="mt-1 text-[12px] text-muted-foreground/60">
-							Seconds a tool can run before the agent receives a timeout error. The tool keeps running in the background. 0 disables the timeout.
+						<p class="text-muted-foreground/60 mt-1 text-[12px]">
+							Seconds a tool can run before the agent receives a timeout error. The tool keeps
+							running in the background. 0 disables the timeout.
 						</p>
 					</div>
 					<div class="flex items-center gap-3">
@@ -1186,7 +1386,7 @@
 							type="number"
 							min="0"
 							max="600"
-							class="w-28 rounded-md border border-border/60 bg-transparent px-3 py-1.5 text-[13px] text-foreground focus:border-foreground/30 focus:outline-none"
+							class="border-border/60 focus:border-foreground/30 w-28 rounded-md border bg-transparent px-3 py-1.5 text-[13px] text-foreground focus:outline-none"
 							value={agentExecutionSettings.toolTimeout}
 							oninput={(e) => {
 								const raw = parseInt((e.currentTarget as HTMLInputElement).value, 10);
@@ -1195,15 +1395,16 @@
 								scheduleAgentExecutionSave('toolTimeout', String(clamped));
 							}}
 						/>
-						<span class="text-[12px] text-muted-foreground/60">seconds</span>
+						<span class="text-muted-foreground/60 text-[12px]">seconds</span>
 					</div>
 				</div>
 
-				<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
+				<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
 					<div class="mb-3">
 						<h3 class="text-[14px] font-medium text-foreground">Agent Response Timeout</h3>
-						<p class="mt-1 text-[12px] text-muted-foreground/60">
-							Seconds an ACP agent prompt can be silent before NeoStack reports a timeout. Any agent activity refreshes the timer. 0 disables the timeout.
+						<p class="text-muted-foreground/60 mt-1 text-[12px]">
+							Seconds an ACP agent prompt can be silent before NeoStack reports a timeout. Any agent
+							activity refreshes the timer. 0 disables the timeout.
 						</p>
 					</div>
 					<div class="flex items-center gap-3">
@@ -1211,46 +1412,72 @@
 							type="number"
 							min="0"
 							max="86400"
-							class="w-28 rounded-md border border-border/60 bg-transparent px-3 py-1.5 text-[13px] text-foreground focus:border-foreground/30 focus:outline-none"
+							class="border-border/60 focus:border-foreground/30 w-28 rounded-md border bg-transparent px-3 py-1.5 text-[13px] text-foreground focus:outline-none"
 							value={agentExecutionSettings.agentResponseTimeout}
 							oninput={(e) => {
 								const raw = parseInt((e.currentTarget as HTMLInputElement).value, 10);
 								const clamped = Number.isFinite(raw) ? Math.max(0, Math.min(86400, raw)) : 0;
-								agentExecutionSettings = { ...agentExecutionSettings, agentResponseTimeout: clamped };
+								agentExecutionSettings = {
+									...agentExecutionSettings,
+									agentResponseTimeout: clamped
+								};
 								scheduleAgentExecutionSave('agentResponseTimeout', String(clamped));
 							}}
 						/>
-						<span class="text-[12px] text-muted-foreground/60">seconds</span>
+						<span class="text-muted-foreground/60 text-[12px]">seconds</span>
 					</div>
 				</div>
 
-				<div class="border-t border-border/40 pt-6 mb-6">
+				<div class="border-border/40 mb-6 border-t pt-6">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">{$t('providers_heading')}</h2>
-					<p class="text-[13px] text-muted-foreground/60">{$t('providers_desc')}</p>
+					<p class="text-muted-foreground/60 text-[13px]">{$t('providers_desc')}</p>
 				</div>
 
 				{#if isLoadingProviders}
-					<div class="flex items-center gap-2 py-8 text-muted-foreground/50">
-						<span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground"></span>
+					<div class="text-muted-foreground/50 flex items-center gap-2 py-8">
+						<span
+							class="border-muted-foreground/30 inline-block h-4 w-4 animate-spin rounded-full border-2 border-t-muted-foreground"
+						></span>
 						Loading...
 					</div>
 				{:else}
 					<!-- Provider priority list -->
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<h3 class="mb-1 text-[14px] font-medium text-foreground">{$t('active_provider_label')}</h3>
-						<p class="mb-3 text-[12px] text-muted-foreground/60">{$t('active_provider_desc')}</p>
+					<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
+						<h3 class="mb-1 text-[14px] font-medium text-foreground">
+							{$t('active_provider_label')}
+						</h3>
+						<p class="text-muted-foreground/60 mb-3 text-[12px]">{$t('active_provider_desc')}</p>
 
 						{#if priorityProviders.length === 0}
-							<p class="py-3 text-[12px] text-muted-foreground/40">No providers configured. Add one below.</p>
+							<p class="text-muted-foreground/40 py-3 text-[12px]">
+								No providers configured. Add one below.
+							</p>
 						{:else}
 							<div class="flex flex-col gap-1">
-								{#each priorityProviders as provider}
-									<div class="group flex items-center gap-2 rounded-md border border-border/40 px-3 py-2 transition-colors hover:bg-accent/20 {selectedProviderId === provider.id ? 'border-[var(--ue-accent)]/30 bg-[var(--ue-accent)]/5' : ''}">
+								{#each priorityProviders as provider (provider.id)}
+									<div
+										class="border-border/40 hover:bg-accent/20 group flex items-center gap-2 rounded-md border px-3 py-2 transition-colors {selectedProviderId ===
+										provider.id
+											? 'border-[var(--ue-accent)]/30 bg-[var(--ue-accent)]/5'
+											: ''}"
+									>
 										<!-- Provider info -->
-										<button class="flex-1 text-left" onclick={() => { selectedProviderId = provider.id; providerApiKeyInput = ''; showAddModelForm = false; showImportModal = false; showDeleteConfirm = ''; }}>
+										<button
+											class="flex-1 text-left"
+											onclick={() => {
+												selectedProviderId = provider.id;
+												providerApiKeyInput = '';
+												showAddModelForm = false;
+												showImportModal = false;
+												showDeleteConfirm = '';
+											}}
+										>
 											<span class="text-[13px] font-medium text-foreground">{provider.name}</span>
 											{#if provider.isUserDefined}
-												<span class="ml-1 rounded bg-[var(--ue-accent)]/10 px-1 py-0.5 text-[9px] text-[var(--ue-accent)]/70">custom</span>
+												<span
+													class="bg-[var(--ue-accent)]/10 text-[var(--ue-accent)]/70 ml-1 rounded px-1 py-0.5 text-[9px]"
+													>custom</span
+												>
 											{/if}
 											{#if provider.configured}
 												<span class="ml-1.5 text-[10px] text-emerald-400">&#x2022; ready</span>
@@ -1259,7 +1486,12 @@
 											{/if}
 										</button>
 										<!-- Remove button -->
-										<button class="rounded p-1 text-muted-foreground/20 opacity-0 transition-all hover:text-red-400 group-hover:opacity-100" onclick={() => handleRemoveProvider(provider.id)} title="Remove">&#x2715;</button>
+										<button
+											class="text-muted-foreground/50 hover:bg-destructive/10 flex h-10 w-10 items-center justify-center rounded transition-colors hover:text-red-400"
+											onclick={() => handleRemoveProvider(provider.id)}
+											title="Remove"
+											aria-label={`Remove ${provider.name}`}>&#x2715;</button
+										>
 									</div>
 								{/each}
 							</div>
@@ -1268,190 +1500,403 @@
 						<!-- Add built-in provider -->
 						{#if builtinAvailableToAdd.length > 0}
 							<div class="mt-3 flex flex-wrap gap-1.5">
-								{#each builtinAvailableToAdd as provider}
+								{#each builtinAvailableToAdd as provider (provider.id)}
 									<button
-										class="rounded-md border border-dashed border-border/40 px-2.5 py-1 text-[12px] text-muted-foreground/40 transition-colors hover:border-border hover:text-muted-foreground"
-										onclick={() => handleAddProvider(provider.id)}
-									>+ {provider.name}</button>
+										class="border-border/40 text-muted-foreground/40 rounded-md border border-dashed px-2.5 py-1 text-[12px] transition-colors hover:border-border hover:text-muted-foreground"
+										onclick={() => handleAddProvider(provider.id)}>+ {provider.name}</button
+									>
 								{/each}
 							</div>
 						{/if}
 
 						<!-- Add custom provider -->
-						<div class="mt-3 border-t border-border/20 pt-3">
+						<div class="border-border/20 mt-3 border-t pt-3">
 							{#if showNewCustomProviderForm}
 								<div class="flex flex-col gap-2">
-									<input type="text" bind:value={newCustomProviderName} class="w-full rounded-md border border-border/60 bg-transparent px-3 py-2 text-[13px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder="Provider name (e.g. My vLLM Server)" />
-									<input type="text" bind:value={newCustomProviderUrl} class="w-full rounded-md border border-border/60 bg-transparent px-3 py-2 text-[13px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder="Base URL (e.g. http://localhost:8000/v1)" />
+									<input
+										type="text"
+										bind:value={newCustomProviderName}
+										class="border-border/60 placeholder:text-muted-foreground/40 focus:border-foreground/30 w-full rounded-md border bg-transparent px-3 py-2 text-[13px] text-foreground focus:outline-none"
+										placeholder="Provider name (e.g. My vLLM Server)"
+									/>
+									<input
+										type="text"
+										bind:value={newCustomProviderUrl}
+										class="border-border/60 placeholder:text-muted-foreground/40 focus:border-foreground/30 w-full rounded-md border bg-transparent px-3 py-2 text-[13px] text-foreground focus:outline-none"
+										placeholder="Base URL (e.g. http://localhost:8000/v1)"
+									/>
 									<div class="flex gap-2">
-										<button class="rounded-md border border-border/60 px-3 py-1.5 text-[12px] text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40" onclick={handleCreateCustomProvider} disabled={!newCustomProviderName.trim()}>Create</button>
-										<button class="rounded-md px-3 py-1.5 text-[12px] text-muted-foreground/60 transition-colors hover:text-foreground" onclick={() => { showNewCustomProviderForm = false; newCustomProviderName = ''; newCustomProviderUrl = ''; }}>Cancel</button>
+										<button
+											class="border-border/60 rounded-md border px-3 py-1.5 text-[12px] text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+											onclick={handleCreateCustomProvider}
+											disabled={!newCustomProviderName.trim()}>Create</button
+										>
+										<button
+											class="text-muted-foreground/60 rounded-md px-3 py-1.5 text-[12px] transition-colors hover:text-foreground"
+											onclick={() => {
+												showNewCustomProviderForm = false;
+												newCustomProviderName = '';
+												newCustomProviderUrl = '';
+											}}>Cancel</button
+										>
 									</div>
 								</div>
 							{:else}
 								<button
-									class="rounded-md border border-dashed border-[var(--ue-accent)]/30 px-2.5 py-1 text-[12px] text-[var(--ue-accent)]/60 transition-colors hover:border-[var(--ue-accent)]/60 hover:text-[var(--ue-accent)]"
-									onclick={() => { showNewCustomProviderForm = true; }}
-								>+ Add Custom Provider</button>
+									class="border-[var(--ue-accent)]/30 text-[var(--ue-accent)]/60 hover:border-[var(--ue-accent)]/60 rounded-md border border-dashed px-2.5 py-1 text-[12px] transition-colors hover:text-[var(--ue-accent)]"
+									onclick={() => {
+										showNewCustomProviderForm = true;
+									}}>+ Add Custom Provider</button
+								>
 							{/if}
 						</div>
 					</div>
 
 					<!-- Selected provider config -->
 					{#if selectedProvider}
-						<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
+						<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
 							<div class="mb-3 flex items-start justify-between">
 								<div>
 									<div class="flex items-center gap-2">
 										<h4 class="text-[14px] font-medium text-foreground">{selectedProvider.name}</h4>
 										{#if selectedProvider.isUserDefined}
-											<span class="rounded bg-[var(--ue-accent)]/10 px-1.5 py-0.5 text-[9px] font-medium text-[var(--ue-accent)]">custom</span>
+											<span
+												class="bg-[var(--ue-accent)]/10 rounded px-1.5 py-0.5 text-[9px] font-medium text-[var(--ue-accent)]"
+												>custom</span
+											>
 										{/if}
 									</div>
-									<p class="mt-0.5 text-[12px] text-muted-foreground/60">{selectedProvider.description}</p>
+									<p class="text-muted-foreground/60 mt-0.5 text-[12px]">
+										{selectedProvider.description}
+									</p>
 								</div>
 								{#if selectedProvider.isUserDefined}
 									{#if showDeleteConfirm === selectedProvider.id}
 										<div class="flex items-center gap-1.5">
 											<span class="text-[11px] text-red-400">Delete?</span>
-											<button class="rounded px-2 py-0.5 text-[11px] text-red-400 transition-colors hover:bg-red-500/10" onclick={() => handleDeleteCustomProvider(selectedProvider.id)}>Yes</button>
-											<button class="rounded px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent" onclick={() => { showDeleteConfirm = ''; }}>No</button>
+											<button
+												class="rounded px-2 py-0.5 text-[11px] text-red-400 transition-colors hover:bg-red-500/10"
+												onclick={() => handleDeleteCustomProvider(selectedProvider.id)}>Yes</button
+											>
+											<button
+												class="rounded px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent"
+												onclick={() => {
+													showDeleteConfirm = '';
+												}}>No</button
+											>
 										</div>
 									{:else}
-										<button class="rounded p-1 text-muted-foreground/30 transition-colors hover:text-red-400" onclick={() => { showDeleteConfirm = selectedProvider.id; }} title="Delete provider">&#x2715;</button>
+										<button
+											class="text-muted-foreground/30 rounded p-1 transition-colors hover:text-red-400"
+											onclick={() => {
+												showDeleteConfirm = selectedProvider.id;
+											}}
+											title="Delete provider">&#x2715;</button
+										>
 									{/if}
 								{/if}
 							</div>
 
 							<div class="grid gap-4">
 								{#if selectedProvider.isUserDefined}
-									<label class="flex cursor-pointer items-center gap-2 rounded-md border border-border/40 bg-background/40 px-3 py-2">
-										<input type="checkbox" checked={selectedProvider.requiresApiKey} onchange={(e) => handleToggleRequiresApiKey(selectedProviderId, (e.currentTarget as HTMLInputElement).checked)} class="h-3.5 w-3.5 rounded border-border accent-[var(--ue-accent)]" />
-										<span class="text-[12px] text-muted-foreground">Require an API key for this provider</span>
+									<label
+										class="border-border/40 bg-background/40 flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2"
+									>
+										<input
+											type="checkbox"
+											checked={selectedProvider.requiresApiKey}
+											onchange={(e) =>
+												handleToggleRequiresApiKey(
+													selectedProviderId,
+													(e.currentTarget as HTMLInputElement).checked
+												)}
+											class="h-3.5 w-3.5 rounded border-border accent-[var(--ue-accent)]"
+										/>
+										<span class="text-[12px] text-muted-foreground"
+											>Require an API key for this provider</span
+										>
 									</label>
 								{/if}
 
-								<!-- API Key -->
-								{#if selectedProvider.requiresApiKey}
+								<!-- Auth: NeoStack signs in with the browser; other providers take an API key -->
+								{#if selectedProviderId === 'neostack'}
 									<div>
-										<span class="mb-1.5 block text-[12px] font-medium text-muted-foreground">{$t('provider_api_key_label')}</span>
+										<span class="mb-1.5 block text-[12px] font-medium text-muted-foreground"
+											>Account</span
+										>
+										<NeoStackSignInButton
+											label="Sign in with NeoStack"
+											variant="primary"
+											onsuccess={() => onNeoStackCloudChanged()}
+										/>
+										<p class="text-muted-foreground/60 mt-1.5 text-[11px]">
+											Opens your browser to sign in securely — no API key needed.
+										</p>
+									</div>
+								{:else if selectedProvider.requiresApiKey}
+									<div>
+										<span class="mb-1.5 block text-[12px] font-medium text-muted-foreground"
+											>{$t('provider_api_key_label')}</span
+										>
 										{#if selectedProvider.hasApiKey}
 											<div class="mb-1.5 flex items-center gap-2">
-												<span class="font-mono text-[12px] text-muted-foreground/50">····{selectedProvider.apiKeyMasked.slice(-4)}</span>
-												<span class="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-400">{$t('provider_key_set')}</span>
-											</div>
-										{/if}
-										{#if selectedProviderId === 'neostack'}
-											<div class="mb-2">
-												<NeoStackSignInButton
-													label={selectedProvider.hasApiKey ? 'Sign in again' : 'Sign in with NeoStack'}
-													variant="primary"
-													onsuccess={() => onNeoStackCloudChanged()}
-												/>
-												<p class="mt-1.5 text-[11px] text-muted-foreground/60">
-													One click — opens neostack.dev, you pick a workspace, and the editor receives a fresh API key.
-												</p>
+												<span class="text-muted-foreground/50 font-mono text-[12px]"
+													>····{selectedProvider.apiKeyMasked.slice(-4)}</span
+												>
+												<span
+													class="rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-400"
+													>{$t('provider_key_set')}</span
+												>
 											</div>
 										{/if}
 										<div class="flex gap-2">
-											<input type="password" bind:value={providerApiKeyInput} class="flex-1 rounded-md border border-border/60 bg-transparent px-3 py-2 text-[13px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder={selectedProvider.hasApiKey ? $t('provider_api_key_replace') : $t('provider_api_key_enter')} />
-											<button class="rounded-md border border-border/60 px-3 py-2 text-[13px] text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40" onclick={() => handleProviderApiKeySave(selectedProviderId, providerApiKeyInput)} disabled={!providerApiKeyInput.trim()}>{$t('save')}</button>
+											<input
+												type="password"
+												bind:value={providerApiKeyInput}
+												class="border-border/60 placeholder:text-muted-foreground/40 focus:border-foreground/30 flex-1 rounded-md border bg-transparent px-3 py-2 text-[13px] text-foreground focus:outline-none"
+												placeholder={selectedProvider.hasApiKey
+													? $t('provider_api_key_replace')
+													: $t('provider_api_key_enter')}
+											/>
+											<button
+												class="border-border/60 rounded-md border px-3 py-2 text-[13px] text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+												onclick={() =>
+													handleProviderApiKeySave(selectedProviderId, providerApiKeyInput)}
+												disabled={!providerApiKeyInput.trim()}>{$t('save')}</button
+											>
 										</div>
 									</div>
 								{:else}
-									<div class="rounded-md bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-400/80">{$t('provider_no_key_needed')}</div>
+									<div
+										class="rounded-md bg-emerald-500/5 px-3 py-2 text-[12px] text-emerald-400/80"
+									>
+										{$t('provider_no_key_needed')}
+									</div>
 								{/if}
 
 								<!-- Base URL -->
 								<div>
-									<span class="mb-1.5 block text-[12px] font-medium text-muted-foreground">{$t('provider_base_url_label')}</span>
+									<span class="mb-1.5 block text-[12px] font-medium text-muted-foreground"
+										>{$t('provider_base_url_label')}</span
+									>
 									{#if selectedProvider.isUserDefined}
-										<input type="text" value={selectedProvider.baseUrl} oninput={(e) => { const url = (e.currentTarget as HTMLInputElement).value; providerSettings = { ...providerSettings, providers: providerSettings.providers.map(p => p.id === selectedProviderId ? { ...p, baseUrl: url } : p) }; debouncedCustomProviderUpdate(selectedProviderId, '', url); }} class="w-full rounded-md border border-border/60 bg-transparent px-3 py-2 text-[13px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder="https://api.example.com/v1" />
+										<input
+											type="text"
+											value={selectedProvider.baseUrl}
+											oninput={(e) => {
+												const url = (e.currentTarget as HTMLInputElement).value;
+												providerSettings = {
+													...providerSettings,
+													providers: providerSettings.providers.map((p) =>
+														p.id === selectedProviderId ? { ...p, baseUrl: url } : p
+													)
+												};
+												debouncedCustomProviderUpdate(selectedProviderId, '', url);
+											}}
+											class="border-border/60 placeholder:text-muted-foreground/40 focus:border-foreground/30 w-full rounded-md border bg-transparent px-3 py-2 text-[13px] text-foreground focus:outline-none"
+											placeholder="https://api.example.com/v1"
+										/>
 									{:else}
-										<input type="text" value={selectedProvider.baseUrl} oninput={(e) => { const url = (e.currentTarget as HTMLInputElement).value; providerSettings = { ...providerSettings, providers: providerSettings.providers.map(p => p.id === selectedProviderId ? { ...p, baseUrl: url } : p) }; debouncedProviderBaseUrl(selectedProviderId, url); }} class="w-full rounded-md border border-border/60 bg-transparent px-3 py-2 text-[13px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder={selectedProvider.defaultBaseUrl} />
+										<input
+											type="text"
+											value={selectedProvider.baseUrl}
+											oninput={(e) => {
+												const url = (e.currentTarget as HTMLInputElement).value;
+												providerSettings = {
+													...providerSettings,
+													providers: providerSettings.providers.map((p) =>
+														p.id === selectedProviderId ? { ...p, baseUrl: url } : p
+													)
+												};
+												debouncedProviderBaseUrl(selectedProviderId, url);
+											}}
+											class="border-border/60 placeholder:text-muted-foreground/40 focus:border-foreground/30 w-full rounded-md border bg-transparent px-3 py-2 text-[13px] text-foreground focus:outline-none"
+											placeholder={selectedProvider.defaultBaseUrl}
+										/>
 									{/if}
-									<p class="mt-1 text-[11px] text-muted-foreground/50">{$t('provider_base_url_help')}</p>
+									<p class="text-muted-foreground/50 mt-1 text-[11px]">
+										{$t('provider_base_url_help')}
+									</p>
 								</div>
 
 								<!-- Provider: Model Management -->
 								{#if selectedProvider.isUserDefined || selectedProvider.supportsModelDiscovery}
-									<div class="border-t border-border/30 pt-3">
+									<div class="border-border/30 border-t pt-3">
 										<div class="mb-2 flex items-center justify-between">
 											<span class="text-[12px] font-medium text-muted-foreground">Models</span>
 											<div class="flex items-center gap-2">
 												{#if !selectedProvider.isUserDefined && selectedProvider.supportsModelDiscovery}
-													<button class="rounded-md border border-border/60 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" onclick={async () => { await refreshProviderModels(); }}>Refresh</button>
+													<button
+														class="border-border/60 rounded-md border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+														onclick={async () => {
+															await refreshProviderModels();
+														}}>Refresh</button
+													>
 												{/if}
 												{#if selectedProvider.isUserDefined}
-													<button class="rounded-md border border-border/60 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" onclick={() => { importJsonText = ''; importResult = null; showImportModal = true; }}>Import JSON</button>
+													<button
+														class="border-border/60 rounded-md border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+														onclick={() => {
+															importJsonText = '';
+															importResult = null;
+															showImportModal = true;
+														}}>Import JSON</button
+													>
 												{/if}
-												<button class="rounded-md border border-border/60 px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" onclick={() => { newModelId = ''; newModelName = ''; newModelDesc = ''; showAddModelForm = !showAddModelForm; }}>+ Add</button>
+												<button
+													class="border-border/60 rounded-md border px-2 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+													onclick={() => {
+														newModelId = '';
+														newModelName = '';
+														newModelDesc = '';
+														showAddModelForm = !showAddModelForm;
+													}}>+ Add</button
+												>
 											</div>
 										</div>
 										{#if !selectedProvider.isUserDefined && selectedProvider.supportsModelDiscovery}
-											<p class="mb-2 text-[11px] text-muted-foreground/50">Models are auto-discovered from the provider's /models endpoint. Use + Add for models not yet discovered.</p>
+											<p class="text-muted-foreground/50 mb-2 text-[11px]">
+												Models are auto-discovered from the provider's /models endpoint. Use + Add
+												for models not yet discovered.
+											</p>
 										{/if}
 
 										<!-- Add model form -->
 										{#if showAddModelForm}
-											<div class="mb-2 flex flex-col gap-1.5 rounded-md border border-border/40 bg-background/50 p-2">
-												<input type="text" bind:value={newModelId} class="w-full rounded border border-border/40 bg-transparent px-2 py-1 text-[12px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder="Model ID (required, e.g. gpt-4o)" />
-												<input type="text" bind:value={newModelName} class="w-full rounded border border-border/40 bg-transparent px-2 py-1 text-[12px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder="Display name (optional)" />
-												<input type="text" bind:value={newModelDesc} class="w-full rounded border border-border/40 bg-transparent px-2 py-1 text-[12px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder="Description (optional)" />
+											<div
+												class="border-border/40 bg-background/50 mb-2 flex flex-col gap-1.5 rounded-md border p-2"
+											>
+												<input
+													type="text"
+													bind:value={newModelId}
+													class="border-border/40 placeholder:text-muted-foreground/40 focus:border-foreground/30 w-full rounded border bg-transparent px-2 py-1 text-[12px] text-foreground focus:outline-none"
+													placeholder="Model ID (required, e.g. gpt-4o)"
+												/>
+												<input
+													type="text"
+													bind:value={newModelName}
+													class="border-border/40 placeholder:text-muted-foreground/40 focus:border-foreground/30 w-full rounded border bg-transparent px-2 py-1 text-[12px] text-foreground focus:outline-none"
+													placeholder="Display name (optional)"
+												/>
+												<input
+													type="text"
+													bind:value={newModelDesc}
+													class="border-border/40 placeholder:text-muted-foreground/40 focus:border-foreground/30 w-full rounded border bg-transparent px-2 py-1 text-[12px] text-foreground focus:outline-none"
+													placeholder="Description (optional)"
+												/>
 												<div class="flex gap-1.5">
-													<button class="rounded border border-border/60 px-2 py-0.5 text-[11px] text-foreground transition-colors hover:bg-accent disabled:opacity-40" onclick={() => handleAddModel(selectedProviderId)} disabled={!newModelId.trim()}>Add</button>
-													<button class="rounded px-2 py-0.5 text-[11px] text-muted-foreground/60 transition-colors hover:text-foreground" onclick={() => { showAddModelForm = false; }}>Cancel</button>
+													<button
+														class="border-border/60 rounded border px-2 py-0.5 text-[11px] text-foreground transition-colors hover:bg-accent disabled:opacity-40"
+														onclick={() => handleAddModel(selectedProviderId)}
+														disabled={!newModelId.trim()}>Add</button
+													>
+													<button
+														class="text-muted-foreground/60 rounded px-2 py-0.5 text-[11px] transition-colors hover:text-foreground"
+														onclick={() => {
+															showAddModelForm = false;
+														}}>Cancel</button
+													>
 												</div>
 											</div>
 										{/if}
 
 										<!-- Model list -->
 										{#if selectedProvider.models && selectedProvider.models.length > 0}
-											<div class="max-h-[200px] overflow-y-auto rounded-md border border-border/30">
-												{#each selectedProvider.models as model}
-													<div class="group flex items-center gap-2 border-b border-border/20 px-3 py-1.5 last:border-b-0">
+											<div class="border-border/30 max-h-[200px] overflow-y-auto rounded-md border">
+												{#each selectedProvider.models as model (model.id)}
+													<div
+														class="border-border/20 group flex items-center gap-2 border-b px-3 py-1.5 last:border-b-0"
+													>
 														<div class="min-w-0 flex-1">
-															<span class="text-[12px] text-foreground">{model.name || model.id}</span>
-															<span class="ml-1.5 text-[10px] text-muted-foreground/40">{model.id}</span>
+															<span class="text-[12px] text-foreground"
+																>{model.name || model.id}</span
+															>
+															<span class="text-muted-foreground/40 ml-1.5 text-[10px]"
+																>{model.id}</span
+															>
 														</div>
-														<button class="rounded p-0.5 text-muted-foreground/20 opacity-0 transition-all hover:text-red-400 group-hover:opacity-100" onclick={() => handleRemoveModel(selectedProviderId, model.id)} title="Remove">&#x2715;</button>
+														<button
+															class="text-muted-foreground/50 hover:bg-destructive/10 flex h-10 w-10 items-center justify-center rounded transition-colors hover:text-red-400"
+															onclick={() => handleRemoveModel(selectedProviderId, model.id)}
+															title="Remove"
+															aria-label={`Remove ${model.name || model.id}`}>&#x2715;</button
+														>
 													</div>
 												{/each}
 											</div>
 										{:else if selectedProvider.isUserDefined}
-											<p class="py-2 text-[11px] text-muted-foreground/40">No models defined. Add manually or import from JSON.</p>
+											<p class="text-muted-foreground/40 py-2 text-[11px]">
+												No models defined. Add manually or import from JSON.
+											</p>
 										{:else}
-											<p class="py-2 text-[11px] text-muted-foreground/40">No extra models added. Discovered models appear in the model picker.</p>
+											<p class="text-muted-foreground/40 py-2 text-[11px]">
+												No extra models added. Discovered models appear in the model picker.
+											</p>
 										{/if}
 
 										<!-- Model discovery toggle (custom providers only) -->
 										{#if selectedProvider.isUserDefined}
 											<label class="mt-2 flex cursor-pointer items-center gap-2">
-												<input type="checkbox" checked={selectedProvider.enableModelDiscovery} onchange={(e) => handleToggleModelDiscovery(selectedProviderId, (e.currentTarget as HTMLInputElement).checked)} class="h-3.5 w-3.5 rounded border-border accent-[var(--ue-accent)]" />
-												<span class="text-[12px] text-muted-foreground">Auto-discover models from /models endpoint</span>
+												<input
+													type="checkbox"
+													checked={selectedProvider.enableModelDiscovery}
+													onchange={(e) =>
+														handleToggleModelDiscovery(
+															selectedProviderId,
+															(e.currentTarget as HTMLInputElement).checked
+														)}
+													class="h-3.5 w-3.5 rounded border-border accent-[var(--ue-accent)]"
+												/>
+												<span class="text-[12px] text-muted-foreground"
+													>Auto-discover models from /models endpoint</span
+												>
 											</label>
 										{/if}
 									</div>
 
 									<!-- Import Modal (custom providers only) -->
 									{#if showImportModal && selectedProvider.isUserDefined}
-										<div class="border-t border-border/30 pt-3">
-											<span class="mb-1.5 block text-[12px] font-medium text-muted-foreground">Import Models from JSON</span>
-											<p class="mb-2 text-[11px] text-muted-foreground/50">Paste a JSON array of models. Format: [&#123;"id": "model-id", "name": "Display Name"&#125;] or an OpenAI /models response.</p>
-											<textarea bind:value={importJsonText} class="h-[120px] w-full resize-y rounded-md border border-border/60 bg-transparent px-3 py-2 font-mono text-[11px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder={'[{"id": "my-model", "name": "My Model"}]'}></textarea>
+										<div class="border-border/30 border-t pt-3">
+											<span class="mb-1.5 block text-[12px] font-medium text-muted-foreground"
+												>Import Models from JSON</span
+											>
+											<p class="text-muted-foreground/50 mb-2 text-[11px]">
+												Paste a JSON array of models. Format: [&#123;"id": "model-id", "name":
+												"Display Name"&#125;] or an OpenAI /models response.
+											</p>
+											<textarea
+												bind:value={importJsonText}
+												class="border-border/60 placeholder:text-muted-foreground/40 focus:border-foreground/30 h-[120px] w-full resize-y rounded-md border bg-transparent px-3 py-2 font-mono text-[11px] text-foreground focus:outline-none"
+												placeholder={'[{"id": "my-model", "name": "My Model"}]'}
+											></textarea>
 											{#if importResult}
-												<div class="mt-1.5 rounded-md px-2 py-1 text-[11px] {importResult.errors.length > 0 ? 'bg-red-500/5 text-red-400' : 'bg-emerald-500/5 text-emerald-400'}">
+												<div
+													class="mt-1.5 rounded-md px-2 py-1 text-[11px] {importResult.errors
+														.length > 0
+														? 'bg-red-500/5 text-red-400'
+														: 'bg-emerald-500/5 text-emerald-400'}"
+												>
 													{importResult.imported} model{importResult.imported !== 1 ? 's' : ''} imported.
-													{#each importResult.errors as error}
+													{#each importResult.errors as error, errorIndex (`${errorIndex}:${error}`)}
 														<div class="mt-0.5 text-red-400/80">{error}</div>
 													{/each}
 												</div>
 											{/if}
 											<div class="mt-2 flex gap-2">
-												<button class="rounded-md border border-border/60 px-3 py-1 text-[12px] text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40" onclick={() => handleImportModels(selectedProviderId)} disabled={!importJsonText.trim() || isImporting}>
+												<button
+													class="border-border/60 rounded-md border px-3 py-1 text-[12px] text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-40"
+													onclick={() => handleImportModels(selectedProviderId)}
+													disabled={!importJsonText.trim() || isImporting}
+												>
 													{isImporting ? 'Importing...' : 'Import'}
 												</button>
-												<button class="rounded-md px-3 py-1 text-[12px] text-muted-foreground/60 transition-colors hover:text-foreground" onclick={() => { showImportModal = false; importResult = null; }}>Close</button>
+												<button
+													class="text-muted-foreground/60 rounded-md px-3 py-1 text-[12px] transition-colors hover:text-foreground"
+													onclick={() => {
+														showImportModal = false;
+														importResult = null;
+													}}>Close</button
+												>
 											</div>
 										</div>
 									{/if}
@@ -1460,119 +1905,225 @@
 						</div>
 					{/if}
 
-					<div class="rounded-md bg-foreground/5 px-3 py-2 text-[11px] text-muted-foreground/50">{$t('provider_reconnect_note')}</div>
+					<div class="bg-foreground/5 text-muted-foreground/50 rounded-md px-3 py-2 text-[11px]">
+						{$t('provider_reconnect_note')}
+					</div>
 
 					<!-- Models enable/disable -->
-					<div class="mt-6 mb-4">
+					<div class="mb-4 mt-6">
 						<h2 class="mb-1 text-[18px] font-medium text-foreground">Models</h2>
-						<p class="text-[13px] text-muted-foreground/60">Choose which models appear in the model selector. {#if hasCustomModelSelection}<span class="text-[var(--ue-accent)]">{enabledModelCount} enabled</span>{:else}All models shown{/if}</p>
+						<p class="text-muted-foreground/60 text-[13px]">
+							Choose which models appear in the model selector. {#if hasCustomModelSelection}<span
+									class="text-[var(--ue-accent)]">{enabledModelCount} enabled</span
+								>{:else}All models shown{/if}
+						</p>
 					</div>
 
 					{#if isLoadingModels}
-						<div class="flex items-center gap-2 py-4 text-muted-foreground/50">
-							<span class="inline-block h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground"></span>
+						<div class="text-muted-foreground/50 flex items-center gap-2 py-4">
+							<span
+								class="border-muted-foreground/30 inline-block h-3 w-3 animate-spin rounded-full border-2 border-t-muted-foreground"
+							></span>
 							Loading models...
 						</div>
 					{:else if settingsModels.length > 0}
 						<!-- Search + actions -->
 						<div class="mb-3 flex items-center gap-2">
-							<input type="text" bind:value={modelSearchQuery} class="flex-1 rounded-md border border-border/60 bg-transparent px-3 py-2 text-[13px] text-foreground placeholder:text-muted-foreground/40 focus:border-foreground/30 focus:outline-none" placeholder="Search models..." />
+							<input
+								type="text"
+								bind:value={modelSearchQuery}
+								class="border-border/60 placeholder:text-muted-foreground/40 focus:border-foreground/30 flex-1 rounded-md border bg-transparent px-3 py-2 text-[13px] text-foreground focus:outline-none"
+								placeholder="Search models..."
+							/>
 						</div>
 						<div class="mb-3 flex items-center gap-2">
-							<button class="rounded-md border border-border/60 px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" onclick={handleEnableAllModels}>Enable All</button>
-							<button class="rounded-md border border-border/60 px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" onclick={handleDisableAllModels}>Disable All</button>
+							<button
+								class="border-border/60 rounded-md border px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+								onclick={handleEnableAllModels}>Enable All</button
+							>
+							<button
+								class="border-border/60 rounded-md border px-2.5 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+								onclick={handleDisableAllModels}>Disable All</button
+							>
 							{#if hasCustomModelSelection}
-								<button class="rounded-md border border-dashed border-border/60 px-2.5 py-1 text-[11px] text-muted-foreground/60 transition-colors hover:border-border hover:text-muted-foreground" onclick={handleShowAllModels}>Reset (Show All)</button>
+								<button
+									class="border-border/60 text-muted-foreground/60 rounded-md border border-dashed px-2.5 py-1 text-[11px] transition-colors hover:border-border hover:text-muted-foreground"
+									onclick={handleShowAllModels}>Reset (Show All)</button
+								>
 							{/if}
-							<span class="ml-auto text-[11px] text-muted-foreground/40">{filteredSettingsModels.length} models</span>
+							<span class="text-muted-foreground/40 ml-auto text-[11px]"
+								>{filteredSettingsModels.length} models</span
+							>
 						</div>
 
 						<!-- Model list -->
-						<div class="rounded-lg border border-border/60 bg-card">
-							<div class="max-h-[400px] overflow-y-auto">
-								{#each filteredSettingsModels as model}
-									<label class="flex cursor-pointer items-center gap-3 border-b border-border/20 px-4 py-2.5 transition-colors last:border-b-0 hover:bg-accent/20">
-										<input type="checkbox" checked={isModelEnabled(model.id)} onchange={(e) => handleToggleModel(model.id, (e.currentTarget as HTMLInputElement).checked)} class="h-3.5 w-3.5 shrink-0 rounded border-border accent-[var(--ue-accent)]" />
-										<div class="min-w-0 flex-1">
-											<div class="flex items-center gap-1.5">
-												<span class="truncate text-[13px] text-foreground">{model.name}</span>
-												{#if model.providerDisplayName}
-													<span class="shrink-0 rounded bg-foreground/5 px-1 py-0.5 text-[9px] text-muted-foreground/40">{model.providerDisplayName}</span>
-												{/if}
+						<div class="border-border/60 rounded-lg border bg-card">
+							<div
+								bind:this={settingsModelListEl}
+								bind:clientHeight={settingsModelViewportHeight}
+								class="max-h-[400px] overflow-y-auto"
+								onscroll={handleSettingsModelScroll}
+							>
+								<div
+									class="relative"
+									style:height={`${filteredSettingsModels.length * SETTINGS_MODEL_ROW_HEIGHT}px`}
+								>
+									{#each visibleSettingsModels as model, visibleIndex (model.id)}
+										{@const modelIndex = settingsModelWindowStart + visibleIndex}
+										<label
+											class="border-border/20 hover:bg-accent/20 absolute left-0 right-0 flex cursor-pointer items-center gap-3 border-b px-4 transition-colors"
+											style:height={`${SETTINGS_MODEL_ROW_HEIGHT}px`}
+											style:transform={`translateY(${modelIndex * SETTINGS_MODEL_ROW_HEIGHT}px)`}
+										>
+											<input
+												type="checkbox"
+												checked={isModelEnabled(model.id)}
+												onchange={(e) =>
+													handleToggleModel(
+														model.id,
+														(e.currentTarget as HTMLInputElement).checked
+													)}
+												class="h-3.5 w-3.5 shrink-0 rounded border-border accent-[var(--ue-accent)]"
+											/>
+											<div class="min-w-0 flex-1">
+												<div class="flex items-center gap-1.5">
+													<span class="truncate text-[13px] text-foreground">{model.name}</span>
+													{#if model.providerDisplayName}
+														<span
+															class="bg-foreground/5 text-muted-foreground/40 shrink-0 rounded px-1 py-0.5 text-[9px]"
+															>{model.providerDisplayName}</span
+														>
+													{/if}
+												</div>
+												<div class="text-muted-foreground/40 truncate text-[11px]">{model.id}</div>
 											</div>
-											<div class="truncate text-[11px] text-muted-foreground/40">{model.id}</div>
-										</div>
-									</label>
-								{/each}
+										</label>
+									{/each}
+								</div>
 							</div>
 						</div>
 						{#if filteredSettingsModels.length === 0 && modelSearchQuery.trim()}
-							<p class="py-4 text-center text-[12px] text-muted-foreground/40">No models match your search.</p>
+							<p class="text-muted-foreground/40 py-4 text-center text-[12px]">
+								No models match your search.
+							</p>
 						{/if}
 					{:else}
-						<p class="py-4 text-[12px] text-muted-foreground/40">No models available. Configure a provider above first.</p>
+						<p class="text-muted-foreground/40 py-4 text-[12px]">
+							No models available. Configure a provider above first.
+						</p>
 					{/if}
 				{/if}
 
 				<!-- Prerequisites -->
-				<div class="mt-8 border-t border-border/40 pt-6">
+				<div class="border-border/40 mt-8 border-t pt-6">
 					<PrerequisitesPanel />
 				</div>
-
 			{:else if $settingsTab === 'usage'}
 				{@const acct = $cloudAccount}
 				{@const conn = acct?.connectionState ?? 'disconnected'}
+				{@const weeklyRemaining = Math.round(acct?.usage?.remainingPercent ?? 0)}
 				{@const periodPct = Math.round(acct?.quota?.period?.percent ?? 0)}
 				{@const burstPct = Math.round(acct?.quota?.burst?.percent ?? 0)}
 				<div class="mb-6 flex items-start justify-between gap-3">
 					<div>
 						<h2 class="mb-1 text-[18px] font-medium text-foreground">{$t('usage_heading')}</h2>
-						<p class="text-[13px] text-muted-foreground/60">{$t('usage_desc')}</p>
+						<p class="text-muted-foreground/60 text-[13px]">{$t('usage_desc')}</p>
 					</div>
 					<button
-						class="rounded-md border border-border/60 px-2.5 py-1.5 text-[12px] text-muted-foreground/70 transition-colors hover:bg-accent hover:text-foreground"
-						onclick={() => refreshCloudAccount()}
-					>{$t('usage_refresh')}</button>
+						class="border-border/60 text-muted-foreground/70 rounded-md border px-2.5 py-1.5 text-[12px] transition-colors hover:bg-accent hover:text-foreground"
+						onclick={() => refreshCloudAccount()}>{$t('usage_refresh')}</button
+					>
 				</div>
 
 				{#if conn !== 'connected' && conn !== 'offline'}
-					<div class="rounded-lg border border-border/60 bg-card/40 p-6 text-center">
-						<p class="text-[13px] text-muted-foreground/70">{$t('usage_signin_prompt')}</p>
+					<div class="border-border/60 bg-card/40 rounded-lg border p-6 text-center">
+						<p class="text-muted-foreground/70 text-[13px]">{$t('usage_signin_prompt')}</p>
 						<div class="mt-3 inline-block">
-							<NeoStackSignInButton label={$t('usage_signin_button')} variant="primary" onsuccess={() => onNeoStackCloudChanged()} />
+							<NeoStackSignInButton
+								label={$t('usage_signin_button')}
+								variant="primary"
+								onsuccess={() => onNeoStackCloudChanged()}
+							/>
 						</div>
 					</div>
 				{:else}
+					{#if acct?.usage}
+						{@const usageColor =
+							weeklyRemaining > 40 ? '#22c55e' : weeklyRemaining > 15 ? '#eab308' : '#ef4444'}
+						<div class="border-border/60 bg-card/40 mb-6 rounded-lg border p-4">
+							<div class="mb-2 flex items-center justify-between gap-3">
+								<div>
+									<h3 class="text-[13px] font-medium text-foreground">
+										{acct.usage.tier === 'pro'
+											? 'Pro'
+											: acct.usage.tier === 'trial'
+												? 'Trial'
+												: acct.usage.tier === 'comp'
+													? 'Complimentary'
+													: 'Free'} weekly AI usage
+									</h3>
+									<p class="text-muted-foreground/50 mt-0.5 text-[10.5px]">
+										Resets {new Date(acct.usage.resetsAt).toLocaleDateString(undefined, {
+											weekday: 'long',
+											month: 'short',
+											day: 'numeric'
+										})}
+									</p>
+								</div>
+								<span class="text-[12px] font-medium tabular-nums" style="color: {usageColor}">
+									{weeklyRemaining}% remaining
+								</span>
+							</div>
+							<div class="bg-muted-foreground/15 h-2 w-full overflow-hidden rounded-full">
+								<div
+									class="h-full rounded-full transition-all"
+									style="width: {weeklyRemaining}%; background-color: {usageColor};"
+								></div>
+							</div>
+							<p class="text-muted-foreground/45 mt-2 text-[10.5px] leading-relaxed">
+								Includes every model call made while an agent works.
+							</p>
+						</div>
+					{/if}
+
 					{#if acct?.credits}
-						<div class="mb-6 rounded-lg border border-border/60 bg-card/40 p-4">
+						<div class="border-border/60 bg-card/40 mb-6 rounded-lg border p-4">
 							<div class="flex items-baseline justify-between">
 								<h3 class="text-[13px] font-medium text-foreground">{$t('usage_credits')}</h3>
-								<span class="tabular-nums text-[16px] font-medium text-foreground">${acct.credits.total.toFixed(2)}</span>
+								<span class="text-[16px] font-medium tabular-nums text-foreground"
+									>${acct.credits.total.toFixed(2)}</span
+								>
 							</div>
-							<div class="mt-2 grid grid-cols-2 gap-4 text-[11.5px] text-muted-foreground/60">
+							<div class="text-muted-foreground/60 mt-2 grid grid-cols-2 gap-4 text-[11.5px]">
 								<div>
 									<div class="text-muted-foreground/55">{$t('usage_credits_subscription')}</div>
-									<div class="tabular-nums text-foreground/80">${acct.credits.subscriptionBalanceUsd.toFixed(2)}</div>
+									<div class="text-foreground/80 tabular-nums">
+										${acct.credits.subscriptionBalanceUsd.toFixed(2)}
+									</div>
 								</div>
 								<div>
 									<div class="text-muted-foreground/55">{$t('usage_credits_permanent')}</div>
-									<div class="tabular-nums text-foreground/80">${acct.credits.permanentBalanceUsd.toFixed(2)}</div>
+									<div class="text-foreground/80 tabular-nums">
+										${acct.credits.permanentBalanceUsd.toFixed(2)}
+									</div>
 								</div>
 							</div>
 						</div>
 					{/if}
 
 					{#if acct?.quota}
-						<div class="mb-6 rounded-lg border border-border/60 bg-card/40 p-4">
+						<div class="border-border/60 bg-card/40 mb-6 rounded-lg border p-4">
 							<h3 class="mb-3 text-[13px] font-medium text-foreground">{$t('usage_quota')}</h3>
 							{#if acct.quota.period}
 								{@const color = periodPct < 60 ? '#22c55e' : periodPct < 85 ? '#eab308' : '#ef4444'}
 								<div class="mb-3">
-									<div class="mb-1 flex items-center justify-between text-[11.5px] text-muted-foreground/60">
+									<div
+										class="text-muted-foreground/60 mb-1 flex items-center justify-between text-[11.5px]"
+									>
 										<span>{$t('usage_quota_period')}</span>
 										<span class="tabular-nums" style="color: {color}">{periodPct}%</span>
 									</div>
-									<div class="h-1.5 w-full overflow-hidden rounded-full bg-muted-foreground/15">
+									<div class="bg-muted-foreground/15 h-1.5 w-full overflow-hidden rounded-full">
 										<div
 											class="h-full rounded-full transition-all"
 											style="width: {periodPct}%; background-color: {color};"
@@ -1583,11 +2134,13 @@
 							{#if acct.quota.burst}
 								{@const color = burstPct < 60 ? '#22c55e' : burstPct < 85 ? '#eab308' : '#ef4444'}
 								<div>
-									<div class="mb-1 flex items-center justify-between text-[11.5px] text-muted-foreground/60">
+									<div
+										class="text-muted-foreground/60 mb-1 flex items-center justify-between text-[11.5px]"
+									>
 										<span>{$t('usage_quota_burst')}</span>
 										<span class="tabular-nums" style="color: {color}">{burstPct}%</span>
 									</div>
-									<div class="h-1.5 w-full overflow-hidden rounded-full bg-muted-foreground/15">
+									<div class="bg-muted-foreground/15 h-1.5 w-full overflow-hidden rounded-full">
 										<div
 											class="h-full rounded-full transition-all"
 											style="width: {burstPct}%; background-color: {color};"
@@ -1598,233 +2151,119 @@
 						</div>
 					{/if}
 
-					{#if acct?.accessPlan || acct?.status}
-						{@const tier = acct?.status && acct.status !== 'none' ? formatTierLabel(acct.status) : ''}
-						<div class="rounded-lg border border-border/60 bg-card/40 p-4 text-[12px]">
+					{#if acct?.planName || acct?.entitled}
+						{@const tier =
+							acct?.clientStatus === 'lifetime' || acct?.clientStatus === 'subscription'
+								? formatTierLabel(acct.clientStatus)
+								: ''}
+						<div class="border-border/60 bg-card/40 rounded-lg border p-4 text-[12px]">
 							<h3 class="mb-2 text-[13px] font-medium text-foreground">{$t('usage_plan')}</h3>
-							<div class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-muted-foreground/70">
+							<div class="text-muted-foreground/70 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
 								{#if tier}
 									<span class="text-muted-foreground/55">{$t('usage_plan_entitlement')}</span>
 									<span class="text-foreground/85">{tier}</span>
 								{/if}
-								{#if acct?.accessPlan?.planName}
+								{#if acct?.planName}
 									<span class="text-muted-foreground/55">{$t('usage_plan_cloud')}</span>
-									<span class="text-foreground/85">{acct.accessPlan.planName}</span>
+									<span class="text-foreground/85">{acct.planName}</span>
 								{/if}
 								{#if acct?.organization?.name || acct?.organization?.slug}
 									<span class="text-muted-foreground/55">{$t('usage_plan_workspace')}</span>
-									<span class="text-foreground/85">{acct?.organization?.name || acct?.organization?.slug}</span>
+									<span class="text-foreground/85"
+										>{acct?.organization?.name || acct?.organization?.slug}</span
+									>
 								{/if}
-								{#if acct?.accessPlan && !acct.accessPlan.allowed && acct.accessPlan.reason}
+								{#if acct && !acct.entitled && acct.reason}
 									<span class="text-muted-foreground/55">{$t('usage_plan_reason')}</span>
-									<span class="text-amber-400/90">{acct.accessPlan.reason}</span>
+									<span class="text-amber-400/90">{acct.reason}</span>
 								{/if}
 							</div>
 						</div>
 					{/if}
 				{/if}
-
 			{:else if $settingsTab === 'generation'}
 				<div class="mb-6">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">Generation</h2>
-					<p class="text-[13px] text-muted-foreground/60">Defaults and API keys for AI image and 3D model generation.</p>
+					<p class="text-muted-foreground/60 text-[13px]">
+						Image, 3D, and audio generation runs through your signed-in NeoStack Cloud account.
+					</p>
 				</div>
-
-				{#if isLoadingGeneration}
-					<div class="flex items-center gap-2 py-8 text-muted-foreground/50">
-						<span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground"></span>
-						Loading...
-					</div>
-				{:else}
-					<!-- Image Generation -->
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<div class="mb-3">
-							<h3 class="text-[14px] font-medium text-foreground">Images</h3>
-							<p class="mt-1 text-[12px] text-muted-foreground/60">
-								Default model for OpenRouter image generation. Direct OpenAI image generation uses the OpenAI API key below.
-							</p>
-						</div>
-						<label for="gen-image-model" class="block text-[12px] text-muted-foreground/70">Default Model</label>
-						<input
-							id="gen-image-model"
-							type="text"
-							placeholder="black-forest-labs/flux.2-flex"
-							class="mt-1 w-full rounded-md border border-border/60 bg-transparent px-3 py-1.5 font-mono text-[12px] text-foreground focus:border-foreground/30 focus:outline-none"
-							value={generationSettings.imageModel}
-							oninput={(e) => {
-								const v = (e.currentTarget as HTMLInputElement).value;
-								generationSettings = { ...generationSettings, imageModel: v };
-								scheduleGenerationSave('imageModel', v);
-							}}
-						/>
-						<label for="gen-openai-key" class="mt-3 block text-[12px] text-muted-foreground/70">OpenAI API Key</label>
-						<input
-							id="gen-openai-key"
-							type="password"
-							class="mt-1 w-full rounded-md border border-border/60 bg-transparent px-3 py-1.5 font-mono text-[12px] text-foreground focus:border-foreground/30 focus:outline-none"
-							value={generationSettings.openAIApiKey}
-							oninput={(e) => {
-								const v = (e.currentTarget as HTMLInputElement).value;
-								generationSettings = { ...generationSettings, openAIApiKey: v };
-								scheduleGenerationSave('openAIApiKey', v);
-							}}
-						/>
-					</div>
-
-					<!-- 3D: Meshy -->
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<div class="mb-3">
-							<h3 class="text-[14px] font-medium text-foreground">3D Models — Meshy</h3>
-							<p class="mt-1 text-[12px] text-muted-foreground/60">
-								Get an API key at <span class="font-mono">meshy.ai</span>. Art style can be overridden per-request by the agent.
-							</p>
-						</div>
-						<label for="gen-meshy-key" class="block text-[12px] text-muted-foreground/70">API Key</label>
-						<input
-							id="gen-meshy-key"
-							type="password"
-							class="mt-1 w-full rounded-md border border-border/60 bg-transparent px-3 py-1.5 font-mono text-[12px] text-foreground focus:border-foreground/30 focus:outline-none"
-							value={generationSettings.meshyApiKey}
-							oninput={(e) => {
-								const v = (e.currentTarget as HTMLInputElement).value;
-								generationSettings = { ...generationSettings, meshyApiKey: v };
-								scheduleGenerationSave('meshyApiKey', v);
-							}}
-						/>
-						<label for="gen-meshy-style" class="mt-3 block text-[12px] text-muted-foreground/70">Default Art Style</label>
-						<div id="gen-meshy-style" class="mt-1 w-48">
-							<CustomSelect
-								value={generationSettings.meshyArtStyle}
-								options={[
-									{ value: 'realistic', label: 'realistic' },
-									{ value: 'cartoon', label: 'cartoon' },
-									{ value: 'low-poly', label: 'low-poly' },
-									{ value: 'sculpture', label: 'sculpture' },
-									{ value: 'pbr', label: 'pbr' }
-								]}
-								onchange={(v) => {
-									generationSettings = { ...generationSettings, meshyArtStyle: v };
-									scheduleGenerationSave('meshyArtStyle', v);
-								}}
-							/>
-						</div>
-					</div>
-
-					<!-- 3D: Tripo -->
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<div class="mb-3">
-							<h3 class="text-[14px] font-medium text-foreground">3D Models — Tripo</h3>
-							<p class="mt-1 text-[12px] text-muted-foreground/60">
-								Get an API key at <span class="font-mono">tripo3d.ai</span>.
-							</p>
-						</div>
-						<label for="gen-tripo-key" class="block text-[12px] text-muted-foreground/70">API Key</label>
-						<input
-							id="gen-tripo-key"
-							type="password"
-							class="mt-1 w-full rounded-md border border-border/60 bg-transparent px-3 py-1.5 font-mono text-[12px] text-foreground focus:border-foreground/30 focus:outline-none"
-							value={generationSettings.tripoApiKey}
-							oninput={(e) => {
-								const v = (e.currentTarget as HTMLInputElement).value;
-								generationSettings = { ...generationSettings, tripoApiKey: v };
-								scheduleGenerationSave('tripoApiKey', v);
-							}}
-						/>
-					</div>
-
-					<!-- 3D: fal.ai -->
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<div class="mb-3">
-							<h3 class="text-[14px] font-medium text-foreground">3D Models — fal.ai</h3>
-							<p class="mt-1 text-[12px] text-muted-foreground/60">
-								Direct BYOK 3D generation.
-							</p>
-						</div>
-						<label for="gen-fal-key" class="block text-[12px] text-muted-foreground/70">API Key</label>
-						<input
-							id="gen-fal-key"
-							type="password"
-							class="mt-1 w-full rounded-md border border-border/60 bg-transparent px-3 py-1.5 font-mono text-[12px] text-foreground focus:border-foreground/30 focus:outline-none"
-							value={generationSettings.falApiKey}
-							oninput={(e) => {
-								const v = (e.currentTarget as HTMLInputElement).value;
-								generationSettings = { ...generationSettings, falApiKey: v };
-								scheduleGenerationSave('falApiKey', v);
-							}}
-						/>
-					</div>
-
-					<!-- Audio: ElevenLabs -->
-					<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-						<div class="mb-3">
-							<h3 class="text-[14px] font-medium text-foreground">Audio — ElevenLabs</h3>
-							<p class="mt-1 text-[12px] text-muted-foreground/60">
-								Text-to-speech, SFX, music, and speech-to-text. Get an API key at <span class="font-mono">elevenlabs.io</span>.
-							</p>
-						</div>
-						<label for="gen-eleven-key" class="block text-[12px] text-muted-foreground/70">API Key</label>
-						<input
-							id="gen-eleven-key"
-							type="password"
-							class="mt-1 w-full rounded-md border border-border/60 bg-transparent px-3 py-1.5 font-mono text-[12px] text-foreground focus:border-foreground/30 focus:outline-none"
-							value={generationSettings.elevenLabsApiKey}
-							oninput={(e) => {
-								const v = (e.currentTarget as HTMLInputElement).value;
-								generationSettings = { ...generationSettings, elevenLabsApiKey: v };
-								scheduleGenerationSave('elevenLabsApiKey', v);
-							}}
-						/>
-					</div>
-				{/if}
-
+				<div class="border-border/60 rounded-lg border bg-card p-4">
+					<h3 class="text-[14px] font-medium text-foreground">Managed by NeoStack Cloud</h3>
+					<p class="text-muted-foreground/60 mt-1 text-[12px]">
+						Models, provider credentials, durable jobs, and usage accounting are managed securely by
+						the Gateway. Open Studio to create and monitor jobs.
+					</p>
+				</div>
 			{:else if $settingsTab === 'crashes'}
 				<div class="mb-6">
 					<h2 class="mb-1 text-[18px] font-medium text-foreground">Crash History</h2>
-					<p class="text-[13px] text-muted-foreground/60">
-						Recent crashes detected by NeoStack AI. You can send crash reports to help us fix issues.
+					<p class="text-muted-foreground/60 text-[13px]">
+						Recent crashes detected by NeoStack AI. You can send crash reports to help us fix
+						issues.
 					</p>
 				</div>
 
 				{#if isLoadingCrashes}
-					<div class="flex items-center gap-2 py-8 text-muted-foreground/50">
-						<span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground"></span>
+					<div class="text-muted-foreground/50 flex items-center gap-2 py-8">
+						<span
+							class="border-muted-foreground/30 inline-block h-4 w-4 animate-spin rounded-full border-2 border-t-muted-foreground"
+						></span>
 						Loading crash history...
 					</div>
 				{:else if crashRecords.length === 0}
-					<div class="rounded-lg border border-border/60 bg-card p-6 text-center">
-						<p class="text-[13px] text-muted-foreground/60">No crashes recorded. That's good!</p>
+					<div class="border-border/60 rounded-lg border bg-card p-6 text-center">
+						<p class="text-muted-foreground/60 text-[13px]">No crashes recorded. That's good!</p>
 					</div>
 				{:else}
 					<div class="space-y-3">
-						{#each crashRecords as crash}
-							{@const status = crash.fullLogSent || crash.manuallyReported
-								? 'sent'
-								: crash.fullLogDeclined
-									? 'declined'
-									: crash.basicReported
-										? 'basic'
-										: 'none'}
-							<div class="rounded-lg border border-border/60 bg-card overflow-hidden">
+						{#each crashRecords as crash (crash.crashId)}
+							{@const status =
+								crash.fullLogSent || crash.manuallyReported
+									? 'sent'
+									: crash.fullLogDeclined
+										? 'declined'
+										: crash.basicReported
+											? 'basic'
+											: 'none'}
+							<div class="border-border/60 overflow-hidden rounded-lg border bg-card">
 								<div class="p-4">
 									<!-- Header -->
-									<div class="flex items-center justify-between mb-2">
+									<div class="mb-2 flex items-center justify-between">
 										<div class="flex items-center gap-2">
-											<span class="inline-block h-2 w-2 rounded-full {status === 'sent' ? 'bg-emerald-400' : status === 'basic' ? 'bg-amber-400' : status === 'declined' ? 'bg-red-400/60' : 'bg-muted-foreground/30'}"></span>
-											<span class="text-[12px] font-mono text-muted-foreground/70">{crash.crashType || 'Crash'}</span>
+											<span
+												class="inline-block h-2 w-2 rounded-full {status === 'sent'
+													? 'bg-emerald-400'
+													: status === 'basic'
+														? 'bg-amber-400'
+														: status === 'declined'
+															? 'bg-red-400/60'
+															: 'bg-muted-foreground/30'}"
+											></span>
+											<span class="text-muted-foreground/70 font-mono text-[12px]"
+												>{crash.crashType || 'Crash'}</span
+											>
 										</div>
-										<span class="text-[11px] text-muted-foreground/50">
-											{new Date(crash.timestamp).toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}
+										<span class="text-muted-foreground/50 text-[11px]">
+											{new Date(crash.timestamp).toLocaleDateString(undefined, {
+												month: 'short',
+												day: 'numeric',
+												hour: '2-digit',
+												minute: '2-digit'
+											})}
 										</span>
 									</div>
 
 									<!-- Error message -->
-									<p class="text-[12px] font-mono text-red-400/80 break-all leading-relaxed mb-3 line-clamp-3">
+									<p
+										class="mb-3 line-clamp-3 break-all font-mono text-[12px] leading-relaxed text-red-400/80"
+									>
 										{crash.errorMessage}
 									</p>
 
 									<!-- Status & Action -->
 									<div class="flex items-center justify-between">
-										<span class="text-[11px] text-muted-foreground/50">
+										<span class="text-muted-foreground/50 text-[11px]">
 											{#if status === 'sent'}
 												Full report sent
 											{:else if status === 'basic'}
@@ -1838,7 +2277,7 @@
 
 										{#if status !== 'sent'}
 											<button
-												class="rounded-md border border-border/60 px-3 py-1.5 text-[12px] text-foreground transition-colors hover:bg-accent disabled:opacity-50 disabled:cursor-not-allowed"
+												class="border-border/60 rounded-md border px-3 py-1.5 text-[12px] text-foreground transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
 												onclick={() => handleReportCrash(crash.crashId)}
 												disabled={reportingCrashId === crash.crashId}
 											>
@@ -1855,18 +2294,43 @@
 						{/each}
 					</div>
 
-					<p class="mt-4 text-[11px] text-muted-foreground/40">
-						Can't send from here? Share crash details on our <a href="https://discord.gg/betide" target="_blank" rel="noopener" class="underline hover:text-foreground">Discord</a>.
+					<p class="text-muted-foreground/40 mt-4 text-[11px]">
+						Can't send from here? Share crash details on our <a
+							href="https://discord.gg/betide"
+							target="_blank"
+							rel="noopener"
+							class="underline hover:text-foreground">Discord</a
+						>.
 					</p>
 				{/if}
 			{:else if $settingsTab === 'notifications'}
 				<NotificationsPanel bind:this={notifPanel} />
 			{:else}
 				<h2 class="mb-1 text-[18px] font-medium text-foreground">
-					{tabs.find(t => t.id === $settingsTab)?.label ?? $t('settings')}
+					{tabs.find((t) => t.id === $settingsTab)?.label ?? $t('settings')}
 				</h2>
-				<p class="text-[13px] text-muted-foreground/60">{$t('coming_soon')}</p>
+				<p class="text-muted-foreground/60 text-[13px]">{$t('coming_soon')}</p>
 			{/if}
 		</div>
 	</div>
 </div>
+
+<style>
+	@media (max-width: 720px) {
+		.settings-shell {
+			flex-direction: column;
+		}
+
+		.settings-sidebar {
+			display: none;
+		}
+
+		.settings-mobile-header {
+			display: flex;
+		}
+
+		.settings-content {
+			padding: 1rem;
+		}
+	}
+</style>

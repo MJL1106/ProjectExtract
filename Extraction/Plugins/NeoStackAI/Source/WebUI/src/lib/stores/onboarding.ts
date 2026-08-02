@@ -1,12 +1,14 @@
 import { writable, get } from 'svelte/store';
+import { toast } from 'svelte-sonner';
 import {
 	getOnboardingCompleted,
 	setOnboardingCompleted,
 	getLanguageOnboardingCompleted,
 	setLanguageOnboardingCompleted,
+	captureOnboardingOutcome
 } from '$lib/bridge.js';
-import { agents, selectedAgent, loadAgents, type Agent } from '$lib/stores/agents.js';
-import { installAgent, loadRegistry } from '$lib/stores/registry.js';
+import { agents, selectedAgent, loadAgents } from '$lib/stores/agents.js';
+import { installAgent } from '$lib/stores/registry.js';
 import { enterSetup } from '$lib/stores/setup.js';
 import { createNewSession } from '$lib/stores/sessions.js';
 
@@ -14,13 +16,7 @@ import { createNewSession } from '$lib/stores/sessions.js';
 
 export type OnboardingStep = 'language' | 'welcome' | 'subscriptions' | 'recommendation';
 
-export type SubscriptionId =
-	| 'claude'
-	| 'chatgpt'
-	| 'gemini'
-	| 'copilot'
-	| 'cursor'
-	| 'none';
+export type SubscriptionId = 'claude' | 'chatgpt' | 'gemini' | 'copilot' | 'cursor' | 'none';
 
 export type SubscriptionOption = {
 	id: SubscriptionId;
@@ -32,12 +28,37 @@ export type SubscriptionOption = {
 // ── Subscription → Registry Agent Mapping ──────────────────────────
 
 export const subscriptionOptions: SubscriptionOption[] = [
-	{ id: 'claude',  label: 'Claude Pro or Max',   sublabel: 'Uses your Anthropic account',    registryAgentId: 'claude-acp' },
-	{ id: 'chatgpt', label: 'ChatGPT Plus or Pro', sublabel: 'Uses your OpenAI account',       registryAgentId: 'codex-acp' },
-	{ id: 'gemini',  label: 'Google Account',      sublabel: 'Free — works with any Google account', registryAgentId: 'gemini' },
-	{ id: 'copilot', label: 'GitHub Copilot',      sublabel: 'GitHub subscription',            registryAgentId: 'github-copilot-cli' },
-	{ id: 'cursor',  label: 'Cursor IDE',          sublabel: 'Cursor subscription',            registryAgentId: 'cursor' },
-	{ id: 'none',    label: 'None of these',       sublabel: "We'll recommend free options",   registryAgentId: '' },
+	{
+		id: 'claude',
+		label: 'Claude Pro or Max',
+		sublabel: 'Uses your Anthropic account',
+		registryAgentId: 'claude-acp'
+	},
+	{
+		id: 'chatgpt',
+		label: 'ChatGPT Plus or Pro',
+		sublabel: 'Uses your OpenAI account',
+		registryAgentId: 'codex-acp'
+	},
+	{
+		id: 'gemini',
+		label: 'Google Account',
+		sublabel: 'Free — works with any Google account',
+		registryAgentId: 'gemini'
+	},
+	{
+		id: 'copilot',
+		label: 'GitHub Copilot',
+		sublabel: 'GitHub subscription',
+		registryAgentId: 'github-copilot-cli'
+	},
+	{ id: 'cursor', label: 'Cursor IDE', sublabel: 'Cursor subscription', registryAgentId: 'cursor' },
+	{
+		id: 'none',
+		label: 'None of these',
+		sublabel: "We'll recommend free options",
+		registryAgentId: ''
+	}
 ];
 
 // Priority: higher index = preferred when multiple subs selected
@@ -46,7 +67,7 @@ const agentPriority: string[] = [
 	'cursor',
 	'codex-acp',
 	'gemini',
-	'claude-acp',
+	'claude-acp'
 ];
 
 // ── Stores ──────────────────────────────────────────────────────────
@@ -67,12 +88,12 @@ export const alternativeAgentNames = alternativeAgentIds;
 // ── Recommendation Engine ───────────────────────────────────────────
 
 const subscriptionToRegistryId: Record<SubscriptionId, string> = {
-	claude:  'claude-acp',
+	claude: 'claude-acp',
 	chatgpt: 'codex-acp',
-	gemini:  'gemini',
+	gemini: 'gemini',
 	copilot: 'github-copilot-cli',
-	cursor:  'cursor',
-	none:    '',
+	cursor: 'cursor',
+	none: ''
 };
 
 function computeRecommendation(): void {
@@ -86,17 +107,17 @@ function computeRecommendation(): void {
 	}
 
 	const candidateIds = [...subs]
-		.filter(s => s !== 'none')
-		.map(s => subscriptionToRegistryId[s])
+		.filter((s) => s !== 'none')
+		.map((s) => subscriptionToRegistryId[s])
 		.filter(Boolean);
 
 	// Sort by priority
-	const sorted = [...candidateIds].sort((a, b) =>
-		agentPriority.indexOf(b) - agentPriority.indexOf(a)
+	const sorted = [...candidateIds].sort(
+		(a, b) => agentPriority.indexOf(b) - agentPriority.indexOf(a)
 	);
 
 	const primary = sorted[0];
-	const alts = candidateIds.filter(id => id !== primary);
+	const alts = candidateIds.filter((id) => id !== primary);
 
 	recommendedAgentId.set(primary);
 	alternativeAgentIds.set(alts);
@@ -109,7 +130,7 @@ export async function checkOnboarding(): Promise<void> {
 	try {
 		const [agentDone, langDone] = await Promise.all([
 			getOnboardingCompleted(),
-			getLanguageOnboardingCompleted(),
+			getLanguageOnboardingCompleted()
 		]);
 
 		if (!langDone) {
@@ -155,7 +176,7 @@ export function goBack(): void {
 }
 
 export function toggleSubscription(id: SubscriptionId): void {
-	selectedSubscriptions.update(subs => {
+	selectedSubscriptions.update((subs) => {
 		const next = new Set(subs);
 		if (id === 'none') {
 			next.clear();
@@ -189,18 +210,32 @@ export async function completeLanguageStep(): Promise<void> {
 }
 
 export async function completeOnboarding(agentRegistryId?: string): Promise<void> {
-	// Mark both flags so neither wizard re-appears on next launch.
-	await Promise.all([
-		setLanguageOnboardingCompleted(),
-		setOnboardingCompleted(),
-	]);
-
 	const registryId = agentRegistryId || get(recommendedAgentId);
 
 	// Install the recommended agent + all alternatives from subscriptions
 	const allIds = [registryId, ...get(alternativeAgentIds)].filter(Boolean);
 	for (const id of allIds) {
-		await installAgent(id, 'auto');
+		try {
+			await installAgent(id, 'auto');
+		} catch (e) {
+			// Keep the wizard open so the user can retry — do NOT mark onboarding done.
+			toast.error(`Failed to install ${id}`, {
+				description: e instanceof Error ? e.message : String(e)
+			});
+			return;
+		}
+	}
+
+	// Mark both flags only AFTER installs succeed so a mid-flow failure doesn't
+	// permanently dismiss the wizard.
+	try {
+		await Promise.all([setLanguageOnboardingCompleted(), setOnboardingCompleted()]);
+		await captureOnboardingOutcome('completed', Boolean(registryId));
+	} catch (e) {
+		toast.error('Failed to save onboarding state', {
+			description: e instanceof Error ? e.message : String(e)
+		});
+		return;
 	}
 
 	// Reload agents so the sidebar picks them up
@@ -213,7 +248,7 @@ export async function completeOnboarding(agentRegistryId?: string): Promise<void
 	// Select the recommended agent and start a session
 	const allAgents = get(agents);
 	// Find by registryId or by name containing the registry ID
-	const agent = allAgents.find(a => a.registryId === registryId);
+	const agent = allAgents.find((a) => a.registryId === registryId);
 	if (agent) {
 		selectedAgent.set(agent);
 		if (agent.status === 'available') {
@@ -226,10 +261,8 @@ export async function completeOnboarding(agentRegistryId?: string): Promise<void
 
 export async function skipOnboarding(): Promise<void> {
 	// Skip dismisses everything once and for all — mark both flags.
-	await Promise.all([
-		setLanguageOnboardingCompleted(),
-		setOnboardingCompleted(),
-	]);
+	await Promise.all([setLanguageOnboardingCompleted(), setOnboardingCompleted()]);
+	await captureOnboardingOutcome('skipped', false);
 	showOnboarding.set(false);
 	onboardingStep.set('language');
 	selectedSubscriptions.set(new Set());

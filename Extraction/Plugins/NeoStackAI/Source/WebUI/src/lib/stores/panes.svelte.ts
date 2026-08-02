@@ -7,6 +7,7 @@
  */
 
 import { createUUID } from '$lib/utils.js';
+import { onSessionDisposed } from '$lib/stores/sessionLifecycle.js';
 
 const MAX_PANES = 4;
 
@@ -56,6 +57,11 @@ class PaneManager {
 
 	/** Open a session in the focused pane */
 	openInFocused(sessionId: string) {
+		const existingIndex = this.findPaneWithSession(sessionId);
+		if (existingIndex >= 0) {
+			this.focusedIndex = existingIndex;
+			return;
+		}
 		if (this.panes.length === 0) {
 			this.panes = [createPane(sessionId)];
 			this.focusedIndex = 0;
@@ -69,6 +75,13 @@ class PaneManager {
 
 	/** Split: add a new pane next to the focused one */
 	split(sessionId: string | null = null) {
+		if (sessionId) {
+			const existingIndex = this.findPaneWithSession(sessionId);
+			if (existingIndex >= 0) {
+				this.focusedIndex = existingIndex;
+				return;
+			}
+		}
 		if (!this.canSplit) return;
 		const insertAt = this.focusedIndex + 1;
 		this.panes.splice(insertAt, 0, createPane(sessionId));
@@ -104,6 +117,11 @@ class PaneManager {
 
 	/** Update a pane's session (e.g., from sidebar click while pane is focused) */
 	updatePaneSession(paneIndex: number, sessionId: string) {
+		const existingIndex = this.findPaneWithSession(sessionId);
+		if (existingIndex >= 0 && existingIndex !== paneIndex) {
+			this.focusedIndex = existingIndex;
+			return;
+		}
 		if (paneIndex >= 0 && paneIndex < this.panes.length) {
 			this.panes[paneIndex] = {
 				...this.panes[paneIndex],
@@ -128,3 +146,4 @@ class PaneManager {
 }
 
 export const paneManager = new PaneManager();
+onSessionDisposed((sessionId: string) => paneManager.cleanupDeletedSession(sessionId));

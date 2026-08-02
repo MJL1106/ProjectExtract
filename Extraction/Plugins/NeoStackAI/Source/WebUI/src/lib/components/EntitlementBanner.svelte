@@ -1,18 +1,25 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import { getEntitlementStatus, type EntitlementStatus } from '$lib/bridge';
+	import { neostackAuth } from '$lib/stores/neostackAuth.js';
 
-	let state: EntitlementStatus | null = $state(null);
+	let entitlement = $state<EntitlementStatus>({
+		entitled: true,
+		status: 'unknown',
+		isBinaryBuild: false
+	});
+	let entitlementResolved = $state(false);
 	let dismissed = $state(false);
 	let pollHandle: ReturnType<typeof setInterval> | null = null;
 
 	async function refresh() {
 		try {
-			state = await getEntitlementStatus();
+			entitlement = await getEntitlementStatus();
+			entitlementResolved = true;
 			// Stop polling once we have a definitive answer (anything other
 			// than "unknown"). Network errors are definitive too — the user
 			// needs to see the banner so they know what's happening.
-			if (state.status !== 'unknown' && pollHandle) {
+			if (entitlement.status !== 'unknown' && pollHandle) {
 				clearInterval(pollHandle);
 				pollHandle = null;
 			}
@@ -41,27 +48,31 @@
 		if (pollHandle) clearInterval(pollHandle);
 	});
 
+	// Re-check whenever the sign-in state changes (sign-in, sign-out, plan
+	// fetch landing) so the banner clears/appears without waiting for a poll.
+	$effect(() => {
+		void $neostackAuth;
+		refresh();
+	});
+
 	const visible = $derived(
-		!dismissed &&
-			state !== null &&
-			!state.entitled &&
-			state.status !== 'unknown'
+		!dismissed && entitlementResolved && !entitlement.entitled && entitlement.status !== 'unknown'
 	);
 
 	const headline = $derived(
-		state?.status === 'network'
-			? state.isBinaryBuild
+		entitlement?.status === 'network'
+			? entitlement.isBinaryBuild
 				? 'Subscription verification offline'
 				: 'Couldn’t reach NeoStack Cloud'
-			: 'NeoStack subscription required'
+			: 'NeoStack access required'
 	);
 
 	const body = $derived(
-		state?.status === 'network'
-			? state.isBinaryBuild
+		entitlement?.status === 'network'
+			? entitlement.isBinaryBuild
 				? 'This binary build needs to verify your subscription on every launch. Tools are paused while we’re offline.'
 				: 'Reconnect to enable plugin updates and the cloud chat provider.'
-			: 'Set a NeoStack API key in Settings > Chat & Agents > Chat Providers, or renew your subscription to keep using the plugin.'
+			: 'Sign in with NeoStack, connect your lifetime purchase, or activate a subscription.'
 	);
 </script>
 
@@ -74,13 +85,13 @@
 		<div class="actions">
 			<a
 				class="primary"
-				href="https://neostack.dev/account"
+				href="https://neostack.dev/billing"
 				target="_blank"
 				rel="noopener noreferrer"
 			>
 				Open billing
 			</a>
-			{#if state?.status === 'network'}
+			{#if entitlement?.status === 'network'}
 				<button type="button" onclick={() => refresh()}>Retry</button>
 			{/if}
 			<button type="button" class="ghost" onclick={() => (dismissed = true)} aria-label="Dismiss">
@@ -97,9 +108,9 @@
 		justify-content: space-between;
 		gap: 1rem;
 		padding: 0.625rem 1rem;
-		background: rgba(220, 38, 38, 0.10);
+		background: rgba(220, 38, 38, 0.1);
 		color: var(--fg-4, inherit);
-		border-bottom: 1px solid rgba(220, 38, 38, 0.20);
+		border-bottom: 1px solid rgba(220, 38, 38, 0.2);
 		font-size: 0.875rem;
 	}
 	.msg {
@@ -125,7 +136,7 @@
 		font-weight: 500;
 		padding: 0.375rem 0.75rem;
 		border-radius: 9999px;
-		border: 1px solid rgba(220, 38, 38, 0.40);
+		border: 1px solid rgba(220, 38, 38, 0.4);
 		background: transparent;
 		color: inherit;
 		cursor: pointer;

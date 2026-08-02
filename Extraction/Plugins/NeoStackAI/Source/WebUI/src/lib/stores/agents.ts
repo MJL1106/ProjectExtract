@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
-import { getAgents, getLastUsedAgent, isInUnreal, type AgentInfo } from '$lib/bridge.js';
+import { getAgents, getLastUsedAgent, type AgentInfo } from '$lib/bridge.js';
+import { neostackAuth } from '$lib/stores/neostackAuth.js';
 
 export type AgentStatus = 'available' | 'not_installed' | 'missing_key' | 'unknown';
 
@@ -20,7 +21,7 @@ export type Agent = {
 
 /** Generate a consistent color from agent name (DJB2a variant with seed 0x1A4D) */
 function hashColor(name: string): string {
-	let hash = 0x1A4D; // Seed chosen to spread common short names across the hue wheel
+	let hash = 0x1a4d; // Seed chosen to spread common short names across the hue wheel
 	for (let i = 0; i < name.length; i++) {
 		hash = name.charCodeAt(i) + ((hash << 5) - hash);
 	}
@@ -49,6 +50,24 @@ export const agents = writable<Agent[]>([]);
 export const selectedAgent = writable<Agent | null>(null);
 export const agentsLoaded = writable(false);
 
+let authRefreshBound = false;
+let lastAuthStatus: string | null = null;
+
+/** Reload agents whenever the NeoStack sign-in state transitions — agent
+ *  statuses are computed at fetch time (NeoStack Cloud reads the auth state),
+ *  so a silent resume landing after the first load must refresh them.
+ *  Idempotent; call once at app mount. */
+export function bindAgentsAuthRefresh(): void {
+	if (authRefreshBound) return;
+	authRefreshBound = true;
+	neostackAuth.subscribe((s) => {
+		if (lastAuthStatus !== null && lastAuthStatus !== s.status) {
+			void loadAgents();
+		}
+		lastAuthStatus = s.status;
+	});
+}
+
 export function canonicalAgentName(name: string): string {
 	return name === 'OpenRouter' ? 'Local & BYOK Chat' : name;
 }
@@ -59,14 +78,24 @@ export async function loadAgents(): Promise<void> {
 		const [infos, lastUsedName] = await Promise.all([getAgents(), getLastUsedAgent()]);
 		const mapped = infos
 			.map(agentInfoToAgent)
-			.filter(a => a.status === 'available' || a.status === 'not_installed' || a.status === 'missing_key');
+			.filter(
+				(a) =>
+					a.status === 'available' || a.status === 'not_installed' || a.status === 'missing_key'
+			);
 		agents.set(mapped);
 		if (mapped.length > 0) {
 			const current = get(selectedAgent);
-			const stillExists = current && mapped.find(a => a.id === current.id);
-			if (!stillExists) {
+			const fresh = current && mapped.find((a) => a.id === current.id);
+			if (fresh) {
+				// Keep the selection but swap in the fresh object — status may
+				// have changed (e.g. NeoStack Cloud missing_key → available
+				// after sign-in) and stale status wedges the setup screen.
+				selectedAgent.set(fresh);
+			} else {
 				// Restore last-used agent if available, otherwise fall back to first
-				const lastUsed = lastUsedName ? mapped.find(a => a.name === canonicalAgentName(lastUsedName)) : null;
+				const lastUsed = lastUsedName
+					? mapped.find((a) => a.name === canonicalAgentName(lastUsedName))
+					: null;
 				selectedAgent.set(lastUsed ?? mapped[0]);
 			}
 		}
@@ -94,9 +123,13 @@ export function withAlpha(color: string, alpha: number): string {
 
 export function statusDotColor(status: AgentStatus): string {
 	switch (status) {
-		case 'available': return 'bg-emerald-500';
-		case 'missing_key': return 'bg-amber-500';
-		case 'not_installed': return 'bg-red-500/60';
-		default: return 'bg-zinc-500/60';
+		case 'available':
+			return 'bg-emerald-500';
+		case 'missing_key':
+			return 'bg-amber-500';
+		case 'not_installed':
+			return 'bg-red-500/60';
+		default:
+			return 'bg-zinc-500/60';
 	}
 }

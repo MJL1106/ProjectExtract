@@ -50,8 +50,18 @@ export function onRelayStateChange(cb: (state: RelayState) => void): () => void 
  * @param token - Better Auth session token for authentication
  * @param targetInstanceId - The instance ID to connect to
  */
-export function connectToRelay(url: string, token: string, targetInstanceId: string): Promise<void> {
+export function connectToRelay(
+	url: string,
+	token: string,
+	targetInstanceId: string
+): Promise<void> {
 	return new Promise((resolve, reject) => {
+		// A manual reconnect while a scheduled one is pending would produce
+		// dueling sockets — cancel the pending attempt first.
+		if (reconnectTimer) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = null;
+		}
 		if (ws) {
 			ws.close();
 			ws = null;
@@ -69,10 +79,12 @@ export function connectToRelay(url: string, token: string, targetInstanceId: str
 
 		ws.onopen = () => {
 			setState('authenticating');
-			ws!.send(JSON.stringify({
-				type: 'auth',
-				sessionToken: token,
-			}));
+			ws!.send(
+				JSON.stringify({
+					type: 'auth',
+					sessionToken: token
+				})
+			);
 		};
 
 		let authResolved = false;
@@ -121,15 +133,21 @@ export function connectToRelay(url: string, token: string, targetInstanceId: str
 				const callbacks = eventCallbacks.get(msg.event);
 				if (callbacks) {
 					for (const cb of callbacks) {
-						try { cb(msg.data); } catch (e) { console.error('Event callback error:', e); }
+						try {
+							cb(msg.data);
+						} catch (e) {
+							console.error('Event callback error:', e);
+						}
 					}
 				}
 				return;
 			}
 
-			// Instance status
+			// Instance status — treat like a connection loss: closing the socket
+			// runs the onclose path, which rejects in-flight RPCs and schedules
+			// a reconnect. Just setting state here would leave us stuck forever.
 			if (msg.type === 'instance_offline') {
-				setState('disconnected');
+				ws?.close();
 				return;
 			}
 
@@ -145,6 +163,15 @@ export function connectToRelay(url: string, token: string, targetInstanceId: str
 				authResolved = true;
 				reject(new Error('Connection closed before auth'));
 			}
+
+			// Reject all pending RPCs — they can never complete on a closed
+			// socket and would otherwise hang until the 30s timeout.
+			for (const pending of pendingRpcs.values()) {
+				clearTimeout(pending.timer);
+				pending.reject(new Error('Connection closed'));
+			}
+			pendingRpcs.clear();
+
 			setState('disconnected');
 			scheduleReconnect();
 		};
@@ -168,7 +195,7 @@ export function disconnectRelay(): void {
 	setState('disconnected');
 
 	// Reject all pending RPCs
-	for (const [id, pending] of pendingRpcs) {
+	for (const pending of pendingRpcs.values()) {
 		clearTimeout(pending.timer);
 		pending.reject(new Error('Disconnected'));
 	}
@@ -194,12 +221,14 @@ export function relayCall<T = any>(method: string, ...args: any[]): Promise<T> {
 
 		pendingRpcs.set(id, { resolve, reject, timer });
 
-		ws.send(JSON.stringify({
-			type: 'rpc_request',
-			id,
-			method,
-			args,
-		}));
+		ws.send(
+			JSON.stringify({
+				type: 'rpc_request',
+				id,
+				method,
+				args
+			})
+		);
 	});
 }
 
@@ -222,7 +251,11 @@ export function onRelayEvent(event: string, callback: EventCallback): () => void
 function setState(newState: RelayState): void {
 	state = newState;
 	for (const cb of stateListeners) {
-		try { cb(newState); } catch {}
+		try {
+			cb(newState);
+		} catch {
+			/* One listener must not block state propagation. */
+		}
 	}
 }
 

@@ -19,7 +19,12 @@
 		type SkillSyncReport
 	} from '$lib/bridge.js';
 
-	let state = $state<SkillsState>({ projectDir: '', manifestPath: '', skills: [], projectSkills: [] });
+	let skillsState = $state<SkillsState>({
+		projectDir: '',
+		manifestPath: '',
+		skills: [],
+		projectSkills: []
+	});
 	let isLoading = $state(false);
 	let isRescanning = $state(false);
 	let hasLoadedOnce = $state(false);
@@ -30,7 +35,7 @@
 	async function load() {
 		isLoading = true;
 		try {
-			state = await getSkills();
+			skillsState = await getSkills();
 		} catch (e) {
 			actionError = `Failed to load skills: ${e}`;
 		}
@@ -55,7 +60,9 @@
 		actionError = '';
 		try {
 			const r = await resolveSkillConflict(name, mode);
-			if (!r.success && r.error) { actionError = r.error; }
+			if (!r.success && r.error) {
+				actionError = r.error;
+			}
 			await load();
 		} catch (e) {
 			actionError = `Resolve failed: ${e}`;
@@ -64,14 +71,13 @@
 	}
 
 	function group(skills: SkillStatus[]): Array<{ source: string; items: SkillStatus[] }> {
-		const map = new Map<string, SkillStatus[]>();
+		const groups: Record<string, SkillStatus[]> = Object.create(null);
 		for (const s of skills) {
 			const key = s.sourceDisplayName || s.sourceId || 'Unknown';
-			if (!map.has(key)) { map.set(key, []); }
-			map.get(key)!.push(s);
+			(groups[key] ??= []).push(s);
 		}
 		// Core first, then extensions alphabetically.
-		return Array.from(map.entries())
+		return Object.entries(groups)
 			.sort(([a], [b]) => {
 				const aCore = a.toLowerCase().includes('core');
 				const bCore = b.toLowerCase().includes('core');
@@ -82,11 +88,13 @@
 			.map(([source, items]) => ({ source, items }));
 	}
 
-	let grouped = $derived(group(state.skills));
-	let editedCount = $derived(state.skills.filter((s) => s.userEdited).length);
-	let conflictCount = $derived(state.skills.filter((s) => s.conflictPending).length);
-	let installedCount = $derived(state.skills.filter((s) => s.installedPaths.length > 0).length);
-	let projectSkillCount = $derived(state.projectSkills.length);
+	let grouped = $derived(group(skillsState.skills));
+	let editedCount = $derived(skillsState.skills.filter((s) => s.userEdited).length);
+	let conflictCount = $derived(skillsState.skills.filter((s) => s.conflictPending).length);
+	let installedCount = $derived(
+		skillsState.skills.filter((s) => s.installedPaths.length > 0).length
+	);
+	let projectSkillCount = $derived(skillsState.projectSkills.length);
 
 	$effect(() => {
 		void load();
@@ -96,12 +104,16 @@
 <div class="mb-6 flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
 	<div>
 		<h2 class="text-[18px] font-medium text-foreground">Agent Skills</h2>
-		<p class="mt-1 text-[13px] text-muted-foreground/60">
+		<p class="text-muted-foreground/60 mt-1 text-[13px]">
 			NeoStack ships skills from installed plugins and syncs them into
-			<code class="rounded bg-foreground/5 px-1.5 py-0.5 text-[11px] text-muted-foreground">.claude/skills/</code>
+			<code class="bg-foreground/5 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground"
+				>.claude/skills/</code
+			>
 			and
-			<code class="rounded bg-foreground/5 px-1.5 py-0.5 text-[11px] text-muted-foreground">.agents/skills/</code>.
-			Custom skills you add to those folders are picked up by Claude Code, Codex, and Copilot CLI — listed below under
+			<code class="bg-foreground/5 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground"
+				>.agents/skills/</code
+			>. Custom skills you add to those folders are picked up by Claude Code, Codex, and Copilot CLI
+			— listed below under
 			<span class="text-foreground/80">Your project skills</span>.
 		</p>
 	</div>
@@ -109,7 +121,7 @@
 		type="button"
 		onclick={handleRescan}
 		disabled={isRescanning}
-		class="inline-flex shrink-0 items-center gap-2 rounded-md border border-border/60 px-3 py-2 text-[12px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+		class="border-border/60 inline-flex shrink-0 items-center gap-2 rounded-md border px-3 py-2 text-[12px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
 	>
 		<Icon icon={ArrowReloadHorizontalIcon} class={isRescanning ? 'animate-spin' : ''} size={14} />
 		{isRescanning ? 'Rescanning…' : 'Rescan + sync'}
@@ -117,27 +129,35 @@
 </div>
 
 {#if actionError}
-	<div class="mb-4 flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-[12px] text-red-300">
+	<div
+		class="mb-4 flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-[12px] text-red-300"
+	>
 		<Icon icon={AlertCircleIcon} size={14} />
 		<span>{actionError}</span>
 	</div>
 {/if}
 
 {#if lastReport}
-	<div class="mb-4 rounded-lg border border-border/60 bg-card p-3 text-[12px] text-muted-foreground/75">
-		Sync result —
-		installed <span class="tabular-nums text-foreground">{lastReport.installed}</span>,
-		updated <span class="tabular-nums text-foreground">{lastReport.updated}</span>,
-		no-op <span class="tabular-nums text-foreground">{lastReport.noOp}</span>,
-		user edits kept <span class="tabular-nums text-foreground">{lastReport.userEditsKept}</span>,
-		conflicts <span class="tabular-nums text-foreground">{lastReport.conflicts}</span>,
-		orphans removed <span class="tabular-nums text-foreground">{lastReport.orphansRemoved}</span>{#if lastReport.errors.length > 0},
-			errors <span class="tabular-nums text-red-300">{lastReport.errors.length}</span>{/if}.
+	<div
+		class="border-border/60 text-muted-foreground/75 mb-4 rounded-lg border bg-card p-3 text-[12px]"
+	>
+		Sync result — installed <span class="tabular-nums text-foreground">{lastReport.installed}</span
+		>, updated <span class="tabular-nums text-foreground">{lastReport.updated}</span>, no-op
+		<span class="tabular-nums text-foreground">{lastReport.noOp}</span>, user edits kept
+		<span class="tabular-nums text-foreground">{lastReport.userEditsKept}</span>, conflicts
+		<span class="tabular-nums text-foreground">{lastReport.conflicts}</span>, orphans removed
+		<span class="tabular-nums text-foreground">{lastReport.orphansRemoved}</span
+		>{#if lastReport.errors.length > 0}, errors <span class="tabular-nums text-red-300"
+				>{lastReport.errors.length}</span
+			>{/if}.
 	</div>
 {/if}
 
-<div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted-foreground/60">
-	<span>NeoStack skills <span class="tabular-nums text-foreground">{state.skills.length}</span></span>
+<div class="text-muted-foreground/60 mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px]">
+	<span
+		>NeoStack skills <span class="tabular-nums text-foreground">{skillsState.skills.length}</span
+		></span
+	>
 	<span>Installed <span class="tabular-nums text-foreground">{installedCount}</span></span>
 	<span>Project skills <span class="tabular-nums text-foreground">{projectSkillCount}</span></span>
 	<span>User-edited <span class="tabular-nums text-foreground">{editedCount}</span></span>
@@ -147,16 +167,22 @@
 </div>
 
 {#if isLoading && !hasLoadedOnce}
-	<div class="flex flex-col items-center justify-center gap-2 rounded-lg border border-border/60 bg-card p-6 text-center">
+	<div
+		class="border-border/60 flex flex-col items-center justify-center gap-2 rounded-lg border bg-card p-6 text-center"
+	>
 		<Icon icon={ArrowReloadHorizontalIcon} class="animate-spin" size={16} />
-		<p class="text-[13px] text-muted-foreground/60">Loading skills…</p>
+		<p class="text-muted-foreground/60 text-[13px]">Loading skills…</p>
 	</div>
 {:else}
-	{#if state.skills.length === 0}
-		<div class="rounded-lg border border-border/60 bg-card p-6 text-center">
-			<p class="text-[13px] text-muted-foreground/60">No skills shipped by any installed NeoStack plugin.</p>
-			<p class="mt-1 text-[11px] text-muted-foreground/40">
-				Core + each extension contributes its own <code class="rounded bg-foreground/5 px-1 py-0.5">Resources/Skills/</code> folder.
+	{#if skillsState.skills.length === 0}
+		<div class="border-border/60 rounded-lg border bg-card p-6 text-center">
+			<p class="text-muted-foreground/60 text-[13px]">
+				No skills shipped by any installed NeoStack plugin.
+			</p>
+			<p class="text-muted-foreground/40 mt-1 text-[11px]">
+				Core + each extension contributes its own <code class="bg-foreground/5 rounded px-1 py-0.5"
+					>Resources/Skills/</code
+				> folder.
 			</p>
 		</div>
 	{:else}
@@ -164,50 +190,64 @@
 			<div class="mt-6 first:mt-0">
 				<div class="mb-2 flex items-center gap-2 text-[12px] font-medium text-foreground">
 					{group.source}
-					<span class="tabular-nums text-muted-foreground/50">· {group.items.length}</span>
+					<span class="text-muted-foreground/50 tabular-nums">· {group.items.length}</span>
 				</div>
 				<ul class="space-y-2">
 					{#each group.items as skill (skill.name)}
-						<li class="rounded-lg border border-border/60 bg-card p-3.5">
+						<li class="border-border/60 rounded-lg border bg-card p-3.5">
 							<div class="flex items-start justify-between gap-3">
 								<div class="min-w-0 flex-1">
 									<div class="flex flex-wrap items-center gap-2">
-										<code class="rounded bg-foreground/6 px-1.5 py-0.5 text-[12px] font-medium text-foreground">
+										<code
+											class="bg-foreground/6 rounded px-1.5 py-0.5 text-[12px] font-medium text-foreground"
+										>
 											{skill.name}
 										</code>
 										{#if skill.sourceVersion}
-											<span class="text-[10px] text-muted-foreground/50">v{skill.sourceVersion}</span>
+											<span class="text-muted-foreground/50 text-[10px]"
+												>v{skill.sourceVersion}</span
+											>
 										{/if}
 										{#if skill.conflictPending}
-											<span class="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300">
+											<span
+												class="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300"
+											>
 												<Icon icon={AlertCircleIcon} size={10} />
 												Upstream update available
 											</span>
 										{:else if skill.userEdited}
-											<span class="inline-flex items-center gap-1 rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300">
+											<span
+												class="inline-flex items-center gap-1 rounded-full border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-[10px] text-blue-300"
+											>
 												<Icon icon={PencilEdit02Icon} size={10} />
 												Edited locally
 											</span>
 										{:else if skill.installedPaths.length > 0}
-											<span class="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">
+											<span
+												class="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300"
+											>
 												<Icon icon={CheckmarkCircle02Icon} size={10} />
 												In sync
 											</span>
 										{:else}
-											<span class="inline-flex items-center gap-1 rounded-full border border-border/50 bg-foreground/5 px-2 py-0.5 text-[10px] text-muted-foreground/70">
+											<span
+												class="border-border/50 bg-foreground/5 text-muted-foreground/70 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10px]"
+											>
 												Not installed
 											</span>
 										{/if}
 									</div>
 									{#if skill.description}
-										<p class="mt-1.5 text-[12px] leading-relaxed text-muted-foreground/70">
+										<p class="text-muted-foreground/70 mt-1.5 text-[12px] leading-relaxed">
 											{skill.description}
 										</p>
 									{/if}
 									{#if skill.tags.length > 0}
 										<div class="mt-1.5 flex flex-wrap gap-1">
 											{#each skill.tags as tag (tag)}
-												<span class="rounded-full bg-foreground/5 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted-foreground/50">
+												<span
+													class="bg-foreground/5 text-muted-foreground/50 rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-wide"
+												>
 													{tag}
 												</span>
 											{/each}
@@ -221,7 +261,7 @@
 									<button
 										type="button"
 										onclick={() => openSkillFile(skill.name, false)}
-										class="inline-flex items-center gap-1.5 rounded-md border border-border/50 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+										class="border-border/50 inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
 									>
 										<Icon icon={FolderOpenIcon} size={11} />
 										Open SKILL.md
@@ -240,7 +280,7 @@
 										type="button"
 										disabled={busySkill === skill.name}
 										onclick={() => handleResolve(skill.name, 'keep-user')}
-										class="inline-flex items-center gap-1.5 rounded-md border border-border/50 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+										class="border-border/50 inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
 									>
 										Keep mine
 									</button>
@@ -264,55 +304,65 @@
 	<div class="mt-6">
 		<div class="mb-2 flex items-center gap-2 text-[12px] font-medium text-foreground">
 			Your project skills
-			<span class="tabular-nums text-muted-foreground/50">· {projectSkillCount}</span>
+			<span class="text-muted-foreground/50 tabular-nums">· {projectSkillCount}</span>
 		</div>
 
 		{#if projectSkillCount === 0}
-			<div class="rounded-lg border border-border/60 bg-card p-4 text-center">
-				<p class="text-[13px] text-muted-foreground/60">No custom project skills found.</p>
-				<p class="mt-1 text-[11px] text-muted-foreground/40">
+			<div class="border-border/60 rounded-lg border bg-card p-4 text-center">
+				<p class="text-muted-foreground/60 text-[13px]">No custom project skills found.</p>
+				<p class="text-muted-foreground/40 mt-1 text-[11px]">
 					Add folders to
-					<code class="rounded bg-foreground/5 px-1 py-0.5">.agents/skills/&lt;name&gt;/SKILL.md</code>
+					<code class="bg-foreground/5 rounded px-1 py-0.5"
+						>.agents/skills/&lt;name&gt;/SKILL.md</code
+					>
 					(or
-					<code class="rounded bg-foreground/5 px-1 py-0.5">.claude/skills/</code>
+					<code class="bg-foreground/5 rounded px-1 py-0.5">.claude/skills/</code>
 					for Claude Code).
 				</p>
 			</div>
 		{:else}
 			<ul class="space-y-2">
-				{#each state.projectSkills as skill (skill.name)}
-					<li class="rounded-lg border border-border/60 bg-card p-3.5">
+				{#each skillsState.projectSkills as skill (skill.name)}
+					<li class="border-border/60 rounded-lg border bg-card p-3.5">
 						<div class="flex items-start justify-between gap-3">
 							<div class="min-w-0 flex-1">
 								<div class="flex flex-wrap items-center gap-2">
-									<code class="rounded bg-foreground/6 px-1.5 py-0.5 text-[12px] font-medium text-foreground">
+									<code
+										class="bg-foreground/6 rounded px-1.5 py-0.5 text-[12px] font-medium text-foreground"
+									>
 										{skill.name}
 									</code>
 									{#if skill.parseError}
-										<span class="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300">
+										<span
+											class="inline-flex items-center gap-1 rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-300"
+										>
 											<Icon icon={AlertCircleIcon} size={10} />
 											Invalid SKILL.md
 										</span>
 									{:else}
-										<span class="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">
+										<span
+											class="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300"
+										>
 											<Icon icon={CheckmarkCircle02Icon} size={10} />
 											Available to agents
 										</span>
 									{/if}
 								</div>
 								{#if skill.description}
-									<p class="mt-1.5 text-[12px] leading-relaxed text-muted-foreground/70">
+									<p class="text-muted-foreground/70 mt-1.5 text-[12px] leading-relaxed">
 										{skill.description}
 									</p>
 								{:else if skill.parseError}
-									<p class="mt-1.5 text-[12px] leading-relaxed text-muted-foreground/50">
+									<p class="text-muted-foreground/50 mt-1.5 text-[12px] leading-relaxed">
 										{skill.parseError}
 									</p>
 								{/if}
 								{#if skill.tags.length > 0}
 									<div class="mt-1.5 flex flex-wrap gap-1">
 										{#each skill.tags as tag (tag)}
-											<span class="rounded-full bg-foreground/5 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-muted-foreground/50">
+											<span
+												class="bg-foreground/5 text-muted-foreground/50 rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-wide"
+											>
 												{tag}
 											</span>
 										{/each}
@@ -325,7 +375,7 @@
 							<button
 								type="button"
 								onclick={() => openSkillFile(skill.folderName || skill.name, false)}
-								class="inline-flex items-center gap-1.5 rounded-md border border-border/50 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+								class="border-border/50 inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
 							>
 								<Icon icon={FolderOpenIcon} size={11} />
 								Open SKILL.md
@@ -337,7 +387,9 @@
 		{/if}
 	</div>
 
-	<div class="mt-6 rounded-md border border-border/40 bg-background/40 p-3 text-[11px] text-muted-foreground/50">
-		Manifest: <code class="text-muted-foreground/70">{state.manifestPath}</code>
+	<div
+		class="border-border/40 bg-background/40 text-muted-foreground/50 mt-6 rounded-md border p-3 text-[11px]"
+	>
+		Manifest: <code class="text-muted-foreground/70">{skillsState.manifestPath}</code>
 	</div>
 {/if}

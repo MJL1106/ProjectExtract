@@ -15,6 +15,7 @@
 
 	let argsExpanded = $state(false);
 	let responding = $state(false);
+	let respondError = $state('');
 	let activeOptionIndex = $state(0);
 	let rootEl: HTMLDivElement | undefined = $state();
 
@@ -23,9 +24,7 @@
 		const id = request.toolCall.toolCallId.toLowerCase();
 		const title = request.toolCall.title.toLowerCase();
 		return (
-			id.includes('exitplanmode') ||
-			title.includes('ready to code') ||
-			title.includes('exit plan')
+			id.includes('exitplanmode') || title.includes('ready to code') || title.includes('exit plan')
 		);
 	});
 
@@ -42,9 +41,10 @@
 	let argsLong = $derived(request.toolCall.rawInput.length > 120);
 
 	$effect(() => {
-		request.requestId;
+		if (!request.requestId) return;
 		argsExpanded = false;
 		responding = false;
+		respondError = '';
 		activeOptionIndex = 0;
 		requestAnimationFrame(() => {
 			const firstButton = rootEl?.querySelector<HTMLButtonElement>('button[data-option-index="0"]');
@@ -77,7 +77,15 @@
 	async function handleOption(optionId: string) {
 		if (responding) return;
 		responding = true;
-		await respondToOption(optionId, sessionId, request);
+		respondError = '';
+		try {
+			await respondToOption(optionId, sessionId, request);
+		} catch (e) {
+			// Request stays queued — leave the dialog open so the user can retry.
+			respondError = e instanceof Error ? e.message : String(e);
+		} finally {
+			responding = false;
+		}
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -122,7 +130,7 @@
 			: 'border-amber-500/30 bg-amber-500/5'}"
 	>
 		<!-- Header -->
-		<div class="flex items-center justify-between gap-2 px-4 pt-3 pb-2">
+		<div class="flex items-center justify-between gap-2 px-4 pb-2 pt-3">
 			<div class="flex items-center gap-2">
 				{#if isExitPlanMode()}
 					<Icon icon={CheckmarkBadge01Icon} size={18} strokeWidth={1.5} class="text-emerald-400" />
@@ -132,7 +140,7 @@
 					<span class="text-[14px] font-semibold text-amber-400">Permission Required</span>
 				{/if}
 			</div>
-			<span class="text-[11px] text-muted-foreground/75">↑/↓ select • Enter confirm</span>
+			<span class="text-muted-foreground/75 text-[11px]">↑/↓ select • Enter confirm</span>
 		</div>
 
 		<!-- Tool info -->
@@ -145,7 +153,7 @@
 			<div class="px-4 pb-3">
 				{#if argsLong}
 					<button
-						class="flex items-center gap-1 text-[11px] text-muted-foreground/60 transition-colors hover:text-muted-foreground"
+						class="text-muted-foreground/60 flex items-center gap-1 text-[11px] transition-colors hover:text-muted-foreground"
 						onclick={() => (argsExpanded = !argsExpanded)}
 					>
 						<Icon
@@ -158,24 +166,29 @@
 				{/if}
 				{#if !argsLong || argsExpanded}
 					<pre
-						class="mt-1.5 max-h-[200px] overflow-auto rounded-lg bg-surface-sunken p-3 text-[12px] leading-relaxed text-muted-foreground/70"
-					>{formattedArgs()}</pre>
+						class="text-muted-foreground/70 mt-1.5 max-h-[200px] overflow-auto rounded-lg bg-surface-sunken p-3 text-[12px] leading-relaxed">{formattedArgs()}</pre>
 				{/if}
 			</div>
 		{/if}
 
+		<!-- Response error (request stays queued — user can retry) -->
+		{#if respondError}
+			<p class="px-4 pb-2 text-[12px] text-red-400">{respondError}</p>
+		{/if}
+
 		<!-- Option buttons -->
-		<div class="flex flex-col gap-1.5 border-t border-border/20 px-4 py-3">
-			{#each request.options as option, index}
+		<div class="border-border/20 flex flex-col gap-1.5 border-t px-4 py-3">
+			{#each request.options as option, index (option.optionId)}
 				{@const icon = buttonIcon(option.kind)}
 				<button
 					role="option"
 					aria-selected={index === activeOptionIndex}
 					data-option-index={index}
-					class="flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[13px] font-medium transition-all {buttonColor(option.kind)} {index ===
-					activeOptionIndex
+					class="flex items-center gap-1.5 rounded-lg border px-3 py-2 text-[13px] font-medium transition-all {buttonColor(
+						option.kind
+					)} {index === activeOptionIndex
 						? 'ring-2 ring-[var(--ue-accent-muted)]'
-						: 'hover:border-border/70'} {responding ? 'opacity-50 cursor-not-allowed' : ''}"
+						: 'hover:border-border/70'} {responding ? 'cursor-not-allowed opacity-50' : ''}"
 					onclick={() => handleOption(option.optionId)}
 					onmouseenter={() => (activeOptionIndex = index)}
 					disabled={responding}

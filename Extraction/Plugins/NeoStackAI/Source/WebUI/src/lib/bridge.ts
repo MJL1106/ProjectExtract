@@ -9,6 +9,7 @@
  */
 import { createUUID } from '$lib/utils.js';
 import { relayCall, onRelayEvent, getRelayState } from './relay.js';
+import { createBridgeBindingRegistry } from './bridgeLifecycle.js';
 
 export type Transport = 'embedded' | 'remote' | 'standalone';
 
@@ -93,10 +94,16 @@ export type ContentBlock = {
 	toolSuccess?: boolean;
 	imageCount?: number;
 	images?: ToolResultImage[];
+	locations?: ToolCallLocation[];
 	/** If this tool call was made inside a subagent (Task), the parent Task's toolCallId */
 	parentToolCallId?: string;
 	/** For system status blocks (e.g. "compacting", "compacted") */
 	systemStatus?: string;
+};
+
+export type ToolCallLocation = {
+	path: string;
+	line?: number;
 };
 
 export type ChatMessage = {
@@ -120,6 +127,8 @@ export type ModelUsageEntry = {
 
 export type StreamingUpdate = {
 	agentName: string;
+	/** Correlates an asynchronous terminal error with the accepted prompt. */
+	requestId?: string;
 	type:
 		| 'text_chunk'
 		| 'thought_chunk'
@@ -140,6 +149,7 @@ export type StreamingUpdate = {
 	toolResult?: string;
 	toolSuccess?: boolean;
 	images?: ToolResultImage[];
+	locations?: ToolCallLocation[];
 	/** If this tool call was made inside a subagent (Task), the parent Task's toolCallId */
 	parentToolCallId?: string;
 	errorMessage?: string;
@@ -172,33 +182,144 @@ function getBridge(): any | null {
 	return null;
 }
 
+const embeddedBridgeBindings = createBridgeBindingRegistry();
+
+// CEF exposes a dynamically generated object whose method surface is defined
+// by native UFUNCTIONs, so this one boundary intentionally remains dynamic.
+function bindEmbeddedListener(name: string, bind: (bridge: any) => void): void {
+	embeddedBridgeBindings.register(name, bind);
+	const bridge = getBridge();
+	embeddedBridgeBindings.refresh(bridge);
+	if (!bridge) warnListenerSkipped(name);
+}
+
+/** Observe bridge loss/replacement for the lifetime of the mounted app. */
+export function startBridgeLifecycleMonitor(signal?: AbortSignal): () => void {
+	if (typeof window === 'undefined' || typeof document === 'undefined') return () => {};
+
+	const refresh = () => embeddedBridgeBindings.refresh(getBridge());
+	const interval = setInterval(refresh, 500);
+	document.addEventListener('ue:ready', refresh);
+	refresh();
+
+	const stop = () => {
+		clearInterval(interval);
+		document.removeEventListener('ue:ready', refresh);
+		signal?.removeEventListener('abort', stop);
+	};
+	signal?.addEventListener('abort', stop, { once: true });
+	return stop;
+}
+
+export function onBridgeAvailabilityChanged(
+	callback: (available: boolean, generation: number) => void
+): () => void {
+	return embeddedBridgeBindings.subscribe(callback);
+}
+
+const EMBEDDED_BRIDGE_QUERY_PARAM = 'neostackEmbedded';
+
+/** Where we are in the wait for the UE bridge to bind. */
+export type BridgeWaitState = 'waiting' | 'available' | 'timed_out';
+
+let bridgeWaitState: BridgeWaitState = 'waiting';
+
+/** Current state of the bridge wait: 'waiting' until the bridge appears,
+ *  'available' once it has, 'timed_out' if it never did (standalone dev). */
+export function getBridgeWaitState(): BridgeWaitState {
+	if (getBridge()) bridgeWaitState = 'available';
+	return bridgeWaitState;
+}
+
+/**
+ * Whether this page was opened by the Unreal plugin and must wait for the
+ * native bridge. Standalone development deliberately has no marker, so it can
+ * initialize mock data immediately instead of guessing from a timeout.
+ */
+export function expectsEmbeddedBridge(): boolean {
+	if (getBridge()) return true;
+	if (typeof window === 'undefined') return false;
+	return new URLSearchParams(window.location.search).get(EMBEDDED_BRIDGE_QUERY_PARAM) === '1';
+}
+
 /**
  * Wait for the UE bridge to become available.
- * The CEF browser starts loading the page before BindUObject() completes,
- * so window.ue.bridge may not be available when onMount fires.
- * This polls until the bridge appears or the timeout expires.
+ * The CEF browser starts loading the page before BindUObject() completes, so
+ * window.ue.bridge may not exist when onMount fires. When binding finishes the
+ * engine dispatches a `ue:ready` CustomEvent on `document`
+ * (CEFWebBrowserWindow.cpp) — but on fast startups that can fire before this
+ * listener attaches, so a slow poll runs as a belt-and-braces fallback.
+ * Resolves true as soon as the bridge appears, no matter how late the editor
+ * binds it. The default has no timeout because embedded pages are marked
+ * explicitly; callers may still provide a timeout for diagnostics/tests.
+ * Resolves false when an optional timeout expires or `signal` is aborted.
  */
-export async function waitForBridge(maxWaitMs = 5000): Promise<boolean> {
+export async function waitForBridge(maxWaitMs?: number, signal?: AbortSignal): Promise<boolean> {
 	// Already available — no wait needed
-	if (getBridge()) return true;
-	// Not in a browser environment (SSR)
-	if (typeof window === 'undefined') return false;
-
-	const start = Date.now();
-	while (Date.now() - start < maxWaitMs) {
-		if ((window as any).ue?.bridge) return true;
-		await new Promise((r) => setTimeout(r, 50));
+	if (getBridge()) {
+		bridgeWaitState = 'available';
+		return true;
 	}
-	console.warn('Bridge not available after', maxWaitMs, 'ms — running in standalone mode');
-	return false;
+	// Not in a browser environment (SSR)
+	if (typeof window === 'undefined' || typeof document === 'undefined' || signal?.aborted) {
+		return false;
+	}
+
+	bridgeWaitState = 'waiting';
+	return new Promise<boolean>((resolve) => {
+		let pollHandle: ReturnType<typeof setInterval> | null = null;
+		let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+		let settled = false;
+
+		const finish = (found: boolean) => {
+			if (settled) return;
+			settled = true;
+			document.removeEventListener('ue:ready', onUeReady);
+			signal?.removeEventListener('abort', onAbort);
+			if (pollHandle !== null) clearInterval(pollHandle);
+			if (timeoutHandle !== null) clearTimeout(timeoutHandle);
+			bridgeWaitState = found ? 'available' : 'timed_out';
+			if (!found && maxWaitMs !== undefined) {
+				console.warn('Bridge not available after', maxWaitMs, 'ms — running in standalone mode');
+			}
+			resolve(found);
+		};
+
+		// Engine fires this when BindUObject() completes (CEFWebBrowserWindow.cpp:1968)
+		const onUeReady = () => {
+			if (getBridge()) finish(true);
+		};
+		const onAbort = () => finish(false);
+		document.addEventListener('ue:ready', onUeReady);
+		signal?.addEventListener('abort', onAbort, { once: true });
+
+		// Fallback: the event may already have fired before the listener attached
+		// (fast startup), or may never fire (standalone dev) — poll slowly too.
+		pollHandle = setInterval(() => {
+			if (getBridge()) finish(true);
+		}, 250);
+
+		if (maxWaitMs !== undefined) {
+			timeoutHandle = setTimeout(() => finish(false), maxWaitMs);
+		}
+	});
+}
+
+/** Log when an event-listener registration is dropped because the bridge is
+ *  missing. A silent no-op here is how late-bridge bugs hide: the caller's
+ *  bind guard latches while nothing was actually registered, and push events
+ *  (streaming, permissions, session lists) never arrive. */
+function warnListenerSkipped(name: string): void {
+	console.warn(`[bridge] ${name}: window.ue.bridge not available — listener NOT registered`);
 }
 
 /** Safely parse a bridge result - UE wraps returns in { ReturnValue: "json string" } */
 function parseResult<T>(value: unknown): T {
 	// UE bridge wraps UFUNCTION returns in { ReturnValue: ... }
-	const raw = (value && typeof value === 'object' && 'ReturnValue' in (value as any))
-		? (value as any).ReturnValue
-		: value;
+	const raw =
+		value && typeof value === 'object' && 'ReturnValue' in (value as any)
+			? (value as any).ReturnValue
+			: value;
 	if (typeof raw === 'string') {
 		return JSON.parse(raw);
 	}
@@ -209,15 +330,40 @@ export function isInUnreal(): boolean {
 	return getBridge() !== null || currentTransport === 'remote';
 }
 
+/** Export bounded WebUI performance records to native telemetry. Native
+ * aggregates allow-listed numeric fields and discards record details. */
+export async function capturePerformanceSnapshot(records: unknown[]): Promise<void> {
+	if (currentTransport === 'remote' || records.length === 0) return;
+	const bridge = getBridge();
+	if (!bridge) return;
+	const safeRecords = records.flatMap((record) => {
+		if (!record || typeof record !== 'object') return [];
+		const value = record as Record<string, unknown>;
+		return [
+			{
+				name: value.name,
+				value: value.value,
+				unit: value.unit,
+				budget: value.budget,
+				exceeded: value.exceeded
+			}
+		];
+	});
+	try {
+		await bridge.captureperformancesnapshot(JSON.stringify(safeRecords));
+	} catch {
+		// Telemetry must never affect the embedded UI lifecycle.
+	}
+}
+
 /** Get the last used agent name (persisted across editor sessions) */
 export async function getLastUsedAgent(): Promise<string> {
 	if (currentTransport === 'remote') return relayCall<string>('getLastUsedAgent');
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.getlastusedagent();
-		const raw = (result && typeof result === 'object' && 'ReturnValue' in result)
-			? result.ReturnValue
-			: result;
+		const raw =
+			result && typeof result === 'object' && 'ReturnValue' in result ? result.ReturnValue : result;
 		return (raw as string) || '';
 	}
 	return '';
@@ -230,9 +376,8 @@ export async function getOnboardingCompleted(): Promise<boolean> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.getonboardingcompleted();
-		const raw = (result && typeof result === 'object' && 'ReturnValue' in result)
-			? result.ReturnValue
-			: result;
+		const raw =
+			result && typeof result === 'object' && 'ReturnValue' in result ? result.ReturnValue : result;
 		return !!raw;
 	}
 	return true; // In dev mode (no UE), skip wizard
@@ -246,14 +391,30 @@ export async function setOnboardingCompleted(): Promise<void> {
 	}
 }
 
+/** Record a persisted onboarding outcome using fixed, metadata-only fields. */
+export async function captureOnboardingOutcome(
+	outcome: 'completed' | 'skipped',
+	agentSelected: boolean
+): Promise<void> {
+	const bridge = getBridge();
+	if (bridge) {
+		try {
+			await bridge.captureonboardingoutcome(outcome, agentSelected);
+		} catch {
+			// Onboarding persistence already succeeded; telemetry is best-effort.
+		}
+	}
+}
+
 /** OS-level user language tag (e.g. "en-US", "fr-FR", "pt-BR"). Empty in standalone mode. */
 export async function getDefaultLanguage(): Promise<string> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.getdefaultlanguage();
-		const raw = (result && typeof result === 'object' && 'ReturnValue' in result)
-			? (result as any).ReturnValue
-			: result;
+		const raw =
+			result && typeof result === 'object' && 'ReturnValue' in result
+				? (result as any).ReturnValue
+				: result;
 		return (raw as string) || '';
 	}
 	return '';
@@ -288,9 +449,10 @@ export async function getLanguageOnboardingCompleted(): Promise<boolean> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.getlanguageonboardingcompleted();
-		const raw = (result && typeof result === 'object' && 'ReturnValue' in result)
-			? (result as any).ReturnValue
-			: result;
+		const raw =
+			result && typeof result === 'object' && 'ReturnValue' in result
+				? (result as any).ReturnValue
+				: result;
 		return !!raw;
 	}
 	return true; // Skip in dev mode
@@ -324,14 +486,9 @@ export async function getEntitlementStatus(): Promise<EntitlementStatus> {
 	return { entitled: true, status: 'lifetime', isBinaryBuild: false };
 }
 
-// ── NeoStack Cloud account (entitlement/status payload) ───────────────
+// ── NeoStack Cloud account (auth state + entitlement payload) ─────────
 
-export type CloudConnectionState =
-	| 'disconnected'
-	| 'loading'
-	| 'connected'
-	| 'key_rejected'
-	| 'offline';
+export type CloudConnectionState = 'disconnected' | 'loading' | 'connected' | 'offline';
 
 export type CloudAccountUser = {
 	name: string | null;
@@ -341,17 +498,9 @@ export type CloudAccountUser = {
 
 export type CloudAccountOrganization = {
 	id: string;
-	name: string | null;
-	slug: string | null;
-	logo: string | null;
-};
-
-export type CloudAccountAccessPlan = {
-	planId: string | null;
-	planName: string | null;
-	requiresPluginEntitlement: boolean;
-	allowed: boolean;
-	reason: string | null;
+	name?: string | null;
+	slug?: string | null;
+	logo?: string | null;
 };
 
 export type CloudAccountCredits = {
@@ -365,24 +514,35 @@ export type CloudAccountQuota = {
 	burst: { percent: number } | null;
 };
 
+export type CloudUsageSummary = {
+	tier: 'free' | 'trial' | 'pro' | 'comp';
+	period: 'weekly';
+	usedPercent: number;
+	remainingPercent: number;
+	exhausted: boolean;
+	resetsAt: string;
+};
+
 export type CloudAccountStatus = {
-	hasApiKey: boolean;
+	signedIn: boolean;
 	entitled: boolean;
 	isBinaryBuild: boolean;
 	checkPending: boolean;
 	clientStatus: string;
 	connectionState: CloudConnectionState;
 	connected: boolean;
-	status?: string;
-	variant?: 'full' | 'binary';
-	hasLifetime?: boolean;
-	subscriptionActive?: boolean;
-	entitledSlugs?: string[];
+	// ideEntitlement payload (present once the signed-in plan check has run).
+	reason?: string | null;
+	plan?: string | null;
+	planName?: string | null;
+	features?: string[];
+	featureFlags?: string[];
 	user?: CloudAccountUser;
 	organization?: CloudAccountOrganization;
-	accessPlan?: CloudAccountAccessPlan;
+	// Legacy credit/quota payloads remain optional for compatibility.
 	credits?: CloudAccountCredits;
 	quota?: CloudAccountQuota | null;
+	usage?: CloudUsageSummary;
 };
 
 export async function getNeoStackAccountStatus(): Promise<CloudAccountStatus> {
@@ -392,7 +552,7 @@ export async function getNeoStackAccountStatus(): Promise<CloudAccountStatus> {
 		return parseResult<CloudAccountStatus>(result);
 	}
 	return {
-		hasApiKey: false,
+		signedIn: false,
 		entitled: true,
 		isBinaryBuild: false,
 		checkPending: false,
@@ -402,16 +562,8 @@ export async function getNeoStackAccountStatus(): Promise<CloudAccountStatus> {
 	};
 }
 
-export async function clearNeoStackCloudKey(): Promise<void> {
-	const bridge = getBridge();
-	if (bridge) {
-		await bridge.clearneostackcloudkey();
-	}
-}
-
 export function bindNeoStackAccountChanged(callback: (status: CloudAccountStatus) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('bindNeoStackAccountChanged', (bridge) => {
 		bridge.bindonneostackaccountchanged((statusJson: string) => {
 			try {
 				callback(JSON.parse(statusJson) as CloudAccountStatus);
@@ -419,7 +571,7 @@ export function bindNeoStackAccountChanged(callback: (status: CloudAccountStatus
 				console.warn('NeoStack account status payload was malformed');
 			}
 		});
-	}
+	});
 }
 
 // ── Provider Settings ───────────────────────────────────────────────
@@ -453,7 +605,7 @@ export type ProviderSettings = {
 	providers: ProviderConfig[];
 };
 
-export type ExtensionRuntimeState =
+export type IntegrationRuntimeState =
 	| 'disabled'
 	| 'registered'
 	| 'active'
@@ -462,16 +614,16 @@ export type ExtensionRuntimeState =
 	| 'failed'
 	| 'unknown';
 
-export type ExtensionDependency = {
+export type IntegrationDependency = {
 	name: string;
 	optional: boolean;
 	enabled: boolean;
 	installed: boolean;
 };
 
-export type ExtensionInfo = {
-	pluginName: string;
-	extensionId: string;
+export type IntegrationInfo = {
+	legacyPluginName: string;
+	integrationId: string;
 	displayName: string;
 	description: string;
 	version: string;
@@ -479,7 +631,7 @@ export type ExtensionInfo = {
 	category: string;
 	statusMessage: string;
 	baseDir: string;
-	runtimeState: ExtensionRuntimeState;
+	runtimeState: IntegrationRuntimeState;
 	enabledInProject: boolean;
 	hasExplicitProjectEntry: boolean;
 	loadedInSession: boolean;
@@ -504,20 +656,20 @@ export type ExtensionInfo = {
 	enablesAgentTo: string[];
 	whenToEnable: string;
 	isRecommended: boolean;
-	dependencies: ExtensionDependency[];
+	dependencies: IntegrationDependency[];
 };
 
-export type ExtensionSettingsState = {
+export type IntegrationSettingsState = {
 	coreApiVersion: number;
 	projectFile: string;
 	restartRequired: boolean;
-	extensions: ExtensionInfo[];
+	integrations: IntegrationInfo[];
 };
 
-export type ExtensionToggleResult = {
+export type IntegrationOverrideResult = {
 	success: boolean;
-	pluginName: string;
-	enabledInProject: boolean;
+	integrationId: string;
+	disabled: boolean;
 	restartRequired: boolean;
 	error?: string;
 };
@@ -575,7 +727,10 @@ export async function refreshProviderModels(): Promise<void> {
 
 // ── Custom Providers ────────────────────────────────────────────────
 
-export async function createCustomProvider(displayName: string, baseUrl: string): Promise<{ providerId: string }> {
+export async function createCustomProvider(
+	displayName: string,
+	baseUrl: string
+): Promise<{ providerId: string }> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.createcustomprovider(displayName, baseUrl);
@@ -591,30 +746,50 @@ export async function deleteCustomProvider(providerId: string): Promise<void> {
 	}
 }
 
-export async function updateCustomProvider(providerId: string, displayName: string, baseUrl: string): Promise<void> {
+export async function updateCustomProvider(
+	providerId: string,
+	displayName: string,
+	baseUrl: string
+): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.updatecustomprovider(providerId, displayName, baseUrl);
 	}
 }
 
-export async function addCustomProviderModel(providerId: string, modelId: string, displayName: string, description: string): Promise<{ success: boolean }> {
+export async function addCustomProviderModel(
+	providerId: string,
+	modelId: string,
+	displayName: string,
+	description: string
+): Promise<{ success: boolean }> {
 	const bridge = getBridge();
 	if (bridge) {
-		const result = await bridge.addcustomprovidermodel(providerId, modelId, displayName, description);
+		const result = await bridge.addcustomprovidermodel(
+			providerId,
+			modelId,
+			displayName,
+			description
+		);
 		return parseResult(result);
 	}
 	return { success: false };
 }
 
-export async function removeCustomProviderModel(providerId: string, modelId: string): Promise<void> {
+export async function removeCustomProviderModel(
+	providerId: string,
+	modelId: string
+): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.removecustomprovidermodel(providerId, modelId);
 	}
 }
 
-export async function importCustomProviderModels(providerId: string, modelsJson: string): Promise<{ imported: number; errors: string[] }> {
+export async function importCustomProviderModels(
+	providerId: string,
+	modelsJson: string
+): Promise<{ imported: number; errors: string[] }> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.importcustomprovidermodels(providerId, modelsJson);
@@ -623,14 +798,20 @@ export async function importCustomProviderModels(providerId: string, modelsJson:
 	return { imported: 0, errors: ['Bridge not available'] };
 }
 
-export async function setCustomProviderModelDiscovery(providerId: string, enabled: boolean): Promise<void> {
+export async function setCustomProviderModelDiscovery(
+	providerId: string,
+	enabled: boolean
+): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.setcustomprovidermodeldiscovery(providerId, enabled);
 	}
 }
 
-export async function setCustomProviderRequiresApiKey(providerId: string, requiresApiKey: boolean): Promise<void> {
+export async function setCustomProviderRequiresApiKey(
+	providerId: string,
+	requiresApiKey: boolean
+): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.setcustomproviderrequiresapikey(providerId, requiresApiKey);
@@ -665,51 +846,50 @@ export async function setEnabledModels(modelIds: string[]): Promise<void> {
 	}
 }
 
-// ── Extension Settings ──────────────────────────────────────────────
+// ── Folded Integrations ─────────────────────────────────────────────
 
-export async function getExtensionSettings(): Promise<ExtensionSettingsState> {
+export async function getIntegrationSettings(): Promise<IntegrationSettingsState> {
 	const bridge = getBridge();
 	if (bridge) {
-		const result = await bridge.getextensionsettings();
+		const result = await bridge.getintegrationsettings();
 		return parseResult(result);
 	}
-	return { coreApiVersion: 0, projectFile: '', restartRequired: false, extensions: [] };
+	return { coreApiVersion: 0, projectFile: '', restartRequired: false, integrations: [] };
 }
 
-export async function setExtensionEnabled(
-	pluginName: string,
-	enabled: boolean
-): Promise<ExtensionToggleResult> {
+export async function setIntegrationOverride(
+	integrationId: string,
+	disabled: boolean
+): Promise<IntegrationOverrideResult> {
 	const bridge = getBridge();
 	if (bridge) {
-		const result = await bridge.setextensionenabled(pluginName, enabled);
+		const result = await bridge.setintegrationoverride(integrationId, disabled);
 		return parseResult(result);
 	}
 	return {
 		success: false,
-		pluginName,
-		enabledInProject: enabled,
+		integrationId,
+		disabled,
 		restartRequired: false,
 		error: 'Bridge not available'
 	};
 }
 
-export type ExtensionBulkToggleResult = {
+export type IntegrationPluginsToggleResult = {
 	success: boolean;
 	count: number;
 	restartRequired: boolean;
 	error?: string;
 };
 
-// Flip the extension and its missing required deps in one .uproject save.
-// Used by the "Enable required" button so a single restart picks up the lot.
-export async function setExtensionPluginsEnabled(
-	pluginNames: string[],
+// Flip every backing plugin declared by an integration in one .uproject save.
+export async function setIntegrationPluginsEnabled(
+	integrationId: string,
 	enabled: boolean
-): Promise<ExtensionBulkToggleResult> {
+): Promise<IntegrationPluginsToggleResult> {
 	const bridge = getBridge();
 	if (bridge) {
-		const result = await bridge.setextensionpluginsenabled(JSON.stringify(pluginNames), enabled);
+		const result = await bridge.setintegrationpluginsenabled(integrationId, enabled);
 		return parseResult(result);
 	}
 	return {
@@ -718,199 +898,6 @@ export async function setExtensionPluginsEnabled(
 		restartRequired: false,
 		error: 'Bridge not available'
 	};
-}
-
-// ── Extension Catalog (NeoStack Cloud) ─────────────────────────
-
-export type ExtensionCatalogChannel = 'stable' | 'beta' | 'dev' | 'alpha';
-
-export type CatalogExtension = {
-	slug: string;
-	pluginName: string;
-	name: string;
-	description: string;
-	latestVersion: string;
-	latestChannel: ExtensionCatalogChannel | '';
-	publishedAt: string;
-	changelog: string;
-	domain?: string;
-	domainLabel?: string;
-	sortOrder?: number;
-	agentSummary?: string;
-	enablesAgentTo?: string[];
-	whenToEnable?: string;
-	isRecommended?: boolean;
-	supportedEngineVersions: string[];
-};
-
-export type CatalogStatus = 'idle' | 'fetching' | 'ready' | 'error';
-
-export type ExtensionCatalogState = {
-	status: CatalogStatus;
-	success: boolean;
-	httpStatus: number;
-	channel: string;
-	engine: string;
-	fetchedAt?: string;
-	error?: string;
-	extensions: CatalogExtension[];
-};
-
-const EMPTY_CATALOG: ExtensionCatalogState = {
-	status: 'idle',
-	success: false,
-	httpStatus: 0,
-	channel: '',
-	engine: '',
-	extensions: []
-};
-
-export async function refreshExtensionCatalog(
-	channel: ExtensionCatalogChannel,
-	includeAllEngines: boolean
-): Promise<void> {
-	const bridge = getBridge();
-	if (bridge) {
-		await bridge.refreshextensioncatalog(channel, includeAllEngines);
-	}
-}
-
-export async function getExtensionCatalog(): Promise<ExtensionCatalogState> {
-	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.getextensioncatalog();
-		return parseResult(result);
-	}
-	return EMPTY_CATALOG;
-}
-
-/** Convenience helper: kicks off a refresh and polls until status flips to
- *  ready / error, or the timeout elapses. The Svelte panel uses this so
- *  callers don't hand-roll the poll loop. */
-export async function fetchExtensionCatalog(
-	channel: ExtensionCatalogChannel,
-	includeAllEngines: boolean,
-	timeoutMs = 15000,
-	pollMs = 250
-): Promise<ExtensionCatalogState> {
-	await refreshExtensionCatalog(channel, includeAllEngines);
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const snapshot = await getExtensionCatalog();
-		if (snapshot.status === 'ready' || snapshot.status === 'error') {
-			return snapshot;
-		}
-		await new Promise((resolve) => setTimeout(resolve, pollMs));
-	}
-	return { ...EMPTY_CATALOG, status: 'error', error: 'Catalog fetch timed out' };
-}
-
-// ── Extension Installer (batch install / update / uninstall) ───
-
-export type ExtensionOpKind = 'install' | 'update' | 'uninstall';
-
-export type ExtensionOpPhase =
-	| 'queued'
-	| 'resolving_download'
-	| 'downloading'
-	| 'verifying'
-	| 'extracting'
-	| 'installing'
-	| 'updating_project'
-	| 'uninstalling'
-	| 'pending_restart'
-	| 'success'
-	| 'failed';
-
-export type ExtensionOp = {
-	slug: string;
-	pluginName: string;
-	kind: ExtensionOpKind;
-	phase: ExtensionOpPhase;
-	channel: string;
-	engine: string;
-	platform: string;
-	error?: string;
-	bytesTotal?: number;
-	bytesDone?: number;
-	resolvedVersion?: string;
-	resolvedFileName?: string;
-	stagedPluginRoot?: string;
-};
-
-export type ExtensionOpQueueState = {
-	count: number;
-	queue: ExtensionOp[];
-};
-
-export type ExtensionOpRunState = {
-	running: boolean;
-	restartRecommended: boolean;
-	succeeded: number;
-	failed: number;
-	startedAt?: string;
-	completedAt?: string;
-	ops: ExtensionOp[];
-};
-
-const EMPTY_QUEUE: ExtensionOpQueueState = { count: 0, queue: [] };
-const EMPTY_RUN: ExtensionOpRunState = {
-	running: false,
-	restartRecommended: false,
-	succeeded: 0,
-	failed: 0,
-	ops: []
-};
-
-export async function queueExtensionOp(
-	slug: string,
-	pluginName: string,
-	kind: ExtensionOpKind,
-	channel: string
-): Promise<void> {
-	const bridge = getBridge();
-	if (bridge) {
-		await bridge.queueextensionop(slug, pluginName, kind, channel);
-	}
-}
-
-export async function dequeueExtensionOp(slug: string, kind: ExtensionOpKind): Promise<void> {
-	const bridge = getBridge();
-	if (bridge) {
-		await bridge.dequeueextensionop(slug, kind);
-	}
-}
-
-export async function clearExtensionOpQueue(): Promise<void> {
-	const bridge = getBridge();
-	if (bridge) {
-		await bridge.clearextensionopqueue();
-	}
-}
-
-export async function getExtensionOpQueue(): Promise<ExtensionOpQueueState> {
-	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.getextensionopqueue();
-		return parseResult(result);
-	}
-	return EMPTY_QUEUE;
-}
-
-export async function applyExtensionOps(): Promise<void> {
-	const bridge = getBridge();
-	if (bridge) {
-		await bridge.applyextensionops();
-	}
-}
-
-export async function getExtensionOpState(): Promise<ExtensionOpRunState> {
-	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.getextensionopstate();
-		return parseResult(result);
-	}
-	return EMPTY_RUN;
 }
 
 // ── Agent Skills ────────────────────────────────────────────────
@@ -964,7 +951,12 @@ export type SkillSyncReport = {
 
 export type SkillConflictMode = 'keep-user' | 'take-new';
 
-const EMPTY_SKILLS: SkillsState = { projectDir: '', manifestPath: '', skills: [], projectSkills: [] };
+const EMPTY_SKILLS: SkillsState = {
+	projectDir: '',
+	manifestPath: '',
+	skills: [],
+	projectSkills: []
+};
 
 export async function getSkills(): Promise<SkillsState> {
 	const bridge = getBridge();
@@ -1100,7 +1092,10 @@ export async function listSoundAssets(query: string = ''): Promise<SoundAsset[]>
 	return [];
 }
 
-export async function previewNotificationSound(soundPath: string, volume: number = 1.0): Promise<void> {
+export async function previewNotificationSound(
+	soundPath: string,
+	volume: number = 1.0
+): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.previewnotificationsound(soundPath, volume);
@@ -1112,9 +1107,8 @@ export async function soundAssetExists(soundPath: string): Promise<boolean> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.soundassetexists(soundPath);
-		const raw = (result && typeof result === 'object' && 'ReturnValue' in result)
-			? result.ReturnValue
-			: result;
+		const raw =
+			result && typeof result === 'object' && 'ReturnValue' in result ? result.ReturnValue : result;
 		return !!raw;
 	}
 	return true; // dev mode (no UE) — assume valid so picker doesn't show false-positive "missing"
@@ -1142,7 +1136,10 @@ export async function getAgentExecutionSettings(): Promise<AgentExecutionSetting
 	return { systemPromptAppend: '', toolTimeout: 60, agentResponseTimeout: 0 };
 }
 
-export async function setAgentExecutionSetting(key: 'systemPromptAppend' | 'toolTimeout' | 'agentResponseTimeout', value: string): Promise<void> {
+export async function setAgentExecutionSetting(
+	key: 'systemPromptAppend' | 'toolTimeout' | 'agentResponseTimeout',
+	value: string
+): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.setagentexecutionsetting(key, value);
@@ -1172,45 +1169,6 @@ export async function setIssueReportDisabled(disabled: boolean): Promise<void> {
 	}
 }
 
-// ── AI Generation Settings ──────────────────────────────────────────
-
-export type GenerationSettings = {
-	imageModel: string;
-	meshyArtStyle: string;
-	meshyApiKey: string;
-	tripoApiKey: string;
-	elevenLabsApiKey: string;
-	falApiKey: string;
-	openAIApiKey: string;
-};
-
-export type GenerationSettingKey = keyof GenerationSettings;
-
-export async function getGenerationSettings(): Promise<GenerationSettings> {
-	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.getgenerationsettings();
-		const parsed = parseResult<GenerationSettings>(result);
-		if (parsed) return parsed;
-	}
-	return {
-		imageModel: '',
-		meshyArtStyle: 'realistic',
-		meshyApiKey: '',
-		tripoApiKey: '',
-		elevenLabsApiKey: '',
-		falApiKey: '',
-		openAIApiKey: ''
-	};
-}
-
-export async function setGenerationSetting(key: GenerationSettingKey, value: string): Promise<void> {
-	const bridge = getBridge();
-	if (bridge) {
-		await bridge.setgenerationsetting(key, value);
-	}
-}
-
 // ── Agent Discovery ─────────────────────────────────────────────────
 
 /** Get list of available agents from the backend */
@@ -1225,7 +1183,9 @@ export async function getAgents(): Promise<AgentInfo[]> {
 }
 
 /** Create a new chat session */
-export async function createSession(agentName: string): Promise<{ sessionId: string; agentName: string }> {
+export async function createSession(
+	agentName: string
+): Promise<{ sessionId: string; agentName: string }> {
 	if (currentTransport === 'remote') return relayCall('createSession', agentName);
 	const bridge = getBridge();
 	if (bridge) {
@@ -1247,7 +1207,9 @@ export async function getSessions(): Promise<SessionInfo[]> {
 }
 
 /** Resume a saved session — loads from disk, connects agent, resumes external session */
-export async function resumeSession(sessionId: string): Promise<{ success: boolean; agentName?: string; error?: string }> {
+export async function resumeSession(
+	sessionId: string
+): Promise<{ success: boolean; agentName?: string; error?: string }> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.resumesession(sessionId);
@@ -1278,7 +1240,8 @@ export async function getSessionTerminalResumeCommand(
 
 /** Get messages for a session */
 export async function getSessionMessages(sessionId: string): Promise<ChatMessage[]> {
-	if (currentTransport === 'remote') return relayCall<ChatMessage[]>('getSessionMessages', sessionId);
+	if (currentTransport === 'remote')
+		return relayCall<ChatMessage[]>('getSessionMessages', sessionId);
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.getsessionmessages(sessionId);
@@ -1288,7 +1251,10 @@ export async function getSessionMessages(sessionId: string): Promise<ChatMessage
 }
 
 /** Rename a session (sets custom title that survives remote sync) */
-export async function renameSession(sessionId: string, newTitle: string): Promise<{ success: boolean }> {
+export async function renameSession(
+	sessionId: string,
+	newTitle: string
+): Promise<{ success: boolean }> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.renamesession(sessionId, newTitle);
@@ -1317,29 +1283,94 @@ export async function exportSessionToMarkdown(sessionId: string): Promise<Export
 	return { success: false, error: 'Not in UE' };
 }
 
-/** Send a prompt to a session */
-export async function sendPrompt(sessionId: string, text: string): Promise<void> {
+export type PromptActionResult = {
+	accepted: boolean;
+	requestId: string;
+	errorCode?: string;
+	message?: string;
+};
+
+function parsePromptActionResult(value: unknown, expectedRequestId: string): PromptActionResult {
+	const raw =
+		value && typeof value === 'object' && 'ReturnValue' in value
+			? (value as { ReturnValue: unknown }).ReturnValue
+			: value;
+
+	// Compatibility for one rolling upgrade window. New native builds always
+	// return the object contract, but an already-open older editor may say "ok".
+	if (raw === 'ok' || raw === '"ok"') {
+		return { accepted: true, requestId: expectedRequestId };
+	}
+
+	let parsed = raw;
+	if (typeof raw === 'string') {
+		try {
+			parsed = JSON.parse(raw);
+		} catch {
+			return {
+				accepted: false,
+				requestId: expectedRequestId,
+				errorCode: 'invalid_response',
+				message: 'The editor returned an invalid prompt response.'
+			};
+		}
+	}
+
+	if (
+		parsed &&
+		typeof parsed === 'object' &&
+		typeof (parsed as Record<string, unknown>).accepted === 'boolean'
+	) {
+		const result = parsed as Partial<PromptActionResult>;
+		return {
+			accepted: result.accepted === true,
+			requestId: result.requestId || expectedRequestId,
+			errorCode: result.errorCode,
+			message: result.message
+		};
+	}
+
+	return {
+		accepted: false,
+		requestId: expectedRequestId,
+		errorCode: 'missing_response',
+		message: 'The editor did not acknowledge the prompt request.'
+	};
+}
+
+/** Send a prompt to a session and wait for native acceptance. */
+export async function sendPrompt(
+	sessionId: string,
+	text: string,
+	requestId = createUUID()
+): Promise<PromptActionResult> {
 	if (currentTransport === 'remote') {
-		await relayCall('sendPrompt', sessionId, text);
-		return;
+		const result = await relayCall('sendPrompt', sessionId, text, requestId);
+		return parsePromptActionResult(result, requestId);
 	}
 	const bridge = getBridge();
 	if (!bridge) {
 		throw new Error('UE bridge unavailable');
 	}
-	await bridge.sendprompt(sessionId, text);
+	const result = await bridge.sendprompt(sessionId, text, requestId);
+	return parsePromptActionResult(result, requestId);
 }
 
-/** Cancel current prompt in a session */
-export async function cancelPrompt(sessionId: string): Promise<void> {
+/** Cancel current prompt and wait for native acceptance. */
+export async function cancelPrompt(
+	sessionId: string,
+	requestId = createUUID()
+): Promise<PromptActionResult> {
 	if (currentTransport === 'remote') {
-		await relayCall('cancelPrompt', sessionId);
-		return;
+		const result = await relayCall('cancelPrompt', sessionId, requestId);
+		return parsePromptActionResult(result, requestId);
 	}
 	const bridge = getBridge();
-	if (bridge) {
-		await bridge.cancelprompt(sessionId);
+	if (!bridge) {
+		throw new Error('UE bridge unavailable');
 	}
+	const result = await bridge.cancelprompt(sessionId, requestId);
+	return parsePromptActionResult(result, requestId);
 }
 
 // ── Agent Setup ─────────────────────────────────────────────────────
@@ -1360,7 +1391,14 @@ export async function getAgentInstallInfo(agentName: string): Promise<AgentInsta
 		const result = await bridge.getagentinstallinfo(agentName);
 		return parseResult(result);
 	}
-	return { agentName, baseExecutableName: '', installCommand: '', installUrl: '', requiresAdapter: false, requiresBaseCLI: false };
+	return {
+		agentName,
+		baseExecutableName: '',
+		installCommand: '',
+		installUrl: '',
+		requiresAdapter: false,
+		requiresBaseCLI: false
+	};
 }
 
 /** Start async agent installation. Listen for progress via onInstallProgress/onInstallComplete. */
@@ -1373,22 +1411,24 @@ export async function installAgent(agentName: string): Promise<void> {
 
 /** Register callback for install progress updates */
 export function onInstallProgress(callback: (agentName: string, message: string) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('onInstallProgress', (bridge) => {
 		bridge.bindoninstallprogress(callback);
-	}
+	});
 }
 
 /** Register callback for install completion */
-export function onInstallComplete(callback: (agentName: string, success: boolean, errorMessage: string) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
+export function onInstallComplete(
+	callback: (agentName: string, success: boolean, errorMessage: string) => void
+): void {
+	bindEmbeddedListener('onInstallComplete', (bridge) => {
 		bridge.bindoninstallcomplete(callback);
-	}
+	});
 }
 
 /** Refresh an agent's status (invalidates cache, re-checks). Returns updated status. */
-export async function refreshAgentStatus(agentName: string): Promise<{ status: AgentStatus; statusMessage: string }> {
+export async function refreshAgentStatus(
+	agentName: string
+): Promise<{ status: AgentStatus; statusMessage: string }> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.refreshagentstatus(agentName);
@@ -1440,7 +1480,10 @@ export async function refreshRegistry(): Promise<void> {
 }
 
 /** Install a registry agent. Method: "binary" | "npx" | "uvx" | "auto" */
-export async function installRegistryAgent(agentId: string, method: string = 'auto'): Promise<void> {
+export async function installRegistryAgent(
+	agentId: string,
+	method: string = 'auto'
+): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.installregistryagent(agentId, method);
@@ -1554,9 +1597,8 @@ export async function getClipboardText(): Promise<string> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.getclipboardtext();
-		const raw = (result && typeof result === 'object' && 'ReturnValue' in result)
-			? result.ReturnValue
-			: result;
+		const raw =
+			result && typeof result === 'object' && 'ReturnValue' in result ? result.ReturnValue : result;
 		return (raw as string) || '';
 	}
 	return '';
@@ -1578,7 +1620,10 @@ export async function openPath(path: string, line: number = 0): Promise<void> {
 		return;
 	}
 	if (typeof bridge.openpath !== 'function') {
-		console.warn('[AIK] openPath: bridge.openpath is not a function, available methods:', Object.keys(bridge));
+		console.warn(
+			'[AIK] openPath: bridge.openpath is not a function, available methods:',
+			Object.keys(bridge)
+		);
 		return;
 	}
 	try {
@@ -1628,6 +1673,45 @@ export type ModelState = {
 	currentModelId: string;
 };
 
+export type ConfigSelectValue = {
+	value: string;
+	name: string;
+	description?: string;
+};
+
+export type ConfigSelectGroup = {
+	group: string;
+	name: string;
+	options: ConfigSelectValue[];
+};
+
+export type SessionSelectConfigOption = {
+	type: 'select';
+	id: string;
+	name: string;
+	description?: string;
+	category?: string;
+	currentValue: string;
+	options: ConfigSelectValue[] | ConfigSelectGroup[];
+};
+
+export type SessionBooleanConfigOption = {
+	type: 'boolean';
+	id: string;
+	name: string;
+	description?: string;
+	category?: string;
+	currentValue: boolean;
+};
+
+export type SessionConfigOption = SessionSelectConfigOption | SessionBooleanConfigOption;
+
+export type ConfigOptionActionResult = {
+	accepted: boolean;
+	errorCode?: string;
+	message?: string;
+};
+
 /** Get available models for an agent */
 export async function getModels(agentName: string): Promise<ModelState> {
 	if (currentTransport === 'remote') return relayCall<ModelState>('getModels', agentName);
@@ -1651,7 +1735,10 @@ export async function getAllModels(agentName: string): Promise<ModelState> {
 
 /** Set the active model for an agent */
 export async function setModel(agentName: string, modelId: string): Promise<void> {
-	if (currentTransport === 'remote') { await relayCall('setModel', agentName, modelId); return; }
+	if (currentTransport === 'remote') {
+		await relayCall('setModel', agentName, modelId);
+		return;
+	}
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.setmodel(agentName, modelId);
@@ -1664,9 +1751,8 @@ export async function getReasoningLevel(agentName: string): Promise<string> {
 	if (bridge) {
 		const result = await bridge.getreasoninglevel(agentName);
 		// ReturnValue is a plain string, not JSON
-		const raw = (result && typeof result === 'object' && 'ReturnValue' in result)
-			? result.ReturnValue
-			: result;
+		const raw =
+			result && typeof result === 'object' && 'ReturnValue' in result ? result.ReturnValue : result;
 		return (raw as string) || 'medium';
 	}
 	return '';
@@ -1680,49 +1766,59 @@ export async function setReasoningLevel(agentName: string, level: string): Promi
 	}
 }
 
+// Remote-mode relay listeners: the embedded bridge's bind* calls REPLACE the
+// previous callback on the C++ side, but onRelayEvent ADDS a subscriber and the
+// wrappers below discard its unsubscribe function. Mirror the replace semantics
+// here so binding the same event twice doesn't stack duplicate callbacks.
+const relayListenerUnsubs = new Map<string, () => void>();
+function bindRelayEvent(event: string, cb: Parameters<typeof onRelayEvent>[1]): void {
+	relayListenerUnsubs.get(event)?.();
+	relayListenerUnsubs.set(event, onRelayEvent(event, cb));
+}
+
 /** Register callback for streaming message updates */
 export function onMessage(callback: (sessionId: string, update: StreamingUpdate) => void): void {
 	if (currentTransport === 'remote') {
-		onRelayEvent('onMessage', (data: any) => {
+		bindRelayEvent('onMessage', (data: any) => {
 			callback(data.sessionId, data.update);
 		});
 		return;
 	}
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('onMessage', (bridge) => {
 		bridge.bindonmessage((sessionId: string, updateJson: string) => {
 			const update: StreamingUpdate = JSON.parse(updateJson);
 			callback(sessionId, update);
 		});
-	}
+	});
 }
 
 /** Register callback for agent state changes */
-export function onStateChanged(callback: (sessionId: string, agentName: string, state: string, message: string) => void): void {
+export function onStateChanged(
+	callback: (sessionId: string, agentName: string, state: string, message: string) => void
+): void {
 	if (currentTransport === 'remote') {
-		onRelayEvent('onStateChanged', (data: any) => {
+		bindRelayEvent('onStateChanged', (data: any) => {
 			callback(data.sessionId, data.agentName, String(data.state), data.message);
 		});
 		return;
 	}
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('onStateChanged', (bridge) => {
 		bridge.bindonstatechanged(callback);
-	}
+	});
 }
 
 /** Register callback for MCP tool readiness status: "waiting" | "ready" | "timeout" */
 export function onMcpStatus(callback: (sessionId: string, status: string) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('onMcpStatus', (bridge) => {
 		bridge.bindonmcpstatus(callback);
-	}
+	});
 }
 
 /** Register callback for session list updates from agents */
-export function onSessionListUpdated(callback: (agentName: string, sessions: SessionInfo[]) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
+export function onSessionListUpdated(
+	callback: (agentName: string, sessions: SessionInfo[]) => void
+): void {
+	bindEmbeddedListener('onSessionListUpdated', (bridge) => {
 		bridge.bindonsessionlistupdated((agentName: string, sessionsJson: string) => {
 			const sessions: SessionInfo[] = JSON.parse(sessionsJson).map((s: any) => ({
 				...s,
@@ -1731,7 +1827,16 @@ export function onSessionListUpdated(callback: (agentName: string, sessions: Ses
 			}));
 			callback(agentName, sessions);
 		});
-	}
+	});
+}
+
+/** Register callback fired when the LOCAL chat list changes outside the page
+ *  (the session mirror adopts a remotely-assigned chat, a native panel opens
+ *  one). Payload-free ping — refetch the list on it. */
+export function onSessionsChanged(callback: () => void): void {
+	bindEmbeddedListener('onSessionsChanged', (bridge) => {
+		bridge.bindonsessionschanged(callback);
+	});
 }
 
 /** Manually refresh session lists from all agents. Returns how many agents are being connected. */
@@ -1782,20 +1887,21 @@ export type PermissionRequest = {
 };
 
 /** Register callback for permission/consent requests */
-export function onPermissionRequest(callback: (sessionId: string, request: PermissionRequest) => void): void {
+export function onPermissionRequest(
+	callback: (sessionId: string, request: PermissionRequest) => void
+): void {
 	if (currentTransport === 'remote') {
-		onRelayEvent('onPermissionRequest', (data: any) => {
+		bindRelayEvent('onPermissionRequest', (data: any) => {
 			callback(data.sessionId, data);
 		});
 		return;
 	}
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('onPermissionRequest', (bridge) => {
 		bridge.bindonpermissionrequest((sessionId: string, requestJson: string) => {
 			const request: PermissionRequest = JSON.parse(requestJson);
 			callback(sessionId, request);
 		});
-	}
+	});
 }
 
 /** Respond to a permission request */
@@ -1810,7 +1916,13 @@ export async function respondToPermission(
 	if (bridge) {
 		const metaJson = outcomeMeta ? JSON.stringify(outcomeMeta) : '';
 		if (bridge.respondtopermissionforsession && sessionId) {
-			await bridge.respondtopermissionforsession(sessionId, agentName, requestId, optionId, metaJson);
+			await bridge.respondtopermissionforsession(
+				sessionId,
+				agentName,
+				requestId,
+				optionId,
+				metaJson
+			);
 		} else {
 			await bridge.respondtopermission(agentName, requestId, optionId, metaJson);
 		}
@@ -1843,53 +1955,113 @@ export async function getModes(agentName: string): Promise<ModeState> {
 
 /** Set the active mode for an agent */
 export async function setMode(agentName: string, modeId: string): Promise<void> {
-	if (currentTransport === 'remote') { await relayCall('setMode', agentName, modeId); return; }
+	if (currentTransport === 'remote') {
+		await relayCall('setMode', agentName, modeId);
+		return;
+	}
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.setmode(agentName, modeId);
 	}
 }
 
-/** Register callback for mode availability updates */
-export function onModesAvailable(callback: (agentName: string, modeState: ModeState) => void): void {
+/** Get every generic ACP config option for a live session. */
+export async function getSessionConfigOptions(sessionId: string): Promise<SessionConfigOption[]> {
 	if (currentTransport === 'remote') {
-		onRelayEvent('onModesAvailable', (data: any) => {
+		return relayCall<SessionConfigOption[]>('getSessionConfigOptions', sessionId);
+	}
+	const bridge = getBridge();
+	if (!bridge) return [];
+	return parseResult(await bridge.getsessionconfigoptions(sessionId));
+}
+
+/** Set a generic select or boolean ACP config option. */
+export async function setSessionConfigOption(
+	sessionId: string,
+	configId: string,
+	value: string | boolean
+): Promise<void> {
+	const valueJson = JSON.stringify(value);
+	const bridge = currentTransport === 'remote' ? null : getBridge();
+	if (currentTransport !== 'remote' && !bridge) {
+		throw new Error('Editor bridge is not available.');
+	}
+	const result =
+		currentTransport === 'remote'
+			? await relayCall<ConfigOptionActionResult>(
+					'setSessionConfigOption',
+					sessionId,
+					configId,
+					valueJson
+				)
+			: parseResult<ConfigOptionActionResult>(
+					await bridge!.setsessionconfigoption(sessionId, configId, valueJson)
+				);
+	if (!result?.accepted) {
+		throw new Error(result?.message || 'Could not change this session setting.');
+	}
+}
+
+/** Register for complete generic ACP config option updates. */
+export function onConfigOptionsAvailable(
+	callback: (sessionId: string, agentName: string, options: SessionConfigOption[]) => void
+): void {
+	if (currentTransport === 'remote') {
+		bindRelayEvent('onConfigOptionsAvailable', (data: any) => {
+			callback(data.sessionId, data.agentName, JSON.parse(data.configOptionsJson || '[]'));
+		});
+		return;
+	}
+	bindEmbeddedListener('onConfigOptionsAvailable', (bridge) => {
+		bridge.bindonconfigoptionsavailable(
+			(sessionId: string, agentName: string, optionsJson: string) => {
+				callback(sessionId, agentName, JSON.parse(optionsJson || '[]'));
+			}
+		);
+	});
+}
+
+/** Register callback for mode availability updates */
+export function onModesAvailable(
+	callback: (agentName: string, modeState: ModeState) => void
+): void {
+	if (currentTransport === 'remote') {
+		bindRelayEvent('onModesAvailable', (data: any) => {
 			callback(data.agentName, data);
 		});
 		return;
 	}
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('onModesAvailable', (bridge) => {
 		bridge.bindonmodesavailable((agentName: string, modesJson: string) => {
 			const modeState: ModeState = JSON.parse(modesJson);
 			callback(agentName, modeState);
 		});
-	}
+	});
 }
 
 /** Register callback for mode change notifications */
 export function onModeChanged(callback: (agentName: string, modeId: string) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('onModeChanged', (bridge) => {
 		bridge.bindonmodechanged(callback);
-	}
+	});
 }
 
 /** Register callback for model availability updates (async push from agents like Codex) */
-export function onModelsAvailable(callback: (agentName: string, modelState: ModelState) => void): void {
+export function onModelsAvailable(
+	callback: (agentName: string, modelState: ModelState) => void
+): void {
 	if (currentTransport === 'remote') {
-		onRelayEvent('onModelsAvailable', (data: any) => {
+		bindRelayEvent('onModelsAvailable', (data: any) => {
 			callback(data.agentName, data);
 		});
 		return;
 	}
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('onModelsAvailable', (bridge) => {
 		bridge.bindonmodelsavailable((agentName: string, modelsJson: string) => {
 			const modelState: ModelState = JSON.parse(modelsJson);
 			callback(agentName, modelState);
 		});
-	}
+	});
 }
 
 // ── Slash Commands ──────────────────────────────────────────────────
@@ -1901,14 +2073,15 @@ export type SlashCommand = {
 };
 
 /** Register callback for slash commands availability updates */
-export function onCommandsAvailable(callback: (sessionId: string, commands: SlashCommand[]) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
+export function onCommandsAvailable(
+	callback: (sessionId: string, commands: SlashCommand[]) => void
+): void {
+	bindEmbeddedListener('onCommandsAvailable', (bridge) => {
 		bridge.bindoncommandsavailable((sessionId: string, commandsJson: string) => {
 			const commands: SlashCommand[] = JSON.parse(commandsJson);
 			callback(sessionId, commands);
 		});
-	}
+	});
 }
 
 // ── Plan/Todo ───────────────────────────────────────────────────────
@@ -1929,25 +2102,24 @@ export type PlanUpdate = {
 /** Register callback for plan/todo updates */
 export function onPlanUpdate(callback: (sessionId: string, plan: PlanUpdate) => void): void {
 	if (currentTransport === 'remote') {
-		onRelayEvent('onPlanUpdate', (data: any) => {
+		bindRelayEvent('onPlanUpdate', (data: any) => {
 			callback(data.sessionId, data);
 		});
 		return;
 	}
-	const bridge = getBridge();
-	if (bridge) {
+	bindEmbeddedListener('onPlanUpdate', (bridge) => {
 		bridge.bindonplanupdate((sessionId: string, planJson: string) => {
 			const plan: PlanUpdate = JSON.parse(planJson);
 			callback(sessionId, plan);
 		});
-	}
+	});
 }
 
 // ── Attachments ─────────────────────────────────────────────────────
 
 export type AttachmentInfo = {
 	id: string;
-	type: 'blueprint_node' | 'blueprint' | 'image' | 'file';
+	type: 'blueprint_node' | 'blueprint' | 'image' | 'file' | 'actor' | 'object';
 	displayName: string;
 	mimeType?: string;
 	width?: number;
@@ -1958,76 +2130,64 @@ export type AttachmentInfo = {
 };
 
 /** Paste image from system clipboard into attachments */
-export async function pasteClipboardImage(): Promise<{ success: boolean; error?: string }> {
+export async function pasteClipboardImage(
+	sessionId: string
+): Promise<{ success: boolean; error?: string }> {
 	const bridge = getBridge();
 	if (bridge) {
-		const result = await bridge.pasteclipboardimage();
+		const result = await bridge.pasteclipboardimage(sessionId);
 		return parseResult(result);
 	}
 	return { success: false, error: 'Not in UE' };
 }
 
 /** Open native file picker for attachments (images + common docs) */
-export async function openImagePicker(): Promise<{ success: boolean; count: number }> {
+export async function openImagePicker(
+	sessionId: string
+): Promise<{ success: boolean; count: number; error?: string }> {
 	const bridge = getBridge();
 	if (bridge) {
-		const result = await bridge.openimagepicker();
+		const result = await bridge.openimagepicker(sessionId);
 		return parseResult(result);
 	}
 	return { success: false, count: 0 };
 }
 
-/** Add an image from base64 data (for JS-side drag-drop) */
-export async function addImageFromBase64(
-	base64: string, mimeType: string, width: number, height: number, displayName: string
-): Promise<{ success: boolean; attachmentId?: string }> {
-	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.addimagefrombase64(base64, mimeType, width, height, displayName);
-		return parseResult(result);
-	}
-	return { success: false };
-}
-
-/** Add a generic file from base64 data (for JS-side drag-drop) */
-export async function addFileFromBase64(
-	base64: string, mimeType: string, displayName: string
-): Promise<{ success: boolean; attachmentId?: string }> {
-	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.addfilefrombase64(base64, mimeType, displayName);
-		return parseResult(result);
-	}
-	return { success: false };
-}
-
 /** Remove an attachment by its GUID */
-export async function removeAttachment(id: string): Promise<void> {
+export async function removeAttachment(sessionId: string, id: string): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
-		await bridge.removeattachment(id);
+		await bridge.removeattachment(sessionId, id);
 	}
 }
 
 /** Get current attachments (metadata only) */
-export async function getAttachments(): Promise<AttachmentInfo[]> {
+export async function getAttachments(sessionId: string): Promise<AttachmentInfo[]> {
 	const bridge = getBridge();
 	if (bridge) {
-		const result = await bridge.getattachments();
+		const result = await bridge.getattachments(sessionId);
 		return parseResult(result);
 	}
 	return [];
 }
 
 /** Register callback for attachment list changes */
-export function onAttachmentsChanged(callback: (attachments: AttachmentInfo[]) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
-		bridge.bindonattachmentschanged((attachmentsJson: string) => {
+export function onAttachmentsChanged(
+	callback: (sessionId: string, attachments: AttachmentInfo[]) => void
+): void {
+	bindEmbeddedListener('onAttachmentsChanged', (bridge) => {
+		bridge.bindonattachmentschanged((sessionId: string, attachmentsJson: string) => {
 			const attachments: AttachmentInfo[] = JSON.parse(attachmentsJson);
-			callback(attachments);
+			callback(sessionId, attachments);
 		});
-	}
+	});
+}
+
+/** Register callback for worker-thread/native attachment ingestion failures. */
+export function onAttachmentError(callback: (sessionId: string, message: string) => void): void {
+	bindEmbeddedListener('onAttachmentError', (bridge) => {
+		bridge.bindonattachmenterror(callback);
+	});
 }
 
 // ── Context Mentions ────────────────────────────────────────────────
@@ -2078,11 +2238,12 @@ export async function startAgentLogin(agentName: string, methodId: string): Prom
 }
 
 /** Register callback for login completion */
-export function onLoginComplete(callback: (agentName: string, success: boolean, errorMessage: string) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
+export function onLoginComplete(
+	callback: (agentName: string, success: boolean, errorMessage: string) => void
+): void {
+	bindEmbeddedListener('onLoginComplete', (bridge) => {
 		bridge.bindonlogincomplete(callback);
-	}
+	});
 }
 
 // ── Agent Usage / Rate Limits ──────────────────────────────────────
@@ -2102,13 +2263,6 @@ export type ExtraUsage = {
 	hasData: boolean;
 };
 
-export type MeshyBalance = {
-	configured: boolean;
-	balance: number;
-	isLoading: boolean;
-	error: string;
-};
-
 export type AgentRateLimitData = {
 	hasData: boolean;
 	isLoading: boolean;
@@ -2121,7 +2275,6 @@ export type AgentRateLimitData = {
 	modelSpecific: RateLimitWindow;
 	modelSpecificLabel: string;
 	extraUsage: ExtraUsage;
-	meshy: MeshyBalance;
 };
 
 /** Get cached rate limit data for an agent (triggers background fetch if needed) */
@@ -2131,7 +2284,25 @@ export async function getAgentUsage(agentName: string): Promise<AgentRateLimitDa
 		const result = await bridge.getagentusage(agentName);
 		return parseResult(result);
 	}
-	return { hasData: false, isLoading: false, errorMessage: '', agentName, planType: '', lastUpdated: '', primary: { usedPercent: 0, resetsAt: '', windowDurationMinutes: 0, hasData: false }, secondary: { usedPercent: 0, resetsAt: '', windowDurationMinutes: 0, hasData: false }, modelSpecific: { usedPercent: 0, resetsAt: '', windowDurationMinutes: 0, hasData: false }, modelSpecificLabel: '', extraUsage: { isEnabled: false, usedAmount: 0, limitAmount: 0, currencyCode: '', hasData: false }, meshy: { configured: false, balance: -1, isLoading: false, error: '' } };
+	return {
+		hasData: false,
+		isLoading: false,
+		errorMessage: '',
+		agentName,
+		planType: '',
+		lastUpdated: '',
+		primary: { usedPercent: 0, resetsAt: '', windowDurationMinutes: 0, hasData: false },
+		secondary: { usedPercent: 0, resetsAt: '', windowDurationMinutes: 0, hasData: false },
+		modelSpecific: { usedPercent: 0, resetsAt: '', windowDurationMinutes: 0, hasData: false },
+		modelSpecificLabel: '',
+		extraUsage: {
+			isEnabled: false,
+			usedAmount: 0,
+			limitAmount: 0,
+			currencyCode: '',
+			hasData: false
+		}
+	};
 }
 
 /** Force-refresh usage data for an agent */
@@ -2143,14 +2314,15 @@ export async function refreshAgentUsage(agentName: string): Promise<void> {
 }
 
 /** Register callback for agent usage/rate-limit updates */
-export function onUsageUpdated(callback: (agentName: string, data: AgentRateLimitData) => void): void {
-	const bridge = getBridge();
-	if (bridge) {
+export function onUsageUpdated(
+	callback: (agentName: string, data: AgentRateLimitData) => void
+): void {
+	bindEmbeddedListener('onUsageUpdated', (bridge) => {
 		bridge.bindonusageupdated((agentName: string, usageJson: string) => {
 			const data: AgentRateLimitData = JSON.parse(usageJson);
 			callback(agentName, data);
 		});
-	}
+	});
 }
 
 // ── Project Indexing ────────────────────────────────────────────────
@@ -2201,9 +2373,20 @@ export async function getIndexingSettings(): Promise<IndexingSettings> {
 		return parseResult(result);
 	}
 	return {
-		provider: 'openrouter', endpointUrl: '', apiKey: '', model: 'google/gemini-embedding-001',
-		dimensions: 768, autoIndex: false,
-		scope: { blueprints: true, cppFiles: true, assets: true, levels: true, config: false, documents: true },
+		provider: 'openrouter',
+		endpointUrl: '',
+		apiKey: '',
+		model: 'google/gemini-embedding-001',
+		dimensions: 768,
+		autoIndex: false,
+		scope: {
+			blueprints: true,
+			cppFiles: true,
+			assets: true,
+			levels: true,
+			config: false,
+			documents: true
+		},
 		hasOpenRouterKey: false
 	};
 }
@@ -2214,7 +2397,17 @@ export async function getIndexingStatus(): Promise<IndexingStatus> {
 		const result = await bridge.getindexingstatus();
 		return parseResult(result);
 	}
-	return { state: 'idle', totalChunks: 0, indexedChunks: 0, lastIndexedAt: '', indexSizeBytes: 0, errorMessage: '', breakdown: { blueprints: 0, cppFiles: 0, assets: 0, levels: 0, config: 0, documents: 0 }, embeddingModel: '', embeddingDimensions: 0 };
+	return {
+		state: 'idle',
+		totalChunks: 0,
+		indexedChunks: 0,
+		lastIndexedAt: '',
+		indexSizeBytes: 0,
+		errorMessage: '',
+		breakdown: { blueprints: 0, cppFiles: 0, assets: 0, levels: 0, config: 0, documents: 0 },
+		embeddingModel: '',
+		embeddingDimensions: 0
+	};
 }
 
 export async function setIndexingProvider(provider: 'openrouter' | 'custom'): Promise<void> {
@@ -2301,7 +2494,10 @@ export async function openSourceControlSubmit(): Promise<void> {
 // ── Terminal ────────────────────────────────────────────────────────
 
 /** Start a new terminal session. Returns the terminal ID. */
-export async function startTerminal(workingDir: string = '', shell: string = ''): Promise<{ terminalId?: string; error?: string }> {
+export async function startTerminal(
+	workingDir: string = '',
+	shell: string = ''
+): Promise<{ terminalId?: string; error?: string }> {
 	const bridge = getBridge();
 	if (bridge) {
 		const result = await bridge.startterminal(workingDir, shell);
@@ -2319,7 +2515,11 @@ export async function writeTerminal(terminalId: string, data: string): Promise<v
 }
 
 /** Resize terminal PTY */
-export async function resizeTerminal(terminalId: string, cols: number, rows: number): Promise<void> {
+export async function resizeTerminal(
+	terminalId: string,
+	cols: number,
+	rows: number
+): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
 		await bridge.resizeterminal(terminalId, cols, rows);
@@ -2336,8 +2536,6 @@ export async function closeTerminal(terminalId: string): Promise<void> {
 
 const terminalOutputListeners = new Set<(terminalId: string, base64Data: string) => void>();
 const terminalExitListeners = new Set<(terminalId: string, exitCode: number) => void>();
-let terminalOutputBridgeBound = false;
-let terminalExitBridgeBound = false;
 
 function dispatchTerminalOutput(terminalId: string, base64Data: string): void {
 	for (const listener of terminalOutputListeners) {
@@ -2368,11 +2566,9 @@ export function subscribeTerminalOutput(
 	callback: (terminalId: string, base64Data: string) => void
 ): () => void {
 	terminalOutputListeners.add(callback);
-	const bridge = getBridge();
-	if (bridge && !terminalOutputBridgeBound) {
+	bindEmbeddedListener('onTerminalOutput', (bridge) => {
 		bridge.bindonterminaloutput(dispatchTerminalOutput);
-		terminalOutputBridgeBound = true;
-	}
+	});
 	return () => {
 		terminalOutputListeners.delete(callback);
 	};
@@ -2383,117 +2579,110 @@ export function subscribeTerminalExit(
 	callback: (terminalId: string, exitCode: number) => void
 ): () => void {
 	terminalExitListeners.add(callback);
-	const bridge = getBridge();
-	if (bridge && !terminalExitBridgeBound) {
+	bindEmbeddedListener('onTerminalExit', (bridge) => {
 		bridge.bindonterminalexit(dispatchTerminalExit);
-		terminalExitBridgeBound = true;
-	}
+	});
 	return () => {
 		terminalExitListeners.delete(callback);
 	};
 }
 
-// ── Studio / Generative Providers ──────────────────────────────────
+// ── Studio / durable NeoStack Cloud media jobs ─────────────────────
 
-export type GenerativeActionDescriptor = {
-	actionId: string;
+export type MediaField = {
+	name: string;
+	type: 'string' | 'number' | 'integer' | 'boolean' | 'string_array';
 	description: string;
-	inputHints: string[];
-	outputHints: string[];
-	creditCost: string;
-	isSynchronous: boolean;
-	paramsSchema?: {
-		type: string;
-		properties: Record<string, {
-			type: string;
-			description?: string;
-			enum?: string[];
-			default?: unknown;
-			minimum?: number;
-			maximum?: number;
-		}>;
-		required?: string[];
-	};
+	required?: boolean;
+	enum?: string[];
+	default?: string | number | boolean;
+	minimum?: number;
+	maximum?: number;
+	multiline?: boolean;
 };
 
-export type GenerativeProviderInfo = {
+export type MediaModel = {
 	id: string;
-	displayName: string;
-	website: string;
-	actions: GenerativeActionDescriptor[];
+	name: string;
+	description: string;
+	provider: string;
+	kind: 'image' | '3d' | 'audio';
+	action: string;
+	capabilities: {
+		input: string[];
+		output: string[];
+		progress: boolean;
+		cancellation: boolean;
+	};
+	required: string[];
+	fields: MediaField[];
 };
 
-export type GenerativeJobInfo = {
-	providerId: string;
-	actionId: string;
-	jobId: string;
-	status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled';
-	progress: number;
-	resultUrl: string;
-	thumbnailUrl: string;
-	extraUrls: Record<string, string>;
-	imageUrls: string[];
-	error: string;
+export type MediaJob = {
+	id: string;
+	model: string;
+	action: string;
+	status: 'submitting' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+	stage: string;
+	progress: number | null;
+	queue_position: number | null;
+	logs: { message: string; timestamp?: string }[];
+	result: unknown;
+	error: string | null;
+	created_at: string;
+	updated_at: string;
+	completed_at: string | null;
 };
 
-export type GenerativeJobResult = {
-	success: boolean;
-	job?: GenerativeJobInfo;
-	error?: string;
-};
+type MediaError = { error?: string | { message?: string } };
 
-export type GenerativeBalanceResult = {
-	success: boolean;
-	balance: number;
-	error?: string;
-};
-
-/** Get all registered generative providers with their actions and parameter schemas */
-export async function getGenerativeProviders(): Promise<GenerativeProviderInfo[]> {
-	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.getgenerativeproviders();
-		return parseResult<GenerativeProviderInfo[]>(result);
-	}
-	return [];
+function mediaError(value: MediaError): string | null {
+	if (typeof value.error === 'string') return value.error;
+	return value.error?.message ?? null;
 }
 
-/** Submit a generation job to a provider */
-export async function submitGenerativeJob(
-	providerId: string,
-	actionId: string,
-	params: Record<string, unknown>
-): Promise<GenerativeJobResult> {
+export async function getMediaModels(): Promise<{ models: MediaModel[]; error: string | null }> {
 	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.submitgenerativejob(providerId, actionId, JSON.stringify(params));
-		return parseResult<GenerativeJobResult>(result);
-	}
-	return { success: false, error: 'Bridge not available' };
+	if (!bridge) return { models: [], error: 'Bridge not available' };
+	const parsed = parseResult<{ data?: MediaModel[] } & MediaError>(await bridge.getmediamodels());
+	return { models: parsed.data ?? [], error: mediaError(parsed) };
 }
 
-/** Check status of a generation job */
-export async function checkGenerativeJobStatus(
-	providerId: string,
-	jobId: string,
-	actionId: string
-): Promise<GenerativeJobResult> {
+export async function listMediaJobs(): Promise<{ jobs: MediaJob[]; error: string | null }> {
 	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.checkgenerativejobstatus(providerId, jobId, actionId);
-		return parseResult<GenerativeJobResult>(result);
-	}
-	return { success: false, error: 'Bridge not available' };
+	if (!bridge) return { jobs: [], error: 'Bridge not available' };
+	const parsed = parseResult<{ jobs?: MediaJob[] } & MediaError>(await bridge.listmediajobs());
+	return { jobs: parsed.jobs ?? [], error: mediaError(parsed) };
 }
 
-/** Get credit balance for a generative provider */
-export async function getGenerativeBalance(providerId: string): Promise<GenerativeBalanceResult> {
+export async function submitMediaJob(
+	model: string,
+	input: Record<string, unknown>
+): Promise<{ job?: MediaJob; error: string | null }> {
 	const bridge = getBridge();
-	if (bridge) {
-		const result = await bridge.getgenerativebalance(providerId);
-		return parseResult<GenerativeBalanceResult>(result);
-	}
-	return { success: false, balance: -1, error: 'Bridge not available' };
+	if (!bridge) return { error: 'Bridge not available' };
+	const parsed = parseResult<{ job?: MediaJob } & MediaError>(
+		await bridge.submitmediajob(model, JSON.stringify(input))
+	);
+	return { job: parsed.job, error: mediaError(parsed) };
+}
+
+export async function getMediaJob(
+	jobId: string
+): Promise<{ job?: MediaJob; error: string | null }> {
+	const bridge = getBridge();
+	if (!bridge) return { error: 'Bridge not available' };
+	const parsed = parseResult<{ job?: MediaJob } & MediaError>(await bridge.getmediajob(jobId));
+	return { job: parsed.job, error: mediaError(parsed) };
+}
+
+export async function cancelMediaJob(
+	jobId: string
+): Promise<{ job?: MediaJob; error: string | null }> {
+	const bridge = getBridge();
+	if (!bridge) return { error: 'Bridge not available' };
+	const parsed = parseResult<{ job?: MediaJob } & MediaError>(await bridge.cancelmediajob(jobId));
+	return { job: parsed.job, error: mediaError(parsed) };
 }
 
 // ── Crash Reporting ─────────────────────────────────────────────────
@@ -2532,56 +2721,170 @@ export async function reportCrash(crashId: string): Promise<{ success: boolean }
 	return { success: false };
 }
 
-// ── NeoStack Sign-in (Device Authorization Grant) ────────────────────
+// ── NeoStack Sign-in (Clerk loopback PKCE) ──────────────────────────
 
-export type DeviceAuthStatus =
-	| 'idle'
-	| 'requesting'
-	| 'waiting'
-	| 'polling'
-	| 'redeeming'
-	| 'success'
-	| 'error';
+export type NeoStackAuthStatus = 'signedOut' | 'signingIn' | 'signedIn';
 
-export interface DeviceAuthState {
-	status: DeviceAuthStatus;
-	message: string;
-	verificationUri: string;
+export interface NeoStackAuthUser {
+	id: string;
+	email: string;
+	name: string;
+	pictureUrl: string;
 }
 
-/** Kick off the OAuth device flow against neostack.dev. Progress updates
- *  arrive on the callback registered via onDeviceAuthStatusChanged. */
-export async function startNeoStackDeviceAuth(): Promise<void> {
+export interface NeoStackEntitlement {
+	entitled: boolean;
+	reason?: string;
+	plan?: string;
+	planName?: string;
+	features?: string[];
+	featureFlags?: string[];
+}
+
+export interface NeoStackAuthState {
+	status: NeoStackAuthStatus;
+	user?: NeoStackAuthUser;
+	/** The token's own org claim (whatever was active at sign-in). */
+	organizationId?: string;
+	/** The org requests actually act in (user override, else the claim) —
+	 *  display THIS one; acting in the wrong org silently is the failure mode
+	 *  org switching exists to kill. */
+	activeOrgId?: string;
+	entitlement?: NeoStackEntitlement;
+	error?: string;
+}
+
+export interface NeoStackOrg {
+	id: string;
+	slug: string;
+	name: string;
+	role: string;
+}
+
+export interface NeoStackOrgsResult {
+	orgs?: NeoStackOrg[];
+	activeOrgId?: string;
+	error?: string;
+}
+
+/** Begin the browser sign-in flow (opens the system browser, loopback PKCE).
+ *  No-op while a flow is already in flight. Progress updates arrive on the
+ *  callback registered via onNeoStackAuthChanged. */
+export async function startNeoStackSignIn(): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
-		await bridge.startneostackdeviceauth();
+		await bridge.startneostacksignin();
 	}
 }
 
-/** Abort the in-progress flow. Safe to call when nothing is running. */
-export async function cancelNeoStackDeviceAuth(): Promise<void> {
+/** Best-effort server-side revoke, then clear the local credential. */
+export async function signOutNeoStack(): Promise<void> {
 	const bridge = getBridge();
 	if (bridge) {
-		await bridge.cancelneostackdeviceauth();
+		await bridge.signoutneostack();
 	}
 }
 
-/** Register a listener for device-auth status updates. */
-export function onDeviceAuthStatusChanged(callback: (state: DeviceAuthState) => void): void {
+/** Snapshot of the current auth state. */
+export async function getNeoStackAuthState(): Promise<NeoStackAuthState> {
 	const bridge = getBridge();
 	if (bridge) {
-		bridge.bindondeviceauthstatuschanged((statusJson: string) => {
+		const result = await bridge.getneostackauthstate();
+		return parseResult<NeoStackAuthState>(result);
+	}
+	// Outside UE (browser dev), pretend signed out so the UI is exercisable.
+	return { status: 'signedOut' };
+}
+
+/** Orgs the signed-in user belongs to. One-shot fetch through the gateway. */
+export function fetchNeoStackOrgs(): Promise<NeoStackOrgsResult> {
+	const bridge = getBridge();
+	if (!bridge) {
+		// Browser dev: an empty picker, not a crash.
+		return Promise.resolve({ orgs: [] });
+	}
+	return new Promise((resolve) => {
+		bridge.fetchneostackorgs((json: string) => {
 			try {
-				const state = JSON.parse(statusJson) as DeviceAuthState;
-				callback(state);
+				resolve(JSON.parse(json) as NeoStackOrgsResult);
 			} catch {
-				// Bridge sent malformed JSON — surface as an error state.
-				callback({
-					status: 'error',
-					message: 'Bad status payload from editor.',
-					verificationUri: '',
-				});
+				resolve({ error: 'Malformed organizations payload' });
 			}
 		});
+	});
+}
+
+/** Switch the org every gateway request acts in ('' = follow the token).
+ *  The updated state arrives via onNeoStackAuthChanged. */
+export async function setNeoStackActiveOrg(orgId: string): Promise<void> {
+	const bridge = getBridge();
+	if (bridge) {
+		await bridge.setneostackactiveorg(orgId);
 	}
+}
+
+export interface NeoStackProject {
+	id: string;
+	slug: string;
+	name: string;
+}
+
+export interface NeoStackProjectsResult {
+	projects?: NeoStackProject[];
+	/** '' = unlinked. */
+	currentProjectId?: string;
+	/** False until the device announce has registered this UE project as a
+	 *  workspace — linking needs the row to exist. */
+	workspaceRegistered?: boolean;
+	error?: string;
+}
+
+/** The active org's linkable projects + this UE project's current link. */
+export function fetchNeoStackProjects(): Promise<NeoStackProjectsResult> {
+	const bridge = getBridge();
+	if (!bridge) {
+		return Promise.resolve({ projects: [] });
+	}
+	return new Promise((resolve) => {
+		bridge.fetchneostackprojects((json: string) => {
+			try {
+				resolve(JSON.parse(json) as NeoStackProjectsResult);
+			} catch {
+				resolve({ error: 'Malformed projects payload' });
+			}
+		});
+	});
+}
+
+/** Link the open UE project to a web project ('' = unlink). The link is by
+ *  ids — the local folder name and the project name are unrelated. */
+export function linkNeoStackProject(
+	projectId: string
+): Promise<{ linked?: boolean; error?: string }> {
+	const bridge = getBridge();
+	if (!bridge) {
+		return Promise.resolve({ error: 'Not running inside Unreal' });
+	}
+	return new Promise((resolve) => {
+		bridge.linkneostackproject(projectId, (json: string) => {
+			try {
+				resolve(JSON.parse(json) as { linked?: boolean; error?: string });
+			} catch {
+				resolve({ error: 'Malformed link result' });
+			}
+		});
+	});
+}
+
+/** Register a listener for auth-state updates. */
+export function onNeoStackAuthChanged(callback: (state: NeoStackAuthState) => void): void {
+	bindEmbeddedListener('onNeoStackAuthChanged', (bridge) => {
+		bridge.bindonneostackauthchanged((stateJson: string) => {
+			try {
+				callback(JSON.parse(stateJson) as NeoStackAuthState);
+			} catch {
+				console.warn('NeoStack auth state payload was malformed');
+			}
+		});
+	});
 }

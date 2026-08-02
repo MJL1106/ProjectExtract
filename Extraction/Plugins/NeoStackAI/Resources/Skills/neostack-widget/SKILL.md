@@ -156,7 +156,7 @@ Set `Font` with either a table or UE ImportText. `FontObject` is resolved from a
 ```lua
 bp:configure_widget("Title", {
   Font = {
-    FontObject = "/Engine/EngineFonts/RobotoMono.RobotoMono",
+    FontObject = "/Engine/EngineFonts/Roboto.Roboto",
     TypefaceFontName = "Bold",
     Size = 28,
     LetterSpacing = 80,
@@ -346,7 +346,7 @@ for _, line in ipairs(compile_log) do log(tostring(line.message or line.text or 
 
 ## Visual verification
 
-Use screenshot asset mode after meaningful layout changes. The default WidgetBlueprint capture is the clean rendered UMG preview and ignores the Designer viewport's current pan/zoom, rulers, and safe-zone chrome:
+Use screenshot asset mode after meaningful layout changes. The default WidgetBlueprint capture creates a clean runtime `Previewing` instance without Designer outlines and ignores the Designer viewport's current pan/zoom, rulers, and safe-zone chrome:
 
 ```lua
 screenshot({mode="asset", asset="/Game/UI/WBP_HUD", max_dimension=1200})

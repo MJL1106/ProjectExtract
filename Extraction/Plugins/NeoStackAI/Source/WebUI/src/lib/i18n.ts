@@ -22,6 +22,11 @@ export const locales = [
 ] as const;
 export type Locale = (typeof locales)[number];
 
+// Only advertise locales that are complete across every customer-facing surface.
+// Keep the remaining translation dictionaries available for continued authoring,
+// but do not silently fall back to English after a user selects them.
+export const releasedLocales = ['en'] as const satisfies readonly Locale[];
+
 export const localeNames: Record<Locale, string> = {
 	en: 'English',
 	ja: '日本語',
@@ -54,7 +59,7 @@ const translations: Record<Locale, TranslationMap> = {
 		tab_appearance: 'Appearance',
 		tab_setup: 'Setup',
 		tab_indexing: 'Project Index',
-		tab_extensions: 'Extensions',
+		tab_extensions: 'Integrations',
 		tab_skills: 'Skills',
 		tab_mcp: 'MCP',
 		tab_tools: 'Tool Profiles',
@@ -98,7 +103,7 @@ const translations: Record<Locale, TranslationMap> = {
 		appearance_hide_email: 'Hide Email Address',
 		appearance_hide_email_desc: 'Partially mask your email address in the user interface.',
 		usage_heading: 'Usage',
-		usage_desc: 'Your NeoStack Cloud credits and rolling quotas for this user.',
+		usage_desc: 'Your weekly NeoStack Cloud allowance. Exact provider costs stay private.',
 		usage_refresh: 'Refresh',
 		usage_signin_prompt: 'Sign in with NeoStack Cloud to view your usage.',
 		usage_signin_button: 'Sign in with NeoStack',
@@ -113,11 +118,13 @@ const translations: Record<Locale, TranslationMap> = {
 		usage_plan_cloud: 'Cloud plan',
 		usage_plan_workspace: 'Workspace',
 		usage_plan_reason: 'Reason',
-		update_check_started: 'Update check started. If an update is available, Unreal will show a notification.',
+		update_check_started:
+			'Update check started. If an update is available, Unreal will show a notification.',
 		update_check_failed: 'Failed to start update check.',
 		agent_chat: 'Agent Chat',
 		new_chat: 'New chat',
 		connecting_tools: 'Connecting to Unreal Editor tools…',
+		connecting_to_editor: 'Connecting to editor…',
 		waiting_for_agent_connect: 'Waiting for agent to connect…',
 		ready_to_send: 'Ready to send a message',
 		agent_error_check_connection: 'Agent error - check connection',
@@ -147,9 +154,11 @@ const translations: Record<Locale, TranslationMap> = {
 		check_for_updates: 'Check for Updates',
 		coming_soon: 'Coming soon',
 		providers_heading: 'Chat Providers',
-		providers_desc: 'Connect NeoStack Cloud for the simplest setup, or enable local/BYOK providers. Models from ready providers appear in the model dropdown.',
+		providers_desc:
+			'Connect NeoStack Cloud for the simplest setup, or enable local/BYOK providers. Models from ready providers appear in the model dropdown.',
 		active_provider_label: 'Enabled Providers',
-		active_provider_desc: 'Toggle providers on or off. Models from all enabled providers will appear in the chat model dropdown, grouped by provider.',
+		active_provider_desc:
+			'Toggle providers on or off. Models from all enabled providers will appear in the chat model dropdown, grouped by provider.',
 		provider_config_label: 'Provider Configuration',
 		provider_api_key_label: 'API Key',
 		provider_api_key_enter: 'Enter API key...',
@@ -159,9 +168,12 @@ const translations: Record<Locale, TranslationMap> = {
 		provider_base_url_label: 'Base URL',
 		provider_base_url_help: 'Leave as default unless you need a custom endpoint.',
 		provider_model_label: 'Default Model',
-		provider_model_help: 'The model to use by default. You can also switch models per-session from the chat dropdown.',
-		provider_active_no_key: ((params) => `${params?.name ?? 'This provider'} is enabled but has no API key configured. Its models won't appear until a key is set.`),
-		provider_reconnect_note: 'Changes to enabled providers or API keys take effect on the next agent connection. Disconnect and reconnect the built-in agent to apply.',
+		provider_model_help:
+			'The model to use by default. You can also switch models per-session from the chat dropdown.',
+		provider_active_no_key: (params) =>
+			`${params?.name ?? 'This provider'} is enabled but has no API key configured. Its models won't appear until a key is set.`,
+		provider_reconnect_note:
+			'Changes to enabled providers or API keys take effect on the next agent connection. Disconnect and reconnect the built-in agent to apply.',
 		// Notifications
 		notif_desc:
 			'Control how you are notified when the agent finishes a task or needs your approval for a tool.',
@@ -184,11 +196,14 @@ const translations: Record<Locale, TranslationMap> = {
 		notif_permission_custom_sound_set: 'A custom permission alert sound asset is configured.',
 		notif_volume_heading: 'Sound Volume',
 		notif_custom_sounds_set: 'Custom success/error sounds are configured.',
-		notif_sound_assets_note: 'To set custom sound assets (task finish, error, or permission alert), use',
+		notif_sound_assets_note:
+			'To set custom sound assets (task finish, error, or permission alert), use',
 		notif_open_project_settings: 'Project Settings',
 		project_index_heading: 'Project Index',
-		project_index_desc: 'Index your project for semantic search. Agents find relevant Blueprints, code, and assets by meaning - not just file names.',
-		project_index_hint_small: "Recommended for larger projects. Small projects with a few Blueprints typically don't need this.",
+		project_index_desc:
+			'Index your project for semantic search. Agents find relevant Blueprints, code, and assets by meaning - not just file names.',
+		project_index_hint_small:
+			"Recommended for larger projects. Small projects with a few Blueprints typically don't need this.",
 		loading: 'Loading…',
 		index_ready: 'Index Ready',
 		indexing: 'Indexing…',
@@ -203,15 +218,18 @@ const translations: Record<Locale, TranslationMap> = {
 		delete: 'Delete',
 		rename: 'Rename',
 		index_mismatch_prefix: 'Index was built with',
-		index_mismatch_suffix: "Changing the model or dimensions requires a full rebuild - embeddings from different models can't be mixed.",
+		index_mismatch_suffix:
+			"Changing the model or dimensions requires a full rebuild - embeddings from different models can't be mixed.",
 		rebuild_index: 'Rebuild Index',
 		clear_instead: 'Clear instead',
 		embedding_provider_heading: 'Embedding Provider',
 		embedding_provider_desc: 'Any service supporting the OpenAI',
 		custom_endpoint: 'Custom Endpoint',
 		model: 'Model',
-		openrouter_embedding_help: 'Uses your OpenRouter API key. Gemini Embedding supports flexible dimensions up to 3072.',
-		no_openrouter_key_configured: 'No OpenRouter API key configured. Set one in Settings -> Chat & Agents -> Chat Providers.',
+		openrouter_embedding_help:
+			'Uses your OpenRouter API key. Gemini Embedding supports flexible dimensions up to 3072.',
+		no_openrouter_key_configured:
+			'No OpenRouter API key configured. Set one in Settings -> Chat & Agents -> Chat Providers.',
 		endpoint_url: 'Endpoint URL',
 		custom_endpoint_help: 'Compatible with Ollama · LM Studio · vLLM · HF TEI · LocalAI',
 		api_key_optional: 'API Key (optional)',
@@ -231,14 +249,20 @@ const translations: Record<Locale, TranslationMap> = {
 		scope_config_desc: 'Project .ini configuration',
 		auto_index_heading: 'Auto-Index',
 		auto_index_desc: 'Re-index incrementally when assets change.',
-		auto_index_warning: 'No index exists yet - build one first. Changes will be indexed automatically after that.',
+		auto_index_warning:
+			'No index exists yet - build one first. Changes will be indexed automatically after that.',
 		saved: 'Saved',
+		failed_to_save: 'Failed to save',
 		failed_to_start_indexing: 'Failed to start indexing',
 		index_cleared: 'Index cleared',
-		failed_to_clear_index: 'Failed to clear index'
-		,
+		failed_to_clear_index: 'Failed to clear index',
+		rename_failed: 'Failed to rename session',
+		change_model_failed: 'Failed to change model',
+		change_reasoning_failed: 'Failed to change reasoning effort',
+		change_mode_failed: 'Failed to change mode',
 		tool_profiles_heading: 'Tool Profiles',
-		tool_profiles_desc: 'Create profiles to control which tools agents can use, customize tool descriptions, and add custom system instructions.',
+		tool_profiles_desc:
+			'Create profiles to control which tools agents can use, customize tool descriptions, and add custom system instructions.',
 		loading_tools: 'Loading tools...',
 		all_tools: 'All Tools',
 		delete_profile: 'Delete profile',
@@ -250,8 +274,10 @@ const translations: Record<Locale, TranslationMap> = {
 		description: 'Description',
 		profile_description_placeholder: "Brief description of this profile's purpose",
 		custom_system_instructions: 'Custom System Instructions',
-		custom_system_instructions_desc: "These instructions are prepended to the agent's system prompt when this profile is active. Use this to guide agent behavior, set constraints, or provide project-specific context.",
-		custom_instructions_placeholder: 'e.g., Always explain changes before making them. Focus on Blueprint-based solutions. Do not modify C++ code.',
+		custom_system_instructions_desc:
+			"These instructions are prepended to the agent's system prompt when this profile is active. Use this to guide agent behavior, set constraints, or provide project-specific context.",
+		custom_instructions_placeholder:
+			'e.g., Always explain changes before making them. Focus on Blueprint-based solutions. Do not modify C++ code.',
 		tool_override_active_one: 'tool description override active',
 		tool_override_active_many: 'tool description overrides active',
 		showing_tools_for: 'Showing tools for',
@@ -284,9 +310,13 @@ const translations: Record<Locale, TranslationMap> = {
 		browse_all_models: 'Browse all models...',
 		effort: 'Effort',
 		stop_generating: 'Stop generating',
+		cancelling: 'Cancelling...',
+		send_prompt_failed: 'Failed to send prompt',
+		cancel_prompt_failed: 'Failed to stop prompt',
 		mode_label: 'Mode',
 		context_window: 'Context window',
-		context_window_desc: 'How much of the conversation the AI can "remember" right now. As it fills up, older messages get summarized to make room. This is not your plan limit.',
+		context_window_desc:
+			'How much of the conversation the AI can "remember" right now. As it fills up, older messages get summarized to make room. This is not your plan limit.',
 		used_left_pct: (params) => `${params?.used}% used (${params?.left}% left)`,
 		tokens_used: (params) => `${params?.used} / ${params?.total} tokens used`,
 		cached: (params) => `${params?.count} cached`,
@@ -358,7 +388,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: '언어',
 		language_desc: '표시 언어를 선택하세요.',
 		general_heading: '일반',
-		update_check_started: '업데이트 확인을 시작했습니다. 업데이트가 있으면 Unreal이 알림을 표시합니다.',
+		update_check_started:
+			'업데이트 확인을 시작했습니다. 업데이트가 있으면 Unreal이 알림을 표시합니다.',
 		update_check_failed: '업데이트 확인을 시작하지 못했습니다.',
 		agent_chat: '에이전트 채팅',
 		new_chat: '새 채팅',
@@ -391,7 +422,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Idioma',
 		language_desc: 'Escolha o idioma de exibição preferido.',
 		general_heading: 'Geral',
-		update_check_started: 'A verificação de atualização foi iniciada. Se houver atualização disponível, o Unreal mostrará uma notificação.',
+		update_check_started:
+			'A verificação de atualização foi iniciada. Se houver atualização disponível, o Unreal mostrará uma notificação.',
 		update_check_failed: 'Falha ao iniciar a verificação de atualização.',
 		agent_chat: 'Chat do Agente',
 		new_chat: 'Novo chat',
@@ -424,7 +456,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Idioma',
 		language_desc: 'Elige tu idioma de visualización preferido.',
 		general_heading: 'General',
-		update_check_started: 'Se inició la comprobación de actualizaciones. Si hay una actualización disponible, Unreal mostrará una notificación.',
+		update_check_started:
+			'Se inició la comprobación de actualizaciones. Si hay una actualización disponible, Unreal mostrará una notificación.',
 		update_check_failed: 'No se pudo iniciar la comprobación de actualizaciones.',
 		agent_chat: 'Chat del agente',
 		new_chat: 'Nuevo chat',
@@ -457,7 +490,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Sprache',
 		language_desc: 'Bevorzugte Anzeigesprache auswählen.',
 		general_heading: 'Allgemein',
-		update_check_started: 'Die Update-Prüfung wurde gestartet. Wenn ein Update verfügbar ist, zeigt Unreal eine Benachrichtigung an.',
+		update_check_started:
+			'Die Update-Prüfung wurde gestartet. Wenn ein Update verfügbar ist, zeigt Unreal eine Benachrichtigung an.',
 		update_check_failed: 'Die Update-Prüfung konnte nicht gestartet werden.',
 		agent_chat: 'Agent-Chat',
 		new_chat: 'Neuer Chat',
@@ -488,9 +522,10 @@ const translations: Record<Locale, TranslationMap> = {
 		tab_notifications: 'Notifications',
 		tab_about: 'À propos',
 		language_heading: 'Langue',
-		language_desc: 'Choisissez la langue d\'affichage préférée.',
+		language_desc: "Choisissez la langue d'affichage préférée.",
 		general_heading: 'Général',
-		update_check_started: 'La vérification des mises à jour a démarré. Si une mise à jour est disponible, Unreal affichera une notification.',
+		update_check_started:
+			'La vérification des mises à jour a démarré. Si une mise à jour est disponible, Unreal affichera une notification.',
 		update_check_failed: 'Impossible de démarrer la vérification des mises à jour.',
 		agent_chat: 'Chat Agent',
 		new_chat: 'Nouveau chat',
@@ -523,7 +558,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Язык',
 		language_desc: 'Выбери предпочитаемый язык интерфейса.',
 		general_heading: 'Общие',
-		update_check_started: 'Проверка обновлений запущена. Если обновление доступно, Unreal покажет уведомление.',
+		update_check_started:
+			'Проверка обновлений запущена. Если обновление доступно, Unreal покажет уведомление.',
 		update_check_failed: 'Не удалось запустить проверку обновлений.',
 		agent_chat: 'Чат агента',
 		new_chat: 'Новый чат',
@@ -556,7 +592,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Język',
 		language_desc: 'Wybierz preferowany język wyświetlania.',
 		general_heading: 'Ogólne',
-		update_check_started: 'Rozpoczęto sprawdzanie aktualizacji. Jeśli aktualizacja jest dostępna, Unreal pokaże powiadomienie.',
+		update_check_started:
+			'Rozpoczęto sprawdzanie aktualizacji. Jeśli aktualizacja jest dostępna, Unreal pokaże powiadomienie.',
 		update_check_failed: 'Nie udało się rozpocząć sprawdzania aktualizacji.',
 		agent_chat: 'Czat agenta',
 		new_chat: 'Nowy czat',
@@ -589,7 +626,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Dil',
 		language_desc: 'Tercih ettiğiniz görüntüleme dilini seçin.',
 		general_heading: 'Genel',
-		update_check_started: 'Güncelleme kontrolü başlatıldı. Bir güncelleme varsa Unreal bildirim gösterecek.',
+		update_check_started:
+			'Güncelleme kontrolü başlatıldı. Bir güncelleme varsa Unreal bildirim gösterecek.',
 		update_check_failed: 'Güncelleme kontrolü başlatılamadı.',
 		agent_chat: 'Ajan Sohbeti',
 		new_chat: 'Yeni sohbet',
@@ -622,7 +660,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Lingua',
 		language_desc: 'Scegli la lingua di visualizzazione preferita.',
 		general_heading: 'Generale',
-		update_check_started: 'Controllo aggiornamenti avviato. Se è disponibile un aggiornamento, Unreal mostrerà una notifica.',
+		update_check_started:
+			'Controllo aggiornamenti avviato. Se è disponibile un aggiornamento, Unreal mostrerà una notifica.',
 		update_check_failed: 'Impossibile avviare il controllo aggiornamenti.',
 		agent_chat: 'Chat Agente',
 		new_chat: 'Nuova chat',
@@ -688,7 +727,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'भाषा',
 		language_desc: 'अपनी पसंदीदा display language चुनें।',
 		general_heading: 'सामान्य',
-		update_check_started: 'Update check शुरू हो गया है। अगर update उपलब्ध है, तो Unreal notification दिखाएगा।',
+		update_check_started:
+			'Update check शुरू हो गया है। अगर update उपलब्ध है, तो Unreal notification दिखाएगा।',
 		update_check_failed: 'Update check शुरू नहीं हो सका।',
 		agent_chat: 'एजेंट चैट',
 		new_chat: 'नई चैट',
@@ -721,7 +761,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Bahasa',
 		language_desc: 'Pilih bahasa tampilan yang Anda inginkan.',
 		general_heading: 'Umum',
-		update_check_started: 'Pemeriksaan pembaruan dimulai. Jika ada pembaruan, Unreal akan menampilkan notifikasi.',
+		update_check_started:
+			'Pemeriksaan pembaruan dimulai. Jika ada pembaruan, Unreal akan menampilkan notifikasi.',
 		update_check_failed: 'Gagal memulai pemeriksaan pembaruan.',
 		agent_chat: 'Chat Agen',
 		new_chat: 'Chat baru',
@@ -754,7 +795,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Ngôn ngữ',
 		language_desc: 'Chọn ngôn ngữ hiển thị ưa thích của bạn.',
 		general_heading: 'Chung',
-		update_check_started: 'Đã bắt đầu kiểm tra cập nhật. Nếu có bản cập nhật, Unreal sẽ hiển thị thông báo.',
+		update_check_started:
+			'Đã bắt đầu kiểm tra cập nhật. Nếu có bản cập nhật, Unreal sẽ hiển thị thông báo.',
 		update_check_failed: 'Không thể bắt đầu kiểm tra cập nhật.',
 		agent_chat: 'Chat Tác nhân',
 		new_chat: 'Chat mới',
@@ -787,7 +829,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Мова',
 		language_desc: 'Оберіть бажану мову відображення.',
 		general_heading: 'Загальні',
-		update_check_started: 'Перевірку оновлень розпочато. Якщо оновлення доступне, Unreal покаже сповіщення.',
+		update_check_started:
+			'Перевірку оновлень розпочато. Якщо оновлення доступне, Unreal покаже сповіщення.',
 		update_check_failed: 'Не вдалося розпочати перевірку оновлень.',
 		agent_chat: 'Чат агента',
 		new_chat: 'Новий чат',
@@ -820,7 +863,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: 'Taal',
 		language_desc: 'Kies je gewenste weergavetaal.',
 		general_heading: 'Algemeen',
-		update_check_started: 'Updatecontrole gestart. Als er een update beschikbaar is, toont Unreal een melding.',
+		update_check_started:
+			'Updatecontrole gestart. Als er een update beschikbaar is, toont Unreal een melding.',
 		update_check_failed: 'Kon de updatecontrole niet starten.',
 		agent_chat: 'Agentchat',
 		new_chat: 'Nieuwe chat',
@@ -853,7 +897,8 @@ const translations: Record<Locale, TranslationMap> = {
 		language_heading: '言語',
 		language_desc: '表示言語を選択してください。',
 		general_heading: '一般',
-		update_check_started: 'アップデート確認を開始しました。更新があれば Unreal に通知が表示されます。',
+		update_check_started:
+			'アップデート確認を開始しました。更新があれば Unreal に通知が表示されます。',
 		update_check_failed: 'アップデート確認を開始できませんでした。',
 		agent_chat: 'エージェントチャット',
 		new_chat: '新しいチャット',
@@ -880,7 +925,9 @@ const translations: Record<Locale, TranslationMap> = {
 const STORAGE_KEY = 'ui_locale';
 
 function sanitizeLocale(value: string | null | undefined): Locale {
-	return locales.includes((value ?? '') as Locale) ? (value as Locale) : 'en';
+	return releasedLocales.includes((value ?? '') as (typeof releasedLocales)[number])
+		? (value as Locale)
+		: 'en';
 }
 
 function getInitialLocale(): Locale {
@@ -904,16 +951,20 @@ locale.subscribe((value) => {
 });
 
 export function setLocale(value: Locale): void {
-	locale.set(value);
+	locale.set(sanitizeLocale(value));
 }
 
 /** Map an OS language tag (e.g. "en-US", "pt-BR", "zh-CN") to a supported locale.
  *  Tries exact match, then strips region suffix. Returns null if nothing matches. */
 export function matchOsLanguageToLocale(osLang: string): Locale | null {
 	if (!osLang) return null;
-	if (locales.includes(osLang as Locale)) return osLang as Locale;
+	if (releasedLocales.includes(osLang as (typeof releasedLocales)[number])) {
+		return osLang as Locale;
+	}
 	const prefix = osLang.split(/[-_]/)[0];
-	if (locales.includes(prefix as Locale)) return prefix as Locale;
+	if (releasedLocales.includes(prefix as (typeof releasedLocales)[number])) {
+		return prefix as Locale;
+	}
 	return null;
 }
 

@@ -1,26 +1,14 @@
 <script lang="ts">
 	import './layout.css';
-	import '@fontsource/geist/400.css';
-	import '@fontsource/geist/500.css';
-	import '@fontsource/geist/600.css';
-	import '@fontsource/geist/700.css';
-	import '@fontsource/geist-mono/400.css';
-	import '@fontsource/geist-mono/500.css';
-	import '@fontsource/inter/400.css';
-	import '@fontsource/inter/500.css';
-	import '@fontsource/roboto/400.css';
-	import '@fontsource/roboto/500.css';
-	import '@fontsource/jetbrains-mono/400.css';
-	import '@fontsource/jetbrains-mono/500.css';
-	import '@fontsource/fira-code/400.css';
-	import '@fontsource/fira-code/500.css';
-	import '@fontsource/source-code-pro/400.css';
-	import '@fontsource/source-code-pro/500.css';
-	import '@fontsource/ibm-plex-mono/400.css';
-	import '@fontsource/ibm-plex-mono/500.css';
+	import '@fontsource/geist/latin-400.css';
+	import '@fontsource/geist/latin-500.css';
+	import '@fontsource/geist/latin-600.css';
+	import '@fontsource/geist/latin-700.css';
+	import '@fontsource/geist-mono/latin-400.css';
+	import '@fontsource/geist-mono/latin-500.css';
 	import '$lib/polyfills.js';
 	import { onMount } from 'svelte';
-	import { loadAgents } from '$lib/stores/agents.js';
+	import { loadAgents, bindAgentsAuthRefresh } from '$lib/stores/agents.js';
 	import { loadSessions, bindSessionListListener } from '$lib/stores/sessions.js';
 	import { bindAgentStateListener } from '$lib/stores/agentState.js';
 	import { bindMessageListener } from '$lib/stores/messages.js';
@@ -30,19 +18,28 @@
 	import { bindCommandsListener } from '$lib/stores/commands.js';
 	import { bindPlanListener } from '$lib/stores/plan.js';
 	import { bindModelsListener } from '$lib/stores/models.js';
+	import { bindConfigOptionsListener } from '$lib/stores/configOptions.js';
 	import { bindUsageListener } from '$lib/stores/rateLimits.js';
 	import { bindCloudAccountListener, refreshCloudAccount } from '$lib/stores/cloudAccount.js';
-	import { bindDeviceAuthListener } from '$lib/stores/deviceAuth.js';
-	import { bindAttachmentsListener } from '$lib/stores/attachments.js';
+	import { bindNeoStackAuthListener } from '$lib/stores/neostackAuth.js';
+	import { bindAttachmentsListener, pasteImage } from '$lib/stores/attachments.js';
 	import { bindLoginListener } from '$lib/stores/auth.js';
 	import { loadSourceControlStatus } from '$lib/stores/sourceControl.js';
-	import { isInUnreal, copyToClipboard, getClipboardText, pasteClipboardImage, waitForBridge } from '$lib/bridge.js';
+	import {
+		copyToClipboard,
+		getClipboardText,
+		waitForBridge,
+		expectsEmbeddedBridge,
+		startBridgeLifecycleMonitor,
+		onBridgeAvailabilityChanged,
+		capturePerformanceSnapshot
+	} from '$lib/bridge.js';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
 	import { ModeWatcher } from 'mode-watcher';
 	import { Toaster } from 'svelte-sonner';
 	import TopNav from '$lib/components/TopNav.svelte';
 	import EntitlementBanner from '$lib/components/EntitlementBanner.svelte';
-	import DeviceAuthDialog from '$lib/components/DeviceAuthDialog.svelte';
+	import ConnectingBanner from '$lib/components/ConnectingBanner.svelte';
 	import {
 		themeChoice,
 		accentHue,
@@ -58,6 +55,10 @@
 		normalizeFontStack
 	} from '$lib/stores/settings.js';
 	import { modKey } from '$lib/platform.js';
+	import {
+		startPerformanceMonitoring,
+		takePerformanceRecordsForExport
+	} from '$lib/performanceTelemetry.js';
 
 	let { children } = $props();
 
@@ -83,36 +84,107 @@
 		// Typography
 		root.style.setProperty('--ui-font-size', `${$uiFontSize}px`);
 		root.style.setProperty('--code-font-size', `${$codeFontSize}px`);
-		root.style.setProperty('--ui-font-family', normalizeFontStack($uiFontFamily, DEFAULT_UI_FONT_STACK));
-		root.style.setProperty('--code-font-family', normalizeFontStack($codeFontFamily, DEFAULT_CODE_FONT_STACK));
+		root.style.setProperty(
+			'--ui-font-family',
+			normalizeFontStack($uiFontFamily, DEFAULT_UI_FONT_STACK)
+		);
+		root.style.setProperty(
+			'--code-font-family',
+			normalizeFontStack($codeFontFamily, DEFAULT_CODE_FONT_STACK)
+		);
 
 		// Body classes for toggles that need CSS-side overrides
 		document.body.classList.toggle('no-translucency', $reduceTransparency);
 		document.body.classList.toggle('font-smoothing-off', !$fontSmoothing);
 	});
 
-	onMount(async () => {
-		// Wait for UE bridge — CEF starts page load before BindUObject() completes
-		await waitForBridge();
+	// True while a slow editor startup is still binding the bridge (shown after
+	// a short delay so it never flashes on normal startups).
+	let waitingForBridge = $state(false);
 
-		loadAgents();
-		loadSessions();
-		bindAgentStateListener();
-		bindMessageListener();
-		bindPermissionListener();
-		bindModeListener();
-		bindInstallListeners();
-		bindCommandsListener();
-		bindPlanListener();
-		bindModelsListener();
-		bindUsageListener();
-		bindCloudAccountListener();
-		bindDeviceAuthListener();
-		refreshCloudAccount();
-		bindAttachmentsListener();
-		bindLoginListener();
-		bindSessionListListener();
-		loadSourceControlStatus();
+	onMount(() => {
+		const stopPerformanceMonitoring = startPerformanceMonitoring();
+		const performanceExportInterval = setInterval(() => {
+			void capturePerformanceSnapshot(takePerformanceRecordsForExport());
+		}, 60_000);
+		let initRan = false;
+		const bridgeWaitController = new AbortController();
+		const hydrateFromBridge = () => {
+			loadAgents();
+			loadSessions();
+			refreshCloudAccount();
+			loadSourceControlStatus();
+		};
+
+		// Store guards intentionally register each JS callback once. The bridge
+		// registry replays those callbacks exactly once when CEF replaces the
+		// native bridge object, so the stores do not need ad-hoc reset hooks.
+		const runInit = () => {
+			if (initRan) return;
+			initRan = true;
+			waitingForBridge = false;
+
+			bindAgentStateListener();
+			bindMessageListener();
+			bindPermissionListener();
+			bindModeListener();
+			bindInstallListeners();
+			bindCommandsListener();
+			bindPlanListener();
+			bindModelsListener();
+			bindConfigOptionsListener();
+			bindUsageListener();
+			bindCloudAccountListener();
+			bindNeoStackAuthListener();
+			bindAgentsAuthRefresh();
+			bindAttachmentsListener();
+			bindLoginListener();
+			bindSessionListListener();
+			hydrateFromBridge();
+		};
+
+		// Surface "Connecting to editor…" only when the bridge is late.
+		const connectingDelay = setTimeout(() => {
+			if (!initRan) waitingForBridge = true;
+		}, 2000);
+		const stopBridgeMonitor = startBridgeLifecycleMonitor(bridgeWaitController.signal);
+		const unsubscribeBridgeAvailability = onBridgeAvailabilityChanged((available) => {
+			if (!available) {
+				if (initRan) waitingForBridge = true;
+				return;
+			}
+
+			clearTimeout(connectingDelay);
+			waitingForBridge = false;
+			if (initRan) hydrateFromBridge();
+			else runInit();
+		});
+
+		if (expectsEmbeddedBridge()) {
+			// Embedded pages carry an explicit marker from the plugin, so keep
+			// waiting until BindUObject succeeds instead of permanently falling
+			// back to mock initialization after an arbitrary timeout.
+			waitForBridge(undefined, bridgeWaitController.signal).then((available) => {
+				if (!available) return;
+				clearTimeout(connectingDelay);
+				runInit();
+			});
+		} else {
+			// Standalone/remote development has no embedded marker and should not
+			// pay a timeout before its mock or relay-backed UI becomes available.
+			clearTimeout(connectingDelay);
+			runInit();
+		}
+
+		return () => {
+			void capturePerformanceSnapshot(takePerformanceRecordsForExport());
+			clearInterval(performanceExportInterval);
+			stopPerformanceMonitoring();
+			clearTimeout(connectingDelay);
+			unsubscribeBridgeAvailability();
+			stopBridgeMonitor();
+			bridgeWaitController.abort();
+		};
 	});
 
 	/**
@@ -136,7 +208,7 @@
 			// Copy
 			const selection = isInput
 				? el.value.substring(el.selectionStart ?? 0, el.selectionEnd ?? 0)
-				: window.getSelection()?.toString() ?? '';
+				: (window.getSelection()?.toString() ?? '');
 			if (selection) {
 				e.preventDefault();
 				copyToClipboard(selection);
@@ -161,7 +233,8 @@
 					// Text has priority for normal paste. If clipboard text is empty and the
 					// focused field is a textarea, try image paste into chat attachments.
 					if (text === '' && el.tagName === 'TEXTAREA') {
-						await pasteClipboardImage();
+						const sessionId = el.dataset.chatSessionId ?? '';
+						if (sessionId) await pasteImage(sessionId);
 						return;
 					}
 
@@ -185,7 +258,14 @@
 
 	function isEditableElement(el: EventTarget | null): el is HTMLInputElement | HTMLTextAreaElement {
 		if (!el) return false;
-		return (el instanceof HTMLInputElement && el.type !== 'checkbox' && el.type !== 'radio' && el.type !== 'button' && el.type !== 'submit') || el instanceof HTMLTextAreaElement;
+		return (
+			(el instanceof HTMLInputElement &&
+				el.type !== 'checkbox' &&
+				el.type !== 'radio' &&
+				el.type !== 'button' &&
+				el.type !== 'submit') ||
+			el instanceof HTMLTextAreaElement
+		);
 	}
 
 	function handleGlobalContextMenu(e: MouseEvent) {
@@ -198,9 +278,10 @@
 		globalCtxIsInput = isEditableElement(target);
 		globalCtxTarget = globalCtxIsInput ? (target as HTMLInputElement | HTMLTextAreaElement) : null;
 		if (globalCtxIsInput && globalCtxTarget) {
-			globalCtxHasSelection = (globalCtxTarget.selectionStart ?? 0) !== (globalCtxTarget.selectionEnd ?? 0);
+			globalCtxHasSelection =
+				(globalCtxTarget.selectionStart ?? 0) !== (globalCtxTarget.selectionEnd ?? 0);
 		} else {
-			globalCtxHasSelection = !!(window.getSelection()?.toString());
+			globalCtxHasSelection = !!window.getSelection()?.toString();
 		}
 		const vw = window.innerWidth;
 		const vh = window.innerHeight;
@@ -211,7 +292,10 @@
 
 	function handleGlobalCtxCopy() {
 		if (globalCtxIsInput && globalCtxTarget) {
-			const sel = globalCtxTarget.value.substring(globalCtxTarget.selectionStart ?? 0, globalCtxTarget.selectionEnd ?? 0);
+			const sel = globalCtxTarget.value.substring(
+				globalCtxTarget.selectionStart ?? 0,
+				globalCtxTarget.selectionEnd ?? 0
+			);
 			if (sel) copyToClipboard(sel);
 		} else {
 			const sel = window.getSelection()?.toString() ?? '';
@@ -271,27 +355,59 @@
 <Tooltip.Provider delayDuration={0} skipDelayDuration={0}>
 	<div class="flex h-screen w-screen flex-col overflow-hidden">
 		<TopNav />
+		<ConnectingBanner visible={waitingForBridge} />
 		<EntitlementBanner />
 		<div class="flex min-h-0 flex-1 overflow-hidden">
 			{@render children()}
 		</div>
 	</div>
-	<DeviceAuthDialog />
 </Tooltip.Provider>
 
 {#if globalCtxVisible}
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<!-- svelte-ignore a11y_click_events_have_key_events -->
-	<div class="fixed inset-0 z-[200]" onclick={() => globalCtxVisible = false} oncontextmenu={(e) => { e.preventDefault(); globalCtxVisible = false; }}></div>
-	<div class="fixed z-[201] min-w-[180px] rounded-lg border border-border bg-popover p-1 shadow-lg" style="left: {globalCtxX}px; top: {globalCtxY}px;">
+	<div
+		class="fixed inset-0 z-[200]"
+		onclick={() => (globalCtxVisible = false)}
+		oncontextmenu={(e) => {
+			e.preventDefault();
+			globalCtxVisible = false;
+		}}
+	></div>
+	<div
+		class="fixed z-[201] min-w-[180px] rounded-lg border border-border bg-popover p-1 shadow-lg"
+		style="left: {globalCtxX}px; top: {globalCtxY}px;"
+	>
 		{#if globalCtxIsInput}
-			<button class="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-[13px] text-popover-foreground {globalCtxHasSelection ? 'hover:bg-accent cursor-default' : 'opacity-40 cursor-not-allowed'}" onclick={handleGlobalCtxCut} disabled={!globalCtxHasSelection}>Cut<span class="ml-auto text-[11px] text-muted-foreground/60">{modKey}X</span></button>
+			<button
+				class="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-[13px] text-popover-foreground {globalCtxHasSelection
+					? 'cursor-default hover:bg-accent'
+					: 'cursor-not-allowed opacity-40'}"
+				onclick={handleGlobalCtxCut}
+				disabled={!globalCtxHasSelection}
+				>Cut<span class="text-muted-foreground/60 ml-auto text-[11px]">{modKey}X</span></button
+			>
 		{/if}
-		<button class="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-[13px] text-popover-foreground {globalCtxHasSelection ? 'hover:bg-accent cursor-default' : 'opacity-40 cursor-not-allowed'}" onclick={handleGlobalCtxCopy} disabled={!globalCtxHasSelection}>Copy<span class="ml-auto text-[11px] text-muted-foreground/60">{modKey}C</span></button>
+		<button
+			class="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-[13px] text-popover-foreground {globalCtxHasSelection
+				? 'cursor-default hover:bg-accent'
+				: 'cursor-not-allowed opacity-40'}"
+			onclick={handleGlobalCtxCopy}
+			disabled={!globalCtxHasSelection}
+			>Copy<span class="text-muted-foreground/60 ml-auto text-[11px]">{modKey}C</span></button
+		>
 		{#if globalCtxIsInput}
-			<button class="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-[13px] text-popover-foreground hover:bg-accent cursor-default" onclick={handleGlobalCtxPaste}>Paste<span class="ml-auto text-[11px] text-muted-foreground/60">{modKey}V</span></button>
+			<button
+				class="flex w-full cursor-default items-center justify-between rounded-md px-3 py-1.5 text-[13px] text-popover-foreground hover:bg-accent"
+				onclick={handleGlobalCtxPaste}
+				>Paste<span class="text-muted-foreground/60 ml-auto text-[11px]">{modKey}V</span></button
+			>
 		{/if}
-		<div class="my-1 h-px bg-border/40"></div>
-		<button class="flex w-full items-center justify-between rounded-md px-3 py-1.5 text-[13px] text-popover-foreground hover:bg-accent cursor-default" onclick={handleGlobalCtxSelectAll}>Select All<span class="ml-auto text-[11px] text-muted-foreground/60">{modKey}A</span></button>
+		<div class="bg-border/40 my-1 h-px"></div>
+		<button
+			class="flex w-full cursor-default items-center justify-between rounded-md px-3 py-1.5 text-[13px] text-popover-foreground hover:bg-accent"
+			onclick={handleGlobalCtxSelectAll}
+			>Select All<span class="text-muted-foreground/60 ml-auto text-[11px]">{modKey}A</span></button
+		>
 	</div>
 {/if}

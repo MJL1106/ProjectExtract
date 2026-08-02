@@ -24,6 +24,14 @@
 		onBridgeLost?: () => void;
 	}
 
+	type TerminalWithCore = Terminal & {
+		_core?: {
+			_renderService?: {
+				dimensions?: { css?: { cell?: { width?: number; height?: number } } };
+			};
+		};
+	};
+
 	let { isActiveTab, onBridgeId, onBridgeLost }: Props = $props();
 
 	class FitAddon implements ITerminalAddon {
@@ -38,9 +46,9 @@
 		proposeDimensions(): { cols: number; rows: number } | undefined {
 			const t = this._terminal;
 			if (!t?.element?.parentElement) return undefined;
-			const core = (t as any)._core;
-			const cellWidth = core._renderService.dimensions.css.cell.width;
-			const cellHeight = core._renderService.dimensions.css.cell.height;
+			const cell = (t as TerminalWithCore)._core?._renderService?.dimensions?.css?.cell;
+			const cellWidth = cell?.width;
+			const cellHeight = cell?.height;
 			if (!cellWidth || !cellHeight) return undefined;
 			const parentEl = t.element.parentElement;
 			const cw = parentEl.clientWidth;
@@ -65,7 +73,6 @@
 	let fitAddon: FitAddon | undefined = $state();
 	let terminalId: string | undefined = $state();
 	let status: 'connecting' | 'connected' | 'exited' | 'error' = $state('connecting');
-	let exitCode: number | undefined = $state();
 	let resizeTimeout: ReturnType<typeof setTimeout> | undefined;
 	let resizeObserver: ResizeObserver | undefined;
 	let intersectionObserver: IntersectionObserver | undefined;
@@ -81,7 +88,6 @@
 
 	function handleExit(id: string, code: number) {
 		if (id !== terminalId) return;
-		exitCode = code;
 		status = 'exited';
 		onBridgeLost?.();
 		terminal?.write(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`);
@@ -216,7 +222,6 @@
 		terminal?.clear();
 		terminal?.reset();
 		status = 'connecting';
-		exitCode = undefined;
 		terminalId = undefined;
 
 		const result = await startTerminal();
@@ -268,7 +273,7 @@
 
 <div class="flex h-full min-h-0 w-full min-w-0 flex-col bg-surface-popup">
 	<div
-		class="flex h-7 shrink-0 items-center justify-end border-b border-border/50 bg-surface-bar px-2"
+		class="border-border/50 flex h-7 shrink-0 items-center justify-end border-b bg-surface-bar px-2"
 	>
 		{#if status === 'exited' || status === 'error'}
 			<button

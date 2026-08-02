@@ -7,7 +7,7 @@ import {
 	installRegistryAgent,
 	uninstallRegistryAgent,
 	updateRegistryAgent,
-	refreshRegistry,
+	refreshRegistry
 } from '$lib/bridge.js';
 import { loadAgents } from '$lib/stores/agents.js';
 
@@ -72,6 +72,7 @@ export async function installAgent(agentId: string, method: string = 'auto'): Pr
 		await loadAgents();
 	} catch (e) {
 		console.warn('Install failed:', e);
+		throw e;
 	} finally {
 		installingAgents.update((set) => {
 			const next = new Set(set);

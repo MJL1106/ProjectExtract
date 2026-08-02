@@ -5,6 +5,7 @@
 		type NotificationSettings
 	} from '$lib/bridge.js';
 	import { t } from '$lib/i18n.js';
+	import { toast } from 'svelte-sonner';
 	import SoundPicker from '$lib/components/SoundPicker.svelte';
 
 	// ── State ──────────────────────────────────────────────────────────
@@ -34,39 +35,54 @@
 		}
 	}
 
-	async function toggle(key: keyof NotificationSettings, value: boolean) {
-		(settings as any)[key] = value;
+	type BooleanSettingKey =
+		| 'onlyWhenUnfocused'
+		| 'notifyOnComplete'
+		| 'flashTaskbar'
+		| 'playSound'
+		| 'playPermissionSound';
+	type VolumeSettingKey = 'soundVolume' | 'permissionSoundVolume';
+	type SoundSettingKey = 'completionSound' | 'errorSound' | 'permissionRequestSound';
+
+	function saveErrorToast(e: unknown) {
+		toast.error($t('failed_to_save'), {
+			description: e instanceof Error ? e.message : String(e)
+		});
+	}
+
+	async function toggle(key: BooleanSettingKey, value: boolean) {
+		const prev = settings[key];
+		settings[key] = value;
 		try {
 			await setNotificationSetting(key, String(value));
 		} catch (e) {
 			console.warn('Failed to save notification setting:', e);
+			settings[key] = prev;
+			saveErrorToast(e);
 		}
 	}
 
-	async function setVolume(value: number) {
-		settings.soundVolume = value;
+	async function setVolume(key: VolumeSettingKey, value: number) {
+		const prev = settings[key];
+		settings[key] = value;
 		try {
-			await setNotificationSetting('soundVolume', String(value));
+			await setNotificationSetting(key, String(value));
 		} catch (e) {
 			console.warn('Failed to save sound volume:', e);
+			settings[key] = prev;
+			saveErrorToast(e);
 		}
 	}
 
-	async function setPermissionVolume(value: number) {
-		settings.permissionSoundVolume = value;
-		try {
-			await setNotificationSetting('permissionSoundVolume', String(value));
-		} catch (e) {
-			console.warn('Failed to save permission sound volume:', e);
-		}
-	}
-
-	async function setSound(key: 'completionSound' | 'errorSound' | 'permissionRequestSound', value: string) {
-		(settings as any)[key] = value;
+	async function setSound(key: SoundSettingKey, value: string) {
+		const prev = settings[key];
+		settings[key] = value;
 		try {
 			await setNotificationSetting(key, value);
 		} catch (e) {
 			console.warn('Failed to save sound:', e);
+			settings[key] = prev;
+			saveErrorToast(e);
 		}
 	}
 
@@ -76,24 +92,28 @@
 
 <div class="mb-6">
 	<h2 class="mb-1 text-[18px] font-medium text-foreground">{$t('tab_notifications')}</h2>
-	<p class="text-[13px] text-muted-foreground/60">{$t('notif_desc')}</p>
-	<p class="mt-1 text-[12px] text-muted-foreground/45">{$t('notif_permission_gate_note')}</p>
+	<p class="text-muted-foreground/60 text-[13px]">{$t('notif_desc')}</p>
+	<p class="text-muted-foreground/45 mt-1 text-[12px]">{$t('notif_permission_gate_note')}</p>
 </div>
 
 {#if isLoading}
-	<div class="flex items-center gap-2 py-8 text-muted-foreground/50">
-		<span class="inline-block h-4 w-4 animate-spin rounded-full border-2 border-muted-foreground/30 border-t-muted-foreground"></span>
+	<div class="text-muted-foreground/50 flex items-center gap-2 py-8">
+		<span
+			class="border-muted-foreground/30 inline-block h-4 w-4 animate-spin rounded-full border-2 border-t-muted-foreground"
+		></span>
 		Loading...
 	</div>
 {:else}
 	<!-- When to notify -->
-	<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
+	<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
 		<h3 class="mb-3 text-[14px] font-medium text-foreground">{$t('notif_when_heading')}</h3>
 
-		<label class="flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors hover:bg-accent/20">
+		<label
+			class="hover:bg-accent/20 flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors"
+		>
 			<div>
 				<span class="text-[13px] text-foreground">{$t('notif_only_unfocused')}</span>
-				<p class="mt-0.5 text-[11px] text-muted-foreground/50">{$t('notif_only_unfocused_desc')}</p>
+				<p class="text-muted-foreground/50 mt-0.5 text-[11px]">{$t('notif_only_unfocused_desc')}</p>
 			</div>
 			<input
 				type="checkbox"
@@ -105,29 +125,34 @@
 	</div>
 
 	<!-- Notification types -->
-	<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
+	<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
 		<h3 class="mb-3 text-[14px] font-medium text-foreground">{$t('notif_types_heading')}</h3>
 
 		<div class="flex flex-col">
 			<!-- Editor toast -->
-			<label class="flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors hover:bg-accent/20">
+			<label
+				class="hover:bg-accent/20 flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors"
+			>
 				<div>
 					<span class="text-[13px] text-foreground">{$t('notif_toast')}</span>
-					<p class="mt-0.5 text-[11px] text-muted-foreground/50">{$t('notif_toast_desc')}</p>
+					<p class="text-muted-foreground/50 mt-0.5 text-[11px]">{$t('notif_toast_desc')}</p>
 				</div>
 				<input
 					type="checkbox"
 					checked={settings.notifyOnComplete}
-					onchange={(e) => toggle('notifyOnComplete', (e.currentTarget as HTMLInputElement).checked)}
+					onchange={(e) =>
+						toggle('notifyOnComplete', (e.currentTarget as HTMLInputElement).checked)}
 					class="h-4 w-4 shrink-0 rounded border-border accent-[var(--ue-accent)]"
 				/>
 			</label>
 
 			<!-- Taskbar flash -->
-			<label class="flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors hover:bg-accent/20">
+			<label
+				class="hover:bg-accent/20 flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors"
+			>
 				<div>
 					<span class="text-[13px] text-foreground">{$t('notif_flash')}</span>
-					<p class="mt-0.5 text-[11px] text-muted-foreground/50">{$t('notif_flash_desc')}</p>
+					<p class="text-muted-foreground/50 mt-0.5 text-[11px]">{$t('notif_flash_desc')}</p>
 				</div>
 				<input
 					type="checkbox"
@@ -138,10 +163,12 @@
 			</label>
 
 			<!-- Sound -->
-			<label class="flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors hover:bg-accent/20">
+			<label
+				class="hover:bg-accent/20 flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors"
+			>
 				<div>
 					<span class="text-[13px] text-foreground">{$t('notif_sound')}</span>
-					<p class="mt-0.5 text-[11px] text-muted-foreground/50">{$t('notif_sound_desc')}</p>
+					<p class="text-muted-foreground/50 mt-0.5 text-[11px]">{$t('notif_sound_desc')}</p>
 				</div>
 				<input
 					type="checkbox"
@@ -152,15 +179,20 @@
 			</label>
 
 			<!-- Permission / Ask User prompt sound -->
-			<label class="flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors hover:bg-accent/20">
+			<label
+				class="hover:bg-accent/20 flex cursor-pointer items-center justify-between rounded-md px-1 py-2.5 transition-colors"
+			>
 				<div>
 					<span class="text-[13px] text-foreground">{$t('notif_permission_sound')}</span>
-					<p class="mt-0.5 text-[11px] text-muted-foreground/50">{$t('notif_permission_sound_desc')}</p>
+					<p class="text-muted-foreground/50 mt-0.5 text-[11px]">
+						{$t('notif_permission_sound_desc')}
+					</p>
 				</div>
 				<input
 					type="checkbox"
 					checked={settings.playPermissionSound}
-					onchange={(e) => toggle('playPermissionSound', (e.currentTarget as HTMLInputElement).checked)}
+					onchange={(e) =>
+						toggle('playPermissionSound', (e.currentTarget as HTMLInputElement).checked)}
 					class="h-4 w-4 shrink-0 rounded border-border accent-[var(--ue-accent)]"
 				/>
 			</label>
@@ -169,7 +201,7 @@
 
 	<!-- Volume slider (only when sound enabled) -->
 	{#if settings.playSound}
-		<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
+		<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
 			<h3 class="mb-3 text-[14px] font-medium text-foreground">{$t('notif_volume_heading')}</h3>
 			<div class="flex items-center gap-3">
 				<input
@@ -178,13 +210,14 @@
 					max="1"
 					step="0.05"
 					value={settings.soundVolume}
-					oninput={(e) => setVolume(parseFloat((e.currentTarget as HTMLInputElement).value))}
-					class="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-border/60 accent-[var(--ue-accent)] [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-foreground"
+					onchange={(e) =>
+						setVolume('soundVolume', parseFloat((e.currentTarget as HTMLInputElement).value))}
+					class="bg-border/60 h-1.5 flex-1 cursor-pointer appearance-none rounded-full accent-[var(--ue-accent)] [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-foreground"
 				/>
 				<span class="w-10 text-right text-[13px] text-muted-foreground">{volumePercent}%</span>
 			</div>
 
-			<div class="mt-4 border-t border-border/30 pt-3">
+			<div class="border-border/30 mt-4 border-t pt-3">
 				<SoundPicker
 					label="Completion sound"
 					value={settings.completionSound}
@@ -202,8 +235,10 @@
 	{/if}
 
 	{#if settings.playPermissionSound}
-		<div class="mb-4 rounded-lg border border-border/60 bg-card p-4">
-			<h3 class="mb-3 text-[14px] font-medium text-foreground">{$t('notif_permission_volume_heading')}</h3>
+		<div class="border-border/60 mb-4 rounded-lg border bg-card p-4">
+			<h3 class="mb-3 text-[14px] font-medium text-foreground">
+				{$t('notif_permission_volume_heading')}
+			</h3>
 			<div class="flex items-center gap-3">
 				<input
 					type="range"
@@ -211,12 +246,18 @@
 					max="1"
 					step="0.05"
 					value={settings.permissionSoundVolume}
-					oninput={(e) => setPermissionVolume(parseFloat((e.currentTarget as HTMLInputElement).value))}
-					class="h-1.5 flex-1 cursor-pointer appearance-none rounded-full bg-border/60 accent-[var(--ue-accent)] [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-foreground"
+					onchange={(e) =>
+						setVolume(
+							'permissionSoundVolume',
+							parseFloat((e.currentTarget as HTMLInputElement).value)
+						)}
+					class="bg-border/60 h-1.5 flex-1 cursor-pointer appearance-none rounded-full accent-[var(--ue-accent)] [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-foreground"
 				/>
-				<span class="w-10 text-right text-[13px] text-muted-foreground">{permissionVolumePercent}%</span>
+				<span class="w-10 text-right text-[13px] text-muted-foreground"
+					>{permissionVolumePercent}%</span
+				>
 			</div>
-			<div class="mt-4 border-t border-border/30 pt-3">
+			<div class="border-border/30 mt-4 border-t pt-3">
 				<SoundPicker
 					label="Permission request sound"
 					value={settings.permissionRequestSound}
@@ -226,5 +267,4 @@
 			</div>
 		</div>
 	{/if}
-
 {/if}

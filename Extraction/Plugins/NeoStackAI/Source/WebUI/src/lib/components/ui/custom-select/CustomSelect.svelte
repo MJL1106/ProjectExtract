@@ -8,18 +8,21 @@
 		options,
 		value = $bindable(''),
 		onchange,
-		id = ''
+		id = '',
+		ariaLabel = 'Select an option'
 	}: {
 		options: Option[];
 		value: string;
 		onchange?: (value: string) => void;
 		id?: string;
+		ariaLabel?: string;
 	} = $props();
 
 	let open = $state(false);
 	let containerEl: HTMLDivElement | undefined = $state();
 
-	const selectedLabel = $derived(options.find(o => o.value === value)?.label ?? value);
+	const selectedLabel = $derived(options.find((o) => o.value === value)?.label ?? value);
+	const listboxId = $derived(`${id || 'custom-select'}-options`);
 
 	function toggle() {
 		open = !open;
@@ -51,24 +54,39 @@
 	});
 </script>
 
-<div bind:this={containerEl} class="relative" {id} onkeydown={handleKeydown}>
+<div
+	bind:this={containerEl}
+	class="relative"
+	{id}
+	role="combobox"
+	aria-label={ariaLabel}
+	aria-expanded={open}
+	aria-controls={listboxId}
+	aria-haspopup="listbox"
+	tabindex="-1"
+	onkeydown={handleKeydown}
+>
 	<button
 		type="button"
-		class="flex w-full items-center justify-between rounded-md border border-border/60 bg-transparent px-3 py-2 text-left text-[13px] text-foreground transition-colors hover:border-foreground/20 focus:border-foreground/30 focus:outline-none"
+		class="border-border/60 hover:border-foreground/20 focus:border-foreground/30 flex w-full items-center justify-between rounded-md border bg-transparent px-3 py-2 text-left text-[13px] text-foreground transition-colors focus:outline-none"
 		onclick={toggle}
 	>
 		<span>{selectedLabel}</span>
-		<span class="ml-2 text-muted-foreground/60 transition-transform" class:rotate-180={open}>
+		<span class="text-muted-foreground/60 ml-2 transition-transform" class:rotate-180={open}>
 			<Icon icon={ArrowDown01Icon} size={14} />
 		</span>
 	</button>
 
 	{#if open}
-		<div class="absolute left-0 right-0 top-full z-50 mt-1 overflow-hidden rounded-md border border-border/60 bg-surface-popup shadow-lg">
-			{#each options as opt}
+		<div
+			id={listboxId}
+			role="listbox"
+			class="border-border/60 absolute left-0 right-0 top-full z-50 mt-1 overflow-hidden rounded-md border bg-surface-popup shadow-lg"
+		>
+			{#each options as opt (opt.value)}
 				<button
 					type="button"
-					class="flex w-full items-center px-3 py-2 text-left text-[13px] transition-colors hover:bg-foreground/5"
+					class="hover:bg-foreground/5 flex w-full items-center px-3 py-2 text-left text-[13px] transition-colors"
 					class:text-foreground={opt.value === value}
 					class:text-muted-foreground={opt.value !== value}
 					onclick={() => select(opt)}

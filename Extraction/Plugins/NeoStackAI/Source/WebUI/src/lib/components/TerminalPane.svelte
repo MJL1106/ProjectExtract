@@ -87,16 +87,14 @@
 </script>
 
 <div class="flex h-full w-full flex-col bg-surface-popup">
-	<div
-		class="flex h-8 shrink-0 items-center gap-1 border-b border-border/50 bg-surface-bar px-2"
-	>
+	<div class="border-border/50 flex h-8 shrink-0 items-center gap-1 border-b bg-surface-bar px-2">
 		<div class="flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto">
 			{#each tabs as tab, i (tab.localId)}
 				<div
 					class="flex max-w-[140px] shrink-0 items-center rounded-md transition-colors {tab.localId ===
 					activeTabId
 						? 'bg-sidebar-accent text-sidebar-foreground'
-						: 'text-muted-foreground hover:bg-sidebar-accent/50'}"
+						: 'hover:bg-sidebar-accent/50 text-muted-foreground'}"
 				>
 					<button
 						type="button"
@@ -110,7 +108,7 @@
 					{#if tabs.length > 1}
 						<button
 							type="button"
-							class="mr-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-destructive/20 hover:text-destructive"
+							class="hover:bg-destructive/20 mr-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-destructive"
 							onclick={(e) => closeTab(e, tab.localId)}
 							aria-label={$t('close_terminal_tab')}
 						>

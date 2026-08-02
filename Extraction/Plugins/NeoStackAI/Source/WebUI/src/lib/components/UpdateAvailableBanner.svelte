@@ -21,7 +21,7 @@
 {#if update}
 	<div class="mx-auto mb-3 w-full max-w-3xl">
 		<div
-			class="flex items-center gap-3 overflow-hidden rounded-lg border border-border/40 px-3.5 py-2"
+			class="border-border/40 flex items-center gap-3 overflow-hidden rounded-lg border px-3.5 py-2"
 			style="background: linear-gradient(135deg, #252525, #1f1f1f);"
 		>
 			<!-- Download icon -->
@@ -45,11 +45,11 @@
 				</svg>
 			</div>
 
-			<div class="flex-1 min-w-0">
-				<div class="text-[12.5px] font-medium text-foreground/85">
+			<div class="min-w-0 flex-1">
+				<div class="text-foreground/85 text-[12.5px] font-medium">
 					Update available for {update.agentName}
 				</div>
-				<div class="text-[11px] text-muted-foreground/50">
+				<div class="text-muted-foreground/50 text-[11px]">
 					v{update.installedVersion} → v{update.latestVersion}
 					{#if update.isNpx}
 						<span class="ml-1 opacity-60">(via npx)</span>
@@ -58,7 +58,7 @@
 			</div>
 
 			<button
-				class="rounded-md px-3 py-1.5 text-[12px] font-medium text-white transition-all hover:brightness-110 active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+				class="rounded-md px-3 py-1.5 text-[12px] font-medium text-white transition-all hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
 				style="background-color: {agentColor};"
 				disabled={isUpdating}
 				onclick={handleUpdate}
@@ -66,7 +66,8 @@
 			>
 				{#if isUpdating}
 					<span class="inline-flex items-center gap-1.5">
-						<span class="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white"></span>
+						<span class="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white"
+						></span>
 						Updating…
 					</span>
 				{:else}

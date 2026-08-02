@@ -5,47 +5,75 @@ import {
 	cancelPrompt,
 	onMessage,
 	type ChatMessage,
-	type ContentBlock,
 	type StreamingUpdate
 } from '$lib/bridge.js';
 import { currentSessionId } from '$lib/stores/sessions.js';
-import { isPromptingState, sessionStates, type AgentConnectionState } from '$lib/stores/agentState.js';
+import {
+	isPromptingState,
+	sessionStates,
+	type AgentConnectionState
+} from '$lib/stores/agentState.js';
 import { handleUsageUpdate } from '$lib/stores/usage.js';
 import { setAuthRequired } from '$lib/stores/auth.js';
 import { sessions } from '$lib/stores/sessions.js';
 import { addSubmittedPromptToHistory } from '$lib/stores/composerHistory.js';
 import { createUUID } from '$lib/utils.js';
+import { isAssistantMessageUpdate } from '$lib/stores/streamingUpdateRouting.js';
+import { paneManager } from '$lib/stores/panes.svelte.js';
+import { isSessionDisposed, onSessionDisposed } from '$lib/stores/sessionLifecycle.js';
+import {
+	beginKeyedPerformanceSpan,
+	endKeyedPerformanceSpan,
+	endKeyedPerformanceSpanAfterPaint
+} from '$lib/performanceTelemetry.js';
+import { createPromptLifecycleRegistry } from '$lib/promptLifecycle.js';
 
 export const messages = writable<ChatMessage[]>([]);
 export const isStreaming = writable(false);
 export const messagesBySession = writable<Record<string, ChatMessage[]>>({});
 export const streamingBySession = writable<Record<string, boolean>>({});
+export const cancellingBySession = writable<Record<string, boolean>>({});
 // Per-session load counters so concurrent loads for different sessions
 // don't cancel each other. Only same-session loads should cancel prior ones.
 const loadRequestIds = new Map<string, number>();
+const loadedSessionIds = new Set<string>();
+const sessionEstimatedBytes = new Map<string, number>();
 let loadRequestCounter = 0;
 
 // ── Streaming gating ─────────────────────────────────────────────────
-const promptActiveForSession = new Set<string>();
+const promptLifecycle = createPromptLifecycleRegistry();
+
+/** A turn is live for this session — locally sent (prompt lifecycle) OR
+ *  remotely initiated (desktop/web prompted this executor; inferred from the
+ *  agent's prompting state, since no local composer send ever happened). */
+function isTurnLive(sessionId: string): boolean {
+	return promptLifecycle.isActive(sessionId) || get(streamingBySession)[sessionId] === true;
+}
 
 // ACP session/load replays are history snapshots, not live prompt turns. Keep
 // replay chunks out of the visible cache until the replay is complete.
 const replayActiveForSession = new Set<string>();
 const replayPreserveCachedForSession = new Set<string>();
-const replayBuffers = new Map<string, ChatMessage[]>();
+const replayBuffers = new Map<string, StreamingUpdate[]>();
 const replayEpochs = new Map<string, number>();
 let replayEpochCounter = 0;
 
 // ── Store helpers ────────────────────────────────────────────────────
 
-function setSessionMessages(sessionId: string, msgs: ChatMessage[]): void {
+function setSessionMessages(sessionId: string, msgs: ChatMessage[], markLoaded = true): void {
+	if (markLoaded) loadedSessionIds.add(sessionId);
+	sessionEstimatedBytes.set(sessionId, estimateTranscriptBytes(msgs));
 	messagesBySession.update((all) => ({ ...all, [sessionId]: msgs }));
 	if (get(currentSessionId) === sessionId) {
 		messages.set(msgs);
 	}
 }
 
-function updateSessionMessages(sessionId: string, updater: (msgs: ChatMessage[]) => ChatMessage[]): void {
+function updateSessionMessages(
+	sessionId: string,
+	updater: (msgs: ChatMessage[]) => ChatMessage[]
+): void {
+	loadedSessionIds.add(sessionId);
 	let nextMsgs: ChatMessage[] = [];
 	messagesBySession.update((all) => {
 		nextMsgs = updater(all[sessionId] ?? []);
@@ -61,6 +89,16 @@ function setSessionStreaming(sessionId: string, streaming: boolean): void {
 	if (get(currentSessionId) === sessionId) {
 		isStreaming.set(streaming);
 	}
+}
+
+function setSessionCancelling(sessionId: string, cancelling: boolean): void {
+	cancellingBySession.update((all) => {
+		if (cancelling) return { ...all, [sessionId]: true };
+		if (!(sessionId in all)) return all;
+		const next = { ...all };
+		delete next[sessionId];
+		return next;
+	});
 }
 
 function normalizeLoadedMessages(msgs: ChatMessage[]): ChatMessage[] {
@@ -111,7 +149,8 @@ function formatAgentError(update: StreamingUpdate, agentName: string): string {
 }
 
 export function finishStreamingForSession(sessionId: string): void {
-	promptActiveForSession.delete(sessionId);
+	promptLifecycle.finish(sessionId);
+	setSessionCancelling(sessionId, false);
 	updateSessionMessages(sessionId, (msgs) => {
 		const last = msgs[msgs.length - 1];
 		if (last?.isStreaming) {
@@ -125,6 +164,89 @@ export function finishStreamingForSession(sessionId: string): void {
 		return msgs;
 	});
 	setSessionStreaming(sessionId, false);
+	const sessionMessages = get(messagesBySession)[sessionId];
+	if (sessionMessages)
+		sessionEstimatedBytes.set(sessionId, estimateTranscriptBytes(sessionMessages));
+	evictStaleSessionCaches(get(currentSessionId) ?? sessionId);
+}
+
+// LRU bookkeeping for the transcript cache: every session ever visited used to
+// stay in memory forever — including base64 screenshot payloads — growing the
+// CEF heap across a workday. Evicted sessions cold-load from SQLite on reopen.
+const sessionTouchOrder = new Map<string, number>();
+let sessionTouchCounter = 0;
+const MAX_CACHED_SESSIONS = 12;
+const MAX_CACHED_TRANSCRIPT_BYTES = 32 * 1024 * 1024;
+
+function estimateTranscriptBytes(msgs: ChatMessage[]): number {
+	let bytes = 0;
+	for (const msg of msgs) {
+		bytes += 256 + msg.messageId.length * 2 + msg.timestamp.length * 2;
+		for (const block of msg.contentBlocks) {
+			bytes += 192 + block.text.length * 2;
+			bytes += (block.toolCallId?.length ?? 0) * 2;
+			bytes += (block.toolName?.length ?? 0) * 2;
+			bytes += (block.toolArguments?.length ?? 0) * 2;
+			bytes += (block.toolResult?.length ?? 0) * 2;
+			for (const image of block.images ?? []) {
+				bytes += 128 + image.base64.length * 2 + image.mimeType.length * 2;
+			}
+		}
+	}
+	return bytes;
+}
+
+function evictStaleSessionCaches(currentSid: string): void {
+	const all = get(messagesBySession);
+	const ids = Object.keys(all);
+	const byteSizes = new Map(
+		ids.map((id) => {
+			const bytes = sessionEstimatedBytes.get(id) ?? estimateTranscriptBytes(all[id]);
+			sessionEstimatedBytes.set(id, bytes);
+			return [id, bytes];
+		})
+	);
+	let totalBytes = ids.reduce((total, id) => total + (byteSizes.get(id) ?? 0), 0);
+	if (ids.length <= MAX_CACHED_SESSIONS && totalBytes <= MAX_CACHED_TRANSCRIPT_BYTES) return;
+
+	const pinnedSessionIds = new Set(
+		paneManager.panes
+			.map((pane) => pane.sessionId)
+			.filter((sessionId): sessionId is string => Boolean(sessionId))
+	);
+	pinnedSessionIds.add(currentSid);
+
+	const evictable = ids
+		.filter(
+			(id) =>
+				!pinnedSessionIds.has(id) &&
+				!promptLifecycle.isActive(id) &&
+				!replayActiveForSession.has(id)
+		)
+		.sort((a, b) => (sessionTouchOrder.get(a) ?? 0) - (sessionTouchOrder.get(b) ?? 0));
+	const evicted: string[] = [];
+	for (const id of evictable) {
+		if (
+			ids.length - evicted.length <= MAX_CACHED_SESSIONS &&
+			totalBytes <= MAX_CACHED_TRANSCRIPT_BYTES
+		) {
+			break;
+		}
+		evicted.push(id);
+		totalBytes -= byteSizes.get(id) ?? 0;
+	}
+	if (evicted.length === 0) return;
+
+	messagesBySession.update((m) => {
+		const next = { ...m };
+		for (const id of evicted) {
+			delete next[id];
+			sessionTouchOrder.delete(id);
+			loadedSessionIds.delete(id);
+			sessionEstimatedBytes.delete(id);
+		}
+		return next;
+	});
 }
 
 // Keep active-view stores in sync when current session changes.
@@ -138,10 +260,25 @@ currentSessionId.subscribe((sid) => {
 	messages.set(allMessages[sid] ?? []);
 	const allStreaming = get(streamingBySession);
 	isStreaming.set(allStreaming[sid] ?? false);
+	sessionTouchOrder.set(sid, ++sessionTouchCounter);
+	evictStaleSessionCaches(sid);
 });
 
 /** Load saved messages for a session */
 export async function loadMessages(sessionId: string): Promise<void> {
+	// Cached sessions render instantly from memory. Refetching on every switch
+	// replaced the array with backend-ID'd copies — every message key changed,
+	// so the whole pane destroyed and re-parsed each ChatMessage (a visible
+	// multi-hundred-ms hitch) — and a snapshot racing a live stream could
+	// overwrite chunks that arrived after the fetch started. The streaming and
+	// replay paths own cache updates; the backend fetch is only for cold loads.
+	if (loadedSessionIds.has(sessionId)) {
+		return;
+	}
+	if (promptLifecycle.isActive(sessionId)) {
+		return;
+	}
+
 	const requestId = ++loadRequestCounter;
 	loadRequestIds.set(sessionId, requestId);
 	const replayEpochAtStart = replayEpochs.get(sessionId) ?? 0;
@@ -149,30 +286,41 @@ export async function loadMessages(sessionId: string): Promise<void> {
 		const msgs = await getSessionMessages(sessionId);
 		if (loadRequestIds.get(sessionId) !== requestId) return;
 		if (
-			replayActiveForSession.has(sessionId)
-			|| (replayEpochs.get(sessionId) ?? 0) !== replayEpochAtStart
+			replayActiveForSession.has(sessionId) ||
+			(replayEpochs.get(sessionId) ?? 0) !== replayEpochAtStart
 		) {
 			return;
 		}
 		setSessionMessages(sessionId, normalizeLoadedMessages(msgs));
-		setSessionStreaming(sessionId, promptActiveForSession.has(sessionId));
+		setSessionStreaming(
+			sessionId,
+			promptLifecycle.isActive(sessionId) ||
+				isPromptingState(get(sessionStates)[sessionId]?.state)
+		);
 	} catch (e) {
 		if (loadRequestIds.get(sessionId) !== requestId) return;
 		if (
-			replayActiveForSession.has(sessionId)
-			|| (replayEpochs.get(sessionId) ?? 0) !== replayEpochAtStart
+			replayActiveForSession.has(sessionId) ||
+			(replayEpochs.get(sessionId) ?? 0) !== replayEpochAtStart
 		) {
 			return;
 		}
 		console.warn('Failed to load messages:', e);
-		setSessionMessages(sessionId, []);
+		setSessionMessages(sessionId, [], false);
 		setSessionStreaming(sessionId, false);
 	}
 }
 
-/** Send a user message and trigger agent prompt */
-export async function sendMessage(sessionId: string, text: string): Promise<boolean> {
-	if (!sessionId || !text.trim()) return false;
+export type PromptSubmissionResult = { sent: boolean; error?: string };
+
+/** Send a user message and commit optimistic state only after native acceptance. */
+export async function sendMessage(
+	sessionId: string,
+	text: string
+): Promise<PromptSubmissionResult> {
+	if (!sessionId || !text.trim())
+		return { sent: false, error: 'A session and prompt are required.' };
+	const requestId = createUUID();
 	const userMsg: ChatMessage = {
 		messageId: createUUID(),
 		role: 'user',
@@ -180,32 +328,79 @@ export async function sendMessage(sessionId: string, text: string): Promise<bool
 		timestamp: new Date().toISOString(),
 		contentBlocks: [{ type: 'text', text: text.trim(), isStreaming: false }]
 	};
+	promptLifecycle.beginPrompt(sessionId, requestId);
+	beginKeyedPerformanceSpan('prompt_to_first_visible_update', sessionId, { requestId });
+	setSessionStreaming(sessionId, true);
 	updateSessionMessages(sessionId, (msgs) => [...msgs, userMsg]);
 	try {
-		await sendPrompt(sessionId, text.trim());
+		const result = await sendPrompt(sessionId, text.trim(), requestId);
+		if (result.requestId !== requestId) {
+			throw new Error('The editor acknowledged a different prompt request.');
+		}
+		const acknowledgement = promptLifecycle.acknowledgePrompt(
+			sessionId,
+			requestId,
+			result.accepted
+		);
+		if (!result.accepted) {
+			if (acknowledgement === 'rejected') setSessionStreaming(sessionId, false);
+			throw new Error(result.message || 'The agent rejected this prompt.');
+		}
 		addSubmittedPromptToHistory(text.trim());
-		promptActiveForSession.add(sessionId);
-		setSessionStreaming(sessionId, true);
-		return true;
+		return { sent: true };
 	} catch (e) {
+		endKeyedPerformanceSpan('prompt_to_first_visible_update', sessionId, {
+			requestId,
+			failedBeforeResponse: true
+		});
 		console.warn('Failed to send prompt:', e);
-		setSessionStreaming(sessionId, false);
+		if (promptLifecycle.getPromptRequestId(sessionId) === requestId) {
+			promptLifecycle.finish(sessionId);
+			setSessionStreaming(sessionId, false);
+		}
 		updateSessionMessages(sessionId, (msgs) =>
 			msgs.filter((m) => m.messageId !== userMsg.messageId)
 		);
-		return false;
+		return {
+			sent: false,
+			error: e instanceof Error ? e.message : String(e)
+		};
 	}
 }
 
-/** Cancel the current streaming prompt */
-export async function cancelCurrentPrompt(sessionId: string): Promise<void> {
-	if (!sessionId) return;
-	try {
-		await cancelPrompt(sessionId);
-	} catch (e) {
-		console.warn('Failed to cancel prompt:', e);
+export type PromptCancellationResult = { cancelled: boolean; error?: string };
+
+/** Cancel the current streaming prompt, keeping local state active until acknowledged. */
+export async function cancelCurrentPrompt(sessionId: string): Promise<PromptCancellationResult> {
+	if (!sessionId) return { cancelled: false, error: 'A session is required.' };
+	if (get(cancellingBySession)[sessionId]) {
+		return { cancelled: false, error: 'Cancellation is already in progress.' };
 	}
-	finishStreamingForSession(sessionId);
+	const requestId = createUUID();
+	if (!promptLifecycle.beginCancellation(sessionId, requestId)) {
+		return { cancelled: false, error: 'Cancellation is already in progress.' };
+	}
+	setSessionCancelling(sessionId, true);
+	try {
+		const result = await cancelPrompt(sessionId, requestId);
+		if (result.requestId !== requestId) {
+			throw new Error('The editor acknowledged a different cancellation request.');
+		}
+		promptLifecycle.acknowledgeCancellation(sessionId, requestId, result.accepted);
+		if (!result.accepted) {
+			throw new Error(result.message || 'The agent rejected cancellation.');
+		}
+		finishStreamingForSession(sessionId);
+		return { cancelled: true };
+	} catch (e) {
+		promptLifecycle.acknowledgeCancellation(sessionId, requestId, false);
+		console.warn('Failed to cancel prompt:', e);
+		setSessionCancelling(sessionId, false);
+		return {
+			cancelled: false,
+			error: e instanceof Error ? e.message : String(e)
+		};
+	}
 }
 
 /** Mark the current streaming message as complete */
@@ -279,9 +474,13 @@ function applyStreamingUpdate(
 	update: StreamingUpdate,
 	isActivePrompt: boolean,
 	mutatedIndices: Set<number>
-): { msg: ChatMessage; shouldStream: boolean } {
+): ChatMessage | null {
+	// Plan, usage, replay-control, and unknown events are routed elsewhere. Do
+	// not create an empty assistant turn merely because one reached this reducer.
+	if (!isAssistantMessageUpdate(update)) {
+		return null;
+	}
 	const msg = getOrCreateAssistantMessage(msgs);
-	let shouldStream = isActivePrompt;
 
 	switch (update.type) {
 		case 'text_chunk':
@@ -297,7 +496,8 @@ function applyStreamingUpdate(
 					mutatedIndices.add(existingSystemIdx);
 				} else {
 					msg.contentBlocks.push({
-						type: 'system', text: update.text,
+						type: 'system',
+						text: update.text,
 						isStreaming: update.systemStatus === 'compacting',
 						systemStatus: update.systemStatus
 					});
@@ -321,7 +521,9 @@ function applyStreamingUpdate(
 				const existing = msg.contentBlocks[existingIdx];
 				if (update.toolArguments) existing.toolArguments = update.toolArguments;
 				if (update.toolName && !existing.toolName) existing.toolName = update.toolName;
-				if (update.parentToolCallId && !existing.parentToolCallId) existing.parentToolCallId = update.parentToolCallId;
+				if (update.locations?.length) existing.locations = update.locations;
+				if (update.parentToolCallId && !existing.parentToolCallId)
+					existing.parentToolCallId = update.parentToolCallId;
 				mutatedIndices.add(existingIdx);
 			} else {
 				// Stop streaming on any text/thought predecessors — record each touched index.
@@ -334,9 +536,14 @@ function applyStreamingUpdate(
 					}
 				}
 				blocks.push({
-					type: 'tool_call', text: '', isStreaming: isActivePrompt,
-					toolCallId: tcId, toolName: update.toolName,
-					toolArguments: update.toolArguments, parentToolCallId: update.parentToolCallId
+					type: 'tool_call',
+					text: '',
+					isStreaming: isActivePrompt,
+					toolCallId: tcId,
+					toolName: update.toolName,
+					toolArguments: update.toolArguments,
+					locations: update.locations,
+					parentToolCallId: update.parentToolCallId
 				});
 				mutatedIndices.add(blocks.length - 1);
 			}
@@ -350,9 +557,13 @@ function applyStreamingUpdate(
 			);
 			if (toolCallIdx < 0 && resultTcId) {
 				msg.contentBlocks.push({
-					type: 'tool_call', text: '', isStreaming: false,
-					toolCallId: resultTcId, toolName: update.toolName || 'tool',
-					toolArguments: '', parentToolCallId: update.parentToolCallId
+					type: 'tool_call',
+					text: '',
+					isStreaming: false,
+					toolCallId: resultTcId,
+					toolName: update.toolName || 'tool',
+					toolArguments: '',
+					parentToolCallId: update.parentToolCallId
 				});
 				toolCallIdx = msg.contentBlocks.length - 1;
 				mutatedIndices.add(toolCallIdx);
@@ -372,9 +583,13 @@ function applyStreamingUpdate(
 				mutatedIndices.add(existingResultIdx);
 			} else {
 				msg.contentBlocks.push({
-					type: 'tool_result', text: '', isStreaming: false,
-					toolCallId: resultTcId, toolResult: update.toolResult,
-					toolSuccess: update.toolSuccess, images: update.images,
+					type: 'tool_result',
+					text: '',
+					isStreaming: false,
+					toolCallId: resultTcId,
+					toolResult: update.toolResult,
+					toolSuccess: update.toolSuccess,
+					images: update.images,
 					parentToolCallId: update.parentToolCallId
 				});
 				mutatedIndices.add(msg.contentBlocks.length - 1);
@@ -383,13 +598,12 @@ function applyStreamingUpdate(
 		}
 
 		case 'error': {
-			const sessionAgent = update.agentName
-				|| get(sessions).find(s => s.sessionId === sessionId)?.agentName || '';
+			const sessionAgent =
+				update.agentName || get(sessions).find((s) => s.sessionId === sessionId)?.agentName || '';
 			const authReason = isLikelyAuthError(update, sessionAgent);
 			if (authReason) {
 				setAuthRequired(sessionAgent, authReason);
 				stopStreamingOnMessage(msg, mutatedIndices);
-				shouldStream = false;
 				break;
 			}
 			const formattedError = formatAgentError(update, sessionAgent);
@@ -398,12 +612,13 @@ function applyStreamingUpdate(
 				mutatedIndices.add(msg.contentBlocks.length - 1);
 			} else {
 				msg.contentBlocks.push({
-					type: 'error', text: formattedError, isStreaming: false
+					type: 'error',
+					text: formattedError,
+					isStreaming: false
 				});
 				mutatedIndices.add(msg.contentBlocks.length - 1);
 			}
 			stopStreamingOnMessage(msg, mutatedIndices);
-			shouldStream = false;
 			break;
 		}
 
@@ -412,7 +627,7 @@ function applyStreamingUpdate(
 	}
 
 	if (!isActivePrompt) stopStreamingOnMessage(msg, mutatedIndices);
-	return { msg, shouldStream };
+	return msg;
 }
 
 /**
@@ -442,7 +657,7 @@ function finishStreamingInArray(msgs: ChatMessage[]): ChatMessage[] {
 	return [...msgs.slice(0, -1), finished];
 }
 
-function applyUpdateToMessages(
+export function reduceStreamingUpdate(
 	msgs: ChatMessage[],
 	sessionId: string,
 	update: StreamingUpdate,
@@ -458,18 +673,36 @@ function applyUpdateToMessages(
 		};
 		return [...finishStreamingInArray(msgs), userMsg];
 	}
+	if (!isAssistantMessageUpdate(update)) return msgs;
 
 	const working = [...msgs];
 	const mutatedIndices = new Set<number>();
-	const { msg } = applyStreamingUpdate(
-		working,
-		sessionId,
-		update,
-		isActivePrompt,
-		mutatedIndices
-	);
-	const idx = working.indexOf(msg);
-	if (idx >= 0) working[idx] = cloneMessage(msg, mutatedIndices);
+	const msg = applyStreamingUpdate(working, sessionId, update, isActivePrompt, mutatedIndices);
+	if (msg) {
+		const idx = working.indexOf(msg);
+		if (idx >= 0) working[idx] = cloneMessage(msg, mutatedIndices);
+	}
+	return working;
+}
+
+/** Reduce a private replay event batch in place and publish only once. */
+function reduceReplayUpdates(sessionId: string, updates: StreamingUpdate[]): ChatMessage[] {
+	let working: ChatMessage[] = [];
+	for (const update of updates) {
+		if (update.type === 'user_message_chunk') {
+			working = finishStreamingInArray(working);
+			working.push({
+				messageId: createUUID(),
+				role: 'user',
+				isStreaming: false,
+				timestamp: new Date().toISOString(),
+				contentBlocks: [{ type: 'text', text: update.text, isStreaming: false }]
+			});
+			continue;
+		}
+		if (!isAssistantMessageUpdate(update)) continue;
+		applyStreamingUpdate(working, sessionId, update, false, new Set<number>());
+	}
 	return working;
 }
 
@@ -480,6 +713,18 @@ function applyUpdateToMessages(
 
 let pendingUpdates: Array<{ sessionId: string; update: StreamingUpdate }> = [];
 let rafId: number | null = null;
+let hiddenFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** Cancel any scheduled RAF flush and apply the queue synchronously. */
+function flushPendingUpdatesNow(): void {
+	if (rafId !== null) {
+		cancelAnimationFrame(rafId);
+		rafId = null;
+	}
+	if (pendingUpdates.length > 0) {
+		flushPendingUpdates();
+	}
+}
 
 function beginHistoryReplay(sessionId: string, preserveCached: boolean): void {
 	flushPendingUpdates();
@@ -496,7 +741,9 @@ function beginHistoryReplay(sessionId: string, preserveCached: boolean): void {
 
 async function finishHistoryReplay(sessionId: string, replayEmpty: boolean): Promise<void> {
 	flushPendingUpdates();
-	const buffered = normalizeLoadedMessages(replayBuffers.get(sessionId) ?? []);
+	const buffered = normalizeLoadedMessages(
+		reduceReplayUpdates(sessionId, replayBuffers.get(sessionId) ?? [])
+	);
 	const preserveCached = replayPreserveCachedForSession.has(sessionId);
 	replayActiveForSession.delete(sessionId);
 	replayPreserveCachedForSession.delete(sessionId);
@@ -524,8 +771,8 @@ async function finishHistoryReplay(sessionId: string, replayEmpty: boolean): Pro
 	try {
 		const msgs = await getSessionMessages(sessionId);
 		if (
-			(replayEpochs.get(sessionId) ?? 0) !== finishEpoch
-			|| replayActiveForSession.has(sessionId)
+			(replayEpochs.get(sessionId) ?? 0) !== finishEpoch ||
+			replayActiveForSession.has(sessionId)
 		) {
 			return;
 		}
@@ -543,10 +790,12 @@ function bufferReplayUpdate(sessionId: string, update: StreamingUpdate): void {
 		return;
 	}
 	const current = replayBuffers.get(sessionId) ?? [];
-	replayBuffers.set(sessionId, applyUpdateToMessages(current, sessionId, update, false));
+	current.push(update);
+	replayBuffers.set(sessionId, current);
 }
 
 function queueStreamingUpdate(sessionId: string, update: StreamingUpdate): void {
+	if (isSessionDisposed(sessionId)) return;
 	if (update.type === 'history_replay_started') {
 		beginHistoryReplay(sessionId, update.replayPreserveCached === true);
 		return;
@@ -564,6 +813,14 @@ function queueStreamingUpdate(sessionId: string, update: StreamingUpdate): void 
 		handleUsageUpdate(update, sessionId);
 		return;
 	}
+	if (update.type !== 'user_message_chunk' && !isAssistantMessageUpdate(update)) {
+		return;
+	}
+	if (isAssistantMessageUpdate(update)) {
+		endKeyedPerformanceSpanAfterPaint('prompt_to_first_visible_update', sessionId, {
+			updateType: update.type
+		});
+	}
 	// Errors and user_message_chunk are important — process immediately
 	if (update.type === 'error' || update.type === 'user_message_chunk') {
 		handleImmediateUpdate(sessionId, update);
@@ -573,9 +830,37 @@ function queueStreamingUpdate(sessionId: string, update: StreamingUpdate): void 
 	if (rafId === null) {
 		rafId = requestAnimationFrame(flushPendingUpdates);
 	}
+	// requestAnimationFrame never fires while CEF has the page hidden (chat tab
+	// closed but the browser window kept alive for instant reopen) — arm a timer
+	// fallback so updates keep applying and the queue can't grow unboundedly in
+	// the background.
+	if (hiddenFlushTimer === null && typeof document !== 'undefined' && document.hidden) {
+		hiddenFlushTimer = setTimeout(() => {
+			hiddenFlushTimer = null;
+			flushPendingUpdatesNow();
+		}, 250);
+	}
 }
 
 function handleImmediateUpdate(sessionId: string, update: StreamingUpdate): void {
+	// Preserve arrival order: RAF-queued chunks must land before this immediate
+	// update, or the tail of the previous assistant turn gets appended into a
+	// fresh message AFTER the interleaved user message (visible reordering).
+	flushPendingUpdatesNow();
+
+	const activeRequestId = promptLifecycle.getPromptRequestId(sessionId);
+	if (
+		update.type === 'error' &&
+		update.requestId &&
+		activeRequestId &&
+		update.requestId !== activeRequestId
+	) {
+		console.warn(
+			`Ignoring stale prompt error for ${sessionId}: expected ${activeRequestId}, received ${update.requestId}`
+		);
+		return;
+	}
+
 	if (update.type === 'user_message_chunk') {
 		finishStreamingForSession(sessionId);
 		const userMsg: ChatMessage = {
@@ -590,14 +875,17 @@ function handleImmediateUpdate(sessionId: string, update: StreamingUpdate): void
 	}
 
 	// Error: apply via standard updateSessionMessages so store properly spreads
-	const isActivePrompt = promptActiveForSession.has(sessionId);
-	promptActiveForSession.delete(sessionId);
+	const isActivePrompt = promptLifecycle.isActive(sessionId);
+	promptLifecycle.finish(sessionId);
+	setSessionCancelling(sessionId, false);
 	updateSessionMessages(sessionId, (msgs) => {
 		const working = [...msgs];
 		const mutatedIndices = new Set<number>();
-		const { msg } = applyStreamingUpdate(working, sessionId, update, isActivePrompt, mutatedIndices);
-		const idx = working.indexOf(msg);
-		if (idx >= 0) working[idx] = cloneMessage(msg, mutatedIndices);
+		const msg = applyStreamingUpdate(working, sessionId, update, isActivePrompt, mutatedIndices);
+		if (msg) {
+			const idx = working.indexOf(msg);
+			if (idx >= 0) working[idx] = cloneMessage(msg, mutatedIndices);
+		}
 		return working;
 	});
 	setSessionStreaming(sessionId, false); // errors always stop streaming
@@ -612,32 +900,32 @@ function flushPendingUpdates(): void {
 	const bySession = new Map<string, StreamingUpdate[]>();
 	for (const { sessionId, update } of batch) {
 		let arr = bySession.get(sessionId);
-		if (!arr) { arr = []; bySession.set(sessionId, arr); }
+		if (!arr) {
+			arr = [];
+			bySession.set(sessionId, arr);
+		}
 		arr.push(update);
 	}
 
 	for (const [sessionId, updates] of bySession) {
-		const isActivePrompt = promptActiveForSession.has(sessionId);
+		const isActivePrompt = isTurnLive(sessionId);
 
 		// ONE store write per session per frame
 		updateSessionMessages(sessionId, (msgs) => {
 			const working = [...msgs];
 			let modifiedMsg: ChatMessage | null = null;
-			let shouldStream = isActivePrompt;
 			// Accumulate touched block indices across every update in this batch
 			// so cloneMessage only spreads the blocks that actually changed.
 			const mutatedIndices = new Set<number>();
 
 			for (const update of updates) {
-				const result = applyStreamingUpdate(
+				modifiedMsg = applyStreamingUpdate(
 					working,
 					sessionId,
 					update,
 					isActivePrompt,
 					mutatedIndices
 				);
-				modifiedMsg = result.msg;
-				shouldStream = result.shouldStream;
 			}
 
 			// Clone the modified message so Svelte's keyed {#each} detects the change
@@ -649,15 +937,17 @@ function flushPendingUpdates(): void {
 			return working;
 		});
 
-		// Set streaming state once per session per frame
-		setSessionStreaming(sessionId, promptActiveForSession.has(sessionId));
+		// Set streaming state once per session per frame. isTurnLive, not the
+		// prompt lifecycle alone: a remotely-initiated turn has no local
+		// lifecycle entry, and reading only it here reset the remote turn's
+		// streaming flag to false on every animation frame.
+		setSessionStreaming(sessionId, isTurnLive(sessionId));
 	}
 }
 
 // ── Binding ──────────────────────────────────────────────────────────
 
 let messageBound = false;
-let stateUnsubscribe: (() => void) | null = null;
 
 /** Wire up streaming callbacks. Call once on mount. */
 export function bindMessageListener(): void {
@@ -667,19 +957,60 @@ export function bindMessageListener(): void {
 	onMessage(queueStreamingUpdate);
 
 	const prevStates: Record<string, AgentConnectionState> = {};
-	stateUnsubscribe = sessionStates.subscribe((states) => {
+	sessionStates.subscribe((states) => {
 		for (const [sessionId, sessionState] of Object.entries(states)) {
 			const prev = prevStates[sessionId];
 			const cur = sessionState.state;
 			if (isPromptingState(prev) && !isPromptingState(cur)) {
 				finishStreamingForSession(sessionId);
 			}
-			if ((cur === 'ready' || cur === 'in_session') && promptActiveForSession.has(sessionId)) {
-				if (prev && !isPromptingState(prev) && prev !== 'connecting' && prev !== 'initializing') {
-					finishStreamingForSession(sessionId);
-				}
+			// A turn started that this page did not send (remote surface
+			// prompted this executor): mirror it as streaming so the pane
+			// shows the working state and a live stop button, exactly like a
+			// local send. Local sends already set this in sendMessage.
+			if (
+				!isPromptingState(prev) &&
+				isPromptingState(cur) &&
+				!promptLifecycle.isActive(sessionId)
+			) {
+				setSessionStreaming(sessionId, true);
 			}
 			prevStates[sessionId] = cur;
 		}
 	});
 }
+
+export function cleanupMessagesForSession(sessionId: string): void {
+	loadRequestIds.delete(sessionId);
+	loadedSessionIds.delete(sessionId);
+	sessionEstimatedBytes.delete(sessionId);
+	promptLifecycle.dispose(sessionId);
+	replayActiveForSession.delete(sessionId);
+	replayPreserveCachedForSession.delete(sessionId);
+	replayBuffers.delete(sessionId);
+	replayEpochs.delete(sessionId);
+	sessionTouchOrder.delete(sessionId);
+	pendingUpdates = pendingUpdates.filter((item) => item.sessionId !== sessionId);
+
+	messagesBySession.update((all) => {
+		const next = { ...all };
+		delete next[sessionId];
+		return next;
+	});
+	streamingBySession.update((all) => {
+		const next = { ...all };
+		delete next[sessionId];
+		return next;
+	});
+	cancellingBySession.update((all) => {
+		const next = { ...all };
+		delete next[sessionId];
+		return next;
+	});
+	if (get(currentSessionId) === sessionId) {
+		messages.set([]);
+		isStreaming.set(false);
+	}
+}
+
+onSessionDisposed(cleanupMessagesForSession);

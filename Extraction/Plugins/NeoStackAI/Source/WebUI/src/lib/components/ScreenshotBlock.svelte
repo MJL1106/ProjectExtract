@@ -4,7 +4,6 @@
 		ArrowDown01Icon,
 		ArrowUp01Icon,
 		CheckmarkCircle02Icon,
-		Cancel01Icon,
 		Loading03Icon,
 		Image01Icon,
 		Copy01Icon
@@ -24,11 +23,7 @@
 	let copied = $state(false);
 
 	let status = $derived(
-		!resultBlock
-			? 'running'
-			: resultBlock.toolSuccess !== false
-				? 'success'
-				: 'error'
+		!resultBlock ? 'running' : resultBlock.toolSuccess !== false ? 'success' : 'error'
 	);
 
 	let statusColor = $derived(
@@ -87,15 +82,14 @@
 		return resultText.split('\n')[0] ?? '';
 	});
 
-	let hasImages = $derived(
-		(resultBlock?.images && resultBlock.images.length > 0) ?? false
-	);
+	let hasImages = $derived((resultBlock?.images && resultBlock.images.length > 0) ?? false);
 
 	let primaryImage = $derived(resultBlock?.images?.[0] ?? null);
 
 	/** Mode badge text */
 	let modeBadge = $derived.by(() => {
-		if (captureMode === 'asset') return assetPath ? assetPath.split('/').pop() ?? 'Asset' : 'Asset';
+		if (captureMode === 'asset')
+			return assetPath ? (assetPath.split('/').pop() ?? 'Asset') : 'Asset';
 		if (captureMode === 'level') return viewMode || 'Level';
 		return 'Active';
 	});
@@ -110,7 +104,9 @@
 		if (resultText) {
 			copyToClipboard(resultText);
 			copied = true;
-			setTimeout(() => { copied = false; }, 1500);
+			setTimeout(() => {
+				copied = false;
+			}, 1500);
 		}
 	}
 
@@ -119,7 +115,7 @@
 	}
 </script>
 
-<div class="my-2.5 w-full overflow-hidden rounded-xl border border-border bg-card/50">
+<div class="bg-card/50 my-2.5 w-full overflow-hidden rounded-xl border border-border">
 	<!-- Header -->
 	<div class="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-[13px]">
 		<!-- Status icon -->
@@ -133,9 +129,7 @@
 		</span>
 
 		<!-- Title -->
-		<span class="flex-1 min-w-0 truncate font-medium text-foreground">
-			Screenshot
-		</span>
+		<span class="min-w-0 flex-1 truncate font-medium text-foreground"> Screenshot </span>
 
 		<!-- Mode badge -->
 		<span class="shrink-0 rounded-md px-2 py-0.5 text-[10px] font-medium {modeBadgeColor}">
@@ -144,20 +138,22 @@
 
 		<!-- Resolution -->
 		{#if cameraInfo?.resolution}
-			<span class="shrink-0 text-[10px] tabular-nums text-muted-foreground/60">
+			<span class="text-muted-foreground/60 shrink-0 text-[10px] tabular-nums">
 				{cameraInfo.resolution}
 			</span>
 		{/if}
 
 		{#if status === 'error'}
-			<span class="shrink-0 rounded-md bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-400">
+			<span
+				class="shrink-0 rounded-md bg-red-500/15 px-1.5 py-0.5 text-[10px] font-medium text-red-400"
+			>
 				failed
 			</span>
 		{/if}
 
 		<!-- Expand/collapse toggle -->
 		<button
-			class="shrink-0 rounded p-1 text-muted-foreground/60 transition-colors hover:bg-accent/30 hover:text-foreground"
+			class="text-muted-foreground/60 hover:bg-accent/30 shrink-0 rounded p-1 transition-colors hover:text-foreground"
 			onclick={() => (expanded = !expanded)}
 			title={expanded ? 'Collapse' : 'Expand'}
 		>
@@ -167,39 +163,48 @@
 
 	<!-- Image content -->
 	{#if status === 'running'}
-		<div class="border-t border-border/50 px-3.5 py-6 flex items-center justify-center">
-			<span class="font-mono text-[11px] text-muted-foreground animate-pulse">Capturing screenshot...</span>
+		<div class="border-border/50 flex items-center justify-center border-t px-3.5 py-6">
+			<span class="animate-pulse font-mono text-[11px] text-muted-foreground"
+				>Capturing screenshot...</span
+			>
 		</div>
 	{:else if hasImages && primaryImage}
 		{#if expanded}
 			<!-- Full image view -->
-			<div class="border-t border-border/50">
+			<div class="border-border/50 border-t">
 				<div class="relative bg-black/30">
 					<img
 						src={imageDataUrl(primaryImage.base64, primaryImage.mimeType)}
 						alt={captureDescription || 'Screenshot'}
-						class="w-full h-auto object-contain"
+						class="h-auto w-full object-contain"
 						style="max-height: 500px;"
 					/>
 				</div>
 
 				<!-- Info bar below image -->
-				<div class="flex items-center gap-2 px-3.5 py-2 text-[10px] text-muted-foreground/70">
-					<span class="flex-1 min-w-0 truncate">{captureDescription}</span>
+				<div class="text-muted-foreground/70 flex items-center gap-2 px-3.5 py-2 text-[10px]">
+					<span class="min-w-0 flex-1 truncate">{captureDescription}</span>
 
 					{#if focusActor}
-						<span class="shrink-0 rounded bg-secondary/60 px-1.5 py-0.5 font-mono text-muted-foreground/60">
+						<span
+							class="bg-secondary/60 text-muted-foreground/60 shrink-0 rounded px-1.5 py-0.5 font-mono"
+						>
 							{focusActor}
 						</span>
 					{/if}
 
 					<button
-						class="shrink-0 rounded p-0.5 text-muted-foreground/50 transition-colors hover:text-foreground"
+						class="text-muted-foreground/50 shrink-0 rounded p-0.5 transition-colors hover:text-foreground"
 						onclick={handleCopy}
 						title="Copy info"
 					>
 						{#if copied}
-							<Icon icon={CheckmarkCircle02Icon} size={12} strokeWidth={1.5} class="text-emerald-400" />
+							<Icon
+								icon={CheckmarkCircle02Icon}
+								size={12}
+								strokeWidth={1.5}
+								class="text-emerald-400"
+							/>
 						{:else}
 							<Icon icon={Copy01Icon} size={12} strokeWidth={1.5} />
 						{/if}
@@ -208,25 +213,26 @@
 			</div>
 		{:else}
 			<!-- Collapsed: smaller preview -->
-			<button class="block w-full border-t border-border/50" onclick={() => (expanded = true)}>
+			<button class="border-border/50 block w-full border-t" onclick={() => (expanded = true)}>
 				<div class="relative bg-black/30">
 					<img
 						src={imageDataUrl(primaryImage.base64, primaryImage.mimeType)}
 						alt={captureDescription || 'Screenshot'}
-						class="w-full h-auto object-contain"
+						class="h-auto w-full object-contain"
 						style="max-height: 120px;"
 					/>
 				</div>
 			</button>
 		{/if}
 	{:else if status === 'error'}
-		<div class="border-t border-border/50 px-3.5 py-2.5">
-			<pre class="font-mono text-[11px] leading-relaxed text-red-400/80">{resultText || 'Screenshot failed'}</pre>
+		<div class="border-border/50 border-t px-3.5 py-2.5">
+			<pre class="font-mono text-[11px] leading-relaxed text-red-400/80">{resultText ||
+					'Screenshot failed'}</pre>
 		</div>
 	{:else}
 		<!-- Success but no images (shouldn't happen normally) -->
-		<div class="border-t border-border/50 px-3.5 py-2.5">
-			<pre class="font-mono text-[11px] leading-relaxed text-foreground/60">{resultText}</pre>
+		<div class="border-border/50 border-t px-3.5 py-2.5">
+			<pre class="text-foreground/60 font-mono text-[11px] leading-relaxed">{resultText}</pre>
 		</div>
 	{/if}
 </div>

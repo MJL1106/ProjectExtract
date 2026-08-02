@@ -30,8 +30,7 @@
 
 	// Reset selection when query changes
 	$effect(() => {
-		query;
-		selectedIndex = 0;
+		if (query || query === '') selectedIndex = 0;
 	});
 
 	export function handleKeydown(e: KeyboardEvent): boolean {
@@ -79,14 +78,14 @@
 		class="absolute bottom-full left-0 z-50 mb-1 max-h-[280px] w-[360px] overflow-y-auto rounded-xl border border-border bg-surface-bar shadow-2xl"
 	>
 		{#if items.length === 0}
-			<div class="px-3 py-3 text-[12px] text-muted-foreground/40">
-				No matching commands
-			</div>
+			<div class="text-muted-foreground/40 px-3 py-3 text-[12px]">No matching commands</div>
 		{:else}
-			<div class="px-3 pt-2 pb-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/40">
+			<div
+				class="text-muted-foreground/40 px-3 pb-0.5 pt-2 text-[10px] font-medium uppercase tracking-wider"
+			>
 				Commands
 			</div>
-			{#each items as cmd, idx}
+			{#each items as cmd, idx (cmd.name)}
 				<button
 					data-index={idx}
 					class="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-[13px] transition-colors
@@ -94,18 +93,18 @@
 					onclick={() => onselect(cmd)}
 					onmouseenter={() => (selectedIndex = idx)}
 				>
-					<span class="flex h-4 w-4 shrink-0 items-center justify-center text-muted-foreground/60">
+					<span class="text-muted-foreground/60 flex h-4 w-4 shrink-0 items-center justify-center">
 						<Icon icon={CommandIcon} size={14} strokeWidth={1.5} />
 					</span>
 					<div class="min-w-0 flex-1">
 						<div class="flex items-baseline gap-1.5">
 							<span class="font-medium">/{cmd.name}</span>
 							{#if cmd.inputHint}
-								<span class="text-[11px] text-muted-foreground/40">{cmd.inputHint}</span>
+								<span class="text-muted-foreground/40 text-[11px]">{cmd.inputHint}</span>
 							{/if}
 						</div>
 						{#if cmd.description}
-							<div class="truncate text-[11px] text-muted-foreground/40">{cmd.description}</div>
+							<div class="text-muted-foreground/40 truncate text-[11px]">{cmd.description}</div>
 						{/if}
 					</div>
 				</button>

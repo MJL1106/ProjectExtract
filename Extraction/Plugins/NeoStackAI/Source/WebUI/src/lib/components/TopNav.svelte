@@ -1,6 +1,10 @@
 <script lang="ts">
 	import Icon from '$lib/components/Icon.svelte';
-	import { MessageMultiple01Icon, Image02Icon, ComputerTerminal01Icon } from '@hugeicons/core-free-icons';
+	import {
+		MessageMultiple01Icon,
+		Image02Icon,
+		ComputerTerminal01Icon
+	} from '@hugeicons/core-free-icons';
 	import { currentTab, type AppTab } from '$lib/stores/navigation.js';
 	import { studioEnabled, terminalEnabled } from '$lib/stores/settings.js';
 
@@ -10,11 +14,14 @@
 		{ id: 'terminal', label: 'Terminal', icon: ComputerTerminal01Icon }
 	];
 
-	let tabs = $derived(allTabs.filter(t =>
-		t.id === 'chat' ||
-		(t.id === 'studio' && $studioEnabled) ||
-		(t.id === 'terminal' && $terminalEnabled)
-	));
+	let tabs = $derived(
+		allTabs.filter(
+			(t) =>
+				t.id === 'chat' ||
+				(t.id === 'studio' && $studioEnabled) ||
+				(t.id === 'terminal' && $terminalEnabled)
+		)
+	);
 
 	function switchTab(id: AppTab) {
 		currentTab.set(id);
@@ -23,13 +30,11 @@
 
 <nav class="flex h-[34px] shrink-0 items-center border-b border-border bg-sidebar">
 	<div class="flex h-full items-center gap-0 pl-2">
-		{#each tabs as tab}
+		{#each tabs as tab (tab.id)}
 			{@const active = $currentTab === tab.id}
 			<button
 				class="focus-ring relative flex h-full items-center gap-1.5 px-3 text-[11px] font-medium transition-colors duration-100
-					{active
-					? 'text-foreground'
-					: 'text-muted-foreground hover:text-foreground'}"
+					{active ? 'text-foreground' : 'text-muted-foreground hover:text-foreground'}"
 				onclick={() => switchTab(tab.id)}
 			>
 				<Icon icon={tab.icon} size={13} />

@@ -3,12 +3,14 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using EpicGames.Core;
 using UnrealBuildTool;
 
 public class NeoStackAI : ModuleRules
 {
 	public NeoStackAI(ReadOnlyTargetRules Target) : base(Target)
 	{
+		bUsePrecompiled = true;
 		// Optional integrations still linked by core (no extension module for these yet)
 		bool bWithCommonUI = IsOptionalPluginAvailable(Target, "CommonUI");
 
@@ -152,13 +154,12 @@ public class NeoStackAI : ModuleRules
 			"LocalFileNetworkReplayStreaming",
 			// GameplayTags (always present — core engine module)
 			"GameplayTags",
-			"GameplayTagsEditor",
 			// Project indexing: file-change watcher for auto-index
 			"DirectoryWatcher",
-			// Python scripting — required for execute_python tool
-			"PythonScriptPlugin",
 			// Asset drop target widget (SAssetDropTarget) for Content Browser drag-drop
 			"EditorWidgets",
+			// Loopback listener for the Clerk PKCE sign-in flow (NeoStackAuth)
+			"Sockets",
 		});
 
 		// Niagara: moved to NSAI_Niagara extension module
@@ -191,8 +192,8 @@ public class NeoStackAI : ModuleRules
 		// Chooser: moved to NSAI_Chooser extension module
 		PublicDefinitions.Add("WITH_CHOOSER=0");
 
-		// Python: required dependency — the plugin cannot function without Python
-		PublicDefinitions.Add("WITH_PYTHON=1");
+		// Python: moved to NSAI_Python_Integration.
+		PublicDefinitions.Add("WITH_PYTHON=0");
 
 		// ChaosFracture: moved to NSAI_ChaosFracture extension module
 		PublicDefinitions.Add("WITH_CHAOS_FRACTURE=0");
@@ -259,32 +260,12 @@ public class NeoStackAI : ModuleRules
 		}
 		PublicDefinitions.Add("WITH_HLOD_UTILITIES=" + (bWithHLODUtilities ? "1" : "0"));
 
-		// UE 5.8 experimental ToolsetRegistry bridge. Detect by source headers, not generated
-		// headers, so source-only engine installs can still build the plugin.
-		string ToolsetRegistrySubsystemHeader = Path.Combine(
-			EngineDirectory,
-			"Plugins", "Experimental", "ToolsetRegistry", "Source", "ToolsetRegistry", "Public", "ToolsetRegistry", "ToolsetRegistrySubsystem.h");
-		string ToolsetRegistryHeader = Path.Combine(
-			EngineDirectory,
-			"Plugins", "Experimental", "ToolsetRegistry", "Source", "ToolsetRegistry", "Public", "ToolsetRegistry", "ToolsetRegistry.h");
-		bool bToolsetRegistryHasBridgeApi = false;
-		if (File.Exists(ToolsetRegistryHeader))
-		{
-			string ToolsetRegistryHeaderText = File.ReadAllText(ToolsetRegistryHeader);
-			bToolsetRegistryHasBridgeApi =
-				ToolsetRegistryHeaderText.Contains("IsEnabled") &&
-				ToolsetRegistryHeaderText.Contains("ListToolNames") &&
-				ToolsetRegistryHeaderText.Contains("GetJsonSchema");
-		}
+		// UE 5.8's ToolsetRegistry is Experimental + NoRedist. A direct module
+		// dependency is stripped from Rocket/Fab packages, so the bridge uses
+		// reflected Blueprint APIs at runtime and never links or redistributes it.
 		bool bWithUEToolsetRegistry =
-			IsOptionalPluginAvailable(Target, "ToolsetRegistry") &&
-			File.Exists(ToolsetRegistrySubsystemHeader) &&
-			File.Exists(ToolsetRegistryHeader) &&
-			bToolsetRegistryHasBridgeApi;
-		if (bWithUEToolsetRegistry)
-		{
-			PrivateDependencyModuleNames.Add("ToolsetRegistry");
-		}
+			Target.Version.MajorVersion > 5 ||
+			(Target.Version.MajorVersion == 5 && Target.Version.MinorVersion >= 8);
 		PublicDefinitions.Add("WITH_UE_TOOLSET_REGISTRY=" + (bWithUEToolsetRegistry ? "1" : "0"));
 
 		// WorldPartitionEditor — needed for UWorldPartitionHLODEditorSubsystem (hlod_write_stats).
@@ -297,10 +278,16 @@ public class NeoStackAI : ModuleRules
 			"SourceControlWindows"
 		});
 
+		// PKCE primitives (SHA-256 challenge + crypto-quality randomness) for
+		// the Clerk sign-in flow (NeoStackAuth).
+		AddEngineThirdPartyPrivateStaticDependencies(Target, "OpenSSL");
+
 		// Live Coding support (Windows only)
 		if (Target.Platform == UnrealTargetPlatform.Win64)
 		{
 			PrivateDependencyModuleNames.Add("LiveCoding");
+			// DPAPI credential-at-rest encryption (CryptProtectData).
+			PublicSystemLibraries.Add("Crypt32.lib");
 		}
 
 		// AppKit framework for clipboard image reading (macOS)
@@ -320,12 +307,7 @@ public class NeoStackAI : ModuleRules
 
 	private bool IsOptionalPluginAvailable(ReadOnlyTargetRules Target, string PluginName)
 	{
-		if (IsPluginExplicitlyDisabled(Target, PluginName))
-		{
-			return false;
-		}
-
-		return IsPluginDescriptorAvailable(Target, PluginName);
+		return NeoStackIntegrationRules.ArePluginsAvailable(Target, new string[] { PluginName }, EngineDirectory);
 	}
 
 	private static bool IsPluginExplicitlyDisabled(ReadOnlyTargetRules Target, string PluginName)
@@ -480,5 +462,156 @@ public class NeoStackAI : ModuleRules
 		catch (Exception) { }
 
 		return false;
+	}
+}
+
+/// Shared availability gate used by every folded integration module. This is a
+/// build-time source-availability check only; runtime enablement is handled by
+/// FNeoStackIntegrationManager through IPluginManager::FindEnabledPlugin.
+public static class NeoStackIntegrationRules
+{
+	private static readonly Dictionary<string, bool> DescriptorCache =
+		new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+	public static bool ArePluginsAvailable(
+		ReadOnlyTargetRules Target,
+		IEnumerable<string> RequiredPlugins,
+		string EngineDirectory)
+	{
+		foreach (string PluginName in RequiredPlugins)
+		{
+			if (IsExplicitlyDisabled(Target, PluginName)
+				|| !IsDescriptorAvailable(Target, PluginName, EngineDirectory))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static bool IsExplicitlyDisabled(ReadOnlyTargetRules Target, string PluginName)
+	{
+		foreach (string DisabledPlugin in Target.DisablePlugins)
+		{
+			if (DisabledPlugin.Equals(PluginName, StringComparison.OrdinalIgnoreCase))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private static bool IsDescriptorAvailable(ReadOnlyTargetRules Target, string PluginName, string EngineDirectory)
+	{
+		string ProjectDirectory = Target.ProjectFile == null
+			? string.Empty
+			: Path.GetDirectoryName(Target.ProjectFile.FullName);
+		// Platform is part of the answer now (a descriptor can exist while every
+		// module in it is disallowed on this platform), so it keys the cache too.
+		string CacheKey = EngineDirectory + "|" + ProjectDirectory + "|" + PluginName + "|" + Target.Platform;
+		lock (DescriptorCache)
+		{
+			if (DescriptorCache.TryGetValue(CacheKey, out bool CachedResult))
+			{
+				return CachedResult;
+			}
+		}
+
+		string DescriptorPath = FindDescriptorBounded(
+			Path.Combine(EngineDirectory, "Plugins"),
+			PluginName + ".uplugin",
+			8);
+		if (DescriptorPath == null && !string.IsNullOrEmpty(ProjectDirectory))
+		{
+			DescriptorPath = FindDescriptorBounded(
+				Path.Combine(ProjectDirectory, "Plugins"),
+				PluginName + ".uplugin",
+				6);
+		}
+
+		// Present AND usable: a plugin whose modules all exclude this platform
+		// never produced generated headers or binaries here (e.g. MIDIDevice is
+		// Win64/Mac only — including its headers on Linux is a guaranteed
+		// compile error in installed builds).
+		bool bAvailable = DescriptorPath != null
+			&& DescriptorSupportsPlatform(DescriptorPath, Target.Platform.ToString());
+
+		lock (DescriptorCache)
+		{
+			DescriptorCache[CacheKey] = bAvailable;
+		}
+		return bAvailable;
+	}
+
+	/** True when at least one module in the descriptor may build for `Platform`
+	 *  (no Modules array counts as supported — content-only plugins). A module
+	 *  counts when its PlatformAllowList (if any) contains the platform and its
+	 *  PlatformDenyList (if any) does not. Unreadable descriptors fail open to
+	 *  preserve the old exists-only behavior for exotic layouts. */
+	private static bool DescriptorSupportsPlatform(string DescriptorPath, string Platform)
+	{
+		try
+		{
+			JsonObject Descriptor = JsonObject.Read(new FileReference(DescriptorPath));
+			if (!Descriptor.TryGetObjectArrayField("Modules", out JsonObject[] Modules) || Modules.Length == 0)
+			{
+				return true;
+			}
+			foreach (JsonObject Module in Modules)
+			{
+				if (Module.TryGetStringArrayField("PlatformAllowList", out string[] AllowList)
+					&& AllowList.Length > 0
+					&& Array.FindIndex(AllowList, P => P.Equals(Platform, StringComparison.OrdinalIgnoreCase)) < 0)
+				{
+					continue;
+				}
+				if (Module.TryGetStringArrayField("PlatformDenyList", out string[] DenyList)
+					&& Array.FindIndex(DenyList, P => P.Equals(Platform, StringComparison.OrdinalIgnoreCase)) >= 0)
+				{
+					continue;
+				}
+				return true;
+			}
+			return false;
+		}
+		catch (Exception)
+		{
+			return true;
+		}
+	}
+
+	private static string FindDescriptorBounded(string Root, string DescriptorFileName, int MaxDepth)
+	{
+		if (!Directory.Exists(Root))
+		{
+			return null;
+		}
+		var Pending = new Stack<KeyValuePair<string, int>>();
+		Pending.Push(new KeyValuePair<string, int>(Root, 0));
+		while (Pending.Count > 0)
+		{
+			KeyValuePair<string, int> Current = Pending.Pop();
+			try
+			{
+				string Candidate = Path.Combine(Current.Key, DescriptorFileName);
+				if (File.Exists(Candidate))
+				{
+					return Candidate;
+				}
+				if (Current.Value >= MaxDepth)
+				{
+					continue;
+				}
+				foreach (string Child in Directory.EnumerateDirectories(Current.Key))
+				{
+					Pending.Push(new KeyValuePair<string, int>(Child, Current.Value + 1));
+				}
+			}
+			catch (Exception)
+			{
+				// Inaccessible plugin roots are treated as unavailable.
+			}
+		}
+		return null;
 	}
 }

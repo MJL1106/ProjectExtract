@@ -1,20 +1,18 @@
 <script lang="ts">
 	import Icon from '$lib/components/Icon.svelte';
-	import {
-		MessageQuestionIcon,
-		Tick02Icon,
-		Cancel01Icon
-	} from '@hugeicons/core-free-icons';
+	import { MessageQuestionIcon, Tick02Icon, Cancel01Icon } from '@hugeicons/core-free-icons';
 	import type { PermissionRequest, Question } from '$lib/bridge.js';
 	import { respondToQuestions, skipQuestions } from '$lib/stores/permissions.js';
+	import { SvelteSet } from 'svelte/reactivity';
 
 	let { request, sessionId }: { request: PermissionRequest; sessionId: string } = $props();
 
 	// Per-question answer state
 	let singleAnswers: Record<string, string> = $state({});
-	let multiAnswers: Record<string, Set<string>> = $state({});
+	let multiAnswers: Record<string, SvelteSet<string>> = $state({});
 	let otherText: Record<string, string> = $state({});
 	let responding = $state(false);
+	let respondError = $state('');
 
 	// Keyboard navigation state
 	let activeQuestionIndex = $state(0);
@@ -23,15 +21,18 @@
 	let currentQuestion = $derived(request.questions[activeQuestionIndex]);
 	let currentOtherOptionIndex = $derived(currentQuestion ? currentQuestion.options.length : 0);
 	let currentOtherActive = $derived(
-		currentQuestion ? getActiveOptionIndex(activeQuestionIndex) === currentQuestion.options.length : false
+		currentQuestion
+			? getActiveOptionIndex(activeQuestionIndex) === currentQuestion.options.length
+			: false
 	);
 
 	$effect(() => {
-		request.requestId;
+		if (!request.requestId) return;
 		singleAnswers = {};
 		multiAnswers = {};
 		otherText = {};
 		responding = false;
+		respondError = '';
 		activeQuestionIndex = 0;
 		activeOptionByQuestion = {};
 		requestAnimationFrame(() => {
@@ -48,7 +49,9 @@
 	}
 
 	function toggleMulti(question: string, label: string) {
-		const set = multiAnswers[question] ? new Set(multiAnswers[question]) : new Set<string>();
+		const set = multiAnswers[question]
+			? new SvelteSet(multiAnswers[question])
+			: new SvelteSet<string>();
 		if (set.has(label)) {
 			set.delete(label);
 		} else {
@@ -114,7 +117,7 @@
 		const optionIndex = getActiveOptionIndex(activeQuestionIndex);
 		if (optionIndex === q.options.length) {
 			const input = rootEl?.querySelector<HTMLInputElement>(
-				`input[data-question-index=\"${activeQuestionIndex}\"]`
+				`input[data-question-index="${activeQuestionIndex}"]`
 			);
 			input?.focus();
 			return;
@@ -132,6 +135,7 @@
 	async function handleSubmit() {
 		if (responding) return;
 		responding = true;
+		respondError = '';
 
 		// Build answers map: question text -> answer text
 		const answers: Record<string, string> = {};
@@ -151,13 +155,27 @@
 			}
 		}
 
-		await respondToQuestions(answers, sessionId, request);
+		try {
+			await respondToQuestions(answers, sessionId, request);
+		} catch (e) {
+			// Request stays queued — leave the dialog open so the user can retry.
+			respondError = e instanceof Error ? e.message : String(e);
+		} finally {
+			responding = false;
+		}
 	}
 
 	async function handleSkip() {
 		if (responding) return;
 		responding = true;
-		await skipQuestions(sessionId, request);
+		respondError = '';
+		try {
+			await skipQuestions(sessionId, request);
+		} catch (e) {
+			respondError = e instanceof Error ? e.message : String(e);
+		} finally {
+			responding = false;
+		}
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
@@ -222,18 +240,21 @@
 			<Icon icon={MessageQuestionIcon} size={18} strokeWidth={1.5} class="text-blue-400" />
 			<span class="text-[14px] font-semibold text-blue-400">Questionnaire</span>
 		</div>
-		<span class="text-[11px] text-muted-foreground/75">Tab switch • ↑/↓ select • Enter apply • Ctrl+Enter submit</span>
+		<span class="text-muted-foreground/75 text-[11px]"
+			>Tab switch • ↑/↓ select • Enter apply • Ctrl+Enter submit</span
+		>
 	</div>
 
 	<!-- Question tabs -->
 	<div class="mb-3 flex flex-wrap gap-1.5">
-		{#each request.questions as q, qi}
+		{#each request.questions as q, qi (q.question)}
 			{@const answered = isQuestionAnswered(q)}
 			<button
 				data-question-tab={qi}
-				class="flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12px] transition-all {qi === activeQuestionIndex
+				class="flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[12px] transition-all {qi ===
+				activeQuestionIndex
 					? 'border-blue-500/60 bg-blue-500/15 text-blue-200'
-					: 'border-border/35 bg-secondary/20 text-muted-foreground hover:border-border/60'}"
+					: 'border-border/35 bg-secondary/20 hover:border-border/60 text-muted-foreground'}"
 				onclick={() => (activeQuestionIndex = qi)}
 				onmouseenter={() => (activeQuestionIndex = qi)}
 			>
@@ -246,11 +267,11 @@
 	</div>
 
 	{#if currentQuestion}
-		<div class="rounded-lg border border-border/30 bg-card/40 p-3">
+		<div class="border-border/30 bg-card/40 rounded-lg border p-3">
 			<div class="mb-2 text-[13px] font-medium text-foreground">{currentQuestion.question}</div>
 
 			<div class="flex flex-col gap-1.5">
-				{#each currentQuestion.options as opt, oi}
+				{#each currentQuestion.options as opt, oi (opt.label)}
 					{@const isSelected = currentQuestion.multiSelect
 						? isMultiSelected(currentQuestion.question, opt.label)
 						: singleAnswers[currentQuestion.question] === opt.label}
@@ -258,8 +279,8 @@
 					<button
 						class="flex items-start gap-2 rounded-lg border px-3 py-2 text-left text-[13px] transition-all
 							{isSelected
-								? 'border-blue-500/55 bg-blue-500/10'
-								: 'border-border/30 bg-transparent hover:border-border/60 hover:bg-secondary/20'}
+							? 'border-blue-500/55 bg-blue-500/10'
+							: 'border-border/30 hover:border-border/60 hover:bg-secondary/20 bg-transparent'}
 							{isActive ? 'ring-2 ring-[var(--ue-accent-muted)]' : ''}"
 						onclick={() => {
 							setActiveOptionIndex(activeQuestionIndex, oi);
@@ -271,7 +292,8 @@
 						}}
 						onmouseenter={() => setActiveOptionIndex(activeQuestionIndex, oi)}
 					>
-						<span class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[11px] font-bold
+						<span
+							class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[11px] font-bold
 							{isSelected ? 'bg-blue-500 text-white' : 'bg-secondary/60 text-muted-foreground'}"
 						>
 							{#if isSelected}
@@ -283,7 +305,7 @@
 						<div class="min-w-0 flex-1">
 							<div class="text-[13px] text-foreground">{opt.label}</div>
 							{#if opt.description}
-								<div class="mt-0.5 text-[12px] text-muted-foreground/60">{opt.description}</div>
+								<div class="text-muted-foreground/60 mt-0.5 text-[12px]">{opt.description}</div>
 							{/if}
 						</div>
 					</button>
@@ -293,11 +315,12 @@
 				<div
 					class="flex items-start gap-2 rounded-lg border px-3 py-2 transition-all
 						{otherText[currentQuestion.question]
-							? 'border-blue-500/55 bg-blue-500/10'
-							: 'border-border/30 bg-transparent'}
+						? 'border-blue-500/55 bg-blue-500/10'
+						: 'border-border/30 bg-transparent'}
 						{currentOtherActive ? 'ring-2 ring-[var(--ue-accent-muted)]' : ''}"
 				>
-					<span class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[11px] font-bold
+					<span
+						class="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-[11px] font-bold
 						{otherText[currentQuestion.question]
 							? 'bg-blue-500 text-white'
 							: 'bg-secondary/60 text-muted-foreground'}"
@@ -312,7 +335,7 @@
 						type="text"
 						data-question-index={activeQuestionIndex}
 						placeholder="Other..."
-						class="min-w-0 flex-1 bg-transparent text-[13px] text-foreground placeholder:text-muted-foreground/40 focus:outline-none"
+						class="placeholder:text-muted-foreground/40 min-w-0 flex-1 bg-transparent text-[13px] text-foreground focus:outline-none"
 						value={otherText[currentQuestion.question] ?? ''}
 						onfocus={() => setActiveOptionIndex(activeQuestionIndex, currentOtherOptionIndex)}
 						oninput={(e) => handleOtherInput(currentQuestion.question, e.currentTarget.value)}
@@ -320,6 +343,10 @@
 				</div>
 			</div>
 		</div>
+	{/if}
+
+	{#if respondError}
+		<p class="mt-2 text-[12px] text-red-400">{respondError}</p>
 	{/if}
 
 	<div class="mt-3 flex items-center gap-2">
@@ -334,7 +361,7 @@
 			Submit
 		</button>
 		<button
-			class="flex items-center gap-1.5 rounded-lg bg-secondary/60 px-4 py-1.5 text-[13px] font-medium text-muted-foreground transition-all hover:bg-secondary hover:text-foreground {responding
+			class="bg-secondary/60 flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-[13px] font-medium text-muted-foreground transition-all hover:bg-secondary hover:text-foreground {responding
 				? 'cursor-not-allowed opacity-50'
 				: ''}"
 			onclick={handleSkip}

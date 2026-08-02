@@ -1,25 +1,19 @@
 import { writable, derived, get } from 'svelte/store';
-import {
-	onPermissionRequest,
-	respondToPermission,
-	type PermissionRequest
-} from '$lib/bridge.js';
+import { onPermissionRequest, respondToPermission, type PermissionRequest } from '$lib/bridge.js';
 import { currentSessionId } from '$lib/stores/sessions.js';
+import { isSessionDisposed, onSessionDisposed } from '$lib/stores/sessionLifecycle.js';
 
 /** Queue of pending permission requests (multiple can arrive from parallel tool calls) */
 export const permissionQueues = writable<Record<string, PermissionRequest[]>>({});
 
 /** Set of session IDs that have pending permission requests (for sidebar badges) */
-export const sessionsNeedingAttention = derived(
-	permissionQueues,
-	($queues) => {
-		const ids = new Set<string>();
-		for (const [sid, queue] of Object.entries($queues)) {
-			if (queue.length > 0) ids.add(sid);
-		}
-		return ids;
+export const sessionsNeedingAttention = derived(permissionQueues, ($queues) => {
+	const ids = new Set<string>();
+	for (const [sid, queue] of Object.entries($queues)) {
+		if (queue.length > 0) ids.add(sid);
 	}
-);
+	return ids;
+});
 
 /** The currently visible permission request (first in queue, null if empty) */
 export const pendingPermission = derived(
@@ -48,32 +42,59 @@ function dequeue(sessionId: string): void {
 }
 
 /** Respond to a standard permission request with the selected option */
-export async function respondToOption(optionId: string, sessionId?: string, request?: PermissionRequest): Promise<void> {
+export async function respondToOption(
+	optionId: string,
+	sessionId?: string,
+	request?: PermissionRequest
+): Promise<void> {
 	const targetSessionId = sessionId ?? get(currentSessionId);
 	const targetRequest = request ?? get(pendingPermission);
 	if (!targetRequest || !targetSessionId) return;
 
-	await respondToPermission(targetSessionId, targetRequest.agentName, targetRequest.requestId, optionId);
+	await respondToPermission(
+		targetSessionId,
+		targetRequest.agentName,
+		targetRequest.requestId,
+		optionId
+	);
 	dequeue(targetSessionId);
 }
 
 /** Submit answers to an AskUserQuestion request */
-export async function respondToQuestions(answers: Record<string, string>, sessionId?: string, request?: PermissionRequest): Promise<void> {
+export async function respondToQuestions(
+	answers: Record<string, string>,
+	sessionId?: string,
+	request?: PermissionRequest
+): Promise<void> {
 	const targetSessionId = sessionId ?? get(currentSessionId);
 	const targetRequest = request ?? get(pendingPermission);
 	if (!targetRequest || !targetSessionId) return;
 
-	await respondToPermission(targetSessionId, targetRequest.agentName, targetRequest.requestId, 'submit', { answers });
+	await respondToPermission(
+		targetSessionId,
+		targetRequest.agentName,
+		targetRequest.requestId,
+		'submit',
+		{ answers }
+	);
 	dequeue(targetSessionId);
 }
 
 /** Skip an AskUserQuestion request */
-export async function skipQuestions(sessionId?: string, request?: PermissionRequest): Promise<void> {
+export async function skipQuestions(
+	sessionId?: string,
+	request?: PermissionRequest
+): Promise<void> {
 	const targetSessionId = sessionId ?? get(currentSessionId);
 	const targetRequest = request ?? get(pendingPermission);
 	if (!targetRequest || !targetSessionId) return;
 
-	await respondToPermission(targetSessionId, targetRequest.agentName, targetRequest.requestId, 'skip');
+	await respondToPermission(
+		targetSessionId,
+		targetRequest.agentName,
+		targetRequest.requestId,
+		'skip'
+	);
 	dequeue(targetSessionId);
 }
 
@@ -87,9 +108,20 @@ export function bindPermissionListener(): void {
 	bound = true;
 
 	onPermissionRequest((sessionId, request) => {
+		if (isSessionDisposed(sessionId)) return;
 		permissionQueues.update((queues) => ({
 			...queues,
 			[sessionId]: [...(queues[sessionId] ?? []), request]
 		}));
 	});
 }
+
+export function cleanupPermissionsForSession(sessionId: string): void {
+	permissionQueues.update((queues) => {
+		const next = { ...queues };
+		delete next[sessionId];
+		return next;
+	});
+}
+
+onSessionDisposed(cleanupPermissionsForSession);

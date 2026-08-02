@@ -42,11 +42,13 @@ export function enterSetup(agent: Agent): void {
 	setupInstallInfo.set(null);
 
 	// Preload install metadata so we can show copy-paste commands immediately.
-	void getAgentInstallInfo(agent.name).then((info) => {
-		setupInstallInfo.set(info);
-	}).catch(() => {
-		// Ignore bridge errors here; setup can still continue with install button flow.
-	});
+	void getAgentInstallInfo(agent.name)
+		.then((info) => {
+			setupInstallInfo.set(info);
+		})
+		.catch(() => {
+			// Ignore bridge errors here; setup can still continue with install button flow.
+		});
 
 	if (agent.status === 'missing_key') {
 		setupState.set('missing_key');
@@ -69,9 +71,16 @@ export async function startInstall(agentName: string): Promise<void> {
 	setupState.set('checking');
 	setupProgress.set('Checking prerequisites...');
 
-	// Fetch install info so we can show CLI commands if needed
-	const info = await getAgentInstallInfo(agentName);
-	setupInstallInfo.set(info);
+	// Fetch install info so we can show CLI commands if needed. A rejection here
+	// must not leave the panel stuck on the 'checking' spinner.
+	try {
+		const info = await getAgentInstallInfo(agentName);
+		setupInstallInfo.set(info);
+	} catch (e) {
+		setupState.set('error');
+		setupError.set(e instanceof Error ? e.message : 'Failed to check prerequisites');
+		return;
+	}
 
 	setupState.set('installing');
 	setupProgress.set('Setting up...');
@@ -99,19 +108,25 @@ export async function recheckStatus(agentName: string): Promise<void> {
 	setupState.set('checking');
 	setupProgress.set('Checking...');
 
-	const result = await refreshAgentStatus(agentName);
+	try {
+		const result = await refreshAgentStatus(agentName);
 
-	if (result.status === 'available') {
-		setupState.set('success');
-		await loadAgents();
-	} else if (result.status === 'missing_key') {
-		setupState.set('missing_key');
-		setupError.set(result.statusMessage || '');
-	} else {
-		// Still not available — go back to idle so user can try again
-		setupState.set('idle');
-		setupProgress.set('');
-		setupError.set(result.statusMessage || '');
+		if (result.status === 'available') {
+			setupState.set('success');
+			await loadAgents();
+		} else if (result.status === 'missing_key') {
+			setupState.set('missing_key');
+			setupError.set(result.statusMessage || '');
+		} else {
+			// Still not available — go back to idle so user can try again
+			setupState.set('idle');
+			setupProgress.set('');
+			setupError.set(result.statusMessage || '');
+		}
+	} catch (e) {
+		// A rejection must not leave the panel stuck on the 'checking' spinner.
+		setupState.set('error');
+		setupError.set(e instanceof Error ? e.message : 'Failed to check agent status');
 	}
 }
 

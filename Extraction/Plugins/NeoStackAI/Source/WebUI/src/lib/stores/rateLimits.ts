@@ -1,18 +1,25 @@
 import { writable, derived, get } from 'svelte/store';
-import { getAgentUsage, refreshAgentUsage, onUsageUpdated, type AgentRateLimitData } from '$lib/bridge.js';
+import {
+	getAgentUsage,
+	refreshAgentUsage,
+	onUsageUpdated,
+	type AgentRateLimitData
+} from '$lib/bridge.js';
 import { selectedAgent } from '$lib/stores/agents.js';
 
 /** Per-agent rate limit data cache */
 export const rateLimitCache = writable<Record<string, AgentRateLimitData>>({});
 
 /** Rate limit data for the currently selected agent */
-export const currentRateLimits = derived(
-	[rateLimitCache, selectedAgent],
-	([$cache, $agent]) => $agent ? $cache[$agent.name] ?? null : null
+export const currentRateLimits = derived([rateLimitCache, selectedAgent], ([$cache, $agent]) =>
+	$agent ? ($cache[$agent.name] ?? null) : null
 );
 
 /** Whether we have data OR are loading for the current agent */
-export const hasRateLimits = derived(currentRateLimits, (d) => d !== null && (d.hasData || d.isLoading));
+export const hasRateLimits = derived(
+	currentRateLimits,
+	(d) => d !== null && (d.hasData || d.isLoading)
+);
 
 /** Whether rate limit data has actual data to show */
 export const hasRateLimitData = derived(currentRateLimits, (d) => d !== null && d.hasData);
@@ -47,18 +54,7 @@ export async function refreshCurrentUsage(): Promise<void> {
 /** Bind the push callback from C++ — call once on mount */
 export function bindUsageListener(): void {
 	onUsageUpdated((agentName, data) => {
-		if (agentName === '_meshy') {
-			// Meshy balance updated — update meshy fields in all cached entries
-			rateLimitCache.update((cache) => {
-				const updated = { ...cache };
-				for (const key of Object.keys(updated)) {
-					updated[key] = { ...updated[key], meshy: data.meshy };
-				}
-				return updated;
-			});
-		} else {
-			rateLimitCache.update((cache) => ({ ...cache, [agentName]: data }));
-		}
+		rateLimitCache.update((cache) => ({ ...cache, [agentName]: data }));
 	});
 }
 
@@ -102,10 +98,14 @@ export function formatLastUpdated(isoDate: string): string {
 /** Currency symbol from code */
 export function currencySymbol(code: string): string {
 	switch (code.toUpperCase()) {
-		case 'USD': return '$';
-		case 'EUR': return '€';
-		case 'GBP': return '£';
-		default: return code + ' ';
+		case 'USD':
+			return '$';
+		case 'EUR':
+			return '€';
+		case 'GBP':
+			return '£';
+		default:
+			return code + ' ';
 	}
 }
 
