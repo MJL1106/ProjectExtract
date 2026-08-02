@@ -1377,6 +1377,24 @@ void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
 		&& (Now - LastCombatReportTime) >= StaleCombatRallySeconds
 		&& (Now - LastRallyWorldTime) >= StaleCombatRallySeconds;
 
+	// Wave-roster alive count for the membership floor latch below. Roster-based on purpose:
+	// TryArmLastManHunt counts and latches in-scope enemies only, so the survivor who has already
+	// fled the room reads as 0 alive and never arms, while the stale-combat rally cannot fire as
+	// long as he keeps re-entering Combat (every entry re-stamps LastCombatReportTime). The
+	// intersection of those two blind spots is exactly the last enemy hiding in the next room.
+	int32 AliveMembers = 0;
+	for (const TWeakObjectPtr<AEnemyCharacter>& WeakMember : WaveMembers)
+	{
+		const AEnemyCharacter* Member = WeakMember.Get();
+		if (!IsValid(Member)) continue;
+		const UHealthComponent* HP = Member->GetHealthComponent();
+		if (HP && HP->IsDead()) continue;
+		++AliveMembers;
+	}
+	const int32 HuntThreshold = ActiveWaveRequest.LastManHuntThreshold;
+	const bool bMembershipFloor = bAllSquadsSpawned && HuntThreshold > 0
+		&& AliveMembers > 0 && AliveMembers <= HuntThreshold;
+
 	for (const TWeakObjectPtr<AEnemyCharacter>& WeakMember : WaveMembers)
 	{
 		AEnemyCharacter* Member = WeakMember.Get();
@@ -1418,6 +1436,17 @@ void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
 
 			UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: rallying stale member %s (hunting)"),
 				*ActiveWaveRequest.WaveId.ToString(), *Member->GetName());
+		}
+
+		// Membership floor: latch the moment the wave's own roster is down to the hunt threshold —
+		// deterministic, no scope-volume or combat-staleness dependency. RefreshLastManLatched runs
+		// later this same tick and immediately stamps live player contact + pins morale Confident.
+		if (bMembershipFloor && !Awareness->IsLastManHunting())
+		{
+			Awareness->SetLastManHunting(true);
+			LastManLatched.Add(Member);
+			UE_LOG(LogEnemyAI, Log, TEXT("Director wave %s: last-man floor latched %s (%d wave members alive)"),
+				*ActiveWaveRequest.WaveId.ToString(), *Member->GetName(), AliveMembers);
 		}
 	}
 
