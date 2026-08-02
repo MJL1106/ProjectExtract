@@ -32,7 +32,8 @@ public class Extraction : ModuleRules
 		{
 			PrivateDependencyModuleNames.AddRange(new string[] {
 				"UnrealEd",
-				"AssetTools"
+				"AssetTools",
+				"AssetRegistry"
 			});
 		}
 
@@ -40,6 +41,7 @@ public class Extraction : ModuleRules
 
 		// Public subfolder include paths
 		PublicIncludePaths.AddRange(new string[] {
+			"Extraction/Public/Commandlets",
 			"Extraction/Public/Core",
 			"Extraction/Public/Character",
 			"Extraction/Public/Animation",
@@ -68,6 +70,7 @@ public class Extraction : ModuleRules
 
 		// Private subfolder include paths
 		PrivateIncludePaths.AddRange(new string[] {
+			"Extraction/Private/Commandlets",
 			"Extraction/Private/Core",
 			"Extraction/Private/Character",
 			"Extraction/Private/Animation",

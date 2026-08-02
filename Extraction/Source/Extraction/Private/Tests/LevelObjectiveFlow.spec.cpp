@@ -1,6 +1,8 @@
 #include "Misc/AutomationTest.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+// WITH_EDITOR is required alongside the automation gate: WITH_DEV_AUTOMATION_TESTS is 1 in a
+// packaged Development build, and Tests/AutomationEditorCommon.h only exists in editor builds.
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
 
 #include "World/LevelObjectiveFlow.h"
 #include "UI/ObjectiveMarkerWidget.h"

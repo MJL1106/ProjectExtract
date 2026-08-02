@@ -40,7 +40,10 @@
 #include "DrawDebugHelpers.h"
 #include "EnemyDebug.h"
 
-#if WITH_DEV_AUTOMATION_TESTS
+// WITH_EDITOR is load-bearing, not belt-and-braces: WITH_DEV_AUTOMATION_TESTS is 1 in a packaged
+// Development build, and these tests reach for editor-only API (FProperty::GetMetaData), so the
+// automation gate alone breaks the Game target while leaving the editor target compiling fine.
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
@@ -66,7 +69,10 @@ namespace
 	constexpr int32 ExpectedAllyCount = 1;
 }
 
-#if WITH_DEV_AUTOMATION_TESTS
+// WITH_EDITOR is load-bearing, not belt-and-braces: WITH_DEV_AUTOMATION_TESTS is 1 in a packaged
+// Development build, and these tests reach for editor-only API (FProperty::GetMetaData), so the
+// automation gate alone breaks the Game target while leaving the editor target compiling fine.
+#if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCompanionReviveMontageTimingTest,
 	"Extraction.Companion.Revive.MontageTiming",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
@@ -1148,14 +1154,15 @@ UEnemyGrenadierComponent* ACompanionCharacter::GetOrCreateGrenadierComponent()
 	GrenadierComponent->InitFromParams(Params);
 	GrenadierComponent->OnGrenadeTelegraph.AddDynamic(this, &ACompanionCharacter::HandleGrenadeTelegraph);
 	GrenadierComponent->OnGrenadeCancelled.AddDynamic(this, &ACompanionCharacter::HandleGrenadeCancelled);
+	GrenadierComponent->OnGrenadeThrown.AddDynamic(this, &ACompanionCharacter::HandleGrenadeThrown);
 	return GrenadierComponent;
 }
 
 void ACompanionCharacter::HandleGrenadeTelegraph(FVector PredictedLanding, float TimeToImpact)
 {
-	// Telegraph the throw out loud — the player is often inside the danger arc.
-	Bark(ECompanionBarkType::ThrowingGrenade);
-
+	// No bark here — the wind-up can still be cancelled (target dies, new command, branch abort),
+	// and calling "frag out" over a throw that never happens is worse than calling it a beat late.
+	// The bark hangs off OnGrenadeThrown instead, which only fires once the projectile exists.
 	const UCompanionTuningDataAsset* T = GetTuning();
 	if (!T) return;
 
@@ -1173,6 +1180,12 @@ void ACompanionCharacter::HandleGrenadeTelegraph(FVector PredictedLanding, float
 
 	if (AnimInst->Montage_Play(Montage) > 0.f)
 		ActiveGrenadeThrowMontage = Montage;
+}
+
+void ACompanionCharacter::HandleGrenadeThrown()
+{
+	// Fires at release, so the call and the grenade are now inseparable.
+	Bark(ECompanionBarkType::ThrowingGrenade);
 }
 
 void ACompanionCharacter::HandleGrenadeCancelled()

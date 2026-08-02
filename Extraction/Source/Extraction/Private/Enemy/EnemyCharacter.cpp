@@ -30,6 +30,7 @@
 #include "EnemySquadSubsystem.h"
 #include "Components/CapsuleComponent.h"
 #include "UI/OverheadWidgetComponent.h"
+#include "Components/WidgetComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/DamageEvents.h"
 #include "TimerManager.h"
@@ -1200,11 +1201,14 @@ void AEnemyCharacter::SetupCorpseWeaponPickup()
 
 	// Hide the pickup's display meshes — the corpse's own gun is the visual. Collision and any
 	// interaction prompt widgets stay live.
+	// UWidgetComponent derives from UMeshComponent, so it lands in this array too: skipping it is
+	// what keeps that promise. SetVisibility(false) here is not undone by the pickup's focus logic
+	// (it drives SetHiddenInGame, a separate flag), so hiding it once kills the prompt for good.
 	TInlineComponentArray<UMeshComponent*> MeshComps;
 	Pickup->GetComponents(MeshComps);
 	for (UMeshComponent* MeshComp : MeshComps)
 	{
-		if (IsValid(MeshComp))
+		if (IsValid(MeshComp) && !MeshComp->IsA<UWidgetComponent>())
 			MeshComp->SetVisibility(false, false);
 	}
 }

@@ -1310,6 +1310,10 @@ private:
 	UFUNCTION()
 	void HandleGrenadeTelegraph(FVector PredictedLanding, float TimeToImpact);
 
+	/** Barks "frag out" at release — bound to OnGrenadeThrown so a cancelled wind-up stays silent. */
+	UFUNCTION()
+	void HandleGrenadeThrown();
+
 	/** Stops the in-flight throw montage on a cancelled wind-up. */
 	UFUNCTION()
 	void HandleGrenadeCancelled();
