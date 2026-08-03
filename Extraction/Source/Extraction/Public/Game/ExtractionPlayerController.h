@@ -263,4 +263,8 @@ private:
 
 	/** Puts the briefing on screen, takes input UI-only and pauses the game. */
 	void ShowTutorialBriefing();
+
+	/** Escape handler. Re-opens the briefing as a pause screen, bypassing both the tutorial-map and
+	 *  already-seen gates that only apply to the automatic level-start show. */
+	void HandlePauseKeyPressed();
 };

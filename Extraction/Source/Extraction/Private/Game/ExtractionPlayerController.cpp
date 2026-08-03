@@ -280,8 +280,26 @@ void AExtractionPlayerController::SetupInputComponent()
 				}
 			}
 		}
+
+		// Bound as a raw key rather than an Enhanced Input action so the pause screen needs no IA or
+		// IMC asset. The briefing takes UI-only input while it is up, so this never fires to close it —
+		// the Confirm button remains the only way out, exactly as at level start.
+		if (IsValid(InputComponent))
+		{
+			InputComponent->BindKey(EKeys::Escape, IE_Pressed, this, &AExtractionPlayerController::HandlePauseKeyPressed);
+		}
 	}
-	
+
+}
+
+void AExtractionPlayerController::HandlePauseKeyPressed()
+{
+	// Re-entrancy guard, and it keeps Escape from stacking a briefing on top of the level-complete or
+	// level-failed screens — both of those pause the game themselves and own the restart path.
+	if (IsValid(TutorialBriefingWidget)) return;
+	if (IsValid(LevelCompleteWidget) || IsValid(LevelFailedWidget)) return;
+
+	ShowTutorialBriefing();
 }
 
 void AExtractionPlayerController::ClientShowLevelComplete_Implementation()
