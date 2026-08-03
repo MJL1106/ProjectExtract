@@ -192,22 +192,48 @@ void UBTTask_EnemyMoveAndShoot::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 	Enemy->SetAimTarget(Target);
 	Controller->SetFocus(Target);
 
+	// LOS fire-gate timer (independent of NoLosAccumulator which drives task failure)
+	if (bHasLOS) Mem->LosLostTimer = 0.f;
+	else Mem->LosLostTimer += DeltaSeconds;
+
+	const float LosGrace = DA->FireLosLostGrace;
+	const bool bMayFire = bHasLOS || Mem->LosLostTimer <= LosGrace;
+
 	// === FIRE SUB-LOOP (runs in both pursue and strafe paths) ===
 	Mem->FireTimer -= DeltaSeconds;
+
+	// Grace expired mid-burst -- stop firing immediately.
+	if (!bMayFire && Mem->bFiring)
+	{
+		AWeaponBase* GraceW = Enemy->GetCurrentWeapon();
+		if (IsValid(GraceW)) GraceW->StopFiring();
+		Mem->bFiring = false;
+		if (Mem->FirePhase == EMoveShootFirePhase::Firing)
+		{
+			Mem->FirePhase = EMoveShootFirePhase::Pause;
+			Mem->FireTimer = FMath::RandRange(DA->BurstPauseMin, DA->BurstPauseMax);
+		}
+	}
 
 	switch (Mem->FirePhase)
 	{
 	case EMoveShootFirePhase::Acquire:
 		if (Mem->FireTimer <= 0.f)
 		{
-			AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
-			if (IsValid(Weapon))
+			// Require live LOS for burst START (not grace-inclusive bMayFire) so a never-sighted
+			// enemy with ReactionDelay < FireLosLostGrace can't fire a blind pip on entry.
+			if (bHasLOS)
 			{
-				Weapon->StartFiring();
-				Mem->bFiring = true;
+				AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
+				if (IsValid(Weapon))
+				{
+					Weapon->StartFiring();
+					Mem->bFiring = true;
+				}
+				Mem->FirePhase = EMoveShootFirePhase::Firing;
+				Mem->FireTimer = FMath::RandRange(DA->BurstDurationMin, DA->BurstDurationMax);
 			}
-			Mem->FirePhase = EMoveShootFirePhase::Firing;
-			Mem->FireTimer = FMath::RandRange(DA->BurstDurationMin, DA->BurstDurationMax);
+			// else: stay in Acquire until LOS is regained (timer already <= 0, re-enters next tick)
 		}
 		break;
 

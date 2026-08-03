@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Companion/CompanionRouteTypes.h"
 #include "CompanionRouteTrigger.generated.h"
 
 class UBoxComponent;
@@ -18,8 +19,14 @@ class EXTRACTION_API ACompanionRouteTrigger : public AActor
 public:
 	ACompanionRouteTrigger();
 
-	/** The route to activate when the player enters the trigger. */
-	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Route Trigger")
+	/** What this trigger does when the player enters it. Execute Route is the original behaviour. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Route Trigger")
+	ECompanionRouteTriggerMode Mode = ECompanionRouteTriggerMode::ExecuteRoute;
+
+	/** The route to act on when the player enters the trigger.
+	 *  Walked in Execute Route mode, faced along in Set Facing Reference mode, unused by Clear. */
+	UPROPERTY(EditInstanceOnly, BlueprintReadOnly, Category = "Route Trigger",
+		meta = (EditCondition = "Mode != ECompanionRouteTriggerMode::ClearFacingReference"))
 	TObjectPtr<ACompanionRoute> Route;
 
 	/** If true, the trigger fires only once and then disables itself. */

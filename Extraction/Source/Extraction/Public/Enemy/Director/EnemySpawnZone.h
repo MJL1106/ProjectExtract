@@ -38,13 +38,22 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ToolTip = "Allow the director's finite WAVES to use this zone. Turn off for zones the player can watch from the fight room (e.g. behind glass — the hidden-check trace treats glass as an occluder). Ambient/tension spawns are unaffected."))
 	bool bWaveEligible = true;
 
+	/** Minimum distance (cm) between any two spawn points handed out for a single squad.
+	 *  Prevents clumping in small zones. Roughly two capsule diameters by default. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ClampMin = "0.0", ToolTip = "Minimum spacing between spawn points in a single squad. Prevents clumping when the zone box is small."))
+	float MinSpawnSeparation = 120.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "SpawnZone", meta = (ToolTip = "Additive score bias for finite director waves only; ambient/tension spawns are unaffected. Positive = this zone is preferred; pairs with the repeat cap so one zone can be the majority spawner without becoming the only one."))
+	float WaveScoreBias = 0.f;
+
 	// --- API for the director ---
 
 	/** True if this zone should produce spawns during the given phase. Empty ActivePhases = all phases. */
 	bool IsActiveForPhase(EMissionPhase Phase) const;
 
-	/** Deterministic spread inside the box. Index-based so a squad gets separated points. Z at box base. */
-	FTransform GetSpawnTransform(int32 Index) const;
+	/** Deterministic spread inside the box. Index-based so a squad gets separated points.
+	 *  SquadSize scales the radius so the full usable box is covered regardless of member count. Z at box base. */
+	FTransform GetSpawnTransform(int32 Index, int32 SquadSize) const;
 
 	/** World-space centre of the box volume. */
 	FVector GetZoneOrigin() const;
@@ -59,6 +68,13 @@ public:
 private:
 	UPROPERTY(VisibleAnywhere, Category = "SpawnZone")
 	TObjectPtr<UBoxComponent> ZoneBox;
+
+	/** Logged once per zone instance to avoid repeating the undersized-box warning every squad spawn. */
+	mutable bool bUndersizedWarningLogged = false;
+
+	/** Spiral point computation for Index > 0 (extracted from GetSpawnTransform for clarity). */
+	FTransform ComputeSpiralPoint(int32 Index, int32 SquadSize, const FVector& Extent,
+		const FVector& Origin, float FloorZ, float MinRadiusForSep, float ConstrainingExtent) const;
 
 #if WITH_EDITORONLY_DATA
 	UPROPERTY(VisibleAnywhere, Category = "SpawnZone")

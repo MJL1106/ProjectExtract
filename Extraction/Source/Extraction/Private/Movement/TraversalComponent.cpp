@@ -5,6 +5,7 @@
 #include "Animation/AnimInstance.h"
 #include "Animation/CompanionAnimInstance.h"
 #include "Animation/ExtractionAnimInstance.h"
+#include "Character/ExtractionPlayerInterface.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "DrawDebugHelpers.h"
@@ -156,6 +157,15 @@ void UTraversalComponent::CancelTraversal()
 bool UTraversalComponent::OwnerHasMontageForType(ETraversalType Type) const
 {
 	if (!IsValid(OwningCharacter)) return false;
+
+	// Kit-migrated player: montages are designer-assigned properties, not anim-instance data.
+	// Default implementation returns false, so legacy classes fall through to the casts below.
+	if (const IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(OwningCharacter))
+	{
+		if (PlayerIface->HasTraversalMontage(Type))
+			return true;
+	}
+
 	USkeletalMeshComponent* MeshComp = OwningCharacter->GetMesh();
 	if (!MeshComp) return false;
 	UAnimInstance* AnimInst = MeshComp->GetAnimInstance();

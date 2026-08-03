@@ -10,6 +10,7 @@
 #include "World/LootTypes.h"
 #include "LootPickup.generated.h"
 
+class ULootMarkerComponent;
 class UStaticMeshComponent;
 
 UCLASS(Blueprintable, HideCategories = (Replication, Input, LOD, Cooking))
@@ -32,6 +33,10 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Loot")
 	TObjectPtr<UStaticMeshComponent> PickupMesh;
+
+	/** Overhead loot marker -- visibility driven by CanLoot(). Designer assigns the widget class on BP. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Loot")
+	TObjectPtr<ULootMarkerComponent> LootMarker;
 
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot")
 	TArray<FLootGrant> Contents;

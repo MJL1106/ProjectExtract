@@ -57,6 +57,47 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Search", meta = (ClampMin = "1.0"))
 	float MoveTimeout = 20.f;
 
+	/** How far past a lootable's collision SURFACE a line-of-sight blocker may sit and still count
+	 *  as that container rather than a wall (cm). A loot volume carries no mesh — it is draped over
+	 *  an existing drawer/table/shelf and that world geometry IS the visual, so the probe point sits
+	 *  inside the furniture and the furniture occludes the volume on every trace. Applies to the loot
+	 *  chain ONLY — the room's enemy scan keeps the strict gate, or an enemy pressed against a wall
+	 *  would wrongly flip the room hot.
+	 *
+	 *  40 is measured, not guessed, and is bounded ABOVE — do not raise it casually. Across DemoMap
+	 *  the farthest draped-furniture hit sits 53.9 cm off the surface while the TIGHTEST structural
+	 *  wall sits 43.1 cm off it (BP_Floor_One_Walls1), so the two ranges overlap and no single value
+	 *  clears both. 40 is the largest round number under that 43.1 cm ceiling: zero wall false-accepts
+	 *  anywhere in the level, and 96.5% of draped-prop hits accepted. 50 makes two structural walls
+	 *  passable and the chain starts reaching into the next room again.
+	 *
+	 *  ROTATING a container eats that 3.1 cm of headroom: the test measures against the world-space
+	 *  AABB, and rotation inflates it (a yaw-rotated 100-cube reads a 70.7 cm half-extent at 45
+	 *  degrees instead of 50, so its AABB surface sits up to 20.7 cm nearer the walls than its real
+	 *  one). Turning a container to match a diagonal desk can therefore pull a wall inside tolerance
+	 *  — re-measure that container's surroundings if you do. */
+	UPROPERTY(EditAnywhere, Category = "Search", meta = (ClampMin = "0.0"))
+	float LootOcclusionTolerance = 40.f;
+
+	/** Horizontal navmesh search half-extent (cm) when projecting loot container origins onto the
+	 *  navmesh during room evaluation. Constraining this prevents a container in a sealed closet
+	 *  from projecting metres into the next room. Keep in sync with
+	 *  BTTask_CompanionLoot::NavProjectHorizontalExtent. */
+	UPROPERTY(EditAnywhere, Category = "Search|NavProject", meta = (ClampMin = "1.0"))
+	float NavProjectHorizontalExtent = 150.f;
+
+	/** Vertical navmesh search half-extent (cm) when projecting a container's collision base
+	 *  onto the navmesh. Kept small (roughly one capsule height) so the query box cannot reach
+	 *  through a floor slab to the storey below. Keep in sync with
+	 *  BTTask_CompanionLoot::NavProjectVerticalExtent. */
+	UPROPERTY(EditAnywhere, Category = "Search|NavProject", meta = (ClampMin = "1.0"))
+	float NavProjectVerticalExtent = 200.f;
+
+	/** A nav-projected point whose Z exceeds the container origin Z by more than this is rejected
+	 *  (it landed on the floor above). Keep in sync with BTTask_CompanionLoot's equivalent. */
+	UPROPERTY(EditAnywhere, Category = "Search|NavProject", meta = (ClampMin = "0.0"))
+	float NavProjectAboveRejectTolerance = 50.f;
+
 private:
 	enum class ESearchPhase : uint8
 	{
@@ -74,6 +115,15 @@ private:
 	/** True when a combat target already existed when the search started — the ping was a
 	 *  deliberate mid-fight override, so a held-over target must not break the search off. */
 	bool bHadCombatTargetAtStart = false;
+
+	/** World time this search (or its latest re-ping restart) began — reference stamp for the
+	 *  director's "has a fight started since?" check. */
+	float TaskStartWorldTime = 0.f;
+
+	/** True when a fight was already raging at ping time (director combat report within
+	 *  RecentFightWindowSeconds of the start stamp) — deliberate mid-fight override, so ongoing
+	 *  combat reports must not break the search off. */
+	bool bFightOngoingAtStart = false;
 
 	/** Door was already open at task start (or opened by something else on the way over) —
 	 *  no montage, no swing, just walk in and run the room check. */
@@ -118,11 +168,16 @@ private:
 	 *  the search from where it stands instead. */
 	bool StartEnterMove(ACompanionAIController* AIC, APawn* Pawn, AActor* Door);
 
-	/** Room check at the anchor: stamp the engagement grant, then hot room -> clear (combat brain
-	 *  takes over), quiet room with a container -> chain a loot sweep, empty room -> start the
-	 *  dwell. Unbroken Stealth skips the grant/loot and goes straight to the dwell. Finishes the
-	 *  task on every path except the dwell. */
+	/** Room check at the anchor: hot room -> clear (combat brain takes over), quiet room with a
+	 *  container -> chain a loot sweep, empty room -> start the dwell. Unbroken Stealth skips
+	 *  the grant/loot and goes straight to the dwell. Finishes the task on every path except
+	 *  the dwell. */
 	void EvaluateRoom(UBehaviorTreeComponent& OwnerComp, class ACompanionAIController* AIC, APawn* Pawn);
+
+	/** Engagement grant + hot-room check + loot-chain dispatch. Returns true if the room was
+	 *  handled (hot or loot chain started) and EvaluateRoom should return immediately. */
+	bool TryHandleOccupiedRoom(UBehaviorTreeComponent& OwnerComp, class ACompanionAIController* AIC,
+		class ACompanionCharacter* Companion);
 
 	/** Suppress/release the door's AI auto-open trigger while this task owns it — the companion
 	 *  walking to its stand point would otherwise trip the trigger and pop the door with no

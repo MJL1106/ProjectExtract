@@ -113,14 +113,11 @@ EBTNodeResult::Type UBTTask_CompanionFollowRoute::ExecuteTask(
 	Mem->CurrentIndex = StartIndex;
 	Mem->Phase = (StartIndex == 0) ? ERoutePhase::MovingToStart : ERoutePhase::Moving;
 
-	// Fix 11: cancel sprint, then snapshot locomotion state for restore
+	// Fix 11: cancel sprint before applying the first stance
 	Companion->SetSprinting(false);
 
-	if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
-	{
-		Mem->OriginalMaxWalkSpeed = CMC->MaxWalkSpeed;
-		Mem->OriginalMaxWalkSpeedCrouched = CMC->MaxWalkSpeedCrouched;
-	}
+	// Locomotion restore is handled by ClearTaskSpeedOverride + RefreshMovementSpeeds in
+	// RestoreDefaults rather than snapshot/restore, so no CMC capture is needed here.
 
 	const FCompanionRouteWaypoint& StartWP = Route->GetWaypoint(StartIndex);
 	ApplyStance(*Mem, StartWP.Stance, StartWP.SpeedOverride);
@@ -416,9 +413,6 @@ void UBTTask_CompanionFollowRoute::ApplyStance(
 	ACompanionCharacter* Companion = Mem.CachedCharacter.Get();
 	if (!IsValid(Companion)) return;
 
-	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
-	if (!CMC) return;
-
 	// Determine walk speed. Resolution order: per-waypoint SpeedOverride > route-wide
 	// CompanionSpeed > stance default.
 	float TargetSpeed = RelaxedSpeed;
@@ -436,16 +430,25 @@ void UBTTask_CompanionFollowRoute::ApplyStance(
 	if (SpeedOverride > 0.f)
 		TargetSpeed = SpeedOverride;
 
-	// Fix 5: crouch speed goes to MaxWalkSpeedCrouched, standing speed to MaxWalkSpeed
+	// Route the authored pace through the task speed override so the Tick focus-edge re-resolve
+	// cannot stomp it. Crouch stance overrides the crouched channel; standing stances override the
+	// walk channel. The non-overridden channel stays at zero so ApplyMovementSpeeds still controls it.
 	if (Stance == ECompanionRouteStance::Crouch)
 	{
-		CMC->MaxWalkSpeedCrouched = TargetSpeed;
+		Companion->SetTaskSpeedOverride(0.f, TargetSpeed);
 		if (!Companion->bIsCrouched)
 			Companion->Crouch();
 	}
 	else
 	{
-		CMC->MaxWalkSpeed = TargetSpeed;
+		// Strafe-clamped like the combat task's move-and-shoot pace: a route leg holds a Gameplay
+		// focal for its whole run, so the body is decoupled from travel and anything above the top
+		// directional row of the locomotion blendspace blends into the forward-only sprint sample.
+		// The authored levers (ACompanionRoute::CompanionSpeed, per-waypoint SpeedOverride) have no
+		// ceiling, so without this a route authored above the cap resurrects the forward-run bug on
+		// the route path with no diagnostic. Crouch stance is deliberately NOT clamped — the crouched
+		// channel has its own fully directional row (see ApplyMovementSpeeds).
+		Companion->SetTaskSpeedOverride(FMath::Min(TargetSpeed, Companion->GetStrafeMaxSpeed()), 0.f);
 		if (Companion->bIsCrouched)
 			Companion->UnCrouch();
 	}
@@ -640,14 +643,11 @@ void UBTTask_CompanionFollowRoute::RestoreDefaults(FRouteMemory& Mem) const
 		Companion->SetScriptedAim(false);
 		Companion->SetRouteHoldingAtFinal(false);
 
-		// Restore both walk speeds
-		if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
-		{
-			if (Mem.OriginalMaxWalkSpeed > 0.f)
-				CMC->MaxWalkSpeed = Mem.OriginalMaxWalkSpeed;
-			if (Mem.OriginalMaxWalkSpeedCrouched > 0.f)
-				CMC->MaxWalkSpeedCrouched = Mem.OriginalMaxWalkSpeedCrouched;
-		}
+		// Release the task speed override and re-derive from the tuning asset instead of restoring
+		// a snapshot -- the snapshot was taken before the route's stance writes and may be stale if
+		// a focus edge or stealth transition landed between ExecuteTask and the teardown.
+		Companion->ClearTaskSpeedOverride();
+		Companion->RefreshMovementSpeeds();
 	}
 
 	if (IsValid(Controller))

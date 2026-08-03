@@ -1,6 +1,10 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "ExtractionCharacter.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
+#include "Components/AudioComponent.h"
+#include "Kismet/GameplayStatics.h"
 #include "ExtractionAnimInstance.h"
 #include "TraversalComponent.h"
 #include "Animation/AnimInstance.h"
@@ -26,6 +30,19 @@
 #include "Engine/DamageEvents.h"
 #include "ExtractionTypes.h"
 #include "Extraction.h"
+#include "HAL/IConsoleManager.h"
+
+/** Base look sensitivity multiplier, tunable live from the console while calibrating.
+ *  Applies to hip and ADS alike (ADS scaling stacks on top). Bake the chosen value
+ *  into the settings menu once one exists. */
+static TAutoConsoleVariable<float> CVarLookSensitivity(
+	TEXT("player.LookSensitivity"), 1.0f,
+	TEXT("Base look sensitivity multiplier (hip and ADS). Default 1."));
+
+/** Live override for ADS look sensitivity: <0 = use the weapon DA's ADSLookSensitivityMult. */
+static TAutoConsoleVariable<float> CVarADSSensMult(
+	TEXT("player.ADSSensMult"), -1.0f,
+	TEXT("Override for the weapon's ADSLookSensitivityMult while aiming. Negative = use DA value."));
 
 namespace ExtractionCharacterConstants
 {
@@ -376,8 +393,6 @@ void AExtractionCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInpu
 		EnhancedInput->BindAction(ADSAction, ETriggerEvent::Completed, this, &AExtractionCharacter::ADSStop);
 	}
 
-	// Temp debug: H key applies 25 damage
-	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionCharacter::DebugApplyDamage);
 }
 
 // ---- Core Input Handlers ----
@@ -407,8 +422,21 @@ void AExtractionCharacter::DoAim(float Yaw, float Pitch)
 {
 	if (IsValid(GetController()))
 	{
-		AddControllerYawInput(Yaw);
-		AddControllerPitchInput(Pitch);
+		// ADS look sensitivity scales with zoom (CoD-style relative sensitivity):
+		// on-screen turn speed stays constant across scopes.
+		float Scale = CVarLookSensitivity.GetValueOnGameThread();
+		if (IsValid(WeaponComponent) && WeaponComponent->IsAiming())
+		{
+			const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
+			if (IsValid(Weapon) && IsValid(Weapon->GetWeaponData()))
+			{
+				const float CVarMult = CVarADSSensMult.GetValueOnGameThread();
+				const float ADSMult = CVarMult >= 0.f ? CVarMult : Weapon->GetWeaponData()->ADSLookSensitivityMult;
+				Scale *= FMath::Clamp(Weapon->GetEffectiveADSFOV() / 90.f, 0.1f, 1.f) * ADSMult;
+			}
+		}
+		AddControllerYawInput(Yaw * Scale);
+		AddControllerPitchInput(Pitch * Scale);
 	}
 }
 
@@ -537,8 +565,7 @@ void AExtractionCharacter::ApplySprintSpeed()
 	else if (IsValid(WeaponComponent) && WeaponComponent->IsAiming())
 	{
 		const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
-		const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
-		MoveComp->MaxWalkSpeed = IsValid(Data) ? Data->ADSMovementSpeed : WalkSpeed;
+		MoveComp->MaxWalkSpeed = IsValid(Weapon) ? Weapon->GetEffectiveADSMovementSpeed() : WalkSpeed;
 	}
 	else
 	{
@@ -651,6 +678,22 @@ void AExtractionCharacter::EnterSlide()
 		if (UAnimInstance* AnimInst = GetMesh()->GetAnimInstance())
 			AnimInst->Montage_Play(SlideMontage);
 	}
+
+	// Slide foley rides an attached component so EndSlide can cut it — a fire-and-forget
+	// one-shot kept outlasting short slides.
+	if (const UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+	{
+		USoundBase* SlideSound = AudioSys->GetBank() ? AudioSys->GetBank()->SlideFoley.Get() : nullptr;
+		UGameAudioSubsystem::DebugPlay(TEXT("SLIDE-START"), SlideSound,
+			FString::Printf(TEXT("owner=%s bankSound=%d"), *GetNameSafe(this), IsValid(SlideSound) ? 1 : 0));
+		if (IsValid(SlideSound))
+		{
+			SlideAudioComp = UGameplayStatics::SpawnSoundAttached(SlideSound, GetRootComponent());
+			if (IsValid(SlideAudioComp))
+				SlideAudioComp->FadeIn(0.08f);
+		}
+	}
+
 	OnSlideStarted();
 }
 
@@ -689,7 +732,6 @@ void AExtractionCharacter::EndSlide()
 {
 	if (!bIsSliding) return;
 
-	bIsSliding = false;
 	SlideElapsed = 0.f;
 
 	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
@@ -703,7 +745,22 @@ void AExtractionCharacter::EndSlide()
 		MoveComp->Velocity = SlideDirection * ExitSpeed + FVector(0.f, 0.f, MoveComp->Velocity.Z);
 	}
 
+	// Cut the slide foley the moment the slide ends — never let the tail outlast the move.
+	if (IsValid(SlideAudioComp))
+	{
+		SlideAudioComp->FadeOut(0.15f, 0.f);
+		SlideAudioComp = nullptr;
+	}
+	if (const UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+	{
+		if (AudioSys->GetBank())
+			AudioSys->PlayFoleyFor(this, AudioSys->GetBank()->SlideStopFoley);
+	}
+
+	// Cleared after UnCrouch — OnEndCrouch's foley guard reads the flag, and clearing first
+	// made every slide end play crouch cloth.
 	UnCrouch();
+	bIsSliding = false;
 
 	if (SlideMontage)
 	{
@@ -1085,7 +1142,9 @@ bool AExtractionCharacter::SetCapsuleHalfHeightWithFloorAdjust(float NewHalfHeig
 		FCollisionQueryParams Params;
 		Params.AddIgnoredActor(this);
 
-		if (GetWorld()->OverlapAnyTestByChannel(
+		// Blocking-only: overlap volumes (ammo drops, doorway triggers, objective steps) are not
+		// obstructions, and OverlapAnyTest would treat them as ceiling and refuse the stand-up.
+		if (GetWorld()->OverlapBlockingTestByChannel(
 				TestLocation, FQuat::Identity, ECC_Pawn, TestShape, Params))
 			return false;
 	}
@@ -1268,17 +1327,6 @@ void AExtractionCharacter::OnRep_IsDBNO()
 		BleedoutTimeRemaining = BleedoutDuration;
 
 	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
-}
-
-void AExtractionCharacter::DebugApplyDamage()
-{
-	if (!HasAuthority()) return;
-	if (!IsValid(HealthComponent)) return;
-
-	HealthComponent->TakeDamage(25.f);
-	UE_LOG(LogExtraction, Verbose, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
-		HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
-		HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
 }
 
 // ---- Interaction / Revive ----
@@ -1486,15 +1534,13 @@ void AExtractionCharacter::UpdateWeaponFOV(float DeltaTime)
 	if (!IsValid(WeaponComponent)) return;
 
 	const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
-	const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
 
-	const float TargetFOV = (WeaponComponent->IsAiming() && IsValid(Data))
-		? Data->ADSFOV
+	const float TargetFOV = (WeaponComponent->IsAiming() && IsValid(Weapon))
+		? Weapon->GetEffectiveADSFOV()
 		: BaseFOV;
 
-	const float InterpSpeed = IsValid(Data) && Data->ADSTransitionTime > 0.f
-		? 1.0f / Data->ADSTransitionTime
-		: 10.0f;
+	const float TransitionTime = IsValid(Weapon) ? Weapon->GetEffectiveADSTransitionTime() : 0.f;
+	const float InterpSpeed = TransitionTime > 0.f ? 1.0f / TransitionTime : 10.0f;
 
 	const float CurrentFOV = FirstPersonCameraComponent->FieldOfView;
 	if (!FMath::IsNearlyEqual(CurrentFOV, TargetFOV, 0.1f))
@@ -1519,8 +1565,7 @@ void AExtractionCharacter::UpdateADSMovementSpeed()
 		PreADSWalkSpeed = MoveComp->MaxWalkSpeed;
 
 		const AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon();
-		const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
-		const float ADSSpeed = IsValid(Data) ? Data->ADSMovementSpeed : ExtractionCharacterConstants::DefaultADSMovementSpeed;
+		const float ADSSpeed = IsValid(Weapon) ? Weapon->GetEffectiveADSMovementSpeed() : ExtractionCharacterConstants::DefaultADSMovementSpeed;
 
 		MoveComp->MaxWalkSpeed = ADSSpeed;
 	}

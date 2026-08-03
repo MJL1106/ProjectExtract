@@ -18,6 +18,7 @@
 #include "CoverScoringStatics.h"
 #include "CoverReservationSubsystem.h"
 #include "CoverPoseComponent.h"
+#include "World/DoorRegistrySubsystem.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
@@ -161,6 +162,30 @@ static FVector GetPerceivedThreatLoc(const AController* Controller, const AActor
 	return UCoverScoringStatics::GetPerceivedThreatLocation(Target, Awareness, bSighted);
 }
 
+/** The awareness component of the owning enemy controller, or null. */
+static const UEnemyAwarenessComponent* GetAwareness(const AController* Controller)
+{
+	const AEnemyAIController* EnemyController = Cast<AEnemyAIController>(Controller);
+	return EnemyController ? EnemyController->GetAwarenessComponent() : nullptr;
+}
+
+/** No usable contact with the target, so cover is pointless and the enemy should close.
+ *  Normally that means no LOS AND out of engage range — an enemy inside EngageRangeMax is expected
+ *  to hold cover and wait for a peek. The wave's last man drops the range half once he has gone
+ *  LastManHuntNoLosSeconds without sight: with nobody left to hold the room with him, the range
+ *  test alone is what kept him camped one room over waiting for a LOS that never arrives. */
+static bool ShouldLeaveCoverForNoContact(const AController* Controller, const UEnemyArchetypeData* DA,
+	bool bHasLOS, bool bInRange)
+{
+	if (bHasLOS) return false;
+	if (!bInRange) return true;
+	if (!IsValid(DA) || DA->LastManHuntNoLosSeconds <= 0.f) return false;
+
+	const UEnemyAwarenessComponent* Awareness = GetAwareness(Controller);
+	if (!IsValid(Awareness) || !Awareness->IsLastManHunting()) return false;
+	return Awareness->GetTimeWithoutSight() >= DA->LastManHuntNoLosSeconds;
+}
+
 /** True while the grenadier component is winding up a throw (non-grenadiers return false). */
 static bool IsGrenadeTelegraphing(const AEnemyCharacter* Enemy)
 {
@@ -290,6 +315,8 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 	if (DA->MinHostileCoverDistance > 0.f || DA->MinHostilePawnDistance > 0.f)
 		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, Controller, HostileAnchors);
 
+	const UDoorRegistrySubsystem* DoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
+
 	TArray<FScoredCover> Scored;
 	Scored.Reserve(Candidates.Num());
 
@@ -310,6 +337,10 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 		// Skip covers next to a hostile or a hostile's declared destination (claim collision)
 		if (UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location, HostileAnchors,
 			DA->MinHostileCoverDistance, DA->MinHostilePawnDistance))
+			continue;
+		// Skip covers behind a closed door (same rule as the EQS DoorCrossing filter) — a pick
+		// through a closed door retreats out of the fight space, auto-opening the door en route.
+		if (IsValid(DoorRegistry) && DoorRegistry->AnyClosedDoorBlocksSegment(PawnLoc, Candidate.Data.Location))
 			continue;
 
 		const FCoverData& Data = Candidate.Data;
@@ -1036,13 +1067,13 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 
 	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
 	const bool bInRange = BB->GetValueAsBool(AEnemyAIController::BB_TargetInRange);
-	if (!bInRange && !bHasLOS)
+	if (ShouldLeaveCoverForNoContact(Controller, DA, bHasLOS, bInRange))
 	{
 		if (Awareness == EEnemyAwarenessState::Combat)
 		{
 			if (bAggressive)
 			{
-				// Out of range/LOS but combat — pursue.
+				// Out of contact but combat — pursue.
 				// Clear any pose latched by MoveToCoverPoint's arrival (montage-slide + wall-facing yaw).
 				if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
 				DropCoverClaimForPursue(BB);
@@ -1525,6 +1556,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		bWithinAimYaw = (YawDelta <= DA->MaxAimYawDeg);
 	}
 	const bool bEffectiveLOS = bHasLOS && bTargetInPeekCone && bWithinAimYaw;
+	if (bEffectiveLOS) Mem->bEverHadEffectiveLOS = true;
 
 	// Feature 1c: pending-relocate timeout — a flanked enemy continuously firing can never reach
 	// bNotFiring, so bRelocatePending defers forever. After CoverRelocatePendingTimeout, force it.
@@ -1557,9 +1589,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		return;
 	}
 
-	// Bug 2 fix: no LOS + out of range while still in Combat — pursue instead of failing.
+	// Bug 2 fix: no usable contact while still in Combat — pursue instead of failing.
 	// Skip this guard for phases that are already handling movement (avoids path churn / slot release).
-	if (!bInRange && !bHasLOS
+	if (ShouldLeaveCoverForNoContact(Controller, DA, bHasLOS, bInRange)
 		&& Mem->Phase != EFireTaskPhase::Fire
 		&& Mem->Phase != EFireTaskPhase::Pursuing
 		&& Mem->Phase != EFireTaskPhase::SeekingCover)
@@ -1875,13 +1907,21 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			return;
 		}
 
-		// Continue moving toward cover. Fire while moving (move-and-shoot).
+		// Continue moving toward cover. Fire while moving (move-and-shoot), LOS-gated.
 		Enemy->SetAimTarget(Target);
 		// Re-assert firing if the weapon auto-stopped mid-transit (e.g. suppression spike).
 		if (bHasLOS && bInRange)
 		{
 			AWeaponBase* W = Enemy->GetCurrentWeapon();
 			if (IsValid(W) && W->CanFire() && !W->IsFiring()) W->StartFiring();
+		}
+		else if (!bHasLOS)
+		{
+			// Stop transit fire when LOS is lost -- mirrors the Fire-phase hysteresis.
+			// The BB LOS refresh cadence (0.25s) provides a natural sub-grace; no separate timer needed
+			// since this is transit fire, not a sustained burst loop.
+			AWeaponBase* W = Enemy->GetCurrentWeapon();
+			if (IsValid(W) && W->IsFiring()) W->StopFiring();
 		}
 		return;
 	}
@@ -1898,6 +1938,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (ReseekCooldown > 0.f
 			&& !BB->GetValueAsBool(AEnemyAIController::BB_HasCover)
 			&& Mem->Phase != EFireTaskPhase::SeekingCover && Mem->Phase != EFireTaskPhase::Pursuing
+			&& !IsGrenadeTelegraphing(Enemy)
 			&& (TickNow - Mem->LastReseekCoverTime) >= ReseekCooldown)
 		{
 			Mem->LastReseekCoverTime = TickNow;
@@ -2131,7 +2172,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				}
 
 				// FIX 2 — Deferred commit: execute the pending relocate at the first safe non-firing phase.
+				// Skip while a grenade wind-up is playing — ExecuteRelocate cancels the throw.
 				if (Mem->bRelocatePending && bSafePhase && bNotFiring && bCooledDown
+					&& !IsGrenadeTelegraphing(Enemy)
 					&& Mem->PeekCyclesAtCover >= DA->MinPeekCyclesBeforeRelocate)
 				{
 					Mem->bRelocatePending = false;
@@ -2156,7 +2199,7 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					bHasCoverNow ? 1 : 0);
 			}
 
-			if (bSafePhase && bNotFiring && bHasLOS)
+			if (bSafePhase && bNotFiring && bHasLOS && !IsGrenadeTelegraphing(Enemy))
 			{
 				// Prefer getting back into cover (NOT gated on suppression). Fall back to open-ground strafe.
 				if ((Now - Mem->LastReseekCoverTime) >= SuppressedReseekCooldown)
@@ -2206,7 +2249,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					const AWeaponBase* GrenWeapon = Enemy->GetCurrentWeapon();
 					const bool bGrenReloading = IsValid(GrenWeapon) && GrenWeapon->IsReloading();
 					const FVector GrenLastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
-					if (!bGrenReloading && GrenComp->CanThrow() && !GrenLastKnown.IsNearlyZero())
+					// A never-sighted ForceEngage'd enemy must not lob at a wall — parity
+					// with the blind-fire gate below.
+					if (!bGrenReloading && GrenComp->CanThrow() && !GrenLastKnown.IsNearlyZero()
+						&& Mem->bEverHadEffectiveLOS)
 						GrenComp->TryThrowAt(GrenLastKnown);
 				}
 			}
@@ -2237,8 +2283,9 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 				// Blind-fire path: stay hunkered, aim at last-known, fire with extra spread.
 				// Never start a blind burst mid grenade wind-up (one-handed spray over a throw).
+				// A never-sighted ForceEngage'd enemy must not pot-shot a wall.
 				if (Mem->bBlindFireDecided && Mem->bBlindFireChosen && bHasCoverAcq && !Mem->bBlindFiringNow
-					&& !IsGrenadeTelegraphing(Enemy))
+					&& Mem->bEverHadEffectiveLOS && !IsGrenadeTelegraphing(Enemy))
 				{
 					// Fix 1: gate on non-zero last-known — a zero last-known must fall back to hide.
 					const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
@@ -2983,15 +3030,27 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					Mem->PhaseTimer = 0.1f;
 					break;
 				}
-				// Released (or cancelled): duck back into cover and settle before the next peek.
-				if (UCoverPoseComponent* PopPose = Enemy->GetCoverPoseComponent())
-				{
-					PopPose->SetPeeking(false);
-					PopPose->SetLean(ECoverLean::None);
-					PopPose->SetInCover(true, ECoverHeight::Crouch);
-				}
-				if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				// Released (or cancelled): duck back. Re-validate cover — it may have been
+				// lost during the wind-up; posing crouched-in-cover in the open is wrong.
 				Mem->bGrenadeLobPopUp = false;
+				const bool bStillHasCover = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
+				if (bStillHasCover)
+				{
+					if (UCoverPoseComponent* PopPose = Enemy->GetCoverPoseComponent())
+					{
+						PopPose->SetPeeking(false);
+						PopPose->SetLean(ECoverLean::None);
+						PopPose->SetInCover(true, ECoverHeight::Crouch);
+					}
+					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+				}
+				else
+				{
+					// Cover lost mid-wind-up: clear the cover pose entirely and stand.
+					if (UCoverPoseComponent* PopPose = Enemy->GetCoverPoseComponent())
+						PopPose->ResetCoverPose();
+					if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+				}
 				Mem->Phase = EFireTaskPhase::Recover;
 				Mem->PhaseTimer = FMath::RandRange(DA->RecoverPhaseMin, DA->RecoverPhaseMax);
 				break;
@@ -3004,75 +3063,80 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				break;
 			}
 
-			// --- Grenadier proactive cover lob (chance-based, over the top) ---
-			// Fires during live engagement — independent of the LOS-blocked hiding lob above — when the
-			// enemy holds crouch cover with an over-the-top firing side. CanThrow()/cooldown/supply
-			// throttle the rate; the shared CanThrow() gate means it never double-throws with the hiding
-			// lob. Presentation splits tucked (crouch montage, stays hunkered) vs pop-up (stands over the
-			// wall, stand montage, ducks back) via the DA fields.
+			// --- Grenadier proactive lob (chance-based, any position) ---
+			// Fires during live engagement — independent of the LOS-blocked hiding lob above.
+			// CanThrow()/cooldown/supply throttle the rate; the shared CanThrow() gate means it
+			// never double-throws with the hiding lob. Pop-up presentation (stand over the wall,
+			// throw, duck back) is only available from crouch-front cover; every other position
+			// takes the tucked path without touching cover pose state.
 			if (UEnemyGrenadierComponent* LobComp = Enemy->GetGrenadierComponent())
 			{
-				const bool bHasCoverLob = BB->GetValueAsBool(AEnemyAIController::BB_HasCover);
 				const AWeaponBase* LobWeapon = Enemy->GetCurrentWeapon();
 				const bool bLobReloading = IsValid(LobWeapon) && LobWeapon->IsReloading();
-				if (bHasCoverLob && !bSuppressed && !bLobReloading && IsValid(Target)
-					&& LobComp->CanThrow() && DA->GrenadeCoverLobChance > 0.f)
+				// A never-sighted ForceEngage'd enemy must not lob at a stale position —
+				// parity with the hiding-lob and blind-fire gates.
+				if (!bSuppressed && !bLobReloading && IsValid(Target)
+					&& LobComp->CanThrow() && DA->GrenadeCoverLobChance > 0.f
+					&& Mem->bEverHadEffectiveLOS)
 				{
-					const FCover LobCover = ReadCoverFromBB(BB);
-					const bool bCrouchOverTop = LobCover.IsValid()
-						&& UCoverGeometryStatics::GetCoverHeight(LobCover.Data) == ECoverHeight::Crouch
-						&& LobCover.Data.bFrontCoverCrouched;
-					if (bCrouchOverTop)
+					const FVector LobTarget = GetPerceivedThreatLoc(Controller, Target);
+					const float LobDistSq = FVector::DistSquared2D(Pawn->GetActorLocation(), LobTarget);
+					// Cheap range pre-check (TryThrowAt re-checks from the socket) — skips the pose
+					// churn of committing a pop-up only for the throw to fail out-of-range.
+					const bool bInLobRange = !LobTarget.IsNearlyZero()
+						&& LobDistSq >= FMath::Square(DA->GrenadeMinRange)
+						&& LobDistSq <= FMath::Square(DA->GrenadeMaxRange);
+					if (bInLobRange && FMath::FRand() < DA->GrenadeCoverLobChance)
 					{
-						const FVector LobTarget = GetPerceivedThreatLoc(Controller, Target);
-						const float LobDistSq = FVector::DistSquared2D(Pawn->GetActorLocation(), LobTarget);
-						// Cheap range pre-check (TryThrowAt re-checks from the socket) — skips the pose
-						// churn of committing a pop-up only for the throw to fail out-of-range.
-						const bool bInLobRange = !LobTarget.IsNearlyZero()
-							&& LobDistSq >= FMath::Square(DA->GrenadeMinRange)
-							&& LobDistSq <= FMath::Square(DA->GrenadeMaxRange);
-						if (bInLobRange && FMath::FRand() < DA->GrenadeCoverLobChance)
+						// Determine if the pop-up option is available: crouch-front cover only.
+						bool bCrouchOverTop = false;
+						FCover LobCover;
+						if (BB->GetValueAsBool(AEnemyAIController::BB_HasCover))
 						{
-							if (FMath::FRand() < DA->GrenadeCoverLobPopUpChance)
+							LobCover = ReadCoverFromBB(BB);
+							bCrouchOverTop = LobCover.IsValid()
+								&& UCoverGeometryStatics::GetCoverHeight(LobCover.Data) == ECoverHeight::Crouch
+								&& LobCover.Data.bFrontCoverCrouched;
+						}
+
+						if (bCrouchOverTop && FMath::FRand() < DA->GrenadeCoverLobPopUpChance)
+						{
+							// Pop up over the wall: stand + front + peek so the stand throw montage
+							// plays and the grenade clears the low cover. Pose is set BEFORE TryThrowAt
+							// because the telegraph -> montage-select chain is synchronous and reads the
+							// cover pose height. bGrenadeLobPopUp holds it and drives the duck-back.
+							UCoverPoseComponent* LobPose = Enemy->GetCoverPoseComponent();
+							if (IsValid(LobPose))
 							{
-								// Pop up over the wall: stand + front + peek so the stand throw montage
-								// plays and the grenade clears the low cover. Pose is set BEFORE TryThrowAt
-								// because the telegraph → montage-select chain is synchronous and reads the
-								// cover pose height. bGrenadeLobPopUp holds it and drives the duck-back.
-								UCoverPoseComponent* LobPose = Enemy->GetCoverPoseComponent();
-								if (IsValid(LobPose))
-								{
-									LobPose->SetInCover(true, ECoverHeight::Stand);
-									LobPose->SetLean(ECoverLean::Front);
-									LobPose->SetPeeking(true);
-								}
-								if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
-								ApplyCoverFacing(Controller, Pawn, LobCover.Data);
-
-								if (LobComp->TryThrowAt(LobTarget))
-								{
-									Mem->bGrenadeLobPopUp = true;
-									Mem->PhaseTimer = 0.1f;
-									break;
-								}
-
-								// Throw refused (arc unsolvable) — revert the pop-up pose, fall through.
-								if (IsValid(LobPose))
-								{
-									LobPose->SetPeeking(false);
-									LobPose->SetLean(ECoverLean::None);
-									LobPose->SetInCover(true, ECoverHeight::Crouch);
-								}
-								if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+								LobPose->SetInCover(true, ECoverHeight::Stand);
+								LobPose->SetLean(ECoverLean::Front);
+								LobPose->SetPeeking(true);
 							}
-							else if (LobComp->TryThrowAt(LobTarget))
+							if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
+							ApplyCoverFacing(Controller, Pawn, LobCover.Data);
+
+							if (LobComp->TryThrowAt(LobTarget))
 							{
-								// Tucked lob: stay hunkered. The generic telegraph hold above keeps the
-								// pause and blocks peeks until release; the crouch pose selects the crouch
-								// throw montage, and the grenade still arcs over the low wall.
-								Mem->PhaseTimer = 0.25f;
+								Mem->bGrenadeLobPopUp = true;
+								Mem->PhaseTimer = 0.1f;
 								break;
 							}
+
+							// Throw refused (arc unsolvable / clearance blocked) — revert the pop-up pose, fall through.
+							if (IsValid(LobPose))
+							{
+								LobPose->SetPeeking(false);
+								LobPose->SetLean(ECoverLean::None);
+								LobPose->SetInCover(true, ECoverHeight::Crouch);
+							}
+							if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->Crouch();
+						}
+						else if (LobComp->TryThrowAt(LobTarget))
+						{
+							// Tucked lob from any position (cover or open ground). No cover pose
+							// changes — the generic telegraph hold above keeps the pause until release.
+							Mem->PhaseTimer = 0.25f;
+							break;
 						}
 					}
 				}
@@ -3432,6 +3496,8 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 	if (DA->MinHostileCoverDistance > 0.f || DA->MinHostilePawnDistance > 0.f)
 		UCoverScoringStatics::GatherHostileAnchors(World, Pawn, Controller, ReseekHostileAnchors);
 
+	const UDoorRegistrySubsystem* ReseekDoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
+
 	TArray<FScoredCover> Scored;
 	Scored.Reserve(Candidates.Num());
 
@@ -3457,6 +3523,9 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 		// Skip covers next to a hostile or a hostile's declared destination (claim collision)
 		if (UCoverScoringStatics::IsNearHostileAnchor(Data.Location, ReseekHostileAnchors,
 			DA->MinHostileCoverDistance, DA->MinHostilePawnDistance))
+			continue;
+		// Skip covers behind a closed door (same rule as the EQS DoorCrossing filter).
+		if (IsValid(ReseekDoorRegistry) && ReseekDoorRegistry->AnyClosedDoorBlocksSegment(PawnLoc, Data.Location))
 			continue;
 
 		// CRITICAL #1: fire-arc gate — same as FindProtectiveCover

@@ -2,10 +2,14 @@
 
 #include "EnemyGrenadeProjectile.h"
 #include "GameFramework/ProjectileMovementComponent.h"
+#include "GameFramework/Pawn.h"
 #include "Components/SphereComponent.h"
 #include "Kismet/GameplayStatics.h"
+#include "GenericTeamAgentInterface.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "Engine/OverlapResult.h" // explicit — TArray<FOverlapResult> (house style)
+#include "CollisionShape.h"
 
 AEnemyGrenadeProjectile::AEnemyGrenadeProjectile()
 {
@@ -66,8 +70,47 @@ void AEnemyGrenadeProjectile::Detonate()
 
 	OnExplode();
 
-	// No team-filtering — radial damage hits everyone (design §7: nades dent enemy morale too).
-	// Falloff: full damage at centre, linear falloff to 0 at DamageRadius edge.
+	// Team-filtered blast: ignore every pawn that is not hostile to the instigator.
+	// This grenade is shared by enemy grenadiers and the companion, so the filter is
+	// instigator-relative (enemies = team 1, player + companion = team 0). Neutrals
+	// (e.g. a captive extractee with NoTeam) are also spared.
+	// If the instigator is null or destroyed (thrower died mid-flight), fall back to
+	// unfiltered damage — no filter is safer than accidentally shielding the player.
+	TArray<AActor*> IgnoreActors;
+	APawn* InstigatorPawn = GetInstigator();
+	if (IsValid(InstigatorPawn))
+	{
+		UWorld* World = GetWorld();
+		if (IsValid(World))
+		{
+			TArray<FOverlapResult> Overlaps;
+			FCollisionObjectQueryParams ObjParams(FCollisionObjectQueryParams::AllDynamicObjects);
+			FCollisionQueryParams QueryParams(SCENE_QUERY_STAT(GrenadeTeamFilter), false);
+			QueryParams.AddIgnoredActor(this);
+
+			if (World->OverlapMultiByObjectType(
+					Overlaps,
+					GetActorLocation(),
+					FQuat::Identity,
+					ObjParams,
+					FCollisionShape::MakeSphere(DamageRadius),
+					QueryParams))
+			{
+				IgnoreActors.Reserve(Overlaps.Num());
+				for (const FOverlapResult& Overlap : Overlaps)
+				{
+					APawn* CandidatePawn = Cast<APawn>(Overlap.GetActor());
+					if (IsValid(CandidatePawn)
+						&& FGenericTeamId::GetAttitude(CandidatePawn, InstigatorPawn) != ETeamAttitude::Hostile)
+					{
+						IgnoreActors.AddUnique(CandidatePawn);
+					}
+				}
+			}
+		}
+	}
+
+	// Falloff: full damage at centre, inner radius at 25% of DamageRadius, 10% minimum at the edge.
 	UGameplayStatics::ApplyRadialDamageWithFalloff(
 		this,
 		Damage,
@@ -77,7 +120,7 @@ void AEnemyGrenadeProjectile::Detonate()
 		DamageRadius,
 		1.f,
 		UDamageType::StaticClass(),
-		TArray<AActor*>(),
+		IgnoreActors,
 		this,
 		GetInstigatorController());
 

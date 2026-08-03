@@ -51,6 +51,7 @@ struct FObjectiveMarker
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnObjectivesChanged);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnObjectiveLabelChanged, FName, Id, const FText&, NewLabel);
 
 UCLASS()
 class EXTRACTION_API UObjectiveSubsystem : public UWorldSubsystem
@@ -62,10 +63,18 @@ public:
 
 	/** Adds (or replaces, by id) an objective marker. Target optional — set to follow a moving actor.
 	 *  Offset is additive on the resolved location (default zero). bShowWorldMarker=false makes the
-	 *  objective text-only (no billboard, no edge indicator) — used for optional objectives. */
+	 *  objective text-only (no billboard, no edge indicator) — used for optional objectives.
+	 *  HeightAboveBase applies to target-based markers only (see FObjectiveMarker). */
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void AddObjective(FName Id, FText Label, FVector WorldLocation, AActor* TargetActor = nullptr,
-		FVector Offset = FVector::ZeroVector, bool bShowWorldMarker = true);
+		FVector Offset = FVector::ZeroVector, bool bShowWorldMarker = true, float HeightAboveBase = 170.f);
+
+	/** Rewrites an existing objective's HUD line and nothing else — no marker move, no display
+	 *  respawn. This is the cheap path a live countdown needs: a defend beat re-labels itself once a
+	 *  second, and routing that through AddObjective would re-resolve the marker target every tick.
+	 *  Silent when the id is not registered or the label already reads the same. */
+	UFUNCTION(BlueprintCallable, Category = "Objective")
+	void UpdateObjectiveLabel(FName Id, FText NewLabel);
 
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void RemoveObjective(FName Id);
@@ -84,6 +93,13 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Objective")
 	FOnObjectivesChanged OnObjectivesChanged;
 
+	/** Narrow path for label-only mutations. Subscribers that only need to update text (the text
+	 *  panel, the marker layer's widget labels) listen here and skip the full ClearChildren +
+	 *  CreateWidget rebuild. A 1Hz countdown raises this instead of OnObjectivesChanged, so marker
+	 *  smoothing state is never reset. */
+	UPROPERTY(BlueprintAssignable, Category = "Objective")
+	FOnObjectiveLabelChanged OnObjectiveLabelChanged;
+
 private:
 	TArray<FObjectiveMarker> Objectives;
 
@@ -93,6 +109,14 @@ private:
 	UPROPERTY()
 	TArray<TObjectPtr<AObjectiveMarkerDisplay>> ActiveDisplays;
 
+	/** The world-marker ids as of the last rebuild that actually did work. A rebuild is a destroy +
+	 *  respawn pass over every billboard in the level, and OnObjectivesChanged fires on every label
+	 *  write — a 1Hz defend countdown would otherwise thrash the whole set once a second. */
+	TSet<FName> LastDisplayedIds;
+
 	void RebuildDisplayActors();
 	void DestroyAllDisplays();
+
+	/** Re-pushes a mutated marker into the display actor already showing it, if there is one. */
+	void RefreshDisplayFor(const FObjectiveMarker& Objective);
 };

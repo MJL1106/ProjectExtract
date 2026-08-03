@@ -4,7 +4,6 @@
 #include "Components/ConsumableInventoryComponent.h"
 #include "Components/WeaponComponent.h"
 #include "Weapon/WeaponBase.h"
-#include "Data/WeaponDataAsset.h"
 #include "Kismet/GameplayStatics.h"
 
 DEFINE_LOG_CATEGORY(LogMissionInventory);
@@ -54,13 +53,12 @@ bool UMissionInventorySubsystem::GrantAmmo(const FLootGrant& Grant, APawn* Recip
 	if (!IsValid(Recipient) || Grant.AmmoAmount <= 0) return false;
 
 	const UWeaponComponent* WeaponComp = Recipient->FindComponentByClass<UWeaponComponent>();
-	AWeaponBase* Weapon = WeaponComp ? WeaponComp->GetCurrentWeapon() : nullptr;
-	const UWeaponDataAsset* Data = Weapon ? Weapon->GetWeaponData() : nullptr;
+	AWeaponBase* Weapon = WeaponComp ? WeaponComp->FindWeaponByAmmoCategory(Grant.AmmoCategory) : nullptr;
 
 	const FText CategoryText = UEnum::GetDisplayValueAsText(Grant.AmmoCategory);
 
-	// No inventory in v1 — ammo that doesn't fit the current weapon is reported and discarded.
-	if (!Data || Data->EnemyWeaponAnimType != Grant.AmmoCategory)
+	// No inventory in v1 — ammo that doesn't fit either carried weapon is reported and discarded.
+	if (!Weapon)
 	{
 		OnLootNotify.Broadcast(FText::Format(
 			NSLOCTEXT("Loot", "AmmoIncompatible", "Found {0} ammo (no compatible weapon)"), CategoryText));
@@ -77,7 +75,7 @@ bool UMissionInventorySubsystem::GrantAmmo(const FLootGrant& Grant, APawn* Recip
 	return true;
 }
 
-void UMissionInventorySubsystem::RecordKeycard(FName KeycardId)
+void UMissionInventorySubsystem::RecordKeycard(FName KeycardId, bool bSilent)
 {
 	if (KeycardId == NAME_None) return;
 
@@ -85,8 +83,9 @@ void UMissionInventorySubsystem::RecordKeycard(FName KeycardId)
 	HeldKeycards.Add(KeycardId, &bAlreadyHeld);
 	if (bAlreadyHeld) return; // no duplicate toast for a card already held
 
-	OnLootNotify.Broadcast(FText::Format(
-		NSLOCTEXT("Loot", "KeycardAcquired", "Keycard acquired: {0}"), FText::FromName(KeycardId)));
+	if (!bSilent)
+		OnLootNotify.Broadcast(FText::Format(
+			NSLOCTEXT("Loot", "KeycardAcquired", "Keycard acquired: {0}"), FText::FromName(KeycardId)));
 	OnKeycardRecorded.Broadcast(KeycardId);
 	UE_LOG(LogMissionInventory, Log, TEXT("RecordKeycard: %s"), *KeycardId.ToString());
 }

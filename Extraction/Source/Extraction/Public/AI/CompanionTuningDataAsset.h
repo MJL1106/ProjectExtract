@@ -8,6 +8,9 @@
 #include "Companion/CompanionCommandTypes.h"
 #include "CompanionTuningDataAsset.generated.h"
 
+class AEnemyGrenadeProjectile;
+class UAnimMontage;
+
 /** Hearing-noise emitted when the companion breaches a door with a given breach type.
  *  Loudness <= 0 or MaxRange <= 0 (or a missing map entry) = silent — Quiet's default. */
 USTRUCT(BlueprintType)
@@ -119,6 +122,17 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
 	float CrouchedWalkSpeed = 250.f;
 
+	// Speed cap (cm/s) applied whenever the companion is STRAFING — moving while a Gameplay focus
+	// holds the body facing something other than its direction of travel. 275 is not a feel number:
+	// it is the Y value of the TOP DIRECTIONAL ROW of BS_Companion_Rifle02_Locomotion, whose Y axis is
+	// raw cm/s (0 / 100 / 275 / 850). The 850 row has ONE sample and it is forward-only, so any speed
+	// above 275 blends the legs into a forward sprint clip while the body faces the focus — the
+	// companion appears to run forwards while side-stepping. Do NOT raise this without re-authoring
+	// that blendspace's top row with a full directional set. Enemy parity: UEnemyArchetypeData's
+	// StrafeWalkSpeed sits at the same tier (250).
+	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
+	float StrafeMaxSpeed = 275.f;
+
 	// Fast-crouch catch-up tier while stealth-active and falling behind: keeps the low silhouette
 	// but hustles. Applied to MaxWalkSpeedCrouched while the follow task reports FastCrouch stage.
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
@@ -145,9 +159,44 @@ public:
 	bool bStealthAllowSprintCatchup = true;
 
 	// Player 2D speed (cm/s) above which the follow task treats the player as sprinting and mirrors
-	// sprint. The kit BP owns player sprint state, so it is inferred from velocity (walk 600 / sprint 900).
+	// sprint. The kit BP owns player sprint state, so it is inferred from velocity, and it must sit
+	// above the kit's jog base (410) and below its hold-sprint (550 since the sprint/slide rework).
+	// KNOWN INERT at 700: the player can never reach it, so the player-side sprint mirror never goes
+	// true and the companion sprints on the raw distance threshold alone. Left as-is deliberately —
+	// the current follow read is the shipped feel; changing it is tracked as its own task, not a
+	// drive-by. Only consulted when the follow leader IS the player: a companion trailing the primary
+	// companion reads its leader's sprint flag directly instead of inferring it from velocity.
+	// FootstepNoiseComponent::SprintSpeedThreshold infers sprint from owner speed the same way and
+	// sits at 480; that is the value to match if this is ever switched on. Do NOT re-derive from
+	// AExtractionCharacter's 600/900 defaults — the live pawn is the kit player, and those stale
+	// figures are where 700 came from.
 	UPROPERTY(EditAnywhere, Category = "Companion|Movement", meta = (ClampMin = "0.0"))
 	float PlayerSprintSpeedThreshold = 700.f;
+
+	// --- Rescue-approach urgency (BTTask_FollowPlayer's sprint-to-target branch) ---
+	// The approach used to sprint unconditionally, which read as panic even with 80 seconds of
+	// bleedout left and the room empty. Pace is now re-decided every tick: sprint when ANY of the
+	// three below trips, jog otherwise. All three are hysteretic in the task so a companion running
+	// a boundary can't flicker the sprint flag (which drives both speed AND the anim's sprint state).
+
+	// Bleedout seconds remaining at/below which the approach sprints. Sits well above
+	// ACompanionCharacter::DesperationBleedoutThreshold (12s, the "commit through threats" line) —
+	// this is "hurry up", that one is "go anyway".
+	UPROPERTY(EditAnywhere, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveSprintBleedoutThreshold = 25.f;
+
+	// Distance (cm) to the downed player above which the approach sprints regardless of the clock —
+	// a long run is worth sprinting even on a full bleedout timer.
+	UPROPERTY(EditAnywhere, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveSprintDistanceThreshold = 1200.f;
+
+	// Distance (cm) from the DOWNED PLAYER to the nearest living hostile at/below which the approach
+	// sprints. Fed by the state service's existing revive threat sweep (published on the companion as
+	// GetNearestThreatToDownedPlayer) — never re-scanned here. Deliberately tighter than
+	// ACompanionCharacter::ReviveThreatRadius: that radius gates whether reviving is SAFE, this one
+	// only asks whether it is worth running.
+	UPROPERTY(EditAnywhere, Category = "Companion|Revive", meta = (ClampMin = "0.0"))
+	float ReviveSprintThreatRadius = 1000.f;
 
 	// --- Stealth crouch-mirror (F4a: companion mirrors the player's own crouch/uncrouch, with a
 	// randomized human-reaction delay, instead of Stealth force-crouching) ---
@@ -171,6 +220,30 @@ public:
 
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation")
 	float FormationOffsetRight = 200.f;
+
+	// Extra back-offset applied to a non-primary companion (the armed extractee). The lateral offset
+	// is already mirrored, so this only staggers the pair front-to-back — without it they sit as a
+	// symmetric wall across the player's rear.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0.0"))
+	float SecondaryFormationBackBias = 100.f;
+
+	// Master switch for the follow CHAIN: a non-primary companion (the armed extractee VIP) trails
+	// the PRIMARY companion using the same formation logic the primary runs against the player —
+	// player <- companion <- VIP. Off restores the mirrored player-follow, where both companions
+	// anchor on one shared player-keyed target (same input, same maths, same timing) and converge
+	// into each other. No effect whatsoever on the primary, which always anchors on the player.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation")
+	bool bSecondaryFollowsPrimaryCompanion = true;
+
+	// Leader-to-player 2D distance (cm) past which a secondary stops trailing the primary and follows
+	// the player directly. Latched: re-acquired only once back inside this by
+	// UBTTask_FollowPlayer::LeaderLeashReleaseHysteresis, or by half this distance when that band
+	// would not fit. Must sit ABOVE SprintDistanceThreshold so ordinary stretchy following never
+	// trips the handover, and BELOW WarpMinDistance so a primary commanded across the level hands the
+	// secondary back to the player before the warp net teleports it. 0 disables the leash: the
+	// secondary then trails the primary at any separation.
+	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "0.0"))
+	float SecondaryLeaderLeashDistance = 2000.f;
 
 	// Floored at 50 so the derived follow min-separation can't collapse and silently disable the back-out.
 	UPROPERTY(EditAnywhere, Category = "Companion|Formation", meta = (ClampMin = "50"))
@@ -422,6 +495,24 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0"))
 	float CombatCoverMaxCommitTime = 4.f;
 
+	// Few-enemy Combat mode: with fewer than CombatOutnumberedCount known threats, low HP alone
+	// (while calm) neither commits to nor holds cover — the companion stays mobile alongside the
+	// player. Heavy incoming fire still forces cover. Disable to restore the pre-change behavior
+	// where any sub-50% HP hides the companion regardless of threat count.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers")
+	bool bFewEnemyCombatMobileCover = true;
+
+	// Suppression bar for the wounded-fire pairing (few-enemy Combat only). The companion must be
+	// under at least this much suppression OR taking hits for low-HP to trigger/hold cover. Set at
+	// the pressure-spike bar so a wounded recommit cannot sneak in cheaper than a genuine spike.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float FewEnemyWoundedCoverSuppressionFrac = 0.75f;
+
+	// Hit count for the wounded-fire pairing (few-enemy Combat only). The companion must have taken
+	// at least this many hits in CoverCommitUnderFireWindow for low-HP to trigger/hold cover.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverTriggers", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 FewEnemyWoundedCoverDamageHits = 3;
+
 	// --- Combat-mode advance hops (cover-to-cover pushes — mobile but cover-clever) ---
 
 	// Master switch: in COMBAT mode, periodically bound to a cover point that gains ground toward
@@ -432,7 +523,7 @@ public:
 
 	// Cooldown (s) between hops.
 	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops", meta = (ClampMin = "1.0"))
-	float CombatAdvanceHopInterval = 5.f;
+	float CombatAdvanceHopInterval = 3.5f;
 
 	// A hop candidate must be at least this much closer (cm) to the threat than the companion is.
 	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops", meta = (ClampMin = "50.0"))
@@ -441,6 +532,20 @@ public:
 	// Max dash length (cm) for one hop — short bounds, never a cross-map sprint.
 	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops", meta = (ClampMin = "100.0"))
 	float CombatAdvanceHopMaxDistance = 800.f;
+
+	// Hop leash: the companion may not bound to a point further than this (cm) from the player. Sits
+	// UNDER CombatLeashDistance and only ever tightens it (the hop takes the min of the two), so a
+	// Combat companion pushing hard still ends up roughly one room from the player rather than the
+	// leash's full 2250. Raising this above CombatLeashDistance does nothing.
+	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops", meta = (ClampMin = "300.0", EditCondition = "bCombatAdvanceHops"))
+	float CombatAdvanceHopMaxPlayerDistance = 1400.f;
+
+	// Seconds after a confirmed companion kill during which ONE hop may skip the interval cooldown —
+	// the free repositioning bound that reads as "took the shot, took the ground". Self-consuming:
+	// the bypass fires once per kill, so a kill cannot chain bounds and the hop timer keeps doubling
+	// as the back-off for failed candidate scans. 0 disables the bypass.
+	UPROPERTY(EditAnywhere, Category = "Companion|CombatHops", meta = (ClampMin = "0.0", EditCondition = "bCombatAdvanceHops"))
+	float CombatPostKillAdvanceWindow = 3.f;
 
 	// Combat-mode override of LooseCoverBiasWeight: the move-shoot jiggle hugs obstacles harder —
 	// fighting BEHIND things while mobile instead of wandering open ground.
@@ -458,7 +563,22 @@ public:
 	// Stretches cover peek burst clocks (stand/quick/corner) while in COMBAT mode — longer
 	// exposure per peek. Applied as a slower countdown at the burst-clock decrements.
 	UPROPERTY(EditAnywhere, Category = "Companion|CombatConfidence", meta = (ClampMin = "1.0", ClampMax = "2.5"))
-	float CombatBurstDurationMultiplier = 1.35f;
+	float CombatBurstDurationMultiplier = 1.6f;
+
+	// --- Defensive-mode in-cover confidence (the middle setting between Combat and Stealth) ---
+	// Defensive is the ECompanionMode::Normal enumerator; only its designer-facing label changed.
+	// Stealth is deliberately absent from both scales below and always runs them at 1.0.
+
+	// Defensive's counterpart to CombatPeekCooldownMultiplier — a small shortening of the between-peek
+	// wait so a Defensive companion under fire answers within about a second instead of holding
+	// through a full cooldown. 1.0 restores the pre-mode-personality behaviour exactly.
+	UPROPERTY(EditAnywhere, Category = "Companion|DefensiveConfidence", meta = (ClampMin = "0.2", ClampMax = "1.0"))
+	float DefensivePeekCooldownMultiplier = 0.8f;
+
+	// Defensive's counterpart to CombatBurstDurationMultiplier. Defaults to 1.0 (unchanged exposure) —
+	// Defensive gets its responsiveness from the cooldown scale above, not from longer exposure.
+	UPROPERTY(EditAnywhere, Category = "Companion|DefensiveConfidence", meta = (ClampMin = "1.0", ClampMax = "2.5"))
+	float DefensiveBurstDurationMultiplier = 1.0f;
 
 	// --- Loose cover bias (default open-engage positioning) ---
 
@@ -482,12 +602,31 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0"))
 	float CoverPickMaxZDelta = 250.f;
 
+	// Stall detection for companion cover moves. Displacement-based (per-tick speed check),
+	// not closing-distance, so nav detours around buildings do not false-fire. Six seconds of
+	// genuinely zero movement is an unambiguous wedge.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.5"))
+	float CoverMoveStallTimeout = 6.f;
+
+	// Minimum speed (cm/s) to count as making progress. Below this for StallTimeout seconds
+	// and the move is abandoned. 10 cm/s is well below any walk speed and catches only a
+	// genuinely stuck pawn.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1.0"))
+	float CoverMoveStallMinProgressSpeed = 10.f;
+
 	// --- Combat leash (decoupled from the follow-task SprintDistanceThreshold) ---
 
 	// Max distance from the player the companion positions freely during a fight in COMBAT mode
 	// before being pulled back. Bolder than Normal — it advances and takes space.
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "300.0"))
 	float CombatLeashDistance = 2250.f;
+
+	// Suppress the LostContact bark when the LoS blocker's impact point is within this distance
+	// (cm) of the companion's eye — the blocker is the companion's own cover wall, not an escaped
+	// enemy. Measured to the IMPACT POINT, not the blocking actor's origin (a long wall's pivot
+	// can sit metres away while the surface we're pressed against is 40cm out). 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0"))
+	float SelfOcclusionBarkSuppressRadius = 250.f;
 
 	// Same leash for fights while in NORMAL (or Stealth-broken) mode — tighter, stays in your fight.
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "300.0"))
@@ -509,7 +648,7 @@ public:
 	// Combat-mode advance margin override — Combat previously advanced on a sidegrade (1.0), which
 	// with the force-commit bug read as cover-to-cover churn with no firing. Sidegrades no longer hop.
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.5", ClampMax = "3.0"))
-	float CombatAdvanceScoreMargin = 1.6f;
+	float CombatAdvanceScoreMargin = 1.35f;
 
 	// Normal/Stealth advance gate: accumulated player ground-gain toward the threat (uu, decays
 	// between monitor re-evals) required before a non-Combat-mode companion may take an ADVANCE
@@ -527,11 +666,40 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0"))
 	float MinHostilePawnDistance = 300.f;
 
+	// Hard reject for relocate candidates whose straight 2D line from the companion passes within
+	// this distance (cm) of a known threat — a compromised companion must route AROUND the enemy
+	// group, never charge through it to reach a scoring winner. Straight-line approximation of the
+	// nav path (cheap, per-candidate). 0 = off.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverSwitch", meta = (ClampMin = "0.0"))
+	float RelocatePathThreatClearance = 350.f;
+
 	// When true, FindBestCoverFor rejects any slot whose hunkered body position is NOT shielded from
 	// the target by world geometry. Slots that are off to the side or behind the companion relative
 	// to the threat are discarded. Disable to revert to the old unfiltered pick.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
 	bool bCoverRequiresBodyProtection = true;
+
+	// When true, ValidateAndRerankCover rejects any EQS-chosen cover point that has NO peek line
+	// to the combat target (CanPeekShoot fails). The companion either adopts a nearby candidate
+	// that passes, or declines the commit entirely (routes to open-engage / turn-and-fight).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
+	bool bCoverRequiresPeekLosToTarget = true;
+
+	// Eye height (cm) for the peek-LOS validation trace at cover commit. Matches the existing
+	// CanPeekShoot call sites (switch monitor, advance hop, open-engage re-seek all use 150).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0"))
+	float CoverEyesOnPeekEyeHeight = 150.f;
+
+	// Max CanPeekShoot traces the eyes-on fallback loop may fire when the EQS winner is blind.
+	// Caps the worst-case cost (12 traces once per commit, only when the pick has no peek line).
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1", ClampMax = "64"))
+	int32 CoverEyesOnMaxCandidateTraces = 12;
+
+	// When true, a speculative (no-LOS) peek burst aims down the cover fire arc instead of
+	// tracking the live enemy through the wall. Aim hands back to the target the instant the
+	// muzzle gate reports a clear line, so shot accuracy is unaffected.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover")
+	bool bSpeculativePeekAimsPeekDirection = true;
 
 	// Chest height (cm) used for the body-shield trace from the behind-cover position.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0"))
@@ -652,6 +820,20 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.5"))
 	float PeekImpulseRearmSeconds = 3.f;
 
+	// --- Pressure fire term (incoming-fire contributes to Pressure01 alongside distance) ---
+	// Being shot at raises pressure even when the nearest threat is far away — a firefight at 18m
+	// no longer reads as calm just because nobody has closed. Gated by bPressureResponsiveCover.
+
+	// Weight [0,1] for the suppression01 half of the fire term. 0 disables suppression's
+	// contribution; 1 means full suppression01 equals full pressure on its own.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float PressureSuppressionWeight = 1.f;
+
+	// Recent damage hits (within CoverCommitUnderFireWindow) that equal maximum fire-term
+	// pressure. Fewer hits contribute proportionally. Clamped >= 1 to prevent division by zero.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 PressureDamageHitsForMax = 3;
+
 	// A VISIBLE threat inside this range defeats cover logic entirely: in-cover releases to
 	// open-engage (which move-shoots) and new cover commits are declined — no cat-and-mouse
 	// laps around the same rock with a chaser on the companion's tail. 0 disables.
@@ -668,6 +850,15 @@ public:
 	// genuine invalidates (occupied, blind) ignore this.
 	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0", ClampMax = "8"))
 	int32 MinPeekCyclesBeforeRelocate = 1;
+
+	// Scales the between-peek wait for the FIRST peek only (no peek cycles completed at this point
+	// yet). Taking fresh cover under fire and then standing behind it through a full rolled cooldown
+	// is the single loudest "the companion does nothing" tell; the first answer wants to land in
+	// about a second. Composes with the mode and pressure cooldown scales. 1.0 disables.
+	// STEALTH IS EXCLUDED — it is ring-fenced from every mode-personality lever, so a broken-stealth
+	// firefight keeps its historic peek cadence. Applies to Defensive and Combat only.
+	UPROPERTY(EditAnywhere, Category = "Companion|Cover", meta = (ClampMin = "0.25", ClampMax = "1.0"))
+	float FirstPeekWaitScale = 0.5f;
 
 	// Suppression resistance divisor for near-miss buildup (enemy-DA parity: higher = harder to
 	// suppress). The component default (1.0) pins the companion after just two near-misses — under
@@ -749,6 +940,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
 	float PlayerThreatAwarenessRadius = 3500.f;
 
+	// How long (s) an enemy stays engageable on the strength of having engaged the COMPANION —
+	// damaged it, or holds live suspicion/search knowledge of it. Widens acquisition past the old
+	// "has this enemy detected the PLAYER" test, so a Searching enemy that shot the companion and
+	// lost it is answered instead of ignored. Never applied in Stealth (the acquisition call site
+	// forces the clause false there), and it does not widen the player-threat scan, whose contract
+	// is specifically "enemies pressuring the player". 0 = only a live target or a current sighting.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
+	float EngagedCompanionMemorySeconds = 4.f;
+
 	// Hysteresis band for target retention: acquire within MaxEngageRange, drop only beyond
 	// MaxEngageRange * this multiplier. Floor of 1.05 guarantees a minimum anti-flicker band
 	// (~175cm at default 3500 range); 1.0 would make acquire and drop thresholds identical.
@@ -759,6 +959,40 @@ public:
 	// keep their combat target status through LoS blocks (the combat task repositions for an angle).
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat")
 	bool bRetainPlayerThreatTargetsWhileLosBlocked = true;
+
+	// An LoS-blocked combat target is only retained while the enemy has had contact with the party
+	// inside this window. Both keeps below the block (cover-active and player-pressure) read Combat
+	// awareness state, which is unbounded — one aggro'd enemy idling behind a wall held the target
+	// forever, so the Combat decorator never aborted and the companion never went back to following.
+	// Stale targets fall through to the normal grace-accrual clear (drop ~= window + LoS grace).
+	// 0 = legacy unbounded retention.
+	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
+	float BlockedTargetActivityWindowSeconds = 10.f;
+
+	// --- Commanded-cover wake ---
+	// Every acquisition path traces from the companion's HUNKERED eye position, and tall cover blocks
+	// that by design (only the lean/peek position has a line). Ordered onto a tall wall the companion
+	// therefore never acquires, never peeks, and never fires. The wake re-asks the question from the
+	// peek position it would actually fight from, and ONLY while the player's cover order is held.
+
+	// Master switch / regression lever. Off = the commanded hold behaves exactly as before.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverWake")
+	bool bCoverWakeOccludedAcquisition = true;
+
+	// The wake needs evidence a fight is actually happening — heard gunfire, covering fire ordered,
+	// the companion or the player taking hits, a director combat report, or an enemy focused on the
+	// player. This is the recency window for the timestamped sources.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverWake", meta = (ClampMin = "0.0"))
+	float CoverWakeLiveFightWindowSeconds = 3.f;
+
+	// Wake candidates are pooled within this range (further clamped by MaxEngageRange) — a peek line
+	// to something on the far side of the level is not a reason to open fire from ordered cover.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverWake", meta = (ClampMin = "0.0"))
+	float CoverWakeMaxAcquireDistance = 2500.f;
+
+	// Pool size and hard cap on the peek-line validation traces the wake may fire per tick.
+	UPROPERTY(EditAnywhere, Category = "Companion|CoverWake", meta = (ClampMin = "1", ClampMax = "8"))
+	int32 CoverWakeMaxCandidates = 3;
 
 	// Companion avoids standing in the player's ADS firing line during combat.
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|Combat")
@@ -777,14 +1011,129 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Combat", meta = (ClampMin = "0", EditCondition = "bAvoidPlayerADSCone"))
 	float ADSConeRange = 1500.f;
 
-	// --- Mode (player-commanded Normal / Combat / Stealth) ---
+	// --- Post-combat overwatch (weapon held ready on the threat chokepoint after the last kill) ---
+
+	// Master switch. Off = legacy behavior: weapon lowers the frame the last target is gone.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|PostCombatOverwatch")
+	bool bEnablePostCombatOverwatch = true;
+
+	// Restrict the hold to Director waves. Between squads it reads as covering the door the next one
+	// comes through; after an ordinary room clear the same pose reads as staring at a corpse, and it
+	// also holds the route facing off for up to PostCombatOverwatchMaxTime. Off restores the old
+	// always-on hold without a rebuild. Only gates ENTRY: a hold already running when the wave ends
+	// finishes on its own terms rather than snapping the weapon down on the last-kill frame.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (EditCondition = "bEnablePostCombatOverwatch"))
+	bool bOverwatchWaveOnly = true;
+
+	// Ceiling (s) on the post-fight hold. The hold normally ends earlier — the player walking off,
+	// a command, a new contact, or the companion itself starting a move all break it immediately.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "1.0", ClampMax = "20.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float PostCombatOverwatchMaxTime = 6.f;
+
+	// Player distance (cm) beyond which the hold breaks — the player has moved on, follow wins.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "200.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchBreakDistance = 800.f;
+
+	// Radius (cm, 2D) around the companion searched for recent enemy corpses. Their centroid is the
+	// first threat reference the hold tries: the pile of enemies that just died marks where the fight
+	// physically happened, and a body cannot have walked somewhere the ally has no sight of. Only
+	// corpses killed during the CURRENT fight are counted (pre-fight bodies are filtered out), and
+	// a separate Z-delta gate stops a 3D radius spanning floors. 0 disables the corpse source and
+	// falls straight through to the last-threat/first-contact chain.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "0.0", UIMin = "500.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchCorpseSearchRadius = 2000.f;
+
+	// Max |Z delta| (cm) between the companion and a corpse for it to count. DemoMap is a stacked
+	// skyscraper, so a pure 3D radius spans several storeys -- 4 enemies killed on floor 2 plus 2
+	// on floor 1 drag the centroid Z into the slab. Same lesson as FollowMaxZDelta, CoverPickMaxZDelta
+	// and RouteFacingMaxZDelta. 0 disables the storey gate.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "0.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchCorpseMaxZDelta = 250.f;
+
+	// Max pairwise 2D separation (cm) among qualifying corpses before the centroid is rejected in
+	// favour of the single NEAREST corpse. A centroid of two separate clusters always lands in the
+	// wall between them -- e.g. 3 corpses in Room A and 2 in Room B produce a centroid inside the
+	// partition. When any pair exceeds this threshold the nearest corpse alone is used, which always
+	// sits in the room the companion is actually standing in. 0 disables the spread reject.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "0.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchCorpseMaxSpread = 1500.f;
+
+	// Threat-memory points closer than this (cm) are skipped (the fight ended at the companion's
+	// feet); the aim falls back to first-contact, then to the pure bearing.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "100.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchMinThreatDist = 400.f;
+
+	// Aim distance (cm) along the threat bearing when no usable door or threat point exists.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "300.0", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchBearingDistance = 1200.f;
+
+	// Seconds between re-resolutions of the held aim point. The point was previously computed once on
+	// entry and re-asserted verbatim, so it went stale as soon as the ally or the fight moved — and
+	// under a wave hold, where the max-time cap is waived, it never expired to correct itself. A
+	// refresh that repeatedly fails to resolve a point ends the hold outright. 0 disables the refresh.
+	// ClampMin stays 0 so the disable still works, but the slider floors at 0.25 (the service's own
+	// tick interval): anything finer just re-runs the door sort and its traces every single tick.
+	UPROPERTY(EditAnywhere, Category = "Companion|PostCombatOverwatch", meta = (ClampMin = "0.0", UIMin = "0.25", EditCondition = "bEnablePostCombatOverwatch"))
+	float OverwatchAimRefreshInterval = 1.f;
+
+	// --- Wave hold (stay combat-ready at cover through a finite Director wave) ---
+
+	// Master switch. Off = legacy behavior: allies return to formation in the gaps between squad
+	// spawns, which reads as them wandering off mid-defence.
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Companion|WaveHold")
+	bool bEnableWaveHold = true;
+
+	// Player distance (cm) beyond which the wave hold breaks so the ally catches up and re-settles
+	// at fresh cover. Deliberately far more generous than OverwatchBreakDistance: the whole point of
+	// the hold is to stay put while the player repositions inside the defence area. Without a leash
+	// at all an ally is stranded a room behind the moment the player pushes on.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "500.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldLeashDistance = 2500.f;
+
+	// Seconds with NOTHING known (no combat target, no alerted threat) before the hold drops mid-wave.
+	// Without it an ally that cleared its corner stands facing the last fight until the next squad
+	// physically walks into its perception, which reads as frozen. 0 disables the release.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldQuietReleaseSeconds = 6.f;
+
+	// Seconds of SUSTAINED knowledge needed to re-arm the hold after the quiet release above fired.
+	// The quiet timer unwinds in real time rather than snapping to zero on the first knowing tick, and
+	// saturates at WaveHoldQuietReleaseSeconds + this the moment the release trips. Without the
+	// hysteresis a single tick of eye-line re-armed the hold, and re-arming fires StopMovement()
+	// wherever the ally happens to be standing — an enemy flickering in and out of sight (an alerted
+	// Searching enemy is accepted as a threat but skipped for acquisition in Normal mode) produced a
+	// stop-go stutter across the whole defence, with an UnCrouch() on every release edge.
+	// 0 = no hysteresis: the release re-arms on the first knowing tick.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldQuietRearmSeconds = 3.f;
+
+	// Stale-combat backstop: release the wave hold when no combat has been reported to the director
+	// for this long, regardless of whether the wave is still technically active. Covers both stuck
+	// enemies and blocked-spawn soft-locks. Must exceed the squad spawn cadence (8s default) so a
+	// healthy wave never trips it. 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldStaleCombatReleaseSeconds = 20.f;
+
+	// Hard ceiling (s) on time held BLIND during a single wave -- held with no combat target and no
+	// LoS-verified threat. Counts only that: a healthy 4-squad defence runs 40-90s wall clock and is
+	// held for nearly all of it, so a ceiling on total held time tripped mid-wave and disabled the hold
+	// for the rest of the defence (allies abandoning cover in every squad gap). The blind gate makes
+	// this an unreachable backstop when the quiet release above is active (WaveHoldQuietReleaseSeconds
+	// > 0 trips first), and the sole blind-time release when a designer zeroes the quiet release.
+	// Once tripped the hold stays released until the wave changes. Must comfortably exceed the quiet
+	// release (6s) so it only fires on a genuine soft-lock. 0 disables.
+	UPROPERTY(EditAnywhere, Category = "Companion|WaveHold", meta = (ClampMin = "0.0", EditCondition = "bEnableWaveHold"))
+	float WaveHoldMaxBlindHoldSeconds = 45.f;
+
+	// --- Mode (player-commanded Defensive / Combat / Stealth) ---
+	// Defensive is the ECompanionMode::Normal enumerator — the label changed, the code name did not.
 
 	// Combat mode: how far AHEAD of the player (along their facing / move direction) the companion
 	// holds formation when out of contact. This is also the lead cap — the formation point never
 	// projects farther than this past the player. Must exceed AcceptableRadius or the follow task's
 	// idle gate stops the companion at the player's side before it reaches the lead point.
 	UPROPERTY(EditAnywhere, Category = "Companion|Mode", meta = (ClampMin = "0.0"))
-	float CombatModeLeadDistance = 400.f;
+	float CombatModeLeadDistance = 550.f;
 
 	// Combat mode: lateral offset of the lead formation point.
 	UPROPERTY(EditAnywhere, Category = "Companion|Mode")
@@ -807,6 +1156,24 @@ public:
 	// re-pins (companion returns to crouched, hold-fire stealth rules).
 	UPROPERTY(EditAnywhere, Category = "Companion|Mode", meta = (ClampMin = "0.5"))
 	float StealthRepinDelay = 4.f;
+
+	// Seconds the weapon stays up after the last target is gone, in COMBAT mode — the fight might not
+	// be over. Posture only: it never holds a facing, so it does not fight the post-combat overwatch
+	// hold or the route facing reference. 0 = lower on the frame the target is lost (legacy).
+	//
+	// SILENTLY CEILINGED BY UBTService_UpdateCompanionState::ExploreReturnDelay (3s). The anim raise
+	// clause requires ECompanionPosture::Combat, and posture flips to Exploration once
+	// OutOfCombatTimer reaches ExploreReturnDelay — a timer that now starts accruing on the same tick
+	// this hold arms, because overwatch no longer enters outside a Director wave. Raising this above
+	// ExploreReturnDelay does nothing at all; raise that first. 2.5 leaves half a second of slack so
+	// which one expires first is not a coin flip at the service's 0.25s tick granularity.
+	UPROPERTY(EditAnywhere, Category = "Companion|Mode", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float CombatWeaponUpHoldSeconds = 2.5f;
+
+	// The same hold in DEFENSIVE mode — a beat, not a stance. Stealth has no entry here and never
+	// raises on target loss at all.
+	UPROPERTY(EditAnywhere, Category = "Companion|Mode", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float DefensiveWeaponUpHoldSeconds = 1.f;
 
 	// --- Follow / formation min-separation ---
 
@@ -855,6 +1222,13 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0"))
 	float WatchThreatLingerSeconds = 6.f;
 
+	// Fight-aware follow: max age (seconds) of the controller's alerted-threat signal for a
+	// no-eye-line companion to act on it — watch stance toward the fight bearing while following,
+	// and follow-slot picks biased to slots with eye-line toward the threat. Covers the trailing
+	// extractee behind a wall who otherwise strolls through a live firefight. 0 disables both.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0"))
+	float FightSignalMaxAge = 4.f;
+
 	// Master kill-switch for ambient facing (path look-ahead while moving, attention-yaw while idle,
 	// idle scan glances). Off = the companion holds whatever yaw it last had out of combat, and
 	// watch-threat facing is the only out-of-combat facing source. Defaults off: the 2026-07-11
@@ -888,5 +1262,116 @@ public:
 	// Max magnitude (degrees) of the idle scan-glance yaw offset.
 	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0", ClampMax = "90.0"))
 	float AmbientScanOffsetMaxDeg = 20.f;
+
+	// --- Route facing reference (face the way the level runs while following) ---
+	// A designer flags an existing ACompanionRoute as a facing reference and installs it with an
+	// overlap trigger. The companion never walks it — it projects onto the route line and faces a
+	// fixed distance further along, so a corner sweeps instead of snapping. Sits BELOW combat,
+	// threats, revive, takedowns and commanded route walks in the facing tier order.
+
+	// Master switch for the whole tier. Off = no route ever installs a facing, exactly as today.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing")
+	bool bRouteFacingReferenceEnabled = true;
+
+	// Distance (cm) walked along the route line past the companion's projection to find the point it
+	// faces. This IS the corner sweep: the turn begins once the look-ahead crosses onto the next leg,
+	// so a larger value starts the turn earlier and turns more gently. Per-route override lives on
+	// ACompanionRoute::FacingReferenceLookAheadOverride for sections with unusually short legs.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "100.0", EditCondition = "bRouteFacingReferenceEnabled"))
+	float RouteFacingLookAheadDistance = 800.f;
+
+	// Max 2D distance (cm) from the companion to its projection on the route for the facing to hold —
+	// wander far enough off the section's spine and the direction stops meaning anything. 0 = unlimited.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0", EditCondition = "bRouteFacingReferenceEnabled"))
+	float RouteFacingMaxDistance = 2000.f;
+
+	// Max |Z delta| (cm) to the projection, tested separately from the 2D range above. DemoMap stacks
+	// floors, so a purely 3D range test keeps a reference installed one storey up live on the floor
+	// below and faces the companion at a corridor overhead (same lesson as FollowMaxZDelta and the
+	// overwatch door Z gate). 0 = unlimited.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "0.0", EditCondition = "bRouteFacingReferenceEnabled"))
+	float RouteFacingMaxZDelta = 250.f;
+
+	// Companion 2D speed (cm/s) above which its own travel direction is trusted for the backtrack
+	// test below. Below it the companion is shuffling in formation and its velocity is noise.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "1.0", EditCondition = "bRouteFacingReferenceEnabled"))
+	float RouteFacingMinHeadingSpeed = 120.f;
+
+	// Backtrack latch ENTER: dot(travel direction, route heading) at or below this means the companion
+	// is running back down the section to catch the player up, and it faces its own direction of
+	// travel instead of the route. Negative — only a genuine reversal counts.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "-1.0", ClampMax = "1.0", EditCondition = "bRouteFacingReferenceEnabled"))
+	float RouteFacingBacktrackEnterDot = -0.15f;
+
+	// Backtrack latch EXIT: the dot must recover to at least this before the route facing resumes.
+	// Must sit above the enter dot — the gap is the hysteresis that stops a companion moving roughly
+	// sideways to the route from flickering between the two facings once per tick.
+	UPROPERTY(EditAnywhere, Category = "Companion|Facing", meta = (ClampMin = "-1.0", ClampMax = "1.0", EditCondition = "bRouteFacingReferenceEnabled"))
+	float RouteFacingBacktrackExitDot = 0.35f;
+
+	// --- Grenade lob (Grenadier-pattern reuse: UEnemyGrenadierComponent attached to the companion;
+	// the projectile is team-blind radial damage, so companion grenades hurt everyone in the blast) ---
+
+	// Master switch. When false (or GrenadeProjectileClass unset) the companion never throws.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	bool bGrenadeEnabled = true;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "1"))
+	int32 GrenadeSupply = 4;
+
+	// Minimum seconds between throws.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.5"))
+	float GrenadeCooldown = 18.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.5"))
+	float GrenadeFuseTime = 2.5f;
+
+	// Wind-up seconds before the fallback spawn fires. Keep >= the throw montage's release-notify
+	// time — the notify releases first and clears this timer.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.1"))
+	float GrenadeTelegraphTime = 1.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.0"))
+	float GrenadeMinRange = 500.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.0"))
+	float GrenadeMaxRange = 2000.f;
+
+	// Damage at the blast centre.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "1.0"))
+	float GrenadeDamage = 120.f;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "1.0"))
+	float GrenadeDamageRadius = 350.f;
+
+	// Seconds the combat target must stay LOS-blocked before the companion lobs at last-known.
+	// Must stay below the combat task's LosBlockedAbandonSeconds (3.0) or the task exits first.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.5"))
+	float GrenadeLobTriggerLOSBlockedTime = 2.f;
+
+	// Scales the landing point toward the thrower (1.0 = exact last-known spot).
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.1", ClampMax = "1.0"))
+	float GrenadeLandingDistanceScale = 1.0f;
+
+	// Player-safety gate: refuse the throw when the player stands within
+	// GrenadeDamageRadius + this buffer (cm) of the predicted landing point.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade", meta = (ClampMin = "0.0"))
+	float GrenadePlayerSafetyBuffer = 100.f;
+
+	// Projectile spawned on throw (BP_EnemyGrenade — indicator + explosion FX come with it).
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	TSubclassOf<AEnemyGrenadeProjectile> GrenadeProjectileClass;
+
+	// Socket on the companion body mesh the grenade launches from.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	FName GrenadeThrowSocket = TEXT("GrenadeSocket");
+
+	// Stand throw montages (one picked at random per throw) + crouched variant. The enemy grenadier
+	// montages play directly — same skeleton, UpperBody slot, release notify included.
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	TArray<TObjectPtr<UAnimMontage>> GrenadeThrowStandMontages;
+
+	UPROPERTY(EditAnywhere, Category = "Companion|Grenade")
+	TObjectPtr<UAnimMontage> GrenadeThrowCrouchMontage;
 
 };

@@ -1,6 +1,7 @@
 // AITargetingStatics — shared sight-location helper for companion and enemy AI.
 
 #include "AI/AITargetingStatics.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Enemy/EnemyCharacter.h"
 #include "Enemy/EnemyArchetypeData.h"
 #include "Character/ExtractionPlayerInterface.h"
@@ -15,6 +16,11 @@ namespace AITargeting
 	static const FName PelvisBoneName(TEXT("pelvis"));
 	static const FName ChestBoneName(TEXT("spine_03"));
 	static const FName NeckBoneName(TEXT("neck_01"));
+
+	// Cap on the pawn-skip loop in HasClearLineIgnoringPawns. A double takedown has at most a
+	// handful of bodies in the way (victim, second enemy, player) — this is headroom, not a budget
+	// meant to be hit; exceeding it means a pathological stack of pawns and is treated as blocked.
+	constexpr int32 MaxPawnStepIterations = 6;
 
 	FVector GetSightLocation(const AActor* Target)
 	{
@@ -41,6 +47,8 @@ namespace AITargeting
 
 	bool GetVisibleBodyPoint(const AActor* Target, const FVector& ObserverEye, const AActor* IgnoreActor, FVector& OutPoint, bool bIncludeHead)
 	{
+		TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_VisibleBodyPoint);
+
 		if (!IsValid(Target)) return false;
 
 		UWorld* World = Target->GetWorld();
@@ -116,5 +124,32 @@ namespace AITargeting
 		if (PlayerIface && PlayerIface->GetIsProne()) return false;
 
 		return true;
+	}
+
+	bool HasClearLineIgnoringPawns(const UWorld* World, const FVector& Start, const FVector& End,
+		FCollisionQueryParams QueryParams, AActor** OutBlocker)
+	{
+		if (!World) return false;
+
+		for (int32 Iteration = 0; Iteration < MaxPawnStepIterations; ++Iteration)
+		{
+			FHitResult Hit;
+			if (!World->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, QueryParams))
+				return true;
+
+			APawn* HitPawn = Cast<APawn>(Hit.GetActor());
+			if (!HitPawn)
+			{
+				if (OutBlocker) *OutBlocker = Hit.GetActor();
+				return false;
+			}
+
+			// Stepped over — join the local ignore set and re-trace from the same Start.
+			QueryParams.AddIgnoredActor(HitPawn);
+		}
+
+		// Exceeded the pawn-skip cap: a pathological stack of bodies, not a real clear line.
+		if (OutBlocker) *OutBlocker = nullptr;
+		return false;
 	}
 }

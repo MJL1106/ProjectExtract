@@ -39,6 +39,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Stats", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float HeadshotMaxHealthFraction = 0.65f;
 
+	/** A bullet to the head kills outright, through shield and armour. Heavies set this false and
+	 *  keep the HeadshotMaxHealthFraction floor instead. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Stats")
+	bool bHeadshotOneTap = true;
+
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Stats", meta = (ClampMin = "1.0"))
 	float PatrolSpeed = 200.f;
 
@@ -144,6 +149,25 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
 	float LostContactGrace = 45.f;
 
+	// --- Director Seed (reinforcement dispatch) ---
+
+	/** Spread radius (cm) for director-spawned squad dispersal — each member offsets from
+	 *  the shared intel point by this distance at a unique angle so they approach and search
+	 *  on different lines. Separate from MinAllySpacing which is a cover-avoidance minimum. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Director", meta = (ClampMin = "100.0"))
+	float DirectorSeedSpreadRadius = 500.f;
+
+	/** 3D distance (cm) from the seed location at which a director-spawned enemy considers
+	 *  itself arrived and transitions to Searching if it has not gained real LOS. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Director", meta = (ClampMin = "50.0"))
+	float DirectorSeedArrivalRadius = 250.f;
+
+	/** Seconds the director-seeded enemy must be near its seed location without LOS before
+	 *  transitioning to Searching. Prevents a momentary close-range LOS break (duck behind
+	 *  a crate) from triggering the search transition. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Director", meta = (ClampMin = "0.0"))
+	float DirectorSeedArrivalGrace = 2.f;
+
 	/** Maximum yaw offset (degrees) between actor forward and the aim target before GetAIAimTarget/GetAIAimLocation
 	 *  returns null/false — forces the weapon to fall back to forward-fire while the body rotates.
 	 *  0 = unlimited (default for all non-heavy archetypes). Heavy DA sets ~60. */
@@ -189,6 +213,36 @@ public:
 	/** Minimum suspicion after an in-scope Search/Breach door startle. Hearing still cannot confirm Combat. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0", ClampMax = "99.0"))
 	float BreachStartleSuspicionFloor = 75.f;
+
+	/** Minimum suspicion after hearing a JOG footstep ("FootstepWalk"), scaled by acoustic occlusion.
+	 *  45 vs SuspicionDecayRate 15/s holds the enemy Suspicious for ~1 s — longer than the ~0.85 s jog
+	 *  step cadence — so sustained jogging ratchets past SearchingThreshold and gets investigated,
+	 *  while one or two steps only earn a head-turn. A jog heard through a closed door
+	 *  (ThroughDoorNoiseMultiplier 0.6 -> 27) stays under SuspiciousThreshold and is ignored.
+	 *  Never slams state on its own — ApplySuspicionState picks it up on the next update. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0", ClampMax = "99.0"))
+	float JogFootstepSuspicionFloor = 45.f;
+
+	/** Minimum suspicion after hearing a SPRINT footstep ("FootstepSprint"), scaled by acoustic
+	 *  occlusion. 80 clears SearchingThreshold (65) outright, so an unoccluded sprint in earshot sends
+	 *  the enemy to investigate immediately — sprinting is not a stealth option. Through a door
+	 *  (x0.6 -> 48) it drops to a turn-and-look. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0", ClampMax = "99.0"))
+	float SprintFootstepSuspicionFloor = 80.f;
+
+	/** Distance (cm) inside which an unsuppressed gunshot is instant Combat on the shooter, no meter,
+	 *  no investigate walk. 800 = ~8 m: a shot fired that close is unmistakably AT you. The range is
+	 *  scaled by noise strength x acoustic multiplier, so a suppressor (~0.3) shrinks it to ~2.4 m and
+	 *  a closed door (0.6) to ~4.8 m — suppressed play is untouched by this. 0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
+	float GunshotCombatSlamRange = 800.f;
+
+	/** Distance (cm) inside which a heard SPRINT footstep is instant Combat on the runner. 600 = ~6 m,
+	 *  deliberately shorter than the gunshot slam — someone sprinting past at that range is on top of
+	 *  you. Scaled the same way (strength x acoustics), so a sprint through a wall never slams.
+	 *  0 = disabled. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))
+	float SprintCombatSlamRange = 600.f;
 
 	/** Fill multiplier at the edge of the view cone (1 at centre). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.05", ClampMax = "1.0"))
@@ -310,11 +364,11 @@ public:
 
 	/** Max number of grenades the enemy carries. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1"))
-	int32 GrenadeSupply = 3;
+	int32 GrenadeSupply = 8;
 
 	/** Minimum seconds between grenade throws. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.5"))
-	float GrenadeCooldown = 12.f;
+	float GrenadeCooldown = 6.f;
 
 	/** Seconds until the grenade detonates after spawning. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.5"))
@@ -324,9 +378,11 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.1"))
 	float GrenadeTelegraphTime = 1.0f;
 
-	/** Minimum throw distance (cm). Targets closer than this won't be lobbed at. */
+	/** Minimum throw distance (cm). Targets closer than this won't be lobbed at.
+	 *  Currently < GrenadeDamageRadius — the thrower survives close-range blasts only because the
+	 *  team filter ignores friendly pawns. Do not remove the filter without raising this value. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.0"))
-	float GrenadeMinRange = 500.f;
+	float GrenadeMinRange = 400.f;
 
 	/** Maximum throw distance (cm). */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1.0"))
@@ -338,11 +394,11 @@ public:
 
 	/** Radius (cm) of the radial damage sphere. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "1.0"))
-	float GrenadeDamageRadius = 350.f;
+	float GrenadeDamageRadius = 600.f;
 
 	/** Seconds the target must be LOS-blocked before the grenadier lobs. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.5"))
-	float GrenadeLobTriggerLOSBlockedTime = 4.f;
+	float GrenadeLobTriggerLOSBlockedTime = 2.5f;
 
 	/** Projectile class spawned on throw. Blueprint-assigned. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier")
@@ -369,7 +425,7 @@ public:
 	 *  during live engagement (independent of the LOS-blocked hiding lob). Naturally rate-limited by
 	 *  GrenadeCooldown + GrenadeSupply, so this just adds variety on top of the cooldown. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Grenadier", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float GrenadeCoverLobChance = 0.20f;
+	float GrenadeCoverLobChance = 0.40f;
 
 	/** Of the proactive cover lobs, the fraction that pop up over the wall (stand + throw + duck) vs
 	 *  lobbing from the tucked crouch pose. 0.35 = ~35% pop-up, ~65% tucked. */
@@ -1003,6 +1059,43 @@ public:
 		ToolTip = "Extra standoff padding behind the cover wall surface, in cm, added on top of capsule radius."))
 	float CoverStandoffPadding = 25.f;
 
+	// --- Proximity body notice ---
+
+	/** Notice an ally's corpse lying close by even when it is outside the view cone.
+	 *  Sight-based body discovery needs a perception hit, and the cone rides the head bone with a
+	 *  limited vertical span — a corpse ragdolled at the enemy's feet sits BELOW it, so the enemy
+	 *  standing right next to a fresh kill never reacted at all. This is the short-range backstop.
+	 *  Routes into the same discovery path as a sighted body (bark, report, investigate, Searching) —
+	 *  never straight to Combat. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Awareness",
+		meta = (ToolTip = "Notice a nearby ally corpse even when it is outside the view cone (a body at the enemy's feet)."))
+	bool bEnableProximityBodyNotice = true;
+
+	/** Radius (cm) within which a corpse can be noticed without being in the view cone. Deliberately
+	 *  short — this is for "it is lying at my feet", not for spotting bodies across the room, which
+	 *  normal cone-based sight discovery already handles. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Awareness", meta = (ClampMin = "0.0",
+		EditCondition = "bEnableProximityBodyNotice",
+		ToolTip = "Radius in cm for out-of-cone corpse notice. Short by design; distant bodies use normal sight discovery."))
+	float BodyNoticeRadius = 400.f;
+
+	/** Seconds a corpse must stay close and unobstructed before the enemy reacts to it. The delay is
+	 *  load-bearing: it stops a takedown kill from instantly alerting the victim's neighbour, which
+	 *  is what breaks a synced double-takedown. Progress resets if the corpse stops qualifying. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Awareness", meta = (ClampMin = "0.0",
+		EditCondition = "bEnableProximityBodyNotice",
+		ToolTip = "Seconds a nearby corpse must persist before the enemy reacts. Keeps takedown kills from instantly alerting neighbours."))
+	float BodyNoticeDelaySeconds = 1.f;
+
+	/** Max vertical gap (cm) between the enemy and a cover point for that point to be committable.
+	 *  Cover only shields on the floor you stand on, and the baked cover set plus the EQS bounds span
+	 *  storeys — a slot one floor up can score well and send the enemy jogging into the open toward a
+	 *  hunker that protects nothing. Mirrors the companion tuning field of the same name; 250
+	 *  tolerates ramps and half-landings. 0 disables. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Cover", meta = (ClampMin = "0.0",
+		ToolTip = "Max vertical gap in cm between the enemy and a cover point for it to be committable. 0 disables."))
+	float CoverPickMaxZDelta = 250.f;
+
 	/** Lateral gap (cm) between the capsule's edge and the wall's actual end at endpoint covers.
 	 *  Arrival positions are corner-snapped so the shoulder sits this far inside the edge regardless
 	 *  of how far from the corner the bake left the point (fixes too-deep / past-the-edge covers). */
@@ -1140,6 +1233,12 @@ public:
 	 *  Applies even when bPostureSystemEnabled is false. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0"))
 	float DBNOStandoffRadius = 1800.f;
+
+	/** Only read while the enemy director has latched this enemy as the last living member of its
+	 *  wave (see FDirectorWaveRequest::LastManHuntThreshold). Every other enemy ignores it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Posture", meta = (ClampMin = "0.0",
+		ToolTip = "How long the wave's last man may go without line of sight to the player before he abandons cover and closes on them. A last man still trading fire behaves exactly as any other enemy; only one that has gone quiet starts hunting. 0 = never close."))
+	float LastManHuntNoLosSeconds = 6.f;
 
 	// --- Rusher (three-phase: cover approach → circle-strafe standoff → triggered charge) ---
 

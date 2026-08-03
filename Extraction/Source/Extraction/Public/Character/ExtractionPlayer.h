@@ -17,6 +17,7 @@
 class AWeaponBase;
 class AEnemyCharacter;
 class ACompanionCharacter;
+class AExtracteeCharacter;
 class UInputComponent;
 class UInputAction;
 class UInputMappingContext;
@@ -30,6 +31,7 @@ class UConsumableInventoryComponent;
 class UAnimMontage;
 class USpringArmComponent;
 class USceneComponent;
+class UCapsuleComponent;
 struct FInputActionValue;
 
 // Distinct name from the legacy AExtractionCharacter declaration to avoid linker conflicts during the migration period.
@@ -104,6 +106,11 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
 	void OnADSChanged(bool bIsADS);
 
+	/** Fired on fire press while the kit throwable (grenade) slot is equipped. BP implements this
+	 *  to call BeginFire on the spawned kit grenade item — the C++ hitscan path is skipped. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Weapon|Events")
+	void OnThrowableFirePressed();
+
 	/** Fired once after Montage_Play succeeds and the end delegate is bound.
 	 *  BP uses this to lock the camera, hide the gun, and show the knife. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Takedown|Events")
@@ -114,9 +121,44 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Takedown|Events")
 	void OnTakedownFinished();
 
-	/** Animation hook fired locally only after the server successfully consumes a stim. */
+	/** Animation hook fired locally only after the server successfully consumes a stim.
+	 *  BP shows the injector prop and starts the injection montage here. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory|Consumables")
 	void OnStimUsed();
+
+	/** Fired locally when the injection window ends — completed OR cancelled (DBNO, death).
+	 *  BP hides the injector prop and stops the montage here, so neither can strand. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Inventory|Consumables")
+	void OnStimUseEnded();
+
+	// ---- Checkpoint loadout snapshot ----
+
+	/** Fired by the checkpoint system when the player reaches a checkpoint. BP captures
+	 *  the four slot records (PrimarySlot, SecondarySlot, ThrowableSlot, MeleeSlot) and
+	 *  the active slot index from its kit-side DT_Item_C variables, builds
+	 *  FCheckpointSlotSnapshot structs, and calls CommitLoadoutSnapshot to hand them back. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Checkpoint")
+	void OnCaptureLoadoutRequested();
+
+	/** Called by BP after it has built the four slot snapshots. C++ overwrites the two gun
+	 *  slots' Ammo/ReserveAmmo from the live AWeaponBase actors (the slot records go stale
+	 *  as the player shoots), fills in the stim count, derives bValid from whether any slot
+	 *  is valid, and stores the snapshot on the GameInstance keyed by level name. */
+	UFUNCTION(BlueprintCallable, Category = "Checkpoint")
+	void CommitLoadoutSnapshot(const FCheckpointLoadoutSnapshot& Snapshot);
+
+	/** Fired on BeginPlay (next tick) when the GameInstance holds a loadout snapshot for
+	 *  the current level. BP writes the four slot records from the snapshot, calls
+	 *  ReplaceSlotWeapon per gun slot in slot-write-first order (bracketed by
+	 *  BeginAudioSuppression/EndAudioSuppression on the WeaponComponent), then swaps to
+	 *  the recorded active slot. C++ restores the stim count itself before firing this. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Checkpoint")
+	void OnRestoreLoadoutRequested(const FCheckpointLoadoutSnapshot& Snapshot);
+
+	/** True for the whole committed injection window. Fire, ADS and reload refuse while set;
+	 *  movement stays free. The kit BP can gate its own actions on this too. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Consumables")
+	bool IsUsingStim() const;
 
 	// ---- Input handlers (BlueprintCallable so kit BP can delegate if needed) ----
 
@@ -152,6 +194,12 @@ public:
 
 	virtual const UAnimMontage* GetBeingRevivedMontage() const override { return BeingRevivedMontage; }
 
+	// ---- Single-reviver claim (see IExtractionPlayerInterface) ----
+
+	virtual bool TryClaimRevive(AActor* Claimant) override;
+	virtual void ReleaseReviveClaim(AActor* Claimant) override;
+	virtual AActor* GetReviveClaimant() const override { return ReviveClaimant.Get(); }
+
 	// ---- IExtractionPlayerInterface ----
 
 	UFUNCTION(BlueprintPure, Category = "Components")
@@ -186,11 +234,71 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Revive")
 	float GetReviveProgress() const { return ReviveDuration > 0.f ? FMath::Clamp(ReviveElapsed / ReviveDuration, 0.f, 1.f) : 0.f; }
 
+	// ---- World-interact prompt (local-only; URevivePromptWidget polls these) ----
+
+	/** IWorldInteractable under the crosshair and currently interactable (low-rate local scan),
+	 *  or nullptr. During a hold this stays pinned to the held target. */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	AActor* GetInteractCandidate() const { return InteractCandidate.Get(); }
+
+	/** The candidate's own prompt text (IWorldInteractable::GetWorldInteractionPrompt). */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	FText GetInteractPrompt() const { return InteractCandidatePrompt; }
+
+	/** True while a hold-to-interact is running (hold-duration interactables only). */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	bool IsInteractHolding() const { return bIsInteractHolding; }
+
+	/** Normalized 0-1 progress of the local interact hold. */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	float GetInteractHoldProgress() const
+	{
+		return InteractHoldDuration > 0.f ? FMath::Clamp(InteractHoldElapsed / InteractHoldDuration, 0.f, 1.f) : 0.f;
+	}
+
+	/**
+	 * Every live ally an interaction trace must step past, with this player itself at index 0 so the
+	 * array can replace a one-element ignore list wholesale. Covers both ACompanionCharacter allies
+	 * (primary + armed VIP) and the unarmed AExtracteeCharacter escort, plus everything attached to
+	 * each of them — an ally's attachments block ECC_Visibility in their own right, the same inclusion
+	 * the companion's own LoS traces make (BTService_UpdateCompanionState, where it is load-bearing).
+	 *
+	 * Allies are in here because their meshes BLOCK ECC_Visibility, and that block is exactly what
+	 * makes them take hitscan damage — it must never be relaxed, so the traces step past them instead.
+	 *
+	 * An ally that is currently interactable ITSELF is deliberately left out: the captive VIP and the
+	 * unrescued escort are both IWorldInteractable, and ignoring them would make the rescue press
+	 * impossible. Both refuse CanWorldInteract once rescued, so they join the list from that frame on.
+	 *
+	 * CONSUMED BY THE AC_Interaction BLUEPRINT COMPONENT on BP_ExtractionCharacter: wire this straight
+	 * into its Line Trace By Channel -> Actors To Ignore, replacing the Make Array that holds only the
+	 * player pawn. The C++ interact traces and UCompanionCommandComponent's ping trace read the same
+	 * list, so all three interaction paths agree on one ignore set.
+	 */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	const TArray<AActor*>& GetInteractTraceIgnoredActors() const;
+
+	// ---- Companion command input action accessors ----
+	// Read-only handles for UI that resolves an input action to its bound key name. The actions
+	// themselves stay assigned on the BP child class.
+
+	/** Middle-mouse companion ping action, or null while the BP child leaves it unassigned. */
+	UFUNCTION(BlueprintPure, Category = "Input|Companion")
+	UInputAction* GetCompanionPingAction() const { return IA_CompanionPing; }
+
+	/** Companion breach-confirm action, or null while the BP child leaves it unassigned. */
+	UFUNCTION(BlueprintPure, Category = "Input|Companion")
+	UInputAction* GetCompanionBreachAction() const { return IA_CompanionBreach; }
+
 	UFUNCTION(BlueprintPure, Category = "Animation")
 	virtual UExtractionAnimInstance* GetExtractionAnimInstance() const override { return CachedAnimInstance; }
 
 	virtual ETraversalType GetActiveTraversalType() const override;
 	virtual bool IsInTraversal() const override;
+
+	/** Checks the designer-assigned traversal montage properties below — the body mesh runs
+	 *  the pristine kit AnimBP, so the UExtractionAnimInstance montage lookup never applies. */
+	virtual bool HasTraversalMontage(ETraversalType Type) const override;
 
 	UFUNCTION(BlueprintPure, Category = "Movement")
 	virtual bool GetIsVaulting() const override;
@@ -260,8 +368,13 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "Movement")
 	void OnWalkHeldChanged(bool bHeld);
 
+	/** Called by the objective/checkpoint system when the player reaches a checkpoint.
+	 *  Fires OnCaptureLoadoutRequested so BP can build and commit the snapshot. */
+	void RequestLoadoutCapture();
+
 	virtual void NotifyWeaponEquipped(AWeaponBase* EquippedWeapon) override { OnWeaponEquipped(EquippedWeapon); }
 	virtual void NotifyADSChanged(bool bIsADS) override { OnADSChanged(bIsADS); }
+	virtual void NotifyThrowableFirePressed() override { OnThrowableFirePressed(); }
 
 	/** Called by UAnimNotify_TakedownKill at the death frame of the finisher montage.
 	 *  Also serves as the fallback when the montage ends/interrupts before the notify fires. */
@@ -274,6 +387,14 @@ public:
 	virtual bool IsInTakedown() const override { return bTakedownMontageActive || bIsReviving; }
 
 protected:
+
+	// ---- Movement audio hooks ----
+	// (Jump foley lives in UFootstepNoiseComponent's movement-mode hook — the kit's jump flow
+	// never fires ACharacter::OnJumped.)
+
+	virtual void OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+	virtual void OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust) override;
+	void PlayCrouchFoley() const;
 
 	// ---- Gameplay Components ----
 
@@ -317,6 +438,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> ReloadAction;
 
+	/** Weapon slot selection (1 / 2 keys). Assigned in the BP child class. */
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> EquipPrimaryAction;
+
+	UPROPERTY(EditAnywhere, Category = "Input")
+	TObjectPtr<UInputAction> EquipSecondaryAction;
+
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> ADSAction;
 
@@ -333,7 +461,7 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> TakedownAction;
 
-	/** Slot 3 health-stim action. Assigned in the BP child class. */
+	/** Health-stim action, bound to the 4 key in IMC_Default. Assigned in the BP child class. */
 	UPROPERTY(EditAnywhere, Category = "Input")
 	TObjectPtr<UInputAction> UseStimAction;
 
@@ -371,6 +499,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Input|Companion")
 	TObjectPtr<UInputAction> IA_CompanionModeCombat;
 
+	/** Mode picker — trigger covering fire (4). */
+	UPROPERTY(EditAnywhere, Category = "Input|Companion")
+	TObjectPtr<UInputAction> IA_CompanionCoverMe;
+
 	// ---- Takedown Config ----
 
 	/** Player-side finisher montage. Assign in the BP child class.
@@ -398,8 +530,41 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "10.0"))
 	float DBNOCrawlSpeed = 100.f;
 
+	/** Acceleration while downed — well below the walking 2048 so the crawl eases in instead of snapping. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "50.0"))
+	float DBNOCrawlAcceleration = 300.f;
+
+	/** Braking while downed — lets the crawl drift to a stop instead of halting on key release. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "50.0"))
+	float DBNOCrawlBrakingDeceleration = 300.f;
+
+	/** Ground friction while downed. The walking 25 stops the capsule near-instantly regardless of
+	 *  braking deceleration; a low value here is what actually makes the stop read as a crawl. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
+	float DBNOCrawlGroundFriction = 4.f;
+
+	/** Body yaw chase rate (deg/s) toward the camera while downed. The body doesn't snap to the
+	 *  camera (no yaw-follow) and doesn't orient to velocity (that would zero the crawl blendspace's
+	 *  Direction input) — it drifts toward where the player looks so directional crawls stay readable. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "10.0"))
+	float DBNOCrawlRotationRate = 120.f;
+
+	/** Max yaw (deg) the downed free-look camera may swing away from the body's facing. The camera
+	 *  sits on the head socket at zero arm length, so an unclamped yaw lets the player turn the view
+	 *  back through their own mesh. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "10.0", ClampMax = "180.0"))
+	float DBNOFreeLookYawLimit = 80.f;
+
+	/** Downed free-look pitch floor (deg). Keeps the view off the player's own torso/floor. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "-89.0", ClampMax = "0.0"))
+	float DBNOFreeLookPitchMin = -35.f;
+
+	/** Downed free-look pitch ceiling (deg) — enough to look up at a reviver. */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0", ClampMax = "89.0"))
+	float DBNOFreeLookPitchMax = 60.f;
+
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "1.0"))
-	float BleedoutDuration = 90.f;
+	float BleedoutDuration = 60.f;
 
 	/** 2.0 matches the companion's revive hold (BP_Companion.ReviveDuration) — both directions
 	 *  of the pair play the same clips at the same pace. */
@@ -422,7 +587,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
 	TObjectPtr<UAnimMontage> BeingRevivedMontage;
 
-	/** Kneel montage played on this player's OWN body while they hold E reviving a downed
+	/** Extra seconds the being-revived montage holds at full weight AFTER ExitDBNO fires,
+	 *  covering the AnimBP's Blend Poses (IsDBNO bool) crossfade from the downed to standing
+	 *  base pose. Must match ABP_Manny's IsDBNO blend node blend time (authored 0.35s). */
+	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
+	float ReviveMontageHoldoverSeconds = 0.35f;
+
+	/** Kneel montage played on this player's OWN body while they hold F reviving a downed
 	 *  teammate — rate-scaled so one cycle spans ReviveDuration. The FP camera rides the head
 	 *  bone through it (takedown-style), so this is what "locks" the reviver's view. */
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO")
@@ -445,6 +616,21 @@ protected:
 	 *  lap — starting past it opens the hold directly on the kneel facing the patient. */
 	UPROPERTY(EditDefaultsOnly, Category = "Health|DBNO", meta = (ClampMin = "0.0"))
 	float ReviverKneelStartOffsetSeconds = 0.4f;
+
+	// ---- Traversal Montages ----
+	// Full-body montages played on the body mesh's generic anim instance. Assigned montages
+	// must target a slot that exists in ABP_Manny's AnimGraph (the kit graph has an inline
+	// DefaultSlot; a FullBody slot also exists after the arms linked-graph). Montages carry
+	// the root motion that moves the capsule while the traversal component holds MOVE_Flying.
+
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Traversal")
+	TObjectPtr<UAnimMontage> VaultMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Traversal")
+	TObjectPtr<UAnimMontage> ClimbMontage;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Movement|Traversal")
+	TObjectPtr<UAnimMontage> MantleMontage;
 
 	// ---- Auto-Lean Config ----
 
@@ -514,7 +700,61 @@ private:
 	/** Tracks which companion instance has its IgnoreActorWhenMoving wired, so respawns re-wire correctly. */
 	TWeakObjectPtr<ACompanionCharacter> WiredCompanion;
 
+	/** Every companion in the world. The armed VIP is a second ACompanionCharacter the command
+	 *  component will never resolve (primary only, by design), so without this its capsule
+	 *  hard-blocks the player. Rebuilt on a slow rescan — TActorIterator can't run per frame.
+	 *  Also the ally source for GetInteractTraceIgnoredActors — one collection, two consumers. */
+	TArray<TWeakObjectPtr<ACompanionCharacter>> SoftCollisionCompanions;
+
+	/** The unarmed escort civilian. A second array rather than an entry above because it is not an
+	 *  ACompanionCharacter and runs its own soft-separation pass — it is cached here purely so the
+	 *  interaction traces can step past its capsule and mesh. */
+	TArray<TWeakObjectPtr<AExtracteeCharacter>> AllyExtractees;
+
+	/** Reused across calls to GetInteractTraceIgnoredActors so the Blueprint interaction
+	 *  component's ~100 Hz re-trace never heap-allocates. Rebuilt from the ally cache each call;
+	 *  Reset() keeps the slack from the first Reserve. */
+	mutable TArray<AActor*> CachedInteractIgnored;
+
+	/** World seconds of the last ally rescan. Sentinel-low so the first tick always scans —
+	 *  the interval alone then gates the empty-list case too. */
+	float LastCompanionScanTime = -1e9f;
+
+	/** Set by HandleActorSpawned so an ally spawned mid-level joins the ignore set on the next tick
+	 *  instead of after up to a full rescan interval. True initially so the first tick scans. */
+	bool bAllyCacheDirty = true;
+
+	/** Flags the ally cache dirty when a companion or escort spawns. Bound to the world's
+	 *  OnActorSpawned; handle released in EndPlay. */
+	void HandleActorSpawned(AActor* SpawnedActor);
+
+	FDelegateHandle ActorSpawnedHandle;
+
+	/** Adds Ally and (recursively) everything attached to it to OutIgnored, unless the ally is itself
+	 *  the current interact target. */
+	void AppendAllyInteractIgnore(AActor* Ally, TArray<AActor*>& OutIgnored) const;
+
+	/** Sums both passes' pushes into a single clamped AddMovementInput — see the cpp for why they
+	 *  must not be applied independently. */
 	void UpdateCompanionSoftCollision();
+
+	/** The primary only, resolved through the command component. Owns the respawn re-wire.
+	 *  Returns its push contribution; does not apply it. */
+	FVector UpdatePrimaryCompanionSoftCollision();
+
+	/** Every non-primary companion (the armed VIP), same wiring and same push as the primary.
+	 *  Returns the summed push contribution; does not apply it. */
+	FVector UpdateAllyCompanionSoftCollision();
+
+	/** Rebuilds both ally collections on the slow rescan (or immediately when an entry went stale or
+	 *  an ally spawned). Driven once per tick from Tick rather than from the soft-collision pass —
+	 *  that pass early-returns while DBNO / reviving / mid-traversal, and the const interaction
+	 *  accessors only read this cache, they never refresh it. */
+	void RefreshAllyCache();
+
+	/** Shared tail of both passes: idempotent ignore assert, then the overlap-depth push RETURNED
+	 *  to the caller (zero when out of range) so the two passes can be clamped as one input. */
+	FVector ApplyCompanionSoftCollision(ACompanionCharacter& Companion, UCapsuleComponent& CompanionCapsule);
 
 	// ---- Auto-Lean State ----
 
@@ -538,6 +778,8 @@ private:
 	void FireStart(const FInputActionValue& Value);
 	void FireStop(const FInputActionValue& Value);
 	void ReloadStart(const FInputActionValue& Value);
+	void EquipPrimaryInput(const FInputActionValue& Value);
+	void EquipSecondaryInput(const FInputActionValue& Value);
 	void ADSStart(const FInputActionValue& Value);
 	void ADSStop(const FInputActionValue& Value);
 
@@ -554,12 +796,38 @@ private:
 
 	/** Camera-forward interact trace: IWorldInteractable first, then ILootable containers,
 	 *  then keycard-unlock locked doors.
-	 *  Returns true when the press was consumed by a world interaction (revive check is skipped). */
+	 *  Returns true when the press was consumed by a world interaction (revive check is skipped).
+	 *  A hold-duration interactable opens the hold here and still consumes the press. */
 	bool TryWorldInteract();
+
+	/** The one camera-forward interact trace. Every interact path goes through it so the press,
+	 *  the hold and the prompt scan can never disagree about what the crosshair is on. */
+	bool TraceInteractHit(FHitResult& OutHit) const;
+
+	/** Currently-interactable IWorldInteractable under the crosshair, or null. */
+	AActor* TraceInteractableUnderCrosshair() const;
+
+	/** Runs the hold clock, cancels on the same guards that block a start, and fires the
+	 *  interaction once InteractHoldDuration elapses. */
+	void UpdateInteractHold(float DeltaTime);
+
+	/** Single teardown for every exit (release, completion, target lost, DBNO). Idempotent. */
+	void CancelInteractHold();
+
+	/** The one authority-side commit for a world interaction, shared by the press, the hold and the
+	 *  server RPC. Raises no completion event of its own — see the note on the implementation. */
+	void CommitWorldInteract(AActor* Target);
+
+	/** Low-rate crosshair scan feeding the interact prompt (local player only). */
+	void UpdateInteractCandidateScan(float DeltaTime);
 
 	/** Server RPC for IWorldInteractable interactions initiated by a client. */
 	UFUNCTION(Server, Reliable)
 	void Server_WorldInteract(AActor* Target);
+
+	/** Server RPC for the hold-started beat (scripted VO under the hold) on a client press. */
+	UFUNCTION(Server, Reliable)
+	void Server_BeginWorldInteractHold(AActor* Target);
 
 	/** Max distance (cm) for the Interact world trace. */
 	UPROPERTY(EditAnywhere, Category = "Interaction", meta = (ClampMin = "0.0"))
@@ -581,6 +849,7 @@ private:
 	void CompanionModeSelectStealthInput(const FInputActionValue& Value);
 	void CompanionModeSelectNormalInput(const FInputActionValue& Value);
 	void CompanionModeSelectCombatInput(const FInputActionValue& Value);
+	void CompanionCoverMeInput(const FInputActionValue& Value);
 
 	UFUNCTION()
 	void OnTakedownMontageEnded(UAnimMontage* Montage, bool bInterrupted);
@@ -592,6 +861,9 @@ private:
 
 	UFUNCTION()
 	void OnTraversalMontageEnded(UAnimMontage* Montage, bool bInterrupted);
+
+	/** Designer-assigned montage for a traversal type, or nullptr (see Movement|Traversal properties). */
+	UAnimMontage* GetTraversalMontage(ETraversalType Type) const;
 
 	// ---- Health / DBNO ----
 
@@ -615,6 +887,12 @@ private:
 	bool bBeingRevivedAnimActive = false;
 
 	void SetBeingRevivedCameraAnimationControl(bool bActive);
+
+	/** Plays or stops BeingRevivedMontage on the body mesh, rate-scaled so the auto blend-out
+	 *  window covers ExpectedDuration + ReviveMontageHoldoverSeconds. Extracted from SetBeingRevived
+	 *  to keep both halves under the 40-line function limit. */
+	void UpdateBeingRevivedMontage(bool bPlay, float ExpectedDuration);
+
 	bool bBeingRevivedCameraOverrideActive = false;
 	bool bBeingRevivedSavedSpringArmUsePawnControlRotation = false;
 
@@ -626,13 +904,35 @@ private:
 	UFUNCTION()
 	void OnRep_IsDBNO();
 
-	/** Temp debug: apply 25 damage to self (bound to H key) */
-	void DebugApplyDamage();
-
 	void HandleStimUsed();
+	void HandleStimUseEnded();
+
+	/** Deferred restore: fires OnRestoreLoadoutRequested after the BP BeginPlay spine,
+	 *  then polls to verify the weapon classes match the snapshot. */
+	void DeferredRestoreLoadout();
+
+	/** Polling verify: re-fires the restore if the primary weapon class does not match. */
+	void VerifyLoadoutRestore();
+
+	/** Ends any injection in progress (DBNO entry, death) so the lockout and the BP-side injector
+	 *  prop can't strand. Idempotent. */
+	void CancelStimUse();
 
 	/** Pre-DBNO crouched speed, restored on ExitDBNO. */
 	float SavedMaxWalkSpeedCrouched = 0.f;
+
+	/** Applies/restores the soft crawl movement profile (accel, braking, friction, body rotation).
+	 *  Restore must run AFTER SetBeingRevived(false) on exit — being-revived saves/restores
+	 *  bUseControllerRotationYaw itself, and this helper owns the pre-DBNO value. */
+	void SetDBNOMovementProfile(bool bEnable);
+	bool bDBNOMovementProfileActive = false;
+
+	/** Per-tick clamp of the downed free-look control rotation to a forward cone around the body. */
+	void ClampDBNOFreeLook();
+	float SavedMaxAcceleration = 0.f;
+	float SavedBrakingDecelerationWalking = 0.f;
+	float SavedGroundFriction = 0.f;
+	bool bSavedDBNOUseControllerRotationYaw = true;
 
 	/** Active companion-route speed lock (cm/s). 0 = no lock. Consumed by
 	 *  UExtractionPlayerMovement::GetMaxSpeed — never written into the movement component. */
@@ -642,6 +942,37 @@ private:
 	float LastReviveWorldTime = -1e9f;
 
 	FTimerHandle BleedoutTimerHandle;
+
+	/** One-tick deferral for the loadout restore so it lands after the character BP's
+	 *  BeginPlay spine (Load/SwapWeapon) has finished. Cleared in EndPlay. */
+	FTimerHandle LoadoutRestoreTimerHandle;
+
+	/** Polling timer that verifies the restore took (weapon class match). Cleared in EndPlay. */
+	FTimerHandle LoadoutVerifyTimerHandle;
+
+	/** Failsafe timer that force-zeroes AudioSuppressionDepth if the BP restore chain
+	 *  early-outs before EndAudioSuppression. Cleared in EndPlay. */
+	FTimerHandle AudioSuppressionFailsafeHandle;
+
+	/** Cached copy of the GameInstance snapshot at BeginPlay time so a stray
+	 *  CommitLoadoutSnapshot from the resume-activated checkpoint step cannot corrupt
+	 *  the in-flight restore. */
+	FCheckpointLoadoutSnapshot CachedRestoreSnapshot;
+
+	/** True once the loadout restore has completed (or was skipped because no snapshot
+	 *  existed). Gates RequestLoadoutCapture to prevent the resume-activated checkpoint
+	 *  step from overwriting the good snapshot with the default loadout. */
+	bool bLoadoutRestoreSettled = false;
+
+	/** Whether CommitLoadoutSnapshot was called during the current RequestLoadoutCapture
+	 *  dispatch. Detects an unimplemented or half-wired BP capture. */
+	bool bLoadoutCommitReceived = false;
+
+	/** Retry counter for VerifyLoadoutRestore. */
+	int32 LoadoutVerifyRetries = 0;
+
+	/** Releases the audio suppression failsafe. */
+	void ReleaseAudioSuppressionFailsafe();
 
 #if !UE_BUILD_SHIPPING
 	// Edge-triggered map: tracks the last logged CanBeSeenFrom result per observer to avoid log spam.
@@ -684,6 +1015,35 @@ private:
 	UFUNCTION(Exec)
 	void CompDown();
 
+	/** Resolve the armed extraction VIP from console. Deliberately NOT ResolveDebugCompanion: both
+	 *  of that function's branches are primary-only (the wired ref comes from the command component,
+	 *  which filters on primary, and the fallback requires bIsPrimaryCompanion) while the VIP clears
+	 *  that flag — so every existing Comp* exec structurally excludes it. Returns the base type so
+	 *  this header stays free of the extractee include. */
+	ACompanionCharacter* ResolveDebugExtractee() const;
+
+	/** console: VipReload — trigger a reload on the armed extraction VIP. */
+	UFUNCTION(Exec)
+	void VipReload();
+
+	/** console: VipRescue — instantly free + arm the VIP (checkpoint fast-forward, no VO). */
+	UFUNCTION(Exec)
+	void VipRescue();
+
+	/** console: VipDebug 1 — pause the VIP's AI so forced poses stick; VipDebug 0 — resume. */
+	UFUNCTION(Exec)
+	void VipDebug(bool bFreeze);
+
+	/** console: VipCover bEnable [bStand] [bLeft] — force the VIP's cover pose on/off.
+	 *  bStand=1 for stand height (default 0 = crouch), bLeft=1 for left side (default 0 = right).
+	 *  Stop the brain first (VipDebug 1) so the BT does not override the pose. */
+	UFUNCTION(Exec)
+	void VipCover(bool bEnable, bool bStand = false, bool bLeft = false);
+
+	/** console: VipPeek — play a peek montage from the current cover pose using the active side. */
+	UFUNCTION(Exec)
+	void VipPeek();
+
 	// ---- Takedown state ----
 
 	/** Victim held during a montage-deferred takedown. Cleared after kill or montage abort. */
@@ -710,11 +1070,32 @@ private:
 	float ReviveElapsed = 0.f;
 	bool bIsReviving = false;
 
+	/** Ally that holds the exclusive right to revive THIS player (see TryClaimRevive). Weak so a
+	 *  destroyed claimant frees the hold on its own; the capability test additionally frees it for a
+	 *  claimant that is merely down or dead rather than gone. Server-only — the AI that reads it
+	 *  never runs on clients. Cleared on both DBNO edges so a claim can't survive into the next down. */
+	TWeakObjectPtr<AActor> ReviveClaimant;
+
 	/** Low-rate crosshair scan feeding the revive prompt (local player only). */
 	void UpdateReviveCandidateScan(float DeltaTime);
 
 	TWeakObjectPtr<AActor> ReviveCandidate;
 	float ReviveCandidateScanAccumulator = 0.f;
+
+	// ---- World-interact hold ----
+
+	UPROPERTY()
+	TObjectPtr<AActor> InteractHoldTarget;
+
+	/** Copied from the target at hold start, so a target that later changes its answer can't
+	 *  stretch or shrink a hold already in progress. */
+	float InteractHoldDuration = 0.f;
+	float InteractHoldElapsed = 0.f;
+	bool bIsInteractHolding = false;
+
+	TWeakObjectPtr<AActor> InteractCandidate;
+	FText InteractCandidatePrompt;
+	float InteractCandidateScanAccumulator = 0.f;
 
 	/** Mirror of BTTask_RevivePlayer's first-tick gate: guards, patient montage + AI-stop via
 	 *  SetBeingRevived, rotation-only AlignForRevive on the target, reviver MESH seat at the
@@ -728,6 +1109,16 @@ private:
 
 	/** Hide/show the held weapon visuals (weapon actor + the kit's hand-socket visual actors). */
 	void SetHeldWeaponHidden(bool bHideWeapon);
+
+	/** Descendants of hand-socket actors that were already hidden when SetHeldWeaponHidden(true) ran.
+	 *  Restored on show so BP-hidden attachment slots stay hidden. Uses TWeakObjectPtr so stale
+	 *  entries from destroyed actors across weapon swaps are harmless. */
+	TSet<TWeakObjectPtr<AActor>> HeldWeaponHiddenSnapshot;
+
+	/** Latch for SetHeldWeaponHidden: true while the batch is hidden. Re-hides and re-shows
+	 *  become no-ops, preventing a second hide from re-capturing descendants that the first hide
+	 *  legitimately turned off. Wraps the entire batch (weapon actor + hand-socket actors). */
+	bool bHeldWeaponHidden = false;
 
 	/** Snaps this reviver into the authored pair frame anchored on the (already rotated) downed
 	 *  companion — radial step to the authored 88cm along the approach line, capsule at the

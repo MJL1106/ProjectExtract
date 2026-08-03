@@ -12,8 +12,12 @@ class AAIController;
 class AController;
 class APawn;
 class ACompanionCharacter;
+class UBehaviorTreeComponent;
+class UBlackboardComponent;
 class UCompanionTuningDataAsset;
 class UWorld;
+enum class ECompanionCommand : uint8;
+struct FCover;
 struct FCoverData;
 
 namespace CompanionCover
@@ -94,6 +98,49 @@ namespace CompanionCover
 	bool NearestCoverLocation(UWorld* World, const FVector& Point, float Radius,
 		const AController* Querier, FVector& OutLocation);
 
+	/** True when the 2D segment PawnLoc -> Dest passes within Clearance (cm) of any threat actor.
+	 *  Pure point-to-segment math, no traces — cheap enough to run per candidate at re-eval cadence.
+	 *  Deliberate straight-line approximation of the nav path: the failure it guards against is the
+	 *  direct charge through an enemy group, not a nav detour that happens to skirt one enemy.
+	 *  Clearance <= 0 disables (returns false). */
+	bool PathPassesNearThreat(const FVector& PawnLoc, const FVector& Dest,
+		TArrayView<AActor* const> Threats, float Clearance);
+
+	/** Muzzle-gated approach-fire state shared by BTTask_MoveToCoverPoint's companion transit and
+	 *  BTTask_CompanionCombat's final-approach walk — one implementation of "fire at the visible
+	 *  combat target while walking to a committed cover point". */
+	struct FApproachFireState
+	{
+		bool bFiring = false;
+		float TickAccum = 0.f;
+		/** Target the aim/focus were issued for — a BB retarget mid-move must re-issue them or fire
+		 *  streams at the old target's position. */
+		TWeakObjectPtr<AActor> LatchedTarget;
+
+		void Reset()
+		{
+			bFiring = false;
+			TickAccum = 0.f;
+			LatchedTarget.Reset();
+		}
+	};
+
+	/** Ticks the approach-fire loop (10 Hz internal throttle): fires at the BB combat target while
+	 *  the companion has eye-line AND a clear muzzle line, holds otherwise. Honors the tuning's
+	 *  bCoverApproachFireWhileMoving toggle and the reload state. Focus is set once at first fire
+	 *  and held for the move (facing flicker on momentary LoS loss reads worse than a held torso). */
+	void TickCoverApproachFire(ACompanionCharacter* Companion, AAIController* Controller,
+		UBlackboardComponent* BB, FApproachFireState& State, float DeltaSeconds);
+
+	/** Approach-fire teardown: stop fire, clear aim, reset the state latch. bKeepFocus=true on
+	 *  arrival (keep facing the threat while entering cover); false on every failure/abort exit.
+	 *  bKeepFocus is CONDITIONAL — it is a hand-off to the combat task, which runs off the blackboard
+	 *  combat target, so the focus is only kept while that key still names the focused actor. With no
+	 *  receiver the focus is released regardless: an unowned actor focus tracks the enemy's live
+	 *  location through geometry and is the "ally aims through walls after the fight" defect. */
+	void StopCoverApproachFire(ACompanionCharacter* Companion, AAIController* Controller,
+		FApproachFireState& State, bool bKeepFocus);
+
 	/** Edge-aligned hunker position using the companion tuning's CoverCornerGap — the same corner
 	 *  alignment enemies get from their archetype DA. Per GetEdgeAlignedHunkerPosition's contract,
 	 *  EVERY companion system that defines "standing at this cover" must use this (arrival targets,
@@ -101,4 +148,21 @@ namespace CompanionCover
 	 *  endpoint covers resolve Front: over-top peeks only, no corner peeks, coin-flip idle side.
 	 *  Falls back to the plain hunker when no tuning is reachable. */
 	FVector CompanionHunkerPosition(const ACompanionCharacter& Companion, const FCoverData& Data, float Standoff);
+
+	/** Selects the best legal cover point on the wall the player pinged. Returns false if no usable
+	 *  candidate survives. Wall matching uses the trace's ImpactNormal to keep only points whose
+	 *  DirectionToWall opposes the pinged face within a tight angular threshold.
+	 *
+	 *  With a valid CombatTarget: hard-requires CanPeekShoot + IsThreatCovered, ranks by ScoreCandidate
+	 *  (body-protected). Without: ranks by proximity to PingImpact, preferring points with any usable
+	 *  lean flag so the companion never parks somewhere it can never shoot from. */
+	bool FindCoverOnPingedWall(UWorld* World, const FVector& PingImpact, const FVector& PingNormal,
+		float SearchRadius, const AController* Querier, const APawn* QuerierPawn,
+		AActor* CombatTarget, FCover& OutCover);
+
+	/** Guarded clear of BB_CompanionCommand: clears only if the active key still holds
+	 *  ExpectedCommand. Used by every failure/completion path in the TakeCover branch so no exit
+	 *  can leave the key stuck. Shared implementation for BTTask_CompanionTakeCover,
+	 *  BTTask_CompanionHoldCover and BTTask_CompanionClearCommand. */
+	void ClearCommandIfStillActive(UBehaviorTreeComponent& OwnerComp, ECompanionCommand ExpectedCommand);
 }

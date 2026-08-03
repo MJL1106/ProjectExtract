@@ -14,14 +14,17 @@
 #include "CoverScoringStatics.h"
 #include "CoverReservationSubsystem.h"
 #include "CoverPoseComponent.h"
+#include "World/DoorRegistrySubsystem.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "CompanionAIController.h"
 #include "CompanionTuningDataAsset.h"
 #include "CompanionCharacter.h"
+#include "Companion/CompanionBarkTypes.h"
 #include "EnemyCharacter.h"
 #include "EnemyAIController.h"        // angle-seek: who is this enemy targeting
 #include "EnemyAwarenessComponent.h"  // angle-seek: GetCombatTarget
+#include "EnemyGrenadierComponent.h"  // grenade lob: shared grenadier component on the companion
 #include "Engine/OverlapResult.h"     // angle-seek: player-centered attacker scan
 #include "Animation/CompanionAnimInstance.h"
 #include "WeaponBase.h"
@@ -73,7 +76,7 @@ namespace
 	};
 
 	// Point overload — caller pre-resolves the destination (avoids recomputing GetSightLocation in tight loops).
-	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, const FVector& ToLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredAttached)
+	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, const FVector& ToLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredForFireTrace)
 	{
 		OutBlockedBy = nullptr;
 		if (!World || !IsValid(ToTarget) || !IsValid(Companion)) return false;
@@ -82,7 +85,7 @@ namespace
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(Companion);
 		QueryParams.AddIgnoredActor(Companion->GetCurrentWeapon());
-		for (AActor* const A : IgnoredAttached) QueryParams.AddIgnoredActor(A);
+		for (AActor* const A : IgnoredForFireTrace) QueryParams.AddIgnoredActor(A);
 
 		const bool bHit = World->LineTraceSingleByChannel(Hit, FromLoc, ToLoc, ECC_Visibility, QueryParams);
 		if (bHit && Hit.GetActor() != ToTarget)
@@ -94,10 +97,10 @@ namespace
 	}
 
 	// Actor overload — resolves the sight point once and forwards to the point overload.
-	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredAttached)
+	static bool HasLineOfSight(UWorld* World, const FVector& FromLoc, AActor* ToTarget, ACompanionCharacter* Companion, AActor*& OutBlockedBy, TArrayView<AActor* const> IgnoredForFireTrace)
 	{
 		if (!IsValid(ToTarget)) { OutBlockedBy = nullptr; return false; }
-		return HasLineOfSight(World, FromLoc, AITargeting::GetSightLocation(ToTarget), ToTarget, Companion, OutBlockedBy, IgnoredAttached);
+		return HasLineOfSight(World, FromLoc, AITargeting::GetSightLocation(ToTarget), ToTarget, Companion, OutBlockedBy, IgnoredForFireTrace);
 	}
 
 	// Root-motion peek commit: the peek montages own the step-out/return motion, so the capsule must
@@ -115,6 +118,25 @@ namespace
 			AIC->ClearFocus(EAIFocusPriority::Move);
 			AIC->SetControlRotation(SlotYaw);
 		}
+	}
+
+	/** Distance (cm) out from the pawn for the "no aim bearing" hold focal. Far enough that the
+	 *  yaw it resolves is the pawn's own forward to within rounding. */
+	constexpr float NoBearingHoldFocalDistance = 1000.f;
+
+	// "I have no bearing worth pointing at" facing: a focal point straight down the pawn's OWN forward
+	// at view height. Holds the current yaw and invents no new bearing (the same idiom the state
+	// service's weapon-up hold uses). Preferred over a bare ClearFocus because clearing stops
+	// UpdateControlRotation, which leaves a bUseControllerDesiredRotation pawn easing toward whatever
+	// yaw the dead focus last resolved — for a blocked combat target that is the through-wall bearing
+	// we are trying to stop asserting.
+	static void CompanionHoldOwnForwardFocal(ACompanionCharacter* Companion, AAIController* AIC)
+	{
+		if (!IsValid(Companion) || !IsValid(AIC)) return;
+		FVector HoldPoint = Companion->GetActorLocation()
+			+ Companion->GetActorForwardVector() * NoBearingHoldFocalDistance;
+		HoldPoint.Z = Companion->GetPawnViewLocation().Z;
+		AIC->SetFocalPoint(HoldPoint, EAIFocusPriority::Gameplay);
 	}
 
 	static const UCompanionTuningDataAsset* GetCompanionTuning(const ACompanionCharacter* Companion)
@@ -140,13 +162,13 @@ namespace
 	// Muzzle→target clearance for the instant a burst commits — the 10 Hz withhold only runs from
 	// the NEXT tick, so an unconditional StartWeaponFire at commit could put the first rounds into
 	// (or through) our own wall.
-	static bool IsBurstMuzzleClear(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached)
+	static bool IsBurstMuzzleClear(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace)
 	{
 		if (!IsValid(Companion) || !IsValid(Target)) return false;
 		AWeaponBase* W = Companion->GetCurrentWeapon();
 		if (!IsValid(W)) return true;
 		AActor* Blocker = nullptr;
-		return HasLineOfSight(Companion->GetWorld(), W->GetMuzzleLocation(), Target, Companion, Blocker, IgnoredAttached);
+		return HasLineOfSight(Companion->GetWorld(), W->GetMuzzleLocation(), Target, Companion, Blocker, IgnoredForFireTrace);
 	}
 
 	// Gathers the companion's known threats (sight-perceived, enemy-tagged, alive), sorted nearest-first
@@ -370,22 +392,33 @@ namespace
 		}
 	}
 
-	/** Combat-mode in-cover confidence: scale for the between-peek wait (bBurstClock=false, <1 =
+	/** Per-mode in-cover confidence: scale for the between-peek wait (bBurstClock=false, <1 =
 	 *  peek sooner) or the burst countdown (bBurstClock=true, >1 = expose longer, applied as a
-	 *  slower decrement). 1 outside Combat mode or with no tuning.
+	 *  slower decrement). Combat is the boldest; Defensive (the ECompanionMode::Normal enumerator)
+	 *  sits between it and Stealth, which is deliberately left at 1 in both channels — it is the one
+	 *  mode the personality pass does not touch. 1 with no tuning.
 	 *  Pressure01 composes on top when bPressureResponsiveCover is enabled. */
-	static float CombatPeekConfidenceScale(const ACompanionCharacter* Companion, bool bBurstClock, float Pressure01 = 0.f)
+	static float ModePeekConfidenceScale(const ACompanionCharacter* Companion,
+		const UCompanionTuningDataAsset* Tuning, bool bBurstClock, float Pressure01 = 0.f)
 	{
-		const ACompanionAIController* AIC = IsValid(Companion)
-			? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
-		const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
-
 		float Scale = 1.f;
-		if (Tuning && IsValid(Companion) && Companion->GetMode() == ECompanionMode::Combat)
+		if (Tuning && IsValid(Companion))
 		{
-			Scale = bBurstClock
-				? FMath::Max(1.f, Tuning->CombatBurstDurationMultiplier)
-				: FMath::Max(0.01f, Tuning->CombatPeekCooldownMultiplier);
+			switch (Companion->GetMode())
+			{
+			case ECompanionMode::Combat:
+				Scale = bBurstClock
+					? FMath::Max(1.f, Tuning->CombatBurstDurationMultiplier)
+					: FMath::Max(0.01f, Tuning->CombatPeekCooldownMultiplier);
+				break;
+			case ECompanionMode::Normal:
+				Scale = bBurstClock
+					? FMath::Max(1.f, Tuning->DefensiveBurstDurationMultiplier)
+					: FMath::Max(0.01f, Tuning->DefensivePeekCooldownMultiplier);
+				break;
+			default:
+				break; // Stealth: unchanged, both channels stay at 1
+			}
 		}
 
 		if (Tuning && Tuning->bPressureResponsiveCover && Pressure01 > 0.f)
@@ -402,6 +435,31 @@ namespace
 			}
 		}
 		return Scale;
+	}
+
+	/** Convenience overload for the handful of sites that do not already hold the tuning asset.
+	 *  Costs a controller cast plus a tuning fetch — never reach for it on a per-frame path. */
+	static float ModePeekConfidenceScale(const ACompanionCharacter* Companion, bool bBurstClock, float Pressure01 = 0.f)
+	{
+		const ACompanionAIController* AIC = IsValid(Companion)
+			? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
+		return ModePeekConfidenceScale(Companion, AIC ? AIC->GetTuning() : nullptr, bBurstClock, Pressure01);
+	}
+
+	/** Extra shortening of the wait before the FIRST peek at a freshly taken cover point. Ducking
+	 *  into cover under fire and then standing behind it through a whole rolled cooldown is the
+	 *  loudest "the companion is doing nothing" tell there is; the first answer wants to land about
+	 *  a second in. 1 once any peek cycle has completed at this point.
+	 *  Stealth is excluded for the same reason ModePeekConfidenceScale leaves it at 1 in both
+	 *  channels: the mode is ring-fenced from the personality pass, and the combat task IS reachable
+	 *  in Stealth once stealth breaks — without this test a broken-stealth firefight would peek
+	 *  twice as fast on its first cycle at every fresh cover point. */
+	static float FirstPeekWaitMultiplier(const ACompanionCharacter* Companion,
+		const UCompanionTuningDataAsset* Tuning, int32 PeekCyclesAtCover)
+	{
+		if (!Tuning || PeekCyclesAtCover > 0) return 1.f;
+		if (IsValid(Companion) && Companion->GetMode() == ECompanionMode::Stealth) return 1.f;
+		return FMath::Clamp(Tuning->FirstPeekWaitScale, 0.25f, 1.f);
 	}
 
 	// Resolves the player pawn + keep-out radius (AcceptableRadius) from the companion's controller.
@@ -521,6 +579,8 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 	bIsFiringBurst = false;
 	// Fix 5: the burst is over — clear the muzzle-withhold latch so the next burst starts un-held.
 	bStandBurstFireHeld = false;
+	bBurstCommitSpeculative = false;
+	bSpeculativeAimVerified = false;
 	StandBurstMuzzleCheckTimer = 0.f;
 	LastStandBurstResumeFireTime = 0.f;
 
@@ -572,6 +632,9 @@ void UBTTask_CompanionCombat::ReturnToCover(ACompanionCharacter* Companion, UCom
 	if (bSuppressed) CooldownMult *= SuppressionCooldownMultiplier;
 	if (bLowHealth)  CooldownMult *= LowHealthCooldownMultiplier;
 	PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown) * CooldownMult;
+	// Covering fire: floor the cooldown so bursts chain without the 0.8-2.2s pause.
+	if (IsValid(Companion) && Companion->IsCoveringFireActive())
+		PeekCooldown = FMath::Min(PeekCooldown, 0.1f);
 	TimeInCoverIdle = 0.f;
 }
 
@@ -945,6 +1008,9 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 	if (!bStandUpRepositionWalking)
 	{
 		bStandUpRepositionWalking = true;
+		// Phase B fires unconditionally every tick with no muzzle-withhold — the speculative gate
+		// must not hold aim null through a walking burst. Verify now so aim tracks the target.
+		bSpeculativeAimVerified = true;
 
 		// Stop any lingering peek montage so cover-align inference doesn't stay
 		// pinned to OverTop/StandPeek while walking.
@@ -1078,7 +1144,7 @@ void UBTTask_CompanionCombat::TickStandUpAndRepositionAction(ACompanionCharacter
 
 void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
 	const FCoverData& CoverData, AActor* Target, bool bSuppressed, bool bLowHp,
-	TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+	TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds)
 {
 	if (!IsValid(Companion) || !IsValid(Target)) return;
 
@@ -1113,10 +1179,15 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 				AWeaponBase* W = Companion->GetCurrentWeapon();
 				const FVector FireOrigin = IsValid(W) ? W->GetMuzzleLocation()
 					: (Companion->GetActorLocation() + FVector(0.f, 0.f, StandFireEyeHeight));
-				const bool bLos = HasLineOfSight(Companion->GetWorld(), FireOrigin, Target, Companion, Blocker, IgnoredAttached);
+				const bool bLos = HasLineOfSight(Companion->GetWorld(), FireOrigin, Target, Companion, Blocker, IgnoredForFireTrace);
 				const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 				const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 					ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
+				if (bCanFire && !bSpeculativeAimVerified)
+				{
+					bSpeculativeAimVerified = true;
+					if (bBurstCommitSpeculative) Companion->SetAimTarget(Target);
+				}
 				if (!bCornerPeekReturning && bCanFire && !bCornerPeekFiring && PeekFireDelayRemaining <= 0.f)
 				{
 					Companion->StartWeaponFire();
@@ -1179,10 +1250,15 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 		{
 			AWeaponBase* W = Companion->GetCurrentWeapon();
 			const FVector FireOrigin = IsValid(W) ? W->GetMuzzleLocation() : (Next + FVector(0.f, 0.f, StandFireEyeHeight));
-			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredAttached);
+			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredForFireTrace);
 			const UCompanionTuningDataAsset* ConeTuning = GetCompanionTuning(Companion);
 			const bool bCanFire = bLos && IsTargetInPeekCone(Companion, CoverData, Target->GetActorLocation(),
 				ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
+			if (bCanFire && !bSpeculativeAimVerified)
+			{
+				bSpeculativeAimVerified = true;
+				if (bBurstCommitSpeculative) Companion->SetAimTarget(Target);
+			}
 			if (bCanFire && !bCornerPeekFiring && PeekFireDelayRemaining <= 0.f)
 			{
 				Companion->StartWeaponFire();
@@ -1204,9 +1280,9 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 		const bool bAtApex = FVector::Dist(Next, ApexTarget) <= RepositionArrivalTolerance;
 		if (bAtApex)
 		{
-			// At apex — burst timer now counts down "time firing at the corner". Combat-mode
-			// confidence + pressure: slower countdown = longer corner exposure.
-			BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Companion, true, Pressure01);
+			// At apex — burst timer now counts down "time firing at the corner". Mode confidence
+			// + pressure: slower countdown = longer corner exposure.
+			BurstTimer -= DeltaSeconds / ModePeekConfidenceScale(Companion, true, Pressure01);
 			if (BurstTimer <= 0.f)
 				bCornerPeekReturning = true;
 		}
@@ -1226,7 +1302,7 @@ void UBTTask_CompanionCombat::TickCornerPeekAction(ACompanionCharacter* Companio
 		{
 			AWeaponBase* W = Companion->GetCurrentWeapon();
 			const FVector FireOrigin = IsValid(W) ? W->GetMuzzleLocation() : (Next + FVector(0.f, 0.f, StandFireEyeHeight));
-			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredAttached);
+			const bool bLos = HasLineOfSight(World, FireOrigin, Target, Companion, Blocker, IgnoredForFireTrace);
 			if (!bLos && bCornerPeekFiring)
 			{
 				Companion->StopWeaponFire();
@@ -1430,7 +1506,7 @@ bool UBTTask_CompanionCombat::TryPrePeekReloadGate(ACompanionCharacter* Companio
 }
 
 void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* Companion, AActor* Target,
-	TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds, const FCoverData* PeekConeCover)
+	TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds, const FCoverData* PeekConeCover)
 {
 	if (!IsValid(Companion) || !IsValid(Target)) return;
 	UWorld* World = Companion->GetWorld();
@@ -1449,7 +1525,7 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 	FCollisionQueryParams MuzzleParams(SCENE_QUERY_STAT(CompanionStandBurstMuzzle), true);
 	MuzzleParams.AddIgnoredActor(Companion);
 	MuzzleParams.AddIgnoredActor(BurstWeapon);
-	for (AActor* Attached : IgnoredAttached)
+	for (AActor* Attached : IgnoredForFireTrace)
 		MuzzleParams.AddIgnoredActor(Attached);
 	const bool bMuzzleBlocked = World->LineTraceSingleByChannel(
 		MuzzleHit, MuzzleLoc, AITargeting::GetSightLocation(Target), ECC_Visibility, MuzzleParams);
@@ -1463,6 +1539,19 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 			ConeTuning ? ConeTuning->CoverPeekConeHalfAngleDeg : 75.f);
 	}
 	const bool bBlocked = (bMuzzleBlocked && MuzzleHit.GetActor() != Target) || bOutOfCone;
+
+	// Speculative aim hand-back: the muzzle gate just proved the line is clear — aim returns
+	// to the live target this instant so the shot stays accurate. Must reassert SetAimTarget
+	// before StartWeaponFire runs (same tick), or the opening round fires with stale null aim.
+	if (!bBlocked && !bSpeculativeAimVerified && bBurstCommitSpeculative)
+	{
+		bSpeculativeAimVerified = true;
+		Companion->SetAimTarget(Target);
+	}
+	else if (!bBlocked)
+	{
+		bSpeculativeAimVerified = true;
+	}
 
 	if (bBlocked && !bStandBurstFireHeld)
 	{
@@ -1504,41 +1593,76 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 
 // --- Open-area move-and-shoot ---
 
-bool UBTTask_CompanionCombat::PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredAttached) const
+bool UBTTask_CompanionCombat::PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace) const
 {
 	if (!IsValid(Companion) || !IsValid(Target)) return false;
 	AActor* BlockedBy = nullptr;
 	const FVector Eye = Point + FVector(0.f, 0.f, StandFireEyeHeight);
-	return HasLineOfSight(Companion->GetWorld(), Eye, Target, Companion, BlockedBy, IgnoredAttached);
+	return HasLineOfSight(Companion->GetWorld(), Eye, Target, Companion, BlockedBy, IgnoredForFireTrace);
 }
 
 void UBTTask_CompanionCombat::EnterMoveShootIfNeeded(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, UCharacterMovementComponent* CMC, const TCHAR* Reason)
 {
 	if (bMoveShootMoveActive) return;
-	// Single source for the MaxWalkSpeed + MaxAcceleration override; EndOpenAreaMoveShoot is the matching restore.
-	// Focus/facing is owned by UpdateMoveShootFacing, called each tick from the LoS-clear and LoS-blocked branches.
-	CachedDefaultWalkSpeed = CMC->MaxWalkSpeed;
-	CMC->MaxWalkSpeed = CombatMoveSpeed;
+	// Single source for the MaxWalkSpeed + MaxAcceleration override; EndOpenAreaMoveShoot is the
+	// matching restore. Focus/facing is owned by UpdateMoveShootFacing, called each tick from the
+	// LoS-clear and LoS-blocked branches.
+	//
+	// Capped at the companion's strafe tier, not taken raw. UpdateMoveShootFacing holds a Gameplay
+	// focus for the whole of move-and-shoot -- on the target itself while LoS is clear, and otherwise
+	// on a point (the last-seen spot while it is still provably visible, else the pawn's own forward)
+	// -- so the body faces its bearing while the feet travel. The legs are playing the locomotion
+	// blendspace's directional rows, and those only go up to 275 (above that there is a single
+	// forward-only sprint sample). Move-and-shoot above the cap is the "runs forwards while
+	// side-stepping" report.
+	//
+	// The override is published on the character via SetTaskSpeedOverride so ApplyMovementSpeeds
+	// skips the walk channel while move-and-shoot is active. Crouched channel stays zero (not
+	// overridden) -- move-and-shoot never crouches.
+	const float Pace = FMath::Min(CombatMoveSpeed, Companion->GetStrafeMaxSpeed());
+	Companion->SetTaskSpeedOverride(Pace, 0.f);
 	CachedDefaultAcceleration = CMC->MaxAcceleration;
 	bMoveShootMoveActive = true;
 	MoveShootRepositionTimer = 0.f;
 	if (bDebugLogging)
-		UE_LOG(LogCompanionAI, Log, TEXT("%s: MOVESHOOT enter %s speed=%.0f"), *Companion->GetName(), Reason, CombatMoveSpeed);
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: MOVESHOOT enter %s speed=%.0f (authored=%.0f)"), *Companion->GetName(), Reason, Pace, CombatMoveSpeed);
 }
 
-void UBTTask_CompanionCombat::UpdateMoveShootFacing(AAIController* AIC, AActor* Target, bool bLosClear)
+void UBTTask_CompanionCombat::UpdateMoveShootFacing(ACompanionCharacter* Companion, AAIController* AIC,
+	AActor* Target, bool bLosClear, TArrayView<AActor* const> IgnoredForFireTrace)
 {
 	if (!IsValid(AIC)) return;
+
 	if (bLosClear)
 	{
 		if (IsValid(Target))
 			AIC->SetFocus(Target, EAIFocusPriority::Gameplay);
+		return;
 	}
-	else if (bHasLastKnownTargetLocation)
+
+	// LoS-BLOCKED. LastKnownTargetLocation is LoS-verified only at the instant it is captured, and this
+	// runs EVERY blocked tick — re-asserting it unverified holds a bearing straight through geometry for
+	// the length of the block, a live through-wall aim source during the tail of a fight rather than
+	// just a teardown leak. So re-verify each assertion: the snapshot is worth pointing at only while
+	// the companion can still SEE the spot it last saw the enemy at (an enemy that stepped behind a
+	// pillar in open view still resolves clear — that IS the last-known-position aim this exists for).
+	// Fire suppression stays in the caller (weapon stopped, aim dropped, low-ready raised for the whole
+	// blocked stretch), so this only ever moves yaw, and it invents no bearing: no search, no sweep.
+	AActor* SnapshotBlocker = nullptr;
+	const bool bSnapshotStillVisible = bHasLastKnownTargetLocation && IsValid(Companion)
+		&& HasLineOfSight(Companion->GetWorld(), Companion->GetPawnViewLocation(), LastKnownTargetLocation,
+			Target, Companion, SnapshotBlocker, IgnoredForFireTrace);
+
+	if (bSnapshotStillVisible)
 	{
 		AIC->SetFocalPoint(LastKnownTargetLocation, EAIFocusPriority::Gameplay);
+		return;
 	}
-	// If no last-known location yet, hold current facing — do not snap to live position.
+
+	// No provable bearing — including "no snapshot captured yet", which used to leave focus untouched.
+	// That hole mattered: an engagement that opens already blocked can still be holding approach-fire's
+	// LIVE enemy actor focus, and leaving it alone tracked that enemy through the wall.
+	CompanionHoldOwnForwardFocal(Companion, AIC);
 }
 
 bool UBTTask_CompanionCombat::ShouldRepickMoveShoot(ACompanionCharacter* Companion, AAIController* AIC, float DeltaSeconds)
@@ -1562,7 +1686,7 @@ bool UBTTask_CompanionCombat::ShouldRepickMoveShoot(ACompanionCharacter* Compani
 	return true;
 }
 
-void UBTTask_CompanionCombat::RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached)
+void UBTTask_CompanionCombat::RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace)
 {
 	// Try up to JiggleLosRetryCount random ground-plane offsets. Loose cover bias: among LoS-valid
 	// candidates, prefer the one with a baked cover point nearest — the companion fights NEAR cover
@@ -1585,7 +1709,7 @@ void UBTTask_CompanionCombat::RerollJiggleOffset(ACompanionCharacter* Companion,
 		const float Angle = FMath::FRandRange(0.f, 2.f * PI);
 		const float Radius = FMath::FRandRange(0.f, JiggleRadius);
 		const FVector Candidate(FMath::Cos(Angle) * Radius, FMath::Sin(Angle) * Radius, 0.f);
-		if (!PointHasLosToTarget(Companion, JiggleHome + Candidate, Target, IgnoredAttached)) continue;
+		if (!PointHasLosToTarget(Companion, JiggleHome + Candidate, Target, IgnoredForFireTrace)) continue;
 
 		if (!bBias)
 		{
@@ -1637,7 +1761,7 @@ UBTTask_CompanionCombat::EJiggleDrift UBTTask_CompanionCombat::RollJiggleDrift()
 	return EJiggleDrift::Hold;
 }
 
-void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds)
 {
 	JiggleDriftTimer -= DeltaSeconds;
 	if (JiggleDriftTimer > 0.f) return;
@@ -1677,7 +1801,7 @@ void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AA
 	if (!ProjectToNav(Companion->GetWorld(), Nudged, MoveShootNavProjectExtent, Projected)) return;
 
 	// LoS-gate the Closer drift: don't creep into the occluded zone near an elevated enemy.
-	if (Drift == EJiggleDrift::Closer && !PointHasLosToTarget(Companion, Projected, Target, IgnoredAttached)) return;
+	if (Drift == EJiggleDrift::Closer && !PointHasLosToTarget(Companion, Projected, Target, IgnoredForFireTrace)) return;
 
 	float KeepOut = 0.f;
 	if (APawn* KOPlayer = ResolvePlayerKeepOut(Companion, KeepOut))
@@ -1830,6 +1954,7 @@ bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& Ow
 	const UCapsuleComponent* Cap = Companion->GetCapsuleComponent();
 	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : 34.f) + 10.f;
 	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(Tuning.CoverFlankArcHalfAngleDeg));
+	const UDoorRegistrySubsystem* DoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
 	// Line tests run per real attacker (a virtual-centroid trace reads a clustered attacker's own
 	// body as a blocker and rejects exactly the covers this feature wants). Bounded per candidate.
 	const int32 MaxLineTests = FMath::Min(Attackers.Num(), 3);
@@ -1846,6 +1971,8 @@ bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& Ow
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, Tuning.CoverSwitchPostVacateCooldown))
 			continue;
 		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller)) continue;
+		// A candidate behind a closed door is never a valid pick (same rule as the EQS DoorCrossing filter).
+		if (IsValid(DoorRegistry) && DoorRegistry->AnyClosedDoorBlocksSegment(MyLocation, Candidate.Data.Location)) continue;
 
 		// The line must be on the ATTACKERS, not the companion's own current target: arc toward
 		// their centroid, then a verified peek-shot on at least one real attacker.
@@ -1883,6 +2010,27 @@ bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& Ow
 	return true;
 }
 
+void UBTTask_CompanionCombat::TryConsumePostKillHopBypass(const ACompanionCharacter* Companion,
+	const UCompanionTuningDataAsset& Tuning)
+{
+	if (Tuning.CombatPostKillAdvanceWindow <= 0.f) return;
+
+	const float KillTime = Companion->GetLastConfirmedKillTime();
+	if (KillTime <= LastHopBypassKillTime) return; // this kill's bound is already spent
+
+	const UWorld* World = Companion->GetWorld();
+	if (!World) return;
+	if ((World->GetTimeSeconds() - KillTime) > Tuning.CombatPostKillAdvanceWindow) return;
+
+	// Spent on BOTH exits below. The caller runs the scan on every tick this returns to, so when the
+	// cooldown has already expired the bound about to commit IS this kill's bound — and leaving the
+	// stamp unspent there let the interval re-arm at that commit hand the same kill a second bound
+	// on the next re-entry, still inside the window.
+	LastHopBypassKillTime = KillTime;
+	if (CombatAdvanceHopTimer <= 0.f) return; // already free to hop — no cooldown to clear
+	CombatAdvanceHopTimer = 0.f;
+}
+
 bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion,
 	AActor* Target, const FVector& MyLocation, bool bPlayerTooFar, float DeltaSeconds)
 {
@@ -1892,11 +2040,19 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 	const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
 	if (!Tuning || !Tuning->bCombatAdvanceHops) return false;
 	if (Companion->GetMode() != ECompanionMode::Combat) return false;
-	if (bAngleSeekActive || bPlayerTooFar || CombatAdvanceHopTimer > 0.f) return false;
+	if (bAngleSeekActive || bPlayerTooFar) return false;
 
 	// Room to gain: only hop while a bound would still land outside the move-shoot ideal minimum.
 	const float DistToTarget = FVector::Dist2D(MyLocation, Target->GetActorLocation());
 	if (DistToTarget <= MoveShootIdealRangeMin + Tuning->CombatAdvanceHopMinGain) return false;
+
+	// One free bound per confirmed kill, placed below EVERY guard that returns without running the
+	// scan. Consuming the stamp on a tick that then bails leaves the cooldown at zero with nothing
+	// to re-arm it, so a hop primed for CombatPostKillAdvanceWindow would stay primed for the rest
+	// of the fight — and killing the enemy you were closest to, the common case, trips the
+	// room-to-gain guard directly above. The remaining early-out below re-arms the timer itself.
+	TryConsumePostKillHopBypass(Companion, *Tuning);
+	if (CombatAdvanceHopTimer > 0.f) return false;
 
 	UWorld* World = Companion->GetWorld();
 	ACoverSystem* CoverSys = ACoverSystem::GetCoverSystem(World);
@@ -1911,6 +2067,10 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
 
 	const float SearchRadius = FMath::Min(Tuning->CoverSearchRadius, Tuning->CombatAdvanceHopMaxDistance);
+	// The hop's own player leash can only ever TIGHTEN the combat leash — a designer raising
+	// CombatAdvanceHopMaxPlayerDistance above CombatLeashDistance must not let a bound out past the
+	// leash the rest of combat positioning respects.
+	const float HopPlayerLeash = FMath::Min(Tuning->CombatLeashDistance, Tuning->CombatAdvanceHopMaxPlayerDistance);
 	TArray<FCover> Candidates;
 	Candidates.Reserve(32);
 	const FBoxSphereBounds SearchBounds(MyLocation, FVector(SearchRadius), SearchRadius);
@@ -1921,6 +2081,7 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(Tuning->CoverFlankArcHalfAngleDeg));
 	const FVector TargetLoc = Target->GetActorLocation();
 	const FVector TargetSight = AITargeting::GetSightLocation(Target);
+	const UDoorRegistrySubsystem* HopDoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
 
 	// Nearest qualifying bound — short purposeful dashes, not the biggest land-grab available.
 	FCover Best;
@@ -1936,7 +2097,7 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 		if (CandToThreat > DistToTarget - Tuning->CombatAdvanceHopMinGain) continue;
 		if (CandToThreat < MoveShootIdealRangeMin) continue;
 		if (IsValid(PlayerPawn)
-			&& FVector::Dist2D(Candidate.Data.Location, PlayerPawn->GetActorLocation()) > Tuning->CombatLeashDistance)
+			&& FVector::Dist2D(Candidate.Data.Location, PlayerPawn->GetActorLocation()) > HopPlayerLeash)
 			continue;
 
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
@@ -1944,6 +2105,9 @@ bool UBTTask_CompanionCombat::TickCombatAdvanceHop(UBehaviorTreeComponent& Owner
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, Tuning->CoverSwitchPostVacateCooldown))
 			continue;
 		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller)) continue;
+		// A hop target behind a closed door is never valid (same rule as the EQS DoorCrossing filter).
+		if (IsValid(HopDoorRegistry) && HopDoorRegistry->AnyClosedDoorBlocksSegment(MyLocation, Candidate.Data.Location))
+			continue;
 
 		const FVector ToThreat2D = (TargetLoc - Candidate.Data.Location).GetSafeNormal2D();
 		if (FVector::DotProduct(UCoverGeometryStatics::GetFireArcForward(Candidate.Data), ToThreat2D) < ArcCos)
@@ -1987,7 +2151,7 @@ static FVector SeedMoveDir(const FVector& MicroTarget, const FVector& CompanionL
 	return Dir.SizeSquared() > KINDA_SMALL_NUMBER ? Dir.GetSafeNormal() : CompanionForward;
 }
 
-void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds)
 {
 	if (!IsValid(Companion) || !IsValid(AIC) || !IsValid(Target)) return;
 	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
@@ -2036,19 +2200,19 @@ void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, A
 		}
 		JiggleDriftTimer = JiggleDriftInterval;
 		InConeContinuousTime = 0.f;
-		RerollJiggleOffset(Companion, Target, IgnoredAttached);
+		RerollJiggleOffset(Companion, Target, IgnoredForFireTrace);
 		SmoothedMoveDir = SeedMoveDir(JiggleHome + JiggleOffset, JiggleHome, Companion->GetActorForwardVector());
 		bJiggleActive = true;
 	}
 
-	TickJiggleDrift(Companion, Target, IgnoredAttached, DeltaSeconds);
+	TickJiggleDrift(Companion, Target, IgnoredForFireTrace, DeltaSeconds);
 
 	// Re-roll the micro-target on the timer or on reach, so the companion never settles.
 	const FVector CompanionLoc = Companion->GetActorLocation();
 	const FVector MicroTarget = JiggleHome + JiggleOffset;
 	JiggleRetargetTimer -= DeltaSeconds;
 	const bool bReached = FVector::DistSquared2D(CompanionLoc, MicroTarget) <= FMath::Square(JiggleReachThreshold);
-	if (JiggleRetargetTimer <= 0.f || bReached) RerollJiggleOffset(Companion, Target, IgnoredAttached);
+	if (JiggleRetargetTimer <= 0.f || bReached) RerollJiggleOffset(Companion, Target, IgnoredForFireTrace);
 
 	// Bounded-turn-rate input toward the micro-target — smoothly rotates the heading rather than snapping,
 	// so legs commit to full deliberate strafe steps instead of half-steps.
@@ -2137,7 +2301,7 @@ void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, A
 	Companion->AddMovementInput(SmoothedMoveDir, 1.0f);
 }
 
-void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds)
+void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds)
 {
 	if (!IsValid(Companion) || !IsValid(AIC) || !IsValid(Target)) return;
 	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
@@ -2159,11 +2323,11 @@ void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Compa
 	FVector Dest;
 	const TCHAR* FanDirName = TEXT("?");
 	bool bWideStep = false;
-	bool bHaveDest = PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance, Dest, &FanDirName);
+	bool bHaveDest = PickFanLosDestination(Companion, Target, IgnoredForFireTrace, MoveShootStrafeDistance, Dest, &FanDirName);
 	if (!bHaveDest)
 	{
 		bWideStep = true;
-		bHaveDest = PickFanLosDestination(Companion, Target, IgnoredAttached, MoveShootStrafeDistance * WideStepFactor, Dest, &FanDirName);
+		bHaveDest = PickFanLosDestination(Companion, Target, IgnoredForFireTrace, MoveShootStrafeDistance * WideStepFactor, Dest, &FanDirName);
 	}
 
 	// No LoS-clear fan point at either distance — hold (respect the reposition timer, don't thrash the nav query).
@@ -2181,7 +2345,7 @@ void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Compa
 	AIC->MoveToLocation(MoveShootDestination, MoveShootAcceptRadius, false, true, false, true);
 }
 
-bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest, const TCHAR** OutDirName) const
+bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float StepDistance, FVector& OutDest, const TCHAR** OutDirName) const
 {
 	if (!IsValid(Companion) || !IsValid(Target)) return false;
 
@@ -2203,7 +2367,7 @@ bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Compani
 	for (int32 i = 0; i < UE_ARRAY_COUNT(Offsets); ++i)
 	{
 		FVector Candidate;
-		if (!TryLateralLosDestination(Companion, Target, IgnoredAttached, Offsets[i].GetSafeNormal() * StepDistance, Candidate)) continue;
+		if (!TryLateralLosDestination(Companion, Target, IgnoredForFireTrace, Offsets[i].GetSafeNormal() * StepDistance, Candidate)) continue;
 		const float DistSq = FVector::DistSquared(Candidate, MyLoc);
 		if (DistSq >= BestDistSq) continue;
 		BestDistSq = DistSq;
@@ -2214,7 +2378,7 @@ bool UBTTask_CompanionCombat::PickFanLosDestination(ACompanionCharacter* Compani
 	return bFound;
 }
 
-bool UBTTask_CompanionCombat::TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, const FVector& LateralOffset, FVector& OutDest) const
+bool UBTTask_CompanionCombat::TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, const FVector& LateralOffset, FVector& OutDest) const
 {
 	const FVector Candidate = Companion->GetActorLocation() + LateralOffset;
 	if (!ProjectToNav(Companion->GetWorld(), Candidate, MoveShootNavProjectExtent, OutDest)) return false;
@@ -2241,20 +2405,23 @@ bool UBTTask_CompanionCombat::TryLateralLosDestination(ACompanionCharacter* Comp
 			}
 		}
 	}
-	return PointHasLosToTarget(Companion, OutDest, Target, IgnoredAttached);
+	return PointHasLosToTarget(Companion, OutDest, Target, IgnoredForFireTrace);
 }
 
 void UBTTask_CompanionCombat::EndOpenAreaMoveShoot(ACompanionCharacter* Companion)
 {
 	if (!bMoveShootMoveActive) return;
 
-	// Restore speed first (so it's attempted even if the controller is gone), then stop/clear focus.
+	// Clear override then re-resolve from the tuning asset instead of restoring a cached value --
+	// the cached walk speed may be stale (e.g. taken before a focus edge, so it is unclamped 550),
+	// and writing it back with the task's gameplay focus still live leaves the companion at the
+	// wrong speed until the next edge fires.
 	if (IsValid(Companion))
 	{
+		Companion->ClearTaskSpeedOverride();
+		Companion->RefreshMovementSpeeds();
 		if (UCharacterMovementComponent* CMC = Companion->GetCharacterMovement())
 		{
-			if (CachedDefaultWalkSpeed > 0.f)
-				CMC->MaxWalkSpeed = CachedDefaultWalkSpeed;
 			if (CachedDefaultAcceleration > 0.f)
 				CMC->MaxAcceleration = CachedDefaultAcceleration;
 		}
@@ -2265,13 +2432,12 @@ void UBTTask_CompanionCombat::EndOpenAreaMoveShoot(ACompanionCharacter* Companio
 		}
 	}
 
-	// Always clear state — flags can never survive without the restore having been attempted,
+	// Always clear state -- flags can never survive without the restore having been attempted,
 	// and a recycled node instance can't carry stale move-shoot state.
 	bMoveShootMoveActive = false;
 	MoveShootRepositionTimer = 0.f;
 	MoveShootDestination = FVector::ZeroVector;
 	bMoveShootHolding = false;
-	CachedDefaultWalkSpeed = 0.f;
 	CachedDefaultAcceleration = 0.f;
 
 	// Jiggle teardown — reset anchor/offset + timers so a resumed engagement re-anchors fresh.
@@ -2294,6 +2460,9 @@ void UBTTask_CompanionCombat::TickMoveShootTowardPlayer(ACompanionCharacter* Com
 	UCharacterMovementComponent* CMC = Companion->GetCharacterMovement();
 	if (!IsValid(CMC)) return;
 
+	// The pull destination is the PLAYER for every companion, primary or not — see the leash comment
+	// at its arming site. Sending a secondary back to the primary here would just duplicate what the
+	// follow task already does and would leave nothing tying the fight to the player.
 	APawn* Player = nullptr;
 	float StopDist = DefaultPlayerPullStopDist;
 	const UCompanionTuningDataAsset* PullTuning = nullptr;
@@ -2393,6 +2562,32 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 
 	if (IsValid(Companion))
 	{
+		// UNCONDITIONAL focus release — the primary fix for "allies aim at enemies through walls after
+		// combat". EndOpenAreaMoveShoot above clears the Gameplay focus too, but it early-returns unless
+		// move-and-shoot was actually active, so it never covered the cover branch. The focus this task
+		// leaves behind is an ACTOR focus (UpdateMoveShootFacing's SetFocus(Target), plus the one
+		// MoveToCoverPoint's approach-fire hands over on arrival), and the controller re-resolves an
+		// actor focus to that enemy's LIVE location every tick with pitch preserved, straight through
+		// geometry. Nothing downstream released it: every service-side release compares against a
+		// stored POINT, while GetFocalPointForPriority resolves an actor focus to the actor's live
+		// location, so those comparisons essentially never matched. The post-combat aim-point maths was
+		// never the cause.
+		//
+		// This runs on the ExecuteTask ENTRY call as well, deliberately. ExecuteTask sets no focus of
+		// its own (only SetAimTarget), so the only thing entry can be holding is MoveToCoverPoint's
+		// arrival hand-off — and a live enemy focus is precisely what spins a wall-relative pose once
+		// the entry snap lands on the cover's fire-arc yaw. StopCoverApproachFire now keeps that
+		// hand-off only while the blackboard still names the focused actor. On the MoveToCoverPoint
+		// path, ResetTaskState clears it unconditionally on entry -- so the receiver check is inert
+		// there. It IS still live for this task's own final-approach call (~3277).
+		//
+		// Residual yaw is expected and is NOT this function's job to place: a bare ClearFocus stops
+		// UpdateControlRotation, so a bUseControllerDesiredRotation pawn holds the control rotation the
+		// dead focus last resolved (BTTask_CompanionFollowRoute's "Fix 10" lesson). That bearing is
+		// frozen, not tracking, and the state service's facing arbitration writes the next one.
+		if (AAIController* FocusAIC = Cast<AAIController>(Companion->GetController()))
+			FocusAIC->ClearFocus(EAIFocusPriority::Gameplay);
+
 		Companion->StopWeaponFire();
 		Companion->SetAimTarget(nullptr);
 		// Lower on teardown: this runs AFTER the service's edge-lower when the abort came from a
@@ -2409,19 +2604,19 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 		}
 		if (bResetPosture)
 		{
-			if (bSmoothSnapping && bPendingCrouchAfterSnap)
-			{
-				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState_SkippedForPendingCrouch action=NoOp"),
-					*GetNameSafe(Companion),
-					Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
-			}
-			else
-			{
-				UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState action=UnCrouch"),
-					*GetNameSafe(Companion),
-					Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
-				Companion->UnCrouch();
-			}
+			// UNCONDITIONAL. There used to be a skip here for "torn down mid smooth-snap with a crouch
+			// still pending", on the theory that the snap would land the crouch itself. It never
+			// could: this same function clears bSmoothSnapping and bPendingCrouchAfterSnap further
+			// down, so the deferred crouch was cancelled on the way out and nothing downstream ever
+			// applied OR popped it. The companion was left crouched with no owner — and AbortTask
+			// takes this path with bResetPosture defaulted true, which is exactly what the BB observer
+			// does the moment the last target clears. That is the "stuck crouched after a fight"
+			// report. The pendingCrouch flag is still logged so the old case stays greppable.
+			UE_LOG(LogCompanionDiag, Verbose, TEXT("%s: [CrouchCall] t=%.3f site=ResetTaskState action=UnCrouch snapping=%d pendingCrouch=%d"),
+				*GetNameSafe(Companion),
+				Companion->GetWorld() ? Companion->GetWorld()->GetTimeSeconds() : 0.f,
+				(int32)bSmoothSnapping, (int32)bPendingCrouchAfterSnap);
+			Companion->UnCrouch();
 		}
 
 		UCompanionAnimInstance* Anim = GetCompanionAnim(Companion);
@@ -2474,6 +2669,8 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	BurstTimer = 0.f;
 	// Fix 5: clear the muzzle-withhold latch so a stale held state can't leak into the next engagement.
 	bStandBurstFireHeld = false;
+	bBurstCommitSpeculative = false;
+	bSpeculativeAimVerified = false;
 	StandBurstMuzzleCheckTimer = 0.f;
 	LastStandBurstResumeFireTime = 0.f;
 	TimeInCoverIdle = 0.f;
@@ -2524,6 +2721,8 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	bFinalApproachRetried = false;
 	FinalApproachNoProgressTime = 0.f;
 	LastFinalApproachPawnLoc = FVector::ZeroVector;
+	// Fire itself already stopped above (StopWeaponFire); this clears the transit-fire latch.
+	FinalApproachFire.Reset();
 	bSmoothSnapping = false;
 	SmoothSnapElapsed = 0.f;
 	bPendingCrouchAfterSnap = false;
@@ -2535,6 +2734,7 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	LastDecisionTime = 0.f;
 	bHasLastKnownTargetLocation = false;
 	LastKnownTargetLocation = FVector::ZeroVector;
+	GrenadeLosBlockedAccum = 0.f;
 	// Angle-seek: deactivate but keep AngleSeekCooldownRemaining — target churn restarts this task
 	// several times per fight, and a reset cooldown would let the flank re-arm instantly after
 	// every kill (the exact ping-pong the cooldown exists to stop).
@@ -2546,6 +2746,7 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	// Pressure tracking: reset distance sample so first tick after re-entry doesn't false-detect closing.
 	PreviousNearestThreatDist = -1.f;
 	Pressure01 = 0.f;
+	if (IsValid(Companion)) Companion->SetPressure01(0.f, IsValid(Companion->GetWorld()) ? Companion->GetWorld()->GetTimeSeconds() : 0.f);
 	bPreviousThreatWasClosing = false;
 	PressureSampleTimer = 0.f;
 	// Keep PeekImpulseCooldownRemaining across task restarts (same reason as angle-seek cooldown).
@@ -2751,6 +2952,9 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	// Full state reset without releasing the cover we're about to occupy.
 	// Don't reset posture — preserves anticipatory crouch from MoveToCoverPoint.
 	ResetTaskState(Companion, BB, FCoverHandle(), false, false);
+	bWasCoveringFireLastTick = false;
+	bHasCoveringFireLastSeen = false;
+	CoveringFireLastSeenLoc = FVector::ZeroVector;
 
 	Companion->SetAimTarget(Target);
 	PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
@@ -2951,6 +3155,12 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	return EBTNodeResult::InProgress;
 }
 
+uint8 UBTTask_CompanionCombat::GetEffectiveMaxHolds(const ACompanionCharacter* Companion) const
+{
+	const bool bStealth = IsValid(Companion) && Companion->GetMode() == ECompanionMode::Stealth;
+	return bStealth ? StealthMaxConsecutiveHolds : MaxConsecutiveHolds;
+}
+
 // --- TickTask ---
 
 void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
@@ -2985,7 +3195,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		return FinishLatentTask(OwnerComp, bTargetDead ? EBTNodeResult::Succeeded : EBTNodeResult::Failed);
 	}
 
-	Ctx.Companion->SetAimTarget(Ctx.Target);
+	// Speculative peek: while the burst was committed with no verified peek line, aim at nothing
+	// (same treatment cover-idle uses) so the companion does not visibly track through the wall.
+	// Aim hands back to the live target the instant the muzzle gate verifies a clear line.
+	const bool bSpeculativeAimHeld = bIsFiringBurst && bBurstCommitSpeculative && !bSpeculativeAimVerified;
+	Ctx.Companion->SetAimTarget(bSpeculativeAimHeld ? nullptr : Ctx.Target);
 
 	if (bWaitingForFinalApproach)
 	{
@@ -3040,7 +3254,15 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 
 		if (!bArrived && !bTimedOut && !bStalled && !bNoProgress)
+		{
+			// Approach-fire during the walk: the final approach used to be a silent, aimed-but-
+			// never-firing crouch-walk (the state service keeps the weapon up while no fire path
+			// runs) — reuse MoveToCoverPoint's muzzle-gated transit fire so a clear line produces
+			// shots on the way in.
+			if (AAIController* FireAIC = Cast<AAIController>(Ctx.Companion->GetController()))
+				CompanionCover::TickCoverApproachFire(Ctx.Companion, FireAIC, Ctx.Blackboard, FinalApproachFire, DeltaSeconds);
 			return;
+		}
 
 		// Far-out failsafe: never glide across the room in cover pose. Re-issue the move once
 		// (a crossing enemy can stall path-following well short of the slot), then release the
@@ -3093,6 +3315,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			AIC->StopMovement();
 		if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
 			CMC->StopMovementImmediately();
+
+		// Transit fire ends at the point — the cover FSM (peeks/bursts) owns fire from here on.
+		// Keep focus so the companion faces the threat while the snap/EnterCoverPose runs.
+		CompanionCover::StopCoverApproachFire(Ctx.Companion,
+			Cast<AAIController>(Ctx.Companion->GetController()), FinalApproachFire, /*bKeepFocus=*/true);
 
 		const FCover ApproachCover = Ctx.Blackboard->GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID());
 		if (ApproachCover.IsValid())
@@ -3178,10 +3405,28 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	const FCover Cover = Ctx.Blackboard->GetValue<UBlackboardKeyType_Cover>(CoverTargetKey.GetSelectedKeyID());
 	const bool bHasCover = Cover.IsValid() && Ctx.Blackboard->GetValueAsBool(HasCoverPositionKey.SelectedKeyName);
 
-	// Build ignored-actors list once per tick — passed to all HasLineOfSight calls below.
-	// TInlineAllocator keeps up to 4 entries on the stack (weapons + accessories — no heap alloc in the common case).
-	TArray<AActor*, TInlineAllocator<4>> TickIgnoredAttached;
-	Ctx.Companion->ForEachAttachedActors([&TickIgnoredAttached](AActor* A) { TickIgnoredAttached.Add(A); return true; });
+	// Build the fire-trace ignore set once per tick — passed to every HasLineOfSight, muzzle-withhold
+	// and candidate-point LoS call below. Attachments (weapon + accessories), plus every same-team pawn
+	// taken from the weapon's OWN friendly-fire list.
+	//
+	// The friendly half is the load-bearing part: AWeaponBase excludes team-mates from the hitscan
+	// entirely, so a round passes straight THROUGH the player and the other companion. Tracing against
+	// them anyway made a friendly body a hard fire block for a shot that would never have hit it — and
+	// since the VIP forms up BEHIND the primary it was systematically the one blocked, then resumed a
+	// further FireInterval late after each withhold. Sourcing the set from the weapon rather than
+	// rebuilding it here means the decision and the bullet cannot drift apart.
+	//
+	// This does NOT weaken anything player-facing. The systems that keep the companion out of the
+	// player's way are positional, not traced, and none of them read this list: the keep-out ring
+	// (ClampOutsidePlayerCircle) and the ADS-cone push-out (ClampOutsidePlayerADSCone) are geometric
+	// clamps on a destination, and the angle-seek scan builds its own query params.
+	//
+	// Inline capacity covers attachments plus a single-player team (player + up to two companions)
+	// with no heap alloc on the common path.
+	TArray<AActor*, TInlineAllocator<8>> TickFireTraceIgnored;
+	Ctx.Companion->ForEachAttachedActors([&TickFireTraceIgnored](AActor* A) { TickFireTraceIgnored.Add(A); return true; });
+	if (AWeaponBase* TickWeapon = Ctx.Companion->GetCurrentWeapon())
+		TickFireTraceIgnored.Append(TickWeapon->GetFriendlyFireIgnoreList());
 
 	// Snapshot the handle we tracked BEFORE it can be overwritten — the slot-loss guard
 	// needs the previous-tick value to detect a monitor-commit vs genuine loss.
@@ -3254,9 +3499,59 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	const bool bSuppressedRaw = Ctx.Companion->IsSuppressed(SuppressionWindowSeconds);
 	const bool bSuppressed = (TickTuning && TickTuning->bIgnoreSuppressionInCover) ? false : bSuppressedRaw;
 	const bool bLowHp = Ctx.Companion->GetHealthFraction() < LowHealthFraction;
+	const bool bCoveringFire = Ctx.Companion->IsCoveringFireActive();
+	// Covering fire ignores the low-HP weight tables so the companion keeps aggressive weights
+	// while hurt. Used ONLY at the weight-table sites below — every ReturnToCover call and both
+	// cooldown computations must still read the true bLowHp.
+	const bool bLowHpForWeights = bLowHp && !bCoveringFire;
 
 	// Mirror for the switch monitor's commit gate (G5) — one int copy per tick.
 	Ctx.Companion->SetPeekCyclesAtCurrentCover(PeekCyclesAtCover);
+
+	// Covering-fire reload-held mirror (Tick reads this; same pattern as SetPeekCyclesAtCurrentCover).
+	Ctx.Companion->SetCoveringFireReloadHeld(bReloadGateActive);
+
+	// Cover-idle mirror defaults false every tick; the in-cover idle branch below re-asserts it.
+	// Written here rather than only at the branch so a tick that never reaches cover clears it.
+	Ctx.Companion->SetCoveringFireCoverIdle(false);
+
+	// Covering-fire end-of-window cleanup: the clock runs in ACompanionCharacter::Tick (which
+	// runs before the BT tick in the same frame). If the window expired this frame, bCoveringFire
+	// (cached at the top of this tick from the now-cleared state) is already false, so the
+	// combat-task injections are inactive.
+	// Do NOT set bIsFiringBurst = false here -- BRANCH 1 needs to run one more tick with
+	// bCoveringFire false so BurstTimer <= 0 fires ReturnToCover, which handles StopWeaponFire,
+	// the smooth-snap back to the hunker, EnterCoverPose, PeekCooldown and all the state
+	// ReturnToCover writes. Only settle muzzle-withhold and aim override state.
+	if (bWasCoveringFireLastTick && !bCoveringFire)
+	{
+		bStandBurstFireHeld = false;
+		PeekFireDelayRemaining = 0.f;
+		Ctx.Companion->ClearAimLocationOverride();
+	}
+	bWasCoveringFireLastTick = bCoveringFire;
+
+	// Covering-fire last-seen tracking + aim override. While the window is active, record the
+	// target's position whenever we have LoS; when LoS is lost, aim at that last-seen location
+	// so rounds go downrange instead of holding fire on a hidden target.
+	if (bCoveringFire)
+	{
+		if (Ctx.Companion->HasTargetLOS())
+		{
+			CoveringFireLastSeenLoc = Ctx.Target->GetActorLocation();
+			bHasCoveringFireLastSeen = true;
+			Ctx.Companion->ClearAimLocationOverride();
+		}
+		else if (bHasCoveringFireLastSeen)
+		{
+			Ctx.Companion->SetAimLocationOverride(CoveringFireLastSeenLoc);
+		}
+	}
+	else if (bHasCoveringFireLastSeen)
+	{
+		bHasCoveringFireLastSeen = false;
+		Ctx.Companion->ClearAimLocationOverride();
+	}
 
 	// Slot-loss guard: cover dropped mid-task while companion was in cover branch.
 	// Prevents falling through to open-engage with stale crouch / firing state.
@@ -3544,6 +3839,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 		TimeInCoverIdle += DeltaSeconds;
 
+		// Sat in cover, not peeking — freeze the covering-fire clock (see SetCoveringFireCoverIdle).
+		Ctx.Companion->SetCoveringFireCoverIdle(true);
+
 		// --- Pressure signal + point-blank threat check (throttled ~5 Hz, one shared gather) ---
 		PeekImpulseCooldownRemaining = FMath::Max(0.f, PeekImpulseCooldownRemaining - DeltaSeconds);
 		PressureSampleTimer -= DeltaSeconds;
@@ -3594,9 +3892,28 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				const float FarDist = TickTuning->PressureFarDistance;
 				const float NearDist = TickTuning->PressureNearDistance;
-				Pressure01 = (NearestDist < TNumericLimits<float>::Max())
+				const float DistanceTerm = (NearestDist < TNumericLimits<float>::Max())
 					? FMath::Clamp((FarDist - NearestDist) / FMath::Max(FarDist - NearDist, 1.f), 0.f, 1.f)
 					: 0.f;
+
+				// Fire term: incoming fire raises pressure independently of distance so a
+				// firefight at mid-range no longer reads as calm.
+				const float Supp01 = Ctx.Companion->GetSuppression01();
+				const float SuppContrib = Supp01 * TickTuning->PressureSuppressionWeight;
+				const int32 DmgHitsMax = FMath::Max(TickTuning->PressureDamageHitsForMax, 1);
+				const int32 RecentHits = Ctx.Companion->GetRecentDamageCount(
+					TickTuning->CoverCommitUnderFireWindow);
+				const float DmgContrib = FMath::Clamp(
+					static_cast<float>(RecentHits) / static_cast<float>(DmgHitsMax), 0.f, 1.f);
+				const float FireTerm = FMath::Clamp(FMath::Max(SuppContrib, DmgContrib), 0.f, 1.f);
+
+				Pressure01 = FMath::Max(DistanceTerm, FireTerm);
+
+				// Mirror to the character for the debug distance overlay.
+				{
+					const UWorld* PressureWorld = Ctx.Companion->GetWorld();
+					Ctx.Companion->SetPressure01(Pressure01, IsValid(PressureWorld) ? PressureWorld->GetTimeSeconds() : 0.f);
+				}
 
 				const bool bClosingNow = (PreviousNearestThreatDist >= 0.f && NearestDist < PreviousNearestThreatDist);
 				const bool bClosingConfirmed = bClosingNow && bPreviousThreatWasClosing;
@@ -3610,7 +3927,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					&& NearestDist <= TickTuning->PeekImpulseDistance)
 				{
 					const float WaitGateThreshold = (MinCoverIdleDwell + PeekCooldown)
-						* CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01);
+						* ModePeekConfidenceScale(Ctx.Companion, TickTuning, false, Pressure01)
+						* FirstPeekWaitMultiplier(Ctx.Companion, TickTuning, PeekCyclesAtCover);
 					if (TimeInCoverIdle < WaitGateThreshold)
 					{
 						TimeInCoverIdle = WaitGateThreshold;
@@ -3622,18 +3940,27 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				if (CovDbg())
 				{
 					UE_LOG(LogCompanionAI, Log,
-						TEXT("[COVDBG] %s PRESSURE p01=%.2f nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
-						*Ctx.Companion->GetName(), Pressure01, NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
-						CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01),
+						TEXT("[COVDBG] %s PRESSURE p01=%.2f distTerm=%.2f fireTerm=%.2f(supp=%.2f w=%.1f dmg=%d/%d) nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
+						*Ctx.Companion->GetName(), Pressure01, DistanceTerm, FireTerm,
+						Supp01, TickTuning->PressureSuppressionWeight, RecentHits, DmgHitsMax,
+						NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
+						ModePeekConfidenceScale(Ctx.Companion, TickTuning, false, Pressure01),
 						(int32)bImpulseFired);
 				}
 			}
 		}
 		if (!bPressureOn)
+		{
 			Pressure01 = 0.f;
+			const UWorld* PressureOffWorld = Ctx.Companion->GetWorld();
+			Ctx.Companion->SetPressure01(0.f, IsValid(PressureOffWorld) ? PressureOffWorld->GetTimeSeconds() : 0.f);
+		}
 
-		// Combat-mode + pressure confidence: the whole wait shrinks.
-		if (TimeInCoverIdle < (MinCoverIdleDwell + PeekCooldown) * CombatPeekConfidenceScale(Ctx.Companion, false, Pressure01)) return;
+		// Mode + pressure confidence shrink the whole wait; the first peek at a fresh point shrinks
+		// it again on top, so taking cover under fire is answered rather than waited out.
+		if (TimeInCoverIdle < (MinCoverIdleDwell + PeekCooldown)
+			* ModePeekConfidenceScale(Ctx.Companion, TickTuning, false, Pressure01)
+			* FirstPeekWaitMultiplier(Ctx.Companion, TickTuning, PeekCyclesAtCover)) return;
 
 		UWorld* const TickWorld = Ctx.Companion ? Ctx.Companion->GetWorld() : nullptr;
 		if (!TickWorld) return;
@@ -3670,13 +3997,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				Ctx.Companion->GetSuppression01(),
 				Ctx.Companion->GetRecentDamageCount(TickTuning ? TickTuning->CoverCommitUnderFireWindow : 4.f),
 				Ctx.Companion->GetPlayerFocusedEnemyCount(),
-				PeekCyclesAtCover, NoPeekLosStrikes, ConsecutiveHolds, MaxConsecutiveHolds,
+				PeekCyclesAtCover, NoPeekLosStrikes, ConsecutiveHolds, GetEffectiveMaxHolds(Ctx.Companion),
 				TimeAtCurrentCover, TimeInCoverIdle, (int32)bJustRepositioned,
 				(int32)CurrentLean, Ctx.Companion->GetCurrentAmmo(), Ctx.Companion->GetHealthFraction());
 		}
 
-		// Gate 1: suppression.
-		if (bSuppressed)
+		// Gate 1: suppression. Covering fire bypasses the stay-down.
+		if (bSuppressed && !bCoveringFire)
 		{
 			float CooldownMult = SuppressionCooldownMultiplier;
 			if (bLowHp) CooldownMult *= LowHealthCooldownMultiplier;
@@ -3913,7 +4240,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		AActor* StandEyeBlocker = nullptr;
 		const FVector StandEye = SubSlotLoc + FVector(0.f, 0.f, StandFireEyeHeight);
 		const bool bStandEyeClear = HasLineOfSight(Ctx.Companion->GetWorld(), StandEye, Ctx.Target,
-			Ctx.Companion, StandEyeBlocker, TickIgnoredAttached);
+			Ctx.Companion, StandEyeBlocker, TickFireTraceIgnored);
 		if (!bStandEyeClear && bDebugLogging)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-eye BLOCKED by %s — excluding in-place fire from roll"),
 				*Ctx.Companion->GetName(), *GetNameSafe(StandEyeBlocker));
@@ -3976,7 +4303,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			ScoreParams.MaxCornerReachCm = TickTuning->CrouchPeekMaxCornerReachCm;
 			ScoreParams.LowHpCornerBaseScore = TickTuning->LowHpCrouchPeekCornerBaseScore;
 			ScoreParams.LowHpOverTopBaseScore = TickTuning->LowHpCrouchPeekOverTopBaseScore;
-			ScoreParams.bLowHp = bLowHp;
+			ScoreParams.bLowHp = bLowHpForWeights;
 			ScoreParams.bSpeculative = !bLosFromCover;
 			ScoreParams.bStandEyeClear = bStandEyeClear;
 
@@ -3997,15 +4324,15 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			const bool bAnyCornerViable = Scores.bCornerLeftViable || Scores.bCornerRightViable;
 
 			// Split over-top score between Stand and Quick by existing weight ratio.
-			const float StandBaseW = bLowHp ? LowHpStandWeight : StandWeight;
-			const float QuickBaseW = bLowHp ? LowHpQuickWeight : QuickWeight;
+			const float StandBaseW = bLowHpForWeights ? LowHpStandWeight : StandWeight;
+			const float QuickBaseW = bLowHpForWeights ? LowHpQuickWeight : QuickWeight;
 			const float OverTopTotal = StandBaseW + QuickBaseW;
 			const float StandFrac = (OverTopTotal > 0.f) ? (StandBaseW / OverTopTotal) : 0.5f;
 
-			const float EffHoldWeight = (bLowHp ? LowHpHoldWeight : HoldWeight) * PressureHoldScale;
-			const float RepoW = bRepoEligible ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f;
+			const float EffHoldWeight = (bLowHpForWeights ? LowHpHoldWeight : HoldWeight) * PressureHoldScale;
+			const float RepoW = bRepoEligible ? (bLowHpForWeights ? LowHpRepositionWeight : RepositionWeight) : 0.f;
 			const float StandUpRepoW = (bRepoEligible && bStandEyeClear)
-				? (bLowHp ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
+				? (bLowHpForWeights ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
 
 			const TPair<EPeekAction, float> ScoredWeights[] = {
 				{ EPeekAction::CornerPeek,           BestCornerScore },
@@ -4081,11 +4408,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			// Stand cover (or legacy crouch path): verified side gap, corner peek primary.
 			const TPair<EPeekAction, float> SideGapWeights[] = {
-				{ EPeekAction::CornerPeek, bLowHp ? LowHpCornerPeekWeight : CornerPeekWeight },
+				{ EPeekAction::CornerPeek, bLowHpForWeights ? LowHpCornerPeekWeight : CornerPeekWeight },
 				{ EPeekAction::Reposition, bRepoEligible
-					? (bIsCrouchCover ? (bLowHp ? LowHpRepositionWeight : RepositionWeight)
-					                  : (bLowHp ? LowHpRepositionWeightStand : RepositionWeightStand)) : 0.f },
-				{ EPeekAction::Hold,       (bLowHp ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
+					? (bIsCrouchCover ? (bLowHpForWeights ? LowHpRepositionWeight : RepositionWeight)
+					                  : (bLowHpForWeights ? LowHpRepositionWeightStand : RepositionWeightStand)) : 0.f },
+				{ EPeekAction::Hold,       (bLowHpForWeights ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(SideGapWeights));
 
@@ -4100,29 +4427,40 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		else if (bIsCrouchCover)
 		{
 			// Crouch cover, no side gap, wallhack disabled: legacy Front over-top roll.
-			const float RepoW        = bRepoEligible ? (bLowHp ? LowHpRepositionWeight : RepositionWeight) : 0.f;
-			const float StandUpRepoW = (bRepoEligible && bStandEyeClear) ? (bLowHp ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
-			const float StandW = bStandEyeClear ? (bLowHp ? LowHpStandWeight : StandWeight) : 0.f;
-			const float QuickW = bStandEyeClear ? (bLowHp ? LowHpQuickWeight : QuickWeight) : 0.f;
+			const float RepoW        = bRepoEligible ? (bLowHpForWeights ? LowHpRepositionWeight : RepositionWeight) : 0.f;
+			const float StandUpRepoW = (bRepoEligible && bStandEyeClear) ? (bLowHpForWeights ? LowHpStandUpAndRepositionWeight : StandUpAndRepositionWeight) : 0.f;
+			const float StandW = bStandEyeClear ? (bLowHpForWeights ? LowHpStandWeight : StandWeight) : 0.f;
+			const float QuickW = bStandEyeClear ? (bLowHpForWeights ? LowHpQuickWeight : QuickWeight) : 0.f;
 			const TPair<EPeekAction, float> FrontWeights[] = {
 				{ EPeekAction::Stand,                StandW },
 				{ EPeekAction::Quick,                QuickW },
-				{ EPeekAction::Hold,                 (bLowHp ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
+				{ EPeekAction::Hold,                 (bLowHpForWeights ? LowHpHoldWeight : HoldWeight) * PressureHoldScale },
 				{ EPeekAction::Reposition,           RepoW },
 				{ EPeekAction::StandUpAndReposition, StandUpRepoW },
 			};
 			Action = RollPeekActionMulti(MakeArrayView(FrontWeights));
 		}
 
+		// Covering fire: never hold or reposition. Promote through the hold-cap ladder below so the
+		// forced action is one this cover can actually shoot from AND CurrentLean is written to match.
+		if (bCoveringFire && Action != EPeekAction::Stand && Action != EPeekAction::Quick
+			&& Action != EPeekAction::CornerPeek)
+		{
+			Action = EPeekAction::Hold;
+			ConsecutiveHolds = GetEffectiveMaxHolds(Ctx.Companion); // skip the hold budget, force promotion
+		}
+		if (bCoveringFire && Action == EPeekAction::Quick && bStandEyeClear) Action = EPeekAction::Stand;
+
 		if (Action == EPeekAction::Hold)
 		{
-			if (ConsecutiveHolds < MaxConsecutiveHolds)
+			const uint8 EffectiveMaxHolds = GetEffectiveMaxHolds(Ctx.Companion);
+			if (ConsecutiveHolds < EffectiveMaxHolds)
 			{
 				++ConsecutiveHolds;
 				PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 				TimeInCoverIdle = 0.f;
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=Hold ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
-				if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: HOLD this cycle (%d/%d)"), *Ctx.Companion->GetName(), ConsecutiveHolds, MaxConsecutiveHolds);
+				if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: HOLD this cycle (%d/%d)"), *Ctx.Companion->GetName(), ConsecutiveHolds, EffectiveMaxHolds);
 				return;
 			}
 			// Hold cap promotion: scorer-viable best option at crouch cover (wallhack), else legacy.
@@ -4256,6 +4594,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
 			AmmoAtBurstStart = Ctx.Companion->GetCurrentAmmo();
 			bIsFiringBurst = true;
+			bBurstCommitSpeculative = (TickTuning && TickTuning->bSpeculativePeekAimsPeekDirection) && !bLosFromCover;
+			bSpeculativeAimVerified = false;
 			if (AAIController* AIC = Cast<AAIController>(Ctx.Companion->GetController()))
 				AIC->StopMovement();
 			if (UCharacterMovementComponent* CMC = Ctx.Companion->GetCharacterMovement())
@@ -4278,7 +4618,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			// likewise starts HELD until the animation reaches exposure.
 			StandBurstMuzzleCheckTimer = 0.f;
 			PeekFireDelayRemaining = PeekFireDelaySeconds;
-			if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickIgnoredAttached))
+			if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickFireTraceIgnored))
 			{
 				Ctx.Companion->StartWeaponFire();
 				bStandBurstFireHeld = false;
@@ -4332,6 +4672,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			AmmoAtBurstStart = Ctx.Companion->GetCurrentAmmo();
 			PeekFireDelayRemaining = PeekFireDelaySeconds;
 			bIsFiringBurst = true;
+			bBurstCommitSpeculative = (TickTuning && TickTuning->bSpeculativePeekAimsPeekDirection) && !bLosFromCover;
+			bSpeculativeAimVerified = false;
 			BurstTimer = FMath::RandRange(MinFireBurst, MaxFireBurst);
 			if (Cover.IsValid())
 				CompanionSnapToCoverFacing(Ctx.Companion, Cover.Data);
@@ -4409,7 +4751,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		StandBurstMuzzleCheckTimer = 0.f;
 		AmmoAtBurstStart = Ctx.Companion->GetCurrentAmmo();
 		PeekFireDelayRemaining = PeekFireDelaySeconds;
-		if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickIgnoredAttached))
+		if (PeekFireDelayRemaining <= 0.f && IsBurstMuzzleClear(Ctx.Companion, Ctx.Target, TickFireTraceIgnored))
 		{
 			Ctx.Companion->StartWeaponFire();
 			bStandBurstFireHeld = false;
@@ -4419,6 +4761,8 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			bStandBurstFireHeld = true;
 		}
 		bIsFiringBurst = true;
+		bBurstCommitSpeculative = (TickTuning && TickTuning->bSpeculativePeekAimsPeekDirection) && !bLosFromCover;
+		bSpeculativeAimVerified = false;
 		DebugBurstLosCheckTimer = 0.f;
 		TimeInCoverIdle = 0.f;
 		TimeAtCurrentCover = 0.f;
@@ -4446,7 +4790,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// Part C burst-clock fix: BurstTimer must NOT decrement while the peek-out animation
 		// is still winding up, otherwise quick peeks expire before a single round fires.
 		if (PeekFireDelayRemaining <= 0.f)
-			BurstTimer -= DeltaSeconds / CombatPeekConfidenceScale(Ctx.Companion, true, Pressure01);
+			BurstTimer -= DeltaSeconds / ModePeekConfidenceScale(Ctx.Companion, TickTuning, true, Pressure01);
 
 		if (bDebugLogging)
 		{
@@ -4455,7 +4799,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				DebugBurstLosCheckTimer = 0.2f;
 				AActor* BurstBlocker = nullptr;
-				const bool bBurstLos = HasLineOfSight(Ctx.Companion->GetWorld(), Ctx.Companion->GetPawnViewLocation(), Ctx.Target, Ctx.Companion, BurstBlocker, TickIgnoredAttached);
+				const bool bBurstLos = HasLineOfSight(Ctx.Companion->GetWorld(), Ctx.Companion->GetPawnViewLocation(), Ctx.Target, Ctx.Companion, BurstBlocker, TickFireTraceIgnored);
 				const bool bNowBlocked = !bBurstLos;
 				const bool bBlockStateChanged = (bNowBlocked != bLastLosBlocked) || (BurstBlocker != LastLosBlocker.Get());
 				if (bBlockStateChanged)
@@ -4506,10 +4850,18 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			const bool bUseSlotForward = (CurrentBurstAction == EPeekAction::StandUpAndReposition
 				&& bStandUpRepositionWalking && Cover.IsValid());
+			// Speculative peek: face the cover fire-arc forward instead of tracking the target
+			// through the wall. Same principle as bUseSlotForward but for the stationary case.
+			const bool bUseSpeculativeForward = bSpeculativeAimHeld && Cover.IsValid() && !bUseSlotForward;
 			const FRotator LookAtRot = (TargetLocation - MyLocation).Rotation();
-			const FRotator DesiredRot = bUseSlotForward
-				? FRotator(0.f, CachedSlotForwardYaw, 0.f)
-				: FRotator(0.f, LookAtRot.Yaw, 0.f);
+			float DesiredYaw;
+			if (bUseSlotForward)
+				DesiredYaw = CachedSlotForwardYaw;
+			else if (bUseSpeculativeForward)
+				DesiredYaw = UCoverGeometryStatics::GetFireArcForward(Cover.Data).Rotation().Yaw;
+			else
+				DesiredYaw = LookAtRot.Yaw;
+			const FRotator DesiredRot(0.f, DesiredYaw, 0.f);
 			Ctx.Companion->SetActorRotation(FMath::RInterpTo(Ctx.Companion->GetActorRotation(),
 				DesiredRot, DeltaSeconds, Ctx.Companion->RotationInterpSpeed));
 		}
@@ -4522,18 +4874,19 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			// a backstop so a mid-Phase-A occlusion pauses the trigger (no shots into our own wall). Phase B
 			// walks and owns its own fire cadence, so only guard Phase A (bRepositionStandPhase).
 			if (bRepositionStandPhase && !bSuppressed && !Ctx.Companion->IsReloading())
-				TickStandBurstMuzzleWithhold(Ctx.Companion, Ctx.Target, TickIgnoredAttached, DeltaSeconds, Cover.IsValid() ? &Cover.Data : nullptr);
+				TickStandBurstMuzzleWithhold(Ctx.Companion, Ctx.Target, TickFireTraceIgnored, DeltaSeconds, Cover.IsValid() ? &Cover.Data : nullptr);
 			TickStandUpAndRepositionAction(Ctx.Companion, Anim, Ctx.Blackboard, Cover.Data, bSuppressed, bLowHp, DeltaSeconds);
 			return;
 		}
 		if (CurrentBurstAction == EPeekAction::CornerPeek)
 		{
-			TickCornerPeekAction(Ctx.Companion, Anim, Cover.Data, Ctx.Target, bSuppressed, bLowHp, TickIgnoredAttached, DeltaSeconds);
+			TickCornerPeekAction(Ctx.Companion, Anim, Cover.Data, Ctx.Target, bSuppressed, bLowHp, TickFireTraceIgnored, DeltaSeconds);
 			return;
 		}
 
-		// Suppression abort — duck back down immediately.
-		if (bSuppressed)
+		// Suppression abort — duck back down immediately. Covering fire bypasses this so the
+		// sustained-fire window continues through incoming fire.
+		if (bSuppressed && !bCoveringFire)
 		{
 			if (bDebugLogging) UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=suppressed-mid-burst"), *Ctx.Companion->GetName());
 			ReturnToCover(Ctx.Companion, Anim, Cover.Data, true, bLowHp);
@@ -4582,10 +4935,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		// target can duck behind cover mid-burst; withhold the trigger while the muzzle→target line is
 		// blocked (no shots into the wall) and resume when clear. BurstTimer keeps counting, so FSM flow is
 		// unchanged. Throttled to 10 Hz; uses the muzzle (where rounds originate), not the head eye.
-		TickStandBurstMuzzleWithhold(Ctx.Companion, Ctx.Target, TickIgnoredAttached, DeltaSeconds, Cover.IsValid() ? &Cover.Data : nullptr);
+		TickStandBurstMuzzleWithhold(Ctx.Companion, Ctx.Target, TickFireTraceIgnored, DeltaSeconds, Cover.IsValid() ? &Cover.Data : nullptr);
 
-		// Burst elapsed — return to cover.
-		if (BurstTimer <= 0.f)
+		// Burst elapsed — return to cover. Covering fire holds the peek for the whole window.
+		if (BurstTimer <= 0.f && !bCoveringFire)
 		{
 			if (bDebugLogging)
 			{
@@ -4657,6 +5010,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		FCollisionQueryParams QueryParams;
 		QueryParams.AddIgnoredActor(Ctx.Companion);
 		QueryParams.AddIgnoredActor(Ctx.Companion->GetCurrentWeapon());
+		// This one built its own params and so was the last trace still treating a team-mate as a
+		// blocker after the shared set was widened — the same false block, on the flag that gates the
+		// whole engage decision rather than a single shot.
+		for (AActor* const Ignored : TickFireTraceIgnored) QueryParams.AddIgnoredActor(Ignored);
 		// Trace from the eyeline (GetPawnViewLocation ~= head height), not the actor centre — the lowered-barrel
 		// height falsely reports blocked LoS against elevated enemies / low geometry.
 		const FVector AimOrigin = Ctx.Companion->GetPawnViewLocation();
@@ -4664,6 +5021,13 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	}
 	const bool bLineOfSight = (!LosHit.bBlockingHit) || (LosHit.GetActor() == Ctx.Target);
 
+	// Deliberately measured to the PLAYER, not the follow leader — do NOT chain this to match the
+	// overwatch anchor in BTService_UpdateCompanionState. This leash bounds how far the companion may
+	// fight from the PLAYER, and the pull it arms walks it back to the player specifically. Routed
+	// through the primary it would compound: a secondary at its full leash from a primary already at
+	// ITS full leash sits at twice the intended distance from the player and neither one trips. The
+	// threshold-margin problem that forced the overwatch change is absent here — 1500cm against a VIP
+	// resting ~700cm out is better than 2x margin.
 	bool bPlayerTooFar = false;
 	{
 		APawn* LeashPlayer = nullptr;
@@ -4779,6 +5143,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				const UCapsuleComponent* OpenCap = Ctx.Companion->GetCapsuleComponent();
 				const float OpenStandoff = (OpenCap ? OpenCap->GetScaledCapsuleRadius() : 34.f) + 10.f;
 				const float ReseekArcCos = FMath::Cos(FMath::DegreesToRadians(CoverTuning->CoverFlankArcHalfAngleDeg));
+				const UDoorRegistrySubsystem* OpenDoorRegistry = CoverWorld->GetSubsystem<UDoorRegistrySubsystem>();
 
 				bool bFoundReachable = false;
 				for (const FCover& Candidate : OpenEngageCandidates)
@@ -4792,6 +5157,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
 					if (Occupant && Occupant != CoverController) continue;
 					if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, CoverController, CoverTuning->CoverSwitchPostVacateCooldown))
+						continue;
+					// Behind a closed door = not reachable for this probe (same rule as the EQS
+					// DoorCrossing filter) — else the task exits to MoveToCoverPoint for a cover
+					// the EQS re-pick will then reject.
+					if (IsValid(OpenDoorRegistry) && OpenDoorRegistry->AnyClosedDoorBlocksSegment(MyLocation, Candidate.Data.Location))
 						continue;
 
 					// Fire-arc gate: target must be within the cover's engagement arc.
@@ -4862,6 +5232,37 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		if (bAngleSeekActive && LosBlockedAccum >= AimDropOnLosBlockedSeconds)
 			EndAngleSeek(Ctx.Companion, TEXT("los-blocked"));
 
+		// --- Grenade lob (enemy-grenadier parity): the target has stayed hidden — flush it out.
+		// CanThrow() covers supply/cooldown/telegraph-in-progress; a full window elapses between
+		// attempts whether the throw commits or fails (range/arc). Player-safety: never throw when
+		// the player stands inside blast radius + buffer of the landing point.
+		if (UEnemyGrenadierComponent* GrenComp = Ctx.Companion->GetOrCreateGrenadierComponent())
+		{
+			GrenadeLosBlockedAccum += DeltaSeconds;
+			const ACompanionAIController* GrenAIC = Cast<ACompanionAIController>(Ctx.Companion->GetController());
+			const UCompanionTuningDataAsset* GrenTuning = GrenAIC ? GrenAIC->GetTuning() : nullptr;
+			if (GrenTuning && GrenadeLosBlockedAccum >= GrenTuning->GrenadeLobTriggerLOSBlockedTime)
+			{
+				GrenadeLosBlockedAccum = 0.f;
+
+				bool bPlayerSafe = true;
+				if (const APawn* GrenPlayer = GrenAIC->GetPlayerCharacter())
+				{
+					const float SafeDist = GrenTuning->GrenadeDamageRadius + GrenTuning->GrenadePlayerSafetyBuffer;
+					bPlayerSafe = FVector::DistSquared(GrenPlayer->GetActorLocation(), LastKnownTargetLocation)
+						> FMath::Square(SafeDist);
+				}
+
+				if (bPlayerSafe && bHasLastKnownTargetLocation && !Ctx.Companion->IsReloading()
+					&& GrenComp->CanThrow() && GrenComp->TryThrowAt(LastKnownTargetLocation))
+				{
+					if (bDebugLogging)
+						UE_LOG(LogCompanionAI, Log, TEXT("%s: GRENADE LOB at last-known %s"),
+							*Ctx.Companion->GetName(), *LastKnownTargetLocation.ToCompactString());
+				}
+			}
+		}
+
 		if (bEnableOpenAreaMoveAndShoot)
 		{
 			// Drop the jiggle latch so the clear-LoS path re-anchors JiggleHome when LoS returns.
@@ -4874,9 +5275,10 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				if (bPlayerTooFar)
 					TickMoveShootTowardPlayer(Ctx.Companion, RegainAIC, Ctx.Target, DeltaSeconds);
 				else
-					TickRegainLosReposition(Ctx.Companion, RegainAIC, Ctx.Target, TickIgnoredAttached, DeltaSeconds);
-				// Face the frozen last-seen position (not the live actor) while repositioning.
-				UpdateMoveShootFacing(RegainAIC, Ctx.Target, false);
+					TickRegainLosReposition(Ctx.Companion, RegainAIC, Ctx.Target, TickFireTraceIgnored, DeltaSeconds);
+				// Face the last-seen position (not the live actor) while repositioning — and only while
+				// a fresh trace still proves that spot visible; otherwise it holds the pawn's forward.
+				UpdateMoveShootFacing(Ctx.Companion, RegainAIC, Ctx.Target, false, TickFireTraceIgnored);
 			}
 		}
 		else
@@ -4893,7 +5295,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 		}
 
-		if (LosBlockedAbandonSeconds > 0.f && LosBlockedAccum >= LosBlockedAbandonSeconds)
+		// Hold the abandon while a grenade wind-up plays — OnTaskFinished would cancel the throw
+		// this same branch just committed.
+		const UEnemyGrenadierComponent* AbandonGren = Ctx.Companion->GetGrenadierComponent();
+		const bool bGrenadeWindingUp = IsValid(AbandonGren) && AbandonGren->IsTelegraphing();
+
+		if (!bGrenadeWindingUp && LosBlockedAbandonSeconds > 0.f && LosBlockedAccum >= LosBlockedAbandonSeconds)
 		{
 			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=los-block-abandon"), *Ctx.Companion->GetName());
@@ -4905,6 +5312,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	}
 
 	LosBlockedAccum = 0.f;
+	GrenadeLosBlockedAccum = 0.f;
 
 	// Snapshot the last confirmed LoS position so the blocked path has a frozen facing anchor.
 	LastKnownTargetLocation = TargetLocation;
@@ -4920,7 +5328,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	if (bEnableOpenAreaMoveAndShoot)
 	{
 		if (AAIController* ClearAIC = Cast<AAIController>(Ctx.Companion->GetController()))
-			UpdateMoveShootFacing(ClearAIC, Ctx.Target, true);
+			UpdateMoveShootFacing(Ctx.Companion, ClearAIC, Ctx.Target, true, TickFireTraceIgnored);
 	}
 	else
 	{
@@ -4966,13 +5374,23 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			if (bPlayerTooFar)
 				TickMoveShootTowardPlayer(Ctx.Companion, MoveAIC, Ctx.Target, DeltaSeconds);
 			else
-				TickCombatJiggle(Ctx.Companion, MoveAIC, Ctx.Target, TickIgnoredAttached, DeltaSeconds);
+				TickCombatJiggle(Ctx.Companion, MoveAIC, Ctx.Target, TickFireTraceIgnored, DeltaSeconds);
 		}
 	}
 
+	// Mode burst personality for the open-engage branch — Combat fires longer and pauses shorter,
+	// Defensive and Stealth both collapse to exactly 1. Hoisted out of the block below because this
+	// path runs EVERY FRAME; it takes TickTuning directly so the resolve costs nothing at all here.
+	// The pause scale is the reciprocal, so one lever moves both halves of the cadence in opposite
+	// directions. Pressure is deliberately not passed: it is a cover concept, the open-engage
+	// decrement has never been pressure-scaled, and Pressure01 can hold a stale value from an
+	// earlier cover stint.
+	const float ModeBurstScale = ModePeekConfidenceScale(Ctx.Companion, TickTuning, true);
+	const float ModePauseScale = 1.f / FMath::Max(ModeBurstScale, KINDA_SMALL_NUMBER);
+
 	if (!bReloadingNow)
 	{
-		BurstTimer -= DeltaSeconds;
+		BurstTimer -= bIsFiringBurst ? DeltaSeconds / ModeBurstScale : DeltaSeconds;
 
 		if (bIsFiringBurst && BurstTimer <= 0.0f)
 		{
@@ -4980,7 +5398,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: FIRE STOP reason=burst-end-open"), *Ctx.Companion->GetName());
 			Ctx.Companion->StopWeaponFire();
 			bIsFiringBurst = false;
-			BurstTimer = FirePauseDuration;
+			BurstTimer = FirePauseDuration * ModePauseScale;
 		}
 		else if (!bIsFiringBurst && BurstTimer <= 0.0f)
 		{
@@ -5003,8 +5421,31 @@ void UBTTask_CompanionCombat::OnTaskFinished(UBehaviorTreeComponent& OwnerComp, 
 	ACompanionCharacter* Companion = Controller ? Cast<ACompanionCharacter>(Controller->GetPawn()) : nullptr;
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 
+	// Focus release runs FIRST and independently of the Companion cast. ResetTaskState clears the
+	// Gameplay focus too, but it is only reached when the pawn resolves — and on the death/unpossess
+	// exit it does not, which left a live enemy-actor focus on a controller with no owner. No focus
+	// this task established may outlive the task on any exit.
+	if (IsValid(Controller))
+		Controller->ClearFocus(EAIFocusPriority::Gameplay);
+
 	if (Companion)
 	{
+		// The covering-fire window is owned by ACompanionCharacter and its clock ticks in Tick,
+		// so a task exit (target death, branch abort, new command) must NOT cancel it — killing
+		// one enemy mid-firefight was ending the window and the player's on-screen countdown.
+		// The reload-pause mirror IS task-owned though: a stale true would freeze the clock
+		// until the hard ceiling, so it must be reset here.
+		Companion->SetCoveringFireReloadHeld(false);
+		Companion->SetCoveringFireCoverIdle(false);
+		// The aim-location override is also task-owned (set per combat-task tick). A stale
+		// override after task restart would aim at the dead previous target's last-seen location.
+		Companion->ClearAimLocationOverride();
+
+		// Cancel an in-flight grenade wind-up (enemy-task parity) — no-op unless telegraphing;
+		// the cancel broadcast stops the throw montage.
+		if (UEnemyGrenadierComponent* GrenComp = Companion->GetGrenadierComponent())
+			GrenComp->CancelThrow();
+
 		if (bDebugLogging)
 		{
 			const TCHAR* ResultStr = (TaskResult == EBTNodeResult::Succeeded) ? TEXT("Succeeded")

@@ -43,9 +43,12 @@ public:
 	/** A player-driven swing (open or close) is starting. Call from the door BP at the start of
 	 *  every E-press path, before the timeline plays — makes the leaf pawn-passable for the swing
 	 *  exactly like an AI breach, so it can't launch the opener. Collision restores when the BP
-	 *  reports the swing's end via NotifyDoorStateChanged (or the timeout fires). */
+	 *  reports the swing's end via NotifyDoorStateChanged (or the timeout fires).
+	 *
+	 *  Returns false (and does nothing) while the door is externally gate-locked — the BP must
+	 *  branch on the return value and skip its open timeline when the swing is refused. */
 	UFUNCTION(BlueprintCallable, Category = "Door|State")
-	void NotifySwingStarting();
+	bool NotifySwingStarting();
 
 protected:
 	virtual void BeginPlay() override;
@@ -84,6 +87,9 @@ private:
 
 	/** True from Breach until the BP reports back (or the timeout fires) — blocks re-breach. */
 	bool bOpenInFlight = false;
+
+	/** Set by ForceOpenInstant so the checkpoint fast-forward swing stays silent. */
+	bool bSilentOpen = false;
 
 	/** One-shot guard so a missing-wiring door doesn't spam the timeout warning per pawn entry. */
 	bool bNotifyWiringWarned = false;

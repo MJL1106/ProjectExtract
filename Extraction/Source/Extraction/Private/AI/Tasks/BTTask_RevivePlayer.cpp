@@ -6,6 +6,7 @@
 #include "CompanionAIController.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.h"
+#include "Companion/CompanionBarkTypes.h"
 #include "HealthComponent.h"
 #include "WeaponBase.h"
 #include "GameFramework/Character.h"
@@ -30,6 +31,17 @@ EBTNodeResult::Type UBTTask_RevivePlayer::ExecuteTask(UBehaviorTreeComponent& Ow
 	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(AIC->GetPawn());
 	if (!IsValid(PlayerActor) || !Player || !Player->GetIsDBNO() || !Companion)
 		return EBTNodeResult::Failed;
+
+	// Backstop to the service-side window gate: if the claim moved to another ally between the
+	// window opening and this task starting, never seat a second reviver on the same body. Read-only
+	// on purpose — BTService_UpdateCompanionState owns the claim's lifecycle, so a refusal here must
+	// not release a hold this companion does not own.
+	if (const AActor* Claimant = Player->GetReviveClaimant(); Claimant && Claimant != Companion)
+	{
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: revive refused — %s already holds the claim"),
+			*Companion->GetName(), *GetNameSafe(Claimant));
+		return EBTNodeResult::Failed;
+	}
 
 	Companion->StopWeaponFire();
 	Companion->SetIsRevivingPlayer(true);
@@ -80,12 +92,14 @@ void UBTTask_RevivePlayer::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* No
 
 		bIsHoldingRevive = true;
 		SetReviveAnimsActive(true);
+		Companion->Bark(ECompanionBarkType::RevivingPlayer);
 	}
 
 	ReviveElapsed += DeltaSeconds;
 	if (ReviveElapsed < Companion->ReviveDuration) return;
 
 	Player->ExitDBNO();
+	Companion->Bark(ECompanionBarkType::PlayerRevived);
 
 	UE_LOG(LogCompanionAI, Log, TEXT("Companion revived %s"), *GetNameSafe(PlayerActor));
 	FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);

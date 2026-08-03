@@ -100,7 +100,8 @@ FVector UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(const UWorld* World,
 }
 
 FVector UCoverGeometryStatics::GetCornerPeekApex(const UWorld* World, const FCoverData& Data,
-	ECoverLean Lean, float Standoff, float CapsuleRadius, float ClearanceMargin, const AActor* IgnoreActor)
+	ECoverLean Lean, float Standoff, float CapsuleRadius, float ClearanceMargin,
+	const AActor* IgnoreActor, const AActor* IgnoreActor2)
 {
 	if (Lean != ECoverLean::Left && Lean != ECoverLean::Right)
 		return GetLeanPeekPosition(Data, Lean);
@@ -114,6 +115,7 @@ FVector UCoverGeometryStatics::GetCornerPeekApex(const UWorld* World, const FCov
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CoverCornerApex), false);
 	if (IgnoreActor) Params.AddIgnoredActor(IgnoreActor);
+	if (IgnoreActor2) Params.AddIgnoredActor(IgnoreActor2);
 
 	float CornerLat;
 	bool bExhausted;
@@ -317,7 +319,7 @@ ECoverLean UCoverGeometryStatics::ChooseGapPeekSide(UWorld* World, const FCoverD
 
 bool UCoverGeometryStatics::TryGetCornerPeekApex(const UWorld* World, const FCoverData& Data,
 	ECoverLean Side, float Standoff, float CapsuleRadius, float ClearanceMargin, float MaxReachCm,
-	const AActor* IgnoreActor, FVector& OutApex)
+	const AActor* IgnoreActor, FVector& OutApex, const AActor* IgnoreActor2)
 {
 	if (Side != ECoverLean::Left && Side != ECoverLean::Right) return false;
 	if (!World) return false;
@@ -329,6 +331,7 @@ bool UCoverGeometryStatics::TryGetCornerPeekApex(const UWorld* World, const FCov
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CoverCornerApexCheck), false);
 	if (IgnoreActor) Params.AddIgnoredActor(IgnoreActor);
+	if (IgnoreActor2) Params.AddIgnoredActor(IgnoreActor2);
 
 	float CornerLat;
 	bool bExhausted;
@@ -486,7 +489,10 @@ bool UCoverGeometryStatics::HasThreatFacingSideFlag(const FCoverData& Data, cons
 bool UCoverGeometryStatics::CanPeekShoot(const UObject* WorldContextObject, const FCoverData& Data,
 	bool bCrouched, const FVector& ThreatLoc, float EyeHeight,
 	const AActor* IgnoreThreatActor, const AActor* IgnorePawn,
-	float LeanOffset)
+	float LeanOffset,
+	bool bUseCornerApex, float ApexStandoff,
+	float ApexCapsuleRadius, float ApexClearanceMargin,
+	float ApexMaxReachCm)
 {
 	const UWorld* World = IsValid(WorldContextObject) ? WorldContextObject->GetWorld() : nullptr;
 	if (!World) return false;
@@ -502,7 +508,27 @@ bool UCoverGeometryStatics::CanPeekShoot(const UObject* WorldContextObject, cons
 	constexpr float FrontPeekEyeHeight = 150.f;
 	const float EffectiveEyeHeight = (Lean == ECoverLean::Front)
 		? FMath::Max(EyeHeight, FrontPeekEyeHeight) : EyeHeight;
-	const FVector PeekPos = GetLeanPeekPosition(Data, Lean, LeanOffset) + FVector(0.f, 0.f, EffectiveEyeHeight);
+
+	// Stand-height side peeks: the fixed +-LeanOffset lands behind the wall on tall surfaces.
+	// TryGetCornerPeekApex (reach-bounded) resolves the corner and returns the apex past the
+	// wall's end. Falls back to GetLeanPeekPosition when the march fails, the wall runs past
+	// MarchMax, or the corner exceeds ApexMaxReachCm. Both pawn and threat actor are ignored
+	// in the march traces so an enemy standing at the corner is not read as wall geometry.
+	FVector BasePeekPos;
+	if (bUseCornerApex && (Lean == ECoverLean::Left || Lean == ECoverLean::Right))
+	{
+		FVector ApexPos;
+		if (TryGetCornerPeekApex(World, Data, Lean, ApexStandoff, ApexCapsuleRadius,
+			ApexClearanceMargin, ApexMaxReachCm, IgnorePawn, ApexPos, IgnoreThreatActor))
+			BasePeekPos = ApexPos;
+		else
+			BasePeekPos = GetLeanPeekPosition(Data, Lean, LeanOffset);
+	}
+	else
+	{
+		BasePeekPos = GetLeanPeekPosition(Data, Lean, LeanOffset);
+	}
+	const FVector PeekPos = BasePeekPos + FVector(0.f, 0.f, EffectiveEyeHeight);
 
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CoverPeekShoot), false);
 	if (IgnoreThreatActor) Params.AddIgnoredActor(IgnoreThreatActor);

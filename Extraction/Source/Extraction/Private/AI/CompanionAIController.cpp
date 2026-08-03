@@ -2,6 +2,7 @@
 
 #include "CompanionAIController.h"
 #include "AI/CompanionTuningDataAsset.h"
+#include "AI/Tasks/BTTask_FollowPlayer.h" // LeaderLeashReleaseHysteresis — see GetFollowLeader
 #include "AI/Cover/AICoverSlot.h"
 #include "BehaviorTree/BehaviorTree.h"
 #include "BehaviorTree/BlackboardComponent.h"
@@ -11,6 +12,8 @@
 #include "Kismet/GameplayStatics.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "CompanionCharacter.h"
+#include "HealthComponent.h"
+#include "Companion/CompanionBarkTypes.h"
 #include "Companion/CompanionRoute.h"
 #include "WeaponBase.h"
 #include "Movement/TraversalComponent.h"
@@ -56,6 +59,7 @@ const FName ACompanionAIController::BB_CommandTargetActor(TEXT("CommandTargetAct
 const FName ACompanionAIController::BB_CommandTargetLocation(TEXT("CommandTargetLocation"));
 const FName ACompanionAIController::BB_TakedownMethod(TEXT("TakedownMethod"));
 const FName ACompanionAIController::BB_BreachType(TEXT("BreachType"));
+const FName ACompanionAIController::BB_FollowLeader(TEXT("FollowLeader"));
 
 ACompanionAIController::ACompanionAIController()
 {
@@ -95,6 +99,113 @@ ACompanionAIController::ACompanionAIController()
 float ACompanionAIController::GetHearingSenseMaxAge() const
 {
 	return HearingConfig ? HearingConfig->GetMaxAge() : 3.f;
+}
+
+void ACompanionAIController::NoteAlertedThreat(const FVector& Location)
+{
+	LastAlertedThreatLocation = Location;
+	LastAlertedThreatTime = GetWorld() ? static_cast<float>(GetWorld()->GetTimeSeconds()) : -1e9f;
+}
+
+bool ACompanionAIController::GetRecentAlertedThreat(float MaxAge, FVector& OutLocation) const
+{
+	if (MaxAge <= 0.f || LastAlertedThreatTime < 0.f) return false;
+	const UWorld* World = GetWorld();
+	if (!World || World->GetTimeSeconds() - LastAlertedThreatTime > MaxAge) return false;
+	OutLocation = LastAlertedThreatLocation;
+	return true;
+}
+
+// ---------------------------------------------------------------------
+// Follow leader — one published anchor for every system that has to form up on the same actor the
+// follow task does: the follow-slot EQS context and the cover-switch monitor's formation point.
+// Resolution itself stays in UBTTask_FollowPlayer::ResolveFollowLeader (throttled TActorIterator +
+// leash latches); this is the publish/read seam only.
+// ---------------------------------------------------------------------
+
+bool ACompanionAIController::IsUsableFollowLeader(const ACompanionCharacter* Leader, const ACompanionCharacter* Follower)
+{
+	if (!IsValid(Leader) || Leader == Follower) return false;
+	if (!Leader->GetController()) return false; // a still-captive extractee has no brain to trail
+	if (Leader->GetIsCompanionDBNO()) return false;
+
+	const UHealthComponent* LeaderHealth = Leader->GetHealthComponent();
+	return !IsValid(LeaderHealth) || !LeaderHealth->IsDead();
+}
+
+void ACompanionAIController::SetFollowLeader(AActor* Leader)
+{
+	// Assigned unconditionally: this member is the load-bearing value that GetFollowLeader and every
+	// consumer read, so it must land even on a tick where the blackboard is unavailable.
+	PublishedFollowLeader = Leader;
+
+	UBlackboardComponent* BB = GetBlackboardComponent();
+	if (!BB) return;
+
+	// The per-tick dedup guards the blackboard WRITE only, and is keyed on what was last actually
+	// mirrored — not on the member above. Keying it on the member meant a publish arriving while the BB
+	// was momentarily null still counted as "already published", so the key stayed empty for that
+	// leader for good.
+	if (MirroredFollowLeader.Get() == Leader) return;
+
+	// The key is authored on the companion blackboard asset in-engine. Until it exists, follow and
+	// cover both still read the leader through the accessors above — only the blackboard mirror goes
+	// dark — so this warns once and carries on rather than failing anything.
+	if (BB->GetKeyID(BB_FollowLeader) == FBlackboard::InvalidKey)
+	{
+		if (!bFollowLeaderKeyWarned)
+		{
+			bFollowLeaderKeyWarned = true;
+			UE_LOG(LogCompanionAI, Warning,
+				TEXT("%s: blackboard has no '%s' key — add it as Object with base class Actor to mirror the follow leader."),
+				*GetName(), *BB_FollowLeader.ToString());
+		}
+		return;
+	}
+
+	BB->SetValueAsObject(BB_FollowLeader, Leader);
+	MirroredFollowLeader = Leader;
+}
+
+AActor* ACompanionAIController::GetFollowLeader() const
+{
+	AActor* Leader = PublishedFollowLeader.Get();
+	if (!IsValid(Leader)) return CachedPlayerCharacter.Get();
+
+	// A COMPANION leader is re-tested at read time, not just at publish time: cover scoring reads this
+	// on the combat branch, long after the follow task that published it stopped ticking, so a primary
+	// that goes DBNO mid-fight must stop anchoring the VIP straight away. The player never fails the
+	// test (it isn't a companion) and so is returned unchanged.
+	const ACompanionCharacter* LeaderCompanion = Cast<ACompanionCharacter>(Leader);
+	if (!LeaderCompanion) return Leader;
+
+	if (!IsUsableFollowLeader(LeaderCompanion, Cast<ACompanionCharacter>(GetPawn())))
+		return CachedPlayerCharacter.Get();
+
+	// The LEASH is re-tested here for the same reason and at the same level as capability above —
+	// ResolveFollowLeader owns it, but that only runs on the follow branch, so a primary commanded away
+	// while the VIP is fighting would otherwise anchor its cover scoring at a departing leader forever.
+	// Overwatch happens to self-correct on its own radius; cover scoring has nothing that would.
+	//
+	// A BACKSTOP, not a co-equal arbiter — hence the margin, and it is load-bearing. This accessor is
+	// const and cannot latch, and on the combat branch it is the SOLE authority because the task is not
+	// ticking. Testing the same raw break distance the task tests would make a primary loitering on that
+	// boundary flip the answer every service tick, and BTService_CoverSwitchMonitor reads this straight
+	// into its formation anchor — so the anchor would jump the whole leader-to-player distance tick to
+	// tick and churn the cover scorer's proximity term. That is the exact indecision this round removes.
+	// Sitting a full release band ABOVE the break distance puts this strictly outside the task's latched
+	// hysteresis, so it can only ever fire for the runaway leader it was added to catch, never contend
+	// with a decision the task has already made.
+	const APawn* Player = CachedPlayerCharacter.Get();
+	const float BackstopDistance = Tuning
+		? Tuning->SecondaryLeaderLeashDistance + UBTTask_FollowPlayer::LeaderLeashReleaseHysteresis : 0.f;
+	if (Tuning && Tuning->SecondaryLeaderLeashDistance > 0.f && IsValid(Player)
+		&& FVector::Dist2D(Leader->GetActorLocation(), Player->GetActorLocation()) > BackstopDistance)
+	{
+		return CachedPlayerCharacter.Get();
+	}
+
+	return Leader;
 }
 
 // NB deliberately NO UpdateControlRotation override (2nd attempt REVERTED 2026-07-12, director
@@ -185,6 +296,18 @@ void ACompanionAIController::OnUnPossess()
 	PlayerTraversalComp.Reset();
 	TimeSinceClosedToPlayer = 0.f;
 	TimeOnDifferentLevel = 0.f;
+	bWarpRefusalWarned = false;
+
+	// The reference is scoped to the pawn this controller drives. Death and revive don't unpossess,
+	// so this doesn't cost the player their section direction — it only stops a recycled controller
+	// inheriting the last pawn's facing.
+	FacingReferenceRoute.Reset();
+
+	// Same scope, and the blackboard is rebuilt on the next possess: a stale published leader would
+	// otherwise dedup the first publish of the new pawn's follow and leave the mirror key empty.
+	PublishedFollowLeader.Reset();
+	MirroredFollowLeader.Reset();
+	bFollowLeaderKeyWarned = false;
 
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearAllTimersForObject(this);
@@ -206,6 +329,10 @@ void ACompanionAIController::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	PlayerTraversalComp.Reset();
 	TimeSinceClosedToPlayer = 0.f;
 	TimeOnDifferentLevel = 0.f;
+	bWarpRefusalWarned = false;
+	PublishedFollowLeader.Reset();
+	MirroredFollowLeader.Reset();
+	bFollowLeaderKeyWarned = false;
 
 	if (UWorld* World = GetWorld())
 		World->GetTimerManager().ClearAllTimersForObject(this);
@@ -259,6 +386,12 @@ void ACompanionAIController::OnPlayerTraversalStarted(ETraversalType Type, float
 
 	if (!T->bMirrorPlayerTraversalEnabled) return;
 
+	// The player's own handler runs first on this broadcast and aborts the traversal on the
+	// spot when its montage can't play — don't mirror a vault the player never performed.
+	APawn* PlayerPawn = UGameplayStatics::GetPlayerCharacter(this, 0);
+	const IExtractionPlayerInterface* PlayerIface = Cast<IExtractionPlayerInterface>(PlayerPawn);
+	if (PlayerIface && !PlayerIface->IsInTraversal()) return;
+
 	const float DistToObstacle = FVector::Dist(MyPawn->GetActorLocation(), ObstacleLocation);
 	if (DistToObstacle > T->MirrorTriggerRange)
 	{
@@ -286,10 +419,13 @@ void ACompanionAIController::TickWarpFallback()
 	const UCompanionTuningDataAsset* T = Tuning;
 	if (!MyPawn || !Player || !T) return;
 
+	// The refusal latch tracks one streak of "stranded and un-warpable". Whenever the stranded timer
+	// resets the streak is over, so a later refusal is new and deserves its own Warning.
 	if (!T->bWarpToPlayerEnabled)
 	{
 		TimeSinceClosedToPlayer = 0.f;
 		TimeOnDifferentLevel = 0.f;
+		bWarpRefusalWarned = false;
 		return;
 	}
 
@@ -297,6 +433,7 @@ void ACompanionAIController::TickWarpFallback()
 	if (DistToPlayer < T->WarpMinDistance)
 	{
 		TimeSinceClosedToPlayer = 0.f;
+		bWarpRefusalWarned = false;
 		return;
 	}
 
@@ -311,11 +448,15 @@ void ACompanionAIController::TickWarpFallback()
 		TimeOnDifferentLevel += WarpTickInterval;
 		if (TimeOnDifferentLevel > ZMismatchTimeBudget)
 		{
-			UE_LOG(LogCompanionAI, Log,
+			UE_LOG(LogCompanionAI, Verbose,
 				TEXT("Z-mismatch warp triggered (ZDiff=%.0f, time=%.1fs)"),
 				ZDiff, TimeOnDifferentLevel);
 			ExecuteWarpBehindPlayer();
-			TimeOnDifferentLevel = 0.f;
+
+			// One warp attempt per tick, maximum. A refused warp no longer resets either timer, so
+			// without this the ShouldWarp() block below would fire a second attempt on the same tick —
+			// two nav projections and two teleport probes for one decision.
+			return;
 		}
 	}
 	else
@@ -323,6 +464,7 @@ void ACompanionAIController::TickWarpFallback()
 		TimeOnDifferentLevel = 0.f;
 	}
 
+	// Fallthrough for the non-Z case: same-floor stranding, judged on time and camera visibility.
 	if (ShouldWarp())
 		ExecuteWarpBehindPlayer();
 }
@@ -359,7 +501,7 @@ bool ACompanionAIController::ShouldWarp() const
 	return !IsCompanionRecentlyRendered();
 }
 
-bool ACompanionAIController::TeleportToLocation(const FVector& Location, const FRotator& Rotation)
+bool ACompanionAIController::TeleportToLocation(const FVector& Location, const FRotator& Rotation, bool bForce)
 {
 	static constexpr float DefaultNavProjectExtent = 500.f;
 
@@ -367,16 +509,22 @@ bool ACompanionAIController::TeleportToLocation(const FVector& Location, const F
 	UWorld* World = GetWorld();
 	if (!MyPawn || !World) return false;
 
-	if (UTraversalComponent* OwnTrav = MyPawn->FindComponentByClass<UTraversalComponent>())
-	{
-		if (OwnTrav->IsBusy())
-			OwnTrav->CancelTraversal();
-	}
-
-	StopMovement();
-
 	UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(World);
 	if (!NavSys) return false;
+
+	UTraversalComponent* OwnTrav = MyPawn->FindComponentByClass<UTraversalComponent>();
+
+	// A traversing pawn cannot be probed truthfully: StartTraversal drops the capsule to NoCollision,
+	// so the overlap test finds nothing and reports success vacuously — and CancelTraversal then moves
+	// the pawn itself (depenetration + floor snap), invalidating the answer before the real teleport
+	// runs. Refuse instead; traversals are short and every caller of the unforced path retries.
+	if (!bForce && IsValid(OwnTrav) && OwnTrav->IsBusy())
+	{
+		UE_LOG(LogCompanionAI, Verbose,
+			TEXT("TeleportToLocation: refused — traversal in progress, cannot probe %s; retrying once it ends"),
+			*Location.ToString());
+		return false;
+	}
 
 	const float ProjectExtent = IsValid(Tuning) ? Tuning->WarpNavProjectExtent : DefaultNavProjectExtent;
 	FNavLocation OutLoc;
@@ -386,8 +534,29 @@ bool ACompanionAIController::TeleportToLocation(const FVector& Location, const F
 		return false;
 	}
 
-	MyPawn->TeleportTo(OutLoc.Location, Rotation);
-	return true;
+	// Probe first. Everything below this point is destructive to the companion's current state, and
+	// callers retry on failure — a refused destination must cost nothing so the retry is free.
+	// FindTeleportSpot is the non-mutating query: TeleportTo(bIsATest) still relocates the component,
+	// it only suppresses the OnTeleported notification. The scratch vector absorbs the adjusted spot;
+	// the real TeleportTo below stays the authoritative result.
+	if (!bForce)
+	{
+		FVector ProbeLocation = OutLoc.Location;
+		if (!World->FindTeleportSpot(MyPawn, ProbeLocation, Rotation))
+		{
+			UE_LOG(LogCompanionAI, Verbose,
+				TEXT("TeleportToLocation: destination %s refused (encroachment / blocked) — pawn state untouched"),
+				*OutLoc.Location.ToString());
+			return false;
+		}
+	}
+
+	if (IsValid(OwnTrav) && OwnTrav->IsBusy())
+		OwnTrav->CancelTraversal();
+
+	StopMovement();
+
+	return MyPawn->TeleportTo(OutLoc.Location, Rotation, /*bIsATest*/ false, /*bNoCheck*/ false);
 }
 
 void ACompanionAIController::ExecuteWarpBehindPlayer()
@@ -409,7 +578,30 @@ void ACompanionAIController::ExecuteWarpBehindPlayer()
 			*Goal.ToString(), bHardWarp ? TEXT("HARD") : TEXT("SOFT"), TimeSinceClosedToPlayer);
 		TimeSinceClosedToPlayer = 0.f;
 		TimeOnDifferentLevel = 0.f;
+		bWarpRefusalWarned = false;
+		return;
 	}
+
+	// Timers deliberately left running — the companion is still stranded, so the next warp tick
+	// retries. A refused teleport is side-effect free, so the retry cadence costs nothing.
+
+	// Past the hard threshold the companion is stranded beyond what the design tolerates AND cannot be
+	// recovered — worth shouting about, but exactly once. bHardWarp latches true and this path runs
+	// twice a second, so an unreachable goal would otherwise log a Warning for the rest of the session.
+	// Everything else (soft-threshold retries, repeats of the same refusal) stays Verbose, formatted
+	// lazily by UE_LOG so the suppressed path allocates nothing.
+	if (bHardWarp && !bWarpRefusalWarned)
+	{
+		bWarpRefusalWarned = true;
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("Warp REFUSED at %s (HARD threshold, stuck=%.1fs) — companion stranded, retrying every %.1fs (further refusals logged at Verbose)"),
+			*Goal.ToString(), TimeSinceClosedToPlayer, WarpTickInterval);
+		return;
+	}
+
+	UE_LOG(LogCompanionAI, Verbose,
+		TEXT("Warp REFUSED at %s (%s threshold, stuck=%.1fs) — companion still stranded, retrying next tick"),
+		*Goal.ToString(), bHardWarp ? TEXT("HARD") : TEXT("SOFT"), TimeSinceClosedToPlayer);
 }
 
 void ACompanionAIController::ReleaseNextCoverSlotIfClaimed()
@@ -466,6 +658,20 @@ void ACompanionAIController::IssueCommand(ECompanionCommand Command, ETakedownMe
 		static_cast<int32>(Method),
 		*GetNameSafe(TargetActor),
 		*TargetLocation.ToString());
+
+	// Acknowledge the order out loud — the accepted-command confirm the player acts on.
+	if (const ACompanionCharacter* Comp = Cast<ACompanionCharacter>(GetPawn()))
+	{
+		switch (Command)
+		{
+		case ECompanionCommand::Breach:    Comp->Bark(ECompanionBarkType::AckBreach); break;
+		case ECompanionCommand::Takedown:  Comp->Bark(ECompanionBarkType::AckTakedown); break;
+		case ECompanionCommand::Loot:      Comp->Bark(ECompanionBarkType::AckLoot); break;
+		case ECompanionCommand::Explore:   Comp->Bark(ECompanionBarkType::AckExplore); break;
+		case ECompanionCommand::TakeCover: Comp->Bark(ECompanionBarkType::TakingCover); break;
+		default: break;
+		}
+	}
 }
 
 void ACompanionAIController::SetBreachType(EBreachType Type)
@@ -547,4 +753,47 @@ void ACompanionAIController::StopRoute(bool bAborted)
 
 	UE_LOG(LogCompanionAI, Log, TEXT("%s: StopRoute (aborted=%d)"),
 		*GetName(), bAborted ? 1 : 0);
+}
+
+// ---------------------------------------------------------------------
+// Facing reference — which way the current level section runs. Read by the companion state service
+// while following; deliberately holds no blackboard key, since nothing in the BT branches on it.
+// ---------------------------------------------------------------------
+
+void ACompanionAIController::SetFacingReferenceRoute(ACompanionRoute* Route)
+{
+	// Name the check that failed. A facing reference that quietly does nothing is invisible in PIE,
+	// and the ways to get it wrong — untick the flag, point the trigger at a one-waypoint marker —
+	// all look identical from the level.
+	const TCHAR* Rejection = nullptr;
+	if (!IsValid(Route))                    Rejection = TEXT("route is null or being destroyed");
+	else if (!Route->bUseAsFacingReference) Rejection = TEXT("bUseAsFacingReference is not ticked on the route");
+	else if (Route->NumPoints() < 2)        Rejection = TEXT("route has fewer than 2 waypoints, so it has no direction");
+
+	if (Rejection)
+	{
+		UE_LOG(LogCompanionAI, Warning,
+			TEXT("%s: SetFacingReferenceRoute(%s) rejected — %s. Any existing reference has been cleared."),
+			*GetName(), *GetNameSafe(Route), Rejection);
+		FacingReferenceRoute.Reset();
+		return;
+	}
+
+	FacingReferenceRoute = Route;
+
+	UE_LOG(LogCompanionAI, Log, TEXT("%s: facing reference set to %s (%d pts)"),
+		*GetName(), *Route->GetName(), Route->NumPoints());
+}
+
+ACompanionRoute* ACompanionAIController::GetFacingReferenceRoute() const
+{
+	return FacingReferenceRoute.Get();
+}
+
+void ACompanionAIController::ClearFacingReferenceRoute()
+{
+	if (const ACompanionRoute* Previous = FacingReferenceRoute.Get())
+		UE_LOG(LogCompanionAI, Log, TEXT("%s: facing reference cleared (was %s)"), *GetName(), *Previous->GetName());
+
+	FacingReferenceRoute.Reset();
 }

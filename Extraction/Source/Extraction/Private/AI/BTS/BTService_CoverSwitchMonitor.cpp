@@ -3,6 +3,7 @@
 // P3 AICS migration: cover source changed from AAICoverSlot line-segment slots to FCoverHandle/FCoverData points.
 
 #include "BTService_CoverSwitchMonitor.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "AI/AITargetingStatics.h"
 #include "AI/BlackboardKeyType_Cover.h"
 #include "AI/CompanionCoverStatics.h"
@@ -99,6 +100,8 @@ void UBTService_CoverSwitchMonitor::InitializeFromAsset(UBehaviorTree& Asset)
 
 void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_CompanionCoverSwitchMonitor);
+
 	Super::TickNode(OwnerComp, NodeMemory, DeltaSeconds);
 
 	FCoverSwitchMonitorMemory& Mem = *reinterpret_cast<FCoverSwitchMonitorMemory*>(NodeMemory);
@@ -293,6 +296,23 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		Mem.CompromiseConsecutiveCount = 0;
 	}
 
+	// Commanded cover hold: the player put the companion on this wall, so neither the score-based
+	// switch below nor the exit-on-trigger-clear may move it off. A compromise break is the one
+	// exception — the enemy has the angle, which voids the order — so it releases the hold and then
+	// takes the ordinary relocate path. Releasing here (rather than leaving the hold latched and
+	// special-casing downstream) is also what stops MoveToCoverPoint's hold restore from dragging
+	// the companion straight back onto the broken point.
+	if (ACompanionCharacter* HoldCompanion = Cast<ACompanionCharacter>(Pawn))
+	{
+		if (HoldCompanion->IsCommandedCoverHoldActive())
+		{
+			if (!bCompromiseBreak) return;
+			HoldCompanion->ClearCommandedCoverHold();
+			UE_LOG(LogCompanionAI, Log,
+				TEXT("[COVMOVE] %s commanded-hold released by compromise break — relocating"), *GetNameSafe(Pawn));
+		}
+	}
+
 	if (!bCompromiseBreak)
 	{
 		if (Mem.TimeSinceArrival < Tuning->CoverSwitchMinDwell) return;
@@ -387,7 +407,11 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	};
 
 	// TODO: lift formation-point computation to a shared utility (spec §5.7 open question).
-	// FollowPlayer uses a velocity-relative offset; the spec wants a fixed actor-facing offset.
+	// FollowPlayer uses a velocity-relative offset; the spec wants a fixed actor-facing offset — that
+	// frame difference is the open question and is why this cannot simply call the follow task's maths.
+	// Everything AROUND the frame is now duplicated deliberately and must be kept in step by hand: the
+	// resolved anchor actor, the side mirror, the leader-anchored back-bias zeroing, the lead floor and
+	// the player-standoff clamp. Any edit to those in BTTask_FollowPlayer needs the matching edit here.
 	AActor* Player = Cast<AActor>(BB->GetValueAsObject(PlayerActorKey.SelectedKeyName));
 	if (!IsValid(Player))
 	{
@@ -411,17 +435,89 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		}
 	}
 
-	// Combat mode anchors the candidate search AHEAD of the player (mirrors the FollowPlayer lead)
-	// so cover-to-cover switches gain ground instead of hanging back at the follow formation.
+	// Combat mode anchors the candidate search AHEAD of the formation anchor (mirrors the FollowPlayer
+	// lead) so cover-to-cover switches gain ground instead of hanging back at the follow formation.
 	const ACompanionCharacter* CompanionPawn = Cast<ACompanionCharacter>(Pawn);
 	const bool bCombatLead = CompanionPawn && CompanionPawn->GetMode() == ECompanionMode::Combat;
-	const FVector FormationPoint = bCombatLead
-		? Player->GetActorLocation()
-			+ Player->GetActorForwardVector() * Tuning->CombatModeLeadDistance
-			+ Player->GetActorRightVector()   * Tuning->CombatModeLeadOffsetRight
-		: Player->GetActorLocation()
-			+ Player->GetActorRightVector()      * Tuning->FormationOffsetRight
-			+ (-Player->GetActorForwardVector()) * Tuning->FormationOffsetBack;
+
+	// Anchor on the same ACTOR the follow task forms up on, not the player. The side sign and stagger
+	// below were mirrored for a secondary but the anchor was left player-keyed, so the VIP's cover
+	// scoring pulled toward the player while its follow pulled toward the primary — two destinations,
+	// read in play as drifting and indecision between slots. GetFollowLeader is the value the follow
+	// task resolved, and it is the PLAYER for a primary companion, so the primary keeps the original
+	// anchor exactly. It also falls back to the player before follow has ever published one.
+	const AActor* ResolvedLeader = Controller->GetFollowLeader();
+	const AActor* FormationAnchor = IsValid(ResolvedLeader) ? ResolvedLeader : Player;
+	const bool bLeaderAnchored = FormationAnchor != Player;
+
+	// Mirror the follow task's per-companion side/stagger so a secondary companion (the armed
+	// extractee) scores cover on the side it actually follows on, not the primary's. Enemies have no
+	// CompanionPawn and the primary is sign +1 / bias 0 — both keep the original anchor exactly.
+	//
+	// The bias is ZEROED on the leader-anchored path, matching BTTask_FollowPlayer: the chain already
+	// staggers the pair by a full FormationOffsetBack, so applying it again on top only drags the VIP
+	// further off track. Repointing the anchor without this left the cover anchor and the follow anchor
+	// a full SecondaryFormationBackBias apart — the same split this whole change removes, and the exact
+	// failure the lead comment below already names.
+	const float SideSign = CompanionPawn ? CompanionPawn->GetFormationSideSign() : 1.f;
+	const float BackBias = (CompanionPawn && !bLeaderAnchored)
+		? CompanionPawn->GetFormationBackBias(Tuning->SecondaryFormationBackBias) : 0.f;
+
+	// Combat lead applies the stagger too (see the §5.7 TODO above — same duplicated maths): the bias
+	// shortens the lead, floored the same way BTTask_FollowPlayer does, or a secondary's cover anchor
+	// and follow anchor sit a full SecondaryFormationBackBias apart and it switches cover backwards.
+	//
+	// KNOWN and NEW, deliberately accepted: on the leader-anchored path this lead now COMPOUNDS — a
+	// Combat-mode VIP takes point ahead of a primary that is itself taking point ahead of the player,
+	// so the chain leads twice. This is a property the anchor repoint introduced, not one inherited:
+	// before it, this lead was player-anchored and did not compound, it simply disagreed with follow.
+	// The trade is deliberate — a shared doubly-led anchor beats two anchors pulling apart. Anchoring
+	// the lead back on the player here would undo the compounding and immediately re-open that split,
+	// because BTTask_FollowPlayer leads off the LEADER and feeds that same point into its idle gate, so
+	// the cover search and the idle gate would then be judging different points.
+	//
+	// FOLLOW-UP, needs PIE: floor the chained lead in BOTH files in one edit — halve
+	// CombatModeLeadDistance on the leader-anchored path here and at the OffsetBack assignment in
+	// BTTask_FollowPlayer::TickTask. Changing either alone re-opens the split.
+	constexpr float LeadFloorMargin = 30.f;
+	const float LeadDistance = FMath::Max(Tuning->CombatModeLeadDistance - BackBias,
+		Tuning->AcceptableRadius + LeadFloorMargin);
+
+	FVector FormationPoint = bCombatLead
+		? FormationAnchor->GetActorLocation()
+			+ FormationAnchor->GetActorForwardVector() * LeadDistance
+			+ FormationAnchor->GetActorRightVector()   * (Tuning->CombatModeLeadOffsetRight * SideSign)
+		: FormationAnchor->GetActorLocation()
+			+ FormationAnchor->GetActorRightVector()      * (Tuning->FormationOffsetRight * SideSign)
+			+ (-FormationAnchor->GetActorForwardVector()) * (Tuning->FormationOffsetBack + BackBias);
+
+	// Player-standoff clamp, leader-anchored only — mirrors BTTask_FollowPlayer's clamp on the same
+	// point, and for the same reason: the leader is a companion that can stand anywhere relative to the
+	// player, so a Combat-mode primary taking point (or the stealth tuck at short range) drops the
+	// trailing anchor straight into the player's lap. Without it here the cover anchor could sit inside
+	// a ring the follow anchor can never enter, and the two would disagree again. Mode-agnostic by
+	// design: it is the player-relative geometry that is unacceptable, not the mode that produced it.
+	if (bLeaderAnchored)
+	{
+		const FVector PawnLoc = Pawn->GetActorLocation();
+		const FVector PlayerLoc = Player->GetActorLocation();
+		// Same read-time floor the follow task applies, reproduced rather than approximated so the two
+		// clamps target an identical ring (LeadFloorMargin is the follow task's FollowDistMargin).
+		const float EffMinSep = FMath::Min(Tuning->FollowMinSeparation, Tuning->AcceptableRadius - LeadFloorMargin);
+		const float EffStandoff = FMath::Max(Tuning->FollowIdleStandoff, EffMinSep + LeadFloorMargin);
+		if (EffStandoff > 0.f && FVector::Dist2D(FormationPoint, PlayerLoc) < EffStandoff)
+		{
+			FVector FromPlayer = (FormationPoint - PlayerLoc).GetSafeNormal2D();
+			if (FromPlayer.IsNearlyZero()) FromPlayer = (PawnLoc - PlayerLoc).GetSafeNormal2D();
+			if (FromPlayer.IsNearlyZero()) FromPlayer = (-Player->GetActorForwardVector()).GetSafeNormal2D();
+			if (!FromPlayer.IsNearlyZero())
+			{
+				const float AnchorZ = FormationPoint.Z; // the anchor's floor, never the player's
+				FormationPoint = PlayerLoc + FromPlayer * EffStandoff;
+				FormationPoint.Z = AnchorZ;
+			}
+		}
+	}
 
 	// Shared scorer params: neutral defaults reproduce the old local formula exactly for enemies
 	// and for Normal/Stealth companions; a Combat-mode companion gets the advance shift (band floor
@@ -477,6 +573,11 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	const float MultiThreatPenalty = FMath::Clamp(Tuning->MultiThreatExposurePenalty, 0.f, 1.f);
 	const bool bScoreMultiThreat = ExtraThreatActors.Num() > 0 && MultiThreatPenalty < 1.f && Tuning->bCoverRequiresBodyProtection;
 
+	// Full known-threat set (focused target + extras) for the path-threat reject below — the
+	// relocate walk must route around the group, so the segment test needs every known enemy.
+	TArray<AActor*, TInlineAllocator<8>> PathThreatActors(ExtraThreatActors);
+	PathThreatActors.Add(CombatTarget);
+
 	// Hostile anchors gathered once per re-eval — enemy pawns + covers enemies have declared intent on.
 	FHostileAnchors HostileAnchors;
 	const bool bRejectHostileAdjacent = Tuning->MinHostileCoverDistance > 0.f || Tuning->MinHostilePawnDistance > 0.f;
@@ -518,6 +619,13 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 		// or heading to. Pure 2D distance — runs before the trace-heavy peek gate.
 		if (bRejectHostileAdjacent && UCoverScoringStatics::IsNearHostileAnchor(Candidate.Data.Location,
 			HostileAnchors, Tuning->MinHostileCoverDistance, Tuning->MinHostilePawnDistance))
+			continue;
+
+		// Path-threat reject: the straight-line approach to this candidate passes through the known
+		// threat set — a compromised relocate must never charge the group to reach a scoring winner.
+		// Pure 2D segment math — also pre-trace.
+		if (CompanionCover::PathPassesNearThreat(Pawn->GetActorLocation(), Candidate.Data.Location,
+			PathThreatActors, Tuning->RelocatePathThreatClearance))
 			continue;
 
 		// Cover must offer a position with LoS to the target.

@@ -11,6 +11,7 @@ class UHealthComponent;
 class UWeaponComponent;
 class UTraversalComponent;
 class UExtractionAnimInstance;
+class AActor;
 class AWeaponBase;
 class UAnimMontage;
 class USceneComponent;
@@ -43,6 +44,12 @@ public:
 	virtual void ExitDBNO() = 0;
 	virtual ETraversalType GetActiveTraversalType() const = 0;
 	virtual bool IsInTraversal() const = 0;
+
+	/** True when this character can play a traversal montage of the given type from
+	 *  designer-assigned montage properties (kit-migrated player: the body mesh runs the
+	 *  pristine kit AnimBP, not UExtractionAnimInstance). Default false — callers fall
+	 *  back to the anim-instance montage lookup. */
+	virtual bool HasTraversalMontage(ETraversalType /*Type*/) const { return false; }
 	virtual bool GetIsVaulting() const = 0;
 	virtual FVector GetVaultTargetLocation() const = 0;
 	virtual float GetVaultSurfaceHeight() const = 0;
@@ -72,6 +79,10 @@ public:
 	/** Notify the implementing character that ADS state changed. Default no-op. */
 	virtual void NotifyADSChanged(bool /*bIsADS*/) {}
 
+	/** Fire pressed while the kit throwable (grenade) slot is equipped — implementations route the
+	 *  press to the kit item's BeginFire instead of the C++ hitscan weapon. Default no-op. */
+	virtual void NotifyThrowableFirePressed() {}
+
 	/** Normalized auto-lean suggestion: -1 = lean left, 0 = none, +1 = lean right.
 	 *  Cosmetic, local-only. Default 0 for classes that don't implement auto-lean. */
 	virtual float GetAutoLeanAlpha() const { return 0.f; }
@@ -91,4 +102,24 @@ public:
 
 	/** The montage this character plays while being revived, or nullptr. */
 	virtual const UAnimMontage* GetBeingRevivedMontage() const { return nullptr; }
+
+	// --- Single-reviver claim ---
+	// Two allies (primary companion + armed VIP) run the SAME behaviour tree against the same
+	// downed body, each with its own per-instance commit flag that the other never reads. Without
+	// arbitration both open their revive window, both snap to the identical authored pair offset
+	// and both play the kneel. The claim makes the window single-holder: the loser's branch never
+	// opens, so it keeps fighting instead of walking in and bailing late.
+	//
+	// Default is a no-op grant — the legacy player class keeps its current behaviour.
+
+	/** Claim the exclusive right to revive this character. True when the caller now holds it
+	 *  (idempotent for the current holder). False when another still-capable actor holds it. */
+	virtual bool TryClaimRevive(AActor* /*Claimant*/) { return true; }
+
+	/** Drop the claim. No-ops unless the caller is the current holder, so a losing bidder's
+	 *  release can never free the winner's hold. */
+	virtual void ReleaseReviveClaim(AActor* /*Claimant*/) {}
+
+	/** Current claim holder, or nullptr when unclaimed. */
+	virtual AActor* GetReviveClaimant() const { return nullptr; }
 };

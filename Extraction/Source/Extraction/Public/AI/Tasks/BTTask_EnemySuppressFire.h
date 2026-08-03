@@ -35,6 +35,10 @@ private:
 		float PhaseTimer = 0.f;
 		bool bAimOverrideActive = false;
 		bool bFiring = false;
+		/** True once LOS has been confirmed at least once -- a never-sighted ForceEngage'd enemy must never fire. */
+		bool bEverHadLOS = false;
+		/** Seconds since LOS was last true; fires while <= FireLosLostGrace. */
+		float LosLostTimer = 0.f;
 	};
 
 	UPROPERTY(EditDefaultsOnly, Category = "Combat|Suppress", meta = (ClampMin = "0.5"))

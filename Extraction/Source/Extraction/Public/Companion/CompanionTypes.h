@@ -6,11 +6,13 @@
 #include "CompanionTypes.generated.h"
 
 /** Player-commanded directive. Sits above ECompanionPosture: mode is what the player ordered,
- *  posture is the situational state the BT service derives from it (and from combat). */
+ *  posture is the situational state the BT service derives from it (and from combat).
+ *  Normal presents as "Defensive" everywhere the player sees it. The ENUMERATOR NAME must stay
+ *  Normal — Blueprint enum pins bind by name, and renaming it silently breaks every placed node. */
 UENUM(BlueprintType)
 enum class ECompanionMode : uint8
 {
-	Normal  UMETA(DisplayName = "Normal"),
+	Normal  UMETA(DisplayName = "Defensive"),
 	Combat  UMETA(DisplayName = "Combat"),
 	Stealth UMETA(DisplayName = "Stealth"),
 };

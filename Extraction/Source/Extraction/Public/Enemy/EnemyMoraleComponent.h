@@ -54,11 +54,23 @@ public:
 
 	// --- Phase 5: squad-routed ingress (called by UEnemySquad, bypasses radius check) ---
 
-	/** A squad member died. Applies ally/officer death morale loss without radius check. */
-	void NotifySquadAllyDied(bool bWasOfficer);
+	/** A squad member died. Applies ally/officer death morale loss without radius check —
+	 *  morale drops squad-wide over the radio, so DeathLocation does not gate anything. */
+	void NotifySquadAllyDied(bool bWasOfficer, const FVector& DeathLocation);
 
 	/** Officer rally: boosts morale, temporarily raises morale floor, un-pins Broken/Shaken. */
 	void NotifyRally(float MoraleBoost, float FloorRaise);
+
+	/** Director wave watchdog: restore morale above ShakenThreshold so the enemy regains bAggressive
+	 *  pursuit in the combat fire task. Lighter than NotifyRally — no floor raise, no timer. */
+	void RallyToConfident();
+
+	/** Director last-man latch: while pinned, morale losses are ignored (gains still apply) and the
+	 *  state resolves to Confident regardless of value. A held floor rather than RallyToConfident's
+	 *  one-shot, so a fresh morale hit cannot abort the wave last man's pursue halfway.
+	 *  Routes through EvaluateState so the OnMoraleStateChanged broadcast (and the BB_MoraleState
+	 *  key written from it) stays in step with what GetMoraleState() reports. */
+	void SetMoralePinnedConfident(bool bPinned);
 
 	/** Delegate broadcast on state transitions. Slice C's controller subscribes to write BB. */
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Morale")
@@ -104,6 +116,9 @@ private:
 	float LastLossWorldTime = -1e9f;
 	float LastFlankLossWorldTime = -1e9f;
 	bool bLowHealthFired = false;
+
+	/** True while the director holds this enemy at Confident (wave last-man latch). */
+	bool bMoralePinnedConfident = false;
 
 	// --- Cached references ---
 	UPROPERTY()

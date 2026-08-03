@@ -81,6 +81,22 @@ bool FCompanionSearchRoomEngagementPolicyTest::RunTest(const FString& Parameters
 		ShouldTreatRoomAsHot(ECompanionMode::Combat, false, true));
 	TestTrue(TEXT("A real combat target makes every mode's room hot"),
 		ShouldTreatRoomAsHot(ECompanionMode::Stealth, true, false));
+
+	// Full acquisition gate. ECompanionMode::Normal is the mode the player sees as "Defensive".
+	TestFalse(TEXT("Defensive ignores an enemy that knows neither the player nor the companion"),
+		CanAcquireTarget(ECompanionMode::Normal, false, false));
+	TestTrue(TEXT("Defensive acquires an enemy pressuring the player"),
+		CanAcquireTarget(ECompanionMode::Normal, true, false));
+	TestTrue(TEXT("Defensive acquires an enemy that has engaged the companion itself"),
+		CanAcquireTarget(ECompanionMode::Normal, false, true));
+
+	// Stealth's third argument is forced false by the caller (bWidenGate), so this asserts the value
+	// the call site actually produces — not a mode-blind evaluation of the pure function.
+	TestFalse(TEXT("Unbroken Stealth acquires nothing off companion awareness"),
+		CanAcquireTarget(ECompanionMode::Stealth, false, false));
+
+	TestTrue(TEXT("Combat stays weapons-free with no knowledge on either side"),
+		CanAcquireTarget(ECompanionMode::Combat, false, false));
 	return true;
 }
 

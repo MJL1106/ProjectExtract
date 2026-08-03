@@ -1,6 +1,7 @@
 // BT task — companion commanded search: breach-enter the pinged door, then engage/loot/dwell.
 
 #include "AI/Tasks/BTTask_CompanionExplore.h"
+#include "AI/Tasks/BTTask_CompanionLoot.h"
 #include "AIController.h"
 #include "AI/CompanionAIController.h"
 #include "AI/CompanionSearchRoomPolicy.h"
@@ -9,11 +10,14 @@
 #include "Companion/CompanionCharacter.h"
 #include "Components/HealthComponent.h"
 #include "Enemy/EnemyCharacter.h"
+#include "Enemy/EnemyDirectorSubsystem.h"
 #include "World/Breachable.h"
 #include "World/DoorBase.h"
+#include "World/InteractionEventSubsystem.h"
 #include "World/Lootable.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Navigation/PathFollowingComponent.h"
+#include "NavigationSystem.h"
 #include "GameFramework/Character.h"
 #include "Kismet/GameplayStatics.h"
 #include "EngineUtils.h"
@@ -22,10 +26,13 @@ DEFINE_LOG_CATEGORY_STATIC(LogCompanionExplore, Log, All);
 
 DEFINE_LOG_CATEGORY_STATIC(LogCompanionExploreLoS, Log, All);
 
-// Same-room gate: the radius alone reaches through walls into neighbouring rooms, which sent the
-// companion chasing a crate behind a second door. A candidate only counts when the companion
-// standing in the room can actually see it: eyes -> candidate bounds centre, ignoring the swung
-// door leaf (it sits right beside the interior anchor and shadows crates near the doorway wall).
+// Same-room gate, STRICT variant — the enemy scan's gate. The radius alone reaches through walls
+// into neighbouring rooms, which sent the companion chasing a container behind a second door. A
+// candidate only counts when the companion standing in the room can actually see it: eyes ->
+// candidate bounds centre, ignoring the swung door leaf (it sits right beside the interior anchor
+// and shadows candidates near the doorway wall). Any blocking hit rejects, with no tolerance:
+// lootables use ExploreLootableHasLoS below, and that leniency must never reach here or an enemy
+// pressed against a wall would read as visible and wrongly flip the room hot.
 static bool ExploreViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor* Candidate, const AActor* IgnoreDoor)
 {
 	FVector EyeLoc; FRotator EyeRot;
@@ -37,8 +44,8 @@ static bool ExploreViewerHasLoS(UWorld* World, const APawn* Viewer, const AActor
 	Params.AddIgnoredActor(Candidate);
 	if (IgnoreDoor) Params.AddIgnoredActor(IgnoreDoor);
 
-	// Bounds centre, not actor location — crate pivots sit at a base corner and can bury the
-	// trace end inside the shelf/table the crate stands on.
+	// Bounds centre, not actor location — a pivot sitting at the actor's base can bury the trace
+	// end inside the floor or the prop it stands on.
 	const FVector Target = Candidate->GetComponentsBoundingBox().GetCenter();
 	if (!World->LineTraceSingleByChannel(Hit, EyeLoc, Target, ECC_Visibility, Params)) return true;
 
@@ -67,10 +74,69 @@ static bool ExploreAnyLiveEnemyWithin(UWorld* World, const FVector& Center, floa
 	return false;
 }
 
+// Same-room gate, LOOTABLE-ONLY variant. Deliberately separate from ExploreViewerHasLoS rather than
+// a loosening of it: the enemy scan shares that helper and must keep rejecting on any blocking hit.
+//
+// A loot volume carries no mesh — it is draped over an existing drawer/table/shelf and that world
+// geometry IS the visual, so the probe point sits INSIDE the furniture, which cannot be ignored (it
+// is not the candidate). Under the strict gate every draped container reads as occluded by the very
+// prop it represents. A hit within OcclusionTolerance of the volume's SURFACE (zero for anything
+// inside it) is therefore that prop and counts as seen; a hit further out is a wall or a doorframe —
+// a different room — and still rejects. Surface distance, NOT distance from the probe point: a
+// centre metric inherits the box diagonal as an omnidirectional floor, so a volume flattened onto a
+// table top would accept the floor and the ceiling as readily as the table.
+//
+// Two probe points (centre + top centre), the same shape as LootViewerHasLoS. They share one
+// acceptance envelope but are different RAYS, so the top one can clear an occluder the centre ray
+// runs into — and this gate is the one that STARTS the chain: reject here and the room reads empty,
+// the companion dwells, and the more forgiving two-probe sweep downstream never runs at all. The
+// second trace only ever costs anything on a candidate the first one already found blocked.
+static bool ExploreLootableHasLoS(UWorld* World, const APawn* Viewer, const AActor* Candidate,
+	const AActor* IgnoreDoor, float OcclusionTolerance)
+{
+	// Collision-only bounds — already the default, stated explicitly so the choice is visible.
+	const FBox Bounds = Candidate->GetComponentsBoundingBox(false);
+	if (!Bounds.IsValid)
+	{
+		// No colliding components — the box would ForceInit and the probe would trace to the world
+		// origin. Reject loudly; a Blueprint subclass with a NoCollision volume must not fail silently.
+		UE_LOG(LogCompanionExploreLoS, Warning, TEXT("lootable %s has no colliding bounds — cannot LoS-probe it"),
+			*GetNameSafe(Candidate));
+		return false;
+	}
+
+	FVector EyeLoc; FRotator EyeRot;
+	Viewer->GetActorEyesViewPoint(EyeLoc, EyeRot);
+
+	FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionSearchLootLoS), false);
+	Params.AddIgnoredActor(Viewer);
+	Params.AddIgnoredActor(Candidate);
+	if (IgnoreDoor) Params.AddIgnoredActor(IgnoreDoor);
+
+	const FVector Center = Bounds.GetCenter();
+	const FVector Probes[] = { Center, FVector(Center.X, Center.Y, Bounds.Max.Z) };
+	const float ToleranceSq = FMath::Square(OcclusionTolerance);
+
+	FHitResult Hit;
+	for (const FVector& Target : Probes)
+	{
+		if (!World->LineTraceSingleByChannel(Hit, EyeLoc, Target, ECC_Visibility, Params)) return true;
+		if (Bounds.ComputeSquaredDistanceToPoint(Hit.ImpactPoint) <= ToleranceSq) return true;
+	}
+
+	UE_LOG(LogCompanionExploreLoS, Log, TEXT("lootable %s rejected — LoS blocked by %s"),
+		*GetNameSafe(Candidate), *GetNameSafe(Hit.GetActor()));
+	return false;
+}
+
 // Nearest still-lootable container within the radius (mirrors BTTask_CompanionLoot's sweep filter),
 // LoS-gated to the pinged room so the chain can't drag the companion through another door.
+// Nav projection gates navigability: a candidate whose origin cannot project onto the navmesh is
+// silently rejected here rather than selected and then failed on during MoveToLocation downstream.
+// Nav projection delegates to UBTTask_CompanionLoot::ProjectContainerToNav (shared helper).
 static AActor* ExploreFindNearestLootable(UWorld* World, const FVector& Center, float Radius,
-	const APawn* Viewer, const AActor* IgnoreDoor)
+	const APawn* Viewer, const AActor* IgnoreDoor, float OcclusionTolerance,
+	float NavHorizExtent, float NavVertExtent, float NavAboveRejectTolerance)
 {
 	if (!World || !IsValid(Viewer)) return nullptr;
 
@@ -84,7 +150,16 @@ static AActor* ExploreFindNearestLootable(UWorld* World, const FVector& Center, 
 		if (!IsValid(Candidate) || !ILootable::Execute_CanLoot(Candidate)) continue;
 		const float DistSq = FVector::DistSquared(Candidate->GetActorLocation(), Center);
 		if (DistSq > BestDistSq) continue;
-		if (!ExploreViewerHasLoS(World, Viewer, Candidate, IgnoreDoor)) continue;
+
+		// LoS first (cheaper: two cached-scene traces vs a Recast poly query).
+		if (!ExploreLootableHasLoS(World, Viewer, Candidate, IgnoreDoor, OcclusionTolerance)) continue;
+
+		// Nav projection via the shared helper (same bounds-based query as BTTask_CompanionLoot).
+		FVector Unused;
+		if (!UBTTask_CompanionLoot::ProjectContainerToNav(World, Candidate,
+			NavHorizExtent, NavVertExtent, NavAboveRejectTolerance, Unused))
+			continue;
+
 		BestDistSq = DistSq;
 		Best = Candidate;
 	}
@@ -173,6 +248,14 @@ EBTNodeResult::Type UBTTask_CompanionExplore::BeginSearch(UBehaviorTreeComponent
 	bHadCombatTargetAtStart = IsValid(BB)
 		&& IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
 
+	// A fight already raging at ping time is a deliberate override (same rule as the combat-target
+	// check above) — only a fight that STARTS after this stamp breaks the search off.
+	constexpr float RecentFightWindowSeconds = 5.f;
+	TaskStartWorldTime = Pawn->GetWorld()->GetTimeSeconds();
+	bFightOngoingAtStart = false;
+	if (const UEnemyDirectorSubsystem* Director = Pawn->GetWorld()->GetSubsystem<UEnemyDirectorSubsystem>())
+		bFightOngoingAtStart = (TaskStartWorldTime - Director->GetLastCombatReportTime()) < RecentFightWindowSeconds;
+
 	// Stand point: where the breach montage was authored to play from. Doors provide one; a
 	// door with none falls back to "in front of its origin, facing it".
 	bHasStandPoint = IBreachable::Execute_GetBreachStandPoint(Door, Pawn, StandLocation, StandFacing);
@@ -257,7 +340,16 @@ void UBTTask_CompanionExplore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 	const UBlackboardComponent* TickBB = OwnerComp.GetBlackboardComponent();
 	const bool bInCombat = IsValid(TickBB)
 		&& IsValid(Cast<AActor>(TickBB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
-	const bool bFreshCombat = bInCombat && !bHadCombatTargetAtStart;
+	bool bFreshCombat = bInCombat && !bHadCombatTargetAtStart;
+
+	// A fight anywhere breaks the search off, not just one the companion personally perceives —
+	// its combat target is perception-gated and never sets while it walks a corridor away from the
+	// shooting. The director stamps every enemy Combat entry; suppressed for mid-fight override pings.
+	if (!bFreshCombat && !bFightOngoingAtStart)
+	{
+		if (const UEnemyDirectorSubsystem* Director = Pawn->GetWorld()->GetSubsystem<UEnemyDirectorSubsystem>())
+			bFreshCombat = Director->GetLastCombatReportTime() > TaskStartWorldTime;
+	}
 
 	if (bFreshCombat && (Phase == ESearchPhase::MovingToDoor || Phase == ESearchPhase::Aligning))
 	{
@@ -462,11 +554,11 @@ void UBTTask_CompanionExplore::TickTask(UBehaviorTreeComponent& OwnerComp, uint8
 	{
 		PhaseElapsed += DeltaSeconds;
 
-		// ANY live combat target ends the dwell — the search already succeeded, so even a
-		// held-over mid-fight target hands control back to the combat brain here.
-		if (!bInCombat && PhaseElapsed < DwellDuration) return;
+		// ANY live combat target (or a fight starting anywhere) ends the dwell - the search
+		// already succeeded, so even a held-over mid-fight target hands control back here.
+		if (!bInCombat && !bFreshCombat && PhaseElapsed < DwellDuration) return;
 
-		UE_LOG(LogCompanionExplore, Log, TEXT("TickTask: dwell over (%.1fs%s) — returning to follow"),
+		UE_LOG(LogCompanionExplore, Log, TEXT("TickTask: dwell over (%.1fs%s) - returning to follow"),
 			PhaseElapsed, bInCombat ? TEXT(", combat") : TEXT(""));
 		FinishSearch(OwnerComp, AIC);
 		return;
@@ -532,6 +624,48 @@ bool UBTTask_CompanionExplore::StartEnterMove(ACompanionAIController* AIC, APawn
 	return true;
 }
 
+bool UBTTask_CompanionExplore::TryHandleOccupiedRoom(UBehaviorTreeComponent& OwnerComp,
+	ACompanionAIController* AIC, ACompanionCharacter* Companion)
+{
+	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
+	const float LootRadius = Tuning ? Tuning->ExploreLootRadius : 1200.f;
+	const float GrantDuration = Tuning ? Tuning->ExploreEngagementDuration : 8.f;
+
+	const ECompanionMode Mode = Companion->GetMode();
+	if (CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Mode))
+		Companion->SetPostBreachEngagement(RoomAnchor, LootRadius, GrantDuration);
+
+	const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+	const bool bInCombat = IsValid(BB)
+		&& IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
+	AActor* SearchedDoor = CachedDoor.Get();
+	const bool bVisibleLiveEnemy = Mode == ECompanionMode::Combat
+		&& ExploreAnyLiveEnemyWithin(Companion->GetWorld(), RoomAnchor, LootRadius,
+			Companion, SearchedDoor);
+
+	if (CompanionSearchRoomPolicy::ShouldTreatRoomAsHot(Mode, bInCombat, bVisibleLiveEnemy))
+	{
+		UE_LOG(LogCompanionExplore, Log, TEXT("EvaluateRoom: room hot — handing to combat"));
+		FinishSearch(OwnerComp, AIC);
+		return true;
+	}
+
+	if (AActor* Container = ExploreFindNearestLootable(Companion->GetWorld(), RoomAnchor, LootRadius,
+		Companion, SearchedDoor, LootOcclusionTolerance,
+		NavProjectHorizontalExtent, NavProjectVerticalExtent, NavProjectAboveRejectTolerance))
+	{
+		UE_LOG(LogCompanionExplore, Log, TEXT("EvaluateRoom: room quiet — chaining loot sweep to %s"),
+			*GetNameSafe(Container));
+		// The Explore decorator observes BB_CompanionCommand — writing Loot here triggers it to
+		// self-abort this Explore task, handing control to the loot sweep.
+		AIC->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife,
+			Container, Container->GetActorLocation(), true);
+		return true;
+	}
+
+	return false;
+}
+
 void UBTTask_CompanionExplore::EvaluateRoom(UBehaviorTreeComponent& OwnerComp, ACompanionAIController* AIC, APawn* Pawn)
 {
 	// The dwell may outlast the task's ownership of the door — release it before deciding.
@@ -540,41 +674,39 @@ void UBTTask_CompanionExplore::EvaluateRoom(UBehaviorTreeComponent& OwnerComp, A
 	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Pawn);
 	const UCompanionTuningDataAsset* Tuning = AIC->GetTuning();
 	const float LootRadius = Tuning ? Tuning->ExploreLootRadius : 1200.f;
-	const float GrantDuration = Tuning ? Tuning->ExploreEngagementDuration : 8.f;
 
-	// Combat is weapons-free and treats a visible live enemy as hot. Normal and Stealth preserve
-	// no-first-shot behavior, so an unaware/searching enemy can be watched while loot continues.
-	if (IsValid(Companion) && LootRadius > 0.f)
+	// Signal that the companion has completed a sweep of this room. Placed objective steps watch for
+	// it via Condition = Interacted, TrackedInteractable = <this door>, bAnyInteractorCounts = true.
+	// Doors raise no interact notify of their own (ADoorBase broadcasts OnDoorOpened, not
+	// NotifyWorldInteract), so this introduces no false positives on existing beats.
+	//
+	// Gated on Phase == Entering: EvaluateRoom is reached from several non-sweep paths as well —
+	// StartEnterMove failure (companion never crossed the threshold), doorway combat break-off during
+	// Holding (companion at the door, not inside), and door-destroyed-while-Holding (CachedDoor is
+	// already stale). Only the Entering phase means the companion physically walked through the door
+	// and reached (or was reaching) the interior point. Both Entering callers count: the normal move
+	// completion and the mid-enter combat interruption ("the entry already happened").
+	//
+	// Placed HERE rather than at the top of EvaluateRoom: NotifyWorldInteract dispatches synchronously
+	// through HandleWorldInteract -> CompleteStep -> RunSideEffects(OnComplete), so any OnComplete
+	// effect on the watching beat (SetCompanionMode, CommandCompanionRoute, TeleportSquad) would
+	// execute before SetDoorAutoOpenSuppressed and before TryHandleOccupiedRoom reads the companion's
+	// mode and issues the loot command. Sitting below both locals keeps the room evaluation's own
+	// reads stable.
+	if (Phase == ESearchPhase::Entering)
 	{
-		const ECompanionMode Mode = Companion->GetMode();
-		if (CompanionSearchRoomPolicy::CanEngageUnawareEnemy(Mode))
-			Companion->SetPostBreachEngagement(RoomAnchor, LootRadius, GrantDuration);
-
-		const UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
-		const bool bInCombat = IsValid(BB)
-			&& IsValid(Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget)));
-		AActor* SearchedDoor = CachedDoor.Get();
-		const bool bVisibleLiveEnemy = Mode == ECompanionMode::Combat
-			&& ExploreAnyLiveEnemyWithin(Companion->GetWorld(), RoomAnchor, LootRadius,
-				Companion, SearchedDoor);
-		if (CompanionSearchRoomPolicy::ShouldTreatRoomAsHot(Mode, bInCombat, bVisibleLiveEnemy))
+		if (AActor* Door = CachedDoor.Get())
 		{
-			UE_LOG(LogCompanionExplore, Log, TEXT("EvaluateRoom: room hot — handing to combat"));
-			FinishSearch(OwnerComp, AIC);
-			return;
-		}
-
-		if (AActor* Container = ExploreFindNearestLootable(Companion->GetWorld(), RoomAnchor, LootRadius, Companion, SearchedDoor))
-		{
-			UE_LOG(LogCompanionExplore, Log, TEXT("EvaluateRoom: room quiet — chaining loot sweep to %s"),
-				*GetNameSafe(Container));
-			AIC->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife,
-				Container, Container->GetActorLocation(), true);
-			// The Explore decorator observes CompanionCommand and self-aborts this task.
-			// That abort owns the handoff; finishing this task again would cancel Loot.
-			return;
+			if (UWorld* World = Door->GetWorld())
+			{
+				if (UInteractionEventSubsystem* Events = World->GetSubsystem<UInteractionEventSubsystem>())
+					Events->NotifyWorldInteract(Door, Pawn);
+			}
 		}
 	}
+
+	if (IsValid(Companion) && LootRadius > 0.f && TryHandleOccupiedRoom(OwnerComp, AIC, Companion))
+		return;
 
 	// Empty room: stand a beat, then hand back to follow.
 	const float DwellMin = Tuning ? Tuning->SearchDwellMin : 2.f;

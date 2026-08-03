@@ -14,6 +14,7 @@
 #include "EnemyDirectorSubsystem.h"
 #include "PatrolRoute.h"
 #include "HealthComponent.h"
+#include "FootstepNoiseComponent.h"
 #include "WeaponBase.h"
 #include "WeaponDataAsset.h"
 #include "ExtractionDamageType.h"
@@ -29,6 +30,7 @@
 #include "EnemySquadSubsystem.h"
 #include "Components/CapsuleComponent.h"
 #include "UI/OverheadWidgetComponent.h"
+#include "Components/WidgetComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Engine/DamageEvents.h"
 #include "TimerManager.h"
@@ -37,6 +39,11 @@
 #include "World/AmmoPickup.h"
 #include "World/LootPickup.h"
 #include "Companion/CompanionCharacter.h"
+#include "Companion/CompanionBarkTypes.h"
+#include "BarkSubsystem.h"
+#include "Kismet/GameplayStatics.h"
+#include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 
 static TAutoConsoleVariable<int32> CVarEnemyPersistCorpses(
 	TEXT("enemy.PersistCorpses"), 1,
@@ -53,6 +60,8 @@ AEnemyCharacter::AEnemyCharacter()
 	SetMinNetUpdateFrequency(5.f);
 
 	HealthComponent = CreateDefaultSubobject<UHealthComponent>(TEXT("HealthComponent"));
+	FootstepAudioComponent = CreateDefaultSubobject<UFootstepNoiseComponent>(TEXT("FootstepAudioComponent"));
+	FootstepAudioComponent->SetEmitAINoise(false); // enemies must not feed the hearing sense with their own steps
 	SuppressionComponent = CreateDefaultSubobject<USuppressionComponent>(TEXT("SuppressionComponent"));
 	MoraleComponent = CreateDefaultSubobject<UEnemyMoraleComponent>(TEXT("MoraleComponent"));
 	CoverPoseComponent = CreateDefaultSubobject<UCoverPoseComponent>(TEXT("CoverPoseComponent"));
@@ -93,8 +102,11 @@ AEnemyCharacter::AEnemyCharacter()
 	// Default mannequin bone-to-region map
 	BoneToHitRegionMap.Reserve(25);
 	BoneToHitRegionMap.Add(FName("head"),       EHitRegion::Head);
-	BoneToHitRegionMap.Add(FName("neck_01"),    EHitRegion::Torso);
-	BoneToHitRegionMap.Add(FName("neck_02"),    EHitRegion::Torso);
+	// Neck counts as head: grows the headshot region downward so near-miss-low shots still
+	// register. Incoming-damage regions only — the enemy PERCEPTION body ladder (AITargeting)
+	// keeps its own neck_01 entry and is untouched.
+	BoneToHitRegionMap.Add(FName("neck_01"),    EHitRegion::Head);
+	BoneToHitRegionMap.Add(FName("neck_02"),    EHitRegion::Head);
 	BoneToHitRegionMap.Add(FName("spine_01"),   EHitRegion::Torso);
 	BoneToHitRegionMap.Add(FName("spine_02"),   EHitRegion::Torso);
 	BoneToHitRegionMap.Add(FName("spine_03"),   EHitRegion::Torso);
@@ -251,9 +263,21 @@ void AEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	// CurrentWeapon is a separate owned/attached actor — UE does not auto-destroy it
 	// when this character is destroyed. Destroy server-side so removal replicates.
+	// The corpse weapon pickup (SetupCorpseWeaponPickup) rides the weapon actor and is not
+	// auto-destroyed with it either — take it down first so no orphaned interactable lingers.
 	if (HasAuthority())
 	{
-		if (AWeaponBase* Weapon = CurrentWeapon.Get()) Weapon->Destroy();
+		if (AWeaponBase* Weapon = CurrentWeapon.Get())
+		{
+			TArray<AActor*> Attached;
+			Weapon->GetAttachedActors(Attached);
+			for (AActor* AttachedActor : Attached)
+			{
+				if (IsValid(AttachedActor))
+					AttachedActor->Destroy();
+			}
+			Weapon->Destroy();
+		}
 		CurrentWeapon = nullptr;
 	}
 
@@ -674,6 +698,11 @@ void AEnemyCharacter::SetWeaponHandSocket(bool bUsePatrolHand, bool bImmediate)
 
 // --- Archetype ---
 
+bool AEnemyCharacter::HasArmoredHead() const
+{
+	return IsValid(ArchetypeData) && !ArchetypeData->bHeadshotOneTap;
+}
+
 void AEnemyCharacter::ApplyArchetypeData()
 {
 	if (!IsValid(ArchetypeData))
@@ -784,7 +813,9 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 
 	const EHitRegion HitRegion = ResolveHitRegion(DamageEvent);
 
-	// Headshot: fraction-of-max-health path (bullet point damage to Head only).
+	// Headshot: fraction-of-max-health floor (bullet point damage to Head only).
+	// High-damage weapons (sniper) keep their multiplied damage when it exceeds the
+	// flat fraction, so heavy calibres stay lethal on the head.
 	float FinalDamage = ActualDamage * GetHitboxDamageMultiplier(DamageEvent, HitRegion);
 	if (HitRegion == EHitRegion::Head &&
 		DamageEvent.IsOfType(FPointDamageEvent::ClassID) &&
@@ -792,12 +823,26 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 	{
 		const float HeadshotFraction = IsValid(ArchetypeData) ? ArchetypeData->HeadshotMaxHealthFraction : 0.65f;
 		if (HeadshotFraction > 0.f)
-			FinalDamage = HeadshotFraction * HealthComponent->GetMaxHealth();
+			FinalDamage = FMath::Max(FinalDamage, HeadshotFraction * HealthComponent->GetMaxHealth());
 	}
 
 	UEnemyArmourComponent* Armour = ArmourComponent.Get();
 	if (IsValid(Armour))
 		FinalDamage = Armour->ModifyIncomingDamage(FinalDamage, DamageEvent, DamageCauser);
+
+	// One-tap headshot: PLAYER bullets to the head kill outright for every archetype that opts
+	// in (Heavy DA sets bHeadshotOneTap false and keeps the fraction floor above). Applied AFTER
+	// the armour step so shields and helmets can't save the target. Player-only — the companion's
+	// AI aim deliberately targets the head and would otherwise one-tap everything it shoots.
+	// Exactly shield+health (not a huge constant) so the damage-number HUD reports real damage.
+	if (HitRegion == EHitRegion::Head &&
+		DamageEvent.IsOfType(FPointDamageEvent::ClassID) &&
+		IsValid(EventInstigator) && EventInstigator->IsPlayerController() &&
+		IsValid(HealthComponent) &&
+		(!IsValid(ArchetypeData) || ArchetypeData->bHeadshotOneTap))
+	{
+		FinalDamage = HealthComponent->GetCurrentShield() + HealthComponent->GetCurrentHealth();
+	}
 
 	if (IsValid(HealthComponent))
 		HealthComponent->TakeDamage(FinalDamage);
@@ -817,15 +862,61 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 
 	// Phase 4: broadcast hit-react for flinch montages (only while alive)
 	if (FinalDamage > 0.f && IsValid(HealthComponent) && !HealthComponent->IsDead())
+	{
 		OnHitReact.Broadcast(HitRegion);
 
+		// Damage-defiance taunt while still healthy — content-gated (only the Heavy's bark set
+		// carries Taunt lines; everyone else's request drops on the no-lines check).
+		constexpr float TauntMinHealthFraction = 0.6f;
+		if (HealthComponent->GetHealthPercent() > TauntMinHealthFraction
+			&& IsValid(ArchetypeData) && IsValid(ArchetypeData->BarkSet))
+			if (UBarkSubsystem* Barks = GetWorld()->GetSubsystem<UBarkSubsystem>())
+				Barks->RequestBark(this, ArchetypeData->BarkSet, EBarkType::Taunt);
+	}
+
+	SpawnBloodImpactFX(DamageEvent, HitRegion);
+
 	return FinalDamage;
+}
+
+void AEnemyCharacter::SpawnBloodImpactFX(const FDamageEvent& DamageEvent, EHitRegion HitRegion) const
+{
+	if (!IsValid(BloodImpactFX)) return;
+	if (!DamageEvent.IsOfType(FPointDamageEvent::ClassID)) return;
+
+	const FPointDamageEvent& PointDamage = static_cast<const FPointDamageEvent&>(DamageEvent);
+	const FHitResult& Hit = PointDamage.HitInfo;
+	if (Hit.ImpactPoint.IsNearlyZero()) return;
+
+	// Face the burst back along the surface normal; fall back to opposing the shot when the
+	// normal is unset (e.g. hand-built damage events).
+	const FVector BurstDir = Hit.ImpactNormal.IsNearlyZero() ? -PointDamage.ShotDirection : FVector(Hit.ImpactNormal);
+	const float BurstScale = (HitRegion == EHitRegion::Head) ? HeadshotBloodScale : 1.f;
+	UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		GetWorld(), BloodImpactFX, Hit.ImpactPoint, BurstDir.Rotation(),
+		FVector(BurstScale), /*bAutoDestroy=*/true, /*bAutoActivate=*/true, ENCPoolMethod::AutoRelease);
 }
 
 // --- Death ---
 
 void AEnemyCharacter::HandleDeath()
 {
+	// Kill attribution for the companion's voice — its own confirm, or approval of the player's
+	// kill. Takedown deaths skip this (no instigator stamp); TakedownConfirm covers those.
+	// The confirmed-kill stamp rides the same attribution: it is what earns Combat mode its one
+	// free advance bound, so it must only ever fire on a kill the companion actually made.
+	if (AController* Killer = LastDamageInstigator.Get())
+	{
+		if (ACompanionCharacter* CompanionKiller = Cast<ACompanionCharacter>(Killer->GetPawn()))
+		{
+			CompanionKiller->Bark(ECompanionBarkType::TargetDown);
+			CompanionKiller->StampConfirmedKill();
+		}
+		else if (Killer->IsPlayerController())
+			if (ACompanionCharacter* Companion = ACompanionCharacter::GetPrimaryCompanion(GetWorld()))
+				Companion->Bark(ECompanionBarkType::ApprovePlayerKill);
+	}
+
 	if (IsValid(AwarenessWidgetComponent))
 		AwarenessWidgetComponent->SetVisibility(false);
 
@@ -912,6 +1003,7 @@ void AEnemyCharacter::HandleDeath()
 	UWorld* World = GetWorld();
 	if (!IsValid(World)) return;
 
+	SetupCorpseWeaponPickup();
 	TrySpawnAmmoDrop();
 	TrySpawnDeathLoot();
 
@@ -1003,7 +1095,8 @@ void AEnemyCharacter::TrySpawnAmmoDrop()
 	const UWeaponDataAsset* Data = Weapon ? Weapon->GetWeaponData() : nullptr;
 	if (!Data) return; // died weaponless — no drop
 
-	const EEnemyWeaponAnimType Category = Data->EnemyWeaponAnimType;
+	const EEnemyWeaponAnimType Category =
+		bOverrideAmmoDropCategory ? AmmoDropCategoryOverride : Data->EnemyWeaponAnimType;
 	const FAmmoDropEntry* Entry = AmmoDropTable->Find(Category);
 	if (!Entry || !Entry->PickupClass) return;
 	if (FMath::FRand() > Entry->DropChance) return;
@@ -1014,7 +1107,7 @@ void AEnemyCharacter::TrySpawnAmmoDrop()
 	UWorld* World = GetWorld();
 	if (!World) return;
 
-	const FTransform SpawnTransform(FRotator::ZeroRotator, GetActorLocation() + FVector(0.f, 0.f, 30.f));
+	const FTransform SpawnTransform(FRotator::ZeroRotator, FindDeathLootSpawnLocation());
 	AAmmoPickup* Pickup = World->SpawnActorDeferred<AAmmoPickup>(
 		Entry->PickupClass, SpawnTransform, nullptr, nullptr,
 		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
@@ -1022,6 +1115,102 @@ void AEnemyCharacter::TrySpawnAmmoDrop()
 
 	Pickup->InitPickup(Category, Amount);
 	Pickup->FinishSpawning(SpawnTransform);
+}
+
+namespace
+{
+	/** Used only when a drop entry has no override and the dropped gun has no data asset — without
+	 *  it a missing asset would size the reserve at zero mags and hand over an unusable gun. */
+	constexpr int32 FallbackRoundsPerMag = 30;
+
+	int32 GetDropRoundsPerMag(const FWeaponDropEntry& Entry, const AWeaponBase* Weapon)
+	{
+		if (Entry.RoundsPerMag > 0) return Entry.RoundsPerMag;
+
+		const UWeaponDataAsset* Data = IsValid(Weapon) ? Weapon->GetWeaponData() : nullptr;
+		if (Data && Data->MagazineSize > 0) return Data->MagazineSize;
+
+		return FallbackRoundsPerMag;
+	}
+
+	/** Partial mag left in the dropped gun — never more than the magazine physically holds. */
+	int32 RollDropMagRounds(const FWeaponDropEntry& Entry, const AWeaponBase* Weapon)
+	{
+		const int32 Lo = FMath::Max(0, FMath::Min(Entry.MinMag, Entry.MaxMag));
+		const int32 Hi = FMath::Max(Lo, Entry.MaxMag);
+		return FMath::Min(FMath::RandRange(Lo, Hi), GetDropRoundsPerMag(Entry, Weapon));
+	}
+
+	/** Reserve is always a whole number of magazines, minimum one — a looted gun never hands over
+	 *  a part-mag remainder the player can't reload with. */
+	int32 RollDropReserveRounds(const FWeaponDropEntry& Entry, const AWeaponBase* Weapon)
+	{
+		const int32 Lo = FMath::Max(1, FMath::Min(Entry.MinReserveMags, Entry.MaxReserveMags));
+		const int32 Hi = FMath::Max(Lo, Entry.MaxReserveMags);
+		return FMath::RandRange(Lo, Hi) * GetDropRoundsPerMag(Entry, Weapon);
+	}
+}
+
+void AEnemyCharacter::SetupCorpseWeaponPickup()
+{
+	if (!HasAuthority() || !AmmoDropTable) return;
+
+	AWeaponBase* Weapon = CurrentWeapon.Get();
+	if (!IsValid(Weapon)) return; // died weaponless — nothing to collect
+
+	const FWeaponDropEntry* Entry = AmmoDropTable->FindWeaponDrop(Weapon->GetClass());
+	if (!Entry || !Entry->PickupClass) return;
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// The corpse keeps its gun in hand; the pickup actor spawns invisible and rides the weapon
+	// so the interact prompt sits on the gun wherever the ragdoll lands it. Collecting runs the
+	// normal swap flow; the pickup BP destroys the weapon it is attached to on success.
+	const FTransform SpawnTransform = Weapon->GetActorTransform();
+	AActor* Pickup = World->SpawnActorDeferred<AActor>(
+		Entry->PickupClass, SpawnTransform, nullptr, nullptr,
+		ESpawnActorCollisionHandlingMethod::AlwaysSpawn);
+	if (!Pickup) return;
+
+	// Stamp the rolled ammo before FinishSpawning so the pickup's construction script builds
+	// its item payload from these values. Contract: BP custom event InitDropAmmo(Mag, Reserve).
+	if (UFunction* InitFn = Pickup->FindFunction(TEXT("InitDropAmmo")))
+	{
+		if (InitFn->ParmsSize == sizeof(int32) * 2)
+		{
+			int32 Parms[2] = { RollDropMagRounds(*Entry, Weapon), RollDropReserveRounds(*Entry, Weapon) };
+			Pickup->ProcessEvent(InitFn, Parms);
+		}
+		else
+		{
+			UE_LOG(LogEnemyAI, Warning,
+				TEXT("%s: weapon-drop pickup '%s' InitDropAmmo signature mismatch — expected (int32, int32)."),
+				*GetName(), *GetNameSafe(Entry->PickupClass));
+		}
+	}
+	else
+	{
+		UE_LOG(LogEnemyAI, Warning,
+			TEXT("%s: weapon-drop pickup '%s' has no InitDropAmmo event — dropped gun ships BP-default ammo."),
+			*GetName(), *GetNameSafe(Entry->PickupClass));
+	}
+
+	Pickup->FinishSpawning(SpawnTransform);
+	Pickup->AttachToActor(Weapon, FAttachmentTransformRules::SnapToTargetNotIncludingScale);
+
+	// Hide the pickup's display meshes — the corpse's own gun is the visual. Collision and any
+	// interaction prompt widgets stay live.
+	// UWidgetComponent derives from UMeshComponent, so it lands in this array too: skipping it is
+	// what keeps that promise. SetVisibility(false) here is not undone by the pickup's focus logic
+	// (it drives SetHiddenInGame, a separate flag), so hiding it once kills the prompt for good.
+	TInlineComponentArray<UMeshComponent*> MeshComps;
+	Pickup->GetComponents(MeshComps);
+	for (UMeshComponent* MeshComp : MeshComps)
+	{
+		if (IsValid(MeshComp) && !MeshComp->IsA<UWidgetComponent>())
+			MeshComp->SetVisibility(false, false);
+	}
 }
 
 FVector AEnemyCharacter::FindDeathLootSpawnLocation() const
@@ -1136,15 +1325,22 @@ bool AEnemyCharacter::CanBeTakenDown(const AActor* TakedownInstigator, bool bIgn
 		return false;
 	}
 
-	if (Awareness->GetAwarenessState() != EEnemyAwarenessState::Unaware)
+	// Unaware is the rule — but a victim this instigator already reserved is grandfathered through
+	// anything short of Combat. The global alert ladder is a ratchet: one missed player shot
+	// escalates it to Loud, which wakes every Unaware enemy in the level, and the strict rule then
+	// whiffs an in-flight takedown that was already lined up. Combat stays a hard reject.
+	const EEnemyAwarenessState AwarenessState = Awareness->GetAwarenessState();
+	const bool bGrandfathered = AwarenessState < EEnemyAwarenessState::Combat
+		&& IsTakedownReservedBy(TakedownInstigator);
+	if (AwarenessState != EEnemyAwarenessState::Unaware && !bGrandfathered)
 	{
 #if !UE_BUILD_SHIPPING
 		if (bLogTakedown)
 		{
 			const FString AwarenessStr = StaticEnum<EEnemyAwarenessState>()
-				? StaticEnum<EEnemyAwarenessState>()->GetNameStringByValue((int64)Awareness->GetAwarenessState())
+				? StaticEnum<EEnemyAwarenessState>()->GetNameStringByValue((int64)AwarenessState)
 				: TEXT("Unknown");
-			UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: awareness=%s (need Unaware)"),
+			UE_LOG(LogEnemyAI, Verbose, TEXT("[Takedown] %s reject: awareness=%s (need Unaware, or reserved and below Combat)"),
 				*GetNameSafe(this), *AwarenessStr);
 		}
 #endif
@@ -1200,6 +1396,39 @@ bool AEnemyCharacter::IsTakedownEligible() const
 		&& (Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware);
 }
 
+bool AEnemyCharacter::IsTakedownEligibleFor(const AActor* TakedownInstigator) const
+{
+	if (IsTakedownEligible()) return true;
+
+	// Grandfather path: only for the holder of the reservation, only inside a volume, only while
+	// alive, and only below Combat. Everything else falls back to the strict rule above so a
+	// Searching enemy never becomes newly pingable (the offer path uses IsTakedownEligible()).
+	if (!IsTakedownReservedBy(TakedownInstigator)) return false;
+	if (TakedownVolumeRefCount <= 0) return false;
+	if (IsValid(HealthComponent) && HealthComponent->IsDead()) return false;
+
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	const UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
+	return IsValid(Awareness) && Awareness->GetAwarenessState() < EEnemyAwarenessState::Combat;
+}
+
+void AEnemyCharacter::ReserveForTakedown(AActor* TakedownInstigator)
+{
+	if (!IsValid(TakedownInstigator)) return;
+	TakedownReservedBy = TakedownInstigator;
+}
+
+void AEnemyCharacter::ClearTakedownReservation(const AActor* TakedownInstigator)
+{
+	if (TakedownReservedBy.Get() != TakedownInstigator) return;
+	TakedownReservedBy.Reset();
+}
+
+bool AEnemyCharacter::IsTakedownReservedBy(const AActor* TakedownInstigator) const
+{
+	return IsValid(TakedownInstigator) && TakedownReservedBy.Get() == TakedownInstigator;
+}
+
 bool AEnemyCharacter::HasDetectedPlayer() const
 {
 	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
@@ -1209,6 +1438,43 @@ bool AEnemyCharacter::HasDetectedPlayer() const
 	if (!IsValid(Awareness)) return false;
 
 	return Awareness->GetAwarenessState() == EEnemyAwarenessState::Combat;
+}
+
+bool AEnemyCharacter::HasActiveCombatContact(float WindowSeconds) const
+{
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return false;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return false;
+
+	if (Awareness->GetAwarenessState() != EEnemyAwarenessState::Combat) return false;
+	if (WindowSeconds <= 0.f) return true;
+
+	return Awareness->GetTimeSinceCombatContact() <= WindowSeconds;
+}
+
+bool AEnemyCharacter::HasEngagedCompanion(const AActor* Companion, float MemorySeconds) const
+{
+	if (!IsValid(Companion)) return false;
+
+	const AEnemyAIController* AIC = Cast<AEnemyAIController>(GetController());
+	if (!AIC) return false;
+
+	const UEnemyAwarenessComponent* Awareness = AIC->GetAwarenessComponent();
+	if (!IsValid(Awareness)) return false;
+
+	if (Awareness->GetCombatTarget() == Companion) return true;
+
+	// Cloak-bypassing on purpose, and the only clause that is: landing hits on the companion proves
+	// this enemy can see it regardless of what the mode cloak says it is allowed to perceive.
+	if (MemorySeconds > 0.f && Awareness->GetTimeSinceDamagedBy(Companion) <= MemorySeconds)
+		return true;
+
+	// Nothing below can hold for an enemy that has perceived nothing at all — skip the map lookup.
+	if (Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware) return false;
+
+	return Awareness->HasLiveKnowledgeOf(Companion, MemorySeconds);
 }
 
 float AEnemyCharacter::GetTimeEnteredCombat() const
@@ -1237,6 +1503,24 @@ bool AEnemyCharacter::IsAlertedForCompanionReadiness() const
 void AEnemyCharacter::SetInTakedownVolume(bool bInVolume)
 {
 	TakedownVolumeRefCount = FMath::Max(0, TakedownVolumeRefCount + (bInVolume ? 1 : -1));
+}
+
+void AEnemyCharacter::BeginTakedownWindow(float Seconds)
+{
+	if (Seconds <= 0.f) return;
+
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	// Max, never assign: a second companion (or a second overlapping pocket) stamping a shorter window
+	// must not shorten one already running.
+	TakedownWindowExpiry = FMath::Max(TakedownWindowExpiry, World->GetTimeSeconds() + Seconds);
+}
+
+bool AEnemyCharacter::IsInTakedownWindow() const
+{
+	const UWorld* World = GetWorld();
+	return IsValid(World) && World->GetTimeSeconds() <= TakedownWindowExpiry;
 }
 
 bool AEnemyCharacter::BeginTakedownHold(AActor* TakedownInstigator, FVector SnapLocation, float SnapYaw, float WatchdogTimeout, bool bIgnoreRangeAndArc)

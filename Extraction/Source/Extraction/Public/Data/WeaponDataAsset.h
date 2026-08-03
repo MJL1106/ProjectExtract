@@ -10,8 +10,11 @@
 #include "WeaponDataAsset.generated.h"
 
 class UExtractionDamageType;
+class UMaterialInterface;
 class UNiagaraSystem;
 class UDamageMitigationSettings;
+class UWeaponAttachmentDataAsset;
+class USoundBase;
 
 /**
  * Per-weapon animation slot set — every montage the enemy anim instance can play for this weapon.
@@ -125,6 +128,62 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire")
 	TSubclassOf<UExtractionDamageType> DamageTypeClass;
 
+	/** Hip-fire cone half-angle (deg) applied to PLAYER shots when not ADS. 0 = laser-accurate
+	 *  hip fire (current behaviour). AI fire is unaffected — enemies/companion keep their own
+	 *  inaccuracy model via IAIShooterInterface. Attachments scale this via HipSpreadMult. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0"))
+	float HipFireSpreadDeg = 0.f;
+
+	/** Sphere-sweep radius (cm) for PLAYER hitscan traces — slight hit forgiveness so near-miss
+	 *  shots (especially headshots) connect. 0 = exact line trace. AI fire always line-traces so
+	 *  enemies don't inherit the forgiveness. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0", ClampMax = "10.0"))
+	float BulletSweepRadius = 2.f;
+
+	// ---- Attachments ----
+
+	/** Per-slot attachment gameplay options, indexed by the kit ST_Attachments enum byte for that
+	 *  slot — index N holds the modifier asset for kit enum value N. Null / missing index = the
+	 *  selection has no gameplay effect (cosmetic only). Authored per weapon; a weapon without a
+	 *  slot (e.g. pistol handguard) leaves the array empty. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> SightAttachments;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> MuzzleAttachments;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> LaserAttachments;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> GripAttachments;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments")
+	TArray<TObjectPtr<UWeaponAttachmentDataAsset>> HandguardAttachments;
+
+	/** Per-slot attachment COMPATIBILITY: the kit enum bytes this weapon accepts in each slot.
+	 *  Curated per gun — world attachment pickups refuse any option not listed for the held
+	 *  weapon. Empty list = the weapon lacks that slot entirely. Separate from the *Attachments
+	 *  stat arrays above (those map byte -> gameplay modifiers; null there means cosmetic-only,
+	 *  not unsupported). Byte 0 (empty/ironsight) never needs listing — pickups never carry it. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedSightOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedMuzzleOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedLaserOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedGripOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedHandguardOptions;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Attachments|Compatibility")
+	TArray<uint8> AcceptedBarrelOptions;
+
 	// ---- Ammo ----
 
 	/** Shots per magazine */
@@ -187,6 +246,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|ADS", meta = (ClampMin = "0.0"))
 	float ADSMovementSpeed = 400.0f;
 
+	/** Extra look-sensitivity multiplier while ADS, on top of the automatic ADSFOV/90 scaling.
+	 *  1 = FOV-relative only (CoD-style). Set below 1 for optics whose magnification lives in a
+	 *  render-target lens rather than the camera FOV (sniper scope). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|ADS", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float ADSLookSensitivityMult = 1.0f;
+
 	// ---- Recoil ----
 
 	/** Recoil pattern data for this weapon */
@@ -229,6 +294,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
 	TObjectPtr<UNiagaraSystem> MuzzleFlashFX;
 
+	/** Relative rotation applied to the first-person muzzle flash where the kit item's Muzzle
+	 *  component axes don't match the FX forward axis (e.g. Infima frames are Y-forward while
+	 *  the flash emits along X — set Yaw=90 there). Zero = aligned with the Muzzle component. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	FRotator FirstPersonMuzzleFlashRotation = FRotator::ZeroRotator;
+
 	/** Niagara system spawned per shot as a bullet tracer streak along the fire line.
 	 *  Null = no tracer. Spawned at the muzzle, oriented toward the end point, engine-pooled
 	 *  via ENCPoolMethod::AutoRelease (satisfies >1/sec pooling rule without a hand-rolled pool). */
@@ -239,6 +310,50 @@ public:
 	 *  Keeps C++ agnostic to whichever tracer system pack is assigned. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
 	FName TracerEndParamName = TEXT("TracerEnd");
+
+	/** Decal material stamped on world geometry per pellet hit (bullet hole). Null = no decal.
+	 *  Rendered through the pooled UImpactDecalSubsystem ring buffer. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<UMaterialInterface> ImpactDecalMaterial;
+
+	/** Bullet-hole decal edge size (cm). Slight per-hit jitter is applied on top. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX", meta = (ClampMin = "1.0"))
+	float ImpactDecalSize = 8.f;
+
+	/** Seconds before a bullet-hole decal starts fading out. The pool cap recycles the oldest
+	 *  holes regardless, so this is a soft lifetime. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX", meta = (ClampMin = "1.0"))
+	float ImpactDecalLifetime = 60.f;
+
+	/** Niagara puff/sparks spawned at each world impact point, oriented to the surface normal.
+	 *  Null = no impact FX. Engine-pooled (AutoRelease), same as TracerFX. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<UNiagaraSystem> ImpactFX;
+
+	/** Fire report played at the muzzle per shot. Null = silent (enemy DAs stay null until assigned).
+	 *  Played from C++ (Multicast_PlayFireFX) — the kit BP fire-audio chain is dead code for the
+	 *  C++-driven fire path, so this field is the single source of the shot sound. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> FireSound;
+
+	/** Fire report used instead of FireSound while a suppressor is equipped (muzzle-slot attachment)
+	 *  or the weapon is effectively suppressed. Null = FireSound plays regardless of suppressor. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> SuppressedFireSound;
+
+	/** Click played once per trigger press when firing dry (empty mag, not reloading). Null = silent. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> DryFireSound;
+
+	/** Reload foley played attached to the weapon for the duration of a reload (authored to match
+	 *  the reload animation timings). Null = silent reload (current behaviour — enemy DAs stay null). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> ReloadSound;
+
+	/** Variant played when reloading from an empty magazine (adds the bolt/slide-release layer).
+	 *  Null = fall back to ReloadSound for both reload types. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|FX")
+	TObjectPtr<USoundBase> ReloadEmptySound;
 
 	// ---- Kit Weapon Bridge ----
 

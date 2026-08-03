@@ -38,6 +38,10 @@ private:
 		bool bAdvancing = false;
 		float RepathTimer = 0.f;
 		FVector LastMoveGoal = FVector::ZeroVector;
+		/** True once the heavy has had LOS at least once — a never-sighted heavy must never fire. */
+		bool bEverHadLOS = false;
+		/** Seconds since LOS was last true; fires while <= FireLosLostGrace. */
+		float LosLostTimer = 0.f;
 	};
 
 	/** Advance/anchor decision: push toward ThreatLoc while outside EngageRangeMin (+hysteresis),

@@ -56,6 +56,41 @@ public:
 	 *  Used by UEnemySquad::ForceEngage to seed Director wave squads into the fight on spawn. */
 	void ForceEngage(AActor* Target);
 
+	/** Director last-man latch: refresh the combat lock on Target without re-running EnterCombat.
+	 *  EnterCombat wipes every suspicion track and re-fires barks, squad broadcast and director
+	 *  seeding — far too heavy for a 1 Hz re-assert. Sets the target, re-stamps LastKnownLocation to
+	 *  the live position so the existing pursue walks toward where the player really is, and pulls
+	 *  the state back to Combat if the lost-contact grace dropped it. */
+	void RefreshLastManContact(AActor* Target);
+
+	/** Latched by the director once this enemy is the last living member of an auto-engage wave.
+	 *  One-way in practice — the wave's living count can never climb back up. Latching also disarms
+	 *  the director-seed arrival quit, which drops to Searching on a path the contact refresh
+	 *  cannot reach and would otherwise eject the latch from Combat. */
+	void SetLastManHunting(bool bHunting);
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	bool IsLastManHunting() const { return bLastManHunting; }
+
+	/** Continuous seconds in Combat without genuine sight of the combat target. Deliberately NOT the
+	 *  private lost-contact clock, which RefreshLastManContact zeroes every director tick to hold the
+	 *  Combat lock; this one only resets when sight actually returns. Lives here rather than in BT
+	 *  node memory because ExecuteTask wipes node memory on every task re-entry. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
+	float GetTimeWithoutSight() const { return TimeWithoutSight; }
+
+	/** Seconds since this enemy last had genuine contact with its combat target — 0 while contact is
+	 *  held (perceived sight, geometric FOV LOS, recent damage, suppression), else the lost-contact
+	 *  clock. BIG_NUMBER outside Combat: no target, no contact. Reads existing state only, no traces
+	 *  and no new tracking. bHadLOS is load-bearing on top of the clock: the perceived-sight branch
+	 *  FREEZES TimeSinceLOSLost rather than zeroing it, so a continuously-sighted target would
+	 *  otherwise report whatever the clock held when sight returned. Plain C++, C++-only consumers. */
+	float GetTimeSinceCombatContact() const
+	{
+		if (CurrentState != EEnemyAwarenessState::Combat) return BIG_NUMBER;
+		return bHadLOS ? 0.f : TimeSinceLOSLost;
+	}
+
 	/** Called by AWeaponBase::ReportNearMisses when a near-miss bullet passes close to this enemy.
 	 *  ShotOrigin is the bullet trace start (eye/muzzle of the shooter) — sent as the investigate
 	 *  point when LOS is blocked so the enemy advances toward the shot corner, not through walls.
@@ -112,6 +147,13 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Awareness")
 	float GetTimeSinceDamagedBy(const AActor* Pawn) const;
 
+	/** True while this enemy holds usable knowledge of Actor: a live sighted track, or a stimulus
+	 *  stamped within MemorySeconds. Single-track lookup, no allocation and no sort — the cheap
+	 *  per-candidate answer GetExtraKnownThreats is the wrong tool for. Cloak-aware, so a companion
+	 *  this enemy is not allowed to perceive yet reads as unknown. MemorySeconds <= 0 = sighted only.
+	 *  Plain C++ rather than a UFUNCTION so a Live Coding patch can reach the body. */
+	bool HasLiveKnowledgeOf(const AActor* Actor, float MemorySeconds) const;
+
 	/** Living hostiles beyond ExcludeTarget this enemy either sees now (live location) or has
 	 *  perceived within MemorySeconds (frozen last-stimulus location — honest knowledge), closest
 	 *  first, capped at MaxCount. MemorySeconds <= 0 = currently-sighted only. Cloaked companions
@@ -122,6 +164,11 @@ public:
 	/** The local player's pawn if it is currently DBNO, else nullptr. Shared by the posture
 	 *  standoff override and the search-converge clamp. */
 	static APawn* FindDownedPlayerPawn(const UObject* WorldContext);
+
+	/** False when the actor is dead OR downed — a DBNO pawn's health component reports dead for the
+	 *  whole bleedout window. Stateless helper; also consumed by BTService_EnemyCombat so a target
+	 *  that goes down stops being shot without waiting on the awareness tick. */
+	static bool IsActorAlive(const AActor* Actor);
 
 private:
 
@@ -157,6 +204,8 @@ private:
 	void SetState(EEnemyAwarenessState NewState);
 	void SetCombatTarget(AActor* NewTarget);
 	void UpdateAwareness();
+	/** Distance/pressure overlay drawn by enemy.DrawDistances. Extracted from UpdateAwareness. */
+	void DrawDistanceOverlay(const AEnemyCharacter* MyChar, UWorld* World) const;
 	void UpdateCombat();
 	void UpdateSuspicion();
 	void ApplySuspicionState(float MaxSuspicion, const FVector& StimulusLocation);
@@ -207,7 +256,18 @@ private:
 	 *  so the position grant reads as mid-fight squad awareness, not a wallhack. */
 	AActor* FindDBNOHandoffCompanion();
 
+	/** Companion-DBNO combat handoff fallback — mirror of FindDBNOHandoffCompanion: the live
+	 *  player within SightRadius, with a suspicion track stamped at their current location — or
+	 *  nullptr. Only called at the moment a DBNO companion drops out of Combat and normal
+	 *  selection found nothing. */
+	AActor* FindDBNOHandoffPlayer();
+
 	void RefreshSearchRoomExposure();
+
+	/** Cloak-lift edge for AlwaysCloakedCompanion (the extraction VIP arming), mirroring
+	 *  RefreshSearchRoomExposure: re-seeds sight tracks once, the tick the cloak drops. */
+	void RefreshAlwaysCloakedCompanion();
+
 	void ApplySilentSearchRoomStartle(ACompanionCharacter* Companion, FSuspicionTrack& Track);
 
 	/** Egress: report our current combat target + last-known to the squad (rate-limited by the squad). */
@@ -219,13 +279,20 @@ private:
 	/** True when the controlled pawn has bIsolatedEncounter set (sight-only, no global alert). */
 	bool IsOwnerIsolatedEncounter() const;
 
-	/** True when the controlled pawn is inside a takedown volume — awareness is "muffled": gunfire,
-	 *  walking and reload noise is dropped so taking one enemy down doesn't cascade to its pocket
-	 *  neighbours. A sprint footstep and the global Loud alert still wake it (both bypass the muffle). */
-	bool IsOwnerTakedownMuffled() const;
+	/** True when the controlled pawn stands in a designer-placed ATakedownVolume. SIGHT ONLY: the
+	 *  pocket keeps the pre-buff sneak-up profile (no point-blank auto-combat, no near-fill boost) so
+	 *  the player can creep into rear-arc melee range. Hearing is deliberately NOT gated on this —
+	 *  see IsOwnerTakedownHushed. */
+	bool IsOwnerTakedownPocket() const;
+
+	/** True while a companion takedown is ARMED on this pawn's pocket. HEARING ONLY: gunfire, walking
+	 *  and squad chatter are dropped for the duration so the player's half of a synced double kill
+	 *  doesn't make the partner spin round mid-takedown. A sprint footstep and the global Loud alert
+	 *  still pierce it. Un-pinged pockets hear normally — the hush is the reward for using the
+	 *  ping+confirm mechanic, not a permanent property of the volume. */
+	bool IsOwnerTakedownHushed() const;
 
 	bool IsHostile(AActor* Actor) const;
-	static bool IsActorAlive(const AActor* Actor);
 
 	UPROPERTY()
 	TWeakObjectPtr<UBlackboardComponent> BlackboardComp;
@@ -244,6 +311,18 @@ private:
 	TMap<TWeakObjectPtr<AActor>, FSuspicionTrack> SuspicionTracks;
 
 	TWeakObjectPtr<ACompanionCharacter> CachedPerceivedCompanion;
+
+	/** The companion we last swallowed a stimulus from while it was unconditionally cloaked, held so
+	 *  we can re-seed sight tracks the moment that cloak lifts. Perception only fires on edges: an
+	 *  enemy already in Combat with the VIP standing in its sight cone had its one sight stimulus
+	 *  dropped while he was cloaked, so no track exists for him and none will arrive without a fresh
+	 *  LOS edge. Only ever written by a cloaked companion, so the primary cannot evict the VIP. */
+	TWeakObjectPtr<ACompanionCharacter> AlwaysCloakedCompanion;
+
+	/** Cached primary companion for the distance overlay — refreshed when stale to avoid
+	 *  a TActorIterator scan every measurement tick. Mutable: written from const draw helper. */
+	mutable TWeakObjectPtr<ACompanionCharacter> CachedPrimaryCompanion;
+
 	uint32 LastSeededSearchRoomExposureGeneration = 0;
 	uint32 LastStartledSearchRoomExposureGeneration = 0;
 
@@ -259,6 +338,16 @@ private:
 
 	/** Clears the investigate-body reference and the target flag on the corpse. */
 	void ClearInvestigateBody();
+
+	/** Out-of-cone backstop for corpses lying close by: after BodyNoticeDelaySeconds of continuous
+	 *  proximity + clear line, routes into HandleBodySighted. The delay is what keeps a takedown kill
+	 *  from instantly alerting the victim's neighbour and wrecking a synced double-takedown. */
+	void UpdateProximityBodyNotice();
+
+	/** Corpse currently accruing notice time, and how long it has qualified for. Reset together the
+	 *  moment it stops qualifying, so a glance past a body banks no progress. */
+	TWeakObjectPtr<AEnemyCharacter> BodyNoticeCandidate;
+	float BodyNoticeElapsed = 0.f;
 
 	TArray<FAcousticCacheEntry> AcousticCache;
 
@@ -281,8 +370,39 @@ private:
 	bool bHadLOS = false;
 	float TimeSinceLOSLost = 0.f;
 
+	// Director last-man latch (see SetLastManHunting) and its independent no-sight accumulator.
+	bool bLastManHunting = false;
+	float TimeWithoutSight = 0.f;
+
+	// Director-seeded pursuit: set AFTER EnterCombat in ForceEngage (only when freshly
+	// entering combat), cleared unconditionally at the TOP of EnterCombat (so any non-director
+	// re-entry clears it by construction), and additionally by the FOV-LOS contact-hold signal.
+	// While active AND bHadLOS is false:
+	//   1. Suppression contact-hold is skipped so LostContactGrace can actually expire.
+	//   2. Arrival near DirectorSeedLocation triggers Searching after a brief grace.
+	bool bDirectorSeeded = false;
+
+	// The per-member approach point assigned at ForceEngage time. Arrival detection measures
+	// against THIS, not against LastKnownLocation (which is live-refreshed by EnterCombat/
+	// squad relay and would track the player). Set alongside bDirectorSeeded.
+	FVector DirectorSeedLocation = FVector::ZeroVector;
+
+	// Accumulated time spent near DirectorSeedLocation without LOS — must reach
+	// DirectorSeedArrivalGrace before transitioning to Searching (debounce).
+	float DirectorSeedArrivalAccum = 0.f;
+
+	// Persistent spawn-source flag: set in ForceEngage, never cleared (survives combat
+	// transitions, target swaps, search cycles). Gates the sustained-pressure search
+	// re-target so only director-spawned enemies keep pressing — hand-placed patrols,
+	// isolated encounters, and corpse investigators are unaffected.
+	bool bWasDirectorSpawned = false;
+
 	// Searching timeout
 	float TimeSpentSearching = 0.f;
+
+	// DBNO overwatch: search timeout holds while the downed player that was our combat target
+	// stays DBNO — cleared the tick the player revives or dies
+	bool bSearchHoldForDBNOPlayer = false;
 
 	// Threat-scored targeting: track the actor that last damaged us and when
 	TWeakObjectPtr<AActor> RecentDamageInstigatorPawn;

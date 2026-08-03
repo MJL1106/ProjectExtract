@@ -105,10 +105,24 @@ void UBTTask_RusherCircleStrafe::TickTask(UBehaviorTreeComponent& OwnerComp, uin
 	Enemy->SetAimTarget(Target);
 	Controller->SetFocus(Target);
 
-	// Fire while orbiting — same reload-safe gate as RusherAdvance.
-	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
-	if (IsValid(Weapon) && Weapon->CanFire() && !Weapon->IsFiring())
-		Weapon->StartFiring();
+	// Fire while orbiting -- LOS-gated, same reload-safe guard as RusherAdvance.
+	{
+		const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
+		const float LosGrace = IsValid(DA) ? DA->FireLosLostGrace : 0.35f;
+		AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
+		if (bHasLOS)
+		{
+			Mem->LosLostTimer = 0.f;
+			if (IsValid(Weapon) && Weapon->CanFire() && !Weapon->IsFiring())
+				Weapon->StartFiring();
+		}
+		else
+		{
+			Mem->LosLostTimer += DeltaSeconds;
+			if (Mem->LosLostTimer > LosGrace && IsValid(Weapon) && Weapon->IsFiring())
+				Weapon->StopFiring();
+		}
+	}
 
 	// Pure time-gated repick: also rate-limits the nav-project + trace cost when picks keep failing
 	// (a leg-completion fast-path would re-run PickOrbitPoint every tick while boxed in).

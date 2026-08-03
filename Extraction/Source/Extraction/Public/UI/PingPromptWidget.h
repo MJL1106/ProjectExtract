@@ -1,16 +1,18 @@
 // UPingPromptWidget -- contextual key-hint prompt shown when the player pings a target.
-// Shows command-specific hints (Breach / Takedown-Knife / Takedown-Shoot / Loot) and hides when cleared.
+// Shows command-specific hints (Breach / Takedown-Knife / Takedown-Shoot / Loot / TakeCover) and hides when cleared.
 //
 // WBP must contain:
-//   UPanelWidget "BreachContainer"      -- visible during Breach pending
-//   UTextBlock   "BreachHintText"       -- displays BreachHint text
-//   UPanelWidget "TakedownContainer"    -- visible during Takedown pending
-//   UTextBlock   "KnifeHintText"        -- displays KnifeHint text
-//   UTextBlock   "ShootHintText"        -- displays ShootHint text
-//   UPanelWidget "LootContainerPanel"   -- (optional) visible during Loot pending
-//   UTextBlock   "LootHintText"         -- (optional) displays LootHint text
-//   UPanelWidget "ExploreContainerPanel" -- (optional) visible during Explore pending
-//   UTextBlock   "ExploreHintText"       -- (optional) displays ExploreHint text
+//   UPanelWidget "BreachContainer"          -- visible during Breach pending
+//   UTextBlock   "BreachHintText"           -- displays BreachHint text
+//   UPanelWidget "TakedownContainer"        -- visible during Takedown pending
+//   UTextBlock   "KnifeHintText"            -- displays KnifeHint text
+//   UTextBlock   "ShootHintText"            -- displays ShootHint text
+//   UPanelWidget "LootContainerPanel"       -- (optional) visible during Loot pending
+//   UTextBlock   "LootHintText"             -- (optional) displays LootHint text
+//   UPanelWidget "ExploreContainerPanel"    -- (optional) visible during Explore pending
+//   UTextBlock   "ExploreHintText"          -- (optional) displays ExploreHint text
+//   UPanelWidget "TakeCoverContainerPanel"  -- (optional) visible during TakeCover pending
+//   UTextBlock   "TakeCoverHintText"        -- (optional) displays TakeCoverHint text
 
 #pragma once
 
@@ -63,6 +65,13 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> ExploreHintText;
 
+	/** Optional so existing WBPs keep compiling until the take-cover panel is added in-editor. */
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UPanelWidget> TakeCoverContainerPanel;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> TakeCoverHintText;
+
 	// --- Designer-editable hint labels ---
 
 	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
@@ -79,6 +88,9 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
 	FText ExploreHint = NSLOCTEXT("PingPrompt", "Explore", "[I] Search area");
+
+	UPROPERTY(EditAnywhere, Category = "Ping|Hints")
+	FText TakeCoverHint = NSLOCTEXT("PingPrompt", "TakeCover", "[I] Take cover");
 
 private:
 	UFUNCTION()

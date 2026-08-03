@@ -11,6 +11,8 @@
 #include "Engine/World.h"
 #include "Components/SceneComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 #include "Extraction.h"
 
 namespace
@@ -30,6 +32,8 @@ void UWeaponComponent::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& Out
 	Super::GetLifetimeReplicatedProps(OutLifetimeProps);
 
 	DOREPLIFETIME(UWeaponComponent, CurrentWeapon);
+	DOREPLIFETIME(UWeaponComponent, PrimaryWeapon);
+	DOREPLIFETIME(UWeaponComponent, SecondaryWeapon);
 	DOREPLIFETIME_CONDITION(UWeaponComponent, bIsAiming, COND_SkipOwner);
 }
 
@@ -42,9 +46,19 @@ void UWeaponComponent::BeginPlay()
 	OwnerIface = Cast<IExtractionPlayerInterface>(OwnerActor);
 	if (!OwnerIface) return;
 
-	// Server spawns default weapon
-	if (OwnerActor->HasAuthority() && DefaultWeaponClass)
-		EquipWeapon(DefaultWeaponClass);
+	// Server spawns both slot weapons; primary starts in hand
+	if (OwnerActor->HasAuthority())
+	{
+		if (DefaultWeaponClass)
+			PrimaryWeapon = SpawnWeaponActor(DefaultWeaponClass);
+		if (DefaultSecondaryWeaponClass)
+			SecondaryWeapon = SpawnWeaponActor(DefaultSecondaryWeaponClass);
+
+		if (IsValid(PrimaryWeapon))
+			SetActiveWeapon(PrimaryWeapon);
+		else if (IsValid(SecondaryWeapon))
+			SetActiveWeapon(SecondaryWeapon);
+	}
 }
 
 void UWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -53,6 +67,10 @@ void UWeaponComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 	if (IsValid(CurrentWeapon))
 		CurrentWeapon->OnWeaponFired.RemoveAll(this);
+	if (IsValid(PrimaryWeapon))
+		PrimaryWeapon->OnWeaponFired.RemoveAll(this);
+	if (IsValid(SecondaryWeapon))
+		SecondaryWeapon->OnWeaponFired.RemoveAll(this);
 
 	OwnerIface = nullptr;
 
@@ -68,59 +86,241 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 
 	bNextShotStealthExempt = false;
 
-	// Destroy existing weapon
-	if (IsValid(CurrentWeapon))
+	// Replace the primary-slot weapon
+	if (IsValid(PrimaryWeapon))
 	{
-		CurrentWeapon->Destroy();
-		CurrentWeapon = nullptr;
+		if (CurrentWeapon == PrimaryWeapon)
+			CurrentWeapon = nullptr;
+		PrimaryWeapon->Destroy();
+		PrimaryWeapon = nullptr;
 	}
 
 	if (!WeaponClass) return;
 
-	UWorld* World = GetWorld();
-	if (!IsValid(World)) return;
+	PrimaryWeapon = SpawnWeaponActor(WeaponClass);
+	if (IsValid(PrimaryWeapon))
+		SetActiveWeapon(PrimaryWeapon);
+}
 
-	ACharacter* OwnerChar = Cast<ACharacter>(OwnerActor);
+AWeaponBase* UWeaponComponent::ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<AWeaponBase> NewWeaponClass, int32 Mag, int32 Reserve)
+{
+	if (!OwnerIface) return nullptr;
+	if (!IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return nullptr;
+	if (!NewWeaponClass) return nullptr;
+	if (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown()) return nullptr;
+
+	bNextShotStealthExempt = false;
+
+	TObjectPtr<AWeaponBase>& Slot = bPrimarySlot ? PrimaryWeapon : SecondaryWeapon;
+	const bool bSlotWasHeld = !IsValid(CurrentWeapon) || CurrentWeapon == Slot;
+
+	// Only cancel the held weapon's reload/fire when the replaced slot IS the held one.
+	// Picking up into the stowed slot must not disturb the gun in your hands.
+	if (bSlotWasHeld && IsValid(CurrentWeapon))
+		CurrentWeapon->AbortFireAndReload();
+
+	if (IsValid(Slot))
+	{
+		if (CurrentWeapon == Slot)
+			CurrentWeapon = nullptr;
+		Slot->Destroy();
+		Slot = nullptr;
+	}
+
+	Slot = SpawnWeaponActor(NewWeaponClass);
+	if (!IsValid(Slot)) return nullptr;
+
+	if (Mag >= 0 || Reserve >= 0)
+		Slot->SetAmmoState(Mag, Reserve);
+
+	if (bSlotWasHeld)
+		SetActiveWeapon(Slot);
+
+	// Corpse-gun grab — layered under SetActiveWeapon's handling foley when the slot was held.
+	if (AudioSuppressionDepth <= 0)
+	{
+		const UWorld* World = GetWorld();
+		UGameAudioSubsystem* AudioSys = World ? World->GetSubsystem<UGameAudioSubsystem>() : nullptr;
+		if (AudioSys && AudioSys->GetBank())
+			AudioSys->PlayFoleyFor(OwnerActor, AudioSys->GetBank()->PickupWeapon);
+	}
+
+	return Slot;
+}
+
+AWeaponBase* UWeaponComponent::FindWeaponByAmmoCategory(EEnemyWeaponAnimType Category) const
+{
+	AWeaponBase* const Candidates[] = { CurrentWeapon.Get(), PrimaryWeapon.Get(), SecondaryWeapon.Get() };
+	for (AWeaponBase* Candidate : Candidates)
+	{
+		if (!IsValid(Candidate)) continue;
+		const UWeaponDataAsset* Data = Candidate->GetWeaponData();
+		if (Data && Data->EnemyWeaponAnimType == Category)
+			return Candidate;
+	}
+	return nullptr;
+}
+
+EWeaponSlot UWeaponComponent::GetActiveWeaponSlot() const
+{
+	if (!IsValid(CurrentWeapon)) return EWeaponSlot::None;
+	if (CurrentWeapon == PrimaryWeapon) return EWeaponSlot::Primary;
+	if (CurrentWeapon == SecondaryWeapon) return EWeaponSlot::Secondary;
+	return EWeaponSlot::None;
+}
+
+AWeaponBase* UWeaponComponent::GetStowedWeapon() const
+{
+	if (!IsValid(CurrentWeapon)) return nullptr;
+	if (CurrentWeapon == PrimaryWeapon) return SecondaryWeapon;
+	if (CurrentWeapon == SecondaryWeapon) return PrimaryWeapon;
+	return nullptr;
+}
+
+AWeaponBase* UWeaponComponent::SpawnWeaponActor(TSubclassOf<AWeaponBase> WeaponClass)
+{
+	if (!WeaponClass) return nullptr;
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return nullptr;
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.Owner = OwnerActor;
 	SpawnParams.Instigator = Cast<APawn>(OwnerActor);
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	CurrentWeapon = World->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
-	if (!IsValid(CurrentWeapon)) return;
+	AWeaponBase* Weapon = World->SpawnActor<AWeaponBase>(WeaponClass, FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
+	if (!IsValid(Weapon)) return nullptr;
 
 	// Attach to the kit IK-rig gun bone (ik_hand_gun) so AC_ProceduralAnimation drives the weapon transform
+	ACharacter* OwnerChar = Cast<ACharacter>(OwnerActor);
 	if (IsValid(OwnerChar))
 	{
 		USkeletalMeshComponent* BodyMesh = OwnerChar->GetMesh();
 		if (IsValid(BodyMesh))
 		{
-			CurrentWeapon->AttachToComponent(
+			Weapon->AttachToComponent(
 				BodyMesh,
 				FAttachmentTransformRules::SnapToTargetNotIncludingScale,
 				KitWeaponAttachSocket
 			);
-			SeatWeaponGripSocket();
 		}
 	}
 
-	CurrentWeapon->InitializeAmmo();
+	Weapon->InitializeAmmo();
+	Weapon->SetWeaponHidden(true); // slots spawn holstered; SetActiveWeapon unhides
+	return Weapon;
+}
+
+void UWeaponComponent::SetActiveWeapon(AWeaponBase* NewWeapon)
+{
+	if (!OwnerIface || !IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return;
+	if (!IsValid(NewWeapon)) return;
+	// Same-weapon re-equip is only allowed to restore the kit gun visual after a throwable —
+	// NotifyWeaponEquipped below respawns the kit item over the grenade.
+	if (NewWeapon == CurrentWeapon && !bThrowableEquipped) return;
+
+	if (IsValid(CurrentWeapon))
+	{
+		CurrentWeapon->AbortFireAndReload();
+		CurrentWeapon->OnWeaponFired.RemoveAll(this);
+		CurrentWeapon->SetWeaponHidden(true);
+	}
+
+	// Genuine hand-swap (or gun restore after a throwable) — first equip at spawn stays silent.
+	const bool bAudibleSwap = IsValid(CurrentWeapon);
+
+	bNextShotStealthExempt = false;
+	bThrowableEquipped = false;
+	CurrentWeapon = NewWeapon;
+	CurrentWeapon->SetWeaponHidden(false);
+	CurrentWeapon->SetOwnerIsAiming(bIsAiming);
+	SeatWeaponGripSocket();
+
+	if (bAudibleSwap && AudioSuppressionDepth <= 0)
+	{
+		const UWorld* World = GetWorld();
+		UGameAudioSubsystem* AudioSys = World ? World->GetSubsystem<UGameAudioSubsystem>() : nullptr;
+		if (AudioSys && AudioSys->GetBank())
+			AudioSys->PlayFoleyFor(OwnerActor, AudioSys->GetBank()->WeaponSwitchFoley);
+	}
 
 	// Bind weapon fire delegate to multicast for 3P effects
 	if (!CurrentWeapon->OnWeaponFired.IsAlreadyBound(this, &UWeaponComponent::OnWeaponFiredCallback))
 		CurrentWeapon->OnWeaponFired.AddDynamic(this, &UWeaponComponent::OnWeaponFiredCallback);
 
-	// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose.
+	// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose + kit item respawn.
 	// Skip on dedicated server (no visuals) and when downed.
 	const APawn* OwnerPawn = Cast<APawn>(OwnerActor);
-	if (IsValid(CurrentWeapon) && IsValid(OwnerActor) && OwnerIface && IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled() && !OwnerIface->GetIsDBNO())
+	if (IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled() && !OwnerIface->GetIsDBNO())
+	{
 		OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
+		CurrentWeapon->ResyncVisualAmmo(); // fresh kit item starts with BP-default counts otherwise
+	}
+}
+
+void UWeaponComponent::SwitchToPrimary()
+{
+	if (!IsValid(OwnerActor)) return;
+	if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return;
+
+	if (OwnerActor->HasAuthority())
+		SetActiveWeapon(PrimaryWeapon);
+	else
+		Server_SwitchWeapon(0);
+}
+
+void UWeaponComponent::SwitchToSecondary()
+{
+	if (!IsValid(OwnerActor)) return;
+	if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return;
+
+	if (OwnerActor->HasAuthority())
+		SetActiveWeapon(SecondaryWeapon);
+	else
+		Server_SwitchWeapon(1);
+}
+
+void UWeaponComponent::ActivateSlot(EWeaponSlot Slot)
+{
+	if (!IsValid(OwnerActor) || !OwnerActor->HasAuthority()) return;
+	if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return;
+
+	AWeaponBase* Target = nullptr;
+	if (Slot == EWeaponSlot::Primary) Target = PrimaryWeapon;
+	else if (Slot == EWeaponSlot::Secondary) Target = SecondaryWeapon;
+
+	if (IsValid(Target))
+		SetActiveWeapon(Target);
+}
+
+void UWeaponComponent::Server_SwitchWeapon_Implementation(uint8 SlotIndex)
+{
+	if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return;
+	SetActiveWeapon(SlotIndex == 0 ? PrimaryWeapon.Get() : SecondaryWeapon.Get());
+}
+
+bool UWeaponComponent::SetThrowableEquipped(bool bEquipped)
+{
+	if (bEquipped == bThrowableEquipped) return true;
+
+	if (bEquipped)
+	{
+		if (OwnerIface && (OwnerIface->GetIsDBNO() || OwnerIface->IsInTakedown())) return false;
+		if (IsValid(CurrentWeapon))
+			CurrentWeapon->AbortFireAndReload();
+		if (bIsAiming)
+			SetAiming(false);
+	}
+
+	bThrowableEquipped = bEquipped;
+	return true;
 }
 
 void UWeaponComponent::StartFire(bool bAuthorityTakedownSnapshot)
 {
 	if (!IsValid(OwnerActor)) return;
+	if (bThrowableEquipped) return; // FireStart diverts to the kit item before reaching here — belt-and-braces
 
 	// Authority path: trust the caller's snapshot directly (ExtractionPlayer resolved it).
 	if (OwnerActor->HasAuthority())
@@ -148,6 +348,7 @@ void UWeaponComponent::StopFire()
 void UWeaponComponent::StartReload()
 {
 	if (!IsValid(OwnerActor)) return;
+	if (bThrowableEquipped) return; // R with the grenade out must not reload the stowed gun
 	if (!OwnerActor->HasAuthority() && IsValid(CurrentWeapon))
 		CurrentWeapon->Reload();
 
@@ -156,6 +357,8 @@ void UWeaponComponent::StartReload()
 
 void UWeaponComponent::SetAiming(bool bNewAiming)
 {
+	if (bThrowableEquipped && bNewAiming) return; // no ADS on the throwable; clearing is allowed
+
 	bIsAiming = bNewAiming;
 
 	if (IsValid(CurrentWeapon))
@@ -271,7 +474,10 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 		// Notify owning-client BP to drive AC_ProceduralAnimation::NewHandPose.
 		// Skip when downed — arms aren't visible and the pose system may not be ready.
 		if (IsValid(OwnerActor) && OwnerIface && !OwnerIface->GetIsDBNO())
+		{
 			OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
+			CurrentWeapon->ResyncVisualAmmo();
+		}
 	}
 	else if (IsValid(OwnerChar))
 	{
@@ -286,6 +492,13 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 			);
 		}
 	}
+
+	// Client-side mirror of SetActiveWeapon's hide/show: only the held weapon renders.
+	AWeaponBase* Slots[] = { PrimaryWeapon.Get(), SecondaryWeapon.Get() };
+	for (AWeaponBase* Slot : Slots)
+		if (IsValid(Slot) && Slot != CurrentWeapon)
+			Slot->SetWeaponHidden(true);
+	CurrentWeapon->SetWeaponHidden(false);
 }
 
 void UWeaponComponent::OnRep_IsAiming()
@@ -317,6 +530,19 @@ void UWeaponComponent::SeatWeaponGripSocket()
 }
 
 // ---- Stealth Exemption ----
+
+// ---- Audio Suppression ----
+
+void UWeaponComponent::BeginAudioSuppression()
+{
+	++AudioSuppressionDepth;
+}
+
+void UWeaponComponent::EndAudioSuppression()
+{
+	if (AudioSuppressionDepth > 0)
+		--AudioSuppressionDepth;
+}
 
 bool UWeaponComponent::ResolveServerTakedownSnapshot()
 {

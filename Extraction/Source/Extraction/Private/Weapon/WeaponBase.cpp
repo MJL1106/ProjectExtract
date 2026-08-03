@@ -1,6 +1,8 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "WeaponBase.h"
+#include "WeaponVisibilityUtils.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "AI/CompanionDiag.h"
 #include "WeaponDataAsset.h"
 #include "Character/ExtractionPlayerInterface.h"
@@ -13,8 +15,11 @@
 #include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
 #include "EnemyMoraleComponent.h"
+#include "ExtractionPlayerController.h"
 #include "Animation/AnimInstance.h"
+#include "Components/AudioComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Sound/SoundBase.h"
 #include "Components/MeshComponent.h"
 #include "Components/PrimitiveComponent.h"
 #include "Camera/CameraComponent.h"
@@ -32,9 +37,13 @@
 #include "Extraction.h"
 #include "EnemyDebug.h"
 #include "DamageMitigationSettings.h"
+#include "World/ImpactDecalSubsystem.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 #include "NiagaraComponent.h"
 #include "NiagaraDataInterfaceArrayFunctionLibrary.h"
 #include "NiagaraFunctionLibrary.h"
+#include "NiagaraSystem.h"
 
 namespace WeaponConstants
 {
@@ -42,6 +51,76 @@ namespace WeaponConstants
 
 	/** Extra seconds added to the computed shell reload duration to cover montage blend-in/out. */
 	static constexpr float ShellReloadSafetyMargin = 1.5f;
+}
+
+namespace
+{
+	/** The kit visual item (BP_Item_Base child stored in BP_ExtractionCharacter.SpawnedItem) keeps its own
+	 *  AmmoCount/MaxAmmo vars, and its Event Reload chain gates the reload ANIMATION on them. Nothing depletes
+	 *  them while our C++ owns firing, so after the first reload tops them up every later reload skips the
+	 *  animation. Mirror the real counts into it via its SetAmmo BP function whenever our ammo changes. */
+	void SyncKitVisualItemAmmo(AActor* OwnerActor, int32 InCurrentAmmo, int32 InReserveAmmo)
+	{
+		if (!IsValid(OwnerActor)) return;
+		const FObjectProperty* ItemProp = CastField<FObjectProperty>(OwnerActor->GetClass()->FindPropertyByName(TEXT("SpawnedItem")));
+		if (!ItemProp) return;
+		UObject* Item = ItemProp->GetObjectPropertyValue_InContainer(OwnerActor);
+		if (!IsValid(Item)) return;
+		UFunction* SetAmmoFn = Item->FindFunction(TEXT("SetAmmo"));
+		if (!SetAmmoFn || SetAmmoFn->ParmsSize != sizeof(int32) * 2) return;
+		struct { int32 AmmoCount; int32 MaxAmmo; } Params{ InCurrentAmmo, InReserveAmmo };
+		Item->ProcessEvent(SetAmmoFn, &Params);
+	}
+
+	/** C++-initiated reloads (auto-reload on empty, held-fire dry reload) never pass through the kit
+	 *  character's IA_Reload chain, so the kit item's Event Reload — which owns the arms + weapon-mesh
+	 *  reload animation — doesn't fire for them. Trigger it directly; the kit chain's own Do Once and
+	 *  ammo gates make a duplicate call from the manual R-key path a no-op. */
+	void TriggerKitVisualItemReload(AActor* OwnerActor)
+	{
+		if (!IsValid(OwnerActor)) return;
+		const FObjectProperty* ItemProp = CastField<FObjectProperty>(OwnerActor->GetClass()->FindPropertyByName(TEXT("SpawnedItem")));
+		if (!ItemProp) return;
+		UObject* Item = ItemProp->GetObjectPropertyValue_InContainer(OwnerActor);
+		if (!IsValid(Item)) return;
+		UFunction* ReloadFn = Item->FindFunction(TEXT("Reload"));
+		if (!ReloadFn || ReloadFn->ParmsSize != 0) return;
+		Item->ProcessEvent(ReloadFn, nullptr);
+	}
+
+	/** Cancels a reload animation on the kit visual item. Mirrors TriggerKitVisualItemReload:
+	 *  the item BP's CancelReload event stops the arms + weapon-mesh reload anim so the magazine
+	 *  mesh doesn't keep floating through a stim injection or other interrupt. No-ops when the
+	 *  item BP has no CancelReload function (kit originals, enemies, companion). */
+	void TriggerKitVisualItemCancelReload(AActor* OwnerActor)
+	{
+		if (!IsValid(OwnerActor)) return;
+		const FObjectProperty* ItemProp = CastField<FObjectProperty>(OwnerActor->GetClass()->FindPropertyByName(TEXT("SpawnedItem")));
+		if (!ItemProp) return;
+		UObject* Item = ItemProp->GetObjectPropertyValue_InContainer(OwnerActor);
+		if (!IsValid(Item)) return;
+		UFunction* CancelFn = Item->FindFunction(TEXT("CancelReload"));
+		if (!CancelFn || CancelFn->ParmsSize != 0) return;
+		Item->ProcessEvent(CancelFn, nullptr);
+	}
+
+	/** The kit's procedural fire feel (arms + gun kick via AC_ProceduralAnimation::RecoilAnimation and
+	 *  the arms fire anim) is normally driven by the kit item's own Trigger flow, which our C++ fire
+	 *  path bypasses — so the camera moved but the hands didn't. Our item BPs implement a cosmetic-only
+	 *  FireKick(bADS) event mirroring that chain; invoke it per local shot. No-ops when the item BP
+	 *  has no FireKick (kit originals, enemies, companion). */
+	void TriggerKitVisualItemFireKick(AActor* OwnerActor, bool bADS)
+	{
+		if (!IsValid(OwnerActor)) return;
+		const FObjectProperty* ItemProp = CastField<FObjectProperty>(OwnerActor->GetClass()->FindPropertyByName(TEXT("SpawnedItem")));
+		if (!ItemProp) return;
+		UObject* Item = ItemProp->GetObjectPropertyValue_InContainer(OwnerActor);
+		if (!IsValid(Item)) return;
+		UFunction* KickFn = Item->FindFunction(TEXT("FireKick"));
+		if (!KickFn || KickFn->ParmsSize != sizeof(bool)) return;
+		bool bParam = bADS;
+		Item->ProcessEvent(KickFn, &bParam);
+	}
 }
 
 static TAutoConsoleVariable<int32> CVarShowBulletTracers(
@@ -62,10 +141,26 @@ static TAutoConsoleVariable<int32> CVarPlayerTraceDebug(
 	TEXT("If non-zero, log player weapon hitscan trace details (start, end, hit actor, component, distance, health check)."),
 	ECVF_Cheat);
 
+static TAutoConsoleVariable<int32> CVarAttachmentDebug(
+	TEXT("weapon.AttachmentDebug"),
+	0,
+	TEXT("If non-zero, log every attachment selection change: the per-slot kit bytes, which attachment assets resolved, ")
+	TEXT("and the resulting effective stats (damage, recoil, ADS time, hip spread, noise, falloff, ADS FOV). ")
+	TEXT("2 or higher also prints to screen. Proves whether a picked-up attachment actually reached the weapon."),
+	ECVF_Cheat);
+
 static TAutoConsoleVariable<int32> CVarFireAlignDebug(
 	TEXT("weapon.FireAlignDebug"),
 	0,
 	TEXT("If non-zero, log enemy weapon fire-align: SetupFireAlign captures (rest/fire relative, sockets, fire offset) and SetFireAlignAlpha (alpha + resulting WeaponMesh relative/world transform). Diagnoses misalignment from the WeaponSocket_Fire blend. Default 0 = no logging, no behavior change."),
+	ECVF_Cheat);
+
+// Single definition — UCompanionAnimInstance re-queries this by name via
+// IConsoleManager::Get().FindConsoleVariable to avoid duplicate CVar registration.
+static TAutoConsoleVariable<int32> CVarCompanionAlignDebug(
+	TEXT("companion.AlignDebug"),
+	0,
+	TEXT("If non-zero, log the weapon-align writer race: which of fire-align / patrol-align / cover-align actually wrote the weapon mesh this frame (they all write an ABSOLUTE relative transform, so the last writer is the only visible one), plus a one-shot dump of each align bake (sockets, the pose-dependent socket-to-bone term, per-scenario offsets). Use during a cover peek-fire to identify the visible writer. Default 0 = no logging, no behavior change."),
 	ECVF_Cheat);
 
 // Single definition — other translation units (companion BT service/task) re-query this by name
@@ -251,6 +346,247 @@ void AWeaponBase::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifet
 	DOREPLIFETIME_CONDITION(AWeaponBase, CurrentState, COND_SkipOwner);
 	DOREPLIFETIME_CONDITION(AWeaponBase, CurrentAmmo, COND_OwnerOnly);
 	DOREPLIFETIME_CONDITION(AWeaponBase, ReserveAmmo, COND_OwnerOnly);
+	DOREPLIFETIME_CONDITION(AWeaponBase, AttachmentSelection, COND_SkipOwner);
+}
+
+// ---- Attachments (gameplay effects) ----
+
+void AWeaponBase::SetAttachmentSelection(uint8 Sight, uint8 Muzzle, uint8 Laser, uint8 Grip, uint8 Handguard)
+{
+	FWeaponAttachmentSelection NewSelection;
+	NewSelection.Sight = Sight;
+	NewSelection.Muzzle = Muzzle;
+	NewSelection.Laser = Laser;
+	NewSelection.Grip = Grip;
+	NewSelection.Handguard = Handguard;
+
+	// Apply locally either way (owning-client feel); non-authority forwards to the server.
+	ApplySelectionInternal(NewSelection);
+	if (!HasAuthority())
+		Server_SetAttachmentSelection(NewSelection);
+}
+
+void AWeaponBase::SetAttachmentSlotOption(uint8 KitSlotByte, uint8 OptionByte)
+{
+	EAttachmentSlot Slot;
+	if (!KitAttachmentSlots::ToAttachmentSlot(KitSlotByte, Slot))
+	{
+		// Distinguishes "the pickup never called this" from "it called with a slot that carries no
+		// stats" — kit Barrels, or a byte from a reordered kit enum.
+		UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s: kit slot byte %u has no gameplay slot (Barrels or unknown) — option %u ignored."),
+			*GetName(), KitSlotByte, OptionByte);
+		return;
+	}
+
+	if (CVarAttachmentDebug.GetValueOnAnyThread() > 0)
+		UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s: kit slot %u -> %s, option byte %u"),
+			*GetName(), KitSlotByte, *UEnum::GetValueAsString(Slot), OptionByte);
+
+	// Read-modify-write: the pickup only knows its own slot, so the other four must survive.
+	FWeaponAttachmentSelection NewSelection = AttachmentSelection;
+	switch (Slot)
+	{
+	case EAttachmentSlot::Sight:     NewSelection.Sight = OptionByte;     break;
+	case EAttachmentSlot::Muzzle:    NewSelection.Muzzle = OptionByte;    break;
+	case EAttachmentSlot::Laser:     NewSelection.Laser = OptionByte;     break;
+	case EAttachmentSlot::Grip:      NewSelection.Grip = OptionByte;      break;
+	case EAttachmentSlot::Handguard: NewSelection.Handguard = OptionByte; break;
+	}
+
+	SetAttachmentSelection(NewSelection.Sight, NewSelection.Muzzle, NewSelection.Laser,
+		NewSelection.Grip, NewSelection.Handguard);
+}
+
+void AWeaponBase::Server_SetAttachmentSelection_Implementation(FWeaponAttachmentSelection NewSelection)
+{
+	ApplySelectionInternal(NewSelection);
+}
+
+void AWeaponBase::ApplySelectionInternal(const FWeaponAttachmentSelection& NewSelection)
+{
+	AttachmentSelection = NewSelection;
+	RecalculateAttachmentEffects();
+}
+
+void AWeaponBase::OnRep_AttachmentSelection()
+{
+	RecalculateAttachmentEffects();
+}
+
+void AWeaponBase::RecalculateAttachmentEffects()
+{
+	const UNiagaraSystem* OldFlash = GetEffectiveMuzzleFlashFX();
+
+	CombinedModifiers = FWeaponStatModifiers();
+	bAttachmentSuppressed = false;
+	AttachmentMuzzleFlashOverride = nullptr;
+
+	if (IsValid(WeaponData))
+	{
+		const auto Accumulate = [this](const TArray<TObjectPtr<UWeaponAttachmentDataAsset>>& Options, uint8 Index)
+		{
+			if (!Options.IsValidIndex(Index)) return;
+			const UWeaponAttachmentDataAsset* Attachment = Options[Index];
+			if (!IsValid(Attachment)) return;
+
+			const FWeaponStatModifiers& M = Attachment->Modifiers;
+			CombinedModifiers.DamageMult *= M.DamageMult;
+			CombinedModifiers.RecoilPitchMult *= M.RecoilPitchMult;
+			CombinedModifiers.RecoilYawMult *= M.RecoilYawMult;
+			CombinedModifiers.ADSTransitionMult *= M.ADSTransitionMult;
+			CombinedModifiers.ADSMoveSpeedMult *= M.ADSMoveSpeedMult;
+			CombinedModifiers.HipSpreadMult *= M.HipSpreadMult;
+			CombinedModifiers.NoiseLoudnessMult *= M.NoiseLoudnessMult;
+			CombinedModifiers.NoiseRangeMult *= M.NoiseRangeMult;
+			CombinedModifiers.FalloffStartMult *= M.FalloffStartMult;
+			CombinedModifiers.ADSFOVDelta += M.ADSFOVDelta;
+			if (M.ADSFOVOverride > 0.f)
+				CombinedModifiers.ADSFOVOverride = M.ADSFOVOverride;
+
+			bAttachmentSuppressed |= Attachment->bSetsSuppressed;
+			if (IsValid(Attachment->MuzzleFlashFXOverride))
+				AttachmentMuzzleFlashOverride = Attachment->MuzzleFlashFXOverride;
+		};
+
+		Accumulate(WeaponData->SightAttachments, AttachmentSelection.Sight);
+		Accumulate(WeaponData->MuzzleAttachments, AttachmentSelection.Muzzle);
+		Accumulate(WeaponData->LaserAttachments, AttachmentSelection.Laser);
+		Accumulate(WeaponData->GripAttachments, AttachmentSelection.Grip);
+		Accumulate(WeaponData->HandguardAttachments, AttachmentSelection.Handguard);
+	}
+
+	LogAttachmentDebug();
+
+	// Flash FX changed — drop the pooled components so the next shot rebuilds with the new system.
+	if (GetEffectiveMuzzleFlashFX() != OldFlash)
+	{
+		if (IsValid(MuzzleFlashComponent))
+		{
+			MuzzleFlashComponent->DestroyComponent();
+			MuzzleFlashComponent = nullptr;
+		}
+		if (IsValid(FirstPersonMuzzleFlashComponent))
+		{
+			FirstPersonMuzzleFlashComponent->DestroyComponent();
+			FirstPersonMuzzleFlashComponent = nullptr;
+		}
+	}
+}
+
+void AWeaponBase::LogAttachmentDebug() const
+{
+	const int32 DebugLevel = CVarAttachmentDebug.GetValueOnAnyThread();
+	if (DebugLevel <= 0) return;
+
+	if (!IsValid(WeaponData))
+	{
+		UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s has NO WeaponData — no attachment can have any effect."), *GetName());
+		return;
+	}
+
+	// Re-resolve per slot so the log names the actual asset, not just the byte. A byte that
+	// resolves to "(none)" while the mesh visibly changed is the signature of a pickup whose
+	// option index has no entry in the weapon's stat array — cosmetic fit, no stats.
+	auto SlotLine = [](const TCHAR* Label, const TArray<TObjectPtr<UWeaponAttachmentDataAsset>>& Options, uint8 Byte)
+	{
+		const UWeaponAttachmentDataAsset* A = Options.IsValidIndex(Byte) ? Options[Byte].Get() : nullptr;
+		return FString::Printf(TEXT("%s=%u:%s"), Label, Byte, IsValid(A) ? *A->GetName() : TEXT("(none)"));
+	};
+
+	const FString Slots = FString::Printf(TEXT("%s %s %s %s %s"),
+		*SlotLine(TEXT("Sight"), WeaponData->SightAttachments, AttachmentSelection.Sight),
+		*SlotLine(TEXT("Muzzle"), WeaponData->MuzzleAttachments, AttachmentSelection.Muzzle),
+		*SlotLine(TEXT("Laser"), WeaponData->LaserAttachments, AttachmentSelection.Laser),
+		*SlotLine(TEXT("Grip"), WeaponData->GripAttachments, AttachmentSelection.Grip),
+		*SlotLine(TEXT("Handguard"), WeaponData->HandguardAttachments, AttachmentSelection.Handguard));
+
+	// Base -> effective for every stat an attachment can move, so a change is self-evidently
+	// attributable: identical pairs mean the modifier layer did nothing.
+	const FString Stats = FString::Printf(
+		TEXT("Dmg %.1f->%.1f | ADSTime %.3f->%.3f | ADSMove %.0f->%.0f | HipSpread %.2f->%.2f | ")
+		TEXT("Falloff %.0f->%.0f | ADSFOV %.1f->%.1f | RecoilMult P%.2f Y%.2f | Suppressed %s"),
+		WeaponData->BaseDamage, GetEffectiveDamage(),
+		WeaponData->ADSTransitionTime, GetEffectiveADSTransitionTime(),
+		WeaponData->ADSMovementSpeed, GetEffectiveADSMovementSpeed(),
+		WeaponData->HipFireSpreadDeg, GetEffectiveHipFireSpreadDeg(),
+		WeaponData->DamageFalloffStartRange, WeaponData->DamageFalloffStartRange * CombinedModifiers.FalloffStartMult,
+		WeaponData->ADSFOV, GetEffectiveADSFOV(),
+		CombinedModifiers.RecoilPitchMult, CombinedModifiers.RecoilYawMult,
+		IsSuppressedEffective() ? TEXT("YES") : TEXT("no"));
+
+	UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s | %s | %s"), *GetName(), *Slots, *Stats);
+
+	if (DebugLevel >= 2 && GEngine)
+	{
+		GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Cyan, FString::Printf(TEXT("[Attach] %s"), *Slots));
+		GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Yellow, FString::Printf(TEXT("[Attach] %s"), *Stats));
+	}
+}
+
+float AWeaponBase::GetEffectiveDamage() const
+{
+	return IsValid(WeaponData) ? WeaponData->BaseDamage * CombinedModifiers.DamageMult : 0.f;
+}
+
+bool AWeaponBase::IsSuppressedEffective() const
+{
+	return (IsValid(WeaponData) && WeaponData->bSuppressed) || bAttachmentSuppressed;
+}
+
+float AWeaponBase::GetEffectiveADSFOV() const
+{
+	if (!IsValid(WeaponData)) return 65.f;
+	if (CombinedModifiers.ADSFOVOverride > 0.f)
+		return FMath::Clamp(CombinedModifiers.ADSFOVOverride, 20.f, 120.f);
+	return FMath::Clamp(WeaponData->ADSFOV + CombinedModifiers.ADSFOVDelta, 20.f, 120.f);
+}
+
+float AWeaponBase::GetEffectiveADSTransitionTime() const
+{
+	return IsValid(WeaponData) ? WeaponData->ADSTransitionTime * CombinedModifiers.ADSTransitionMult : 0.15f;
+}
+
+float AWeaponBase::GetEffectiveADSMovementSpeed() const
+{
+	return IsValid(WeaponData) ? WeaponData->ADSMovementSpeed * CombinedModifiers.ADSMoveSpeedMult : 400.f;
+}
+
+float AWeaponBase::GetEffectiveHipFireSpreadDeg() const
+{
+	return IsValid(WeaponData) ? WeaponData->HipFireSpreadDeg * CombinedModifiers.HipSpreadMult : 0.f;
+}
+
+float AWeaponBase::GetEffectiveNoiseLoudness() const
+{
+	return IsValid(WeaponData) ? WeaponData->NoiseLoudness * CombinedModifiers.NoiseLoudnessMult : 0.f;
+}
+
+float AWeaponBase::GetEffectiveNoiseRange() const
+{
+	return IsValid(WeaponData) ? WeaponData->NoiseRange * CombinedModifiers.NoiseRangeMult : 0.f;
+}
+
+UNiagaraSystem* AWeaponBase::GetEffectiveMuzzleFlashFX() const
+{
+	if (IsValid(AttachmentMuzzleFlashOverride)) return AttachmentMuzzleFlashOverride;
+	return IsValid(WeaponData) ? WeaponData->MuzzleFlashFX : nullptr;
+}
+
+void AWeaponBase::SetVisualHighlight(bool bHighlight)
+{
+	if (IsValid(WeaponMesh))
+		WeaponMesh->SetRenderCustomDepth(bHighlight);
+
+	if (IsValid(SpawnedVisualActor))
+	{
+		TInlineComponentArray<UPrimitiveComponent*> Primitives;
+		SpawnedVisualActor->GetComponents(Primitives);
+		for (UPrimitiveComponent* Prim : Primitives)
+		{
+			if (IsValid(Prim))
+				Prim->SetRenderCustomDepth(bHighlight);
+		}
+	}
 }
 
 void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -282,7 +618,11 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		SpawnedVisualActor->Destroy();
 		SpawnedVisualActor = nullptr;
+		VisualActorHiddenSnapshot.Reset();
+		bWeaponHiddenBySnapshot = false;
 	}
+
+	StopReloadAudio();
 
 	if (const UWorld* World = GetWorld())
 	{
@@ -297,6 +637,10 @@ void AWeaponBase::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 FVector AWeaponBase::GetMuzzleLocation() const
 {
+	// The kit FP item's Muzzle component is the designer-placed barrel tip; the hidden TP frame
+	// has no Muzzle socket, so without this the fallback is the actor (hand) location.
+	if (IsValid(FirstPersonMuzzle))
+		return FirstPersonMuzzle->GetComponentLocation();
 	if (IsValid(WeaponMesh) && WeaponMesh->DoesSocketExist(WeaponConstants::MuzzleSocketName))
 		return WeaponMesh->GetSocketLocation(WeaponConstants::MuzzleSocketName);
 	return GetActorLocation();
@@ -316,9 +660,23 @@ USkeletalMeshComponent* AWeaponBase::GetThirdPersonGripMesh() const
 
 void AWeaponBase::SetWeaponHidden(bool bNewHidden)
 {
+	if (bWeaponHiddenBySnapshot == bNewHidden) return;
+	bWeaponHiddenBySnapshot = bNewHidden;
+
 	SetActorHiddenInGame(bNewHidden);
 	if (IsValid(SpawnedVisualActor))
-		SpawnedVisualActor->SetActorHiddenInGame(bNewHidden);
+	{
+		if (bNewHidden)
+		{
+			VisualActorHiddenSnapshot.Reset();
+			WeaponVisibilityUtils::SnapshotAndHideActorTree(SpawnedVisualActor, VisualActorHiddenSnapshot);
+		}
+		else
+		{
+			WeaponVisibilityUtils::RestoreActorTree(SpawnedVisualActor, VisualActorHiddenSnapshot);
+			VisualActorHiddenSnapshot.Reset();
+		}
+	}
 }
 
 // ---- Fire Control ----
@@ -407,7 +765,7 @@ void AWeaponBase::StartFiring()
 	}
 }
 
-void AWeaponBase::StopFiring()
+void AWeaponBase::StopFiringInternal()
 {
 	bWantsToFire = false;
 
@@ -427,11 +785,21 @@ void AWeaponBase::StopFiring()
 		RecoilRecoveryPitchApplied = 0.f;
 		RecoilRecoveryYawApplied = 0.f;
 	}
+}
 
-	// Auto-reload if magazine empty and we have reserve (player UX — AI weapons set bAutoReloadOnEmpty=false to defer to BT).
+void AWeaponBase::StopFiring()
+{
+	StopFiringInternal();
+
+	// Auto-reload if magazine empty and we have reserve (player UX -- AI weapons set bAutoReloadOnEmpty=false to defer to BT).
 	if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
 		Reload();
+}
 
+void AWeaponBase::AbortFireAndReload()
+{
+	StopFiringInternal();
+	CancelReload();
 }
 
 void AWeaponBase::OnAutoFireTimer()
@@ -469,21 +837,47 @@ void AWeaponBase::OnAutoFireTimer()
 	FireShot();
 }
 
+const TArray<AActor*>& AWeaponBase::GetFriendlyFireIgnoreList()
+{
+	// Same staleness rule PerformHitscan uses. AI fire gates poll this while holding fire, long after
+	// the last burst rebuilt it, so it cannot simply return the cache: a companion that spawned or
+	// died since then would still be treated as solid (or transparent) by every withhold check.
+	const UWorld* World = GetWorld();
+	if (World && (World->GetTimeSeconds() - FFIgnoreListBuiltTime) > FFIgnoreListRefreshSeconds)
+		RebuildFFIgnoreList();
+
+	return CachedFFIgnoreList;
+}
+
 void AWeaponBase::RebuildFFIgnoreList()
 {
-	CachedFFIgnoreList.Reset();
-
+	// EMPTY and STALE are not the same risk, and the whole shape of this function turns on that.
+	// An empty list means the hitscan excludes NOBODY — a live friendly-fire shot. A stale one is
+	// merely wrong in both directions and harmless either way: it can over-ignore a team-mate that has
+	// since died, or under-ignore one that has since spawned, and neither costs anything worse than a
+	// withheld or wasted round. So the clear happens only once a rebuild is certain to complete, and
+	// every refusal path below leaves the LAST GOOD list intact. Clearing up front meant a transient
+	// null or non-ACharacter owner (possession swap, mid-destroy frame) emptied it and the next shot
+	// went through the team — sustained automatic fire refreshes only via PerformHitscan's staleness
+	// check, so nothing upstream would have caught it.
+	UWorld* World = GetWorld();
 	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
-	if (!IsValid(OwnerChar)) return;
-
 	const IGenericTeamAgentInterface* TeamAgent = Cast<IGenericTeamAgentInterface>(OwnerChar);
-	if (!TeamAgent) return;
+	const bool bCanBuild = World && IsValid(OwnerChar) && TeamAgent;
+
+	// Stamp on refusal as well as success: the stamp is the throttle for every caller, and leaving it
+	// unstamped meant a per-frame caller re-ran the whole pawn iteration each frame for as long as the
+	// refusing state lasted. But NOT before the first successful build — until then the list really is
+	// empty, so a refusal must stay retryable on the very next call rather than banking a full refresh
+	// interval of unfiltered fire.
+	if (World && (bCanBuild || FFIgnoreListBuiltTime > FFIgnoreListNeverBuilt))
+		FFIgnoreListBuiltTime = World->GetTimeSeconds();
+
+	if (!bCanBuild) return;
 
 	const FGenericTeamId OwnerTeam = TeamAgent->GetGenericTeamId();
 
-	UWorld* World = GetWorld();
-	if (!World) return;
-
+	CachedFFIgnoreList.Reset();
 	CachedFFIgnoreList.Reserve(32);
 	for (TActorIterator<APawn> It(World); It; ++It)
 	{
@@ -493,8 +887,6 @@ void AWeaponBase::RebuildFFIgnoreList()
 		if (OtherTeam && OtherTeam->GetGenericTeamId() == OwnerTeam)
 			CachedFFIgnoreList.Add(OtherPawn);
 	}
-
-	FFIgnoreListBuiltTime = World->GetTimeSeconds();
 }
 
 void AWeaponBase::RebuildSuppressionTargets()
@@ -531,6 +923,8 @@ void AWeaponBase::RebuildSuppressionTargets()
 
 void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& TraceEnd, AActor* HitActor)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Weapon_NearMissReporting);
+
 	if (NearMissRadius <= 0.f) return;
 
 	const UWorld* World = GetWorld();
@@ -583,6 +977,28 @@ void AWeaponBase::ReportNearMisses(const FVector& TraceStart, const FVector& Tra
 			}
 		}
 	}
+
+	// Audible crack for enemy shots passing the player's head. Enemy shooters only — the player
+	// has no SuppressionComponent (so the loop above never sees them), and companion fire whizzing
+	// past would read as friendly fire. Skipped when the player was actually hit (flesh SFX owns that).
+	if (!GetOwner() || !GetOwner()->IsA<AEnemyCharacter>()) return;
+
+	const APlayerController* LocalPC = World->GetFirstPlayerController();
+	APawn* PlayerPawn = LocalPC ? LocalPC->GetPawn() : nullptr;
+	if (!IsValid(PlayerPawn) || PlayerPawn == HitActor) return;
+
+	// Ear height, not capsule centre — flybys sell the danger at head level.
+	const FVector HeadLocation = PlayerPawn->GetActorLocation() + FVector(0.f, 0.f, 60.f);
+	const float T = FMath::Clamp(FVector::DotProduct(HeadLocation - TraceStart, Segment) / SegmentLenSq, 0.f, 1.f);
+	const FVector ClosestPoint = TraceStart + Segment * T;
+
+	UGameAudioSubsystem* AudioSys = World->GetSubsystem<UGameAudioSubsystem>();
+	const USurfaceAudioBank* Bank = AudioSys ? AudioSys->GetBank() : nullptr;
+	const float FlybyRadius = Bank ? Bank->FlybyRadius : 0.f;
+	if (FlybyRadius <= 0.f) return;
+	if (FVector::DistSquared(ClosestPoint, HeadLocation) > FlybyRadius * FlybyRadius) return;
+
+	AudioSys->PlayFlyby(ClosestPoint);
 }
 
 void AWeaponBase::FireShot()
@@ -594,6 +1010,7 @@ void AWeaponBase::FireShot()
 	{
 		CurrentAmmo = FMath::Max(CurrentAmmo - 1, 0);
 		OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+		SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 	}
 
 	// Hitscan on server
@@ -606,7 +1023,10 @@ void AWeaponBase::FireShot()
 	if (OwnerIface && IsValid(OwnerPawn) && OwnerPawn->IsLocallyControlled())
 	{
 		if (IsValid(Cast<APlayerController>(OwnerPawn->GetController())))
+		{
 			ApplyRecoil();
+			TriggerKitVisualItemFireKick(GetOwner(), bOwnerIsAiming);
+		}
 	}
 
 	OnWeaponFired.Broadcast();
@@ -624,6 +1044,8 @@ void AWeaponBase::FireCosmetic(const FVector& AimEndPoint)
 
 void AWeaponBase::PerformHitscan()
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_Weapon_Hitscan);
+
 	if (!IsValid(WeaponData)) return;
 
 	ACharacter* OwnerChar = Cast<ACharacter>(GetOwner());
@@ -641,6 +1063,10 @@ void AWeaponBase::PerformHitscan()
 		PC->GetPlayerViewPoint(CameraLoc, CameraRot);
 		TraceStart = CameraLoc;
 		AimDirection = CameraRot.Vector();
+
+		// Player hip-fire cone — zero while ADS or when the DA leaves HipFireSpreadDeg at 0.
+		if (!bOwnerIsAiming)
+			AimDirection = ApplyConeSpread(AimDirection, GetEffectiveHipFireSpreadDeg());
 	}
 	else
 	{
@@ -688,13 +1114,13 @@ void AWeaponBase::PerformHitscan()
 	FCollisionQueryParams QueryParams;
 	QueryParams.AddIgnoredActor(this);
 	QueryParams.AddIgnoredActor(OwnerChar);
-	QueryParams.bReturnPhysicalMaterial = false;
+	QueryParams.bReturnPhysicalMaterial = true; // surface-typed impact SFX off the hit phys material
 
 	// Friendly-fire prevention for ALL shooters: built once per burst, refreshed at most every 1s.
 	const bool bAIOwned = !IsValid(PC);
 	{
 		const UWorld* QueryWorld = GetWorld();
-		if (QueryWorld && (QueryWorld->GetTimeSeconds() - FFIgnoreListBuiltTime) > 1.f)
+		if (QueryWorld && (QueryWorld->GetTimeSeconds() - FFIgnoreListBuiltTime) > FFIgnoreListRefreshSeconds)
 			RebuildFFIgnoreList();
 		QueryParams.AddIgnoredActors(CachedFFIgnoreList);
 	}
@@ -721,6 +1147,10 @@ void AWeaponBase::PerformHitscan()
 		UHealthComponent* Health; // cached once, reused in morale pass
 		bool bWasAlive;
 		bool bGateAllowsDamage = true; // set false by the mitigation gate when the shot is suppressed
+		float AppliedDamage = 0.f;     // sum of TakeDamage returns this shot (post hitbox/armour)
+		float HeadshotDamage = 0.f;    // portion of AppliedDamage from head-region pellets
+		FVector LastImpact = FVector::ZeroVector; // impact point of the last damaging pellet
+		FVector FirstImpact = FVector::ZeroVector; // impact point of the first pellet — flesh SFX anchor
 	};
 	TArray<FVictimRecord, TInlineAllocator<4>> VictimRecords;
 
@@ -729,6 +1159,14 @@ void AWeaponBase::PerformHitscan()
 	FVector CenterImpactOrEnd = TraceStart + AimDirection * WeaponData->MaxRange;
 	AActor* CenterHitActor = nullptr;
 
+	// World-geometry pellet hits — bullet hole + surface puff after the damage pass.
+	TArray<FHitResult, TInlineAllocator<8>> WorldImpacts;
+
+	// Player shots sweep a thin sphere for slight hit forgiveness (headshots especially);
+	// AI keeps exact line traces so enemies don't inherit it. Character capsules ignore
+	// ECC_Visibility, so the sweep still resolves against the mesh and returns the bone.
+	const float SweepRadius = bAIOwned ? 0.f : WeaponData->BulletSweepRadius;
+
 	// === TRACE PASS (no TakeDamage — avoids re-entrancy during traces) ===
 	for (int32 P = 0; P < NumPellets; ++P)
 	{
@@ -736,7 +1174,10 @@ void AWeaponBase::PerformHitscan()
 		const FVector PelletEnd = TraceStart + PelletDir * WeaponData->MaxRange;
 
 		FHitResult PelletHit;
-		const bool bHit = World->LineTraceSingleByChannel(PelletHit, TraceStart, PelletEnd, ECC_Visibility, QueryParams);
+		const bool bHit = (SweepRadius > 0.f)
+			? World->SweepSingleByChannel(PelletHit, TraceStart, PelletEnd, FQuat::Identity, ECC_Visibility,
+				FCollisionShape::MakeSphere(SweepRadius), QueryParams)
+			: World->LineTraceSingleByChannel(PelletHit, TraceStart, PelletEnd, ECC_Visibility, QueryParams);
 
 		if (P == 0)
 		{
@@ -746,6 +1187,10 @@ void AWeaponBase::PerformHitscan()
 		}
 
 		if (!bHit) continue;
+
+		// Non-character surfaces get a bullet hole; character hits get blood FX via TakeDamage.
+		if (!Cast<ACharacter>(PelletHit.GetActor()))
+			WorldImpacts.Add(PelletHit);
 
 		AActor* HitActor = PelletHit.GetActor();
 		if (!IsValid(HitActor)) continue;
@@ -760,9 +1205,10 @@ void AWeaponBase::PerformHitscan()
 		{
 			UHealthComponent* VH = HitActor->FindComponentByClass<UHealthComponent>();
 			VictimRecords.Add({ HitActor, VH, VH && VH->IsAlive(), true });
+			VictimRecords.Last().FirstImpact = PelletHit.ImpactPoint;
 		}
 
-		const float PelletDamage = WeaponData->BaseDamage * ComputeFalloffScale(PelletHit.Distance);
+		const float PelletDamage = GetEffectiveDamage() * ComputeFalloffScale(PelletHit.Distance);
 		PelletRecords.Add({ HitActor, PelletHit, PelletDir, PelletDamage });
 	}
 
@@ -799,16 +1245,13 @@ void AWeaponBase::PerformHitscan()
 		AActor* HitActor = PR.Victim.Get();
 		if (!IsValid(HitActor)) continue;
 
-		// Check mitigation gate: find this pellet's victim record and skip TakeDamage if gated.
-		if (bGateActive)
+		// Find this pellet's victim record — gate check + hit-feedback accumulation.
+		FVictimRecord* VR = nullptr;
+		for (FVictimRecord& V : VictimRecords)
 		{
-			const FVictimRecord* VR = nullptr;
-			for (const FVictimRecord& V : VictimRecords)
-			{
-				if (V.Victim.Get() == HitActor) { VR = &V; break; }
-			}
-			if (VR && !VR->bGateAllowsDamage) continue;
+			if (V.Victim.Get() == HitActor) { VR = &V; break; }
 		}
+		if (bGateActive && VR && !VR->bGateAllowsDamage) continue;
 
 		FPointDamageEvent DamageEvent;
 		DamageEvent.Damage = PR.Damage;
@@ -819,7 +1262,28 @@ void AWeaponBase::PerformHitscan()
 		UE_LOG(LogExtraction, Verbose, TEXT("%s hit %s for %.1f damage"),
 			*GetNameSafe(OwnerChar), *GetNameSafe(HitActor), PR.Damage);
 
-		HitActor->TakeDamage(PR.Damage, DamageEvent, OwnerChar->GetController(), this);
+		const float Applied = HitActor->TakeDamage(PR.Damage, DamageEvent, OwnerChar->GetController(), this);
+
+		if (VR && Applied > 0.f)
+		{
+			VR->AppliedDamage += Applied;
+			VR->LastImpact = PR.Hit.ImpactPoint;
+			const AEnemyCharacter* VictimEnemy = Cast<AEnemyCharacter>(HitActor);
+			if (VictimEnemy && VictimEnemy->ResolveHitRegion(DamageEvent) == EHitRegion::Head)
+				VR->HeadshotDamage += Applied;
+		}
+	}
+
+	// === HIT FEEDBACK (player shooters only): one event per victim per shot ===
+	if (AExtractionPlayerController* FeedbackPC = Cast<AExtractionPlayerController>(PC))
+	{
+		for (const FVictimRecord& VR : VictimRecords)
+		{
+			// No HealthComponent = world geometry (walls return the engine-default TakeDamage value) — no feedback.
+			if (VR.AppliedDamage <= 0.f || !VR.Health) continue;
+			const bool bKilled = VR.bWasAlive && VR.Health->IsDead();
+			FeedbackPC->NotifyDamageDealt(VR.Victim.Get(), VR.AppliedDamage, VR.HeadshotDamage, bKilled, VR.LastImpact);
+		}
 	}
 
 	// === MORALE PASS (once per victim per shot, reusing cached HealthComponent) ===
@@ -861,22 +1325,67 @@ void AWeaponBase::PerformHitscan()
 			UE_LOG(LogExtraction, Verbose, TEXT("PLAYER-FIRE hit %s but it has NO UHealthComponent — damage will be ignored"), *GetNameSafe(CenterHitActor));
 	}
 
+	// World impact FX — bullet hole (pooled decal ring) + surface puff (pooled Niagara) per pellet.
+	UGameAudioSubsystem* AudioSys = World->GetSubsystem<UGameAudioSubsystem>();
+	if (WorldImpacts.Num() > 0)
+	{
+		UImpactDecalSubsystem* DecalSys = World->GetSubsystem<UImpactDecalSubsystem>();
+		// A shotgun blast lands up to 8 pellets in one frame — two impact cues sell the surface
+		// hit without stacking into a single loud crack (concurrency caps the cross-shot spam).
+		constexpr int32 MaxImpactSoundsPerShot = 2;
+		int32 ImpactSoundsPlayed = 0;
+		for (const FHitResult& Impact : WorldImpacts)
+		{
+			if (DecalSys && IsValid(WeaponData->ImpactDecalMaterial))
+				DecalSys->SpawnBulletHole(WeaponData->ImpactDecalMaterial, Impact,
+					WeaponData->ImpactDecalSize, WeaponData->ImpactDecalLifetime);
+
+			if (IsValid(WeaponData->ImpactFX))
+				UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+					World, WeaponData->ImpactFX, Impact.ImpactPoint, Impact.ImpactNormal.Rotation(),
+					FVector(1.f), /*bAutoDestroy*/ true, /*bAutoActivate*/ true, ENCPoolMethod::AutoRelease);
+
+			if (AudioSys && ImpactSoundsPlayed < MaxImpactSoundsPerShot)
+			{
+				AudioSys->PlayWorldImpact(Impact);
+				++ImpactSoundsPlayed;
+			}
+		}
+	}
+
+	// Flesh impact SFX — once per victim per shot, for every shooter (player, enemy, companion).
+	// Keyed on the HealthComponent so world geometry never triggers it; plays even when the AI
+	// mitigation gate zeroed the damage — a bullet that visibly lands must still sound like a hit.
+	// Player shots get the 2D hit-confirm (feedback must read at any range); AI shots stay
+	// positional at the victim.
+	if (AudioSys)
+	{
+		for (const FVictimRecord& VR : VictimRecords)
+			if (VR.Health) AudioSys->PlayFleshImpact(VR.FirstImpact, /*bAsLocal2D*/ !bAIOwned, VR.HeadshotDamage > 0.f);
+	}
+
+	// Brass tinkle for player shots — scheduled with a short delay so it reads as the shell
+	// hitting the floor after the report.
+	if (!bAIOwned && AudioSys)
+		AudioSys->PlayShellDrop(OwnerChar->GetActorLocation());
+
 	// FX and noise — one per shot, using the center pellet.
 	ReportNearMisses(TraceStart, CenterImpactOrEnd, CenterHitActor);
 	Multicast_PlayFireFX(GetMuzzleLocation(), CenterImpactOrEnd, bCenterHit);
 
-	if (WeaponData->NoiseRange > 0.f)
-		UAISense_Hearing::ReportNoiseEvent(World, GetMuzzleLocation(), WeaponData->NoiseLoudness, OwnerChar, WeaponData->NoiseRange, TEXT("WeaponFire"));
+	if (GetEffectiveNoiseRange() > 0.f)
+		UAISense_Hearing::ReportNoiseEvent(World, GetMuzzleLocation(), GetEffectiveNoiseLoudness(), OwnerChar, GetEffectiveNoiseRange(), TEXT("WeaponFire"));
 }
 
 float AWeaponBase::ComputeFalloffScale(float Distance) const
 {
 	if (!IsValid(WeaponData) || !WeaponData->bUseDamageFalloff) return 1.f;
-	if (WeaponData->DamageFalloffEndRange <= WeaponData->DamageFalloffStartRange) return 1.f;
-	if (Distance <= WeaponData->DamageFalloffStartRange) return 1.f;
+	const float FalloffStart = WeaponData->DamageFalloffStartRange * CombinedModifiers.FalloffStartMult;
+	if (WeaponData->DamageFalloffEndRange <= FalloffStart) return 1.f;
+	if (Distance <= FalloffStart) return 1.f;
 	if (Distance >= WeaponData->DamageFalloffEndRange) return WeaponData->MinDamageFraction;
 	return FMath::GetMappedRangeValueClamped(
-		FVector2D(WeaponData->DamageFalloffStartRange, WeaponData->DamageFalloffEndRange),
+		FVector2D(FalloffStart, WeaponData->DamageFalloffEndRange),
 		FVector2D(1.f, WeaponData->MinDamageFraction),
 		Distance);
 }
@@ -902,9 +1411,38 @@ void AWeaponBase::Multicast_PlayFireFX_Implementation(const FVector& MuzzleLocat
 		MuzzleFlashComponent->Activate(true);
 
 	// First-person flash on the kit FP gun — the TP flash above is OwnerNoSee.
-	EnsureFirstPersonMuzzleFlashComponent();
-	if (IsValid(FirstPersonMuzzleFlashComponent))
-		FirstPersonMuzzleFlashComponent->Activate(true);
+	// The kit's Muzzle slot component only carries a mesh when a muzzle attachment
+	// (suppressor) is equipped via the modding screen — no mesh = bare muzzle = flash.
+	const UStaticMeshComponent* MuzzleSlot = Cast<UStaticMeshComponent>(FirstPersonMuzzle);
+	const bool bMuzzleAttachmentEquipped = IsValid(MuzzleSlot) && IsValid(MuzzleSlot->GetStaticMesh());
+	if (!bMuzzleAttachmentEquipped)
+	{
+		EnsureFirstPersonMuzzleFlashComponent();
+		if (IsValid(FirstPersonMuzzleFlashComponent))
+			FirstPersonMuzzleFlashComponent->Activate(true);
+	}
+
+	// Fire report. A mounted muzzle attachment (modding-screen suppressor) or effective
+	// suppression swaps to the suppressed report when one is assigned.
+	if (IsValid(WeaponData))
+	{
+		const bool bWantSuppressedReport = bMuzzleAttachmentEquipped || IsSuppressedEffective();
+		USoundBase* Report = (bWantSuppressedReport && IsValid(WeaponData->SuppressedFireSound))
+			? WeaponData->SuppressedFireSound.Get()
+			: WeaponData->FireSound.Get();
+		if (IsValid(Report))
+		{
+			// Fire cues are authored 2D for the local player's own gun — AI shots must be forced
+			// through the bank's gunfire attenuation or every enemy reads as firing in your ear.
+			const ACharacter* ReportOwner = Cast<ACharacter>(GetOwner());
+			const bool bLocalPlayerShot = IsValid(ReportOwner) && IsValid(Cast<APlayerController>(ReportOwner->GetController()));
+			UGameAudioSubsystem* AudioSys = GetWorld() ? GetWorld()->GetSubsystem<UGameAudioSubsystem>() : nullptr;
+			if (!bLocalPlayerShot && AudioSys)
+				AudioSys->PlayAIFireReport(Report, MuzzleLocation);
+			else
+				UGameplayStatics::PlaySoundAtLocation(GetWorld(), Report, MuzzleLocation);
+		}
+	}
 
 	// Bullet tracer: one-shot pooled Niagara streak along the fire line.
 	SpawnTracer(MuzzleLocation, EndPoint);
@@ -961,6 +1499,30 @@ void AWeaponBase::ReattachMagazine()
 	bMagazineDetached = false;
 }
 
+// ---- Weapon align rest pose ----
+
+void AWeaponBase::CaptureAlignRestPoseOnce()
+{
+	if (bAlignRestPoseCaptured || !IsValid(WeaponMesh)) return;
+
+	// First setup of this equip runs before any align writer has moved the mesh, so this read is
+	// the one genuinely pristine one. Everything later reads back a writer's output.
+	AlignRestPose = WeaponMesh->GetRelativeTransform();
+	bAlignRestPoseCaptured = true;
+}
+
+void AWeaponBase::RestoreAlignRestPose()
+{
+	if (!bAlignRestPoseCaptured || !IsValid(WeaponMesh)) return;
+
+	// The enemy hand-swap settle owns the mesh while it runs and eases to its own identity rest —
+	// stealing it back mid-settle would snap the gun. Nothing else can be mid-write here: the
+	// caller re-baselines immediately after, which resets the align writers' targets anyway.
+	if (bHandSwapSettling) return;
+
+	WeaponMesh->SetRelativeTransform(AlignRestPose);
+}
+
 // ---- Weapon fire alignment ----
 
 void AWeaponBase::SetupFireAlign(USkeletalMeshComponent* EnemyMesh, FName FireSocket)
@@ -968,6 +1530,7 @@ void AWeaponBase::SetupFireAlign(USkeletalMeshComponent* EnemyMesh, FName FireSo
 	bFireAlignReady = false;
 
 	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+	CaptureAlignRestPoseOnce();
 	if (FireSocket.IsNone())
 	{
 		UE_LOG(LogExtraction, Warning, TEXT("SetupFireAlign: %s — FireSocket is None"), *GetNameSafe(this));
@@ -1056,6 +1619,7 @@ void AWeaponBase::SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName Socke
 	for (bool& bReady : bCoverAlignTargetReady) bReady = false;
 
 	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+	CaptureAlignRestPoseOnce();
 
 	const FName RestSocket = WeaponMesh->GetAttachSocketName();
 	if (!EnemyMesh->DoesSocketExist(RestSocket) || !EnemyMesh->DoesSocketExist(SocketSpaceBone))
@@ -1083,6 +1647,31 @@ void AWeaponBase::SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName Socke
 	}
 
 	CoverAlignCurrent = CoverAlignRestRelative;
+	if (CVarCompanionAlignDebug.GetValueOnGameThread() != 0)
+		LogCoverAlignBake(RestSocket, SocketSpaceBone, TRest * TBone.Inverse());
+}
+
+void AWeaponBase::LogCoverAlignBake(FName RestSocket, FName AlignBone, const FTransform& SocketToBone) const
+{
+	static const TCHAR* ScenarioNames[CoverAlignScenarioCount] = {
+		TEXT("Idle"), TEXT("OverTop"), TEXT("PeekLeft"), TEXT("PeekRight"),
+		TEXT("StandIdleLeft"), TEXT("StandIdleRight"), TEXT("StandPeekLeft"), TEXT("StandPeekRight")
+	};
+
+	UE_LOG(LogExtraction, Warning,
+		TEXT("[ALIGN-BAKE] %s restSock='%s' alignBone='%s' | socketToBone loc=%s rotDeg=%s | rest loc=%s rotDeg=%s"),
+		*GetNameSafe(this), *RestSocket.ToString(), *AlignBone.ToString(),
+		*SocketToBone.GetLocation().ToString(), *SocketToBone.Rotator().ToString(),
+		*CoverAlignRestRelative.GetLocation().ToString(), *CoverAlignRestRelative.Rotator().ToString());
+
+	for (int32 i = 0; i < CoverAlignScenarioCount; ++i)
+	{
+		if (!bCoverAlignTargetReady[i]) continue;
+		const FTransform Offset = CoverAlignTargets[i].GetRelativeTransform(CoverAlignRestRelative);
+		UE_LOG(LogExtraction, Warning, TEXT("[ALIGN-BAKE] %s scenario=%s offsetLoc=%s offsetRotDeg=%s"),
+			*GetNameSafe(this), ScenarioNames[i],
+			*Offset.GetLocation().ToString(), *Offset.Rotator().ToString());
+	}
 }
 
 void AWeaponBase::UpdateCoverAlign(ECoverWeaponAlign Scenario, float DeltaSeconds, float InterpSpeed)
@@ -1125,6 +1714,7 @@ void AWeaponBase::SetupMeleeAlign(USkeletalMeshComponent* EnemyMesh, FName Melee
 	bMeleeAlignReady = false;
 
 	if (!IsValid(EnemyMesh) || !IsValid(WeaponMesh)) return;
+	CaptureAlignRestPoseOnce();
 	if (MeleeSocket.IsNone())
 	{
 		UE_LOG(LogExtraction, Warning, TEXT("SetupMeleeAlign: %s — MeleeSocket is None"), *GetNameSafe(this));
@@ -1178,7 +1768,17 @@ void AWeaponBase::SetupPatrolAlign()
 	bPatrolAlignReady = false;
 
 	if (!IsValid(WeaponMesh)) return;
+	CaptureAlignRestPoseOnce();
 	if (!IsValid(WeaponData)) return;
+
+	// Patrol offsets come from the weapon's OWN DataAsset, so a pistol and a rifle never share
+	// them — unlike the cover/fire align values, which live on the ABP and follow a duplicate.
+	if (CVarCompanionAlignDebug.GetValueOnGameThread() != 0)
+		UE_LOG(LogExtraction, Warning,
+			TEXT("[ALIGN-BAKE] %s patrol-align DA='%s' locOffset=%s rotOffsetDeg=%s"),
+			*GetNameSafe(this), *GetNameSafe(WeaponData),
+			*WeaponData->PatrolAlignLocationOffset.ToString(),
+			*WeaponData->PatrolAlignRotationOffset.ToString());
 
 	// Zero offsets = no patrol-carry pose. Weapon stays at ADS — skip entirely.
 	if (WeaponData->PatrolAlignLocationOffset.IsNearlyZero() &&
@@ -1348,6 +1948,17 @@ bool AWeaponBase::CanReload() const
 		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
 }
 
+void AWeaponBase::DebugDrainMagazine(int32 LeaveRounds)
+{
+	if (!IsValid(WeaponData)) return;
+
+	const int32 NewAmmo = FMath::Clamp(LeaveRounds, 0, WeaponData->MagazineSize);
+	if (NewAmmo == CurrentAmmo) return;
+
+	CurrentAmmo = NewAmmo;
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+}
+
 void AWeaponBase::Reload()
 {
 	if (!CanReload()) return;
@@ -1388,6 +1999,9 @@ void AWeaponBase::Reload()
 		if (IsValid(WeaponData) && WeaponData->ReloadNoiseRange > 0.f)
 			UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetActorLocation(), WeaponData->ReloadNoiseLoudness, GetOwner(), WeaponData->ReloadNoiseRange, TEXT("Reload"));
 	}
+
+	TriggerKitVisualItemReload(GetOwner());
+	StartReloadAudio();
 
 	// Stop firing
 	bWantsToFire = false;
@@ -1431,6 +2045,7 @@ void AWeaponBase::OnReloadFinished()
 			FireReadyTimeSeconds = GetWorld()->GetTimeSeconds() + WeaponData->PostReloadFireDelay;
 
 		OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+		SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 
 		// Safety net: snap the magazine home if the notify-end was missed (montage interrupted, etc.).
 		ReattachMagazine();
@@ -1487,6 +2102,7 @@ void AWeaponBase::HandleShellInserted()
 	if (!WeaponData->bInfiniteReserve)
 		ReserveAmmo = FMath::Max(ReserveAmmo - 1, 0);
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 
 	const bool bMore = CurrentAmmo < WeaponData->MagazineSize
 		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
@@ -1505,6 +2121,17 @@ void AWeaponBase::HandleShellInserted()
 
 void AWeaponBase::CancelReload()
 {
+	// Kit visual cancel runs unconditionally: the kit item's reload animation length is
+	// authored independently of WeaponData->ReloadTime, so CurrentState can already be Idle
+	// while the kit anim is still playing. The helper no-ops when there is no SpawnedItem
+	// or CancelReload function. Guard against re-entrancy from the ProcessEvent BP callback.
+	if (!bCancellingReload)
+	{
+		bCancellingReload = true;
+		TriggerKitVisualItemCancelReload(GetOwner());
+		bCancellingReload = false;
+	}
+
 	if (CurrentState != EWeaponState::Reloading) return;
 
 	if (const UWorld* World = GetWorld())
@@ -1514,8 +2141,9 @@ void AWeaponBase::CancelReload()
 
 	ReattachMagazine();
 	StopVisualWeaponReload();
+	StopReloadAudio();
 
-	// Shell-by-shell weapons prime their Loop to self-loop — force-stop the body montage
+	// Shell-by-shell weapons prime their Loop to self-loop -- force-stop the body montage
 	// so it doesn't keep looping after an interrupt.
 	if (IsValid(WeaponData) && WeaponData->bShellByShellReload)
 		StopBodyReloadMontage();
@@ -1673,6 +2301,10 @@ void AWeaponBase::ApplyRecoil()
 
 	RecoilOffset *= (bOwnerIsAiming ? Pattern.ADSMultiplier : 1.0f);
 
+	// Attachment recoil scaling (grips/handguards).
+	RecoilOffset.X *= CombinedModifiers.RecoilYawMult;
+	RecoilOffset.Y *= CombinedModifiers.RecoilPitchMult;
+
 	// Apply to camera
 	OwnerIface->DoAim(RecoilOffset.X, RecoilOffset.Y);
 
@@ -1761,6 +2393,7 @@ void AWeaponBase::InitializeAmmo()
 	CurrentAmmo = WeaponData->MagazineSize;
 	ReserveAmmo = WeaponData->DefaultReserveAmmo;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 }
 
 int32 AWeaponBase::AddReserveAmmo(int32 Amount)
@@ -1769,7 +2402,31 @@ int32 AWeaponBase::AddReserveAmmo(int32 Amount)
 
 	ReserveAmmo += Amount;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	// A stowed weapon must not stomp the held weapon's kit item counts — the owner has ONE
+	// SpawnedItem (the held gun's); equip re-syncs via ResyncVisualAmmo when this slot activates.
+	if (!IsHidden())
+		SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 	return Amount;
+}
+
+void AWeaponBase::SetAmmoState(int32 Mag, int32 Reserve)
+{
+	if (!HasAuthority()) return;
+
+	if (Mag >= 0)
+		CurrentAmmo = IsValid(WeaponData) ? FMath::Min(Mag, WeaponData->MagazineSize) : Mag;
+	if (Reserve >= 0)
+		ReserveAmmo = Reserve;
+
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	if (!IsHidden())
+		SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
+}
+
+void AWeaponBase::ResyncVisualAmmo()
+{
+	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 }
 
 // ---- RepNotify ----
@@ -1789,6 +2446,7 @@ void AWeaponBase::OnRep_CurrentState()
 void AWeaponBase::OnRep_CurrentAmmo()
 {
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 }
 
 // ---- IKitWeaponInterface ----
@@ -1852,6 +2510,15 @@ void AWeaponBase::KitFire_HitScan_Implementation()
 					*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, *GetNameSafe(WeaponData));
 			}
 		}
+		// Dry click once per trigger press — only when truly dry and idle (not mid-reload).
+		// Reuses the bDryFireLogged once-per-cycle latch (reset by KitBeginFire / reload finish).
+		if (!bDryFireLogged && CurrentAmmo <= 0 && CurrentState == EWeaponState::Idle
+			&& IsValid(WeaponData) && IsValid(WeaponData->DryFireSound))
+		{
+			bDryFireLogged = true;
+			UGameplayStatics::PlaySoundAtLocation(GetWorld(), WeaponData->DryFireSound.Get(), GetActorLocation());
+		}
+
 		// Dry dispatch on an empty mag — kick the reload instead of silently no-oping.
 		if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
 			Reload();
@@ -2002,6 +2669,7 @@ void AWeaponBase::KitSetAmmo_Implementation(int32 AmmoCount, int32 MaxAmmo)
 
 	bDryFireLogged = false;
 	OnAmmoChanged.Broadcast(CurrentAmmo, ReserveAmmo);
+	SyncKitVisualItemAmmo(GetOwner(), CurrentAmmo, ReserveAmmo);
 }
 
 // ---- AI Damage Mitigation ----
@@ -2029,7 +2697,7 @@ bool AWeaponBase::RollShotDamage(const UDamageMitigationSettings& S, AActor* Tar
 void AWeaponBase::EnsureMuzzleFlashComponent()
 {
 	if (IsValid(MuzzleFlashComponent)) return;
-	if (!IsValid(WeaponData) || !IsValid(WeaponData->MuzzleFlashFX)) return;
+	if (!IsValid(GetEffectiveMuzzleFlashFX())) return;
 
 	USkeletalMeshComponent* GripMesh = GetThirdPersonGripMesh();
 	if (!IsValid(GripMesh)) return;
@@ -2039,7 +2707,7 @@ void AWeaponBase::EnsureMuzzleFlashComponent()
 			*GetNameSafe(this), *GetNameSafe(GripMesh->GetSkeletalMeshAsset()), *WeaponConstants::MuzzleSocketName.ToString());
 
 	MuzzleFlashComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-		WeaponData->MuzzleFlashFX,
+		GetEffectiveMuzzleFlashFX(),
 		GripMesh,
 		WeaponConstants::MuzzleSocketName,
 		FVector::ZeroVector,
@@ -2071,7 +2739,7 @@ void AWeaponBase::EnsureFirstPersonMuzzleFlashComponent()
 {
 	if (IsValid(FirstPersonMuzzleFlashComponent)) return;
 	if (!IsValid(FirstPersonMuzzle)) return;
-	if (!IsValid(WeaponData) || !IsValid(WeaponData->MuzzleFlashFX)) return;
+	if (!IsValid(WeaponData) || !IsValid(GetEffectiveMuzzleFlashFX())) return;
 	if (GetNetMode() == NM_DedicatedServer) return;
 
 	// Only the owning player's screen shows the FP gun — gate on local control rather than
@@ -2082,12 +2750,12 @@ void AWeaponBase::EnsureFirstPersonMuzzleFlashComponent()
 	if (!IsValid(OwnerPawn) || !OwnerPawn->IsLocallyControlled()) return;
 
 	FirstPersonMuzzleFlashComponent = UNiagaraFunctionLibrary::SpawnSystemAttached(
-		WeaponData->MuzzleFlashFX,
+		GetEffectiveMuzzleFlashFX(),
 		FirstPersonMuzzle,
 		NAME_None,
 		FVector::ZeroVector,
-		FRotator::ZeroRotator,
-		EAttachLocation::SnapToTarget,
+		WeaponData->FirstPersonMuzzleFlashRotation,
+		EAttachLocation::KeepRelativeOffset,
 		false,  // bAutoDestroy
 		false); // bAutoActivate
 
@@ -2133,4 +2801,29 @@ void AWeaponBase::SpawnTracer(const FVector& MuzzleLocation, const FVector& EndP
 	UNiagaraDataInterfaceArrayFunctionLibrary::SetNiagaraArrayVector(TracerComp, TracerImpactsParam, { EndPoint });
 	TracerComp->SetVariableBool(TracerTriggerParam, true);
 	TracerComp->SetVariableInt(TracerTriggerParam, 1);
+}
+
+// ---- Reload audio ----
+
+void AWeaponBase::StartReloadAudio()
+{
+	if (!IsValid(WeaponData)) return;
+
+	// Empty-mag reload gets the bolt/slide-release variant; tactical (or no variant) uses the base sound.
+	USoundBase* Sound = (CurrentAmmo == 0 && IsValid(WeaponData->ReloadEmptySound))
+		? WeaponData->ReloadEmptySound.Get()
+		: WeaponData->ReloadSound.Get();
+	if (!IsValid(Sound)) return;
+
+	StopReloadAudio();
+	ReloadAudioComponent = UGameplayStatics::SpawnSoundAttached(Sound, GetRootComponent());
+}
+
+void AWeaponBase::StopReloadAudio()
+{
+	if (!IsValid(ReloadAudioComponent)) { ReloadAudioComponent = nullptr; return; }
+
+	// Short fade instead of a hard cut so an interrupted reload doesn't click.
+	ReloadAudioComponent->FadeOut(0.1f, 0.f);
+	ReloadAudioComponent = nullptr;
 }

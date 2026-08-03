@@ -80,7 +80,8 @@ public:
 	 *  GetLeanPeekPosition for Front/None leans, unresolvable corners, or walls longer than the march
 	 *  range. C++ only. */
 	static FVector GetCornerPeekApex(const UWorld* World, const FCoverData& Data, ECoverLean Lean,
-		float Standoff, float CapsuleRadius, float ClearanceMargin, const AActor* IgnoreActor = nullptr);
+		float Standoff, float CapsuleRadius, float ClearanceMargin,
+		const AActor* IgnoreActor = nullptr, const AActor* IgnoreActor2 = nullptr);
 
 	/** Pick the best valid lean side for the current stance vs the threat direction. */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry")
@@ -131,7 +132,8 @@ public:
 	 *  corner-peek apex position. C++ only. */
 	static bool TryGetCornerPeekApex(const UWorld* World, const FCoverData& Data, ECoverLean Side,
 		float Standoff, float CapsuleRadius, float ClearanceMargin, float MaxReachCm,
-		const AActor* IgnoreActor, FVector& OutApex);
+		const AActor* IgnoreActor, FVector& OutApex,
+		const AActor* IgnoreActor2 = nullptr);
 
 	/** Crouch-peek wallhack scorer: evaluates CornerLeft, CornerRight, and OverTop candidates,
 	 *  traces primary LOS to ThreatLoc and optional extra threats, and returns per-option scores +
@@ -145,10 +147,28 @@ public:
 		TArrayView<AActor* const> ExtraThreats,
 		const FCrouchPeekScoreParams& Params, FCrouchPeekScores& OutScores);
 
-	/** True when the pawn can see the threat from its resolved lean-peek position. */
+	// Named constants for CanPeekShoot corner-apex parameters. Used at call sites that pass
+	// values positionally (FindCoverOnPingedWall). NOT used as UFUNCTION defaults -- UHT does
+	// not evaluate identifier defaults, only numeric literals.
+	static constexpr float PeekLeanOffset = 65.f;
+	static constexpr float PeekApexStandoff = 44.f;
+	static constexpr float PeekApexCapsuleRadius = 34.f;
+	static constexpr float PeekApexClearanceMargin = 10.f;
+	static constexpr float PeekApexMaxReachCm = 175.f;
+
+	/** True when the pawn can see the threat from its resolved lean-peek position.
+	 *  bUseCornerApex: for Stand-height side peeks, use TryGetCornerPeekApex (reach-bounded
+	 *  corner-marched position past the wall end) instead of the fixed +/-LeanOffset lateral
+	 *  nudge. The fixed offset lands behind the wall on tall surfaces; the apex clears it.
+	 *  Falls back to GetLeanPeekPosition when the march fails, the wall runs past MarchMax,
+	 *  the corner exceeds ApexMaxReachCm, or the lean is Front/None. Opt-in: all existing
+	 *  callers pass the default (false) and are unaffected. */
 	UFUNCTION(BlueprintPure, Category = "Cover|Geometry", meta = (WorldContext = "WorldContextObject"))
 	static bool CanPeekShoot(const UObject* WorldContextObject, const FCoverData& Data,
 		bool bCrouched, const FVector& ThreatLoc, float EyeHeight,
 		const AActor* IgnoreThreatActor, const AActor* IgnorePawn,
-		float LeanOffset = 65.f);
+		float LeanOffset = 65.f,
+		bool bUseCornerApex = false, float ApexStandoff = 44.f,
+		float ApexCapsuleRadius = 34.f, float ApexClearanceMargin = 10.f,
+		float ApexMaxReachCm = 175.f);
 };

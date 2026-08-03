@@ -7,6 +7,7 @@
 #include "BehaviorTree/BTTaskNode.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "BTTask_EnemyMoveAndShoot.h"
+#include "AI/CompanionCoverStatics.h"
 #include "AI/Cover/CoverPoseTypes.h"
 #include "CoverSystemPublicData.h"
 #include "BTTask_MoveToCoverPoint.generated.h"
@@ -63,21 +64,27 @@ private:
 		TWeakObjectPtr<AEnemyCharacter> CachedEnemy;
 		TWeakObjectPtr<const UEnemyArchetypeData> CachedDA;
 
-		// Advance-fire sub-loop (ported from BTTask_EnemyMoveToCover)
+		// Advance-fire sub-loop (ported from BTTask_EnemyMoveToCover) — enemy pawns only.
 		EMoveShootFirePhase FirePhase = EMoveShootFirePhase::Acquire;
 		float FireTimer = 0.f;
 		float FireTickAccum = 0.f;
 		bool bFiring = false;
-		// Companion approach-fire: the target aim/focus were issued for — a BB retarget mid-move
-		// must re-issue them or fire streams at the old target's position.
-		TWeakObjectPtr<AActor> ApproachFireTarget;
+		// Companion transit fire — shared muzzle-gated loop (also used by the combat task's
+		// final-approach walk).
+		CompanionCover::FApproachFireState ApproachFire;
 
 		// Stall detection
 		float StallBestDist = TNumericLimits<float>::Max();
 		float StallAccum = 0.f;
+		// Companion displacement-based stall: last pawn location for per-tick displacement calc.
+		FVector LastPawnLoc = FVector::ZeroVector;
+		bool bHasLastPawnLoc = false;
 
 		// Mid-move claim revalidation (destination stolen while en route)
 		float ClaimCheckAccum = 0.f;
+
+		// Cached from ExecuteTask so TickTask can read it.
+		bool bIsCommandedCover = false;
 
 		void Reset()
 		{
@@ -91,10 +98,13 @@ private:
 			FireTimer = 0.f;
 			FireTickAccum = 0.f;
 			bFiring = false;
-			ApproachFireTarget.Reset();
+			ApproachFire.Reset();
 			StallBestDist = TNumericLimits<float>::Max();
 			StallAccum = 0.f;
+			LastPawnLoc = FVector::ZeroVector;
+			bHasLastPawnLoc = false;
 			ClaimCheckAccum = 0.f;
+			bIsCommandedCover = false;
 		}
 	};
 
@@ -104,9 +114,12 @@ private:
 	void HandleFailure(UBehaviorTreeComponent& OwnerComp, FMoveToCoverPointMemory* Mem,
 		UBlackboardComponent* BB, AAIController* Controller) const;
 
-	/** Companion-only: re-scores the EQS-chosen cover against ALL known threats (not just the
-	 *  focused target) and returns a better-shielding nearby candidate, or ChosenCover unchanged.
-	 *  The shared EQS/scorer is untouched — this is a local post-filter on the result. */
-	FCover RerankCoverForMultiThreat(UBehaviorTreeComponent& OwnerComp, AAIController* Controller,
-		APawn* Pawn, const class UCompanionTuningDataAsset& Tuning, const FCover& ChosenCover) const;
+	/** Companion-only: validates the EQS-chosen cover has a usable peek line to the combat target
+	 *  (eyes-on) AND re-scores it against ALL known threats (multi-threat re-rank). If the chosen
+	 *  point is blind, the nearest candidate with a peek line is adopted; if none passes,
+	 *  bOutNoEyesOnCandidate is set and the caller declines the commit. No-combat-target (DBNO
+	 *  retreat, wave hold, stealth) skips both jobs and returns unchanged. */
+	FCover ValidateAndRerankCover(UBehaviorTreeComponent& OwnerComp, AAIController* Controller,
+		APawn* Pawn, const class UCompanionTuningDataAsset& Tuning, const FCover& ChosenCover,
+		bool& bOutNoEyesOnCandidate) const;
 };

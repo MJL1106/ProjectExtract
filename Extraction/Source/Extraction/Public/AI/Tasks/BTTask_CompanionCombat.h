@@ -8,6 +8,7 @@
 #include "BehaviorTree/BehaviorTreeTypes.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Companion/CompanionTypes.h"
+#include "AI/CompanionCoverStatics.h"
 #include "AI/Cover/CoverPoseTypes.h"
 #include "CoverSystemPublicData.h"
 #include "BTTask_CompanionCombat.generated.h"
@@ -108,9 +109,16 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights|LowHealth", meta = (ClampMin = "1.0"))
 	float LowHealthCooldownMultiplier = 2.0f;
 
-	/** How many consecutive Hold cycles before the companion is forced to Stand. */
+	/** How many consecutive Hold cycles before the companion is forced to Stand. Applies to Defensive
+	 *  and Combat; Stealth uses StealthMaxConsecutiveHolds instead. Dropped from 2 to 1 so a companion
+	 *  in a fight answers on the second cycle at the latest rather than sitting out two full cooldowns. */
 	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0", ClampMax = "5"))
-	uint8 MaxConsecutiveHolds = 2;
+	uint8 MaxConsecutiveHolds = 1;
+
+	/** Stealth's own hold cap, kept at the historic 2 so the mode's peek cadence is byte-for-byte
+	 *  what it was before the hold cap tightened. Stealth stays out of the mode-personality pass. */
+	UPROPERTY(EditAnywhere, Category = "Combat|PeekWeights", meta = (ClampMin = "0", ClampMax = "5"))
+	uint8 StealthMaxConsecutiveHolds = 2;
 
 	// --- Suppression ---
 
@@ -142,9 +150,13 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot")
 	bool bEnableOpenAreaMoveAndShoot = true;
 
-	/** Movement speed (cm/s) while aiming + firing in the open — tactical pace, below WalkSpeed. */
+	/** Movement speed (cm/s) while aiming + firing in the open — tactical pace, below WalkSpeed.
+	 *  HARD-CAPPED at the companion's strafe tier (UCompanionTuningDataAsset::StrafeMaxSpeed, 275) at
+	 *  the point of use: move-and-shoot holds a focus on the target, so anything above the locomotion
+	 *  blendspace's top directional row plays a forward sprint clip while the body faces sideways.
+	 *  Values below the cap are honoured as authored; values above it are clamped down. */
 	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "1.0"))
-	float CombatMoveSpeed = 300.f;
+	float CombatMoveSpeed = 275.f;
 
 	/** Below this range (cm) the companion retreats from the target. */
 	UPROPERTY(EditAnywhere, Category = "Combat|MoveShoot", meta = (ClampMin = "0.0"))
@@ -428,7 +440,7 @@ private:
 		const FCoverData& CoverData, bool bSuppressed, bool bLowHp, float DeltaSeconds);
 	void TickCornerPeekAction(ACompanionCharacter* Companion, UCompanionAnimInstance* Anim,
 		const FCoverData& CoverData, AActor* Target, bool bSuppressed, bool bLowHp,
-		TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+		TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds);
 
 	/** Shared move-shoot entry: caches + lowers walk speed and focuses the target (single-source for the MaxWalkSpeed override). No-op if already active. */
 	void EnterMoveShootIfNeeded(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, UCharacterMovementComponent* CMC, const TCHAR* Reason);
@@ -437,13 +449,13 @@ private:
 	bool ShouldRepickMoveShoot(ACompanionCharacter* Companion, AAIController* AIC, float DeltaSeconds);
 
 	/** Open-area combat jiggle: continuous restless micro-motion (AddMovementInput) within JiggleRadius of JiggleHome while LoS is clear. SetFocus already faces the enemy; firing runs after this call. */
-	void TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+	void TickCombatJiggle(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds);
 
 	/** Re-rolls JiggleOffset up to JiggleLosRetryCount times to find a micro-target with LoS; falls back to ZeroVector (sit on anchor) if none pass. Resets the retarget timer. */
-	void RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached);
+	void RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace);
 
 	/** Drift cycle: weighted-rolls Closer/Farther/Hold and nudges JiggleHome by JiggleDriftStep along the horizontal companion->target axis, clamped to [MoveShootIdealRangeMin, MoveShootIdealRangeMax] and nav-projected. LoS-gates the Closer drift. No-op on Hold or failed projection. */
-	void TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+	void TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds);
 
 	/** Player-pull move-and-shoot: when the player is too far, close the gap while keeping the enemy focused. Prefers player proximity over jiggle position. */
 	void TickMoveShootTowardPlayer(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, float DeltaSeconds);
@@ -452,19 +464,24 @@ private:
 	EJiggleDrift RollJiggleDrift() const;
 
 	/** LoS-blocked reposition: keep facing the target, sidestep laterally to a nav point that has LoS. Holds (no thrash) if no side works. */
-	void TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds);
+	void TickRegainLosReposition(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds);
 
 	/** Shared LoS test: does Point (raised to eye height) have a clear ECC_Visibility line to the target? Ignores self + weapon + attached. */
-	bool PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredAttached) const;
+	bool PointHasLosToTarget(ACompanionCharacter* Companion, const FVector& Point, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace) const;
 
-	/** Move-shoot facing: live focus on actor when LoS is clear; frozen focal point at LastKnownTargetLocation when blocked. No-op if blocked and no last-known location yet. */
-	void UpdateMoveShootFacing(AAIController* AIC, AActor* Target, bool bLosClear);
+	/** Move-shoot facing. LoS clear: live actor focus on the target. LoS blocked: the frozen
+	 *  LastKnownTargetLocation, but only while a fresh trace still proves that spot visible — the
+	 *  snapshot is LoS-verified at capture time only, and this runs every blocked tick, so asserting it
+	 *  unverified is a through-wall bearing held for the length of the block. With no provable bearing
+	 *  (including no snapshot yet) it holds the pawn's own forward rather than leaving a stale focus up. */
+	void UpdateMoveShootFacing(ACompanionCharacter* Companion, AAIController* AIC, AActor* Target,
+		bool bLosClear, TArrayView<AActor* const> IgnoredForFireTrace);
 
 	/** Projects MyLoc+LateralOffset onto the navmesh and returns true only if the projected point has LoS to the target. */
-	bool TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, const FVector& LateralOffset, FVector& OutDest) const;
+	bool TryLateralLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, const FVector& LateralOffset, FVector& OutDest) const;
 
 	/** Regain-LoS fan: tests right/left/back/back-right/back-left offsets at StepDistance, nav-projects + LoS-verifies each, returns the NEAREST valid point (smallest displacement). Biases toward a small back-step over a big swing. Returns false if none clear. */
-	bool PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float StepDistance, FVector& OutDest, const TCHAR** OutDirName = nullptr) const;
+	bool PickFanLosDestination(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float StepDistance, FVector& OutDest, const TCHAR** OutDirName = nullptr) const;
 
 	/** Symmetric teardown for move-and-shoot: stop movement, clear focus, restore walk speed, reset state. */
 	void EndOpenAreaMoveShoot(ACompanionCharacter* Companion);
@@ -537,6 +554,11 @@ private:
 	static constexpr float PeekResolveDistThresholdSq = 50.f * 50.f;
 
 	float LosBlockedAccum = 0.f;
+
+	/** Grenade-lob accumulator (enemy-grenadier parity) — separate from LosBlockedAccum because each
+	 *  throw attempt resets it for a full window between tries without disturbing the abandon clock. */
+	float GrenadeLosBlockedAccum = 0.f;
+
 	float TimeInOpenEngageNoCover = 0.f;
 	int8 LastTickBranch = -1;
 	bool bLastLosBlocked = false;
@@ -554,8 +576,9 @@ private:
 	float MoveShootRepositionTimer = 0.f;
 	/** True while holding after a failed nav projection — gate must wait the full interval (ignore bIdle) before re-picking. */
 	bool bMoveShootHolding = false;
-	/** CMC->MaxWalkSpeed captured on entry so it can be restored on exit. 0 = not captured. */
-	float CachedDefaultWalkSpeed = 0.f;
+	// CachedDefaultWalkSpeed removed: the task speed override API (SetTaskSpeedOverride /
+	// ClearTaskSpeedOverride + RefreshMovementSpeeds) re-derives from the tuning asset on exit
+	// instead of restoring a snapshot that may be stale.
 
 	/** Latched leash bool with hysteresis — trips at LeashDist, releases only once back inside the dead-band. */
 	bool bPlayerPullLatched = false;
@@ -617,6 +640,29 @@ private:
 	 *  restarts (target churn, the hop's own Succeeded) must not re-arm an instant hop. */
 	float CombatAdvanceHopTimer = 0.f;
 
+	/** The companion kill stamp whose free bound has already been spent. Also NOT reset by
+	 *  ResetTaskState: a task restart must not hand the same kill a second bound. */
+	float LastHopBypassKillTime = -1e9f;
+
+	/** Post-kill free bound: if the companion's last confirmed kill is inside
+	 *  CombatPostKillAdvanceWindow and has not been spent yet, clears the hop cooldown and marks the
+	 *  stamp consumed. Self-consuming on purpose — the cooldown also serves as the back-off for a
+	 *  failed candidate scan, so a bypass that merely ignored it would re-run the octree query and
+	 *  its traces every frame of the window, and one kill would chain bound after bound.
+	 *  The stamp is consumed on BOTH exits, including the one where the cooldown had already expired
+	 *  and there was nothing to clear: the caller runs the scan on any tick this returns to, so the
+	 *  bound about to commit is that kill's bound either way. Leaving it unspent on that path let the
+	 *  commit's own interval re-arm hand the same kill a second bound on the next re-entry.
+	 *  Must only be called from a point where every remaining path either runs the scan or re-arms
+	 *  the timer itself — otherwise a cleared cooldown never gets re-armed and the bound outlives
+	 *  its window. */
+	void TryConsumePostKillHopBypass(const ACompanionCharacter* Companion,
+		const UCompanionTuningDataAsset& Tuning);
+
+	/** Hold cap for the companion's current mode — StealthMaxConsecutiveHolds in Stealth, else
+	 *  MaxConsecutiveHolds. Shared by the cap test and both logs that print it. */
+	uint8 GetEffectiveMaxHolds(const ACompanionCharacter* Companion) const;
+
 	/** Combat-mode cover-to-cover bound: every CombatAdvanceHopInterval, pick the nearest cover
 	 *  that gains CombatAdvanceHopMinGain toward the threat (within leash + hop max dash, with a
 	 *  verified firing line), commit it via the cover-commit grant and finish the task into
@@ -661,6 +707,15 @@ private:
 	// is unchanged. Throttled by StandBurstMuzzleCheckTimer (10 Hz). bStandBurstFireHeld = fire withheld.
 	float StandBurstMuzzleCheckTimer = 0.f;
 	bool bStandBurstFireHeld = false;
+
+	/** True when the current burst was committed with NO verified peek line — the target bearing
+	 *  runs through the companion's own cover wall. Aim points down the cover fire arc until the
+	 *  muzzle gate proves the line is clear. */
+	bool bBurstCommitSpeculative = false;
+
+	/** Set the first time the muzzle/corner fire gate reports a clear line during a speculative
+	 *  burst — aim hands back to the live target that instant so the shot stays accurate. */
+	bool bSpeculativeAimVerified = false;
 
 	/** World time the muzzle-withhold last resumed fire. StartFiring() fires an instant shot on every call
 	 *  with no internal refire guard, so a 10 Hz blocked/clear flicker could resume-fire faster than the
@@ -733,6 +788,8 @@ private:
 	FVector LastFinalApproachPawnLoc = FVector::ZeroVector;
 	/** Accumulated seconds of sub-threshold displacement during the final approach. */
 	float FinalApproachNoProgressTime = 0.f;
+	/** Muzzle-gated transit fire during the final-approach walk (shared with MoveToCoverPoint). */
+	CompanionCover::FApproachFireState FinalApproachFire;
 
 	// Smooth-snap tween state
 	bool bSmoothSnapping = false;
@@ -774,7 +831,7 @@ private:
 	 *  line is blocked (no shots into our own wall), resuming when clear. Throttled to 10 Hz via
 	 *  StandBurstMuzzleCheckTimer; bStandBurstFireHeld latches the withheld state. Used by the plain
 	 *  Stand/Quick burst and by StandUpAndReposition Phase A (stand-fire-in-place). No-op if no weapon. */
-	void TickStandBurstMuzzleWithhold(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredAttached, float DeltaSeconds, const FCoverData* PeekConeCover = nullptr);
+	void TickStandBurstMuzzleWithhold(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds, const FCoverData* PeekConeCover = nullptr);
 
 	virtual EBTNodeResult::Type AbortTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
 
@@ -784,6 +841,15 @@ private:
 
 	/** True while a reload triggered by TryPrePeekReloadGate is in flight. */
 	bool bReloadGateActive = false;
+
+	/** Edge detect for covering-fire window expiry — set to IsCoveringFireActive() at the end of
+	 *  each tick; compared at the start of the next to detect the falling edge. */
+	bool bWasCoveringFireLastTick = false;
+
+	/** Last-seen target position while covering fire is active. Drives the aim override when
+	 *  the target goes behind cover. Reset on task entry and window end. */
+	FVector CoveringFireLastSeenLoc = FVector::ZeroVector;
+	bool bHasCoveringFireLastSeen = false;
 
 	/** World time when the reload gate was activated. */
 	float ReloadGateStartTime = 0.f;

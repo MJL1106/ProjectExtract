@@ -8,6 +8,7 @@
 #include "Game/ExtractionGameMode.h"
 #include "Game/ObjectiveSubsystem.h"
 #include "Game/MissionInventorySubsystem.h"
+#include "World/InteractionEventSubsystem.h"
 #include "Core/Extraction.h"
 
 DEFINE_LOG_CATEGORY(LogLiftGate);
@@ -104,17 +105,39 @@ void ALevelCompletionLiftGate::WorldInteract_Implementation(AActor* Interactor)
 		return;
 	}
 
-	// Unlocked: complete the level.
-	AExtractionGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AExtractionGameMode>() : nullptr;
-	if (IsValid(GM))
+	if (bCompletesLevel)
 	{
+		AExtractionGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<AExtractionGameMode>() : nullptr;
+		if (!IsValid(GM))
+		{
+			UE_LOG(LogLiftGate, Warning, TEXT("%s: could not resolve AExtractionGameMode for CompleteLevel"), *GetName());
+			return;
+		}
+
+		// Raised AFTER the game mode resolves: it signals "the lift was used", so a press that could
+		// not complete the level must not raise it.
+		RaiseUsedNotify(Interactor);
+
 		UE_LOG(LogLiftGate, Log, TEXT("%s: completing level via %s"), *GetName(), *GetNameSafe(Interactor));
 		GM->CompleteLevel();
+		return;
 	}
-	else
-	{
-		UE_LOG(LogLiftGate, Warning, TEXT("%s: could not resolve AExtractionGameMode for CompleteLevel"), *GetName());
-	}
+
+	// bCompletesLevel off: the ride is a beat, not the end of the mission. No game mode is resolved —
+	// there is nothing here that needs one — and the raise is the entire payload, because the
+	// objective step watching this gate is what decides where the squad ends up.
+	RaiseUsedNotify(Interactor);
+	UE_LOG(LogLiftGate, Log, TEXT("%s: used by %s — level completion is owned by the objective chain"),
+		*GetName(), *GetNameSafe(Interactor));
+}
+
+void ALevelCompletionLiftGate::RaiseUsedNotify(AActor* Interactor)
+{
+	if (bCompletionRaised) return;
+	bCompletionRaised = true;
+
+	if (UInteractionEventSubsystem* Events = GetWorld() ? GetWorld()->GetSubsystem<UInteractionEventSubsystem>() : nullptr)
+		Events->NotifyWorldInteract(this, Interactor);
 }
 
 // ------------------------------------------------------------------
@@ -139,6 +162,11 @@ void ALevelCompletionLiftGate::UnlockExit()
 
 void ALevelCompletionLiftGate::RegisterUseLiftObjective()
 {
+	// When an AObjectiveStep owns this beat, bRegisterOwnObjective is false and the gate
+	// stays out of the objective subsystem entirely. bObjectiveRegistered stays false,
+	// so RemoveUseLiftObjective is a no-op on EndPlay.
+	if (!bRegisterOwnObjective) return;
+
 	if (UObjectiveSubsystem* Objectives = GetObjectiveSubsystem())
 	{
 		Objectives->AddObjective(UseLiftObjectiveId, UseLiftObjectiveLabel, GetObjectiveLocation());

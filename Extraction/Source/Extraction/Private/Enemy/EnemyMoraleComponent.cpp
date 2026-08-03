@@ -78,6 +78,7 @@ void UEnemyMoraleComponent::DeactivateForDeath()
 	}
 
 	RallyFloorRaise = 0.f;
+	bMoralePinnedConfident = false;
 
 	if (CachedSuppressionComp.IsValid())
 		CachedSuppressionComp->OnSuppressedStateChanged.RemoveDynamic(this, &UEnemyMoraleComponent::HandleSuppressedStateChanged);
@@ -132,7 +133,7 @@ void UEnemyMoraleComponent::NotifyLowHealth()
 
 // --- Phase 5: squad-routed ingress ---
 
-void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer)
+void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer, const FVector& /*DeathLocation*/)
 {
 	if (bFearless) return;
 	if (!OwnerEnemy.IsValid()) return;
@@ -140,7 +141,6 @@ void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer)
 
 	const float Loss = bWasOfficer ? LossOfficerDied : LossAllyDied;
 	ApplyMoraleDelta(-Loss);
-	RequestBark(EBarkType::ManDown);
 }
 
 void UEnemyMoraleComponent::NotifyRally(float MoraleBoost, float FloorRaise)
@@ -170,6 +170,30 @@ void UEnemyMoraleComponent::NotifyRally(float MoraleBoost, float FloorRaise)
 		RallyFloorTimerHandle, this, &UEnemyMoraleComponent::ClearRallyFloor,
 		RallyFloorDuration, false);
 
+	EvaluateState();
+}
+
+void UEnemyMoraleComponent::RallyToConfident()
+{
+	if (bFearless) return;
+	if (!OwnerEnemy.IsValid()) return;
+	if (CachedHealthComp.IsValid() && CachedHealthComp->IsDead()) return;
+	if (CurrentState == EMoraleState::Confident) return;
+
+	// Push morale above ShakenThreshold AND the Broken-exit hysteresis band so EvaluateState
+	// flips to Confident regardless of current state. Without Max3 a Broken enemy with
+	// BrokenThreshold + BrokenExitMargin > ShakenThreshold + 1 would stay Broken.
+	CurrentMorale = FMath::Max3(CurrentMorale, ShakenThreshold + 1.f, BrokenThreshold + BrokenExitMargin);
+	EvaluateState();
+}
+
+void UEnemyMoraleComponent::SetMoralePinnedConfident(bool bPinned)
+{
+	if (bMoralePinnedConfident == bPinned) return;
+	bMoralePinnedConfident = bPinned;
+
+	// EvaluateState owns the transition broadcast, and BB_MoraleState is written only from that
+	// broadcast — going straight to CurrentState here would desync the blackboard from GetMoraleState().
 	EvaluateState();
 }
 
@@ -207,14 +231,12 @@ void UEnemyMoraleComponent::HandleEnemyDied(AEnemyCharacter* DeadEnemy, FVector 
 		if (DistSq > OfficerRadius * OfficerRadius) return;
 
 		ApplyMoraleDelta(-LossOfficerDied);
-		RequestBark(EBarkType::ManDown);
 		return;
 	}
 
 	if (DistSq > AllyDeathRadius * AllyDeathRadius) return;
 
 	ApplyMoraleDelta(-LossAllyDied);
-	RequestBark(EBarkType::ManDown);
 }
 
 // --- Suppression handler ---
@@ -273,6 +295,10 @@ void UEnemyMoraleComponent::MoraleTick()
 
 void UEnemyMoraleComponent::ApplyMoraleDelta(float Delta, bool bIsContinuousDrain)
 {
+	// Last-man pin: losses are swallowed outright (gains still apply) so nothing — suppression,
+	// flanking, low health — can drag the wave's final survivor back out of Confident mid-pursue.
+	if (bMoralePinnedConfident && Delta < 0.f) return;
+
 	const float ScaledDelta = (Delta < 0.f) ? (Delta / MoraleEventResistance) : Delta;
 	const float OldMorale = CurrentMorale;
 	CurrentMorale = FMath::Clamp(CurrentMorale + ScaledDelta, GetEffectiveMoraleFloor(), 100.f);
@@ -289,7 +315,11 @@ void UEnemyMoraleComponent::ApplyMoraleDelta(float Delta, bool bIsContinuousDrai
 void UEnemyMoraleComponent::EvaluateState()
 {
 	EMoraleState NewState;
-	if (CurrentMorale <= BrokenThreshold)
+	if (bMoralePinnedConfident)
+	{
+		NewState = EMoraleState::Confident;
+	}
+	else if (CurrentMorale <= BrokenThreshold)
 	{
 		NewState = EMoraleState::Broken;
 	}
@@ -381,9 +411,5 @@ void UEnemyMoraleComponent::RequestBark(EBarkType Type) const
 	UBarkSubsystem* BarkSys = World->GetSubsystem<UBarkSubsystem>();
 	if (!IsValid(BarkSys)) return;
 
-	const FText SpeakerName = IsValid(OwnerEnemy->GetArchetypeData())
-		? OwnerEnemy->GetArchetypeData()->DisplayName
-		: FText::FromString(TEXT("Enemy"));
-
-	BarkSys->RequestBark(OwnerEnemy.Get(), CachedBarkSet.Get(), Type, SpeakerName);
+	BarkSys->RequestBark(OwnerEnemy.Get(), CachedBarkSet.Get(), Type);
 }

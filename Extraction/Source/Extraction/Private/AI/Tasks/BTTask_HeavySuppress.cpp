@@ -105,6 +105,8 @@ EBTNodeResult::Type UBTTask_HeavySuppress::ExecuteTask(UBehaviorTreeComponent& O
 
 	if (bHasLOS)
 	{
+		Mem->bEverHadLOS = true;
+		Mem->LosLostTimer = 0.f;
 		Enemy->SetAimTarget(Target);
 		Controller->SetFocus(Target);
 		bHasAimSource = true;
@@ -129,13 +131,17 @@ EBTNodeResult::Type UBTTask_HeavySuppress::ExecuteTask(UBehaviorTreeComponent& O
 		: BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
 	UpdateAdvance(Controller, Pawn, DA, Mem, bHasAimSource, EntryThreatLoc, 0.f);
 
-	// Only start firing if there is a valid aim source — don't forward-hose into the void
+	// Fire only when the heavy can actually see the target (or within the LOS-lost grace after
+	// losing sight mid-burst). A ForceEngage'd heavy that has never had LOS never starts firing.
+	const bool bMayFire = bHasAimSource && Mem->bEverHadLOS && bHasLOS;
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
-	if (bHasAimSource && IsValid(Weapon))
+	if (bMayFire && IsValid(Weapon))
 		Weapon->StartFiring();
 
-	Mem->Phase = EHeavySuppressPhase::Fire;
-	Mem->PhaseTimer = FMath::RandRange(DA->BurstDurationMin, DA->BurstDurationMax);
+	Mem->Phase = bMayFire ? EHeavySuppressPhase::Fire : EHeavySuppressPhase::Pause;
+	Mem->PhaseTimer = bMayFire
+		? FMath::RandRange(DA->BurstDurationMin, DA->BurstDurationMax)
+		: FMath::RandRange(DA->BurstPauseMin, DA->BurstPauseMax);
 
 	return EBTNodeResult::InProgress;
 }
@@ -168,6 +174,8 @@ void UBTTask_HeavySuppress::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 
 	if (bHasLOS)
 	{
+		Mem->bEverHadLOS = true;
+		Mem->LosLostTimer = 0.f;
 		if (Mem->bAimOverrideActive)
 		{
 			Enemy->ClearAimLocationOverride();
@@ -179,6 +187,7 @@ void UBTTask_HeavySuppress::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 	}
 	else
 	{
+		Mem->LosLostTimer += DeltaSeconds;
 		// Clear aim target so WeaponBase uses the location override, not the actor position
 		Enemy->SetAimTarget(nullptr);
 		const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
@@ -198,9 +207,21 @@ void UBTTask_HeavySuppress::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 		: BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
 	UpdateAdvance(Controller, Pawn, DA, Mem, bHasAimSource, TickThreatLoc, DeltaSeconds);
 
-	Mem->PhaseTimer -= DeltaSeconds;
+	// LOS fire gate: the heavy may fire only while it can see the target (or within the brief
+	// continue-fire grace after losing sight mid-burst). A never-sighted heavy never starts.
+	const bool bWithinGrace = Mem->LosLostTimer <= DA->FireLosLostGrace;
+	const bool bMayFire = bHasAimSource && Mem->bEverHadLOS && (bHasLOS || bWithinGrace);
 
+	// Grace expired mid-burst — stop firing immediately.
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
+	if (!bMayFire && Mem->Phase == EHeavySuppressPhase::Fire && IsValid(Weapon))
+	{
+		Weapon->StopFiring();
+		Mem->Phase = EHeavySuppressPhase::Pause;
+		Mem->PhaseTimer = FMath::RandRange(DA->BurstPauseMin, DA->BurstPauseMax);
+	}
+
+	Mem->PhaseTimer -= DeltaSeconds;
 
 	switch (Mem->Phase)
 	{
@@ -217,11 +238,12 @@ void UBTTask_HeavySuppress::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* N
 	case EHeavySuppressPhase::Pause:
 		if (Mem->PhaseTimer <= 0.f)
 		{
-			// Only resume firing if there's still a valid aim source
-			if (bHasAimSource && IsValid(Weapon))
+			if (bMayFire && IsValid(Weapon))
 				Weapon->StartFiring();
-			Mem->Phase = EHeavySuppressPhase::Fire;
-			Mem->PhaseTimer = FMath::RandRange(DA->BurstDurationMin, DA->BurstDurationMax);
+			Mem->Phase = bMayFire ? EHeavySuppressPhase::Fire : EHeavySuppressPhase::Pause;
+			Mem->PhaseTimer = bMayFire
+				? FMath::RandRange(DA->BurstDurationMin, DA->BurstDurationMax)
+				: FMath::RandRange(DA->BurstPauseMin, DA->BurstPauseMax);
 		}
 		break;
 	}

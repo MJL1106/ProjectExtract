@@ -27,6 +27,8 @@ private:
 		bool bRoleClaimed = false;
 		bool bMoveIssued = false;
 		bool bFiring = false;
+		/** Seconds since LOS was last true; fires while <= FireLosLostGrace. */
+		float LosLostTimer = 0.f;
 	};
 
 	/** Number of sample points around the target ring. */

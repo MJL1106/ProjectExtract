@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ProjectExtract — Objectives, Director, Waves &amp; Loot Setup</title>
+<style>
+  :root{
+    --bg:#12151a; --panel:#1a1f27; --panel2:#20262f; --ink:#dfe6ee; --dim:#8b97a5;
+    --accent:#5cc8ff; --green:#68d391; --amber:#f6c65b; --red:#f08080;
+    --border:#2c3540; --code:#0e1116;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f5f7fa; --panel:#ffffff; --panel2:#eef2f6; --ink:#1d2530; --dim:#5c6b7a;
+      --accent:#0b7fc4; --green:#1f9d55; --amber:#b7791f; --red:#c53030; --border:#d7dee6; --code:#eef1f5; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 "Segoe UI",system-ui,sans-serif;}
+  .wrap{max-width:1000px;margin:0 auto;padding:32px 24px 80px;}
+  h1{font-size:26px;margin:0 0 4px}
+  h2{font-size:20px;margin:42px 0 10px;color:var(--accent);border-bottom:1px solid var(--border);padding-bottom:6px}
+  h3{font-size:15px;margin:22px 0 6px}
+  h4{font-size:14px;margin:16px 0 4px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+  p{margin:8px 0}
+  .sub{color:var(--dim);margin-bottom:24px}
+  code{background:var(--code);border:1px solid var(--border);border-radius:4px;padding:1px 5px;font:13px Consolas,monospace;white-space:nowrap}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:16px 20px;margin:14px 0}
+  .place{display:inline-block;background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:2px 8px;font:600 12px "Segoe UI";color:var(--green);margin:0 4px 4px 0}
+  .warn{border-left:4px solid var(--red);background:var(--panel2);padding:10px 14px;border-radius:6px;margin:10px 0}
+  .tip{border-left:4px solid var(--amber);background:var(--panel2);padding:10px 14px;border-radius:6px;margin:10px 0}
+  table{border-collapse:collapse;width:100%;margin:10px 0;font-size:13.5px}
+  th,td{border:1px solid var(--border);padding:6px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2)}
+  td.n{text-align:right;white-space:nowrap}
+  .overflow{overflow-x:auto}
+  ol.check{counter-reset:c;list-style:none;padding-left:0}
+  ol.check li{counter-increment:c;padding:7px 0 7px 40px;position:relative;border-bottom:1px dashed var(--border)}
+  ol.check li::before{content:counter(c);position:absolute;left:0;top:7px;width:26px;height:26px;border-radius:50%;background:var(--accent);color:var(--bg);font-weight:700;text-align:center;line-height:26px;font-size:13px}
+  .links{font-size:12.5px;color:var(--dim);white-space:normal}
+  .pill{font:600 11px "Segoe UI";border-radius:10px;padding:1px 8px;margin-left:6px;vertical-align:middle}
+  .pill.done{background:rgba(104,211,145,.15);color:var(--green);border:1px solid var(--green)}
+  .pill.data{background:rgba(92,200,255,.15);color:var(--accent);border:1px solid var(--accent)}
+  .pill.code{background:rgba(246,198,91,.15);color:var(--amber);border:1px solid var(--amber)}
+  .toc{columns:2;gap:32px;font-size:14px}
+  .toc a{color:var(--ink);text-decoration:none}
+  .toc a:hover{color:var(--accent)}
+  .flow{background:var(--code);border:1px solid var(--border);border-radius:8px;padding:12px 16px;font:13px Consolas,monospace;overflow-x:auto;white-space:pre}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Objectives, Director, Waves &amp; Loot</h1>
+<p class="sub">How to author the next section of the level: what the player is told to do, what the director throws at them, and what they find in the crates. Property names are verbatim from the Details panel; every number quoted is read from the live asset.</p>
+
+<div class="card">
+<h3 style="margin-top:0">Contents</h3>
+<div class="toc">
+<a href="#map">Who owns what</a><br>
+<a href="#obj">1 · Objectives — the two ways</a><br>
+<a href="#obj-have">2 · What we have so far</a><br>
+<a href="#obj-next">3 · Authoring the next objective</a><br>
+<a href="#dir">4 · Director — arming the next phase</a><br>
+<a href="#zones">5 · Spawn zones</a><br>
+<a href="#comp">6 · Choosing what spawns</a><br>
+<a href="#waves">7 · Waves</a><br>
+<a href="#loot">8 · Loot containers</a><br>
+<a href="#case">9 · The assault-rifle case</a><br>
+<a href="#attach">10 · Which attachments are available</a><br>
+<a href="#check">11 · Pre-PIE checklist</a><br>
+<a href="#fail">12 · When nothing happens</a><br>
+</div>
+</div>
+
+<h2 id="map">Who owns what</h2>
+
+<table>
+<tr><th>System</th><th>Owns</th><th>Authored in</th></tr>
+<tr><td>Objective markers</td><td>The HUD waypoint + world billboard + the text panel line</td><td>Placed actor, or a Blueprint call</td></tr>
+<tr><td>Level objective flow</td><td>The scripted step chain for the shipped level</td><td>One placed actor, wired by reference <span class="pill code">step list is C++</span></td></tr>
+<tr><td>Enemy director</td><td>Ambient reinforcements once the level goes loud</td><td>DataAsset + spawn zones + phase triggers</td></tr>
+<tr><td>Waves</td><td>Finite, scripted assaults with a defined end</td><td>A wave request struct on a placed actor</td></tr>
+<tr><td>Loot containers</td><td>Ammo, keycards, stims</td><td>Per placed instance</td></tr>
+<tr><td>Weapon cases</td><td>Physical attachment/ammo pickups in foam</td><td>Slots on the BP, ticked per instance</td></tr>
+</table>
+
+<p>The director and the objective flow are independent. The flow does not spawn enemies, and the director does not know what the objective is. They meet in exactly two places: a phase trigger telling the director the mission moved on, and a wave request fired from an objective beat.</p>
+
+<h2 id="obj">1 · Objectives — the two ways</h2>
+
+<h3>A · <span class="place">ObjectiveMarkerActor</span> <span class="pill data">data-only, use this for new content</span></h3>
+<p>Drop-in actor that registers a waypoint at its own location and can retire itself. This is the route for the next part of the level — no code, no C++ enum entry.</p>
+
+<table>
+<tr><th>Property</th><th>Meaning</th><th>Default</th></tr>
+<tr><td><code>ObjectiveId</code></td><td>Unique id. Registering the same id twice replaces the first.</td><td>actor's own name if left <code>None</code></td></tr>
+<tr><td><code>Label</code></td><td>Short line shown next to the icon and in the objective panel.</td><td>empty</td></tr>
+<tr><td><code>bActivateOnBeginPlay</code></td><td>Off = the marker stays dark until something calls <code>Activate()</code>.</td><td>true</td></tr>
+<tr><td><code>CompletionRadius</code></td><td>Completes when the player gets within this many cm. 0 = disabled.</td><td>0</td></tr>
+<tr><td><code>RequiredKeycardId</code></td><td>Completes when the mission inventory records that keycard. <code>None</code> = disabled.</td><td>None</td></tr>
+<tr><td><code>bToastOnComplete</code></td><td>Raise the "Objective complete" HUD toast.</td><td>true</td></tr>
+</table>
+
+<p>Set neither completion criterion and the marker is permanent until something destroys the actor or calls <code>Deactivate()</code>. <code>OnObjectiveCompleted</code> fires after the marker has already removed itself, so a handler can immediately activate the next one — including under the same id.</p>
+
+<div class="tip"><b>Chaining pattern.</b> Place N markers, all with <code>bActivateOnBeginPlay</code> off except the first. Bind each one's <code>OnObjectiveCompleted</code> to the next one's <code>Activate</code> in the Level Blueprint. That is a whole objective chain with no C++.</div>
+
+<h3>B · <span class="place">ALevelObjectiveFlow</span> <span class="pill code">step list is a C++ enum</span></h3>
+<p>One placed actor that runs the shipped level's beat sequence, listening to doors, routes, enemy deaths, loot and the extraction actors. It owns a single primary objective marker at a time and re-points it as the step advances.</p>
+
+<div class="warn"><b>Adding a genuinely new scripted beat to this actor is a code change</b> — the steps and the events that drive them are fixed enums (<code>ELevelObjectiveStep</code> / <code>ELevelObjectiveEvent</code>). For the next section of the level, prefer <b>A</b> unless you want the checkpoint/fast-forward machinery, which only the flow has.</div>
+
+<h2 id="obj-have">2 · What we have so far</h2>
+
+<p>The shipped chain, in order. Each arrow is the event that advances it.</p>
+
+<div class="flow">Inactive
+  → BreachRoofDoor            (RoofDoor opened)
+  → FollowCompanionDownstairs (DownstairsRoute completed)
+  → BreachStairwellDoor       (StairwellBreachDoor opened)
+  → ClearRoom1                (all Room1Enemies dead)
+  → FindOfficeKeycard         (KeycardContainer looted)
+  → UnlockStairwellDoor       (Room1ExitDoor opened)
+  → SwitchCompanionToStealth  (Room2EntryDoor opened)
+  → FirstDoubleTakedown       (FirstTakedownPair dead)
+  → SecondDoubleTakedown      (SecondTakedownPair dead)
+  → ReachExtractionTarget     (extraction started — VIP rescued)
+  → DefendPosition            (extraction wave completed)
+  → UseLift                   (LiftGate ridden)
+  → Completed</div>
+
+<h4>The reference fields you wire on the placed flow actor</h4>
+<table>
+<tr><th>Category</th><th>Fields</th></tr>
+<tr><td>Roof</td><td><code>RoofDoor</code>, <code>DownstairsRoute</code>, <code>StairwellBreachDoor</code></td></tr>
+<tr><td>Room 1</td><td><code>Room1Enemies</code> (array), <code>KeycardContainer</code>, <code>Room1ExitDoor</code>, <code>Room1AreaLocation</code></td></tr>
+<tr><td>Room 2</td><td><code>Room2EntryDoor</code>, <code>FirstTakedownPair</code>, <code>SecondTakedownPair</code>, <code>SupplyCrates</code> (array)</td></tr>
+<tr><td>Extraction</td><td><code>ExtractionTarget</code>, <code>Extractee</code>, <code>LiftGate</code>, <code>ExtractionWave</code>, <code>ExtractionCompletionAction</code></td></tr>
+<tr><td>Checkpoints</td><td><code>CheckpointSteps</code> (array), <code>CheckpointSpawns</code> (map: step → TargetPoint)</td></tr>
+</table>
+
+<p><b>Two shipped patterns worth copying.</b></p>
+<ul>
+<li><b>Area-anchored marker.</b> <code>Room1AreaLocation</code> pins the "clear the room" marker to a fixed spot instead of chasing whichever enemy is still alive. Left at zero it auto-computes the spawn-time centroid of <code>Room1Enemies</code>.</li>
+<li><b>Optional objective.</b> <code>SupplyCrates</code> drives a second, text-only objective — it appears in the HUD panel with no world billboard and no off-screen indicator, and re-points to the nearest unlooted crate as you empty them. That "text-only" behaviour is the <code>bShowWorldMarker = false</code> flag on the subsystem call.</li>
+</ul>
+
+<h4>Marker anatomy (any route)</h4>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>TargetActor</code></td><td>Set it and the marker follows that actor. Null = static <code>WorldLocation</code>.</td></tr>
+<tr><td><code>HeightAboveBase</code></td><td>Target markers resolve at the target's <b>bounds base</b> + this. Default 170. A floor crate, a door and an enemy therefore all read at the same marker height.</td></tr>
+<tr><td><code>Offset</code></td><td>Additive nudge on top of everything else.</td></tr>
+<tr><td><code>bShowWorldMarker</code></td><td>False = HUD text only, no billboard, no edge indicator. Use for optional objectives.</td></tr>
+</table>
+
+<h2 id="obj-next">3 · Authoring the next objective</h2>
+
+<p>Say the next beat is "reach the server room, plant the device, hold, then leave by the north stair."</p>
+
+<b>Place the objective chain</b>
+<ol class="check">
+<li><code>Place Actors → search "ObjectiveMarkerActor" → drag to the server-room door</code></li>
+<li><code>Details → Objective → ObjectiveId</code> → <code>Obj_ReachServerRoom</code></li>
+<li><code>Details → Objective → Label</code> → <code>"Reach the server room"</code></li>
+<li><code>Details → Objective|Completion → CompletionRadius</code> → <code>400.0</code></li>
+<li>Duplicate it to the device position; set <code>ObjectiveId</code> = <code>Obj_PlantDevice</code>, <code>Label</code> = <code>"Plant the device"</code>, <code>bActivateOnBeginPlay</code> → <code>false</code></li>
+<li><code>Level Blueprint → bind Obj_ReachServerRoom.OnObjectiveCompleted → Obj_PlantDevice.Activate</code></li>
+</ol>
+
+<b>Arm the hold</b>
+<ol class="check">
+<li>Place an <span class="place">ExtractionTargetActor</span> at the device</li>
+<li><code>Details → ExtractionTarget|Objectives → ReachObjectiveId / DefenceObjectiveId</code> → your own ids</li>
+<li><code>Details → ExtractionTarget|Wave → WaveRequest</code> → fill per <a href="#waves">§7</a></li>
+<li><code>Details → ExtractionTarget|Wave → CompletionAction</code> → <code>UnlockExit</code></li>
+<li><code>Details → ExtractionTarget|Wave → LiftGateTarget</code> → the north-stair gate actor</li>
+</ol>
+
+<p>That gives you: waypoint → waypoint → interact → defence wave → gate unlocks, with no code. The <code>ExtractionTargetActor</code> registers its own reach and defence objectives, so you do not need marker actors for those two.</p>
+
+<h2 id="dir">4 · Director — arming the next phase</h2>
+
+<h3>When it does anything at all</h3>
+<p>The director is asleep until global alert reaches <b>Loud</b> — an enemy confirming combat, an alarm, or body discovery escalating. Before that, everything the player meets is a placed enemy. Stealth content is authored, not directed.</p>
+
+<p>Once loud it ticks once a second and asks: is tension under the phase ceiling, has the cadence elapsed, is there alive-cap headroom, is there a legal zone. All four must pass.</p>
+
+<h3>Tension, and why kills <em>pause</em> spawning</h3>
+<p>Tension rises with kills, player damage taken, and each engaged enemy near the player; it decays every second. Cross <code>PeakTensionThreshold</code> and the director stops adding squads. Fall below <code>ReliefEntryThreshold</code> and it waits out <code>ReliefDuration</code> before building again. That is the sawtooth — hard fight, then quiet. Turning <em>up</em> <code>TensionPerKill</code> makes fights <em>shorter</em>.</p>
+
+<h3>Phases</h3>
+<p>One global phase at a time: <b>Infiltration → Objective → Extraction</b>. Not per floor, not per room. Each phase has its own ceiling, cadence, alive cap and squad list.</p>
+
+<b>Advance the phase</b>
+<ol class="check">
+<li><code>Place Actors → search "BP_PhaseTrigger" → drag into the level</code> <span class="links">(/Game/Core/Enemies/AI)</span></li>
+<li>Scale the box across the whole doorway/corridor the player must pass</li>
+<li>Set its target phase in the Details panel</li>
+<li><code>File → Save Current Level</code></li>
+</ol>
+
+<p>Advancing the phase forces the director back to <b>Build</b>, so the new phase can start applying pressure as soon as cadence and the alive cap allow. Put triggers on story beats, not floor changes.</p>
+
+<h3>Scope</h3>
+<p><span class="place">EnemyDirectorScopeVolume</span> limits what the director counts and where it can spawn. With none placed it sees the whole world — which is why the test gym has one, or the gym's 40-odd parked enemies would fill every alive cap.</p>
+
+<div class="warn">Multiple enabled scopes act as one combined union, not as separate per-floor brains. Scale <b>one</b> box over the whole building, Z tall enough to include every floor, stairwell and spawn room. There is no runtime enable/disable, so do not try to use scopes as floor states — use <code>ActivePhases</code> on the zones instead.</div>
+
+<h2 id="zones">5 · Spawn zones</h2>
+
+<p><span class="place">EnemySpawnZone</span> is a box the director pulls spawn points from.</p>
+
+<table>
+<tr><th>Property</th><th>Use</th></tr>
+<tr><td><code>AreaTag</code></td><td>Label for you and the logs. No gameplay effect.</td></tr>
+<tr><td><code>ActivePhases</code></td><td>Which phases may use this zone. <b>Empty = all phases.</b> This is your per-floor / per-route control.</td></tr>
+<tr><td><code>DirectorConfig</code></td><td>Pushed to the world director on registration if none is set yet. First zone to register wins — assign the same asset on all of them.</td></tr>
+<tr><td><code>bWaveEligible</code></td><td>Finite waves only. Turn off for zones the player can watch from the fight room — the hidden-check treats glass as an occluder, so a zone behind a window passes the test and then pops enemies in full view.</td></tr>
+<tr><td><code>WaveScoreBias</code></td><td>Finite waves only. Positive = preferred. Lets one zone be the majority spawner without becoming the only one.</td></tr>
+</table>
+
+<h4>A zone is rejected if…</h4>
+<ul>
+<li>it is not active for the current phase</li>
+<li>it is outside the active scope volume</li>
+<li>the nearest point in the box is closer than <code>SpawnDistanceMin</code> (live: <b>1500</b>)</li>
+<li>it is farther than <code>SpawnDistanceMax</code> (live: <b>4500</b>)</li>
+<li>the zone origin is visible from the player's viewpoint</li>
+<li>any of the first 3 sample spawn points are visible</li>
+<li>the origin will not project to navmesh</li>
+</ul>
+
+<h4>Placement rules</h4>
+<ul>
+<li>15–45 m from the likely fight space. A perfect spawn room 60 m away is invisible to the director.</li>
+<li>At least one wall or corner between the fight and the zone.</li>
+<li>Service rooms, stair landings, back corridors, security offices, loading bays — not the main room.</li>
+<li>Big enough for the largest squad in that phase; sized so the box does not spill into walls or props.</li>
+<li>Reachable. A spawn closet still needs a door-sized nav path out.</li>
+<li>Floors and ceilings must block <code>Visibility</code>, or cross-floor sightline checks behave strangely.</li>
+<li>3–5 zones per floor or major wing; 10–14 across a three-floor building.</li>
+</ul>
+
+<h2 id="comp">6 · Choosing what spawns</h2>
+
+<p>Squad selection is per phase, from that phase's <code>Compositions</code> list on the <span class="place">DirectorConfigData</span> asset.</p>
+
+<ol class="check">
+<li>Compositions whose total member count will not fit under the phase's <code>MaxAlive</code> headroom are dropped.</li>
+<li>One of the survivors is chosen by weighted roll.</li>
+<li>A legal zone is picked and the squad spawns spread across the box, grouped as a squad and seeded with the player's last known position.</li>
+</ol>
+
+<p><b><code>Weight</code> is relative, not a percentage.</b> 2.0 is twice as likely as 1.0. <b><code>MaxAlive</code> counts placed enemies too</b> — put 8 living guards inside the scope with an Infiltration cap of 8 and the director cannot spawn anything until some die.</p>
+
+<h3>Live: <span class="place">DA_DirectorConfig</span> <span class="links">(/Game/Core/Enemies/AI/Data)</span></h3>
+
+<table>
+<tr><th>Tension</th><th class="n">Value</th><th>Spawning</th><th class="n">Value</th></tr>
+<tr><td><code>TensionDecayPerSecond</code></td><td class="n">4.0</td><td><code>SpawnDistanceMin</code></td><td class="n">1500</td></tr>
+<tr><td><code>TensionPerPlayerHealthLost</code></td><td class="n">0.8</td><td><code>SpawnDistanceMax</code></td><td class="n">4500</td></tr>
+<tr><td><code>TensionPerKill</code></td><td class="n">8.0</td><td></td><td></td></tr>
+<tr><td><code>TensionPerEngagedEnemy</code></td><td class="n">3.0</td><td></td><td></td></tr>
+<tr><td><code>PeakTensionThreshold</code></td><td class="n">75.0</td><td></td><td></td></tr>
+<tr><td><code>ReliefEntryThreshold</code></td><td class="n">40.0</td><td></td><td></td></tr>
+<tr><td><code>ReliefDuration</code></td><td class="n">25.0</td><td></td><td></td></tr>
+</table>
+
+<div class="overflow">
+<table>
+<tr><th>Phase</th><th class="n">Ceiling</th><th class="n">Cadence</th><th class="n">MaxAlive</th><th>Compositions (weight — makeup)</th></tr>
+<tr><td><b>Infiltration</b></td><td class="n">40</td><td class="n">45 s</td><td class="n">8</td>
+<td><code>GruntPair</code> 1.0 — 2× Grunt</td></tr>
+<tr><td><b>Objective</b></td><td class="n">60</td><td class="n">25 s</td><td class="n">20</td>
+<td><code>Grunts</code> 1.0 — 3× Grunt<br>
+<code>HeavyPush</code> 1.0 — Heavy + 2× Grunt + Officer<br>
+<code>Flankers</code> 0.8 — 2× Grunt + Rusher<br>
+<code>Led</code> 0.6 — 2× Grunt + Officer<br>
+<code>Flush</code> 0.5 — 2× Grunt + Grenadier <b>(listed twice)</b></td></tr>
+<tr><td><b>Extraction</b></td><td class="n">85</td><td class="n">15 s</td><td class="n">20</td>
+<td><code>HeavyPush</code> 1.0 — Heavy + 2× Grunt + Officer<br>
+<code>Rush</code> 0.8 — 3× Rusher<br>
+<code>ShotgunPush</code> 0.7 — 3× Grunt <b>(no Shotgun in it)</b><br>
+<code>Led</code> 0.6 — 2× Grunt + Officer</td></tr>
+</table>
+</div>
+
+<div class="warn"><b>Two authoring slips in the live asset, worth fixing before you tune anything.</b> <code>Flush</code> is entered twice in <code>ObjectiveConfig</code>, so its real odds are 1.0 not 0.5 — equal-first with <code>Grunts</code> and <code>HeavyPush</code>. And <code>ShotgunPush</code> in <code>ExtractionConfig</code> contains three Grunts and no <span class="place">BP_Enemy_Shotgun</span>; the second entry's class was left as Grunt. Neither errors — they just quietly make the mix different from the one the names describe.</div>
+
+<h3>Other configs on disk</h3>
+<table>
+<tr><th>Asset</th><th>What it is</th></tr>
+<tr><td><span class="place">DA_Director_Room2Punishment</span> <span class="links">(/Game/Core/Enemies/Director)</span></td><td>Punishment profile — swapped in when the player breaks stealth discipline. Faster decay (6.0), and both Objective and Extraction run ceiling 85 / cadence 12 s / MaxAlive 16. Same composition lists, harder pacing.</td></tr>
+<tr><td><span class="place">DA_DirectorTestConfig</span> <span class="links">(/Game/Core/Enemies/AI/Data)</span></td><td>Gym-only. Smaller caps (6/10/12) and faster cadence (20/15/10 s) so a director test loop is watchable. Do not ship it.</td></tr>
+</table>
+
+<h3>Tuning levers</h3>
+<table>
+<tr><th>You want</th><th>Turn up</th><th>Turn down</th></tr>
+<tr><td>More stealth, less chaos</td><td><code>SpawnCadenceSeconds</code>, placed-enemy count</td><td><code>MaxAlive</code>, <code>IntensityCeiling</code>, composition size</td></tr>
+<tr><td>Harder response after the alarm</td><td><code>MaxAlive</code>, <code>IntensityCeiling</code>, zone count, specialist compositions</td><td><code>SpawnCadenceSeconds</code></td></tr>
+<tr><td>More breathing room between fights</td><td><code>TensionPerKill</code>, <code>TensionPerPlayerHealthLost</code>, <code>ReliefDuration</code>, <code>PeakTensionThreshold</code></td><td><code>ReliefEntryThreshold</code></td></tr>
+<tr><td>Relentless pressure</td><td><code>TensionDecayPerSecond</code>, <code>IntensityCeiling</code></td><td><code>ReliefDuration</code>, <code>TensionPerKill</code></td></tr>
+</table>
+
+<div class="tip">Add one new archetype per pass. Putting every archetype in every phase on the first attempt means you cannot feel what any single change did.</div>
+
+<h2 id="waves">7 · Waves</h2>
+
+<p>A wave is a finite, scripted assault: N squads, spawned on a cadence, and it is <b>complete only when all N have spawned and every member is dead</b>. That is the difference from the ambient director, which never ends. Use waves for holdouts, defences and set-piece pushes.</p>
+
+<h3>The wave request</h3>
+<table>
+<tr><th>Field</th><th>Meaning</th><th>Default</th></tr>
+<tr><td><code>WaveId</code></td><td>Name it. Comes back in the completed/blocked events and the logs.</td><td>None</td></tr>
+<tr><td><code>TargetSquads</code></td><td>How many squads the wave will send in total.</td><td>4</td></tr>
+<tr><td><code>MissionPhase</code></td><td>Which phase block the compositions come from, for the duration of the wave.</td><td>Objective</td></tr>
+<tr><td><code>ConfigOverride</code></td><td>Use a different <span class="place">DirectorConfigData</span> just for this wave. Wave config beats punishment beats base.</td><td>null</td></tr>
+<tr><td><code>bAutoEngage</code></td><td>Squads spawn straight into combat on the player. Off = they spawn Searching and must find the fight themselves.</td><td>true</td></tr>
+<tr><td><code>SpawnCadenceOverride</code></td><td>Seconds between wave squads. 0 = use the phase cadence — usually too slow for a scripted assault.</td><td>0</td></tr>
+<tr><td><code>FirstSquadDelaySeconds</code></td><td>Delay before squad one. Without this, the cadence gate applies to the first squad too and a 25 s cadence opens the wave with 25 s of silence.</td><td>2.0</td></tr>
+<tr><td><code>GuaranteedSquads</code></td><td>Pin a named composition to a squad slot (1-based). <b>Bypasses both the weighted roll and the MaxAlive fit filter.</b></td><td>empty</td></tr>
+<tr><td><code>BlockedWarningSeconds</code></td><td>How long the wave may be starved before it warns.</td><td>30</td></tr>
+</table>
+
+<div class="tip"><b>Guaranteed squads are how you get a set piece.</b> Composition choice is otherwise pure weighted RNG, so the Heavy push only ever showed up on a lucky roll. Pin <code>{SquadNumber: 4, CompositionName: "HeavyPush"}</code> and the wave always closes on the Heavy.</div>
+
+<h3>Firing one</h3>
+<table>
+<tr><th>Route</th><th>When</th></tr>
+<tr><td><span class="place">ExtractionTargetActor</span> — its own <code>WaveRequest</code></td><td>Default. Player interacts ("Begin Extraction"), wave runs, <code>CompletionAction</code> fires. Set <code>bExternalTriggerOnly</code> when another actor owns the trigger beat (the VIP rescue) — mesh hides, interaction disables, wave starts only via code.</td></tr>
+<tr><td><span class="place">ALevelObjectiveFlow</span> — its <code>ExtractionWave</code></td><td>Only used when there is <b>no</b> <code>ExtractionTarget</code> wired. With one present the target's request wins, so the config never lives in two places.</td></tr>
+<tr><td>Blueprint → <code>StartWave</code> on the director subsystem</td><td>Anything bespoke. Refuses if another wave is already active.</td></tr>
+</table>
+
+<h4>Completion action</h4>
+<table>
+<tr><td><code>UnlockExit</code></td><td>Unlocks the wired <code>LiftGateTarget</code> / <code>LiftGate</code>. The normal choice.</td></tr>
+<tr><td><code>CompleteLevel</code></td><td>Ends the level outright.</td></tr>
+<tr><td><code>BroadcastOnly</code></td><td>Fires the event and nothing else — you handle it in Blueprint.</td></tr>
+</table>
+
+<h3>Recipe — a three-stage holdout</h3>
+<ol class="check">
+<li><code>WaveId</code> → <code>Wave_ServerRoomHold</code></li>
+<li><code>TargetSquads</code> → <code>6</code></li>
+<li><code>MissionPhase</code> → <code>Extraction</code> (borrows the hardest composition list)</li>
+<li><code>FirstSquadDelaySeconds</code> → <code>4.0</code> (a beat to take cover)</li>
+<li><code>SpawnCadenceOverride</code> → <code>10.0</code> (phase cadence of 15 s is too slack for a holdout)</li>
+<li><code>bAutoEngage</code> → <code>true</code></li>
+<li><code>GuaranteedSquads</code> → add <code>{SquadNumber 1, "Grunts"}</code>, <code>{SquadNumber 4, "Rush"}</code>, <code>{SquadNumber 6, "HeavyPush"}</code></li>
+<li>Turn <code>bWaveEligible</code> off on any zone visible from the hold position</li>
+<li>Set <code>WaveScoreBias</code> to <code>2.0</code> on the two zones you want most of the pressure coming from</li>
+</ol>
+<p>That reads as: soft opening, rushers at the midpoint, Heavy to close — with the RNG only deciding squads 2, 3 and 5.</p>
+
+<div class="warn">Squads 2, 3 and 5 still respect <code>MaxAlive</code>. Six squads at ~4 members against a cap of 20 means the wave will stall mid-way if the player is not killing. That stall is intended pacing, not a bug — but if the wave must finish on a timer, raise <code>MaxAlive</code> in the <code>ConfigOverride</code> rather than lowering the squad count.</div>
+
+<h2 id="loot">8 · Loot containers</h2>
+
+<p><span class="place">BP_LootContainer</span> <span class="links">(/Game/Core/Blueprints/World)</span> is an <b>invisible box</b> you drape over an existing drawer, table, shelf or locker. The world geometry is the visual — the actor carries no mesh. One container = one search = everything in <code>Contents</code> granted at once, always to the <b>player</b>, even when the companion is the one who looted it.</p>
+
+<table>
+<tr><th>Property</th><th>Meaning</th></tr>
+<tr><td><code>Contents</code></td><td>Array of grants. Authored per placed instance.</td></tr>
+<tr><td><code>InteractPrompt</code></td><td>HUD prompt while looking into the volume. Default <code>"Search"</code>.</td></tr>
+<tr><td><code>bLooted</code></td><td>Tick on a placed instance to start pre-emptied — set dressing that reads as already searched.</td></tr>
+<tr><td><code>InteractVolume</code></td><td>Scale it over the drawer/shelf, not the whole room.</td></tr>
+<tr><td><code>OnOpened</code></td><td>Blueprint event — play the drawer slide and the SFX here.</td></tr>
+</table>
+
+<h4>Grant types</h4>
+<table>
+<tr><th>Type</th><th>Fields</th><th>Notes</th></tr>
+<tr><td><code>Ammo</code></td><td><code>AmmoCategory</code>, <code>AmmoAmount</code> (default 30)</td><td>Category must match the recipient's current weapon type or nothing is granted. Rifle ammo in a pistol level is a dead crate.</td></tr>
+<tr><td><code>Keycard</code></td><td><code>KeycardId</code></td><td>Must match the door's <code>RequiredKeycardId</code> exactly. This is the whole job — a typo is a soft-lock.</td></tr>
+<tr><td><code>Stim</code></td><td><code>StimCount</code> (default 1)</td><td>Clamped by the player's consumable capacity — over-stocking a crate silently wastes the surplus.</td></tr>
+</table>
+
+<b>Place a supply crate</b>
+<ol class="check">
+<li><code>Place Actors → search "BP_LootContainer" → drag onto the shelf</code></li>
+<li>Scale <code>InteractVolume</code> to cover the shelf face the player will look at</li>
+<li><code>Details → Loot → Contents → +</code> → <code>Type</code> = <code>Ammo</code>, <code>AmmoCategory</code> = <code>Rifle</code>, <code>AmmoAmount</code> = <code>60</code></li>
+<li><code>Details → Loot → Contents → +</code> → <code>Type</code> = <code>Stim</code>, <code>StimCount</code> = <code>1</code></li>
+<li><code>Details → Loot → InteractPrompt</code> → <code>"Search supplies"</code></li>
+</ol>
+
+<h2 id="case">9 · The assault-rifle case</h2>
+
+<p><span class="place">BP_WeaponCase_AssaultRifle</span> <span class="links">(/Game/Core/Blueprints/World)</span> is the open foam case whose cutouts hold <b>real pickup actors</b> — not a loot volume. It authors in two tiers:</p>
+
+<ul>
+<li><b><code>SlotDefinitions</code></b> — every cutout this case <em>type</em> has. Authored once on the Blueprint. Editing it changes every placed case.</li>
+<li><b><code>FilledSlots</code></b> — which of those cutouts <em>this placed case</em> actually holds. A dropdown of the slot ids. <b>This is the per-instance knob.</b></li>
+</ul>
+
+<p>In the editor the filled slots show preview meshes; on BeginPlay the previews are destroyed and the real pickups spawn attached to the same socket.</p>
+
+<h3>The nine authored cutouts</h3>
+<div class="overflow">
+<table>
+<tr><th>SlotId</th><th>Socket</th><th>Spawns</th><th>Grants</th></tr>
+<tr><td><code>Scope</code></td><td><code>Scope</code></td><td>BP_Attach_Scope</td><td>Sight byte 2</td></tr>
+<tr><td><code>Suppressor</code></td><td><code>Silencer</code></td><td>BP_Attach_SuppressorLong</td><td>Muzzle byte 3</td></tr>
+<tr><td><code>Laser</code></td><td><code>Laser</code></td><td>BP_Attach_Laser</td><td>Laser byte 1</td></tr>
+<tr><td><code>GripVertical</code></td><td><code>Grip_Vertical</code></td><td>BP_Attach_GripVertical</td><td>Grip byte 1</td></tr>
+<tr><td><code>GripAngled</code></td><td><code>Grip_Angled</code></td><td>BP_Attach_GripAngled</td><td>Grip byte 2</td></tr>
+<tr><td><code>HandguardShort</code></td><td><code>Handguard_Short</code></td><td>BP_Attach_HandguardShort</td><td>Handguard byte 1</td></tr>
+<tr><td><code>HandguardExtended</code></td><td><code>Handguard_Default</code></td><td>BP_Attach_HandguardExtended</td><td>Handguard byte 2</td></tr>
+<tr><td><code>Ammo</code></td><td><code>Magazine</code></td><td>BP_AmmoPickup_Rifle</td><td>rifle ammo</td></tr>
+<tr><td><code>Stim</code></td><td>— (offset only)</td><td>BP_Stim_Pickup</td><td>1 stim</td></tr>
+</table>
+</div>
+
+<p>Note the case offers the <b>long</b> suppressor, not the short one, and offers no holosight — those are choices in <code>SlotDefinitions</code>, not limits of the system.</p>
+
+<b>Decide what a placed case contains</b>
+<ol class="check">
+<li>Select the case in the level</li>
+<li><code>Details → Case → FilledSlots → +</code> → pick a slot id from the dropdown</li>
+<li>Repeat per item. Duplicates are ignored; unknown names are logged and skipped</li>
+<li><code>File → Save Current Level</code></li>
+</ol>
+
+<b>Add a new option to the case type</b>
+<ol class="check">
+<li><code>Content Browser → /Game/Core/Blueprints/World/BP_WeaponCase_AssaultRifle → double-click</code></li>
+<li><code>Class Defaults → Case → SlotDefinitions → +</code></li>
+<li><code>SlotId</code> → e.g. <code>Holosight</code></li>
+<li><code>SocketName</code> → the socket on the case mesh, or leave <code>None</code> and place it with <code>Offset</code></li>
+<li><code>PickupClass</code> → <code>/Game/Core/Weapons/Pickups/Attachments/BP_Attach_Holosight</code></li>
+<li><code>PreviewMesh</code> → the matching static mesh (or <code>PreviewSkeletalMesh</code> — assign one, never both)</li>
+<li>Compile + Save</li>
+</ol>
+
+<div class="tip"><b>If an item sits wrong in the foam</b> the fix order is: (1) the slot's <code>Offset</code> transform — non-uniform scale is supported and expected; (2) <code>OnCaseItemPreFinish</code> to switch off the pickup's <code>bLieFlat</code>, which otherwise rotates tall meshes onto their side and fights the cutout; (3) <code>OnCaseItemSpawned</code> to shrink the item's interaction collider, since foam sockets sit ~11 cm apart. Only reach for <code>bIgnoreInteractionTrace</code> if PIE actually shows the case body swallowing the interact trace — it also makes the case transparent to bullets.</div>
+
+<h2 id="attach">10 · Which attachments are available</h2>
+
+<p>Three independent gates. An attachment only reaches the player's gun if it clears all three.</p>
+
+<table>
+<tr><th>Gate</th><th>Set where</th><th>Fail behaviour</th></tr>
+<tr><td>1 · Does the world offer it?</td><td>Case <code>FilledSlots</code>, or a loose <code>BP_Attach_*</code> placed in the level</td><td>Player never finds it</td></tr>
+<tr><td>2 · Does the held weapon accept the byte?</td><td><code>Accepted*Options</code> on the weapon's <span class="place">WeaponDataAsset</span></td><td>Pickup refuses — nothing mounts</td></tr>
+<tr><td>3 · Does the byte carry stats?</td><td><code>*Attachments</code> array on the same asset, indexed by byte</td><td>Mounts, looks right, changes nothing (cosmetic-only)</td></tr>
+</table>
+
+<h3>Byte tables</h3>
+<p>Each pickup carries a <code>Slot</code> and a <code>Value</code>. <code>Value</code> is the kit enum byte for that slot — this is the number every array below is indexed by.</p>
+
+<div class="overflow">
+<table>
+<tr><th>Slot</th><th>Enum</th><th>0</th><th>1</th><th>2</th><th>3</th></tr>
+<tr><td>Sight</td><td><code>ENUM_Sights</code></td><td>Empty</td><td>Holosight</td><td>Scope</td><td>—</td></tr>
+<tr><td>Muzzle</td><td><code>ENUM_Muzzle</code></td><td>Empty</td><td>Supressor</td><td>Muzzle Break</td><td>Supressor Long</td></tr>
+<tr><td>Laser</td><td><code>ENUM_Laser</code></td><td>Empty</td><td>Laser</td><td>Flash</td><td>—</td></tr>
+<tr><td>Grip</td><td><code>ENUM_LeftHand</code></td><td>Normal</td><td>Vertical</td><td>Angled</td><td>Akimbo</td></tr>
+<tr><td>Handguard</td><td><code>ENUM_Handguards</code></td><td>Default</td><td>Short</td><td>Extended</td><td>—</td></tr>
+<tr><td>Barrel</td><td><code>ENUM_Barrels</code></td><td>Default</td><td>Short</td><td>Extended</td><td>—</td></tr>
+</table>
+</div>
+
+<h4>Pickups that exist <span class="links">(/Game/Core/Weapons/Pickups/Attachments)</span></h4>
+<table>
+<tr><th>Blueprint</th><th>Slot</th><th class="n">Value</th></tr>
+<tr><td><code>BP_Attach_Holosight</code></td><td>Sight</td><td class="n">1</td></tr>
+<tr><td><code>BP_Attach_Scope</code></td><td>Sight</td><td class="n">2</td></tr>
+<tr><td><code>BP_Attach_Laser</code></td><td>Laser</td><td class="n">1</td></tr>
+<tr><td><code>BP_Attach_Torch</code></td><td>Laser</td><td class="n">2</td></tr>
+<tr><td><code>BP_Attach_Suppressor</code></td><td>Muzzle</td><td class="n">1</td></tr>
+<tr><td><code>BP_Attach_SuppressorLong</code></td><td>Muzzle</td><td class="n">3</td></tr>
+<tr><td><code>BP_Attach_GripVertical</code></td><td>Grip</td><td class="n">1</td></tr>
+<tr><td><code>BP_Attach_GripAngled</code></td><td>Grip</td><td class="n">2</td></tr>
+<tr><td><code>BP_Attach_HandguardShort</code></td><td>Handguard</td><td class="n">1</td></tr>
+<tr><td><code>BP_Attach_HandguardExtended</code></td><td>Handguard</td><td class="n">2</td></tr>
+<tr><td><code>BP_Attach_BarrelShort</code></td><td>Barrel</td><td class="n">1</td></tr>
+<tr><td><code>BP_Attach_BarrelExtended</code></td><td>Barrel</td><td class="n">2</td></tr>
+</table>
+<p>All twelve derive from <span class="place">BP_Attachment_Pickup</span>, which holds the per-slot mesh maps keyed by <code>Value</code> — so a new option is a new child with <code>Slot</code> + <code>Value</code> set and a mesh added to the parent's map, not a new class.</p>
+
+<h3>Live: <span class="place">DA_AssaultRifle</span> <span class="links">(/Game/Core/Weapons)</span></h3>
+<table>
+<tr><th>Slot</th><th>Accepted bytes</th><th>Stat asset per byte</th></tr>
+<tr><td>Sight</td><td>1, 2</td><td>1 → DA_Attach_Holosight · 2 → DA_Attach_Scope</td></tr>
+<tr><td>Muzzle</td><td>1, 3</td><td>1 → DA_Attach_Suppressor · 2 → <i>none</i> · 3 → DA_Attach_SuppressorLong</td></tr>
+<tr><td>Laser</td><td>1, 2</td><td>1 → DA_Attach_Laser · 2 → <i>none</i> (Torch is cosmetic)</td></tr>
+<tr><td>Grip</td><td>1, 2</td><td>1 → DA_Attach_GripVertical · 2 → DA_Attach_GripAngled</td></tr>
+<tr><td>Handguard</td><td>1, 2</td><td>1 → DA_Attach_HandguardShort · 2 → DA_Attach_HandguardExtended</td></tr>
+<tr><td>Barrel</td><td><b>empty</b></td><td>—</td></tr>
+</table>
+
+<p><b>Read that as:</b> the rifle takes both suppressors but refuses the muzzle break (byte 2 is not in the accepted list). It takes the torch, which mounts and looks right but does nothing. And it refuses barrels entirely — the two barrel pickups exist but no weapon accepts them yet, and there is no barrel stat array at all, so barrels can only ever be cosmetic.</p>
+
+<p><span class="place">DA_Pistol</span> uses the same sight/muzzle/laser lists and has no grip, handguard or barrel slot.</p>
+
+<h3>What each attachment actually does</h3>
+<div class="overflow">
+<table>
+<tr><th>Asset</th><th>Slot</th><th>Effect</th></tr>
+<tr><td><code>DA_Attach_Holosight</code></td><td>Sight</td><td>No stat change — reticle only</td></tr>
+<tr><td><code>DA_Attach_Scope</code></td><td>Sight</td><td>ADS transition ×1.3 (slower to aim), ADS move speed ×0.85</td></tr>
+<tr><td><code>DA_Attach_Suppressor</code></td><td>Muzzle</td><td>Damage ×0.95, noise loudness ×0.25, noise range ×0.30, <b>marks the weapon suppressed</b>, silenced muzzle flash</td></tr>
+<tr><td><code>DA_Attach_SuppressorLong</code></td><td>Muzzle</td><td>No damage loss, ADS transition ×1.1, noise loudness ×0.10, noise range ×0.15, <b>marks the weapon suppressed</b>, silenced muzzle flash</td></tr>
+<tr><td><code>DA_Attach_Laser</code></td><td>Laser</td><td>Hip-fire spread ×0.4</td></tr>
+<tr><td><code>DA_Attach_GripVertical</code></td><td>Grip</td><td>Vertical recoil ×0.8</td></tr>
+<tr><td><code>DA_Attach_GripAngled</code></td><td>Grip</td><td>ADS transition ×0.85 (faster to aim)</td></tr>
+<tr><td><code>DA_Attach_HandguardShort</code></td><td>Handguard</td><td>Recoil ×1.05 both axes, ADS transition ×0.9</td></tr>
+<tr><td><code>DA_Attach_HandguardExtended</code></td><td>Handguard</td><td>Recoil ×0.9 both axes, ADS transition ×1.05, damage falloff start ×1.15</td></tr>
+</table>
+</div>
+
+<p>Modifiers from every mounted attachment combine — multipliers multiply, deltas add — into the weapon's cached effective stats. Suppression is OR'd: the weapon counts as suppressed if its own flag is set <em>or</em> any mounted attachment sets it, which is what stealth-kill semantics key off.</p>
+
+<div class="warn"><code>DisplayName</code> is empty on all nine attachment assets. Nothing reads it today, but the loadout menu will — fill them in before that lands or every entry shows blank.</div>
+
+<b>Change what a weapon will accept</b>
+<ol class="check">
+<li><code>Content Browser → /Game/Core/Weapons/DA_AssaultRifle → double-click</code></li>
+<li><code>Details → Weapon|Attachments|Compatibility → AcceptedMuzzleOptions → +</code> → <code>2</code> (allows the muzzle break)</li>
+<li><code>Details → Weapon|Attachments → MuzzleAttachments → index 2</code> → assign a stat asset, or leave null for cosmetic-only</li>
+<li><code>File → Save</code></li>
+</ol>
+
+<h2 id="check">11 · Pre-PIE checklist</h2>
+<ol class="check">
+<li>Navmesh rebuilt and green across the new area (press <b>P</b>)</li>
+<li>Every new spawn-zone origin projects to navmesh, and every spawn room has a route out</li>
+<li>Zones sit 15–45 m from the fight and are not visible from the main angles</li>
+<li>Every zone's <code>ActivePhases</code> matches the beat it should serve</li>
+<li>The scope volume's Z reaches the new floor</li>
+<li>Every phase you use has at least one valid composition</li>
+<li><code>MaxAlive</code> exceeds the placed enemies in scope plus one full composition</li>
+<li>Placed squads have a shared <code>SquadId</code>; <code>bIsolatedEncounter</code> is off</li>
+<li>Every keycard grant id matches its door's <code>RequiredKeycardId</code> character for character</li>
+<li>Ammo grants use the category of the weapon the player will be holding there</li>
+<li>Wave zones the player can see are <code>bWaveEligible</code> = off</li>
+<li>Every <code>GuaranteedSquads</code> composition name exists in the effective phase config</li>
+<li>Objective ids are unique, and every chained marker has <code>bActivateOnBeginPlay</code> off</li>
+<li>Floors and ceilings block <code>Visibility</code></li>
+</ol>
+
+<h2 id="fail">12 · When nothing happens</h2>
+
+<h4>No reinforcements arrive</h4>
+<p>In the order worth checking: the level never reached <b>Loud</b> · no zone is active for the current phase · every zone is visible to the player · every zone is outside 1500–4500 · zones sit outside the scope · zone origin is off navmesh · the phase's composition array is empty · the smallest composition will not fit under <code>MaxAlive</code> · placed enemies already fill <code>MaxAlive</code> · the director is in <b>Peak</b> or <b>Relief</b>.</p>
+
+<h4>Enemies appear in stupid places</h4>
+<p>Zones are in main rooms rather than service space · the box is too big and spills into geometry · the first sample points land inside cover · the spawn room is not actually off-sightline · <code>SpawnDistanceMin</code> is too low · a floor or ceiling is not blocking <code>Visibility</code>.</p>
+
+<h4>The wave never completes</h4>
+<p>Completion needs all squads spawned <em>and</em> all members dead. A member stuck off-navmesh or behind a closed door holds the wave open forever. Check <code>GetWaveRemainingMembers</code> in the logs, and confirm every wave-eligible zone has a real path into the fight.</p>
+
+<h4>A crate gives nothing</h4>
+<p>The ammo category does not match the held weapon · the stim count exceeded consumable capacity · <code>bLooted</code> was ticked on the instance · the interact volume is smaller than it looks and the trace is missing it.</p>
+
+<h4>An attachment will not mount</h4>
+<p>Its byte is not in the weapon's <code>Accepted*Options</code>. If it mounts but changes nothing, the byte's index in the <code>*Attachments</code> array is null — that is cosmetic-only by design, not a failure.</p>
+
+<h4>Useful log strings</h4>
+<div class="flow">Director woke
+Mission phase
+Director spawned squad
+Director: no eligible spawn zone
+Director: no valid composition fits
+Director config validation</div>
+
+<p class="links" style="margin-top:32px">Related: <code>agent_docs/level_setup_guide.html</code> (placing everything else in a fresh level) · <code>agent_docs/enemy_director_level_setup.md</code> (multi-floor director layout in depth) · <code>agent_docs/companion_testing.md</code> (companion QA scenarios).</p>
+
+</div>
+</body>
+</html>

@@ -13,6 +13,7 @@ enum class ECompanionCommand : uint8
 	Takedown,
 	Loot,
 	Explore, // location command (no target actor) — go search a pinged spot, loot what's there
+	TakeCover, // location command — take cover at a pinged wall/crate position
 };
 
 UENUM(BlueprintType)

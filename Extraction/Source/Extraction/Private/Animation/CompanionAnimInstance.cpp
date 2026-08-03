@@ -16,9 +16,35 @@
 #include "Enemy/Debug/EnemyDebug.h"
 #include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
 
+#if !UE_BUILD_SHIPPING
+// Locomotion blendspace probe: drive the Speed/Direction inputs directly so any cell can be
+// eyeballed without steering the AI into it. The companion animates in place — this overrides the
+// blend inputs, not the movement component, so the feet run while the capsule stands still.
+static TAutoConsoleVariable<float> CVarCompanionDebugLocoSpeed(
+	TEXT("companion.DebugLocoSpeed"),
+	0.f,
+	TEXT("Force the companion locomotion blendspace Speed input (cm/s). 0 = off. 275 = run row, 850 = sprint row."),
+	ECVF_Cheat);
+
+static TAutoConsoleVariable<float> CVarCompanionDebugLocoDirection(
+	TEXT("companion.DebugLocoDirection"),
+	0.f,
+	TEXT("Force the companion locomotion blendspace Direction input (deg, -180..180). Needs companion.DebugLocoSpeed > 0. Ignored while DebugLocoSweep is on."),
+	ECVF_Cheat);
+
+static TAutoConsoleVariable<float> CVarCompanionDebugLocoSweep(
+	TEXT("companion.DebugLocoSweep"),
+	0.f,
+	TEXT("Seconds per full -180..180 Direction sweep, so one command walks every column of the blendspace. 0 = off (hold DebugLocoDirection)."),
+	ECVF_Cheat);
+#endif
+
 namespace CompanionAnimConstants
 {
 	static constexpr float DirectionInterpSpeed = 15.0f;
+
+	/** Throttle for the [ALIGN] writer-race diagnostic so it prints ~4Hz instead of per-frame. */
+	static constexpr float AlignDebugLogInterval = 0.25f;
 }
 
 void UCompanionAnimInstance::NativeInitializeAnimation()
@@ -39,6 +65,8 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 	CoverStrafeStaleTimer = 0.f;
 	CompCoverAimGate = 1.f;
 	CompCoverAimScenario = 0;
+	TargetLosAimAlpha = 1.f;
+	TargetLosLostTime = 0.f;
 
 	APawn* PawnOwner = TryGetPawnOwner();
 	if (!IsValid(PawnOwner)) return;
@@ -70,13 +98,22 @@ void UCompanionAnimInstance::NativeInitializeAnimation()
 	RecoilSpineOffset = FVector::ZeroVector;
 	CoverReloadSpineRefRotation = FRotator::ZeroRotator;
 	CoverReloadSpineAlpha = 0.f;
-	FireAlignAlpha = 0.f;
 	bFireAlignSetup = false;
-	PatrolAlignAlpha = 0.f;
 	bPatrolAlignSetup = false;
 	bCoverAlignSetup = false;
 	CachedWeapon.Reset();
+	// FireAlignAlpha and PatrolAlignAlpha deliberately NOT zeroed: they persist across re-inits
+	// so the equip block's same-weapon detection can restore them and avoid a visible snap.
+	// The equip block zeroes both on a genuine weapon change; member initializers handle first init.
 	bWasAlive = true;
+
+	// bAlignRebakePending deliberately survives a re-init (see its declaration) -- only the settle
+	// measurement resets, so the gate re-samples against the pose this init leaves the mesh in.
+	AlignRebakeStableTime = 0.f;
+	AlignRebakeWaitTime = 0.f;
+	bAlignRebakePoseRefSampled = false;
+	AlignRebakeGatedWallTime = 0.f;
+	bAlignRebakeStarvationLogged = false;
 }
 
 void UCompanionAnimInstance::NativeUninitializeAnimation()
@@ -100,6 +137,24 @@ void UCompanionAnimInstance::OnReloadMontageBlendingOut(UAnimMontage* Montage, b
 
 	if (IsValid(W))
 		W->StopVisualWeaponReload();
+}
+
+bool UCompanionAnimInstance::IsReloadPoseActive() const
+{
+	if (bIsReloading) return true;
+
+	// The reload montage can outlast the weapon's Reloading state when MontageLength > 2x ReloadTime
+	// (play-rate clamp caps at 2.0). Check all three montage sources so the hand stays uncontested
+	// through the blend-out tail.
+	if (IsValid(ReloadMontage) && Montage_IsPlaying(ReloadMontage)) return true;
+	if (IsValid(ReloadMontage_Crouch) && Montage_IsPlaying(ReloadMontage_Crouch)) return true;
+
+	AWeaponBase* W = IsValid(OwningCompanion) ? OwningCompanion->GetCurrentWeapon() : nullptr;
+	const UWeaponDataAsset* DA = IsValid(W) ? W->GetWeaponData() : nullptr;
+	if (DA && IsValid(DA->EnemyAnimSet.Reload) && Montage_IsPlaying(DA->EnemyAnimSet.Reload))
+		return true;
+
+	return false;
 }
 
 void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
@@ -187,6 +242,22 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		: MovementComponent->MaxWalkSpeed;
 	NormalizedSpeed = MaxSpeed > 0.f ? Speed / MaxSpeed : 0.f;
 
+#if !UE_BUILD_SHIPPING
+	// Blendspace probe (see the companion.DebugLoco* cvars). Applied after the real inputs are
+	// resolved, so clearing DebugLocoSpeed hands control straight back with no state to unwind.
+	if (const float DebugLocoSpeed = CVarCompanionDebugLocoSpeed.GetValueOnGameThread(); DebugLocoSpeed > 0.f)
+	{
+		Speed = DebugLocoSpeed;
+		bHasVelocity = true;
+		const float SweepSeconds = CVarCompanionDebugLocoSweep.GetValueOnGameThread();
+		const UWorld* ProbeWorld = GetWorld();
+		Direction = (SweepSeconds > 0.f && ProbeWorld)
+			? FMath::UnwindDegrees(FMath::Fmod(ProbeWorld->GetTimeSeconds() / SweepSeconds, 1.f) * 360.f - 180.f)
+			: FMath::UnwindDegrees(CVarCompanionDebugLocoDirection.GetValueOnGameThread());
+		NormalizedSpeed = MaxSpeed > 0.f ? Speed / MaxSpeed : 0.f;
+	}
+#endif
+
 	// Throttled speed diag — only logs while actually moving (>20) so it's not idle spam.
 	if (Speed > 20.f)
 	{
@@ -273,9 +344,10 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		{
 			static const TCHAR* BranchNames[] = { TEXT("None"), TEXT("ActorTarget"), TEXT("Scripted"), TEXT("CombatFocal") };
 			UE_LOG(LogCompanionAI, Display,
-				TEXT("[AimLog][Anim] branch=%s aimTarget=%s posture=%d lowReady=%d focusLive=%d yaw=%.0f pitch=%.0f"),
+				TEXT("[AimLog][Anim] branch=%s aimTarget=%s posture=%d lowReady=%d focusLive=%d yaw=%.0f pitch=%.0f losAlpha=%.2f los=%d"),
 				BranchNames[AimBranch], *GetNameSafe(AimTarget), (int32)CurrentPosture,
-				(int32)OwningCompanion->IsLowReadyAim(), (int32)bFocusLive, AimYaw, AimPitch);
+				(int32)OwningCompanion->IsLowReadyAim(), (int32)bFocusLive, AimYaw, AimPitch,
+				TargetLosAimAlpha, (int32)OwningCompanion->HasTargetLOS());
 			LastLoggedAimBranch = AimBranch;
 		}
 	}
@@ -289,6 +361,9 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	// Cache once per frame — used by both the aim gate and the cover-align block below.
 	const bool bPeekMontagePlaying = IsAnyCoverPeekMontagePlaying();
+
+	// --- Non-cover LOS aim fade: spine relaxes to forward when the target is behind geometry ---
+	UpdateTargetLosAimFade(AimTarget, bPeekMontagePlaying, DeltaSeconds);
 
 	// --- Cover aim gate: ease AimPitch/AimYaw to zero when tucked in cover ---
 	// Nothing companion-side sets the pose component's bPeeking, so an actively playing peek
@@ -393,10 +468,24 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	if (bIsAlive)
 	{
+		// --- Deferred align re-baseline: drop the cached handle so the equip block below re-bakes ---
+		// One bake path, not a second partially-initialised one. See RequestWeaponAlignRebake.
+		if (TryConsumeAlignRebake(Weapon, DeltaSeconds))
+			CachedWeapon.Reset();
+
 		// --- Equip block: rebind when the wielded weapon changes ---
 		if (Weapon != CachedWeapon.Get())
 		{
+			// A re-bake or anim re-init drops CachedWeapon to re-trigger this block, often
+			// on the SAME weapon actor. Detect that: zeroing the alphas would pop the weapon
+			// to rest for one frame, producing a visible snap on a character that was otherwise
+			// holding a smooth patrol-carry blend.
+			const bool bSameWeaponRebake = IsValid(Weapon) && (Weapon == LastEquippedWeapon.Get());
+			const float StashedPatrolAlpha = bSameWeaponRebake ? PatrolAlignAlpha : 0.f;
+			const float StashedFireAlpha = bSameWeaponRebake ? FireAlignAlpha : 0.f;
+
 			CachedWeapon = Weapon;
+			LastEquippedWeapon = Weapon;
 			bFireAlignSetup = false;
 			FireAlignAlpha = 0.f;
 			bPatrolAlignSetup = false;
@@ -410,6 +499,13 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 			if (IsValid(Weapon))
 			{
+				// Every Setup*Align below takes its rest / Alpha=0 target from a LIVE
+				// GetRelativeTransform(), which is only pristine on the very first bake of an
+				// equip — by any later bake, patrol-align has been writing that transform every
+				// frame. Restore the captured rest first, or each re-bake composes its new targets
+				// on top of the previous bake's output and the offset compounds.
+				Weapon->RestoreAlignRestPose();
+
 				if (const UWeaponDataAsset* DA = Weapon->GetWeaponData())
 				{
 					RecoilProfile = DA->EnemyRecoilProfile;
@@ -447,6 +543,20 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				Weapon->SetupPatrolAlign();
 				bPatrolAlignSetup = Weapon->IsPatrolAlignReady();
 
+				// Re-bake on the same weapon: restore the stashed alphas so the
+				// per-frame patrol/fire blocks below write the equivalent visual
+				// pose later this frame and nothing visibly snaps.
+				// WARNING: do NOT call SetPatrolAlignAlpha (or any pose-writing
+				// call) here -- SetupCoverAlign and SetupFireAlign below capture
+				// their rest baseline from the live WeaponMesh relative transform,
+				// so any pose written before those bakes poisons all eight cover
+				// targets and the fire-align rest with a baked-in patrol offset.
+				if (bSameWeaponRebake)
+				{
+					PatrolAlignAlpha = StashedPatrolAlpha;
+					FireAlignAlpha = StashedFireAlpha;
+				}
+
 				// Cover-align setup: compose the per-scenario ABP-tuned socket poses once on equip.
 				{
 					FCoverAlignPoses Poses;
@@ -461,6 +571,8 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 					Weapon->SetupCoverAlign(GetOwningComponent(), CoverAlignBoneName, Poses);
 					bCoverAlignSetup = Weapon->IsCoverAlignReady();
 				}
+
+				LogAlignSetupConfig();
 			}
 			else
 			{
@@ -475,6 +587,13 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				CoverReloadSpineAlpha = 0.f;
 			}
 		}
+
+		// --- Align-writer diagnostics (companion.AlignDebug) — each writer records that it wrote ---
+		// Fire-, patrol- and cover-align all write an ABSOLUTE relative transform to the same mesh,
+		// in that order, so only the last writer of the frame is visible. These name it.
+		bool bFireAlignWriting = false;
+		bool bPatrolAlignWriting = false;
+		int32 DiagCoverScenario = 0;
 
 		// Fire-align setup: run once after an equip when the socket name is configured.
 		if (IsValid(Weapon) && !FireAlignSocketName.IsNone() && !bFireAlignSetup)
@@ -492,7 +611,10 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 			// Skip the call when fully settled at rest to avoid fighting the rest transform each frame.
 			if (FireAlignAlpha > KINDA_SMALL_NUMBER || bFirePlaying)
+			{
 				Weapon->SetFireAlignAlpha(FireAlignAlpha);
+				bFireAlignWriting = true;
+			}
 		}
 
 		// --- Patrol-align (idle-carry): ease weapon between relaxed idle and ADS pose ---
@@ -505,8 +627,16 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 			const bool bAlphaSettled = FMath::IsNearlyEqual(PatrolAlignAlpha, PrevAlpha, KINDA_SMALL_NUMBER);
 			if (!bAlphaSettled || PatrolAlignAlpha > KINDA_SMALL_NUMBER)
+			{
 				Weapon->SetPatrolAlignAlpha(PatrolAlignAlpha);
+				bPatrolAlignWriting = true;
+			}
 		}
+
+		// Hoisted once: both cover-align and LHIK suppress during the reload pose (weapon state
+		// OR montage blend-out tail). Nothing between the two sites starts or stops a montage,
+		// so the value cannot change — one call saves the per-frame montage-list scans.
+		const bool bReloadPose = IsReloadPoseActive();
 
 		// --- Cover-align: ease the weapon to the per-scenario cover socket while posed ---
 		// Scenario by inference (no BT plumbing): peek montage playing selects the aim scenario,
@@ -514,41 +644,53 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		if (bCoverAlignSetup && IsValid(Weapon))
 		{
 			ECoverWeaponAlign Scenario = ECoverWeaponAlign::None;
-			if (bPeekMontagePlaying)
+
+			// While a reload pose is active, leave Scenario at None so UpdateCoverAlign eases
+			// the weapon back to rest -- the reload montage owns hand_r and cover-align would
+			// fight it. Shared with the LHIK gate below via bReloadPose.
+			if (!bReloadPose)
 			{
-				if (LatchedCoverHeight == ECoverHeight::Crouch && !bIsCrouched)
+				if (bPeekMontagePlaying)
 				{
-					Scenario = ECoverWeaponAlign::OverTop;
+					if (LatchedCoverHeight == ECoverHeight::Crouch && !bIsCrouched)
+					{
+						Scenario = ECoverWeaponAlign::OverTop;
+					}
+					else if (LatchedCoverHeight == ECoverHeight::Stand)
+					{
+						Scenario = (ActivePeekSide == EPeekSide::Left)
+							? ECoverWeaponAlign::StandPeekLeft : ECoverWeaponAlign::StandPeekRight;
+					}
+					else
+					{
+						Scenario = (ActivePeekSide == EPeekSide::Left)
+							? ECoverWeaponAlign::PeekLeft : ECoverWeaponAlign::PeekRight;
+					}
 				}
-				else if (LatchedCoverHeight == ECoverHeight::Stand)
+				else if (bInCover)
 				{
-					Scenario = (ActivePeekSide == EPeekSide::Left)
-						? ECoverWeaponAlign::StandPeekLeft : ECoverWeaponAlign::StandPeekRight;
-				}
-				else
-				{
-					Scenario = (ActivePeekSide == EPeekSide::Left)
-						? ECoverWeaponAlign::PeekLeft : ECoverWeaponAlign::PeekRight;
+					if (LatchedCoverHeight == ECoverHeight::Stand)
+					{
+						Scenario = (ActivePeekSide == EPeekSide::Left)
+							? ECoverWeaponAlign::StandIdleLeft : ECoverWeaponAlign::StandIdleRight;
+					}
+					else
+					{
+						Scenario = ECoverWeaponAlign::Idle;
+					}
 				}
 			}
-			else if (bInCover)
-			{
-				if (LatchedCoverHeight == ECoverHeight::Stand)
-				{
-					Scenario = (ActivePeekSide == EPeekSide::Left)
-						? ECoverWeaponAlign::StandIdleLeft : ECoverWeaponAlign::StandIdleRight;
-				}
-				else
-				{
-					Scenario = ECoverWeaponAlign::Idle;
-				}
-			}
+
 			Weapon->UpdateCoverAlign(Scenario, DeltaSeconds, CoverAlignBlendSpeed);
+			DiagCoverScenario = static_cast<int32>(Scenario);
 		}
 
+		LogWeaponAlignWriters(Weapon, bFireAlignWriting, bPatrolAlignWriting, DiagCoverScenario, DeltaSeconds);
+
 		// --- Left-Hand IK (socket transform — cheap once validity is cached) ---
-		// Disabled during reloads so the left hand follows the reload montage (mag grab).
-		if (bGripSocketValid && CachedGripMesh.IsValid() && !bIsReloading)
+		// Disabled while a reload pose is active (weapon state or montage tail) so the left
+		// hand follows the reload montage (mag grab). Shared bReloadPose with cover-align above.
+		if (bGripSocketValid && CachedGripMesh.IsValid() && !bReloadPose)
 		{
 			LeftHandIKTarget = CachedGripMesh->GetSocketTransform(CachedGripSocketName, RTS_World);
 			bHasLeftHandIK = true;
@@ -921,6 +1063,46 @@ UAnimMontage* UCompanionAnimInstance::PlayOverTopPeek(EPeekSide FromSide, float 
 	return OverTop;
 }
 
+// --- Non-cover LOS aim fade ---
+
+void UCompanionAnimInstance::UpdateTargetLosAimFade(AActor* AimTarget, bool bPeekMontagePlaying, float DeltaSeconds)
+{
+	// Scope: outside cover, not peeking, and an actor target is driving aim (branch 1 only).
+	// Inside cover the CoverAimTrackAlpha already handles the LOS fade — two independent alphas
+	// compose cleanly because their scopes are disjoint.
+	//
+	// Takedowns own their verified sightline; ordinary firing must still fade as soon as LOS is lost.
+	const bool bTakedownActive = OwningCompanion->IsCommandedTakedownArmed()
+		|| OwningCompanion->IsTakedownMontagePlaying();
+
+	const bool bInScope = !bInCover && !bPeekMontagePlaying && !bTakedownActive
+		&& IsValid(AimTarget);
+
+	if (bInScope)
+	{
+		if (!OwningCompanion->HasTargetLOS())
+		{
+			TargetLosLostTime += DeltaSeconds;
+		}
+		else
+		{
+			TargetLosLostTime = 0.f;
+		}
+
+		const float AlphaTarget = (TargetLosLostTime > AimLosFadeGraceSeconds) ? 0.f : 1.f;
+		TargetLosAimAlpha = FMath::FInterpTo(TargetLosAimAlpha, AlphaTarget, DeltaSeconds, AimLosFadeSpeed);
+	}
+	else
+	{
+		// Out of scope: recover toward 1 so peek starts never inherit a zeroed alpha.
+		TargetLosLostTime = 0.f;
+		TargetLosAimAlpha = FMath::FInterpTo(TargetLosAimAlpha, 1.f, DeltaSeconds, AimLosFadeSpeed);
+	}
+
+	AimPitch *= TargetLosAimAlpha;
+	AimYaw *= TargetLosAimAlpha;
+}
+
 // --- Cover-Reload Spine Tuck ---
 
 namespace
@@ -961,6 +1143,189 @@ void UCompanionAnimInstance::UpdateCoverReloadSpine(float DeltaSeconds)
 				CoverReloadSpineRefRotation.Pitch, CoverReloadSpineRefRotation.Yaw, CoverReloadSpineRefRotation.Roll);
 		}
 	}
+}
+
+// --- Weapon-Align Re-baseline + Diagnostics ---
+
+namespace
+{
+	/** companion.AlignDebug is registered in WeaponBase.cpp (single definition, alongside the other
+	 *  weapon CVars) — look it up by name once, the pattern the rest of the companion code uses. */
+	bool IsAlignDebugEnabled()
+	{
+		static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AlignDebug"));
+		return CVar && CVar->GetInt() != 0;
+	}
+}
+
+void UCompanionAnimInstance::RequestWeaponAlignRebake()
+{
+	bAlignRebakePending = true;
+	AlignRebakeStableTime = 0.f;
+	AlignRebakeWaitTime = 0.f;
+	bAlignRebakePoseRefSampled = false;
+	AlignRebakeGatedWallTime = 0.f;
+	bAlignRebakeStarvationLogged = false;
+
+	UE_LOG(LogCompanionDiag, Log,
+		TEXT("%s: ALIGN-REBAKE requested -- deferring until the bake's pose reference holds still for %.2fs"),
+		*GetNameSafe(OwningCompanion.Get()), AlignRebakeSettleSeconds);
+}
+
+bool UCompanionAnimInstance::IsAlignRebakePoseSettled(const AWeaponBase* Weapon, float DeltaSeconds)
+{
+	USkeletalMeshComponent* Mesh = GetOwningComponent();
+	const USkeletalMeshComponent* WeaponMesh = IsValid(Weapon) ? Weapon->GetWeaponMesh() : nullptr;
+	if (!IsValid(Mesh) || !IsValid(WeaponMesh)) return false;
+
+	// The cover-align-writing refusal is hoisted into TryConsumeAlignRebake (above the wait-time
+	// accumulator) so neither the settle measurement nor the ceiling can advance while the gun is
+	// mid-peek. This function now only measures the pose reference.
+
+	// SetupCoverAlign composes Poses * TBone * TRest.Inverse(), so the attach-socket-to-align-bone
+	// offset is the ONLY pose-dependent term in the whole bake. Watching that offset is therefore the
+	// exact measure of "is the pose this bake depends on still moving": it is constant (and so settles
+	// immediately) when the weapon's attach socket is parented to the align bone, and goes quiet only
+	// once the joints between them stop when it is not. Robust either way, and cheap.
+	const FTransform PoseRef =
+		Mesh->GetSocketTransform(WeaponMesh->GetAttachSocketName(), RTS_Component)
+		* Mesh->GetSocketTransform(CoverAlignBoneName, RTS_Component).Inverse();
+
+	const float TranslationDist = FVector::Dist(PoseRef.GetLocation(), AlignRebakeLastPoseRef.GetLocation());
+	const float RotationDeg = FMath::RadiansToDegrees(
+		PoseRef.GetRotation().AngularDistance(AlignRebakeLastPoseRef.GetRotation()));
+	const bool bStable = bAlignRebakePoseRefSampled
+		&& TranslationDist <= AlignRebakeTranslationTolerance
+		&& RotationDeg <= AlignRebakeRotationTolerance;
+	AlignRebakeLastPoseRef = PoseRef;
+	bAlignRebakePoseRefSampled = true;
+
+	AlignRebakeStableTime = bStable ? AlignRebakeStableTime + DeltaSeconds : 0.f;
+	return AlignRebakeStableTime >= AlignRebakeSettleSeconds;
+}
+
+bool UCompanionAnimInstance::IsAlignRebakeBlocked(const AWeaponBase* Weapon)
+{
+	// In cover: the skeleton holds a cover-specific pose and cover-align writes cover-specific
+	// offsets. A rebake here would snap CoverAlignCurrent to rest (visible pop). Blocks the
+	// in-cover reload case as well, but does NOT subsume IsCoverAlignWriting -- peek montages
+	// clear bInCover (BTTask_CompanionCombat calls ExitCoverPose before PlayPeekFire), so
+	// IsCoverAlignWriting is the only thing blocking a rebake mid-peek.
+	if (bInCover)
+	{
+		AlignRebakeStableTime = 0.f;
+		bAlignRebakePoseRefSampled = false;
+		return true;
+	}
+
+	// Out-of-cover reload: weapon is in the reload pose, not at rest. Reset settle so the
+	// window re-measures after the montage blend-out rather than inheriting stale stability
+	// from before the reload and passing instantly on the first open frame.
+	if (IsReloadPoseActive())
+	{
+		AlignRebakeStableTime = 0.f;
+		bAlignRebakePoseRefSampled = false;
+		return true;
+	}
+
+	// Cover-align still easing back to rest after a peek or after exiting cover. Load-bearing
+	// for peeks: bInCover is false during the peek montage (ExitCoverPose runs first), so this
+	// guard is the only thing preventing a rebake while the weapon is mid-peek offset.
+	if (IsValid(Weapon) && Weapon->IsCoverAlignWriting()) return true;
+
+	return false;
+}
+
+bool UCompanionAnimInstance::TryConsumeAlignRebake(AWeaponBase* Weapon, float DeltaSeconds)
+{
+	// INVARIANT: rebake only when weapon mesh is at pristine rest and pose has been stable.
+	if (!bAlignRebakePending || !IsValid(Weapon)) return false;
+	if (IsAlignRebakeBlocked(Weapon))
+	{
+		// Starvation: AlignRebakeWaitTime freezes while gated so the forced-rebake Warning
+		// can never fire for a VIP that lives in cover. Emit once on wall-clock timeout.
+		AlignRebakeGatedWallTime += DeltaSeconds;
+		const bool bStarved = !bAlignRebakeStarvationLogged && AlignRebakeMaxWaitSeconds > 0.f
+			&& AlignRebakeGatedWallTime >= AlignRebakeMaxWaitSeconds;
+		if (bStarved)
+		{
+			bAlignRebakeStarvationLogged = true;
+			UE_LOG(LogCompanionDiag, Warning,
+				TEXT("%s: ALIGN-REBAKE starved -- pending %.2fs (inCover=%d reload=%d coverAlignWrite=%d)"),
+				*GetNameSafe(OwningCompanion.Get()), AlignRebakeGatedWallTime, (int32)bInCover,
+				(int32)IsReloadPoseActive(), IsValid(Weapon) ? (int32)Weapon->IsCoverAlignWriting() : 0);
+		}
+		return false;
+	}
+
+	AlignRebakeWaitTime += DeltaSeconds;
+	const bool bSettled = IsAlignRebakePoseSettled(Weapon, DeltaSeconds);
+	const bool bTimedOut = AlignRebakeMaxWaitSeconds > 0.f && AlignRebakeWaitTime >= AlignRebakeMaxWaitSeconds;
+	if (!bSettled && !bTimedOut) return false;
+
+	// Braces are load-bearing: UE_LOG expands to a braced block, so a braceless if/else here
+	// orphans the else on the trailing semicolon (C2181).
+	if (bSettled)
+	{
+		UE_LOG(LogCompanionDiag, Log, TEXT("%s: ALIGN-REBAKE firing after %.2fs"), *GetNameSafe(OwningCompanion.Get()), AlignRebakeWaitTime);
+	}
+	else
+	{
+		UE_LOG(LogCompanionDiag, Warning, TEXT("%s: ALIGN-REBAKE forced after %.2fs"), *GetNameSafe(OwningCompanion.Get()), AlignRebakeWaitTime);
+	}
+
+	bAlignRebakePending = false;
+	AlignRebakeStableTime = 0.f;
+	AlignRebakeWaitTime = 0.f;
+	bAlignRebakePoseRefSampled = false;
+	AlignRebakeGatedWallTime = 0.f;
+	bAlignRebakeStarvationLogged = false;
+	return true;
+}
+
+void UCompanionAnimInstance::LogWeaponAlignWriters(const AWeaponBase* Weapon, bool bFireWriting,
+	bool bPatrolWriting, int32 CoverScenario, float DeltaSeconds)
+{
+	if (!IsAlignDebugEnabled() || !IsValid(Weapon)) return;
+
+	AlignDebugLogAccum += DeltaSeconds;
+	if (AlignDebugLogAccum < CompanionAnimConstants::AlignDebugLogInterval) return;
+	AlignDebugLogAccum = 0.f;
+
+	// Writers run fire -> patrol -> cover in NativeUpdateAnimation and each writes an ABSOLUTE
+	// relative transform, so the last one to write is the only one visible. winner names it.
+	const bool bCoverWriting = Weapon->IsCoverAlignWriting();
+	const TCHAR* Winner = bCoverWriting ? TEXT("cover")
+		: bPatrolWriting ? TEXT("patrol")
+		: bFireWriting ? TEXT("fire")
+		: TEXT("none(rest)");
+
+	const USkeletalMeshComponent* WeaponMesh = Weapon->GetWeaponMesh();
+	const FTransform Rel = IsValid(WeaponMesh) ? WeaponMesh->GetRelativeTransform() : FTransform::Identity;
+
+	UE_LOG(LogCompanionDiag, Log,
+		TEXT("[ALIGN] %s winner=%s | fire(a=%.2f w=%d sock='%s') patrol(a=%.2f w=%d) cover(scen=%d w=%d) | peek=%d inCover=%d aiming=%d reloading=%d | rel loc=%s rotDeg=%s"),
+		*GetNameSafe(OwningCompanion.Get()), Winner,
+		FireAlignAlpha, (int32)bFireWriting, *FireAlignSocketName.ToString(),
+		PatrolAlignAlpha, (int32)bPatrolWriting,
+		CoverScenario, (int32)bCoverWriting,
+		(int32)IsAnyCoverPeekMontagePlaying(), (int32)bInCover, (int32)bIsAiming, (int32)bIsReloading,
+		*Rel.GetLocation().ToString(), *Rel.Rotator().ToString());
+}
+
+void UCompanionAnimInstance::LogAlignSetupConfig() const
+{
+	if (!IsAlignDebugEnabled()) return;
+
+	// These live on the ABP, not on the weapon or its DataAsset — an ABP duplicated from another
+	// character's inherits every one of them, so both allies carry identical values until retuned.
+	UE_LOG(LogCompanionDiag, Warning,
+		TEXT("[ALIGN-CFG] %s alignBone='%s' fireAlignSocket='%s' | blend cover=%.1f fire=%.1f patrol=%.1f | peekL loc=%s rot=%s | peekR loc=%s rot=%s | overTop loc=%s rot=%s"),
+		*GetNameSafe(OwningCompanion.Get()), *CoverAlignBoneName.ToString(), *FireAlignSocketName.ToString(),
+		CoverAlignBlendSpeed, FireAlignBlendSpeed, PatrolAlignBlendSpeed,
+		*CoverAlignPeekLeftTransform.GetLocation().ToString(), *CoverAlignPeekLeftTransform.Rotator().ToString(),
+		*CoverAlignPeekRightTransform.GetLocation().ToString(), *CoverAlignPeekRightTransform.Rotator().ToString(),
+		*CoverAlignOverTopTransform.GetLocation().ToString(), *CoverAlignOverTopTransform.Rotator().ToString());
 }
 
 // --- Recoil Solver ---

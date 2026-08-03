@@ -64,6 +64,8 @@ EBTNodeResult::Type UBTTask_EnemySuppressFire::ExecuteTask(UBehaviorTreeComponen
 
 	if (bHasLOS)
 	{
+		Mem->bEverHadLOS = true;
+		Mem->LosLostTimer = 0.f;
 		Enemy->SetAimTarget(Target);
 		Controller->SetFocus(Target);
 		bHasAimSource = true;
@@ -81,9 +83,11 @@ EBTNodeResult::Type UBTTask_EnemySuppressFire::ExecuteTask(UBehaviorTreeComponen
 		}
 	}
 
-	// Start firing if we have something to shoot at
+	// Fire only when the suppressor can actually see the target (or within the LOS-lost grace after
+	// losing sight mid-burst). A ForceEngage'd suppressor that has never had LOS never starts firing.
+	const bool bMayFire = bHasAimSource && Mem->bEverHadLOS && bHasLOS;
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
-	if (bHasAimSource && IsValid(Weapon) && !Weapon->IsReloading())
+	if (bMayFire && IsValid(Weapon) && !Weapon->IsReloading())
 	{
 		Weapon->StartFiring();
 		Mem->bFiring = true;
@@ -111,7 +115,7 @@ EBTNodeResult::Type UBTTask_EnemySuppressFire::ExecuteTask(UBehaviorTreeComponen
 			const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
 			UBarkSubsystem* Barks = World->GetSubsystem<UBarkSubsystem>();
 			if (IsValid(DA) && Barks && Squad->TryClaimSquadBark(EBarkType::Suppressing))
-				Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::Suppressing, DA->DisplayName);
+				Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::Suppressing);
 		}
 	}
 
@@ -179,12 +183,16 @@ void UBTTask_EnemySuppressFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 		return FinishLatentTask(OwnerComp, EBTNodeResult::Failed);
 	}
 
+	const UEnemyArchetypeData* DA = Enemy->GetArchetypeData();
+
 	// Keep aim current with LOS state
 	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
 	bool bHasAimSource = false;
 
 	if (bHasLOS)
 	{
+		Mem->bEverHadLOS = true;
+		Mem->LosLostTimer = 0.f;
 		if (Mem->bAimOverrideActive)
 		{
 			Enemy->ClearAimLocationOverride();
@@ -196,6 +204,7 @@ void UBTTask_EnemySuppressFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 	}
 	else
 	{
+		Mem->LosLostTimer += DeltaSeconds;
 		Enemy->SetAimTarget(nullptr);
 		const FVector LastKnown = BB->GetValueAsVector(AEnemyAIController::BB_LastKnownLocation);
 		if (!LastKnown.IsNearlyZero())
@@ -206,6 +215,12 @@ void UBTTask_EnemySuppressFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 			bHasAimSource = true;
 		}
 	}
+
+	// LOS fire gate: may fire only while it can see the target (or within the brief
+	// continue-fire grace after losing sight mid-burst). A never-sighted suppressor never fires.
+	const float LosGrace = IsValid(DA) ? DA->FireLosLostGrace : 0.35f;
+	const bool bWithinGrace = Mem->LosLostTimer <= LosGrace;
+	const bool bMayFire = bHasAimSource && Mem->bEverHadLOS && (bHasLOS || bWithinGrace);
 
 	// Ammo-aware: if reloading, hold fire and wait (auto-reload refills)
 	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
@@ -219,12 +234,21 @@ void UBTTask_EnemySuppressFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 		return;
 	}
 
+	// Grace expired mid-burst -- stop firing immediately.
+	if (!bMayFire && Mem->Phase == ESuppressFirePhase::Fire && IsValid(Weapon) && Mem->bFiring)
+	{
+		Weapon->StopFiring();
+		Mem->bFiring = false;
+		Mem->Phase = ESuppressFirePhase::Pause;
+		Mem->PhaseTimer = FMath::RandRange(BurstPauseMin, BurstPauseMax);
+	}
+
 	Mem->PhaseTimer -= DeltaSeconds;
 
 	switch (Mem->Phase)
 	{
 	case ESuppressFirePhase::Fire:
-		if (!Mem->bFiring && bHasAimSource && IsValid(Weapon))
+		if (!Mem->bFiring && bMayFire && IsValid(Weapon))
 		{
 			Weapon->StartFiring();
 			Mem->bFiring = true;
@@ -244,13 +268,15 @@ void UBTTask_EnemySuppressFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint
 	case ESuppressFirePhase::Pause:
 		if (Mem->PhaseTimer <= 0.f)
 		{
-			if (bHasAimSource && IsValid(Weapon))
+			if (bMayFire && IsValid(Weapon))
 			{
 				Weapon->StartFiring();
 				Mem->bFiring = true;
 			}
-			Mem->Phase = ESuppressFirePhase::Fire;
-			Mem->PhaseTimer = FMath::RandRange(BurstDurationMin, BurstDurationMax);
+			Mem->Phase = bMayFire ? ESuppressFirePhase::Fire : ESuppressFirePhase::Pause;
+			Mem->PhaseTimer = bMayFire
+				? FMath::RandRange(BurstDurationMin, BurstDurationMax)
+				: FMath::RandRange(BurstPauseMin, BurstPauseMax);
 		}
 		break;
 	}

@@ -67,6 +67,21 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "LevelCompletion|Prompts")
 	FText LockedInteractionMessage = NSLOCTEXT("LiftGate", "LockedMsg", "Eliminate remaining enemies");
 
+	/** Off turns the gate into a plain interaction: the unlock check still runs and the world-interact
+	 *  notify is still raised once, but nothing here ends the level — an objective step watching this
+	 *  gate's Interacted event owns what happens next (the endgame rides the lift and teleports the
+	 *  squad rather than cutting to the results screen). On by default, so every gate placed before
+	 *  this flag existed behaves exactly as it always has. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "LevelCompletion")
+	bool bCompletesLevel = true;
+
+	/** Off suppresses the gate's own HUD objective line, for levels where an AObjectiveStep
+	 *  watching this gate's Interacted event registers the beat under its own StepId.
+	 *  Without this, one beat renders as two entries with mismatched wording. On by default
+	 *  so every gate placed before this flag existed behaves as it always has. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "LevelCompletion|Objectives")
+	bool bRegisterOwnObjective = true;
+
 	/** Objective id registered on unlock ("Use the lift"). */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "LevelCompletion|Objectives")
 	FName UseLiftObjectiveId = TEXT("Objective_UseLift");
@@ -82,8 +97,15 @@ private:
 	/** Set once the objective has been registered, to guard EndPlay cleanup. */
 	bool bObjectiveRegistered = false;
 
+	/** Once-only guard on the world-interact raise. CompleteLevel runs a fade the player can keep
+	 *  pressing through, and each press would otherwise re-raise "the lift was used". */
+	bool bCompletionRaised = false;
+
 	UFUNCTION()
 	void OnRep_bUnlocked();
+
+	/** Announces "the lift was used" exactly once, whatever the gate does about it afterwards. */
+	void RaiseUsedNotify(AActor* Interactor);
 
 	/** Shared helper: registers (or re-registers) the use-lift objective. */
 	void RegisterUseLiftObjective();

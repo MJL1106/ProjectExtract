@@ -15,6 +15,7 @@
 #include "EnemyCharacter.generated.h"
 
 class UHealthComponent;
+class UFootstepNoiseComponent;
 class UEnemyArchetypeData;
 class AWeaponBase;
 class APatrolRoute;
@@ -43,6 +44,7 @@ class UEnemyPostureComponent;
 class UEnemySquadSubsystem;
 class UEnemySquad;
 class UAmmoDropTableDataAsset;
+class UNiagaraSystem;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTakedownExecuted, AActor*, Instigator);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleePerformed);
@@ -232,6 +234,22 @@ public:
 	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it; only the companion BT service calls it. */
 	bool HasDetectedPlayer() const;
 
+	/** HasDetectedPlayer plus an activity qualifier: Combat state AND genuine contact with its target
+	 *  within WindowSeconds (sight, geometric FOV LOS, recent damage, or suppression). WindowSeconds
+	 *  <= 0 reproduces HasDetectedPlayer exactly. Combat state alone is unbounded — an aggro'd enemy
+	 *  that breaks LOS and idles stays in Combat for its whole LostContactGrace and re-arms it on any
+	 *  fleeting contact, which is what pinned the friendlies' target retention forever. Reads
+	 *  awareness state only, no traces. Plain C++ (no UFUNCTION), matching HasDetectedPlayer. */
+	bool HasActiveCombatContact(float WindowSeconds) const;
+
+	/** True when this enemy has engaged the COMPANION itself: it is targeting the companion now, has
+	 *  damaged it within MemorySeconds, or holds live suspicion/search knowledge of it. The companion
+	 *  side of HasDetectedPlayer — together they answer "is this enemy part of a fight we are in".
+	 *  The damage clause deliberately bypasses the sight cloak: an enemy that has landed hits on the
+	 *  companion has demonstrated it can see it, whatever the cloak says it is permitted to perceive.
+	 *  Plain C++ (no UFUNCTION) so Live Coding can hot-patch it, matching HasDetectedPlayer. */
+	bool HasEngagedCompanion(const AActor* Companion, float MemorySeconds) const;
+
 	/** World seconds of this enemy's most recent transition into Combat awareness, or a large
 	 *  negative sentinel if never / component missing. Companion stealth-break compares this
 	 *  against the stealth pin time to distinguish a NEW fight from a stale Combat-state tail. */
@@ -241,9 +259,48 @@ public:
 	 *  Searching and Combat count; Suspicious does not. */
 	bool IsAlertedForCompanionReadiness() const;
 
+	/** Instigator-aware eligibility. Same as IsTakedownEligible(), except a victim RESERVED by this
+	 *  instigator also passes while it has only drifted to Searching.
+	 *
+	 *  Why: the global alert ladder is a ratchet. One missed player shot escalates to Loud, which
+	 *  wakes every Unaware enemy to Searching — including the pocket victim the companion is already
+	 *  lined up on — and the strict Unaware rule then fails the in-flight takedown permanently. An
+	 *  already-committed kill must survive that; a victim that reaches Combat genuinely has not. */
+	bool IsTakedownEligibleFor(const AActor* TakedownInstigator) const;
+
+	/** Claim this enemy as an in-flight takedown victim. Grandfathers it against the alert-ratchet
+	 *  wake-up (see IsTakedownEligibleFor). One reservation at a time — last claim wins. */
+	void ReserveForTakedown(AActor* TakedownInstigator);
+
+	/** Release a reservation. No-op unless TakedownInstigator currently holds it. */
+	void ClearTakedownReservation(const AActor* TakedownInstigator);
+
+	/** True when TakedownInstigator currently holds this enemy's takedown reservation. */
+	bool IsTakedownReservedBy(const AActor* TakedownInstigator) const;
+
+	/** True when ANYONE holds a takedown reservation on this enemy. Used to keep an in-flight
+	 *  takedown victim asleep — e.g. the proximity body notice must not wake the very enemy the
+	 *  companion is lined up on, or the takedown it is about to land turns into a whiff. */
+	bool IsReservedForTakedown() const { return TakedownReservedBy.IsValid(); }
+
 	/** Called by ATakedownVolume on overlap begin/end. Increments/decrements an internal
 	 *  counter so overlapping more than one volume is handled correctly. */
 	void SetInTakedownVolume(bool bInVolume);
+
+	/** Opens (or extends) this enemy's takedown window: the short hush an ARMED companion takedown
+	 *  holds over its victim and that victim's pocket partners, so the player's own synced shot doesn't
+	 *  make the partner spin round mid-kill.
+	 *
+	 *  Heartbeat, not a flag: the companion re-stamps this every Tick while it stays armed, and expiry
+	 *  only ever moves forward (Max), so two overlapping windows compose. Teardown is simply the
+	 *  stamping STOPPING — companion death, BT abort, EndPlay and the finish path all let it lapse
+	 *  within one refresh interval. Nothing to clear, so nothing can leak a permanently deaf enemy,
+	 *  which is exactly what an unconditional volume flag was doing before. */
+	void BeginTakedownWindow(float Seconds);
+
+	/** True while a companion takedown is armed on this enemy's pocket (see BeginTakedownWindow).
+	 *  Drives the hearing hush; sight is unaffected (that is IsInTakedownVolume's job). */
+	bool IsInTakedownWindow() const;
 
 
 	/**
@@ -320,6 +377,9 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Data")
 	const UEnemyArchetypeData* GetArchetypeData() const { return ArchetypeData; }
 
+	/** Headshots do not drop this enemy outright (heavies) -- drives the armoured-head hitmarker. */
+	bool HasArmoredHead() const;
+
 	UFUNCTION(BlueprintPure, Category = "Enemy|Components")
 	UHealthComponent* GetHealthComponent() const { return HealthComponent; }
 
@@ -343,6 +403,15 @@ public:
 	 *  base enemy BP — null disables death drops for this enemy. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Data")
 	TObjectPtr<UAmmoDropTableDataAsset> AmmoDropTable;
+
+	/** When true, death ammo drops use AmmoDropCategoryOverride instead of the weapon DA's anim
+	 *  type. The Rusher's SMG is keyed Rifle for animation selection — this lets it still drop
+	 *  SMG-category ammo. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Data")
+	bool bOverrideAmmoDropCategory = false;
+
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Data", meta = (EditCondition = "bOverrideAmmoDropCategory"))
+	EEnemyWeaponAnimType AmmoDropCategoryOverride = EEnemyWeaponAnimType::SMG;
 
 	/** Guaranteed loot dropped as a physical pickup on death (e.g. keycards). Authored per placed instance. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Enemy|Loot")
@@ -390,9 +459,11 @@ public:
 
 	bool IsIsolatedEncounter() const { return bIsolatedEncounter; }
 
-	/** True while standing inside at least one ATakedownVolume. Drives awareness "muffling": a pocket
-	 *  enemy ignores gunfire, walking and reload noise so taking one down doesn't cascade to its
-	 *  neighbours — but a sprint footstep and a level-wide Loud alert still wake it. Distinct from the
+	/** True while standing inside at least one ATakedownVolume. Marks this enemy as designer-authored
+	 *  takedown bait: it is pingable (IsTakedownEligible) and keeps the pre-buff sneak-up sight profile
+	 *  — no point-blank auto-combat, no near-fill boost — because the pocket exists to be crept on.
+	 *  Hearing is NOT affected: that hush is the armed-takedown window (IsInTakedownWindow), so an
+	 *  un-pinged pocket hears an unsuppressed shot beside it like anyone else. Distinct from the
 	 *  bIsolatedEncounter test flag, which is fully deaf. */
 	bool IsInTakedownVolume() const { return TakedownVolumeRefCount > 0; }
 
@@ -425,16 +496,33 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|Hitbox")
 	TMap<FName, EHitRegion> BoneToHitRegionMap;
 
+	/** Blood burst spawned at the bullet impact point on point-damage hits.
+	 *  Assign the kit's NS_Smoke_Blood_System in the enemy BP defaults. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|FX")
+	TObjectPtr<UNiagaraSystem> BloodImpactFX;
+
+	/** Uniform scale applied to BloodImpactFX on head-region hits — headshots bleed bigger. */
+	UPROPERTY(EditDefaultsOnly, Category = "Enemy|FX", meta = (ClampMin = "1.0"))
+	float HeadshotBloodScale = 1.6f;
+
 private:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
 	TObjectPtr<UHealthComponent> HealthComponent;
+
+	/** Audible surface-aware footsteps only — AI-noise emission is disabled at construction. */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Enemy|Components", meta = (AllowPrivateAccess))
+	TObjectPtr<UFootstepNoiseComponent> FootstepAudioComponent;
 
 	UPROPERTY()
 	TObjectPtr<AWeaponBase> CurrentWeapon;
 
 	/** True when the weapon is currently attached to the patrol-hand socket (DA-driven hand-swap). */
 	bool bWeaponOnPatrolHand = false;
+
+	/** Spawns BloodImpactFX at the hit location for point-damage events (kit enemy-blood behaviour).
+	 *  Head-region hits scale the burst by HeadshotBloodScale. */
+	void SpawnBloodImpactFX(const FDamageEvent& DamageEvent, EHitRegion HitRegion) const;
 
 	/** True while the combat service's eye-to-target trace is clear. AI-side only (not replicated). */
 	bool bHasTargetLOS = false;
@@ -524,6 +612,14 @@ private:
 
 	/** Number of ATakedownVolumes currently containing this enemy. Positive = in at least one volume. */
 	int32 TakedownVolumeRefCount = 0;
+
+	/** World time the takedown hush lapses (see BeginTakedownWindow). Large negative sentinel so a
+	 *  never-stamped enemy is out of window from frame one, including before the world clock starts. */
+	float TakedownWindowExpiry = -1e9f;
+
+	/** Who has claimed this enemy as an in-flight takedown victim (weak — the instigator can die
+	 *  mid-approach). Drives the grandfather exemption in IsTakedownEligibleFor / CanBeTakenDown. */
+	TWeakObjectPtr<AActor> TakedownReservedBy;
 
 	/** Generic damage amount guaranteed to kill through any shield (takedown path). */
 	static constexpr float TakedownDamage = 1.e6f;
@@ -630,6 +726,11 @@ private:
 	/** Authority-only death-drop roll: chance from AmmoDropTable keyed by the held weapon's
 	 *  category; spawns an AAmmoPickup next to the corpse on success. */
 	void TrySpawnAmmoDrop();
+
+	/** Authority-only: makes the corpse's held gun collectable. Spawns the mapped weapon pickup
+	 *  (WeaponDropTable keyed by weapon class) invisible and attached to the weapon actor, with a
+	 *  rolled partial mag + reserve. Weapons with no table entry offer nothing. */
+	void SetupCorpseWeaponPickup();
 
 	/** Authority-only: spawns a loot pickup with DeathLoot contents next to the corpse. */
 	void TrySpawnDeathLoot();

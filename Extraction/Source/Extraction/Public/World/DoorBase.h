@@ -11,8 +11,10 @@
 #include "DoorBase.generated.h"
 
 class AEnemyCharacter;
+class APawn;
 class UBoxComponent;
 class UStaticMeshComponent;
+class USoundBase;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnDoorOpened, AActor*, Door);
 
@@ -70,6 +72,12 @@ public:
 	 *  on a door the companion cannot open would shove it against the closed leaf until timeout. */
 	bool CanAutoOpenForAI() const { return bAutoOpenForAI; }
 
+	/** True when the 2D segment A->B crosses this door's plane within the doorway span on this
+	 *  floor. Pure math on the closed-bounds snapshot — no traces. Used by the cover pickers'
+	 *  closed-door reject (a cover candidate behind a closed door is never a valid pick) and by
+	 *  IsPawnPathingThroughDoorway's per-path-segment loop. */
+	bool DoesSegmentCrossDoorway(const FVector& A, const FVector& B) const;
+
 protected:
 	virtual void PostInitializeComponents() override;
 	virtual void BeginPlay() override;
@@ -98,6 +106,11 @@ protected:
 	 *  companion follow all qualify; no awareness gating. The player never auto-opens. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|AutoOpen")
 	bool bAutoOpenForAI = true;
+
+	/** Played at the acoustic portal when the leaf starts swinging (any opener: AI auto-open,
+	 *  keycard unlock, breach). The checkpoint fast-forward ForceOpenInstant stays silent. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Door|Audio")
+	TObjectPtr<USoundBase> OpenSound;
 
 	/** When true the companion pushes through into the room after breaching this door even in
 	 *  Normal/Stealth mode (Combat already does). Movement only — montage and noise stay
@@ -147,6 +160,14 @@ protected:
 
 	/** Auto-open filter + gate for one actor (the OnDoorwayOverlap body). */
 	void TryAutoOpenFor(AActor* OtherActor);
+
+	/** Play OpenSound at the acoustic portal, deduped through UDoorRegistrySubsystem so stacked
+	 *  doorway actors (entrance prefabs) and same-beat player+AI opens produce one audible open. */
+	void PlayOpenSoundDeduped();
+
+	/** True when the pawn's active nav path crosses this door's plane within the doorway span —
+	 *  i.e. it is actually going THROUGH, not merely brushing the trigger while walking past. */
+	bool IsPawnPathingThroughDoorway(const APawn* Pawn) const;
 
 	/** Re-run the auto-open filter for every pawn already inside the trigger. Call after the
 	 *  door becomes breachable again (a pack door re-closing) — no new BeginOverlap fires for

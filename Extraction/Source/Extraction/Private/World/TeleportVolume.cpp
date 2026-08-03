@@ -9,6 +9,7 @@
 #include "GameFramework/PlayerController.h"
 #include "Kismet/GameplayStatics.h"
 #include "TimerManager.h"
+#include "EngineUtils.h"
 
 #include "Character/ExtractionPlayerInterface.h"
 #include "Components/HealthComponent.h"
@@ -106,26 +107,51 @@ void ATeleportVolume::TeleportAndHealPlayer(APawn* PlayerPawn, const FTransform&
 
 void ATeleportVolume::TeleportAndHealCompanion(const FTransform& SpawnTransform)
 {
-	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(
-		UGameplayStatics::GetActorOfClass(GetWorld(), ACompanionCharacter::StaticClass()));
-
-	if (!IsValid(Companion))
+	// Every ACTIVE companion rides along (the armed extractee included); a captive extractee has
+	// no controller yet and stays put -- teleporting the hostage would break its rescue staging.
+	bool bAnyCompanionFound = false;
+	bool bAnyMoved = false;
+	for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It)
 	{
-		UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume: no companion found — skipping companion teleport"));
-		return;
+		ACompanionCharacter* Companion = *It;
+		if (!IsValid(Companion)) continue;
+
+		ACompanionAIController* CompanionController = Cast<ACompanionAIController>(Companion->GetController());
+		if (!IsValid(CompanionController)) continue;
+
+		bAnyCompanionFound = true;
+
+		const FVector Loc = SpawnTransform.GetLocation();
+		const FRotator Rot = SpawnTransform.GetRotation().Rotator();
+
+		// A heal volume must never leave a squadmate behind, so the destination is not negotiable.
+		// Forcing still goes through the controller: teleporting the pawn directly would skip the
+		// navmesh projection, the traversal cancel and StopMovement, leaving a stale move order to
+		// walk the companion straight back out of the volume.
+		const bool bMoved = CompanionController->TeleportToLocation(Loc, Rot, /*bForce*/ true);
+		if (!bMoved)
+			UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume [%s]: forced teleport failed for companion %s at %s — navmesh projection failed or destination blocked/encroached"),
+				*GetName(), *Companion->GetName(), *Loc.ToString());
+
+		bAnyMoved |= bMoved;
+
+		UHealthComponent* Health = Companion->FindComponentByClass<UHealthComponent>();
+		if (!IsValid(Health)) continue;
+
+		if (Health->IsDead())
+			Health->Revive(1.f);
+		else
+			Health->Heal(Health->GetMaxHealth());
 	}
 
-	ACompanionAIController* CompanionController = Cast<ACompanionAIController>(Companion->GetController());
-	if (IsValid(CompanionController))
-		CompanionController->TeleportToLocation(SpawnTransform.GetLocation(), SpawnTransform.GetRotation().Rotator());
-
-	UHealthComponent* Health = Companion->FindComponentByClass<UHealthComponent>();
-	if (!IsValid(Health)) return;
-
-	if (Health->IsDead())
-		Health->Revive(1.f);
-	else
-		Health->Heal(Health->GetMaxHealth());
+	if (!bAnyCompanionFound)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume [%s]: no possessed companion found — skipping companion teleport"), *GetName());
+	}
+	else if (!bAnyMoved)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ATeleportVolume [%s]: companions found but none could be moved — squad left at its old location"), *GetName());
+	}
 }
 
 FTransform ATeleportVolume::GetPlayerSpawnTransform() const

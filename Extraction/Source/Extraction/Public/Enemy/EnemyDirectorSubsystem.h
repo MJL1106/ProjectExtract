@@ -10,6 +10,7 @@
 #include "DirectorWaveTypes.h"
 #include "EnemyDirectorSubsystem.generated.h"
 
+class APawn;
 class ACompanionCharacter;
 class AEnemyCharacter;
 class AEnemyDirectorScopeVolume;
@@ -46,6 +47,7 @@ class EXTRACTION_API UEnemyDirectorSubsystem : public UWorldSubsystem
 
 public:
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
 	virtual void Deinitialize() override;
 
 	// ---------- v1 API (preserved) ----------
@@ -61,6 +63,15 @@ public:
 	 *  Unlike the alert ladder (a ratchet that never de-escalates), this is a decaying event
 	 *  stamp — compare against a reference time to ask "has a fight started since X?". */
 	float GetLastCombatReportTime() const { return LastCombatReportTime; }
+
+	/** Enemies currently in Searching / Combat awareness state as of the last director sweep
+	 *  (1s cadence, scope-gated, distance-ungated). Unlike the alert ladder these fall back to
+	 *  0 when the hunt dies down — live signals for music/presentation. */
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director")
+	int32 GetSearchingEnemyCount() const { return LastSweepSearchingCount; }
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director")
+	int32 GetCombatEnemyCount() const { return LastSweepCombatCount; }
 
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Director")
 	void TripAlarm();
@@ -84,6 +95,17 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Director")
 	FOnMissionPhaseChanged OnMissionPhaseChanged;
 
+	// ---------- v2 API: ambient spawning control ----------
+
+	/** Shuts off (or restores) ambient/tension spawning without touching scripted waves, the alert
+	 *  ladder, or enemies already alive. The defend timer's completion side effect uses this to stop
+	 *  reinforcements while letting the surviving fight play out. */
+	UFUNCTION(BlueprintCallable, Category = "Enemy|Director")
+	void SetAmbientSpawningEnabled(bool bEnabled);
+
+	UFUNCTION(BlueprintPure, Category = "Enemy|Director")
+	bool IsAmbientSpawningEnabled() const { return bAmbientSpawningEnabled; }
+
 	// ---------- v2 API: config ----------
 
 	UFUNCTION(BlueprintCallable, Category = "Enemy|Director")
@@ -99,6 +121,11 @@ public:
 
 	UFUNCTION(BlueprintPure, Category = "Enemy|Director")
 	float GetTension() const { return Tension; }
+
+	/** True when the effective phase has bSustainedPressure AND no scripted wave owns the
+	 *  director (sustained pressure is an ambient concept — waves use bAutoEngage). Folds
+	 *  in the effective config/phase resolution so callers do not reach past the director. */
+	bool IsSustainedPressureActive() const;
 
 	// ---------- v2 API: spawn zone registration ----------
 
@@ -143,6 +170,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Director|Wave")
 	int32 GetWaveRemainingMembers() const { return WaveProgress.RemainingMembers; }
 
+	/** Registered corpses (capped at MaxCorpses). Read by the awareness component's proximity body
+	 *  notice -- a bounded list beats iterating every enemy in the level per awareness tick. */
+	const TArray<TWeakObjectPtr<AEnemyCharacter>>& GetCorpses() const { return Corpses; }
+
+	/** Wave threat reference for the companion overwatch system: returns the location of the last-picked
+	 *  spawn zone (the direction waves come from). Falls back to any registered wave-eligible zone if
+	 *  LastPickedZone is stale. Returns false when no usable zone exists. */
+	bool GetWaveThreatReference(FVector& OutLocation) const;
+
 private:
 
 	// ---------- v1 internals ----------
@@ -169,6 +205,8 @@ private:
 	static constexpr float DefaultReliefDuration = 25.f;
 	static constexpr float DefaultSpawnDistMin = 1500.f;
 	static constexpr float DefaultSpawnDistMax = 4500.f;
+	static constexpr float DefaultStoreySeparationHeight = 250.f;
+	static constexpr float DefaultSpawnDistMinDifferentStorey = 350.f;
 	static constexpr float NavProjectExtentXY = 200.f;
 	static constexpr float NavProjectExtentZ = 400.f;
 
@@ -182,6 +220,11 @@ private:
 	static constexpr float DistanceBandBonus = 25.f;
 	static constexpr float CompanionProximityPenalty = 60.f;
 	static constexpr float ZoneScoreJitter = 10.f;
+	/** Caps a zone at MaxConsecutiveZonePicks consecutive picks — applied only once a zone has
+	 *  already taken the last MaxConsecutiveZonePicks in a row, so a biased zone stays the majority
+	 *  spawner but never runs the whole wave. */
+	static constexpr float RepeatZonePenalty = 30.f;
+	static constexpr int32 MaxConsecutiveZonePicks = 2;
 
 	// ---------- v2: tension ----------
 
@@ -189,7 +232,9 @@ private:
 	void UpdateTension(float DeltaSeconds, float EngagedCount);
 	float PollPlayerHealthLost();
 	void UpdateSawtooth(float DeltaSeconds);
-	bool TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*>* OutSpawned = nullptr);
+	bool TrySpawn(int32 AliveCount, TArray<AEnemyCharacter*>* OutSpawned = nullptr,
+		const TSet<AEnemySpawnZone*>* ExcludedZones = nullptr,
+		AEnemySpawnZone** OutUsedZone = nullptr);
 	bool ShouldSpawn(int32 AliveCount) const;
 
 	// ---------- v2: effective config / phase selection ----------
@@ -201,12 +246,19 @@ private:
 	{
 		int32 AliveCount = 0;
 		float EngagedCount = 0.f;
+		int32 SearchingCount = 0;
+		int32 CombatCount = 0;
 	};
 
 	FEnemySweepResult SweepEnemies() const;
 
 	float Tension = 0.f;
 	int32 RecentKills = 0;
+	int32 LastSweepSearchingCount = 0;
+	int32 LastSweepCombatCount = 0;
+	/** Living, in-scope enemies counted by this tick's SweepEnemies pass — wave members and
+	 *  pre-placed level actors alike. Consumed by the last-man latch so it does not re-sweep. */
+	int32 LastSweepAliveCount = 0;
 	float CachedPlayerHealthLastTick = -1.f;
 	TWeakObjectPtr<UHealthComponent> CachedPlayerHealth;
 
@@ -214,6 +266,10 @@ private:
 
 	EDirectorState DirectorState = EDirectorState::Build;
 	float ReliefTimer = 0.f;
+
+	// ---------- v2: ambient spawning gate ----------
+
+	bool bAmbientSpawningEnabled = true;
 
 	// ---------- v2: mission phase ----------
 
@@ -245,19 +301,52 @@ private:
 	const FMissionPhaseConfig& GetCurrentPhaseConfig() const;
 	int32 GetCompositionSize(const FSquadComposition& Comp) const;
 	bool PickComposition(const FMissionPhaseConfig& PhaseConfig, int32 AliveCount, FSquadComposition& OutComposition) const;
-	AEnemySpawnZone* PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize) const;
+
+	/** The guaranteed-squad entry pinned to the wave's NEXT squad slot, or nullptr. Shared by
+	 *  ShouldSpawn (which must waive the alive cap for it) and PickComposition (which resolves it). */
+	const FDirectorGuaranteedSquad* FindGuaranteedSquadForNext() const;
+	AEnemySpawnZone* PickSpawnZone(const FVector& PlayerLoc, const FVector& ViewLoc, const FRotator& ViewRot, int32 SquadSize,
+		const TSet<AEnemySpawnZone*>* ExcludedZones = nullptr) const;
+	bool IsZoneTooClose(const AEnemySpawnZone* Zone, const FVector& PlayerLoc) const;
 	bool IsPointInPlayerSightline(const FVector& Point, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams) const;
-	bool IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const;
+	bool IsZoneHiddenFromPlayer(const AEnemySpawnZone* Zone, int32 SampleCount, int32 SquadSize, const FVector& ViewLoc, const FVector& ViewDir, const FCollisionQueryParams& QueryParams, UNavigationSystemV1* NavSys) const;
 	float ScoreZone(const AEnemySpawnZone* Zone, const FVector& PlayerLoc, const FVector& CompanionLoc, bool bHasCompanion, float DistMin, float DistMax) const;
 	const ACompanionCharacter* FindCompanion() const;
 	void SpawnSquadAtZone(const FSquadComposition& Composition, AEnemySpawnZone* Zone, TArray<AEnemyCharacter*>& OutSpawned);
-	AEnemyCharacter* SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index);
+	void FinalizeSpawnedSquad(const TArray<AEnemyCharacter*>& Spawned);
+	AEnemyCharacter* SpawnEntryAtZone(UWorld* World, TSubclassOf<AEnemyCharacter> EnemyClass, AEnemySpawnZone* Zone, int32 Index, int32 SquadSize, TArray<FVector>& UsedPositions);
+	bool FindSeparatedSpawnLocation(UNavigationSystemV1* NavSys, AEnemySpawnZone* Zone, int32 Index, int32 SquadSize, TArray<FVector>& UsedPositions, FVector& OutLocation, FRotator& OutRotation) const;
+	bool ProjectSpawnPointToNav(UNavigationSystemV1* NavSys, const AEnemySpawnZone* Zone, int32 EffectiveIndex, FVector& InOutLocation) const;
 	void SeedSquadWithFight(UEnemySquad* Squad) const;
 
 	TWeakObjectPtr<UEnemySquadSubsystem> CachedSquadSubsystem;
 
+	/** Last zone returned by PickSpawnZone — scored down once it has taken MaxConsecutiveZonePicks
+	 *  in a row, so squads can't keep stacking in one room. Reset on wave state clear. */
+	TWeakObjectPtr<AEnemySpawnZone> LastPickedZone;
+
+	/** How many picks in a row LastPickedZone has won. Drives the repeat penalty's threshold. */
+	int32 ConsecutiveZonePicks = 0;
+
 	bool bLoggedNoComposition = false;
 	bool bLoggedNoZone = false;
+	bool bLoggedNoScopeVolumes = false;
+
+	/** Per-filter tally from the last PickSpawnZone sweep — turns "no eligible spawn zone" from a
+	 *  dead end into a named cause. Diagnostic only; rewritten every sweep. */
+	struct FZoneRejectCounts
+	{
+		int32 Considered = 0;
+		int32 Phase = 0;
+		int32 WaveIneligible = 0;
+		int32 OutsideScope = 0;
+		int32 TooClose = 0;
+		int32 TooFar = 0;
+		int32 Visible = 0;
+		int32 OffNavMesh = 0;
+		FString ToString() const;
+	};
+	mutable FZoneRejectCounts LastZoneRejects;
 
 	// ---------- v2: kill tracking ----------
 
@@ -275,6 +364,23 @@ private:
 	 *  (gave up and returned to a guard post) — a passive holdout stalls the kill-all wave. */
 	void ReassertWaveMemberEngagement();
 
+	/** Last-man ARMING: when a wave has all squads spawned and the in-scope alive count is at or
+	 *  below threshold, populate LastManLatched with every living in-scope enemy. Called from
+	 *  ReassertWaveMemberEngagement. Does NOT refresh already-latched entries — that is
+	 *  RefreshLastManLatched's job. */
+	void TryArmLastManHunt();
+
+	/** Per-tick refresh + prune for every entry in LastManLatched. Runs directly in DirectorTick
+	 *  (not inside ReassertWaveMemberEngagement) so it survives wave completion. */
+	void RefreshLastManLatched();
+
+	/** Unlatch every living entry and empty the set. */
+	void UnlatchAllLastMan();
+
+	/** Enemies currently latched for last-man hunt. Outlives wave completion — prune + refresh run
+	 *  directly from DirectorTick, and the set is only cleared on a new StartWave or Deinitialize. */
+	TSet<TWeakObjectPtr<AEnemyCharacter>> LastManLatched;
+
 	UPROPERTY()
 	FDirectorWaveRequest ActiveWaveRequest;
 
@@ -285,6 +391,14 @@ private:
 	float WaveBlockedTime = 0.f;
 	bool bWaveBlockedBroadcast = false;
 
+	/** Wall-clock stamp of the last rally burst in ReassertWaveMemberEngagement. Prevents the rally
+	 *  block from re-firing every director tick when ForceEngage early-outs on an already-Combat enemy
+	 *  and never refreshes LastCombatReportTime. Reset in ClearWaveState. */
+	double LastRallyWorldTime = 0.0;
+	/** Set once WaveBlockedTime passes 2x BlockedWarningSeconds — waives the IsZoneHiddenFromPlayer
+	 *  gate in PickSpawnZone so a wave blocked on sightline can make progress. Reset on wave clear. */
+	bool bWaveSightlineWaived = false;
+
 	// ---------- v2: punishment profile ----------
 
 	TWeakObjectPtr<AActor> PunishmentSource;
@@ -293,6 +407,20 @@ private:
 	TObjectPtr<UDirectorConfigData> PunishmentConfig;
 
 	EMissionPhase PunishmentPhase = EMissionPhase::Infiltration;
+
+	// ---------- v2: punishment squad search-target refresh ----------
+
+	/** Squads spawned while the punishment profile is active. Their search target is
+	 *  periodically refreshed in DirectorTick while the alarm is raised. */
+	TArray<TWeakObjectPtr<UEnemySquad>> PunishmentSquads;
+
+	/** Wall-clock stamp of the last search-target refresh for punishment squads.
+	 *  Initialised to a negative sentinel so the first refresh is never skipped
+	 *  when a punishment activates in the opening seconds of a level. */
+	double LastPunishmentSquadRefreshTime = -1e9;
+
+	void RefreshPunishmentSquadTargets();
+	FVector FindBestLastKnownFromSquad(const UEnemySquad* Squad, const APawn* PlayerPawn) const;
 
 	// ---------- timers ----------
 

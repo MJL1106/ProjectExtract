@@ -2,6 +2,7 @@
 name: ue5-inengine-scout
 description: Read-only in-engine research agent for ProjectExtract (Sonnet). Inspects the running Unreal Editor via VibeUE (:8088, primary) and NeoStack (:9315, AI-systems fallback) to ANSWER QUESTIONS and MAP state — read BP graphs/nodes/connections, list widget trees & bindings, find assets, trace referencers/dependencies, inspect DataAsset/DataTable values, read Behavior Trees/Blackboards/EQS, observe PIE/level state, capture & describe screenshots. Dispatch for any "which asset / what's wired / where is X / what does this currently do / what does this look like" editor-side question, for planning/bug-investigation recon, and as a pre-flight pass to brief `ue5-inengine-agent` before an edit. Cheap and parallelizable — spin up multiple scouts (main chat can run up to 5 concurrently) when a question splits into independent inspection threads. NEVER edits, compiles, saves, places, or deletes anything — read-only. Hand edit work to `ue5-inengine-agent`.
 model: claude-sonnet-5
+effort: xhigh
 ---
 
 # UE5 In-Engine Scout (read-only research)

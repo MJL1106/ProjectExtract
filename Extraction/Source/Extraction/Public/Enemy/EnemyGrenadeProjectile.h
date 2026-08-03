@@ -1,5 +1,5 @@
 // AEnemyGrenadeProjectile — frag grenade: bouncing projectile, fuse-detonated radial damage.
-// Spawner configures via Init(); projectile itself is dumb (no team filtering).
+// Spawner configures via Init(). Detonation filters damage by instigator team attitude.
 
 #pragma once
 

@@ -71,6 +71,9 @@ FCoverScoreParams UCoverScoringStatics::MakeParamsForEnemy(const AEnemyCharacter
 		// distance now penalises — far candidates clamp to the largest penalty.
 		Params.IdealDistMin = FMath::Max(0.f, Params.IdealDistMin + DA->PosturePressDistMinDelta);
 		Params.DistanceBandWeight = -Params.DistanceBandWeight;
+		// ...but not onto the player: the standoff floor penalises candidates hugging the threat on
+		// every Press pick path (flank-break relocate, reseek, EQS), not just the advance path.
+		Params.MinThreatDistance = DA->PressMinThreatDistance;
 		break;
 	case EEnemyPosture::FallBack:
 		Params.IdealDistMin += DA->PostureFallBackDistMinDelta;
@@ -145,6 +148,12 @@ float UCoverScoringStatics::ScoreCandidate(const UWorld* World, const FCoverData
 	if (Params.DBNOAvoidRadius > 0.f
 		&& FVector::DistSquared2D(Data.Location, Params.DBNOAvoidLocation) < FMath::Square(Params.DBNOAvoidRadius))
 		Score = ApplyScorePenalty(Score, Params.DBNOAvoidPenalty);
+
+	// Threat standoff floor (Press): the band term above rewards closing distance without limit, so
+	// penalise anything inside the floor rather than letting a relocate land on top of the threat.
+	if (Params.MinThreatDistance > 0.f
+		&& FVector::DistSquared2D(Data.Location, ThreatLoc) < FMath::Square(Params.MinThreatDistance))
+		Score = ApplyScorePenalty(Score, Params.MinThreatDistancePenalty);
 
 	return Score;
 }

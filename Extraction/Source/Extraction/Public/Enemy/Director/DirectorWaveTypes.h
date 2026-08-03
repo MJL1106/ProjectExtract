@@ -9,6 +9,24 @@
 #include "DirectorConfigData.h"
 #include "DirectorWaveTypes.generated.h"
 
+/** Pins a named composition to a specific squad slot of a wave, bypassing the weighted roll.
+ *  Composition selection is otherwise pure weighted RNG over whatever fits under MaxAlive, so a
+ *  set-piece squad (the Heavy push) only ever showed up on a lucky roll. */
+USTRUCT(BlueprintType)
+struct EXTRACTION_API FDirectorGuaranteedSquad
+{
+	GENERATED_BODY()
+
+	/** Which squad of the wave this applies to, 1-based (1 = the wave's first squad). */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave", meta = (ClampMin = "1"))
+	int32 SquadNumber = 1;
+
+	/** Must match FSquadComposition::Name in the effective phase config. An unresolvable name logs a
+	 *  warning and falls back to the weighted roll rather than stalling the wave. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave")
+	FName CompositionName = NAME_None;
+};
+
 USTRUCT(BlueprintType)
 struct EXTRACTION_API FDirectorWaveRequest
 {
@@ -38,6 +56,25 @@ struct EXTRACTION_API FDirectorWaveRequest
 	 *  (tuned for ambient pacing — often too slow for a scripted assault). */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave", meta = (ClampMin = "0.0"))
 	float SpawnCadenceOverride = 0.f;
+
+	/** Seconds before the wave's FIRST squad may spawn, measured from StartWave. Separate from the
+	 *  cadence because StartWave zeroes the spawn timer and the cadence gate then applies to squad
+	 *  one as well — a 25s cadence opened the wave with 25s of silence. The director ticks at 1Hz,
+	 *  so values below ~1s all behave the same. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave", meta = (ClampMin = "0.0"))
+	float FirstSquadDelaySeconds = 2.f;
+
+	/** Once every squad has spawned and the wave is down to this many living members or fewer, each
+	 *  survivor is latched into last-man hunt mode: morale pinned Confident and the player's live
+	 *  position re-stamped every director tick, so the tail of the wave comes to the player instead
+	 *  of camping cover in a cleared room. 0 = disabled. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave", meta = (ClampMin = "0"))
+	int32 LastManHuntThreshold = 1;
+
+	/** Compositions pinned to specific squad slots. Guaranteed squads bypass both the weighted roll
+	 *  and the MaxAlive fit filter — guaranteed means guaranteed. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Wave")
+	TArray<FDirectorGuaranteedSquad> GuaranteedSquads;
 };
 
 UENUM(BlueprintType)

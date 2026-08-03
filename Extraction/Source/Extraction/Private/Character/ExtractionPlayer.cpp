@@ -25,9 +25,14 @@
 #include "FootstepNoiseComponent.h"
 #include "EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
+#include "Extractee/ExtracteeCompanion.h"
+#include "Extractee/ExtracteeCharacter.h"
+#include "Animation/CompanionAnimInstance.h"
 #include "EngineUtils.h"
+#include "Engine/World.h"
 #include "WeaponComponent.h"
 #include "WeaponBase.h"
+#include "WeaponVisibilityUtils.h"
 #include "ExtractionDamageType.h"
 #include "TimerManager.h"
 #include "Engine/DamageEvents.h"
@@ -42,8 +47,11 @@
 #include "EnemyDebug.h"
 #include "World/Lootable.h"
 #include "World/BreachableDoor.h"
+#include "Audio/GameAudioSubsystem.h"
+#include "Audio/SurfaceAudioBank.h"
 #include "World/WorldInteractable.h"
 #include "Game/ExtractionGameMode.h"
+#include "Game/ExtractionGameInstance.h"
 
 AExtractionPlayer::AExtractionPlayer(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UExtractionPlayerMovement>(
@@ -157,9 +165,11 @@ void AExtractionPlayer::PostInitializeComponents()
 
 	if (USkeletalMeshComponent* MeshComp = GetMesh())
 	{
+		// Null on the shipped setup: the pristine kit ABP_Manny is a plain UAnimInstance.
+		// Montage playback (traversal, being-revived) goes through the generic instance.
 		CachedAnimInstance = Cast<UExtractionAnimInstance>(MeshComp->GetAnimInstance());
 		if (!IsValid(CachedAnimInstance))
-			UE_LOG(LogExtraction, Warning, TEXT("'%s': AnimInstance is not UExtractionAnimInstance — check ABP parent class."), *GetNameSafe(this));
+			UE_LOG(LogExtraction, Verbose, TEXT("'%s': AnimInstance is not UExtractionAnimInstance — montages play on the generic instance."), *GetNameSafe(this));
 	}
 }
 
@@ -171,7 +181,19 @@ void AExtractionPlayer::BeginPlay()
 		HealthComponent->OnDeath.AddDynamic(this, &AExtractionPlayer::HandleDeath);
 
 	if (IsValid(ConsumableInventoryComponent))
+	{
 		ConsumableInventoryComponent->OnStimUsedNative.AddUObject(this, &AExtractionPlayer::HandleStimUsed);
+		ConsumableInventoryComponent->OnStimUseEndedNative.AddUObject(this, &AExtractionPlayer::HandleStimUseEnded);
+	}
+
+	// Ally spawn watch: the interaction ignore set is read straight off the rescan cache, so an ally
+	// that appears at runtime (a Director respawn) would otherwise block interaction until the next
+	// scheduled rescan. The handler only sets a flag.
+	if (const UWorld* World = GetWorld())
+	{
+		ActorSpawnedHandle = World->AddOnActorSpawnedHandler(
+			FOnActorSpawned::FDelegate::CreateUObject(this, &AExtractionPlayer::HandleActorSpawned));
+	}
 
 	// Late-join / standalone catch-up: re-fire OnWeaponEquipped if weapon already equipped
 	if (IsLocallyControlled() && !GetIsDBNO() && IsValid(WeaponComponent))
@@ -179,6 +201,40 @@ void AExtractionPlayer::BeginPlay()
 		AWeaponBase* ExistingWeapon = WeaponComponent->GetCurrentWeapon();
 		if (IsValid(ExistingWeapon))
 			OnWeaponEquipped(ExistingWeapon);
+	}
+
+	// Checkpoint loadout restore: cache the snapshot and schedule for the NEXT TICK so it
+	// lands after the character BP's BeginPlay spine (Load/SwapWeapon) has finished.
+	if (HasAuthority())
+	{
+		const UExtractionGameInstance* GameInstance = GetGameInstance<UExtractionGameInstance>();
+		if (GameInstance)
+		{
+			const FName LevelName(*UGameplayStatics::GetCurrentLevelName(this, true));
+			const FCheckpointLoadoutSnapshot& Snapshot = GameInstance->GetLoadoutSnapshotForLevel(LevelName);
+			if (Snapshot.bValid)
+			{
+				CachedRestoreSnapshot = Snapshot;
+				if (const UWorld* World = GetWorld())
+				{
+					World->GetTimerManager().SetTimer(LoadoutRestoreTimerHandle, this,
+						&AExtractionPlayer::DeferredRestoreLoadout, KINDA_SMALL_NUMBER, false);
+				}
+			}
+			else
+			{
+				// No snapshot to restore -- settle immediately so captures are allowed.
+				bLoadoutRestoreSettled = true;
+			}
+		}
+		else
+		{
+			bLoadoutRestoreSettled = true;
+		}
+	}
+	else
+	{
+		bLoadoutRestoreSettled = true;
 	}
 }
 
@@ -198,10 +254,22 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		HealthComponent->OnDeath.RemoveDynamic(this, &AExtractionPlayer::HandleDeath);
 
 	if (IsValid(ConsumableInventoryComponent))
+	{
 		ConsumableInventoryComponent->OnStimUsedNative.RemoveAll(this);
+		ConsumableInventoryComponent->OnStimUseEndedNative.RemoveAll(this);
+	}
 
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+		World->GetTimerManager().ClearTimer(LoadoutRestoreTimerHandle);
+		World->GetTimerManager().ClearTimer(LoadoutVerifyTimerHandle);
+		World->GetTimerManager().ClearTimer(AudioSuppressionFailsafeHandle);
+
+		if (ActorSpawnedHandle.IsValid())
+			World->RemoveOnActorSpawnedHandler(ActorSpawnedHandle);
+	}
+	ActorSpawnedHandle.Reset();
 
 	// Takedown was committed — kill the frozen victim so player despawn can't leave them stuck alive.
 	if (AEnemyCharacter* Victim = PendingTakedownVictim.Get())
@@ -210,6 +278,7 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	bTakedownMontageActive = false;
 
 	CancelRevive();          // reviver-side teardown (idempotent no-op when not reviving)
+	CancelInteractHold();    // idempotent no-op when no hold is running
 	SetBeingRevived(false);  // patient-side teardown (companion-revives-player direction)
 
 	Super::EndPlay(EndPlayReason);
@@ -231,6 +300,26 @@ void AExtractionPlayer::Tick(float DeltaTime)
 			MoveComp->MaxWalkSpeedCrouched = DBNOCrawlSpeed;
 			if (!bIsCrouched && MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
 		}
+
+		// Not during being-revived: look input is locked and AlignForRevive owns the body's facing.
+		if (IsLocallyControlled() && !bBeingRevivedAnimActive)
+		{
+			// Body drifts toward the camera yaw (rate-limited) instead of snapping or orienting
+			// to velocity — keeps the crawl blendspace's Direction input meaningful so the
+			// sideways/backward downed anims actually play.
+			if (const AController* C = GetController())
+			{
+				FRotator ActorRot = GetActorRotation();
+				const float NewYaw = FMath::FixedTurn(ActorRot.Yaw, C->GetControlRotation().Yaw, DBNOCrawlRotationRate * DeltaTime);
+				if (!FMath::IsNearlyEqual(NewYaw, ActorRot.Yaw))
+				{
+					ActorRot.Yaw = NewYaw;
+					SetActorRotation(ActorRot);
+				}
+			}
+
+			if (bDBNOFreeLookActive) ClampDBNOFreeLook();
+		}
 	}
 
 	// Yaw-follow watchdog: three systems save/restore bUseControllerRotationYaw and a cross-
@@ -251,8 +340,14 @@ void AExtractionPlayer::Tick(float DeltaTime)
 	if (IsLocallyControlled() && bIsReviving)
 		UpdateRevive(DeltaTime);
 
+	if (IsLocallyControlled() && bIsInteractHolding)
+		UpdateInteractHold(DeltaTime);
+
 	if (IsLocallyControlled())
+	{
 		UpdateReviveCandidateScan(DeltaTime);
+		UpdateInteractCandidateScan(DeltaTime);
+	}
 
 	if (IsLocallyControlled() && IsValid(WeaponComponent))
 	{
@@ -284,7 +379,15 @@ void AExtractionPlayer::Tick(float DeltaTime)
 		AutoLeanAlpha = FMath::FInterpTo(AutoLeanAlpha, AutoLeanTargetAlpha, DeltaTime, AutoLeanInterpSpeed);
 	}
 
-	if (IsLocallyControlled()) UpdateCompanionSoftCollision();
+	if (IsLocallyControlled())
+	{
+		// Refreshed here rather than only inside the soft-collision pass: that pass early-returns while
+		// DBNO / reviving / mid-traversal, and the interaction ignore set reads this same cache from a
+		// const accessor that never refreshes it. Interval-gated internally, so this is a float compare
+		// on all but every SoftCollisionRescanInterval-th frame.
+		RefreshAllyCache();
+		UpdateCompanionSoftCollision();
+	}
 }
 
 void AExtractionPlayer::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -330,6 +433,12 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 
 	if (ReloadAction)
 		EnhancedInput->BindAction(ReloadAction, ETriggerEvent::Started, this, &AExtractionPlayer::ReloadStart);
+
+	if (EquipPrimaryAction)
+		EnhancedInput->BindAction(EquipPrimaryAction, ETriggerEvent::Started, this, &AExtractionPlayer::EquipPrimaryInput);
+
+	if (EquipSecondaryAction)
+		EnhancedInput->BindAction(EquipSecondaryAction, ETriggerEvent::Started, this, &AExtractionPlayer::EquipSecondaryInput);
 
 	if (ADSAction)
 	{
@@ -391,8 +500,9 @@ void AExtractionPlayer::SetupPlayerInputComponent(UInputComponent* PlayerInputCo
 	if (IA_CompanionModeCombat)
 		EnhancedInput->BindAction(IA_CompanionModeCombat, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionModeSelectCombatInput);
 
-	// Temp debug: H key applies 25 damage
-	PlayerInputComponent->BindKey(EKeys::H, IE_Pressed, this, &AExtractionPlayer::DebugApplyDamage);
+	if (IA_CompanionCoverMe)
+		EnhancedInput->BindAction(IA_CompanionCoverMe, ETriggerEvent::Started, this, &AExtractionPlayer::CompanionCoverMeInput);
+
 }
 
 void AExtractionPlayer::PawnClientRestart()
@@ -453,6 +563,16 @@ void AExtractionPlayer::DoMove(float Right, float Forward)
 	if (bIsReviving) return;
 	if (!IsValid(GetController())) return;
 
+	// While downed the body no longer yaw-follows the camera (free look + orient-to-movement),
+	// so actor axes drift from where the player is looking — steer camera-relative instead.
+	if (bIsDBNO)
+	{
+		const FRotator YawRot(0.f, GetControlRotation().Yaw, 0.f);
+		AddMovementInput(FRotationMatrix(YawRot).GetScaledAxis(EAxis::Y), Right);
+		AddMovementInput(FRotationMatrix(YawRot).GetScaledAxis(EAxis::X), Forward);
+		return;
+	}
+
 	AddMovementInput(GetActorRightVector(), Right);
 	AddMovementInput(GetActorForwardVector(), Forward);
 }
@@ -484,7 +604,18 @@ void AExtractionPlayer::FireStart(const FInputActionValue& Value)
 	if (bIsDBNO) return;
 	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
+	if (IsUsingStim()) return;
 	if (!IsValid(WeaponComponent)) return;
+
+	// Kit throwable equipped: route the press to the kit grenade item and skip the hitscan path —
+	// a grenade throw must not broadcast OnPlayerFiredWeapon (companion shoot-takedown sync).
+	if (WeaponComponent->IsThrowableEquipped())
+	{
+		NotifyThrowableFirePressed();
+		if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+			AudioSys->PlayThrowFoley();
+		return;
+	}
 
 	// Snapshot the companion shoot-takedown state BEFORE broadcasting: the synchronous
 	// takedown listener disarms before the actual weapon shot lands.
@@ -515,9 +646,35 @@ void AExtractionPlayer::ReloadStart(const FInputActionValue& Value)
 	if (bIsDBNO) return;
 	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
+	if (IsUsingStim()) return;
 	if (!IsValid(WeaponComponent)) return;
 
 	WeaponComponent->StartReload();
+}
+
+void AExtractionPlayer::EquipPrimaryInput(const FInputActionValue& Value)
+{
+	if (bIsDBNO) return;
+	if (bIsReviving || bBeingRevivedAnimActive) return;
+	if (IsInTraversal()) return;
+	// Weapon switch is the fourth hand-owning action after fire/ADS/reload: the injector pen is
+	// attached to the same right-hand item socket the new weapon would spawn into, and the equip
+	// montage would fight the injection montage.
+	if (IsUsingStim()) return;
+	if (!IsValid(WeaponComponent)) return;
+
+	WeaponComponent->SwitchToPrimary();
+}
+
+void AExtractionPlayer::EquipSecondaryInput(const FInputActionValue& Value)
+{
+	if (bIsDBNO) return;
+	if (bIsReviving || bBeingRevivedAnimActive) return;
+	if (IsInTraversal()) return;
+	if (IsUsingStim()) return;
+	if (!IsValid(WeaponComponent)) return;
+
+	WeaponComponent->SwitchToSecondary();
 }
 
 void AExtractionPlayer::ADSStart(const FInputActionValue& Value)
@@ -525,6 +682,7 @@ void AExtractionPlayer::ADSStart(const FInputActionValue& Value)
 	if (bIsDBNO) return;
 	if (bIsReviving || bBeingRevivedAnimActive) return;
 	if (IsInTraversal()) return;
+	if (IsUsingStim()) return;
 	if (!IsValid(WeaponComponent)) return;
 
 	// TODO: notify kit BP to cancel sprint on ADS entry via BIE
@@ -573,6 +731,13 @@ bool AExtractionPlayer::TryStartTraversal()
 	// Mid-revive-hold: a vault would displace the kneeling reviver AND cross-clobber the shared
 	// yaw-follow save with the traversal component's own (leaves yaw-follow stuck off).
 	if (bIsReviving) return false;
+	// Traversal montages stop-all on the body instance — a vault input mid-takedown would
+	// interrupt the finisher montage mid-kill.
+	if (bTakedownMontageActive) return false;
+	// Gate rather than cancel: the traversal montage's stop-all would kill the injection montage
+	// while the window (and its weapon hide) keeps running, leaving empty hands until it expires —
+	// and cancelling the stim instead would forfeit the heal.
+	if (IsUsingStim()) return false;
 	if (IsInTraversal()) return false;
 	if (!IsValid(TraversalComponent)) return false;
 
@@ -590,38 +755,50 @@ bool AExtractionPlayer::TryStartTraversal()
 
 // ---- Traversal Callbacks ----
 
+UAnimMontage* AExtractionPlayer::GetTraversalMontage(ETraversalType Type) const
+{
+	switch (Type)
+	{
+	case ETraversalType::Vault:  return VaultMontage;
+	case ETraversalType::Climb:  return ClimbMontage;
+	case ETraversalType::Mantle: return MantleMontage;
+	default: return nullptr;
+	}
+}
+
+bool AExtractionPlayer::HasTraversalMontage(ETraversalType Type) const
+{
+	return GetTraversalMontage(Type) != nullptr;
+}
+
 void AExtractionPlayer::HandleTraversalStarted(ETraversalType Type, float PlayRate, FVector /*ObstacleLocation*/, FVector /*LandingLocation*/)
 {
 	if (bIsDBNO) return;
 
 	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] HandleTraversalStarted type=%d playRate=%.2f"), (int32)Type, PlayRate);
 
-	UExtractionAnimInstance* AnimInst = CachedAnimInstance;
-	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] CachedAnimInstance is %s"), *GetNameSafe(AnimInst));
-	if (!IsValid(AnimInst)) return;
+	// The body mesh runs the pristine kit ABP_Manny (plain UAnimInstance) — montages come from
+	// the designer-assigned properties, played on the generic instance's TraversalSlot.
+	UAnimMontage* Montage = GetTraversalMontage(Type);
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
 
-	switch (Type)
+	// StartTraversal already switched to MOVE_Flying/no-collision, and only the montage end
+	// delegate restores it promptly (the worst-case timer is seconds away) — if the montage
+	// can't play, end the traversal on the spot instead of stranding the player.
+	if (!IsValid(AnimInst) || !Montage || AnimInst->Montage_Play(Montage, PlayRate) <= 0.f)
 	{
-	case ETraversalType::Vault:
-		AnimInst->PlayVaultMontage(PlayRate);
-		UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] PlayVaultMontage called"));
-		break;
-	case ETraversalType::Climb:
-		AnimInst->PlayClimbMontage(PlayRate);
-		UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] PlayClimbMontage called"));
-		break;
-	case ETraversalType::Mantle:
-		AnimInst->PlayMantleMontage(PlayRate);
-		UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] PlayMantleMontage called"));
-		break;
-	default: break;
+		UE_LOG(LogExtraction, Warning, TEXT("[VAULT_DEBUG] traversal montage unavailable (type=%d montage=%s animinst=%s) — ending traversal"),
+			(int32)Type, *GetNameSafe(Montage), *GetNameSafe(AnimInst));
+		if (IsValid(TraversalComponent))
+			TraversalComponent->EndTraversal();
+		return;
 	}
 
 	FOnMontageEnded EndDelegate;
 	EndDelegate.BindUObject(this, &AExtractionPlayer::OnTraversalMontageEnded);
-	AnimInst->Montage_SetEndDelegate(EndDelegate, AnimInst->GetCurrentActiveMontage());
-	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] End delegate bound to active montage=%s"),
-		*GetNameSafe(AnimInst->GetCurrentActiveMontage()));
+	AnimInst->Montage_SetEndDelegate(EndDelegate, Montage);
+	UE_LOG(LogExtraction, Verbose, TEXT("[VAULT_DEBUG] End delegate bound to montage=%s"), *GetNameSafe(Montage));
 }
 
 void AExtractionPlayer::OnTraversalMontageEnded(UAnimMontage* Montage, bool bInterrupted)
@@ -634,6 +811,18 @@ void AExtractionPlayer::HandleTraversalEnded()
 {
 	// No sprint state to restore — kit BP owns sprint.
 	UE_LOG(LogExtraction, Verbose, TEXT("'%s' traversal ended"), *GetNameSafe(this));
+
+	// Abnormal end (DBNO cancel, worst-case timer): stop any still-playing traversal montage
+	// so its root motion can't drag the walking character, and so its end delegate can't fire
+	// late into a NEW traversal (it lands while ActiveTraversalType is None and no-ops).
+	USkeletalMeshComponent* MeshComp = GetMesh();
+	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
+	if (!IsValid(AnimInst)) return;
+	for (UAnimMontage* Montage : { VaultMontage.Get(), ClimbMontage.Get(), MantleMontage.Get() })
+	{
+		if (Montage && AnimInst->Montage_IsPlaying(Montage))
+			AnimInst->Montage_Stop(0.25f, Montage);
+	}
 }
 
 ETraversalType AExtractionPlayer::GetActiveTraversalType() const
@@ -679,6 +868,22 @@ namespace
 		const float Opposing = FVector::DotProduct(Push, InputDir);
 		return (Opposing < 0.f) ? (Push - InputDir * Opposing) : Push;
 	}
+
+	// A companion can appear after the last scan (the VIP is placed, but a respawn is a spawn), and
+	// TActorIterator walks the whole level — far too heavy for the player's per-frame tick.
+	// File-distinct names: anonymous namespaces merge inside a unity blob, and ExtracteeCharacter.cpp
+	// declares its own CompanionRescanInterval/ExpectedCompanionCount pair.
+	constexpr float SoftCollisionRescanInterval = 2.f;
+
+	// Primary + armed VIP. Sized once on the first build; Reset() then keeps the slack, so the
+	// Reserve is a deliberate no-op on every rebuild after that and none of them reallocate.
+	constexpr int32 ExpectedSoftCollisionCompanionCount = 2;
+
+	// One escort civilian per mission.
+	constexpr int32 ExpectedAllyExtracteeCount = 1;
+
+	// Self + primary + armed VIP + escort, each with room for a weapon and a couple of attachments.
+	constexpr int32 ExpectedInteractIgnoreCount = 12;
 }
 
 void AExtractionPlayer::UpdateCompanionSoftCollision()
@@ -686,18 +891,35 @@ void AExtractionPlayer::UpdateCompanionSoftCollision()
 	if (GetIsDBNO() || bIsReviving) return;
 	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy()) return;
 
-	if (!IsValid(CompanionCommandComponent)) return;
+	// Two passes rather than one loop: only the primary carries the respawn re-wire, and a bail-out
+	// on the primary (no command component, capsule gone) must not take the VIP's wiring with it.
+	// Both return their push instead of applying it so they sum into ONE AddMovementInput: two
+	// saturated pushes at CompanionPushStrength each swamp the player's own unit input vector, and
+	// CMC's ScaleInputAcceleration clamps the total — the player would keep a fraction of their
+	// intended direction and get shoved sideways at full walk speed in exactly the corridor this
+	// separation work targets.
+	FVector Push = UpdatePrimaryCompanionSoftCollision();
+	Push += UpdateAllyCompanionSoftCollision();
+	if (Push.IsNearlyZero()) return;
+
+	AddMovementInput(Push.GetClampedToMaxSize(CompanionPushStrength), 1.f);
+}
+
+FVector AExtractionPlayer::UpdatePrimaryCompanionSoftCollision()
+{
+	if (!IsValid(CompanionCommandComponent)) return FVector::ZeroVector;
 	ACompanionCharacter* Companion = CompanionCommandComponent->GetCompanion();
-	if (!IsValid(Companion)) return;
+	if (!IsValid(Companion)) return FVector::ZeroVector;
 
 	UCapsuleComponent* CompCapsule = Companion->GetCapsuleComponent();
-	if (!IsValid(CompCapsule) || CompCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) return;
+	if (!IsValid(CompCapsule) || CompCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) return FVector::ZeroVector;
 
-	// Old-companion-instance cleanup only (respawn swap) — the live pair's ignore flags are
-	// asserted unconditionally below, every tick, instead of latch-gated on this. A latch-gated
-	// one-time wire never noticed BTTask_RevivePlayer's SetReviveAnimsActive(false) stripping the
-	// player's ignore of the companion at hold teardown (MoveIgnoreActorRemove on both capsules) —
-	// pass-through stayed broken for the rest of the level after the first companion-revives-player.
+	// Old-companion-instance cleanup only (respawn swap) — the live pair's ignore flags are asserted
+	// unconditionally by ApplyCompanionSoftCollision, every tick, instead of latch-gated on this. A
+	// latch-gated one-time wire never noticed BTTask_RevivePlayer's SetReviveAnimsActive(false)
+	// stripping the player's ignore of the companion at hold teardown (MoveIgnoreActorRemove on both
+	// capsules) — pass-through stayed broken for the rest of the level after the first
+	// companion-revives-player.
 	if (WiredCompanion.Get() != Companion)
 	{
 		if (ACompanionCharacter* Old = WiredCompanion.Get())
@@ -709,30 +931,123 @@ void AExtractionPlayer::UpdateCompanionSoftCollision()
 		WiredCompanion = Companion;
 	}
 
-	// Idempotent per-tick assert (self-heals any external clear, e.g. the revive teardown above):
-	// the player still ignores the companion (existing pass-through feel); the companion no longer
-	// ignores the player, so ITS movement sweeps block against the player's capsule — CMC
-	// wall-slide walks it around instead of shoving through (asymmetric blocking, F2).
-	GetCapsuleComponent()->IgnoreActorWhenMoving(Companion, true);
-	CompCapsule->IgnoreActorWhenMoving(this, false);
+	return ApplyCompanionSoftCollision(*Companion, *CompCapsule);
+}
 
-	FVector Delta = GetActorLocation() - Companion->GetActorLocation();
+FVector AExtractionPlayer::UpdateAllyCompanionSoftCollision()
+{
+	// Kept despite Tick refreshing first: interval-gated, so the second call of the frame is a float
+	// compare, and this pass then never depends on its caller having refreshed for it.
+	RefreshAllyCache();
+
+	FVector Push = FVector::ZeroVector;
+	for (const TWeakObjectPtr<ACompanionCharacter>& Entry : SoftCollisionCompanions)
+	{
+		ACompanionCharacter* Ally = Entry.Get();
+		if (!IsValid(Ally)) continue;
+		if (Ally->IsPrimaryCompanion()) continue; // the pass above owns it, via the command component
+
+		// Unpossessed = the VIP still captive at his placed spot. He is set dressing until rescued,
+		// so leave him solid: pass-through would let the player stand inside a kneeling hostage for
+		// the whole rescue hold. He starts blocking-free the frame the rescue possesses him.
+		if (!Ally->GetController()) continue;
+
+		UCapsuleComponent* AllyCapsule = Ally->GetCapsuleComponent();
+		if (!IsValid(AllyCapsule) || AllyCapsule->GetCollisionEnabled() == ECollisionEnabled::NoCollision) continue;
+
+		Push += ApplyCompanionSoftCollision(*Ally, *AllyCapsule);
+	}
+
+	return Push;
+}
+
+void AExtractionPlayer::RefreshAllyCache()
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+
+	auto HasStaleEntry = [](const auto& Entries)
+	{
+		for (const auto& Entry : Entries)
+		{
+			if (!Entry.IsValid()) return true;
+		}
+		return false;
+	};
+
+	// Rebuild on the interval, plus immediately when an entry goes stale or an ally spawned. Interval-
+	// gated rather than empty-gated: before any ally exists an empty-list trigger would re-walk every
+	// actor in the level on every frame of the player's tick. Short-circuit order matters — the two
+	// staleness walks only run once the cheap checks have both declined.
+	const float Now = World->GetTimeSeconds();
+	const bool bRebuild = bAllyCacheDirty
+		|| (Now - LastCompanionScanTime) >= SoftCollisionRescanInterval
+		|| HasStaleEntry(SoftCollisionCompanions)
+		|| HasStaleEntry(AllyExtractees);
+	if (!bRebuild) return;
+
+	LastCompanionScanTime = Now;
+	bAllyCacheDirty = false;
+
+	SoftCollisionCompanions.Reset();
+	SoftCollisionCompanions.Reserve(ExpectedSoftCollisionCompanionCount);
+	AllyExtractees.Reset();
+	AllyExtractees.Reserve(ExpectedAllyExtracteeCount);
+
+	// Single pass: ACompanionCharacter and AExtracteeCharacter are both ACharacter subclasses on
+	// separate branches, so one iterator with two casts covers both collections in one walk.
+	for (TActorIterator<ACharacter> It(World); It; ++It)
+	{
+		if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(*It))
+		{
+			SoftCollisionCompanions.Add(Companion);
+		}
+		else if (AExtracteeCharacter* Extractee = Cast<AExtracteeCharacter>(*It))
+		{
+			AllyExtractees.Add(Extractee);
+		}
+	}
+}
+
+void AExtractionPlayer::HandleActorSpawned(AActor* SpawnedActor)
+{
+	if (!SpawnedActor) return;
+
+	// Fires for every spawn in the level, so this stays two class-chain walks and a flag write — the
+	// actual rescan is deferred to the next RefreshAllyCache. Nothing may touch the actor here: the
+	// broadcast lands mid-SpawnActor, before BeginPlay.
+	if (!SpawnedActor->IsA<ACompanionCharacter>() && !SpawnedActor->IsA<AExtracteeCharacter>()) return;
+
+	bAllyCacheDirty = true;
+}
+
+FVector AExtractionPlayer::ApplyCompanionSoftCollision(ACompanionCharacter& Companion, UCapsuleComponent& CompanionCapsule)
+{
+	// Idempotent per-tick assert (self-heals any external clear, e.g. BTTask_RevivePlayer's hold
+	// teardown): MUTUAL ignores, as the original soft pass-through shipped them. Neither body's
+	// movement sweeps see the other, so neither can shove the other around — the separation is the
+	// soft push below and nothing else. The asymmetric variant (companion blocking against the
+	// player, so CMC wall-slide would walk it around) is what shoved the companion whenever the
+	// player stood inside them, and parked its capsule on the crouched player. Don't reintroduce it.
+	GetCapsuleComponent()->IgnoreActorWhenMoving(&Companion, true);
+	CompanionCapsule.IgnoreActorWhenMoving(this, true);
+
+	FVector Delta = GetActorLocation() - Companion.GetActorLocation();
 	Delta.Z = 0.f;
 
 	const float CombinedRadius = GetCapsuleComponent()->GetScaledCapsuleRadius()
-		+ CompCapsule->GetScaledCapsuleRadius()
+		+ CompanionCapsule.GetScaledCapsuleRadius()
 		+ CompanionPushPadding;
 
 	const float Dist = Delta.Size();
-	if (Dist >= CombinedRadius) return;
+	if (Dist >= CombinedRadius) return FVector::ZeroVector;
 
 	FVector PushDir = (Dist > KINDA_SMALL_NUMBER) ? (Delta / Dist) : GetActorRightVector();
 	PushDir.Z = 0.f;
 	PushDir = PushDir.GetSafeNormal();
 
 	const float DepthFraction = 1.f - (Dist / CombinedRadius);
-	const FVector Push = StripOpposingPush(PushDir * (CompanionPushStrength * DepthFraction), GetLastMovementInputVector());
-	AddMovementInput(Push, 1.f);
+	return StripOpposingPush(PushDir * (CompanionPushStrength * DepthFraction), GetLastMovementInputVector());
 }
 
 // ---- Auto-Lean ----
@@ -794,17 +1109,23 @@ void AExtractionPlayer::UpdateAutoLean(float DeltaTime)
 void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 {
 	if (bIsDBNO) return;
-	// Mid-takedown E would start the revive: the kneel's stop-all Montage_Play kills the takedown
+	// Mid-takedown F would start the revive: the kneel's stop-all Montage_Play kills the takedown
 	// montage (orphaning the victim) and the seat snap flips the capsule mid-kill.
 	if (bTakedownMontageActive) return;
-	// Mid-traversal E is the reverse of TryStartTraversal's bIsReviving guard: the revive hold
+	// Mid-traversal F is the reverse of TryStartTraversal's bIsReviving guard: the revive hold
 	// would snapshot bUseControllerRotationYaw while traversal already holds it false, and
 	// its restore then leaves yaw-follow stuck off — the body stops tracking the camera and the
 	// kit's turn/aim layers contort the pose (the "player floats at doors" latch).
 	if (IsInTraversal()) return;
+	// The last hand-owning action after fire/ADS/reload/equip: looting a weapon runs
+	// ReplaceSlotWeapon -> SetActiveWeapon, which shows the gun the injection just hid, and
+	// nothing re-asserts the hide for the rest of the window.
+	if (IsUsingStim()) return;
 	if (!IsLocallyControlled()) return;
 
 	if (bIsReviving) return;
+	// Repeat-fire on a held key must not restart the clock from zero.
+	if (bIsInteractHolding) return;
 
 	// World interactions (loot container / keycard door) win over the revive hold.
 	if (TryWorldInteract()) return;
@@ -818,15 +1139,76 @@ void AExtractionPlayer::InteractStart(const FInputActionValue& Value)
 void AExtractionPlayer::InteractStop(const FInputActionValue& Value)
 {
 	if (!IsLocallyControlled()) return;
+
+	if (bIsInteractHolding)
+	{
+		UE_LOG(LogExtraction, Log, TEXT("Interact hold cancel: F released at %.2fs / %.2fs on '%s'"),
+			InteractHoldElapsed, InteractHoldDuration, *GetNameSafe(InteractHoldTarget));
+		CancelInteractHold();
+		return;
+	}
+
 	if (!bIsReviving) return;
 
-	UE_LOG(LogExtraction, Log, TEXT("Revive cancel: E released at %.2fs / %.2fs"), ReviveElapsed, ReviveDuration);
+	UE_LOG(LogExtraction, Log, TEXT("Revive cancel: F released at %.2fs / %.2fs"), ReviveElapsed, ReviveDuration);
 	CancelRevive();
 }
 
-bool AExtractionPlayer::TryWorldInteract()
+const TArray<AActor*>& AExtractionPlayer::GetInteractTraceIgnoredActors() const
 {
-	UWorld* World = GetWorld();
+	// Reuse the member buffer: Reset() keeps the allocation from the first Reserve, so the two
+	// C++ callers (TraceInteractHit and the ping trace in the command component) never
+	// heap-allocate after the first call.
+	CachedInteractIgnored.Reset();
+	CachedInteractIgnored.Reserve(ExpectedInteractIgnoreCount);
+
+	// Index 0 is this player, so the array can drop straight into a Blueprint ignore list that
+	// previously held only the pawn. const_cast: trace params and Blueprint both take non-const
+	// actors, and every consumer of this list does nothing but compare pointers.
+	CachedInteractIgnored.Add(const_cast<AExtractionPlayer*>(this));
+
+	// Read-only over the rescan cache — Tick owns the refresh (see RefreshAllyCache).
+	// DBNO / CanWorldInteract filtering is applied per call in AppendAllyInteractIgnore so
+	// dynamic state changes are always current, not stale from the last cache rebuild.
+	for (const TWeakObjectPtr<ACompanionCharacter>& Entry : SoftCollisionCompanions)
+		AppendAllyInteractIgnore(Entry.Get(), CachedInteractIgnored);
+
+	for (const TWeakObjectPtr<AExtracteeCharacter>& Entry : AllyExtractees)
+		AppendAllyInteractIgnore(Entry.Get(), CachedInteractIgnored);
+
+	return CachedInteractIgnored;
+}
+
+void AExtractionPlayer::AppendAllyInteractIgnore(AActor* Ally, TArray<AActor*>& OutIgnored) const
+{
+	if (!IsValid(Ally)) return;
+
+	// A downed companion must block the interact trace so the revive press reaches FindReviveTarget
+	// instead of punching through to a loot container behind. AExtracteeCompanion inherits from
+	// ACompanionCharacter, so this covers the armed VIP as well.
+	if (const ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Ally))
+		if (Companion->GetIsCompanionDBNO()) return;
+
+	// An ally that is the interact TARGET stays traceable: the captive VIP and the unrescued escort
+	// are both IWorldInteractable, and ignoring them would make the rescue press impossible. Both
+	// refuse CanWorldInteract once rescued, so they join the ignore set from that frame — which is
+	// also why no possession hook is needed for the VIP, only for allies that spawn at runtime.
+	if (Ally->Implements<UWorldInteractable>()
+		&& IWorldInteractable::Execute_CanWorldInteract(Ally, const_cast<AExtractionPlayer*>(this)))
+		return;
+
+	OutIgnored.Add(Ally);
+
+	// Attachments occlude in their own right: the C++ WeaponMesh is NoCollision, so anything solid on
+	// an ally is a BP-added component or an attached actor. Recursive — a sight attached to an attached
+	// weapon blocks the ray just as well. The companion's own LoS traces append the same set (see
+	// BTService_UpdateCompanionState, where the inclusion is called load-bearing).
+	Ally->GetAttachedActors(OutIgnored, /*bResetArray*/ false, /*bRecursivelyIncludeAttachedActors*/ true);
+}
+
+bool AExtractionPlayer::TraceInteractHit(FHitResult& OutHit) const
+{
+	const UWorld* World = GetWorld();
 	if (!World) return false;
 
 	// Controller view point tracks CalcCamera (kit-driven FP camera) — more accurate than eyes.
@@ -835,20 +1217,82 @@ bool AExtractionPlayer::TryWorldInteract()
 	if (const AController* C = GetController())
 		C->GetPlayerViewPoint(ViewLoc, ViewRot);
 
-	FHitResult Hit;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(PlayerInteract), false, this);
+	// Allies must not swallow the ray. Their meshes BLOCK ECC_Visibility (that block is what makes
+	// them take hitscan damage, so it stays), which meant an ally standing between the player and a
+	// container produced the nearer hit, won the comparison below, and handed TryWorldInteract an actor
+	// implementing neither interaction interface — the press then silently did nothing. The nearer-hit
+	// rule itself is untouched: it is what stops the player interacting through walls.
+	Params.AddIgnoredActors(GetInteractTraceIgnoredActors());
+
 	const FVector TraceEnd = ViewLoc + ViewRot.Vector() * InteractTraceRange;
-	if (!World->LineTraceSingleByChannel(Hit, ViewLoc, TraceEnd, ECC_Visibility, Params)) return false;
+
+	// Two passes over the same ray: solid world interactables on Visibility, plus the dedicated
+	// Interact channel that invisible loot volumes block (they must stay out of the Visibility
+	// channel — AI sight and cover generation live there). Nearer hit wins; either one counts.
+	FHitResult VisibilityHit;
+	const bool bHitVisibility = World->LineTraceSingleByChannel(VisibilityHit, ViewLoc, TraceEnd, ECC_Visibility, Params);
+
+	FHitResult InteractHit;
+	const bool bHitInteract = World->LineTraceSingleByChannel(
+		InteractHit, ViewLoc, TraceEnd, ExtractionInteraction::InteractTraceChannel, Params);
+
+	if (!bHitVisibility && !bHitInteract) return false;
+	if (!bHitInteract) { OutHit = VisibilityHit; return true; }
+	if (!bHitVisibility) { OutHit = InteractHit; return true; }
+
+	OutHit = InteractHit.Distance <= VisibilityHit.Distance ? InteractHit : VisibilityHit;
+	return true;
+}
+
+AActor* AExtractionPlayer::TraceInteractableUnderCrosshair() const
+{
+	FHitResult Hit;
+	if (!TraceInteractHit(Hit)) return nullptr;
+
+	AActor* HitActor = Hit.GetActor();
+	if (!IsValid(HitActor) || !HitActor->Implements<UWorldInteractable>()) return nullptr;
+
+	// const_cast: the interface Execute_ wrappers take a non-const interactor, and the scan path
+	// that needs this helper is itself const. The call is a pure query.
+	return IWorldInteractable::Execute_CanWorldInteract(HitActor, const_cast<AExtractionPlayer*>(this))
+		? HitActor : nullptr;
+}
+
+bool AExtractionPlayer::TryWorldInteract()
+{
+	FHitResult Hit;
+	if (!TraceInteractHit(Hit)) return false;
 
 	AActor* HitActor = Hit.GetActor();
 	if (!IsValid(HitActor)) return false;
 
-	// Generic world interactable — extraction targets, terminals, etc.
+	// Generic world interactable — extraction targets, the captive VIP, terminals, etc.
 	if (HitActor->Implements<UWorldInteractable>() && IWorldInteractable::Execute_CanWorldInteract(HitActor, this))
 	{
+		// Hold-gated interactables open the hold instead of firing; the press is consumed either way.
+		const float HoldSeconds = IWorldInteractable::Execute_GetWorldInteractHoldSeconds(HitActor, this);
+		if (HoldSeconds > 0.f)
+		{
+			InteractHoldTarget = HitActor;
+			InteractHoldDuration = HoldSeconds;
+			InteractHoldElapsed = 0.f;
+			bIsInteractHolding = true;
+
+			// The under-the-hold beat (scripted VO) is authority-side, like the interaction itself.
+			if (HasAuthority())
+				IWorldInteractable::Execute_OnWorldInteractHoldStarted(HitActor, this);
+			else
+				Server_BeginWorldInteractHold(HitActor);
+
+			UE_LOG(LogExtraction, Log, TEXT("Interact hold start: '%s' (%.2fs)"),
+				*GetNameSafe(HitActor), HoldSeconds);
+			return true;
+		}
+
 		if (HasAuthority())
 		{
-			IWorldInteractable::Execute_WorldInteract(HitActor, this);
+			CommitWorldInteract(HitActor);
 		}
 		else
 		{
@@ -892,7 +1336,105 @@ void AExtractionPlayer::Server_WorldInteract_Implementation(AActor* Target)
 		return;
 	}
 
+	CommitWorldInteract(Target);
+}
+
+void AExtractionPlayer::Server_BeginWorldInteractHold_Implementation(AActor* Target)
+{
+	if (!IsValid(Target)) return;
+	if (!Target->Implements<UWorldInteractable>()) return;
+	if (!IWorldInteractable::Execute_CanWorldInteract(Target, this)) return;
+	if (IWorldInteractable::Execute_GetWorldInteractHoldSeconds(Target, this) <= 0.f) return;
+
+	const float MaxDistSq = FMath::Square(InteractTraceRange + WorldInteractDistanceSlack);
+	if (Target->GetComponentsBoundingBox().ComputeSquaredDistanceToPoint(GetActorLocation()) > MaxDistSq)
+	{
+		UE_LOG(LogExtraction, Warning, TEXT("Server_BeginWorldInteractHold: '%s' too far from '%s'"),
+			*GetNameSafe(this), *GetNameSafe(Target));
+		return;
+	}
+
+	IWorldInteractable::Execute_OnWorldInteractHoldStarted(Target, this);
+}
+
+void AExtractionPlayer::UpdateInteractHold(float DeltaTime)
+{
+	// Same guards that block a start, re-checked every frame — a hold that outlives its
+	// preconditions must not commit the interaction when the clock runs out.
+	auto AbortIf = [this](bool bCondition, const TCHAR* Reason)
+	{
+		if (!bCondition) return false;
+		UE_LOG(LogExtraction, Log, TEXT("Interact hold cancel: %s at %.2fs / %.2fs on '%s'"),
+			Reason, InteractHoldElapsed, InteractHoldDuration, *GetNameSafe(InteractHoldTarget));
+		CancelInteractHold();
+		return true;
+	};
+
+	if (AbortIf(bIsDBNO, TEXT("player went DBNO"))) return;
+	if (AbortIf(bTakedownMontageActive, TEXT("takedown started"))) return;
+	if (AbortIf(IsInTraversal(), TEXT("traversal started"))) return;
+	if (AbortIf(!IsValid(InteractHoldTarget), TEXT("target destroyed"))) return;
+	if (AbortIf(!IWorldInteractable::Execute_CanWorldInteract(InteractHoldTarget, this),
+		TEXT("target refused interaction"))) return;
+
+	// Walking away cancels; looking away does not — a five-second hold that breaks on every
+	// stray mouse twitch is unusable.
+	const float MaxDistSq = FMath::Square(InteractTraceRange + WorldInteractDistanceSlack);
+	if (AbortIf(InteractHoldTarget->GetComponentsBoundingBox().ComputeSquaredDistanceToPoint(GetActorLocation()) > MaxDistSq,
+		TEXT("walked out of range"))) return;
+
+	InteractHoldElapsed += DeltaTime;
+	if (InteractHoldElapsed < InteractHoldDuration) return;
+
+	AActor* Target = InteractHoldTarget;
+	UE_LOG(LogExtraction, Log, TEXT("Interact hold complete: '%s' (%.2fs)"), *GetNameSafe(Target), InteractHoldDuration);
+
+	// State resets BEFORE the commit — WorldInteract can destroy or re-configure the target.
+	CancelInteractHold();
+
+	if (HasAuthority())
+		CommitWorldInteract(Target);
+	else
+		Server_WorldInteract(Target);
+}
+
+void AExtractionPlayer::CommitWorldInteract(AActor* Target)
+{
+	if (!IsValid(Target)) return;
+
+	// Deliberately does NOT raise the world-interact notify. IWorldInteractable returns no success
+	// signal, and several implementers accept the call and refuse the action (a locked lift toasts
+	// "eliminate remaining enemies" and returns). Each interactable raises the notify from its own
+	// success branch instead, so a beat can never be ticked off by a refused press.
 	IWorldInteractable::Execute_WorldInteract(Target, this);
+}
+
+void AExtractionPlayer::CancelInteractHold()
+{
+	if (!bIsInteractHolding) return;
+
+	bIsInteractHolding = false;
+	InteractHoldElapsed = 0.f;
+	InteractHoldDuration = 0.f;
+	InteractHoldTarget = nullptr;
+}
+
+void AExtractionPlayer::UpdateInteractCandidateScan(float DeltaTime)
+{
+	InteractCandidateScanAccumulator += DeltaTime;
+	if (InteractCandidateScanAccumulator < 0.1f) return;
+	InteractCandidateScanAccumulator = 0.f;
+
+	// While the hold runs the prompt stays pinned to the held target (progress bar); a downed
+	// player interacts with nothing.
+	AActor* Candidate = nullptr;
+	if (bIsInteractHolding) Candidate = InteractHoldTarget;
+	else if (!bIsDBNO && !bIsReviving) Candidate = TraceInteractableUnderCrosshair();
+
+	InteractCandidate = Candidate;
+	InteractCandidatePrompt = IsValid(Candidate)
+		? IWorldInteractable::Execute_GetWorldInteractionPrompt(Candidate, this)
+		: FText::GetEmpty();
 }
 
 void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
@@ -1065,9 +1607,10 @@ void AExtractionPlayer::CompanionConfirmBreachInput(const FInputActionValue& /*V
 	// One confirm key — routes to whatever the ping prompt is showing.
 	switch (CompanionCommandComponent->GetPendingCommand())
 	{
-	case ECompanionCommand::Loot:    CompanionCommandComponent->ConfirmLoot();    break;
-	case ECompanionCommand::Explore: CompanionCommandComponent->ConfirmExplore(); break;
-	default:                         CompanionCommandComponent->ConfirmBreach();  break;
+	case ECompanionCommand::Loot:      CompanionCommandComponent->ConfirmLoot();      break;
+	case ECompanionCommand::Explore:   CompanionCommandComponent->ConfirmExplore();   break;
+	case ECompanionCommand::TakeCover: CompanionCommandComponent->ConfirmTakeCover(); break;
+	default:                           CompanionCommandComponent->ConfirmBreach();    break;
 	}
 }
 
@@ -1095,15 +1638,78 @@ void AExtractionPlayer::CompanionModeSelectCombatInput(const FInputActionValue& 
 	CompanionCommandComponent->SelectCompanionMode(ECompanionMode::Combat);
 }
 
+void AExtractionPlayer::CompanionCoverMeInput(const FInputActionValue& /*Value*/)
+{
+	if (!IsValid(CompanionCommandComponent)) return;
+	CompanionCommandComponent->TriggerCoverMe();
+}
+
 void AExtractionPlayer::UseStimInput(const FInputActionValue& /*Value*/)
 {
-	if (IsValid(ConsumableInventoryComponent))
-		ConsumableInventoryComponent->TryUseStim();
+	// Same gate as fire/ADS/reload: an injection montage owns the upper body, so it must not start
+	// on top of a revive hold or a traversal montage that already does.
+	if (bIsDBNO) return;
+	if (bIsReviving || bBeingRevivedAnimActive) return;
+	if (IsInTraversal()) return;
+	if (!IsValid(ConsumableInventoryComponent)) return;
+
+	ConsumableInventoryComponent->TryUseStim();
+}
+
+bool AExtractionPlayer::IsUsingStim() const
+{
+	return IsValid(ConsumableInventoryComponent) && ConsumableInventoryComponent->IsUsingStim();
 }
 
 void AExtractionPlayer::HandleStimUsed()
 {
+	// The injection owns the hands from here. Pre-empt an in-flight reload first: the reload's
+	// detached magazine actor is a separate spawned mesh the weapon-hide does not cover, so it
+	// floats through the injection animation. Placed here (not UseStimInput) because
+	// HandleStimUsed only fires after the authority confirms the stim, so a refused press
+	// (empty pouch, full health) never cancels a reload the player intended to keep.
+	if (IsValid(WeaponComponent))
+	{
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
+			Weapon->AbortFireAndReload();
+
+		if (WeaponComponent->IsAiming())
+		{
+			WeaponComponent->SetAiming(false);
+			OnADSChanged(false);
+		}
+	}
+	bAutoLeanActive = false;
+	AutoLeanTargetAlpha = 0.f;
+
+	// Hide after the ADS/pose drop: OnADSChanged drives the kit's NewHandPose, which can re-show
+	// the hand-socket item a hide-first ordering just hid.
+	SetHeldWeaponHidden(true);
+
 	OnStimUsed();
+}
+
+void AExtractionPlayer::HandleStimUseEnded()
+{
+	// Only undo the injection's own hide. A stim cancelled INTO a down or a revive hold would
+	// otherwise un-hide the gun those states just hid, and nothing re-hides it afterwards.
+	if (!bIsDBNO && !bBeingRevivedAnimActive && !bIsReviving)
+		SetHeldWeaponHidden(false);
+
+	OnStimUseEnded();
+}
+
+void AExtractionPlayer::CancelStimUse()
+{
+	if (!IsValid(ConsumableInventoryComponent)) return;
+
+	// Off authority the only caller is OnRep_IsDBNO, which is mirroring a cancel the server has
+	// ALREADY made (EnterDBNO ran there first) — so it takes the local teardown. The component's
+	// public cancel is authority-only and would refuse it.
+	if (HasAuthority())
+		ConsumableInventoryComponent->CancelStimUse();
+	else
+		ConsumableInventoryComponent->CancelStimUseLocally();
 }
 
 void AExtractionPlayer::FinishPendingTakedown()
@@ -1194,6 +1800,30 @@ void AExtractionPlayer::HandleDeath()
 	EnterDBNO();
 }
 
+void AExtractionPlayer::OnStartCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnStartCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	PlayCrouchFoley();
+}
+
+void AExtractionPlayer::OnEndCrouch(float HalfHeightAdjust, float ScaledHalfHeightAdjust)
+{
+	Super::OnEndCrouch(HalfHeightAdjust, ScaledHalfHeightAdjust);
+	PlayCrouchFoley();
+}
+
+void AExtractionPlayer::PlayCrouchFoley() const
+{
+	// Stance-change cloth only for deliberate crouch toggles — slides, prone shuffles and the
+	// DBNO capsule shrink all route through Crouch/UnCrouch too and must stay silent here.
+	if (GetIsDBNO() || GetIsProne() || GetIsSliding()) return;
+
+	const UWorld* World = GetWorld();
+	UGameAudioSubsystem* AudioSys = World ? World->GetSubsystem<UGameAudioSubsystem>() : nullptr;
+	if (AudioSys && AudioSys->GetBank())
+		AudioSys->Play2D(AudioSys->GetBank()->CrouchFoley);
+}
+
 void AExtractionPlayer::EnterDBNO()
 {
 	if (bIsDBNO) return;
@@ -1205,6 +1835,12 @@ void AExtractionPlayer::EnterDBNO()
 
 	// Cancel active revive (downed player can't finish reviving someone)
 	if (bIsReviving) CancelRevive();
+	CancelInteractHold();
+	CancelStimUse();
+
+	// Fresh down, fresh arbitration — a claim left over from a previous DBNO would lock the wrong
+	// ally out until its capability test happened to fail.
+	ReviveClaimant.Reset();
 
 	// IsBusy covers approach phase + mid-vault
 	if (IsValid(TraversalComponent) && TraversalComponent->IsBusy())
@@ -1221,6 +1857,21 @@ void AExtractionPlayer::EnterDBNO()
 		if (MoveComp->GetNavAgentPropertiesRef().bCanCrouch) Crouch();
 	}
 
+	// Drop weapon state before hiding: the ADS/pose events can re-show the hand-socket item
+	// if they fire after the hide (same ordering rule as SetReviveAnimsActive).
+	if (IsValid(WeaponComponent))
+	{
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
+		{
+			Weapon->AbortFireAndReload();
+			Weapon->CancelRecoilRecovery();
+		}
+		WeaponComponent->SetAiming(false);
+		OnADSChanged(false);
+	}
+	SetHeldWeaponHidden(true);
+	SetDBNOMovementProfile(true);
+
 	// Start bleedout timer (server only)
 	if (HasAuthority())
 	{
@@ -1235,19 +1886,19 @@ void AExtractionPlayer::EnterDBNO()
 				BleedoutDuration, false);
 		}
 
-		// Both-DBNO check: if the companion is also downed, immediate mission fail
-		for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It)
+		// Squad-wipe check: fail only when NO companion can still pick the squad up (with the
+		// armed extractee in play, one downed ally plus a standing one is not a wipe).
+		if (!ACompanionCharacter::IsAnyCompanionReviveCapable(GetWorld(), nullptr))
 		{
-			if (It->GetIsDBNO())
-			{
-				if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
-					GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
-				break;
-			}
+			if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
+				GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
 		}
 	}
 
 	SetDBNOCameraFreeLook(true);
+
+	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+		AudioSys->StartDBNOAudio();
 
 	OnDBNOStateChanged.Broadcast(true, BleedoutDuration);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' entered DBNO (%.0fs bleedout)"), *GetNameSafe(this), BleedoutDuration);
@@ -1256,12 +1907,17 @@ void AExtractionPlayer::EnterDBNO()
 void AExtractionPlayer::ExitDBNO()
 {
 	if (!bIsDBNO) return;
-	bIsDBNO = false;
+	// bIsDBNO stays set until after UnCrouch() below — OnEndCrouch's foley guard reads it, and
+	// clearing first made every revive stand-up play crouch cloth.
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
 
 	BleedoutTimeRemaining = 0.f;
+
+	// The revive is done — drop the hold unconditionally (not holder-scoped: whoever finished it,
+	// nobody should still own a claim on a player who is back up).
+	ReviveClaimant.Reset();
 
 	if (IsValid(HealthComponent))
 		HealthComponent->Revive(ReviveHealthPercent);
@@ -1277,12 +1933,18 @@ void AExtractionPlayer::ExitDBNO()
 			MoveComp->MaxWalkSpeed = GetClass()->GetDefaultObject<AExtractionPlayer>()->GetCharacterMovement()->MaxWalkSpeed;
 	}
 	UnCrouch();
+	bIsDBNO = false;
 
 	SetBeingRevived(false);
 	SetDBNOCameraFreeLook(false);
+	SetHeldWeaponHidden(false);
+	SetDBNOMovementProfile(false);
 
 	if (const UWorld* World = GetWorld())
 		LastReviveWorldTime = World->GetTimeSeconds();
+
+	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+		AudioSys->StopDBNOAudio();
 
 	OnDBNOStateChanged.Broadcast(false, 0.f);
 	UE_LOG(LogExtraction, Log, TEXT("'%s' revived at %.0f%% health"), *GetNameSafe(this), ReviveHealthPercent * 100.f);
@@ -1298,13 +1960,21 @@ void AExtractionPlayer::OnBleedoutExpired()
 
 void AExtractionPlayer::FullDeath()
 {
-	bIsDBNO = false;
 	BleedoutTimeRemaining = 0.f;
+
+	if (UGameAudioSubsystem* AudioSys = GetWorld()->GetSubsystem<UGameAudioSubsystem>())
+		AudioSys->StopDBNOAudio();
 
 	bAutoLeanActive = false;
 	AutoLeanTargetAlpha = 0.f;
+	// bIsDBNO stays set across CancelStimUse and SetBeingRevived below: both of their
+	// weapon-restore paths are gated on !bIsDBNO, and a corpse must keep the gun hidden.
+	CancelStimUse();
 	SetBeingRevived(false);
+	bIsDBNO = false;
 	SetDBNOCameraFreeLook(false);
+	// Weapon stays hidden — the level-fail flow owns the screen from here.
+	SetDBNOMovementProfile(false);
 
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
@@ -1315,6 +1985,55 @@ void AExtractionPlayer::FullDeath()
 	{
 		if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
 			GM->FailLevel(NSLOCTEXT("Extraction", "PlayerDiedReason", "You died."));
+	}
+}
+
+void AExtractionPlayer::ClampDBNOFreeLook()
+{
+	AController* C = GetController();
+	if (!IsValid(C)) return;
+
+	FRotator ControlRot = C->GetControlRotation();
+	const float BodyYaw = GetActorRotation().Yaw;
+	const float YawDelta = FRotator::NormalizeAxis(ControlRot.Yaw - BodyYaw);
+	const float ClampedYawDelta = FMath::Clamp(YawDelta, -DBNOFreeLookYawLimit, DBNOFreeLookYawLimit);
+	const float Pitch = FRotator::NormalizeAxis(ControlRot.Pitch);
+	const float ClampedPitch = FMath::Clamp(Pitch, DBNOFreeLookPitchMin, DBNOFreeLookPitchMax);
+
+	if (FMath::IsNearlyEqual(YawDelta, ClampedYawDelta) && FMath::IsNearlyEqual(Pitch, ClampedPitch))
+		return;
+
+	ControlRot.Yaw = BodyYaw + ClampedYawDelta;
+	ControlRot.Pitch = ClampedPitch;
+	C->SetControlRotation(ControlRot);
+}
+
+void AExtractionPlayer::SetDBNOMovementProfile(bool bEnable)
+{
+	if (bDBNOMovementProfileActive == bEnable) return;
+
+	UCharacterMovementComponent* MoveComp = GetCharacterMovement();
+	if (!IsValid(MoveComp)) return;
+	bDBNOMovementProfileActive = bEnable;
+
+	if (bEnable)
+	{
+		SavedMaxAcceleration = MoveComp->MaxAcceleration;
+		SavedBrakingDecelerationWalking = MoveComp->BrakingDecelerationWalking;
+		SavedGroundFriction = MoveComp->GroundFriction;
+		bSavedDBNOUseControllerRotationYaw = bUseControllerRotationYaw;
+
+		MoveComp->MaxAcceleration = DBNOCrawlAcceleration;
+		MoveComp->BrakingDecelerationWalking = DBNOCrawlBrakingDeceleration;
+		MoveComp->GroundFriction = DBNOCrawlGroundFriction;
+		bUseControllerRotationYaw = false;
+	}
+	else
+	{
+		MoveComp->MaxAcceleration = SavedMaxAcceleration;
+		MoveComp->BrakingDecelerationWalking = SavedBrakingDecelerationWalking;
+		MoveComp->GroundFriction = SavedGroundFriction;
+		bUseControllerRotationYaw = bSavedDBNOUseControllerRotationYaw;
 	}
 }
 
@@ -1359,30 +2078,45 @@ void AExtractionPlayer::SetBeingRevived(bool bBeingRevived, float ExpectedDurati
 
 	if (bBeingRevived && IsValid(WeaponComponent))
 	{
-		WeaponComponent->StopFire();
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
+			Weapon->AbortFireAndReload();
 		WeaponComponent->SetAiming(false);
 		OnADSChanged(false);
 		bAutoLeanActive = false;
 		AutoLeanTargetAlpha = 0.f;
-		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon()) Weapon->CancelReload();
 	}
 	// After the ADS/pose drops: OnADSChanged drives the kit's NewHandPose, which can re-show
 	// the hand-socket item a hide-first ordering just hid.
-	SetHeldWeaponHidden(bBeingRevived);
+	if (bBeingRevived)
+		SetHeldWeaponHidden(true);
+	else if (!bIsDBNO && !bIsReviving)
+		SetHeldWeaponHidden(false);
 
+	UpdateBeingRevivedMontage(bBeingRevived, ExpectedDuration);
+}
+
+void AExtractionPlayer::UpdateBeingRevivedMontage(bool bPlay, float ExpectedDuration)
+{
 	USkeletalMeshComponent* MeshComp = GetMesh();
 	UAnimInstance* AnimInst = IsValid(MeshComp) ? MeshComp->GetAnimInstance() : nullptr;
 	if (!IsValid(AnimInst) || !BeingRevivedMontage) return;
-	if (bBeingRevived && bIsDBNO)
+
+	if (bPlay && bIsDBNO)
 	{
 		AnimInst->SetRootMotionMode(ERootMotionMode::RootMotionFromMontagesOnly);
+
+		// Match the companion reviver's full-clip-over-hold timing. The anti-snap holdover belongs
+		// to the explicit stop blend below; folding it into the rate visibly slows only the player.
 		const float Length = BeingRevivedMontage->GetPlayLength();
-		const float Rate = ExpectedDuration > 0.f && Length > 0.f ? Length / ExpectedDuration : 1.f;
+		const float Rate = Length > KINDA_SMALL_NUMBER && ExpectedDuration > KINDA_SMALL_NUMBER
+			? FMath::Clamp(Length / ExpectedDuration, 0.1f, 10.f)
+			: 1.f;
 		AnimInst->Montage_Play(BeingRevivedMontage, Rate);
 	}
 	else if (AnimInst->Montage_IsPlaying(BeingRevivedMontage))
 	{
-		AnimInst->Montage_Stop(0.25f, BeingRevivedMontage);
+		const float StopBlendTime = FMath::Max(ReviveMontageHoldoverSeconds, 0.25f);
+		AnimInst->Montage_Stop(StopBlendTime, BeingRevivedMontage);
 	}
 }
 
@@ -1411,7 +2145,11 @@ void AExtractionPlayer::SetBeingRevivedCameraAnimationControl(bool bActive)
 
 void AExtractionPlayer::SetHeldWeaponHidden(bool bHideWeapon)
 {
+	if (bHeldWeaponHidden == bHideWeapon) return;
+	bHeldWeaponHidden = bHideWeapon;
+
 	// SetWeaponHidden, not SetActorHiddenInGame: the visible gun is a separate visual actor.
+	// WeaponBase owns its own visibility snapshot for SpawnedVisualActor descendants.
 	if (IsValid(WeaponComponent))
 	{
 		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
@@ -1419,17 +2157,32 @@ void AExtractionPlayer::SetHeldWeaponHidden(bool bHideWeapon)
 	}
 
 	// The kit's VISIBLE third-person gun is a separate BP-spawned actor (BP_Item_Base's Item_Mesh)
-	// attached to a hand socket — C++ has no direct ref (BP-only SpawnedItemRef), so hide any actor
-	// hanging off the weapon-hand sockets. Covers the gun body + its attachment meshes in one call.
+	// attached to a hand socket -- C++ has no direct ref (BP-only SpawnedItemRef), so hide any actor
+	// hanging off the weapon-hand sockets. Walks the full subtree of each matched actor so spawned
+	// attachment actors (scope, laser) one level deeper are caught.
+	// Symmetric: on hide, snapshot descendants that were already hidden by the owning BP
+	// (variable-driven attachment slots). On show, only restore what this system hid.
 	TArray<AActor*> AttachedActors;
 	GetAttachedActors(AttachedActors);
+
+	if (bHideWeapon)
+		HeldWeaponHiddenSnapshot.Reset();
+
 	for (AActor* Attached : AttachedActors)
 	{
 		const USceneComponent* AttachedRoot = IsValid(Attached) ? Attached->GetRootComponent() : nullptr;
 		const FName Socket = AttachedRoot ? AttachedRoot->GetAttachSocketName() : NAME_None;
 		if (Socket == TEXT("ik_hand_gun") || Socket == TEXT("ItemHand_R") || Socket == TEXT("ItemHand_L"))
-			Attached->SetActorHiddenInGame(bHideWeapon);
+		{
+			if (bHideWeapon)
+				WeaponVisibilityUtils::SnapshotAndHideActorTree(Attached, HeldWeaponHiddenSnapshot);
+			else
+				WeaponVisibilityUtils::RestoreActorTree(Attached, HeldWeaponHiddenSnapshot);
+		}
 	}
+
+	if (!bHideWeapon)
+		HeldWeaponHiddenSnapshot.Reset();
 }
 
 // Reads a float-ish BP variable off an anim instance (UE5 BP floats are doubles).
@@ -1609,16 +2362,15 @@ void AExtractionPlayer::SetReviveAnimsActive(bool bActive)
 {
 	if (bActive && IsValid(WeaponComponent))
 	{
-		WeaponComponent->StopFire();
+		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon(); IsValid(Weapon))
+		{
+			Weapon->AbortFireAndReload();
+			Weapon->CancelRecoilRecovery();
+		}
 		WeaponComponent->SetAiming(false);
 		OnADSChanged(false);
 		bAutoLeanActive = false;
 		AutoLeanTargetAlpha = 0.f;
-		if (AWeaponBase* Weapon = WeaponComponent->GetCurrentWeapon())
-		{
-			Weapon->CancelRecoilRecovery();
-			Weapon->CancelReload();
-		}
 	}
 	// After the ADS/pose drops: OnADSChanged drives the kit's NewHandPose, which can re-show
 	// the hand-socket item a hide-first ordering just hid.
@@ -1713,7 +2465,11 @@ void AExtractionPlayer::OnRep_IsDBNO()
 	}
 
 	if (bIsDBNO)
+	{
 		BleedoutTimeRemaining = BleedoutDuration;
+		// EnterDBNO never runs on a simulated proxy — this is the remote client's cancel.
+		CancelStimUse();
+	}
 
 	if (!bIsDBNO)
 	{
@@ -1725,18 +2481,12 @@ void AExtractionPlayer::OnRep_IsDBNO()
 		SetDBNOCameraFreeLook(true);
 	}
 
+	// Restore order matters when leaving DBNO: SetBeingRevived above ran first, so the
+	// profile's saved bUseControllerRotationYaw wins (see SetDBNOMovementProfile).
+	SetHeldWeaponHidden(bIsDBNO);
+	SetDBNOMovementProfile(bIsDBNO);
+
 	OnDBNOStateChanged.Broadcast(bIsDBNO, bIsDBNO ? BleedoutDuration : 0.f);
-}
-
-void AExtractionPlayer::DebugApplyDamage()
-{
-	if (!HasAuthority()) return;
-	if (!IsValid(HealthComponent)) return;
-
-	HealthComponent->TakeDamage(25.f);
-	UE_LOG(LogExtraction, Verbose, TEXT("Debug: Applied 25 damage. Health=%.0f/%.0f Shield=%.0f/%.0f"),
-		HealthComponent->GetCurrentHealth(), HealthComponent->GetMaxHealth(),
-		HealthComponent->GetCurrentShield(), HealthComponent->GetMaxShield());
 }
 
 // ---- Revive ----
@@ -1884,9 +2634,7 @@ ACompanionCharacter* AExtractionPlayer::ResolveDebugCompanion() const
 {
 	if (WiredCompanion.IsValid()) return WiredCompanion.Get();
 
-	for (TActorIterator<ACompanionCharacter> It(GetWorld()); It; ++It) return *It;
-
-	return nullptr;
+	return ACompanionCharacter::GetPrimaryCompanion(GetWorld());
 }
 
 void AExtractionPlayer::CompAim(bool bEnable)
@@ -1967,4 +2715,361 @@ void AExtractionPlayer::CompDown()
 
 	UE_LOG(LogCompanion, Log, TEXT("CompDown: forcing companion DBNO via console"));
 	CompHealth->Die();
+}
+
+ACompanionCharacter* AExtractionPlayer::ResolveDebugExtractee() const
+{
+	const UWorld* World = GetWorld();
+	if (!World) return nullptr;
+
+	for (TActorIterator<AExtracteeCompanion> It(World); It; ++It)
+		if (IsValid(*It)) return *It;
+
+	return nullptr;
+}
+
+void AExtractionPlayer::VipReload()
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipReload: no extraction VIP found")); return; }
+
+	// Force it even on a full magazine. CanReload() requires CurrentAmmo < MagazineSize, so on a
+	// freshly-spawned VIP that has not fired a shot the command would otherwise silently no-op —
+	// which is exactly the case you want to inspect the animation in.
+	if (AWeaponBase* Weapon = Vip->GetCurrentWeapon())
+	{
+		if (!Weapon->IsReloading() && !Weapon->CanReload())
+			Weapon->DebugDrainMagazine(0);
+	}
+
+	// Reload is inherited straight from ACompanionCharacter — the VIP overrides only the fire gate —
+	// so this is the exact call the BT combat task makes, not a debug-only shortcut.
+	Vip->ReloadWeapon();
+	UE_LOG(LogCompanion, Log, TEXT("VipReload triggered on %s"), *Vip->GetName());
+}
+
+void AExtractionPlayer::VipRescue()
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipRescue: no extraction VIP found")); return; }
+
+	AExtracteeCompanion* Extractee = Cast<AExtracteeCompanion>(Vip);
+	if (!IsValid(Extractee)) { UE_LOG(LogCompanion, Warning, TEXT("VipRescue: cast to ExtracteeCompanion failed")); return; }
+	if (!Extractee->IsCaptive()) { UE_LOG(LogCompanion, Warning, TEXT("VipRescue: already freed (armed=%d)"), Extractee->IsArmed()); return; }
+
+	Extractee->ForceRescue();
+	UE_LOG(LogCompanion, Log, TEXT("VipRescue: forced rescue on %s"), *Extractee->GetName());
+}
+
+void AExtractionPlayer::VipDebug(bool bFreeze)
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipDebug: no extraction VIP found")); return; }
+
+	AAIController* AIC = Cast<AAIController>(Vip->GetController());
+	UBrainComponent* Brain = AIC ? AIC->GetBrainComponent() : nullptr;
+	if (!Brain) { UE_LOG(LogCompanion, Warning, TEXT("VipDebug: no brain component")); return; }
+
+	if (bFreeze) Brain->StopLogic(TEXT("VipDebug"));
+	else Brain->RestartLogic();
+
+	UE_LOG(LogCompanion, Log, TEXT("VipDebug freeze -> %d"), bFreeze);
+}
+
+void AExtractionPlayer::VipCover(bool bEnable, bool bStand, bool bLeft)
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipCover: no extraction VIP found")); return; }
+
+	USkeletalMeshComponent* MeshComp = Vip->GetMesh();
+	UCompanionAnimInstance* AnimInst = IsValid(MeshComp) ? Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()) : nullptr;
+	if (!AnimInst) { UE_LOG(LogCompanion, Warning, TEXT("VipCover: no CompanionAnimInstance")); return; }
+
+	if (bEnable)
+	{
+		// Match the capsule to the cover height so bIsCrouched agrees with LatchedCoverHeight --
+		// otherwise reload picks the wrong montage and peek takes the wrong align branch.
+		bStand ? Vip->UnCrouch() : Vip->Crouch();
+
+		// EnterCoverPose syncs the CoverPoseComponent (SetInCover/SetLean), so the per-frame
+		// bInCover mirror in NativeUpdateAnimation reads back the forced state as long as the
+		// brain is stopped (VipDebug 1).
+		const EPeekSide Side = bLeft ? EPeekSide::Left : EPeekSide::Right;
+		const ECoverHeight Height = bStand ? ECoverHeight::Stand : ECoverHeight::Crouch;
+		AnimInst->EnterCoverPose(Side, Height, true);
+		UE_LOG(LogCompanion, Log, TEXT("VipCover: entered cover (Stand=%d, Left=%d)"), bStand, bLeft);
+	}
+	else
+	{
+		Vip->UnCrouch();
+		AnimInst->ExitCoverPose();
+		UE_LOG(LogCompanion, Log, TEXT("VipCover: exited cover"));
+	}
+}
+
+void AExtractionPlayer::VipPeek()
+{
+	ACompanionCharacter* Vip = ResolveDebugExtractee();
+	if (!Vip) { UE_LOG(LogCompanion, Warning, TEXT("VipPeek: no extraction VIP found")); return; }
+
+	USkeletalMeshComponent* MeshComp = Vip->GetMesh();
+	UCompanionAnimInstance* AnimInst = IsValid(MeshComp) ? Cast<UCompanionAnimInstance>(MeshComp->GetAnimInstance()) : nullptr;
+	if (!AnimInst) { UE_LOG(LogCompanion, Warning, TEXT("VipPeek: no CompanionAnimInstance")); return; }
+	if (!AnimInst->IsInCover()) { UE_LOG(LogCompanion, Warning, TEXT("VipPeek: VIP is not in cover")); return; }
+
+	// Use the anim instance's active peek side -- matches the side passed to EnterCoverPose.
+	UAnimMontage* Montage = AnimInst->PlayPeekFire(AnimInst->GetActivePeekSide());
+	if (!IsValid(Montage)) { UE_LOG(LogCompanion, Warning, TEXT("VipPeek: peek montage unassigned in ABP")); return; }
+
+	UE_LOG(LogCompanion, Log, TEXT("VipPeek: playing %s"), *Montage->GetName());
+}
+
+// --- Single-reviver claim ---
+
+bool AExtractionPlayer::TryClaimRevive(AActor* Claimant)
+{
+	if (!IsValid(Claimant)) return false;
+
+	AActor* Holder = ReviveClaimant.Get();
+	if (Holder == Claimant) return true; // idempotent re-claim by the current holder
+
+	// A hold whose owner has gone down, died or lost its controller is stale — steal it, or the
+	// surviving ally could never take over a revive the first one can no longer finish.
+	if (IsValid(Holder) && ACompanionCharacter::IsReviveClaimantCapable(Holder)) return false;
+
+	ReviveClaimant = Claimant;
+	return true;
+}
+
+void AExtractionPlayer::ReleaseReviveClaim(AActor* Claimant)
+{
+	// Holder-only: a losing bidder releasing must never free the winner's hold.
+	if (ReviveClaimant.Get() != Claimant) return;
+	ReviveClaimant.Reset();
+}
+
+// ------------------------------------------------------------------
+// Checkpoint loadout snapshot
+// ------------------------------------------------------------------
+
+void AExtractionPlayer::RequestLoadoutCapture()
+{
+	if (!HasAuthority()) return;
+
+	// Block captures until the deferred restore has completed (or was skipped). Without
+	// this, the resume-activated checkpoint step calls RecordCheckpoint -> here before the
+	// restore has fired, overwriting the good snapshot with the freshly-spawned defaults.
+	if (!bLoadoutRestoreSettled)
+	{
+		UE_LOG(LogExtraction, Verbose,
+			TEXT("RequestLoadoutCapture skipped -- loadout restore has not settled yet"));
+		return;
+	}
+
+	bLoadoutCommitReceived = false;
+	OnCaptureLoadoutRequested();
+
+	if (!bLoadoutCommitReceived)
+	{
+		UE_LOG(LogExtraction, Warning,
+			TEXT("OnCaptureLoadoutRequested fired but CommitLoadoutSnapshot was never called "
+				 "-- is the BP graph wired?"));
+	}
+}
+
+void AExtractionPlayer::CommitLoadoutSnapshot(const FCheckpointLoadoutSnapshot& Snapshot)
+{
+	if (!HasAuthority()) return;
+
+	bLoadoutCommitReceived = true;
+
+	UExtractionGameInstance* GameInstance = GetGameInstance<UExtractionGameInstance>();
+	if (!GameInstance) return;
+
+	// Copy the BP-built snapshot so we can overwrite the live ammo from weapon actors.
+	FCheckpointLoadoutSnapshot Final = Snapshot;
+
+	// Gun slots: the slot records hold pickup-time ammo that goes stale as the player
+	// shoots. Read the live truth from the AWeaponBase actors.
+	if (IsValid(WeaponComponent))
+	{
+		if (AWeaponBase* Primary = WeaponComponent->GetPrimaryWeapon(); IsValid(Primary))
+		{
+			Final.PrimarySlot.Ammo = Primary->GetCurrentAmmo();
+			Final.PrimarySlot.ReserveAmmo = Primary->GetReserveAmmo();
+		}
+		if (AWeaponBase* Secondary = WeaponComponent->GetSecondaryWeapon(); IsValid(Secondary))
+		{
+			Final.SecondarySlot.Ammo = Secondary->GetCurrentAmmo();
+			Final.SecondarySlot.ReserveAmmo = Secondary->GetReserveAmmo();
+		}
+	}
+
+	// Active weapon slot from C++ (immune to the kit mirror desync). A held throwable leaves
+	// CurrentWeapon pointing at the gun, so GetActiveWeaponSlot would report Primary/Secondary
+	// while the grenade is out -- report None there so the restore falls back to ActiveSlotIndex.
+	if (IsValid(WeaponComponent))
+	{
+		Final.ActiveWeaponSlot = WeaponComponent->IsThrowableEquipped()
+			? EWeaponSlot::None
+			: WeaponComponent->GetActiveWeaponSlot();
+	}
+
+	// Stim count from the live consumable inventory.
+	if (IsValid(ConsumableInventoryComponent))
+		Final.StimCount = ConsumableInventoryComponent->GetStimCount();
+
+	// Derive validity from slot content rather than stamping unconditionally, so an
+	// unimplemented or half-wired BP capture cannot commit an empty snapshot.
+	Final.bValid = Final.PrimarySlot.bValid || Final.SecondarySlot.bValid
+		|| Final.ThrowableSlot.bValid || Final.MeleeSlot.bValid;
+
+	if (!Final.bValid)
+	{
+		UE_LOG(LogExtraction, Warning,
+			TEXT("CommitLoadoutSnapshot: all four slot snapshots are invalid -- snapshot not stored"));
+		return;
+	}
+
+	const FName LevelName(*UGameplayStatics::GetCurrentLevelName(this, true));
+	GameInstance->SetLoadoutSnapshot(LevelName, Final);
+
+	UE_LOG(LogExtraction, Log, TEXT("Loadout snapshot committed for level '%s'"), *LevelName.ToString());
+}
+
+void AExtractionPlayer::DeferredRestoreLoadout()
+{
+	if (!CachedRestoreSnapshot.bValid)
+	{
+		bLoadoutRestoreSettled = true;
+		return;
+	}
+
+	// Restore stim count: the component's BeginPlay already granted StartingStims,
+	// so we must SET the count rather than add to it.
+	if (IsValid(ConsumableInventoryComponent))
+		ConsumableInventoryComponent->SetStimCount(CachedRestoreSnapshot.StimCount);
+
+	// C++ owns the audio suppression bracket so a BP early-out cannot strand it.
+	if (IsValid(WeaponComponent))
+		WeaponComponent->BeginAudioSuppression();
+
+	UE_LOG(LogExtraction, Log, TEXT("Restoring loadout from checkpoint"));
+
+	// Hand the cached snapshot to BP for slot-record writes and weapon replacement.
+	OnRestoreLoadoutRequested(CachedRestoreSnapshot);
+
+	// Re-select the gun that was in hand. Driven from C++ rather than BP because the kit's
+	// SwapWeapon event is dead (its exec pin is unconnected), and doing it here keeps the
+	// switch inside the audio suppression bracket so the restore stays silent.
+	if (IsValid(WeaponComponent))
+		WeaponComponent->ActivateSlot(CachedRestoreSnapshot.ActiveWeaponSlot);
+
+	// Deliberately NOT settling here -- the verify poll below can keep re-firing the restore.
+	// A capture arriving inside that window would snapshot the still-unrestored default loadout
+	// and make a transient failure permanent. VerifyLoadoutRestore settles on its terminal paths
+	// instead, so the latch tracks "restore chain finished", not "first attempt fired".
+
+	// Arm a failsafe that force-zeroes the audio suppression depth after 1s in case
+	// the BP restore chain early-outs before calling EndAudioSuppression.
+	if (const UWorld* World = GetWorld())
+	{
+		World->GetTimerManager().SetTimer(AudioSuppressionFailsafeHandle, this,
+			&AExtractionPlayer::ReleaseAudioSuppressionFailsafe, 1.f, false);
+	}
+
+	// Start the verify poll to catch async BP spines that re-equip the default gun.
+	LoadoutVerifyRetries = 0;
+	if (const UWorld* World = GetWorld())
+	{
+		static constexpr float VerifyPollSeconds = 0.25f;
+		World->GetTimerManager().SetTimer(LoadoutVerifyTimerHandle, this,
+			&AExtractionPlayer::VerifyLoadoutRestore, VerifyPollSeconds, true);
+	}
+	else
+	{
+		// No world means the poll can never run and settle the latch, which would block
+		// captures for the rest of the level. Settle here instead.
+		bLoadoutRestoreSettled = true;
+	}
+}
+
+namespace
+{
+	/** A slot counts as restored when it was empty at capture, when it carries no gameplay class
+	 *  to compare against (nothing to verify -- comparing would burn every retry), or when the
+	 *  live weapon's class matches what was captured. */
+	bool IsSlotRestored(const FCheckpointSlotSnapshot& Slot, AWeaponBase* Live)
+	{
+		if (!Slot.bValid || !Slot.WeaponClass) return true;
+		return IsValid(Live) && Live->GetClass() == Slot.WeaponClass;
+	}
+}
+
+void AExtractionPlayer::VerifyLoadoutRestore()
+{
+	static constexpr int32 MaxVerifyRetries = 8;
+
+	if (!CachedRestoreSnapshot.bValid || !IsValid(WeaponComponent))
+	{
+		if (const UWorld* World = GetWorld())
+			World->GetTimerManager().ClearTimer(LoadoutVerifyTimerHandle);
+		bLoadoutRestoreSettled = true;
+		return;
+	}
+
+	// Both gun slots must match -- a snapshot with only a secondary would otherwise report
+	// restored on the first tick and stop polling.
+	const bool bMismatch =
+		!IsSlotRestored(CachedRestoreSnapshot.PrimarySlot, WeaponComponent->GetPrimaryWeapon()) ||
+		!IsSlotRestored(CachedRestoreSnapshot.SecondarySlot, WeaponComponent->GetSecondaryWeapon());
+
+	if (bMismatch && LoadoutVerifyRetries < MaxVerifyRetries)
+	{
+		++LoadoutVerifyRetries;
+		UE_LOG(LogExtraction, Log,
+			TEXT("VerifyLoadoutRestore: weapon mismatch, re-firing restore (attempt %d/%d)"),
+			LoadoutVerifyRetries, MaxVerifyRetries);
+
+		if (IsValid(WeaponComponent))
+			WeaponComponent->BeginAudioSuppression();
+
+		OnRestoreLoadoutRequested(CachedRestoreSnapshot);
+
+		if (IsValid(WeaponComponent))
+			WeaponComponent->ActivateSlot(CachedRestoreSnapshot.ActiveWeaponSlot);
+
+		if (const UWorld* World = GetWorld())
+		{
+			World->GetTimerManager().SetTimer(AudioSuppressionFailsafeHandle, this,
+				&AExtractionPlayer::ReleaseAudioSuppressionFailsafe, 1.f, false);
+		}
+		return;
+	}
+
+	// Match confirmed or retries exhausted -- the restore chain is finished, so stop polling
+	// and settle the latch: captures are only safe now that nothing will re-fire the restore.
+	if (const UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(LoadoutVerifyTimerHandle);
+
+	bLoadoutRestoreSettled = true;
+
+	if (bMismatch)
+	{
+		UE_LOG(LogExtraction, Warning,
+			TEXT("VerifyLoadoutRestore: weapon still mismatched after %d retries -- giving up"),
+			MaxVerifyRetries);
+	}
+}
+
+void AExtractionPlayer::ReleaseAudioSuppressionFailsafe()
+{
+	if (!IsValid(WeaponComponent)) return;
+	if (WeaponComponent->IsAudioSuppressed())
+	{
+		UE_LOG(LogExtraction, Verbose,
+			TEXT("Audio suppression failsafe: force-clearing suppression depth"));
+		while (WeaponComponent->IsAudioSuppressed())
+			WeaponComponent->EndAudioSuppression();
+	}
 }

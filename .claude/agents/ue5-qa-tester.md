@@ -2,6 +2,7 @@
 name: ue5-qa-tester
 description: UE5 automation test writer for ProjectExtract. Creates and runs automation tests for single-player FPS systems including weapons, health, and AI behavior.
 model: claude-sonnet-5
+effort: xhigh
 tools:
   - Glob
   - Grep

@@ -1,9 +1,11 @@
 // BTService_EnemyCombat — validates target liveness; writes HasLineOfSight, TargetInRange.
 
 #include "BTService_EnemyCombat.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "AI/AITargetingStatics.h"
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
+#include "EnemyAwarenessComponent.h"
 #include "EnemyCharacter.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
@@ -19,6 +21,8 @@ UBTService_EnemyCombat::UBTService_EnemyCombat()
 
 void UBTService_EnemyCombat::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds)
 {
+	TRACE_CPUPROFILER_EVENT_SCOPE(Extraction_AI_EnemyCombatService);
+
 	UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
 	if (!BB) return;
 
@@ -29,7 +33,10 @@ void UBTService_EnemyCombat::TickNode(UBehaviorTreeComponent& OwnerComp, uint8* 
 	AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Pawn);
 	AActor* Target = Cast<AActor>(BB->GetValueAsObject(AEnemyAIController::BB_CombatTarget));
 
-	if (!IsValid(Target))
+	// Liveness, not just validity: a DBNO player stays a live UObject for the whole bleedout window,
+	// so IsValid alone left LOS/InRange true and the fire task kept shooting the body until the
+	// awareness tick got round to clearing the key. Dead or downed reads the same here — no target.
+	if (!IsValid(Target) || !UEnemyAwarenessComponent::IsActorAlive(Target))
 	{
 		BB->SetValueAsBool(AEnemyAIController::BB_HasLineOfSight, false);
 		BB->SetValueAsBool(AEnemyAIController::BB_TargetInRange, false);

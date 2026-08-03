@@ -11,6 +11,7 @@
 #include "ObjectiveSubsystem.h"
 #include "MissionInventorySubsystem.h"
 #include "LevelCompletionLiftGate.h"
+#include "InteractionEventSubsystem.h"
 #include "Extraction.h"
 
 DEFINE_LOG_CATEGORY(LogExtractionTarget);
@@ -54,6 +55,17 @@ void AExtractionTargetActor::BeginPlay()
 	const USkeletalMesh* MeshAsset = IsValid(SkeletalMesh) ? SkeletalMesh->GetSkeletalMeshAsset() : nullptr;
 	if (!MeshAsset || !MeshAsset->GetPhysicsAsset())
 		InteractionBox->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
+
+	// Pure wave controller behind an extractee rescue: invisible, untouchable, no prompt.
+	if (bExternalTriggerOnly)
+	{
+		if (IsValid(SkeletalMesh))
+		{
+			SkeletalMesh->SetHiddenInGame(true);
+			SkeletalMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		}
+		InteractionBox->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+	}
 
 
 #if WITH_EDITOR
@@ -131,7 +143,13 @@ void AExtractionTargetActor::OnRep_bAvailable()
 
 bool AExtractionTargetActor::CanWorldInteract_Implementation(AActor* /*Interactor*/) const
 {
-	return bAvailable && !bActivated && !bCompleted;
+	return !bExternalTriggerOnly && bAvailable && !bActivated && !bCompleted;
+}
+
+bool AExtractionTargetActor::BeginExtractionExternal()
+{
+	WorldInteract_Implementation(nullptr);
+	return bActivated || bCompleted;
 }
 
 void AExtractionTargetActor::WorldInteract_Implementation(AActor* Interactor)
@@ -173,6 +191,12 @@ void AExtractionTargetActor::WorldInteract_Implementation(AActor* Interactor)
 	}
 
 	bActivated = true;
+
+	// Success branch only — every earlier return above is a refusal, and a refusal must not tick
+	// off an objective beat watching this actor.
+	if (UInteractionEventSubsystem* Events = GetWorld() ? GetWorld()->GetSubsystem<UInteractionEventSubsystem>() : nullptr)
+		Events->NotifyWorldInteract(this, Interactor);
+
 	OnExtractionTargetWaveStarted.Broadcast();
 	UE_LOG(LogExtractionTarget, Log, TEXT("%s: activated by %s, wave '%s' started"),
 		*GetName(), *GetNameSafe(Interactor), *WaveRequest.WaveId.ToString());
@@ -331,7 +355,7 @@ void AExtractionTargetActor::ValidateConfig() const
 	if (CompletionAction == EWaveCompletionAction::UnlockExit && !IsValid(LiftGateTarget))
 		UE_LOG(LogExtractionTarget, Warning, TEXT("%s: CompletionAction is UnlockExit but LiftGateTarget is null"), *GetName());
 
-	if (IsValid(InteractionBox) && !InteractionBox->GetCollisionEnabled())
+	if (!bExternalTriggerOnly && IsValid(InteractionBox) && !InteractionBox->GetCollisionEnabled())
 		UE_LOG(LogExtractionTarget, Warning, TEXT("%s: InteractionBox has no collision enabled"), *GetName());
 
 	if (IsValid(SkeletalMesh) && !SkeletalMesh->GetSkeletalMeshAsset())

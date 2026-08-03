@@ -1,12 +1,21 @@
 // Player-owned component that handles camera-trace pinging and command confirmation.
 
 #include "CompanionCommandComponent.h"
+#include "AI/CompanionCoverStatics.h"
+#include "Companion/CompanionBarkTypes.h"
+#include "CoverSystemPublicData.h"
+#include "CoverGeometryStatics.h"
+#include "AI/BlackboardKeyType_Cover.h"
 #include "World/Breachable.h"
 #include "World/DoorBase.h"
 #include "World/BreachableDoor.h"
 #include "World/Lootable.h"
+#include "World/WorldInteractable.h"
 #include "Enemy/EnemyCharacter.h"
 #include "Companion/CompanionCharacter.h"
+#include "Components/HealthComponent.h"
+#include "Audio/MusicSubsystem.h"
+#include "Character/ExtractionPlayer.h"
 #include "AI/CompanionAIController.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Camera/CameraComponent.h"
@@ -37,6 +46,9 @@ void UCompanionCommandComponent::EndPlay(const EEndPlayReason::Type EndPlayReaso
 	CloseModeMenu(); // clears the auto-close timer + unregisters ModeSelectContext
 	SetPromptContextRegistered(false);
 
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(CoverReissueTimerHandle);
+
 	if (ACompanionCharacter* Companion = CachedCompanion.Get())
 		Companion->OnModeChanged.RemoveDynamic(this, &UCompanionCommandComponent::HandleCompanionModeChanged);
 
@@ -52,8 +64,8 @@ ACompanionCharacter* UCompanionCommandComponent::ResolveCompanion()
 {
 	if (CachedCompanion.IsValid()) return CachedCompanion.Get();
 
-	AActor* Found = UGameplayStatics::GetActorOfClass(GetWorld(), ACompanionCharacter::StaticClass());
-	ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Found);
+	// Primary only -- the armed extractee is a companion too, but takes no player commands.
+	ACompanionCharacter* Companion = ACompanionCharacter::GetPrimaryCompanion(GetWorld());
 	if (IsValid(Companion))
 	{
 		CachedCompanion = Companion;
@@ -105,16 +117,38 @@ void UCompanionCommandComponent::IssuePing()
 	const FVector TraceDir   = Cam ? Cam->GetForwardVector() : EyesRot.Vector();
 	const FVector TraceEnd   = TraceStart + TraceDir * PingTraceRange;
 
-	FHitResult Hit;
 	FCollisionQueryParams Params(SCENE_QUERY_STAT(CompanionPing), false, Owner);
 	Params.AddIgnoredActor(Owner);
-	const bool bHit = World->LineTraceSingleByChannel(Hit, TraceStart, TraceEnd, ECC_Visibility, Params);
+
+	// Same ally blindness the player's interaction traces need, from the same single source of truth:
+	// an ally's mesh blocks ECC_Visibility (that block is what makes it take hitscan damage), so the
+	// primary standing in front of the player won the nearer-hit comparison below and the ping resolved
+	// to the ally — which matches no command and reads as a dead ping. No command targets an ally, and
+	// an ally that is itself interactable is deliberately still traceable, so nothing is lost here.
+	if (const AExtractionPlayer* PlayerOwner = Cast<AExtractionPlayer>(Owner))
+		Params.AddIgnoredActors(PlayerOwner->GetInteractTraceIgnoredActors());
+
+	// Second pass on the dedicated Interact channel so a loot volume (which ignores Visibility so
+	// it can't block AI sight or cover generation) can still be pinged for the companion to search.
+	// Nearer hit wins.
+	FHitResult VisibilityHit;
+	const bool bHitVisibility = World->LineTraceSingleByChannel(VisibilityHit, TraceStart, TraceEnd, ECC_Visibility, Params);
+
+	FHitResult InteractHit;
+	const bool bHitInteract = World->LineTraceSingleByChannel(
+		InteractHit, TraceStart, TraceEnd, ExtractionInteraction::InteractTraceChannel, Params);
+
+	const bool bPreferInteract = bHitInteract && (!bHitVisibility || InteractHit.Distance <= VisibilityHit.Distance);
+	const bool bHit = bHitVisibility || bHitInteract;
+	const FHitResult Hit = bPreferInteract ? InteractHit : VisibilityHit;
+
 	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] trace hit=%d actor=%s class=%s"), bHit,
 		*GetNameSafe(Hit.GetActor()), Hit.GetActor() ? *Hit.GetActor()->GetClass()->GetName() : TEXT("None"));
 
 	if (!bHit || !IsValid(Hit.GetActor()))
 	{
 		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] no hit -> clear"));
+		PlayPingFeedback(false);
 		ClearPending();
 		return;
 	}
@@ -135,6 +169,7 @@ void UCompanionCommandComponent::IssuePing()
 		if (IsCompanionRouteActive())
 		{
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] door %s suppressed — route active"), *GetNameSafe(HitActor));
+			PlayPingFeedback(false);
 			ClearPending();
 			return;
 		}
@@ -145,6 +180,7 @@ void UCompanionCommandComponent::IssuePing()
 			PendingTarget  = HitActor;
 			SetPromptContextRegistered(false); // breach prompt confirms on B — no G/V shield needed
 			OnPingChanged.Broadcast(PendingCommand, HitActor);
+			PlayPingFeedback(true);
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> BREACH %s (broadcast)"), *GetNameSafe(HitActor));
 			return;
 		}
@@ -164,11 +200,13 @@ void UCompanionCommandComponent::IssuePing()
 				PendingTarget  = HitActor; // marker rides the door
 				SetPromptContextRegistered(false); // explore confirms on the breach key — no G/V shield needed
 				OnPingChanged.Broadcast(PendingCommand, HitActor);
+				PlayPingFeedback(true);
 				UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> SEARCH door %s (broadcast)"), *GetNameSafe(HitActor));
 				return;
 			}
 		}
 
+		PlayPingFeedback(false);
 		ClearPending();
 		return;
 	}
@@ -179,6 +217,7 @@ void UCompanionCommandComponent::IssuePing()
 		if (IsCompanionRouteActive())
 		{
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] breachable %s suppressed — route active"), *GetNameSafe(HitActor));
+			PlayPingFeedback(false);
 			ClearPending();
 			return;
 		}
@@ -186,6 +225,7 @@ void UCompanionCommandComponent::IssuePing()
 		PendingTarget  = HitActor;
 		SetPromptContextRegistered(false);
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
+		PlayPingFeedback(true);
 		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> BREACH %s (broadcast)"), *GetNameSafe(HitActor));
 		return;
 	}
@@ -197,6 +237,7 @@ void UCompanionCommandComponent::IssuePing()
 		PendingTarget  = HitActor;
 		SetPromptContextRegistered(false); // loot confirms on the breach key — no G/V shield needed
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
+		PlayPingFeedback(true);
 		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> LOOT %s (broadcast)"), *GetNameSafe(HitActor));
 		return;
 	}
@@ -213,18 +254,58 @@ void UCompanionCommandComponent::IssuePing()
 			PendingTarget  = Enemy;
 			SetPromptContextRegistered(true);
 			OnPingChanged.Broadcast(PendingCommand, Enemy);
+			PlayPingFeedback(true);
 			UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> TAKEDOWN %s (broadcast)"), *GetNameSafe(Enemy));
 			return;
 		}
 		// An ineligible enemy stays a dead ping — never downgrade a hostile under the crosshair
 		// to "search this spot".
+		PlayPingFeedback(false);
 		ClearPending();
 		return;
 	}
 
+	// Priority 4: Cover — wall/crate with legal positions for the companion.
+	// Route test runs before the octree query so a scripted-route ping does not pay the search cost.
+	if (!IsCompanionRouteActive())
+	{
+		ACompanionCharacter* Companion = ResolveCompanion();
+		ACompanionAIController* CoverController = GetCompanionController();
+		if (IsValid(Companion) && IsValid(CoverController))
+		{
+			AActor* CombatTarget = nullptr;
+			if (const UBlackboardComponent* BB = CoverController->GetBlackboardComponent())
+				CombatTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+
+			FCover FoundCover;
+			if (CompanionCover::FindCoverOnPingedWall(World, Hit.ImpactPoint, Hit.ImpactNormal,
+				CoverPingRadius, CoverController, Companion, CombatTarget, FoundCover))
+			{
+				PendingCommand = ECompanionCommand::TakeCover;
+				PendingTarget.Reset(); // location-only command, no target actor
+				PendingCoverPingImpact = Hit.ImpactPoint;
+				PendingCoverPingNormal = Hit.ImpactNormal;
+				PendingCoverLocation = FoundCover.Data.Location;
+				SetPromptContextRegistered(false);
+				OnPingChanged.Broadcast(PendingCommand, nullptr);
+				PlayPingFeedback(true);
+				UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] -> TAKECOVER at %s (broadcast)"), *FoundCover.Data.Location.ToString());
+				return;
+			}
+		}
+	}
+
 	// No open-ground fallback: searches are door-targeted — pinging ground offers nothing.
 	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] hit %s matched no command -> clear"), *GetNameSafe(HitActor));
+	PlayPingFeedback(false);
 	ClearPending();
+}
+
+void UCompanionCommandComponent::PlayPingFeedback(bool bAccepted) const
+{
+	USoundBase* Sound = bAccepted ? PingConfirmSound : PingFailSound;
+	if (IsValid(Sound))
+		UGameplayStatics::PlaySound2D(GetWorld(), Sound);
 }
 
 // ---- Confirm helpers ----
@@ -235,6 +316,16 @@ void UCompanionCommandComponent::ClearPending()
 	PendingTarget.Reset();
 	SetPromptContextRegistered(false);
 	OnPingChanged.Broadcast(ECompanionCommand::None, nullptr);
+}
+
+void UCompanionCommandComponent::ClearCommandedCoverIfActive()
+{
+	ACompanionCharacter* Companion = ResolveCompanion();
+	if (IsValid(Companion) && Companion->IsCommandedCoverHoldActive())
+		Companion->ClearCommandedCoverHold();
+
+	if (UWorld* World = GetWorld())
+		World->GetTimerManager().ClearTimer(CoverReissueTimerHandle);
 }
 
 void UCompanionCommandComponent::SetPromptContextRegistered(bool bRegister)
@@ -271,6 +362,7 @@ void UCompanionCommandComponent::ConfirmTakedown(ETakedownMethod Method)
 		return;
 	}
 
+	ClearCommandedCoverIfActive();
 	UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] -> IssueCommand Takedown on %s via %s"), *GetNameSafe(Target), *GetNameSafe(Controller));
 	Controller->IssueCommand(ECompanionCommand::Takedown, Method, Target, Target->GetActorLocation());
 	ClearPending();
@@ -438,6 +530,7 @@ void UCompanionCommandComponent::ConfirmBreach()
 	}
 	Controller->SetBreachType(BreachType);
 
+	ClearCommandedCoverIfActive();
 	Controller->IssueCommand(ECompanionCommand::Breach, ETakedownMethod::Knife, Target, Target->GetActorLocation());
 	ClearPending();
 }
@@ -455,6 +548,7 @@ void UCompanionCommandComponent::ConfirmLoot()
 		return;
 	}
 
+	ClearCommandedCoverIfActive();
 	Controller->IssueCommand(ECompanionCommand::Loot, ETakedownMethod::Knife, Target, Target->GetActorLocation());
 	ClearPending();
 }
@@ -491,6 +585,185 @@ void UCompanionCommandComponent::ConfirmExplore()
 	}
 	Controller->SetBreachType(BreachType);
 
+	ClearCommandedCoverIfActive();
 	Controller->IssueCommand(ECompanionCommand::Explore, ETakedownMethod::Knife, Target, Target->GetActorLocation());
 	ClearPending();
+}
+
+void UCompanionCommandComponent::ConfirmTakeCover()
+{
+	if (PendingCommand != ECompanionCommand::TakeCover) return;
+
+	// Route suppression backstop (same as ConfirmBreach / ConfirmExplore).
+	if (IsCompanionRouteActive())
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] TakeCover rejected — route active"));
+		ClearPending();
+		return;
+	}
+
+	ACompanionCharacter* Companion = ResolveCompanion();
+	ACompanionAIController* Controller = GetCompanionController();
+	if (!IsValid(Companion) || !IsValid(Controller))
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("ConfirmTakeCover: companion controller not found"));
+		ClearPending();
+		return;
+	}
+
+	// Re-resolve the cover at confirm time (state may have changed since ping).
+	AActor* CombatTarget = nullptr;
+	if (const UBlackboardComponent* BB = Controller->GetBlackboardComponent())
+		CombatTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+
+	FCover ResolvedCover;
+	if (!CompanionCover::FindCoverOnPingedWall(GetWorld(), PendingCoverPingImpact, PendingCoverPingNormal,
+		CoverPingRadius, Controller, Companion, CombatTarget, ResolvedCover))
+	{
+		UE_LOG(LogCompanionCommand, Warning, TEXT("[Confirm] TakeCover re-resolve failed — no legal cover left"));
+		PlayPingFeedback(false);
+		ClearPending();
+		return;
+	}
+
+	// Re-ping while already holding: the clear and the re-issue must be in SEPARATE FRAMES.
+	// Frame N: key -> None (abort processes, ClearCommandIfStillActive sees None, does not wipe).
+	// Frame N+1: None -> TakeCover (genuine false->true decorator edge on a settled tree).
+	// SetTimerForNextTick returns an FTimerHandle in UE5, satisfying the timer-cleanup rule.
+	if (Companion->IsCommandedCoverHoldActive())
+	{
+		Companion->ClearCommandedCoverHold();
+		Controller->ClearActiveCommand(); // frame N: key -> None
+
+		// Cancel any pending deferral from a rapid double-confirm.
+		if (UWorld* World = GetWorld())
+			World->GetTimerManager().ClearTimer(CoverReissueTimerHandle);
+
+		TWeakObjectPtr<ACompanionCharacter> WeakComp = Companion;
+		TWeakObjectPtr<ACompanionAIController> WeakCtrl = Controller;
+		const FCover Pending = ResolvedCover;
+		if (UWorld* World = GetWorld())
+		{
+			CoverReissueTimerHandle = World->GetTimerManager().SetTimerForNextTick(
+				FTimerDelegate::CreateLambda([WeakComp, WeakCtrl, Pending]()
+				{
+					if (!WeakComp.IsValid() || !WeakCtrl.IsValid()) return;
+					WeakComp->SetCommandedCoverTarget(Pending);
+					WeakCtrl->IssueCommand(ECompanionCommand::TakeCover, ETakedownMethod::Knife,
+						nullptr, Pending.Data.Location);
+				}));
+		}
+		ClearPending();
+		return;
+	}
+
+	// First-time order: straight through, no deferral.
+	Companion->SetCommandedCoverTarget(ResolvedCover);
+
+	// IssueCommand barks TakingCover internally -- no duplicate bark here.
+	Controller->IssueCommand(ECompanionCommand::TakeCover, ETakedownMethod::Knife, nullptr, ResolvedCover.Data.Location);
+
+	ClearPending();
+}
+
+bool UCompanionCommandComponent::IsCoverMeAvailable()
+{
+	return EvaluateCoverMe() == ECoverMeGate::Ready;
+}
+
+UCompanionCommandComponent::ECoverMeGate UCompanionCommandComponent::EvaluateCoverMe(
+	AActor** OutCombatTarget, ACompanionCharacter** OutCompanion)
+{
+	ACompanionCharacter* Companion = ResolveCompanion();
+	if (!IsValid(Companion)) return ECoverMeGate::NoCompanion;
+	if (Companion->GetIsCompanionDBNO()) return ECoverMeGate::NoCompanion;
+	const UHealthComponent* HC = Companion->GetHealthComponent();
+	if (IsValid(HC) && HC->IsDead()) return ECoverMeGate::NoCompanion;
+
+	if (Companion->IsCoveringFireActive() || Companion->IsCoveringFirePending()) return ECoverMeGate::AlreadyActive;
+	if (Companion->IsCoveringFireOnCooldown()) return ECoverMeGate::OnCooldown;
+
+	ACompanionAIController* Controller = GetCompanionController();
+	if (!IsValid(Controller)) return ECoverMeGate::NoCompanion;
+	const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
+	if (!BB) return ECoverMeGate::NoCompanion;
+
+	// Companion passed all validity gates — write it out so callers skip re-resolve.
+	if (OutCompanion) *OutCompanion = Companion;
+
+	// Populate the live blackboard target when there is one — TriggerCoverMe uses it to decide
+	// whether to grant a cover commit. Its absence is NOT a reason to refuse.
+	AActor* BBTarget = Cast<AActor>(BB->GetValueAsObject(ACompanionAIController::BB_CombatTarget));
+	if (IsValid(BBTarget) && OutCombatTarget) *OutCombatTarget = BBTarget;
+
+	// No combat gate. Every "is a fight happening" signal tried here was a proxy that goes false
+	// during the exact moments the player wants this: the companion's blackboard target needs
+	// current sight perception, player-damage recency needs to be actively taking rounds, and the
+	// music state needs shots fired inside a window — so a lull in cover silently revoked the
+	// command and the row vanished mid-fight. Availability is now purely mechanical: alive, not
+	// already covering, off cooldown. Spending it with no enemies around is the player's call.
+	return ECoverMeGate::Ready;
+}
+
+bool UCompanionCommandComponent::CanPeekShootTarget(ACompanionCharacter* Companion, AActor* Target)
+{
+	ACompanionAIController* Controller = GetCompanionController();
+	if (!IsValid(Controller)) return false;
+	const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
+	if (!BB) return false;
+	const FBlackboard::FKey CoverKeyID = BB->GetKeyID(TEXT("CoverTarget"));
+	if (CoverKeyID == FBlackboard::InvalidKey) return false;
+	const FCover CurrentCover = BB->GetValue<UBlackboardKeyType_Cover>(CoverKeyID);
+	if (!CurrentCover.IsValid()) return false;
+	const bool bCrouched = UCoverGeometryStatics::GetCoverHeight(CurrentCover.Data) == ECoverHeight::Crouch;
+	return UCoverGeometryStatics::CanPeekShoot(
+		Companion->GetWorld(), CurrentCover.Data, bCrouched,
+		Target->GetActorLocation(), 140.f, Target, Companion);
+}
+
+void UCompanionCommandComponent::TriggerCoverMe()
+{
+	// Silent no-op if the picker already auto-closed. Logged because it is indistinguishable
+	// from a broken command in play: the press makes no sound and nothing moves.
+	if (!bModeMenuOpen)
+	{
+		UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] ignored — picker not open (timed out?)"));
+		return;
+	}
+
+	AActor* CombatTarget = nullptr;
+	ACompanionCharacter* Companion = nullptr;
+	const ECoverMeGate Gate = EvaluateCoverMe(&CombatTarget, &Companion);
+	if (Gate != ECoverMeGate::Ready)
+	{
+		PlayPingFeedback(false);
+		CloseModeMenu();
+		const TCHAR* Reason =
+			Gate == ECoverMeGate::NoCompanion  ? TEXT("no companion")  :
+			Gate == ECoverMeGate::NoCombat     ? TEXT("no combat")     :
+			Gate == ECoverMeGate::AlreadyActive? TEXT("already active"):
+			Gate == ECoverMeGate::OnCooldown   ? TEXT("on cooldown")   : TEXT("unknown");
+		UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] rejected — %s"), Reason);
+		return;
+	}
+
+	// Close the menu WITHOUT writing ECompanionMode — this differs from SelectCompanionMode.
+	CloseModeMenu();
+	if (!IsValid(Companion)) return; // guard: CloseModeMenu broadcasts, weak ref may go stale
+
+	// The window ALWAYS starts on the press — bark and countdown are immediate, never deferred to
+	// cover arrival. Waiting for the cover machinery meant the common mid-fight case (live target,
+	// no shot from the current spot) gave no feedback at all and rejected every re-press as
+	// "already active" until a fallback fired seconds later. The clock now runs while he moves.
+	Companion->ArmCoveringFire(CoveringFireDuration);
+	Companion->StartCoveringFire();
+	Companion->Bark(ECompanionBarkType::Suppressing);
+
+	// Live target he cannot shoot from here: grant commit so the cover machinery still repositions
+	// him — now during the already-running window instead of before it.
+	if (IsValid(CombatTarget) && !CanPeekShootTarget(Companion, CombatTarget))
+		Companion->SetCoverCommitGrant(true);
+
+	UE_LOG(LogCompanionCommand, Log, TEXT("[CoverMe] started (%.1fs), hasTarget=%d"),
+		CoveringFireDuration, IsValid(CombatTarget));
 }

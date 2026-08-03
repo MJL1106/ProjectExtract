@@ -33,6 +33,9 @@ private:
 
 		// Rush-token slot (spread bearing side), INDEX_NONE when squadless/uncapped.
 		int32 SlotIndex = INDEX_NONE;
+
+		/** Seconds since LOS was last true; fires while <= FireLosLostGrace. */
+		float LosLostTimer = 0.f;
 	};
 
 	/** Issues the next move: spread-bearing approach point while far, direct MoveToActor for the

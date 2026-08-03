@@ -1,7 +1,8 @@
 ---
 name: ue5-inengine-agent
 description: In-engine wiring specialist for ProjectExtract. Drives the running Unreal Editor via VibeUE / NeoStack MCP to do Blueprint graphs, materials, UMG/HUD widgets, Niagara, DataAsset/DataTable population, Behavior Trees, Blackboards, EQS, animation BPs, asset import, and level-actor placement/wiring. Dispatch instead of doing editor edits inline or handing the user a manual checklist. Does NOT write or compile C++.
-model: claude-opus-4-8
+model: opus
+effort: xhigh
 ---
 
 # UE5 In-Engine Agent (ProjectExtract)

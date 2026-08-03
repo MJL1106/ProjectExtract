@@ -107,18 +107,23 @@ EBTNodeResult::Type UBTTask_EnemyFlank::ExecuteTask(UBehaviorTreeComponent& Owne
 	}
 	Mem->bMoveIssued = true;
 
-	// Start firing while moving
-	AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
-	if (IsValid(Weapon))
+	// Start firing while moving -- only if we have LOS (Pattern B LOS gate)
+	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
+	if (bHasLOS)
 	{
-		Weapon->StartFiring();
-		Mem->bFiring = true;
+		AWeaponBase* Weapon = Enemy->GetCurrentWeapon();
+		if (IsValid(Weapon))
+		{
+			Weapon->StartFiring();
+			Mem->bFiring = true;
+		}
+		Mem->LosLostTimer = 0.f;
 	}
 
 	// Bark
 	UBarkSubsystem* Barks = Pawn->GetWorld()->GetSubsystem<UBarkSubsystem>();
 	if (Barks && Squad->TryClaimSquadBark(EBarkType::Flanking))
-		Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::Flanking, DA->DisplayName);
+		Barks->RequestBark(Enemy, DA->BarkSet, EBarkType::Flanking);
 
 	return EBTNodeResult::InProgress;
 }
@@ -171,6 +176,35 @@ void UBTTask_EnemyFlank::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Node
 	// Keep aim on target while moving
 	Enemy->SetAimTarget(Target);
 	Controller->SetFocus(Target);
+
+	// LOS fire gate: stop firing when LOS lost past grace, re-start when regained
+	const bool bHasLOS = BB->GetValueAsBool(AEnemyAIController::BB_HasLineOfSight);
+	{
+		const float LosGrace = IsValid(DA) ? DA->FireLosLostGrace : 0.35f;
+		if (bHasLOS)
+		{
+			Mem->LosLostTimer = 0.f;
+			if (!Mem->bFiring)
+			{
+				AWeaponBase* W = Enemy->GetCurrentWeapon();
+				if (IsValid(W) && W->CanFire() && !W->IsFiring())
+				{
+					W->StartFiring();
+					Mem->bFiring = true;
+				}
+			}
+		}
+		else
+		{
+			Mem->LosLostTimer += DeltaSeconds;
+			if (Mem->LosLostTimer > LosGrace && Mem->bFiring)
+			{
+				AWeaponBase* W = Enemy->GetCurrentWeapon();
+				if (IsValid(W)) W->StopFiring();
+				Mem->bFiring = false;
+			}
+		}
+	}
 
 	// Check arrival
 	if (!Mem->bMoveIssued) return;

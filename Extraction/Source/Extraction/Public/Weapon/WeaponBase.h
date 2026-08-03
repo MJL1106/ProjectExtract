@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "ExtractionTypes.h"
+#include "WeaponAttachmentDataAsset.h"
 #include "Weapon/KitWeaponInterface.h"
 #include "WeaponBase.generated.h"
 
@@ -15,6 +16,7 @@ class USuppressionComponent;
 class UNiagaraComponent;
 class UNiagaraSystem;
 class UDamageMitigationSettings;
+class UAudioComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnWeaponFired);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnReloadComplete);
@@ -67,6 +69,13 @@ public:
 
 	void StartFiring();
 	void StopFiring();
+
+	/** Stops fire and cancels reload atomically, WITHOUT the auto-reload-on-empty block that
+	 *  StopFiring carries. Use at weapon-swap / state-interrupt sites where a reload would be
+	 *  immediately cancelled anyway -- avoids a spurious 600cm AI noise event from the phantom
+	 *  reload that StopFiring+CancelReload otherwise produces on an empty magazine. */
+	void AbortFireAndReload();
+
 	bool CanFire() const;
 
 	/** Cosmetic-only fire: muzzle flash + tracer + fire montage broadcast, NO hitscan/damage/alert/ammo.
@@ -77,6 +86,12 @@ public:
 
 	void Reload();
 	bool CanReload() const;
+
+	/** Debug-only: drop the magazine to LeaveRounds so a reload can be forced from the console while
+	 *  the weapon is still full. CanReload() requires CurrentAmmo < MagazineSize, so without draining
+	 *  first a full-mag debug reload silently no-ops and the animation can never be inspected on
+	 *  demand. Broadcasts OnAmmoChanged like any other ammo change so HUD/UI stay in sync. */
+	void DebugDrainMagazine(int32 LeaveRounds = 0);
 
 	/**
 	 * Called by the AnimNotify_EnemyShellInserted notify once per shell seat.
@@ -151,6 +166,19 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Weapon")
 	FVector GetMuzzleLocation() const;
 
+	/**
+	 * The same-team pawns this weapon's shot trace ignores. Friendly fire is prevented by excluding
+	 * them from the hitscan entirely, so a round passes straight THROUGH a team-mate rather than
+	 * stopping on one. Exposed so AI fire decisions can trace against the identical set: a LoS or
+	 * muzzle-clearance check that treats a friendly body as a blocker withholds a shot the bullet
+	 * would have taken, and reading the weapon's own list means the two can never drift apart.
+	 * Non-const because it refreshes the cache on the shared FFIgnoreListRefreshSeconds cadence —
+	 * callers that poll while NOT firing would otherwise read a list built for an earlier fight.
+	 * The reference aliases the cache: COPY IT before any further call on this weapon, since a
+	 * refresh reallocates and the hazard is invisible at the call site.
+	 */
+	const TArray<AActor*>& GetFriendlyFireIgnoreList();
+
 	/** Set by WeaponComponent when ADS state changes */
 	void SetOwnerIsAiming(bool bAiming) { bOwnerIsAiming = bAiming; }
 
@@ -162,6 +190,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
 	int32 AddReserveAmmo(int32 Amount);
 
+	/** Overwrites ammo counts (weapon-pickup state restore). Authority-only. Pass a negative
+	 *  value to leave that count unchanged. Mag clamps to the data asset's magazine size. */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Ammo")
+	void SetAmmoState(int32 Mag, int32 Reserve);
+
+	/** Re-broadcasts current ammo to the HUD and the kit visual item without changing counts.
+	 *  Called after a weapon switch — the freshly-spawned kit item holds BP-default counts. */
+	void ResyncVisualAmmo();
+
+	/** Interaction-focus outline: toggles render custom depth on the weapon mesh and every
+	 *  primitive of the spawned visual actor (corpse-gun pickup highlight). */
+	UFUNCTION(BlueprintCallable, Category = "Weapon")
+	void SetVisualHighlight(bool bHighlight);
+
 	/** Override the auto-reload flag set in the data asset. Enemies force this true so they never
 	 *  go permanently silent — no BT reload task exists for enemies. */
 	void SetAutoReloadOnEmpty(bool bEnable) { bAutoReloadOnEmpty = bEnable; }
@@ -171,6 +213,64 @@ public:
 	 *  equip; pass null on unequip to drop the flash component. */
 	UFUNCTION(BlueprintCallable, Category = "Weapon|FX")
 	void SetFirstPersonMuzzle(USceneComponent* InMuzzle);
+
+	// ---- Attachments (gameplay effects) ----
+
+	/**
+	 * Applies the kit ST_Attachments selection (raw per-slot enum bytes) to this weapon's
+	 * gameplay stats. Each byte indexes the matching *Attachments option array on the weapon
+	 * DA; null/missing entries are neutral (cosmetic-only selection). Called by the character
+	 * BP equip flow after SpawnAttachments, and by attachment pickups on swap.
+	 * Client calls forward to the server; the selection replicates to other clients.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Attachments")
+	void SetAttachmentSelection(uint8 Sight, uint8 Muzzle, uint8 Laser, uint8 Grip, uint8 Handguard);
+
+	/** Current per-slot selection (raw kit ST_Attachments bytes). By value — the read-only view the
+	 *  attachment stat preview needs to compare a candidate option against what is already fitted. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	FWeaponAttachmentSelection GetAttachmentSelection() const { return AttachmentSelection; }
+
+	/**
+	 * Sets ONE slot from a RAW KIT ENUM_AttachmentSlot byte, preserving the other four.
+	 * This is what world attachment pickups call: they carry a kit slot byte and an option byte
+	 * and nothing else, and the kit enum order differs from EAttachmentSlot (see
+	 * KitAttachmentSlots in ExtractionTypes.h). Keeping the translation here means the Blueprint
+	 * never has to know the mapping and so cannot drift from it.
+	 * Kit byte 5 (Barrels) and unknown bytes are a no-op — those carry no gameplay modifiers.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Weapon|Attachments")
+	void SetAttachmentSlotOption(uint8 KitSlotByte, uint8 OptionByte);
+
+	/** BaseDamage scaled by mounted attachments. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	float GetEffectiveDamage() const;
+
+	/** True when the weapon DA or any mounted attachment marks this weapon suppressed. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	bool IsSuppressedEffective() const;
+
+	/** ADSFOV after attachment override/delta, clamped to the DA's valid range. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	float GetEffectiveADSFOV() const;
+
+	/** ADSTransitionTime scaled by mounted attachments. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	float GetEffectiveADSTransitionTime() const;
+
+	/** ADSMovementSpeed scaled by mounted attachments. */
+	UFUNCTION(BlueprintPure, Category = "Weapon|Attachments")
+	float GetEffectiveADSMovementSpeed() const;
+
+	/** Player hip-fire cone half-angle (deg) after attachment scaling. */
+	float GetEffectiveHipFireSpreadDeg() const;
+
+	/** NoiseLoudness / NoiseRange for AI hearing after attachment scaling. */
+	float GetEffectiveNoiseLoudness() const;
+	float GetEffectiveNoiseRange() const;
+
+	/** Muzzle flash FX honouring any attachment override (suppressor → silenced flash). */
+	UNiagaraSystem* GetEffectiveMuzzleFlashFX() const;
 
 	// ---- Magazine swap (enemy reload visual) ----
 
@@ -304,6 +404,22 @@ public:
 	/** True while cover-align is actively writing WeaponMesh's relative transform. */
 	bool IsCoverAlignWriting() const { return bCoverAlignWriting; }
 
+	// ---- Align rest pose (shared baseline for every Setup*Align) ----
+
+	/**
+	 * Restores WeaponMesh to the relative transform captured by this equip's FIRST align setup —
+	 * the pose before any align writer had moved it — so a re-run of Setup*Align baselines from a
+	 * pristine mesh rather than from another writer's output.
+	 *
+	 * Load-bearing for any re-bake: every Setup*Align takes its rest / Alpha=0 target from a live
+	 * WeaponMesh->GetRelativeTransform(), which is only pristine on the first bake. By the time
+	 * anything asks for a re-bake, patrol-align (and possibly fire/cover align) have already
+	 * written that transform, so re-baking straight over their output compounds the offset on
+	 * every re-bake. No-op until the first setup has captured — a freshly equipped weapon mesh is
+	 * already at its rest pose.
+	 */
+	void RestoreAlignRestPose();
+
 	// ---- Hand-swap settle (two-socket weapon carry) ----
 
 	/**
@@ -399,6 +515,15 @@ protected:
 	UPROPERTY(Transient)
 	TObjectPtr<AActor> SpawnedVisualActor;
 
+	/** Descendants of SpawnedVisualActor that were already hidden when SetWeaponHidden(true) ran.
+	 *  Restored on SetWeaponHidden(false) so BP-hidden attachment slots stay hidden. */
+	TSet<TWeakObjectPtr<AActor>> VisualActorHiddenSnapshot;
+
+	/** Latch for SetWeaponHidden: true while the snapshot-hide is active. Re-hides and re-shows
+	 *  become no-ops, preventing a second hide from re-capturing descendants that the first hide
+	 *  legitimately turned off (scope/laser/magazine stay hidden forever otherwise). */
+	bool bWeaponHiddenBySnapshot = false;
+
 	/** When true, the weapon auto-reloads on empty (suitable for player UX).
 	 *  AI-controlled weapons should set this false so the BT task drives reload timing —
 	 *  the companion's reload-while-cover-returning flow needs BT control to avoid
@@ -451,6 +576,10 @@ private:
 
 	/** True while the magazine is detached and riding the hand. */
 	bool bMagazineDetached = false;
+
+	/** Re-entrancy guard for the hoisted TriggerKitVisualItemCancelReload call in CancelReload.
+	 *  The ProcessEvent into the kit item BP could theoretically call back into CancelReload. */
+	bool bCancellingReload = false;
 
 	// ---- Patrol alignment runtime state ----
 
@@ -513,6 +642,26 @@ private:
 	/** True while UpdateCoverAlign is writing WeaponMesh's relative transform (off-rest). */
 	bool bCoverAlignWriting = false;
 
+	// ---- Align rest pose runtime state ----
+
+	/** WeaponMesh's relative transform as it was before any align writer touched it, captured by
+	 *  the first Setup*Align of this equip. Per-attachment: the companion never re-attaches its
+	 *  weapon, and the enemy hand-swap path defines its own rest as identity. */
+	FTransform AlignRestPose = FTransform::Identity;
+
+	/** True once AlignRestPose holds a real capture. */
+	bool bAlignRestPoseCaptured = false;
+
+	/** Captures AlignRestPose the first time any align setup runs. Called at the top of every
+	 *  Setup*Align, before that setup reads GetRelativeTransform() for its own rest target. */
+	void CaptureAlignRestPoseOnce();
+
+	/** companion.AlignDebug one-shot bake dump. SocketToBone is TRest * TBone.Inverse() — the ONLY
+	 *  pose-dependent term in the composition, so comparing it across two bakes says whether the
+	 *  pose at bake time affects the result at all (it cancels when the weapon's attach socket is
+	 *  parented to the align bone). */
+	void LogCoverAlignBake(FName RestSocket, FName AlignBone, const FTransform& SocketToBone) const;
+
 	// ---- Recoil offset runtime state ----
 
 	/**
@@ -538,6 +687,11 @@ private:
 	bool bMeleeAlignReady = false;
 
 	// ---- Fire ----
+
+	/** Shared stop mechanics used by both StopFiring and AbortFireAndReload: clears bWantsToFire,
+	 *  cancels the auto-fire timer, transitions state to Idle, and begins recoil recovery.
+	 *  Does NOT trigger auto-reload -- that decision belongs to the caller. */
+	void StopFiringInternal();
 
 	void FireShot();
 	void PerformHitscan();
@@ -600,6 +754,41 @@ private:
 	UFUNCTION()
 	void OnRep_CurrentAmmo();
 
+	// ---- Attachment runtime state ----
+
+	/** Current per-slot selection (kit ST_Attachments enum bytes). Neutral zeros until set. */
+	UPROPERTY(ReplicatedUsing = OnRep_AttachmentSelection)
+	FWeaponAttachmentSelection AttachmentSelection;
+
+	UFUNCTION()
+	void OnRep_AttachmentSelection();
+
+	UFUNCTION(Server, Reliable)
+	void Server_SetAttachmentSelection(FWeaponAttachmentSelection NewSelection);
+
+	/** Stores the selection and recomputes cached effects. */
+	void ApplySelectionInternal(const FWeaponAttachmentSelection& NewSelection);
+
+	/** Recombines CombinedModifiers/suppressed/flash-override from the current selection.
+	 *  Drops the pooled muzzle-flash components when the effective flash FX changed. */
+	void RecalculateAttachmentEffects();
+
+	/** Dumps the current selection, the attachment assets it resolved to, and the resulting
+	 *  effective stats. Gated on weapon.AttachmentDebug — the whole point is to prove whether a
+	 *  picked-up attachment actually reached the weapon, so it re-resolves rather than trusting
+	 *  the cached modifiers. Costs nothing while the CVar is 0. */
+	void LogAttachmentDebug() const;
+
+	/** Product/sum of all mounted attachments' modifiers. Neutral defaults when nothing mounted. */
+	FWeaponStatModifiers CombinedModifiers;
+
+	/** True when any mounted attachment sets bSetsSuppressed. */
+	bool bAttachmentSuppressed = false;
+
+	/** Non-null when a mounted attachment overrides the muzzle flash FX. */
+	UPROPERTY(Transient)
+	TObjectPtr<UNiagaraSystem> AttachmentMuzzleFlashOverride;
+
 	// ---- Timers ----
 
 	FTimerHandle AutoFireTimerHandle;
@@ -658,8 +847,16 @@ private:
 
 	/** Friendly-fire ignore list rebuilt once per StartFiring call. Per-shot TActorIterator is too expensive. */
 	TArray<AActor*> CachedFFIgnoreList;
-	/** World time when CachedFFIgnoreList was last built. Used for the 1s refresh during sustained fire. */
-	float FFIgnoreListBuiltTime = -1e9f;
+	/** Sentinel for "CachedFFIgnoreList has never been built successfully" — the one state in which the
+	 *  list is empty, and an empty list means the hitscan excludes nobody. */
+	static constexpr float FFIgnoreListNeverBuilt = -1e9f;
+
+	/** World time when CachedFFIgnoreList was last built. See FFIgnoreListRefreshSeconds. */
+	float FFIgnoreListBuiltTime = FFIgnoreListNeverBuilt;
+
+	/** Rebuild cadence for CachedFFIgnoreList during sustained fire, and for GetFriendlyFireIgnoreList's
+	 *  own staleness check. The list is a whole-world pawn iteration, so it must never run per shot. */
+	static constexpr float FFIgnoreListRefreshSeconds = 1.f;
 
 	/** Near-miss radius for suppression reporting (cm). Pawn within this distance of the bullet segment gets suppressed. */
 	UPROPERTY(EditDefaultsOnly, Category = "Weapon|Suppression", meta = (ClampMin = "0.0"))
@@ -721,4 +918,18 @@ private:
 	/** Spawns a one-shot Niagara tracer streak from MuzzleLocation toward EndPoint.
 	 *  Engine-pooled (AutoRelease). No-ops when WeaponData->TracerFX is null. */
 	void SpawnTracer(const FVector& MuzzleLocation, const FVector& EndPoint);
+
+	// ---- Reload audio ----
+
+	/** Reload foley attached to the weapon for the current reload. Null while not reloading. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAudioComponent> ReloadAudioComponent;
+
+	/** Plays the DA reload sound (empty-mag variant when the mag is dry) attached to the weapon.
+	 *  No-ops when the DA has no reload sound assigned. */
+	void StartReloadAudio();
+
+	/** Fades out and drops the reload foley — called on cancel and EndPlay so a cut reload
+	 *  never leaves mag/bolt foley playing over idle. */
+	void StopReloadAudio();
 };

@@ -43,4 +43,8 @@ private:
 
 	TWeakObjectPtr<UCompanionCommandComponent> CachedCommandComp;
 	TWeakObjectPtr<AActor> TrackedTarget;
+
+	/** World location to track when there is no target actor (TakeCover). */
+	FVector TrackedLocation = FVector::ZeroVector;
+	bool bTrackingLocation = false;
 };

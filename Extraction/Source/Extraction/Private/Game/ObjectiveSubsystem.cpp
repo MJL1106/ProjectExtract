@@ -30,7 +30,7 @@ void UObjectiveSubsystem::Deinitialize()
 }
 
 void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocation,
-	AActor* TargetActor, FVector Offset, bool bShowWorldMarker)
+	AActor* TargetActor, FVector Offset, bool bShowWorldMarker, float HeightAboveBase)
 {
 	if (Id == NAME_None) return;
 
@@ -44,6 +44,7 @@ void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocat
 		Existing->TargetActor = TargetActor;
 		Existing->Offset = Offset;
 		Existing->bShowWorldMarker = bShowWorldMarker;
+		Existing->HeightAboveBase = HeightAboveBase;
 
 		if (bShowWorldMarker)
 		{
@@ -79,9 +80,28 @@ void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocat
 	Marker.TargetActor = TargetActor;
 	Marker.Offset = Offset;
 	Marker.bShowWorldMarker = bShowWorldMarker;
+	Marker.HeightAboveBase = HeightAboveBase;
 
 	OnObjectivesChanged.Broadcast();
 	RebuildDisplayActors();
+}
+
+void UObjectiveSubsystem::UpdateObjectiveLabel(FName Id, FText NewLabel)
+{
+	if (Id == NAME_None) return;
+
+	FObjectiveMarker* Existing = Objectives.FindByPredicate(
+		[Id](const FObjectiveMarker& Marker) { return Marker.Id == Id; });
+	if (!Existing) return;
+
+	// Compared, not blindly written: a countdown re-formats the same clock every tick it lands inside
+	// the same second, and a broadcast per re-format is a HUD rebuild the player never sees a change
+	// from. Silence is the point of this call existing.
+	if (Existing->Label.EqualTo(NewLabel)) return;
+
+	Existing->Label = NewLabel;
+	RefreshDisplayFor(*Existing);
+	OnObjectiveLabelChanged.Broadcast(Id, NewLabel);
 }
 
 void UObjectiveSubsystem::RemoveObjective(FName Id)
@@ -106,6 +126,9 @@ void UObjectiveSubsystem::ClearObjectives()
 void UObjectiveSubsystem::SetMarkerDisplayClass(TSubclassOf<AObjectiveMarkerDisplay> InClass)
 {
 	MarkerDisplayClass = InClass;
+	// The guard below skips a rebuild when the shown-id set has not moved, and a class swap moves
+	// nothing but the class — forget the last set so the next rebuild is unconditional.
+	LastDisplayedIds.Reset();
 	RebuildDisplayActors();
 }
 
@@ -118,6 +141,21 @@ void UObjectiveSubsystem::RebuildDisplayActors()
 
 	// Skip on dedicated server -- these are client-side visuals only.
 	if (World->GetNetMode() == NM_DedicatedServer) return;
+
+	// This whole function is a destroy + respawn pass over every billboard in the level, reached from
+	// AddObjective and RemoveObjective on every marker change. The work depends on nothing but WHICH
+	// ids want a world marker, so an unchanged set is an unchanged display list. A display destroyed
+	// from underneath us still forces a pass through, so the self-healing respawn survives the
+	// shortcut.
+	TSet<FName> DisplayedIds;
+	DisplayedIds.Reserve(Objectives.Num());
+	for (const FObjectiveMarker& Objective : Objectives)
+		if (Objective.bShowWorldMarker) DisplayedIds.Add(Objective.Id);
+
+	const bool bHasStaleDisplay = ActiveDisplays.ContainsByPredicate(
+		[](const AObjectiveMarkerDisplay* Display) { return !IsValid(Display); });
+	if (!bHasStaleDisplay && DisplayedIds.Num() == LastDisplayedIds.Num() && DisplayedIds.Includes(LastDisplayedIds))
+		return;
 
 	// Destroy stale displays whose objective id is no longer active.
 	for (int32 i = ActiveDisplays.Num() - 1; i >= 0; --i)
@@ -159,6 +197,12 @@ void UObjectiveSubsystem::RebuildDisplayActors()
 			ActiveDisplays.Add(Display);
 		}
 	}
+
+	// Committed AFTER the loop: if SpawnActor returned null the id is NOT recorded as displayed,
+	// so the next call retries the spawn instead of silently accepting the hole.
+	LastDisplayedIds.Reset();
+	for (const AObjectiveMarkerDisplay* Display : ActiveDisplays)
+		if (IsValid(Display)) LastDisplayedIds.Add(Display->GetObjectiveId());
 }
 
 void UObjectiveSubsystem::DestroyAllDisplays()
@@ -169,4 +213,20 @@ void UObjectiveSubsystem::DestroyAllDisplays()
 			Display->Destroy();
 	}
 	ActiveDisplays.Reset();
+
+	// Load-bearing for the rebuild guard: ClearObjectives lands here, and re-registering the SAME id
+	// afterwards would otherwise match the stale set and skip the respawn.
+	LastDisplayedIds.Reset();
+}
+
+void UObjectiveSubsystem::RefreshDisplayFor(const FObjectiveMarker& Objective)
+{
+	if (!Objective.bShowWorldMarker) return;
+
+	for (AObjectiveMarkerDisplay* Display : ActiveDisplays)
+	{
+		if (!IsValid(Display) || Display->GetObjectiveId() != Objective.Id) continue;
+		Display->InitObjective(Objective);
+		return;
+	}
 }

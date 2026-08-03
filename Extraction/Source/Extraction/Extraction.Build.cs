@@ -23,14 +23,17 @@ public class Extraction : ModuleRules
 			"GameplayTasks",
 			"NavigationSystem",
 			"AICoverSystem",
-			"Niagara"
+			"Niagara",
+			"DeveloperSettings",
+			"PhysicsCore"
 		});
 
 		if (Target.bBuildEditor)
 		{
 			PrivateDependencyModuleNames.AddRange(new string[] {
 				"UnrealEd",
-				"AssetTools"
+				"AssetTools",
+				"AssetRegistry"
 			});
 		}
 
@@ -38,6 +41,7 @@ public class Extraction : ModuleRules
 
 		// Public subfolder include paths
 		PublicIncludePaths.AddRange(new string[] {
+			"Extraction/Public/Commandlets",
 			"Extraction/Public/Core",
 			"Extraction/Public/Character",
 			"Extraction/Public/Animation",
@@ -59,11 +63,14 @@ public class Extraction : ModuleRules
 			"Extraction/Public/AI/EQS",
 			"Extraction/Public/AI/Navigation",
 			"Extraction/Public/AI/Cover",
-			"Extraction/Public/World"
+			"Extraction/Public/World",
+			"Extraction/Public/Extractee",
+			"Extraction/Public/Audio"
 		});
 
 		// Private subfolder include paths
 		PrivateIncludePaths.AddRange(new string[] {
+			"Extraction/Private/Commandlets",
 			"Extraction/Private/Core",
 			"Extraction/Private/Character",
 			"Extraction/Private/Animation",
@@ -86,7 +93,9 @@ public class Extraction : ModuleRules
 			"Extraction/Private/AI/Navigation",
 			"Extraction/Private/AI/Cover",
 			"Extraction/Private/World",
-			"Extraction/Private/Tests"
+			"Extraction/Private/Extractee",
+			"Extraction/Private/Tests",
+			"Extraction/Private/Audio"
 		});
 	}
 }

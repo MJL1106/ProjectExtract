@@ -80,7 +80,10 @@ void ACompanionModeDoorGate::OnTriggerOverlap(UPrimitiveComponent* OverlappedCom
 	if (!IsValid(Pawn) || !Pawn->IsPlayerControlled()) return;
 
 	// Objective is local UI: only the controlling client adds it.
-	if (Pawn->IsLocallyControlled() && !bObjectiveAdded)
+	// When an AObjectiveStep owns this beat, bRegisterOwnObjective is false and the gate
+	// stays out of the objective subsystem. bObjectiveAdded stays false, so
+	// RemoveObjectiveLocal is a no-op on EndPlay / PerformUnlock / OnRep.
+	if (bRegisterOwnObjective && Pawn->IsLocallyControlled() && !bObjectiveAdded)
 	{
 		if (UObjectiveSubsystem* Objectives = GetWorld()->GetSubsystem<UObjectiveSubsystem>())
 		{

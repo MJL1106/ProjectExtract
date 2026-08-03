@@ -11,6 +11,29 @@ class AEnemyGrenadeProjectile;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnGrenadeTelegraph, FVector, PredictedLanding, float, TimeToImpact);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnGrenadeCancelled);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnGrenadeThrown);
+
+/** Owner-agnostic init values — mirror of the UEnemyArchetypeData grenadier block, for non-enemy
+ *  throwers (the companion inits from UCompanionTuningDataAsset). */
+USTRUCT()
+struct FGrenadierInitParams
+{
+	GENERATED_BODY()
+
+	int32 GrenadeSupply = 8;
+	float GrenadeCooldown = 6.f;
+	float GrenadeFuseTime = 2.5f;
+	float GrenadeTelegraphTime = 1.f;
+	float GrenadeMinRange = 400.f;
+	float GrenadeMaxRange = 2000.f;
+	float GrenadeDamage = 80.f;
+	float GrenadeDamageRadius = 600.f;
+	float GrenadeLandingDistanceScale = 1.f;
+	FName GrenadeThrowSocket = TEXT("GrenadeSocket");
+
+	UPROPERTY()
+	TSubclassOf<AEnemyGrenadeProjectile> GrenadeProjectileClass;
+};
 
 UCLASS(ClassGroup = "Enemy", meta = (BlueprintSpawnableComponent))
 class EXTRACTION_API UEnemyGrenadierComponent : public UActorComponent
@@ -24,6 +47,9 @@ public:
 
 	/** Initialise supply/timing/damage from the archetype data asset. */
 	void InitFromArchetype(const UEnemyArchetypeData* Data);
+
+	/** Initialise from explicit values — non-enemy throwers (companion). */
+	void InitFromParams(const FGrenadierInitParams& Params);
 
 	/** True when supply > 0, cooldown has elapsed, and no throw is currently telegraphing. */
 	UFUNCTION(BlueprintPure, Category = "Enemy|Grenadier")
@@ -64,16 +90,21 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Enemy|Grenadier")
 	FOnGrenadeCancelled OnGrenadeCancelled;
 
+	/** Broadcast only once the projectile has actually spawned. Anything that must not fire for a
+	 *  cancelled wind-up (the companion's "frag out" call) hangs off this, not OnGrenadeTelegraph. */
+	UPROPERTY(BlueprintAssignable, Category = "Enemy|Grenadier")
+	FOnGrenadeThrown OnGrenadeThrown;
+
 private:
 	/** Cached from DA at InitFromArchetype. */
-	int32 GrenadeSupply = 3;
-	float GrenadeCooldown = 12.f;
+	int32 GrenadeSupply = 8;
+	float GrenadeCooldown = 6.f;
 	float GrenadeFuseTime = 2.5f;
 	float GrenadeTelegraphTime = 1.f;
-	float GrenadeMinRange = 500.f;
+	float GrenadeMinRange = 400.f;
 	float GrenadeMaxRange = 2000.f;
 	float GrenadeDamage = 80.f;
-	float GrenadeDamageRadius = 350.f;
+	float GrenadeDamageRadius = 600.f;
 
 	UPROPERTY()
 	TSubclassOf<AEnemyGrenadeProjectile> GrenadeProjectileClass;
@@ -93,10 +124,16 @@ private:
 	/** Target landing location stored at commit time; re-arced from the socket at release. */
 	FVector PendingLandingLocation = FVector::ZeroVector;
 
+	/** Arc height that passed the trajectory check at commit time; reused for the release re-solve. */
+	float PendingArcParam = 0.5f;
+
 	FTimerHandle TelegraphTimerHandle;
 	FTimerHandle CooldownTimerHandle;
 
 	/** Shared spawn path — called by both ReleaseGrenade() and the fallback timer. */
 	void SpawnGrenadeFromSocket();
 	void OnCooldownElapsed();
+
+	/** MaxSpeed from the projectile class CDO — the launch velocity gets clamped to it. 0 = uncapped. */
+	float GetProjectileMaxSpeed() const;
 };

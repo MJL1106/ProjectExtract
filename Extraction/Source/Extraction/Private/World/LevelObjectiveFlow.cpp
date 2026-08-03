@@ -6,8 +6,12 @@
 #include "Companion/CompanionRoute.h"
 #include "Components/HealthComponent.h"
 #include "Enemy/EnemyCharacter.h"
+#include "Enemy/EnemyDirectorSubsystem.h"
 #include "EngineUtils.h"
+#include "Extractee/ExtracteeCompanion.h"
+#include "Character/ExtractionPlayer.h"
 #include "Game/ExtractionGameInstance.h"
+#include "Game/ExtractionGameMode.h"
 #include "Game/MissionInventorySubsystem.h"
 #include "Game/ObjectiveSubsystem.h"
 #include "GameFramework/PlayerController.h"
@@ -104,6 +108,7 @@ void ALevelObjectiveFlow::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& 
 	DOREPLIFETIME(ALevelObjectiveFlow, CurrentOptionalTarget);
 	DOREPLIFETIME(ALevelObjectiveFlow, PresentationRevision);
 	DOREPLIFETIME(ALevelObjectiveFlow, Room1AreaLocation);
+	DOREPLIFETIME(ALevelObjectiveFlow, DefendAreaLocation);
 }
 
 void ALevelObjectiveFlow::BeginPlay()
@@ -133,6 +138,7 @@ void ALevelObjectiveFlow::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	{
 		World->GetTimerManager().ClearTimer(CheckpointHealPollHandle);
 		World->GetTimerManager().ClearTimer(CheckpointSpawnRetryHandle);
+		World->GetTimerManager().ClearTimer(ExtractionWaveRetryHandle);
 	}
 	if (HasAuthority()) UnbindDelegates();
 	if (UObjectiveSubsystem* Objectives = GetWorld() ? GetWorld()->GetSubsystem<UObjectiveSubsystem>() : nullptr)
@@ -163,6 +169,12 @@ bool ALevelObjectiveFlow::ActivateFlow()
 			Room1AreaLocation = Sum / ValidCount;
 	}
 
+	WarnOnSuspectWiring();
+
+	// The VIP is not rescuable until the Reach step is current (no out-of-order path to catch up).
+	if (IsValid(Extractee))
+		Extractee->SetRescueEnabled(false);
+
 	CurrentStep = ELevelObjectiveStep::BreachRoofDoor;
 	ForceNetUpdate();
 	UpdatePrimaryObjective();
@@ -191,8 +203,28 @@ bool ALevelObjectiveFlow::ValidateReferences() const
 	Require(KeycardContainer, TEXT("KeycardContainer"));
 	Require(Room1ExitDoor, TEXT("Room1ExitDoor"));
 	Require(Room2EntryDoor, TEXT("Room2EntryDoor"));
-	Require(ExtractionTarget, TEXT("ExtractionTarget"));
 	Require(LiftGate, TEXT("LiftGate"));
+
+	// Extraction beat owner: the armed VIP (current design) or the legacy placeholder actor. One
+	// is required; neither means the level has nothing to extract and the flow would dead-end at
+	// the Reach step, so refuse to activate rather than run half a mission.
+	if (!IsValid(Extractee) && !IsValid(ExtractionTarget))
+	{
+		UE_LOG(LogLevelObjectiveFlow, Error,
+			TEXT("%s: neither Extractee nor ExtractionTarget is set — nothing owns the extraction beat"),
+			*GetName());
+		bValid = false;
+	}
+
+	// The flow only runs the wave itself when no target actor owns it, and StartWave rejects
+	// TargetSquads < 1 — a default-constructed request would silently never start.
+	if (!IsValid(ExtractionTarget) && ExtractionWave.TargetSquads < 1)
+	{
+		UE_LOG(LogLevelObjectiveFlow, Error,
+			TEXT("%s: this flow owns the extraction wave but ExtractionWave.TargetSquads is %d (< 1)"),
+			*GetName(), ExtractionWave.TargetSquads);
+		bValid = false;
+	}
 
 	if (Room1Enemies.IsEmpty())
 	{
@@ -215,6 +247,49 @@ bool ALevelObjectiveFlow::ValidateReferences() const
 	for (const AEnemyCharacter* Enemy : SecondTakedownPair) Require(Enemy, TEXT("SecondTakedownPair entry"));
 	for (const ALootContainer* Crate : SupplyCrates) Require(Crate, TEXT("SupplyCrates entry"));
 	return bValid;
+}
+
+void ALevelObjectiveFlow::WarnOnSuspectWiring() const
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	// Extractee is EditInstanceOnly — it lives on the placed actor, not the class defaults, so a
+	// level saved before it existed silently reverts to the legacy placeholder path and the rescue
+	// starts nothing. A one-tick fix, but only if someone knows to make it.
+	if (!IsValid(Extractee))
+	{
+		for (TActorIterator<AExtracteeCompanion> It(World); It; ++It)
+		{
+			UE_LOG(LogLevelObjectiveFlow, Warning,
+				TEXT("%s: '%s' is in the level but Extractee is unset — the rescue will not start the extraction "
+					 "wave. Wire it on the placed flow actor."),
+				*GetName(), *It->GetName());
+			break;
+		}
+		return;
+	}
+
+	if (IsValid(ExtractionTarget) && !ExtractionTarget->IsExternalTriggerOnly())
+	{
+		UE_LOG(LogLevelObjectiveFlow, Warning,
+			TEXT("%s: Extractee is wired but '%s' is not bExternalTriggerOnly — the placeholder stays visible and "
+				 "separately interactable alongside the VIP rescue."),
+			*GetName(), *ExtractionTarget->GetName());
+	}
+
+	// Flow-owned wave: nothing else validates the request, and a missing config DA falls back to
+	// the Director's ambient profile — technically a wave, but not the scripted assault.
+	if (OwnsExtractionWave())
+	{
+		if (ExtractionWave.WaveId.IsNone())
+			UE_LOG(LogLevelObjectiveFlow, Warning,
+				TEXT("%s: ExtractionWave.WaveId is None — completion matching is by id, so name it."), *GetName());
+		if (!IsValid(ExtractionWave.ConfigOverride))
+			UE_LOG(LogLevelObjectiveFlow, Warning,
+				TEXT("%s: ExtractionWave.ConfigOverride is unset — the defence wave will run on the ambient "
+					 "director profile instead of an assault profile."), *GetName());
+	}
 }
 
 void ALevelObjectiveFlow::BindDelegates()
@@ -258,6 +333,20 @@ void ALevelObjectiveFlow::BindDelegates()
 	{
 		ExtractionTarget->OnExtractionTargetWaveStarted.AddUniqueDynamic(this, &ALevelObjectiveFlow::HandleExtractionStarted);
 		ExtractionTarget->OnExtractionTargetCompleted.AddUniqueDynamic(this, &ALevelObjectiveFlow::HandleExtractionCompleted);
+	}
+
+	if (IsValid(Extractee))
+		Extractee->OnRescued.AddUniqueDynamic(this, &ALevelObjectiveFlow::HandleExtracteeRescued);
+
+	// With no target actor there is nobody else listening for the Director — bind it here, before
+	// the wave can start, so the completion that unlocks the exit can never be missed.
+	if (OwnsExtractionWave())
+	{
+		if (UEnemyDirectorSubsystem* Director = GetWorld() ? GetWorld()->GetSubsystem<UEnemyDirectorSubsystem>() : nullptr)
+		{
+			Director->OnDirectorWaveCompleted.AddUniqueDynamic(this, &ALevelObjectiveFlow::HandleDirectorWaveCompleted);
+			Director->OnDirectorWaveBlocked.AddUniqueDynamic(this, &ALevelObjectiveFlow::HandleDirectorWaveBlocked);
+		}
 	}
 }
 
@@ -303,6 +392,15 @@ void ALevelObjectiveFlow::UnbindDelegates()
 		ExtractionTarget->OnExtractionTargetWaveStarted.RemoveDynamic(this, &ALevelObjectiveFlow::HandleExtractionStarted);
 		ExtractionTarget->OnExtractionTargetCompleted.RemoveDynamic(this, &ALevelObjectiveFlow::HandleExtractionCompleted);
 	}
+
+	if (IsValid(Extractee))
+		Extractee->OnRescued.RemoveDynamic(this, &ALevelObjectiveFlow::HandleExtracteeRescued);
+
+	if (UEnemyDirectorSubsystem* Director = GetWorld() ? GetWorld()->GetSubsystem<UEnemyDirectorSubsystem>() : nullptr)
+	{
+		Director->OnDirectorWaveCompleted.RemoveDynamic(this, &ALevelObjectiveFlow::HandleDirectorWaveCompleted);
+		Director->OnDirectorWaveBlocked.RemoveDynamic(this, &ALevelObjectiveFlow::HandleDirectorWaveBlocked);
+	}
 }
 
 void ALevelObjectiveFlow::Advance(ELevelObjectiveEvent Event)
@@ -314,14 +412,26 @@ void ALevelObjectiveFlow::Advance(ELevelObjectiveEvent Event)
 	CurrentStep = NextStep;
 	if (CurrentStep == ELevelObjectiveStep::FirstDoubleTakedown)
 		ActivateOptionalSupplies();
-	if (CurrentStep == ELevelObjectiveStep::ReachExtractionTarget && IsValid(ExtractionTarget))
-		ExtractionTarget->ActivateTarget();
+	if (CurrentStep == ELevelObjectiveStep::ReachExtractionTarget)
+	{
+		if (IsValid(ExtractionTarget))
+			ExtractionTarget->ActivateTarget();
+		if (IsValid(Extractee))
+			Extractee->SetRescueEnabled(true);
+	}
 	if (CheckpointSteps.Contains(CurrentStep))
 	{
 		TryApplyCompanionCheckpointHeal();
 		// Record the checkpoint so a level restart (fail flow) resumes here.
 		if (UExtractionGameInstance* GameInstance = Cast<UExtractionGameInstance>(GetGameInstance()))
 			GameInstance->SetCheckpoint(FName(*UGameplayStatics::GetCurrentLevelName(this, true)), CurrentStep);
+
+		// Capture the player's loadout so the restart restores weapons/ammo/stims.
+		if (APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0))
+		{
+			if (AExtractionPlayer* Player = Cast<AExtractionPlayer>(PC->GetPawn()))
+				Player->RequestLoadoutCapture();
+		}
 	}
 
 	ForceNetUpdate();
@@ -330,19 +440,40 @@ void ALevelObjectiveFlow::Advance(ELevelObjectiveEvent Event)
 	EvaluateCurrentEnemyStep();
 
 	// Late-entry catch-up: an event that fires before its step is current (keycard looted
-	// mid-fight, exit door unlocked early) is dropped by the linear machine, and the source
-	// broadcasts are one-shot — they never re-fire once the step activates. Re-check world
-	// state on entry and advance again; the recursion walks through every already-satisfied step.
+	// mid-fight, a door the companion breached on the way past) is dropped by the linear machine,
+	// and the source broadcasts are one-shot — they never re-fire once the step activates. Re-check
+	// world state on entry and advance again; the recursion walks through every satisfied step.
+	//
+	// EVERY door step gets this, not just the two that used to. A dropped door event is a hard
+	// deadlock with no recovery: the step never completes, so the flow — and the extraction it
+	// gates — stops for the rest of the level.
 	if (CurrentStep == ELevelObjectiveStep::FindOfficeKeycard
 		&& IsValid(KeycardContainer) && KeycardContainer->IsLooted())
 	{
 		Advance(ELevelObjectiveEvent::KeycardLooted);
 		return;
 	}
-	if (CurrentStep == ELevelObjectiveStep::UnlockStairwellDoor
-		&& IsValid(Room1ExitDoor) && Room1ExitDoor->IsOpenForAcoustics())
+
+	struct FDoorCatchUp
 	{
-		Advance(ELevelObjectiveEvent::ExitDoorOpened);
+		ELevelObjectiveStep Step;
+		const ADoorBase* Door;
+		ELevelObjectiveEvent Event;
+	};
+	const FDoorCatchUp DoorCatchUps[] = {
+		{ ELevelObjectiveStep::BreachRoofDoor,           RoofDoor,             ELevelObjectiveEvent::RoofDoorOpened },
+		{ ELevelObjectiveStep::BreachStairwellDoor,      StairwellBreachDoor,  ELevelObjectiveEvent::StairwellDoorOpened },
+		{ ELevelObjectiveStep::UnlockStairwellDoor,      Room1ExitDoor,        ELevelObjectiveEvent::ExitDoorOpened },
+		{ ELevelObjectiveStep::SwitchCompanionToStealth, Room2EntryDoor,       ELevelObjectiveEvent::Room2DoorOpened },
+	};
+	for (const FDoorCatchUp& CatchUp : DoorCatchUps)
+	{
+		if (CurrentStep != CatchUp.Step || !IsValid(CatchUp.Door) || !CatchUp.Door->IsOpenForAcoustics()) continue;
+
+		UE_LOG(LogLevelObjectiveFlow, Log, TEXT("%s: step %d entered with '%s' already open — catching up"),
+			*GetName(), static_cast<int32>(CurrentStep), *GetNameSafe(CatchUp.Door));
+		Advance(CatchUp.Event);
+		return;
 	}
 }
 
@@ -354,7 +485,8 @@ void ALevelObjectiveFlow::TryApplyCompanionCheckpointHeal()
 	ACompanionCharacter* Companion = CachedCompanion.Get();
 	if (!IsValid(Companion))
 	{
-		for (TActorIterator<ACompanionCharacter> It(World); It; ++It) { Companion = *It; break; }
+		// Primary only — the extractee joins fully healed at rescue and owns its own recovery.
+		Companion = ACompanionCharacter::GetPrimaryCompanion(World);
 		CachedCompanion = Companion;
 	}
 	if (!IsValid(Companion))
@@ -470,6 +602,20 @@ void ALevelObjectiveFlow::FastForwardToStep(ELevelObjectiveStep TargetStep)
 		ActivateOptionalSupplies();
 	if (TargetStep >= ELevelObjectiveStep::ReachExtractionTarget && IsValid(ExtractionTarget))
 		ExtractionTarget->ActivateTarget();
+	if (TargetStep == ELevelObjectiveStep::ReachExtractionTarget && IsValid(Extractee))
+		Extractee->SetRescueEnabled(true);
+	if (TargetStep >= ELevelObjectiveStep::DefendPosition && IsValid(Extractee))
+	{
+		// Past the rescue: the VIP resumes armed at the player's side, and — since its interact
+		// is gone — the defence wave must start here rather than wait for one.
+		// He is still at his staged spot this frame, so it is also the last chance to read the
+		// hold-ground for the Defend marker.
+		if (DefendAreaLocation.IsZero())
+			DefendAreaLocation = Extractee->GetActorLocation();
+		Extractee->ForceRescue();
+		if (TargetStep == ELevelObjectiveStep::DefendPosition)
+			TryStartExtractionWave();
+	}
 
 	ForceNetUpdate();
 	RefreshRecordedEnemyDeaths();
@@ -522,21 +668,23 @@ void ALevelObjectiveFlow::TryApplyCheckpointSpawn()
 	if (AController* PlayerController = PlayerPawn->GetController())
 		PlayerController->SetControlRotation(SpawnRot);
 
-	ACompanionCharacter* Companion = CachedCompanion.Get();
-	if (!IsValid(Companion))
+	// Every possessed companion lands beside the player (alternating sides); a captive
+	// extractee has no controller and stays at its staged spot.
+	int32 CompanionsMoved = 0;
+	for (TActorIterator<ACompanionCharacter> It(World); It; ++It)
 	{
-		for (TActorIterator<ACompanionCharacter> It(World); It; ++It) { Companion = *It; break; }
-		CachedCompanion = Companion;
-	}
-	if (IsValid(Companion))
-	{
-		const FVector CompanionLoc = SpawnLoc + SpawnPoint->GetActorRightVector() * 150.f;
+		ACompanionCharacter* Companion = *It;
+		if (!IsValid(Companion) || !Companion->GetController()) continue;
+
+		const float Side = (CompanionsMoved % 2 == 0) ? 150.f : -150.f;
+		const FVector CompanionLoc = SpawnLoc + SpawnPoint->GetActorRightVector() * Side;
 		if (!Companion->TeleportTo(CompanionLoc, SpawnRot))
 			Companion->TeleportTo(SpawnLoc, SpawnRot, /*bIsATest*/ false, /*bNoCheck*/ true);
+		++CompanionsMoved;
 	}
 
-	UE_LOG(LogLevelObjectiveFlow, Log, TEXT("%s: checkpoint resume — player%s teleported to step-%d spawn"),
-		*GetName(), IsValid(Companion) ? TEXT(" + companion") : TEXT(""), static_cast<int32>(CurrentStep));
+	UE_LOG(LogLevelObjectiveFlow, Log, TEXT("%s: checkpoint resume — player + %d companion(s) teleported to step-%d spawn"),
+		*GetName(), CompanionsMoved, static_cast<int32>(CurrentStep));
 }
 
 void ALevelObjectiveFlow::UpdatePrimaryObjective()
@@ -567,9 +715,19 @@ void ALevelObjectiveFlow::UpdatePrimaryObjective()
 	case ELevelObjectiveStep::SecondDoubleTakedown:
 		Label = NSLOCTEXT("LevelFlow", "SecondTakedown", "Perform the second double takedown"); Target = FindFirstLivingEnemy(SecondTakedownPair); break;
 	case ELevelObjectiveStep::ReachExtractionTarget:
-		Label = NSLOCTEXT("LevelFlow", "ReachTarget", "Reach and interact with the extraction target"); Target = ExtractionTarget; break;
+		if (IsValid(Extractee))
+		{
+			Label = NSLOCTEXT("LevelFlow", "FreeHostage", "Free the hostage - hold F"); Target = Extractee;
+		}
+		else
+		{
+			Label = NSLOCTEXT("LevelFlow", "ReachTarget", "Reach and interact with the extraction target"); Target = ExtractionTarget;
+		}
+		break;
 	case ELevelObjectiveStep::DefendPosition:
-		Label = NSLOCTEXT("LevelFlow", "Defend", "Defend the position"); Target = ExtractionTarget; break;
+		Label = NSLOCTEXT("LevelFlow", "Defend", "Defend the position");
+		Target = ExtractionTarget; // Null on the VIP path — the static anchor below takes over.
+		break;
 	case ELevelObjectiveStep::UseLift:
 		// The existing lift gate owns the only marker after it unlocks.
 		Objectives->RemoveObjective(PrimaryObjectiveId); return;
@@ -578,21 +736,26 @@ void ALevelObjectiveFlow::UpdatePrimaryObjective()
 		Objectives->RemoveObjective(PrimaryObjectiveId); return;
 	}
 
-	// ClearRoom1 pins to the fixed room area instead of following living enemies around
-	// (Zero anchor = fall back to the enemy-follow Target resolved in the switch above).
-	if (CurrentStep == ELevelObjectiveStep::ClearRoom1 && !Room1AreaLocation.IsZero())
+	// Steps that pin to a fixed patch of ground rather than following an actor. Zero anchor =
+	// fall back to the Target resolved in the switch above.
+	const bool bStaticAnchor =
+		(CurrentStep == ELevelObjectiveStep::ClearRoom1 && !Room1AreaLocation.IsZero())
+		|| (CurrentStep == ELevelObjectiveStep::DefendPosition && !DefendAreaLocation.IsZero());
+	if (bStaticAnchor)
 	{
+		const FVector AnchorLocation = (CurrentStep == ELevelObjectiveStep::ClearRoom1)
+			? Room1AreaLocation : DefendAreaLocation;
 		if (HasAuthority() && CurrentPrimaryTarget != nullptr)
 		{
 			CurrentPrimaryTarget = nullptr;
 			++PresentationRevision;
 			ForceNetUpdate();
 		}
-		// Enemy centroid sits at capsule centre; lift so the marker reads at the same height
+		// Both anchors sit at capsule centre; lift so the marker reads at the same height
 		// as target-based markers (FObjectiveMarker::HeightAboveBase above the floor).
-		constexpr float Room1AreaMarkerLift = 80.f;
+		constexpr float AreaMarkerLift = 80.f;
 		Objectives->AddObjective(PrimaryObjectiveId, Label,
-			Room1AreaLocation + FVector(0.f, 0.f, Room1AreaMarkerLift));
+			AnchorLocation + FVector(0.f, 0.f, AreaMarkerLift));
 		return;
 	}
 
@@ -611,11 +774,45 @@ void ALevelObjectiveFlow::UpdatePrimaryObjective()
 	}
 	if (!IsValid(Target))
 	{
-		UE_LOG(LogLevelObjectiveFlow, Error, TEXT("%s: step %d has no valid marker target"),
-			*GetName(), static_cast<uint8>(CurrentStep));
+		// Bailing here used to leave the panel showing the PREVIOUS step's objective (or nothing
+		// at all), which reads as "the game forgot about me". A step with a resolvable anchor is
+		// still worth a marker — only a step with nothing to point at loses one.
+		const AActor* Anchor = ResolveMarkerFallbackAnchor();
+		if (!IsValid(Anchor))
+		{
+			UE_LOG(LogLevelObjectiveFlow, Error, TEXT("%s: step %d has no valid marker target and no fallback anchor"),
+				*GetName(), static_cast<uint8>(CurrentStep));
+			Objectives->RemoveObjective(PrimaryObjectiveId);
+			return;
+		}
+
+		UE_LOG(LogLevelObjectiveFlow, Warning, TEXT("%s: step %d marker target unresolved — anchoring on '%s'"),
+			*GetName(), static_cast<uint8>(CurrentStep), *GetNameSafe(Anchor));
+		Objectives->AddObjective(PrimaryObjectiveId, Label, Anchor->GetActorLocation());
 		return;
 	}
 	Objectives->AddObjective(PrimaryObjectiveId, Label, Target->GetActorLocation(), Target);
+}
+
+const AActor* ALevelObjectiveFlow::ResolveMarkerFallbackAnchor() const
+{
+	// Enemy-group steps lose their target the instant the last tracked enemy dies or is destroyed
+	// (UpdatePrimaryObjective runs before the step advances). Fall back to the area the fight was
+	// in; every other step falls back to the extraction end of the level.
+	switch (CurrentStep)
+	{
+	case ELevelObjectiveStep::ClearRoom1:
+		return nullptr; // Already handled above by the Room1AreaLocation static marker.
+	case ELevelObjectiveStep::FirstDoubleTakedown:
+	case ELevelObjectiveStep::SecondDoubleTakedown:
+		return Room2EntryDoor.Get();
+	default:
+		break;
+	}
+
+	if (IsValid(Extractee)) return Extractee;
+	if (IsValid(ExtractionTarget)) return ExtractionTarget;
+	return nullptr;
 }
 
 void ALevelObjectiveFlow::EvaluateCurrentEnemyStep()
@@ -824,6 +1021,113 @@ void ALevelObjectiveFlow::HandleSupplyDestroyed(AActor* DestroyedActor)
 	if (ALootContainer* Container = Cast<ALootContainer>(DestroyedActor))
 		CompletedSupplyCrates.Add(TWeakObjectPtr<ALootContainer>(Container));
 	if (bOptionalSuppliesActive) UpdateOptionalSupplies();
+}
+
+void ALevelObjectiveFlow::HandleExtracteeRescued()
+{
+	if (!HasAuthority()) return;
+
+	// Freeze the hold-ground here, while the VIP is still standing where the player freed him.
+	if (DefendAreaLocation.IsZero())
+	{
+		const AActor* Anchor = IsValid(Extractee) ? static_cast<const AActor*>(Extractee)
+			: static_cast<const AActor*>(ExtractionTarget);
+		if (IsValid(Anchor)) DefendAreaLocation = Anchor->GetActorLocation();
+	}
+
+	// The rescue IS the extraction trigger: start the wave through the target actor's guarded
+	// path. Its OnExtractionTargetWaveStarted then advances the flow to DefendPosition.
+	TryStartExtractionWave();
+}
+
+void ALevelObjectiveFlow::TryStartExtractionWave()
+{
+	UWorld* World = GetWorld();
+	if (!World || !HasAuthority()) return;
+
+	bool bStarted = false;
+	if (IsValid(ExtractionTarget))
+	{
+		bStarted = ExtractionTarget->BeginExtractionExternal();
+	}
+	else
+	{
+		// No target actor: the flow owns the wave. Advance ourselves — the ExtractionStarted event
+		// normally arrives via the target's OnExtractionTargetWaveStarted, which nobody broadcasts here.
+		UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>();
+		if (IsValid(Director))
+		{
+			// Idempotent: a retry that lands after the wave took hold must not start a second one.
+			bStarted = Director->GetActiveWaveId() == ExtractionWave.WaveId
+				|| CurrentStep > ELevelObjectiveStep::ReachExtractionTarget
+				|| Director->StartWave(ExtractionWave);
+		}
+		if (bStarted) Advance(ELevelObjectiveEvent::ExtractionStarted);
+	}
+
+	if (bStarted)
+	{
+		World->GetTimerManager().ClearTimer(ExtractionWaveRetryHandle);
+		return;
+	}
+
+	// StartWave refused (another wave still active, Director not ready). The rescue can't be
+	// re-interacted, so keep knocking until the Director accepts.
+	if (!World->GetTimerManager().IsTimerActive(ExtractionWaveRetryHandle))
+	{
+		UE_LOG(LogLevelObjectiveFlow, Warning,
+			TEXT("%s: extraction wave refused to start — retrying every 2s"), *GetName());
+		World->GetTimerManager().SetTimer(ExtractionWaveRetryHandle, this,
+			&ALevelObjectiveFlow::TryStartExtractionWave, 2.f, /*bLoop=*/true);
+	}
+}
+
+void ALevelObjectiveFlow::HandleDirectorWaveCompleted(FName WaveId)
+{
+	if (!HasAuthority() || !OwnsExtractionWave()) return;
+	if (WaveId != ExtractionWave.WaveId) return;
+
+	UE_LOG(LogLevelObjectiveFlow, Log, TEXT("%s: extraction wave '%s' completed"), *GetName(), *WaveId.ToString());
+
+	PerformExtractionCompletionAction();
+	Advance(ELevelObjectiveEvent::ExtractionCompleted);
+}
+
+void ALevelObjectiveFlow::HandleDirectorWaveBlocked(FName WaveId, FText Reason)
+{
+	if (!HasAuthority() || !OwnsExtractionWave()) return;
+	if (WaveId != ExtractionWave.WaveId) return;
+
+	UE_LOG(LogLevelObjectiveFlow, Warning, TEXT("%s: extraction wave '%s' blocked: %s"),
+		*GetName(), *WaveId.ToString(), *Reason.ToString());
+
+	// Same player-facing surface the target actor used — a wave that can't find spawn room is
+	// otherwise a silent stall on a "defend the position" objective.
+	if (UMissionInventorySubsystem* Inventory = GetWorld() ? GetWorld()->GetSubsystem<UMissionInventorySubsystem>() : nullptr)
+		Inventory->OnLootNotify.Broadcast(Reason);
+}
+
+void ALevelObjectiveFlow::PerformExtractionCompletionAction()
+{
+	switch (ExtractionCompletionAction)
+	{
+	case EWaveCompletionAction::UnlockExit:
+		if (IsValid(LiftGate))
+			LiftGate->UnlockExit();
+		else
+			UE_LOG(LogLevelObjectiveFlow, Warning, TEXT("%s: UnlockExit with no LiftGate"), *GetName());
+		break;
+
+	case EWaveCompletionAction::CompleteLevel:
+		if (AExtractionGameMode* GameMode = GetWorld() ? GetWorld()->GetAuthGameMode<AExtractionGameMode>() : nullptr)
+			GameMode->CompleteLevel();
+		else
+			UE_LOG(LogLevelObjectiveFlow, Warning, TEXT("%s: CompleteLevel with no AExtractionGameMode"), *GetName());
+		break;
+
+	case EWaveCompletionAction::BroadcastOnly:
+		break;
+	}
 }
 
 void ALevelObjectiveFlow::HandleExtractionStarted()
