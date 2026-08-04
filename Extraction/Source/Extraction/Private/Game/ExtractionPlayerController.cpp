@@ -7,14 +7,9 @@
 #include "InputMappingContext.h"
 #include "ExtractionCameraManager.h"
 #include "Blueprint/UserWidget.h"
-#include "PlayerHealthWidget.h"
-#include "AmmoWidget.h"
-#include "CompanionModeWidget.h"
 #include "ObjectiveMarkerLayer.h"
-#include "ObjectiveTextPanelWidget.h"
 #include "Game/ObjectiveSubsystem.h"
 #include "World/ObjectiveMarkerDisplay.h"
-#include "LootNotificationWidget.h"
 #include "LevelCompleteWidget.h"
 #include "LevelFailedWidget.h"
 #include "RevivePromptWidget.h"
@@ -23,6 +18,8 @@
 #include "AttachmentStatPreviewWidget.h"
 #include "ConsumableWidget.h"
 #include "TutorialBriefingWidget.h"
+#include "UI/ExtractionHudBridgeComponent.h"
+#include "GameFramework/HUD.h"
 #include "ExtractionGameMode.h"
 #include "ExtractionGameInstance.h"
 #include "Extraction.h"
@@ -89,19 +86,6 @@ AExtractionPlayerController::AExtractionPlayerController()
 {
 	// set the player camera manager class
 	PlayerCameraManagerClass = AExtractionCameraManager::StaticClass();
-
-	// Default HUD widget class
-	static ConstructorHelpers::FClassFinder<UPlayerHealthWidget> HUDWidgetBP(
-		TEXT("/Game/Core/UI/WBP_PlayerHealth"));
-	if (HUDWidgetBP.Succeeded())
-		HUDWidgetClass = HUDWidgetBP.Class;
-
-	// Default ammo widget class
-	static ConstructorHelpers::FClassFinder<UAmmoWidget> AmmoBP(
-		TEXT("/Game/Core/UI/WBP_Ammo"));
-	if (AmmoBP.Succeeded())
-		AmmoWidgetClass = AmmoBP.Class;
-
 }
 
 void AExtractionPlayerController::BeginPlay()
@@ -187,7 +171,15 @@ void AExtractionPlayerController::ShowTutorialBriefing()
 
 	if (!IsValid(TutorialBriefingWidget))
 		TutorialBriefingWidget = CreateWidget<UTutorialBriefingWidget>(this, TutorialBriefingWidgetClass);
+	// Deliberately before the hide below: a failed create here would otherwise leave the HUD hidden
+	// with no briefing on screen to dismiss it, and the game unpaused underneath.
 	if (!IsValid(TutorialBriefingWidget)) return;
+
+	// Must precede AddToPlayerScreen — that is what runs the briefing's construct, and its sweep
+	// records the prior visibility of everything still showing. With the overlay already collapsed
+	// the sweep is left only the kit's own widgets (crosshair, companion HUD) to catch, so the two
+	// restores never contend for the same widget.
+	SetPauseHudHidden(true);
 
 	if (!TutorialBriefingWidget->IsInViewport())
 		TutorialBriefingWidget->AddToPlayerScreen(TutorialBriefingZOrder);
@@ -212,12 +204,17 @@ void AExtractionPlayerController::DismissTutorialBriefing()
 	SetInputMode(FInputModeGameOnly());
 	SetShowMouseCursor(false);
 
+	// RemoveFromParent runs the widget's destruct, which restores everything its sweep hid.
 	if (IsValid(TutorialBriefingWidget))
 		TutorialBriefingWidget->RemoveFromParent();
 	TutorialBriefingWidget = nullptr;
 
+	// After the sweep's restore, so the two never write the same widget in the same frame.
+	SetPauseHudHidden(false);
+
 	// Idempotent: leaves a HUD that survived the briefing untouched, re-adds anything that was torn
-	// off underneath it.
+	// off underneath it. Creates and re-adds only — it never writes visibility, so it cannot undo
+	// the line above or reveal anything the HUD modules own.
 	RestoreHUD();
 
 	if (UExtractionGameInstance* GI = GetGameInstance<UExtractionGameInstance>())
@@ -237,17 +234,97 @@ void AExtractionPlayerController::RestoreHUD()
 			UE_LOG(LogExtraction, Error, TEXT("Could not spawn mobile controls widget."));
 	}
 
-	EnsureOnPlayerScreen(this, HUDWidget, HUDWidgetClass, HUDLayerZOrder);
-	EnsureOnPlayerScreen(this, AmmoWidget, AmmoWidgetClass, HUDLayerZOrder);
-	EnsureOnPlayerScreen(this, CompanionModeWidget, CompanionModeWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, ObjectiveLayerWidget, ObjectiveLayerWidgetClass, HUDLayerZOrder);
-	EnsureOnPlayerScreen(this, ObjectiveTextPanelWidget, ObjectiveTextPanelWidgetClass, HUDLayerZOrder);
-	EnsureOnPlayerScreen(this, LootToastWidget, LootToastWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, RevivePromptWidget, RevivePromptWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, HitmarkerWidget, HitmarkerWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, DamageNumberWidget, DamageNumberWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, ConsumableWidget, ConsumableWidgetClass, HUDLayerZOrder);
-	EnsureOnPlayerScreen(this, AttachmentStatPreviewWidget, AttachmentStatPreviewWidgetClass, HUDLayerZOrder);
+}
+
+void AExtractionPlayerController::CollectScreenOverlayWidgets(TArray<UUserWidget*>& OutWidgets) const
+{
+	// Deliberately NOT the mobile controls: those are input affordances, and the pause screen takes
+	// UI-only input anyway. Nor anything EHB owns — that tree answers to its own manager.
+	UUserWidget* const Group[] =
+	{
+		ObjectiveLayerWidget.Get(), RevivePromptWidget.Get(), HitmarkerWidget.Get(),
+		DamageNumberWidget.Get(), ConsumableWidget.Get()
+	};
+
+	OutWidgets.Reset();
+	OutWidgets.Reserve(UE_ARRAY_COUNT(Group));
+	for (UUserWidget* Widget : Group)
+		if (IsValid(Widget)) OutWidgets.Add(Widget);
+}
+
+// Parameter is bInHidden, not bHidden: AActor already declares a bHidden UPROPERTY and UHT
+// rejects a reflected function parameter that shadows one.
+void AExtractionPlayerController::SetScreenOverlayHidden(bool bInHidden)
+{
+	if (bInHidden == bScreenOverlayHidden) return;
+	bScreenOverlayHidden = bInHidden;
+
+	if (!bInHidden)
+	{
+		for (const FOverlayVisibilityRecord& Record : HiddenOverlayWidgets)
+		{
+			UUserWidget* Widget = Record.Widget.Get();
+			if (IsValid(Widget)) Widget->SetVisibility(Record.PriorVisibility);
+		}
+		HiddenOverlayWidgets.Reset();
+		return;
+	}
+
+	TArray<UUserWidget*> Overlay;
+	CollectScreenOverlayWidgets(Overlay);
+
+	HiddenOverlayWidgets.Reset();
+	HiddenOverlayWidgets.Reserve(Overlay.Num());
+	for (UUserWidget* Widget : Overlay)
+	{
+		const ESlateVisibility Current = Widget->GetVisibility();
+		// Already hidden for its own reasons (the hitmarker between hits) — leave it, and do not
+		// record it, so the restore cannot wrongly make it visible.
+		if (Current == ESlateVisibility::Collapsed || Current == ESlateVisibility::Hidden) continue;
+
+		HiddenOverlayWidgets.Add({ Widget, Current });
+		Widget->SetVisibility(ESlateVisibility::Collapsed);
+	}
+}
+
+UExtractionHudBridgeComponent* AExtractionPlayerController::ResolveHudBridge() const
+{
+	if (UExtractionHudBridgeComponent* Cached = CachedHudBridge.Get()) return Cached;
+
+	AHUD* Hud = GetHUD();
+	if (!IsValid(Hud)) return nullptr;
+
+	UExtractionHudBridgeComponent* Bridge = Hud->FindComponentByClass<UExtractionHudBridgeComponent>();
+	CachedHudBridge = Bridge;
+	return Bridge;
+}
+
+void AExtractionPlayerController::SetPauseHudHidden(bool bInHidden)
+{
+	SetScreenOverlayHidden(bInHidden);
+
+	if (UExtractionHudBridgeComponent* Bridge = ResolveHudBridge())
+		Bridge->SetHudHidden(bInHidden, PauseHudFadeSeconds);
+}
+
+void AExtractionPlayerController::RegisterAttachmentStatPreview(UAttachmentStatPreviewWidget* Widget)
+{
+	if (!IsValid(Widget)) return;
+	AttachmentStatPreview = Widget;
+}
+
+void AExtractionPlayerController::UnregisterAttachmentStatPreview(UAttachmentStatPreviewWidget* Widget)
+{
+	// Identity check, not a blind clear: a module rebuilt on a context switch constructs the new
+	// panel before destructing the old one, so the old one's teardown arrives second and would
+	// otherwise unregister its own replacement.
+	if (AttachmentStatPreview.Get() != Widget) return;
+	AttachmentStatPreview.Reset();
 }
 
 void AExtractionPlayerController::NotifyDamageDealt(AActor* Victim, float Damage, float HeadshotDamage, bool bKilled, const FVector& WorldLocation)

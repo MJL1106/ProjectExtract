@@ -146,6 +146,9 @@ void UTutorialBriefingWidget::HideOtherWidgets()
 	{
 		if (!IsValid(Widget)) continue;
 		if (Widget == this) continue;
+		// Skipped at CAPTURE, not at restore: an excluded widget must never enter HiddenWidgets,
+		// or a later restore hands it a visibility it never asked for.
+		if (ExcludedRootClass && Widget->IsA(ExcludedRootClass)) continue;
 
 		const ESlateVisibility Current = Widget->GetVisibility();
 		// Already hidden for its own reasons — leave it alone, and do not record it so restore

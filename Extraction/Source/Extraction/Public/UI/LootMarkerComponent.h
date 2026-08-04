@@ -13,6 +13,20 @@
  *  single-bind by design; unbound is the default and costs nothing. */
 DECLARE_DELEGATE_RetVal(bool, FLootMarkerAvailabilityQuery);
 
+/** Drives which silhouette/icon the marker widget shows. Set per owner in each actor's
+ *  constructor -- containers, loose pickups, weapon cases and generic interactables all read
+ *  differently at a glance even before the label resolves. */
+UENUM(BlueprintType)
+enum class ELootMarkerKind : uint8
+{
+	Container,
+	Pickup,
+	WeaponCase,
+	Interactable
+};
+
+class ULootMarkerWidget;
+
 /**
  * Drop-in component for lootable actors. Drives visibility from interface availability
  * checks and a max-distance threshold; occlusion and scaling are inherited from the parent.
@@ -51,6 +65,18 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Loot Marker", meta = (ClampMin = "0.0"))
 	float MarkerWorldZOffset = 40.f;
 
+	/** Which silhouette the marker widget renders. Set on the LootMarker subobject in each
+	 *  owner's constructor. */
+	UPROPERTY(EditAnywhere, Category = "Loot Marker")
+	ELootMarkerKind MarkerKind = ELootMarkerKind::Container;
+
+	/** Overrides the resolved label text. Falls back to the owner's IWorldInteractable prompt
+	 *  when empty and the owner implements that interface (ALootContainer's "Search"); actors
+	 *  that implement neither ILootable's nor IWorldInteractable's label surface (ALootPickup,
+	 *  AWeaponCase) rely on this being set. */
+	UPROPERTY(EditAnywhere, Category = "Loot Marker")
+	FText MarkerLabelOverride;
+
 protected:
 	/** Beyond this distance from the local player the marker hides entirely. */
 	UPROPERTY(EditAnywhere, Category = "Loot Marker", meta = (ClampMin = "100.0"))
@@ -59,6 +85,10 @@ protected:
 	/** Seconds between availability refresh polls. */
 	UPROPERTY(EditAnywhere, Category = "Loot Marker", meta = (ClampMin = "0.05"))
 	float AvailabilityPollInterval = 0.25f;
+
+	/** Distance (cm) inside which the widget swaps to its expanded key-prompt state. */
+	UPROPERTY(EditAnywhere, Category = "Loot Marker", meta = (ClampMin = "50.0"))
+	float NearDistance = 400.f;
 
 private:
 	/** Fallback availability flag when no interface is found on the owner. */
@@ -69,8 +99,28 @@ private:
 
 	FTimerHandle AvailabilityTimerHandle;
 
+	/** Widget + label last pushed via SetMarkerInfo -- RefreshAvailability re-pushes only when
+	 *  either changes, so a steady-state poll costs one FText compare, not a widget call. */
+	TWeakObjectPtr<ULootMarkerWidget> LastInfoWidget;
+	FText LastPushedLabel;
+
+	/** Latched near/far state -- enters near at NearDistance, exits only past
+	 *  NearDistance + NearDistanceHysteresis, so a player idling at the boundary doesn't flap
+	 *  the widget's proximity state every 0.25 s poll. */
+	bool bIsNearLatched = false;
+
+	/** True once a widget-class mismatch has been logged, so a permanently-wrong WBP parent
+	 *  warns once instead of every poll. */
+	bool bLoggedWidgetCastFailure = false;
+
 	void RefreshAvailability();
 
-	/** Resolves whether the marker should be visible based on interface state and distance. */
-	bool ResolveAvailability(AActor* Owner) const;
+	/** Resolves whether the marker should be visible based on interface state and distance.
+	 *  OutDistanceCm is only meaningful when this returns true; computed once here so
+	 *  RefreshAvailability never re-derives distance for the proximity push. */
+	bool ResolveAvailability(AActor* Owner, float& OutDistanceCm) const;
+
+	/** MarkerLabelOverride when set, else the owner's IWorldInteractable prompt when it
+	 *  implements that interface, else empty text. */
+	FText ResolveMarkerLabel(AActor* Owner) const;
 };

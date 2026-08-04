@@ -30,7 +30,7 @@ void UObjectiveSubsystem::Deinitialize()
 }
 
 void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocation,
-	AActor* TargetActor, FVector Offset, bool bShowWorldMarker, float HeightAboveBase)
+	AActor* TargetActor, FVector Offset, bool bShowWorldMarker, float HeightAboveBase, bool bOptional)
 {
 	if (Id == NAME_None) return;
 
@@ -45,6 +45,8 @@ void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocat
 		Existing->Offset = Offset;
 		Existing->bShowWorldMarker = bShowWorldMarker;
 		Existing->HeightAboveBase = HeightAboveBase;
+		Existing->bOptional = bOptional;
+		// State deliberately untouched — see FObjectiveMarker::State.
 
 		if (bShowWorldMarker)
 		{
@@ -81,9 +83,29 @@ void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocat
 	Marker.Offset = Offset;
 	Marker.bShowWorldMarker = bShowWorldMarker;
 	Marker.HeightAboveBase = HeightAboveBase;
+	Marker.bOptional = bOptional;
 
 	OnObjectivesChanged.Broadcast();
 	RebuildDisplayActors();
+}
+
+void UObjectiveSubsystem::MarkObjectiveComplete(FName Id, bool bSucceeded)
+{
+	if (Id == NAME_None) return;
+
+	FObjectiveMarker* Existing = Objectives.FindByPredicate(
+		[Id](const FObjectiveMarker& Marker) { return Marker.Id == Id; });
+	if (!Existing) return;
+
+	const EObjectiveState NewState = bSucceeded ? EObjectiveState::Succeeded : EObjectiveState::Failed;
+	if (Existing->State == NewState) return;
+
+	Existing->State = NewState;
+
+	// Deliberately not RebuildDisplayActors: the shown-id set has not moved, so that pass would
+	// early-out anyway, and a completion must reach subscribers regardless of the billboard set.
+	RefreshDisplayFor(*Existing);
+	OnObjectiveStateChanged.Broadcast(Id, NewState);
 }
 
 void UObjectiveSubsystem::UpdateObjectiveLabel(FName Id, FText NewLabel)

@@ -9,8 +9,11 @@
 #include "Components/WeaponComponent.h"
 #include "Data/WeaponAttachmentDataAsset.h"
 #include "Data/WeaponDataAsset.h"
+#include "Game/ExtractionPlayerController.h"
 #include "UI/AttachmentStatRowWidget.h"
 #include "Weapon/WeaponBase.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogAttachmentPreview, Log, All);
 
 namespace
 {
@@ -144,6 +147,23 @@ void UAttachmentStatPreviewWidget::NativeConstruct()
 	// from one pickup to the next.
 	RowWidgets.Reserve(AttachmentStatRowCount);
 	HidePreview();
+
+	AExtractionPlayerController* PC = Cast<AExtractionPlayerController>(GetOwningPlayer());
+	// Registration is the only binding in the HUD that gets a single attempt -- there is no
+	// construct-time retry to fall back on. Failing it leaves GetAttachmentStatPreview() null
+	// forever and every pickup silently does nothing, so say so rather than fail invisibly.
+	UE_CLOG(!PC, LogAttachmentPreview, Warning,
+		TEXT("%s: no AExtractionPlayerController -- attachment pickups will not drive this panel"), *GetName());
+	if (PC)
+		PC->RegisterAttachmentStatPreview(this);
+}
+
+void UAttachmentStatPreviewWidget::NativeDestruct()
+{
+	if (AExtractionPlayerController* PC = Cast<AExtractionPlayerController>(GetOwningPlayer()))
+		PC->UnregisterAttachmentStatPreview(this);
+
+	Super::NativeDestruct();
 }
 
 // ---- Public API ----

@@ -302,6 +302,26 @@ assert(type(actors) == "table")
 assert(type(recreation_script) == "string")
 ```
 
+Run Unreal's native Map Check directly before accepting or saving a composed
+level:
+
+```lua
+local check = assert(open_level():map_check())
+assert(check.passed, "Map Check reported " .. tostring(check.errors) .. " error(s)")
+if not check.clean then
+  log("Map Check warnings: " .. tostring(check.warnings))
+end
+```
+
+`passed` means the current run has no errors; `clean` means it has neither
+errors nor warnings. The `errors`, `warnings`, and `issue_count` fields always
+describe this invocation. By default Map Check clears its message-log page
+first. For diagnostics that must append to the existing page, call
+`map_check({clear_log=false})`; its `page_error_count`,
+`page_warning_count`, and `page_issue_count` fields then expose cumulative page
+totals while the non-`page_` fields remain per-run deltas. Use
+`deprecated_only=true` only when explicitly checking deprecated actors.
+
 Call `level:save()` after edits to an already-named map. Use `save_level_as(path)`
 only when assigning or changing the map package path.
 
@@ -346,6 +366,8 @@ correct; otherwise stop and localize the capture defect.
 | A mutation logs success but the read looks stale | Re-open the level and verify in a new `execute_script` call. |
 | Duplicate labels are engine-generated | Relabel and refolder each table returned by `duplicate_actors`. |
 | Property write fails | Inspect `details.status` and `details.error`; do not assume actor and root-component properties share a target. |
+| Map Check returns nil | Stop PIE and verify an editor world is active; malformed options are rejected instead of coerced. |
+| Map Check passes but is not clean | Errors are zero but warnings remain. Inspect the native `MapCheck` message log instead of treating warnings as errors. |
 | Save fails | Confirm a writable `/Game/...` package path and inspect the exact editor log. |
 | Screenshot misses the scene | Use explicit camera transforms or `focus_actor`, then inspect the returned image rather than trusting the text response. |
 | `hide_overlays=true` still shows editor chrome | Treat the screenshot as failed and report the capture defect; do not use it as visual proof. |

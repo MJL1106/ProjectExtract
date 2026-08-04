@@ -15,6 +15,7 @@
 
 class UWidgetComponent;
 class UObjectiveMarker3DWidget;
+class APlayerController;
 
 UCLASS(Blueprintable)
 class EXTRACTION_API AObjectiveMarkerDisplay : public AActor
@@ -46,6 +47,12 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Objective|Display", meta = (ClampMin = "100.0"))
 	float ReferenceDistance = 700.f;
 
+	/** Exponent applied to the distance/reference ratio before clamping. 1.0 (default) holds
+	 *  constant apparent on-screen size, matching legacy behaviour exactly. Values below 1.0 let
+	 *  the marker shrink with distance instead of staying a fixed size all the way out. */
+	UPROPERTY(EditAnywhere, Category = "Objective|Display", meta = (ClampMin = "0.1", ClampMax = "2.0"))
+	float DistanceFalloffExponent = 1.f;
+
 	/** Minimum scale factor (prevents marker from becoming invisible at close range). */
 	UPROPERTY(EditAnywhere, Category = "Objective|Display", meta = (ClampMin = "0.01"))
 	float MinScale = 0.4f;
@@ -63,6 +70,8 @@ private:
 
 	TWeakObjectPtr<UObjectiveMarker3DWidget> CachedWidget;
 
-	void UpdateBillboardAndScale(float DeltaSeconds);
-	void UpdateDistance();
+	/** Both take the already-resolved PlayerController -- Tick resolves it once per frame rather
+	 *  than each helper looking it up separately. */
+	void UpdateBillboardAndScale(APlayerController* PC);
+	void UpdateDistance(APlayerController* PC);
 };

@@ -10,6 +10,17 @@
 
 class AObjectiveMarkerDisplay;
 
+/** Lifecycle of one objective line. Objectives used to vanish on completion (RemoveObjective was
+ *  the only exit); a completed objective can now stay on the panel wearing its outcome instead. */
+UENUM(BlueprintType)
+enum class EObjectiveState : uint8
+{
+	NotTracked,
+	Tracked,
+	Succeeded,
+	Failed
+};
+
 USTRUCT(BlueprintType)
 struct FObjectiveMarker
 {
@@ -45,6 +56,16 @@ struct FObjectiveMarker
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	bool bShowWorldMarker = true;
 
+	/** Side objective — the HUD renders it as secondary. Independent of bShowWorldMarker: an
+	 *  optional objective may still want a world billboard, and a text-only mandatory one exists. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective")
+	bool bOptional = false;
+
+	/** Owned by MarkObjectiveComplete, never by AddObjective — re-registering an id (a label
+	 *  rewrite, a marker move) must not resurrect a finished objective as Tracked. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective")
+	EObjectiveState State = EObjectiveState::Tracked;
+
 	/** Resolved marker position this frame: target bounds-base + HeightAboveBase (or static
 	 *  WorldLocation) plus the per-objective Offset. */
 	FVector ResolveLocation() const;
@@ -52,6 +73,7 @@ struct FObjectiveMarker
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnObjectivesChanged);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnObjectiveLabelChanged, FName, Id, const FText&, NewLabel);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnObjectiveStateChanged, FName, Id, EObjectiveState, NewState);
 
 UCLASS()
 class EXTRACTION_API UObjectiveSubsystem : public UWorldSubsystem
@@ -67,7 +89,8 @@ public:
 	 *  HeightAboveBase applies to target-based markers only (see FObjectiveMarker). */
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void AddObjective(FName Id, FText Label, FVector WorldLocation, AActor* TargetActor = nullptr,
-		FVector Offset = FVector::ZeroVector, bool bShowWorldMarker = true, float HeightAboveBase = 170.f);
+		FVector Offset = FVector::ZeroVector, bool bShowWorldMarker = true, float HeightAboveBase = 170.f,
+		bool bOptional = false);
 
 	/** Rewrites an existing objective's HUD line and nothing else — no marker move, no display
 	 *  respawn. This is the cheap path a live countdown needs: a defend beat re-labels itself once a
@@ -75,6 +98,12 @@ public:
 	 *  Silent when the id is not registered or the label already reads the same. */
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void UpdateObjectiveLabel(FName Id, FText NewLabel);
+
+	/** Marks an objective finished in place. The line stays on the panel wearing Succeeded/Failed
+	 *  instead of disappearing — RemoveObjective is still the way to retire one outright.
+	 *  Silent when the id is not registered or already holds that outcome. */
+	UFUNCTION(BlueprintCallable, Category = "Objective")
+	void MarkObjectiveComplete(FName Id, bool bSucceeded = true);
 
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void RemoveObjective(FName Id);
@@ -99,6 +128,11 @@ public:
 	 *  smoothing state is never reset. */
 	UPROPERTY(BlueprintAssignable, Category = "Objective")
 	FOnObjectiveLabelChanged OnObjectiveLabelChanged;
+
+	/** Same narrow-path reasoning as OnObjectiveLabelChanged: a completion recolours one line and
+	 *  must not cost the panel a full rebuild. Raised on every genuine state transition. */
+	UPROPERTY(BlueprintAssignable, Category = "Objective")
+	FOnObjectiveStateChanged OnObjectiveStateChanged;
 
 private:
 	TArray<FObjectiveMarker> Objectives;

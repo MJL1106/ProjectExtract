@@ -171,6 +171,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Command")
 	FVector GetPendingCoverLocation() const { return PendingCoverLocation; }
 
+	/** Resolves the world location the ping marker should track this frame. False when no ping is
+	 *  live. TakeCover resolves to the cover location; every other command resolves through the
+	 *  ping anchor captured at ping time (actor + local offset, or a bare world point). */
+	UFUNCTION(BlueprintPure, Category = "Companion|Command")
+	bool GetPingWorldLocation(FVector& OutLocation) const;
+
 	/** Returns the resolved companion, or null if not yet spawned. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Command")
 	ACompanionCharacter* GetCompanion() { return ResolveCompanion(); }
@@ -203,6 +209,12 @@ private:
 	/** Resolved cover point location for the ping marker (TakeCover). */
 	FVector PendingCoverLocation = FVector::ZeroVector;
 
+	/** Ping impact anchor for the marker, captured at ping time: local-space offset from
+	 *  PendingTarget (via CapturePingAnchor) when a target exists, or the raw world point when
+	 *  it doesn't. Resolved back to world space by GetPingWorldLocation. */
+	FVector PendingPingOffset = FVector::ZeroVector;
+	bool bPendingPingOffsetValid = false;
+
 	/** Lazily resolved on first use; valid for the lifetime of the level. */
 	TWeakObjectPtr<ACompanionCharacter> CachedCompanion;
 
@@ -222,6 +234,10 @@ private:
 
 	void ConfirmTakedown(ETakedownMethod Method);
 	void ClearPending();
+
+	/** Captures the ping impact as the marker anchor: local-space offset from TargetActor when
+	 *  valid, raw world point otherwise. Called once from each ping-accept branch in IssuePing. */
+	void CapturePingAnchor(AActor* TargetActor, const FVector& ImpactPoint);
 
 	/** Audible ping feedback — confirm blip on an accepted ping, fail blip on a dead one.
 	 *  Only IssuePing calls this; ClearPending stays silent (it also runs on command completion). */

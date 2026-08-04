@@ -1,21 +1,31 @@
-// UObjectiveMarkerWidget -- edge-clamped off-screen indicator for objectives. Shows ONLY when
-// the objective is off-screen or behind the camera. While the world-space billboard is visible
-// (projection valid and on-screen) this widget hides itself. Keeps wayfinding without the
-// sprint-bob problem of the old screen-projection approach.
+// UObjectiveMarkerWidget -- screen-space tracker for one objective. It owns no visuals: it projects
+// the objective's world position, decides on-screen vs edge-clamped, smooths the result, and hands
+// the WBP everything it needs (off-screen flag, chevron angle, distance, objective state) as
+// BlueprintReadOnly state plus events. Styling lives entirely in the WBP.
 //
-// WBP must contain:
-//   UImage     "MarkerIcon"   -- directional arrow/icon
-//   UTextBlock "DistanceText" -- hidden in edge mode (kept for layout compat)
-//   UTextBlock "LabelText"    -- (optional) hidden in edge mode
+// Positioning is ABSOLUTE player-screen space -- this widget is a child of the UObjectiveMarkerLayer
+// canvas, NOT a HUD module. Re-parenting it under anything that applies its own anchor/offset (or a
+// second HUD scale) displaces the projection twice.
+//
+// Chevron convention: EdgeAngleDegrees is 0 when the target lies to the RIGHT of screen centre and
+// increases clockwise. Author the chevron pointing right at zero rotation and feed the angle into
+// the CHEVRON image's render transform -- rotating the widget root would spin the label with it.
+//
+// WBP contract (all optional -- bind only what the design uses):
+//   UImage     "MarkerIcon"
+//   UTextBlock "DistanceText" -- auto-filled with "<n> m" when bound
+//   UTextBlock "LabelText"    -- auto-filled with the objective label, collapsed when empty
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "Game/ObjectiveSubsystem.h"
+#include "UI/ScreenMarkerProjection.h"
 #include "ObjectiveMarkerWidget.generated.h"
 
 class UImage;
+class UObjectiveMarkerLayer;
 class UTextBlock;
 
 UCLASS(Abstract, Blueprintable)
@@ -24,55 +34,177 @@ class EXTRACTION_API UObjectiveMarkerWidget : public UUserWidget
 	GENERATED_BODY()
 
 public:
-	/** Called by the layer right after spawn. */
-	void SetObjective(const FObjectiveMarker& InObjective);
+	/** Called by the layer once, right after spawn. Resets tracking and arms the appear pulse. */
+	void SetObjective(const FObjectiveMarker& InObjective, UObjectiveMarkerLayer* InLayer);
 
-	/** Label-only update. Updates the stored label without resetting the smoothed screen position
-	 *  or projection state — the marker keeps its interpolation continuity. */
-	void UpdateLabel(const FText& NewLabel) { Objective.Label = NewLabel; }
+	/** In-place data rewrite for a marker that is already live (the objective moved, re-targeted, or
+	 *  changed flags). Deliberately keeps the smoothed position and does NOT replay the pulse. */
+	void RefreshObjective(const FObjectiveMarker& InObjective);
+
+	/** Narrow update paths. The layer routes the subsystem's label/state deltas here so one
+	 *  objective changing never costs the whole marker set its interpolation continuity. */
+	void UpdateLabel(const FText& NewLabel);
+	void UpdateState(EObjectiveState NewState);
 
 	FName GetObjectiveId() const { return Objective.Id; }
 
-	/** Exponential interpolation with the same result for equivalent elapsed time. */
-	static FVector2D InterpolateScreenPosition(const FVector2D& Current, const FVector2D& Target,
-		float DeltaTime, float Speed);
+	UFUNCTION(BlueprintPure, Category = "Objective|Marker")
+	FText GetObjectiveLabel() const { return Objective.Label; }
 
-	/** Constrains a marker centre to the padded viewport rectangle. */
-	static FVector2D ClampToViewport(const FVector2D& Position, const FVector2D& ViewportSize, float Padding);
+	// --- Per-frame state the WBP reads ---
+
+	/** True while the target is behind the camera or outside the padded viewport rectangle. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective|Marker")
+	bool bIsOffScreen = false;
+
+	/** Chevron rotation in degrees, [0, 360). Only meaningful while bIsOffScreen. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective|Marker")
+	float EdgeAngleDegrees = 0.f;
+
+	/** Straight-line distance from the camera to the objective, in metres. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective|Marker")
+	float DistanceMeters = 0.f;
+
+	/** Objective lifecycle -- lets completed/failed markers restyle without asking the subsystem. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective|Marker")
+	EObjectiveState State = EObjectiveState::Tracked;
+
+	/** Distance-driven scale this widget resolved for the current frame. Already applied to the
+	 *  render transform unless bDriveRenderTransform is off. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective|Marker")
+	float MarkerScale = 1.f;
+
+	/** Distance-driven opacity for the current frame. Applied unless bDriveRenderTransform is off. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective|Marker")
+	float MarkerOpacity = 1.f;
+
+	// --- Events the WBP implements ---
+
+	/** Fired once, on the first frame this marker resolves a valid position. Play the intro pulse
+	 *  here. Not replayed when the objective's data is rewritten or when it re-enters the screen. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Objective|Marker")
+	void OnMarkerAppeared();
+
+	/** Fired whenever a tracked value actually moves -- drive chevron rotation, distance text and
+	 *  fades from here instead of ticking the WBP. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Objective|Marker")
+	void OnMarkerStateUpdated(bool bOffScreen, float EdgeAngle, float Distance);
+
+	/** Fired on setup and on every genuine Tracked -> Succeeded/Failed transition. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Objective|Marker")
+	void OnObjectiveStateUpdated(EObjectiveState NewState);
+
+	/** Fired on setup and on every label rewrite (a defend beat re-labels itself once a second). */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Objective|Marker")
+	void OnObjectiveLabelUpdated(const FText& NewLabel);
 
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
-	// --- Bound widgets (designer wires in WBP) ---
+	// --- Bound widgets (designer wires in WBP; all optional) ---
 
-	UPROPERTY(meta = (BindWidget))
+	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UImage> MarkerIcon;
 
-	UPROPERTY(meta = (BindWidget))
+	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> DistanceText;
 
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> LabelText;
 
-	// --- Tuning ---
+	// --- Tuning: clamping ---
 
-	/** Minimum distance (px, DPI-scaled) the marker keeps from the viewport edge when clamped. */
-	UPROPERTY(EditAnywhere, Category = "Objective|Marker", meta = (ClampMin = "0.0"))
-	float EdgePadding = 60.f;
+	/** Minimum gap (DPI-scaled px) the marker keeps from every viewport edge, on-screen and off.
+	 *  Sized so a marker never sits half off the screen or under the corner HUD elements. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Layout", meta = (ClampMin = "0.0"))
+	float EdgeMargin = 64.f;
 
-	/** Screen-space smoothing speed. Zero snaps directly to the projected target. */
-	UPROPERTY(EditAnywhere, Category = "Objective|Marker", meta = (ClampMin = "0.0"))
-	float InterpolationSpeed = 12.f;
+	/** Extra inset the target must clear before an off-screen marker flips back to on-screen. Capped:
+	 *  once it approaches half the smaller viewport dimension the on-screen test rect floors out and
+	 *  an off-screen marker can never come back. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Layout", meta = (ClampMin = "0.0", ClampMax = "128.0"))
+	float ReentryHysteresis = 16.f;
 
-	/** Fraction of screen inset from each edge -- if the projection lands inside this region the
-	 *  marker is considered "on-screen" and this widget hides. Prevents flickering at edges. */
-	UPROPERTY(EditAnywhere, Category = "Objective|Marker", meta = (ClampMin = "0.0", ClampMax = "0.5"))
-	float OnScreenInsetFraction = 0.05f;
+	/** Screen-space smoothing speed; higher tracks tighter. 0 snaps every frame. Also damps the
+	 *  sprint camera bob that made the old projection jitter. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Layout", meta = (ClampMin = "0.0"))
+	float PositionInterpSpeed = 14.f;
+
+	/** Collapses the marker to zero opacity while the target is on-screen. Turn this on only when
+	 *  the world-space billboard (AObjectiveMarkerDisplay) is doing the on-screen job. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Layout")
+	bool bHideWhenOnScreen = false;
+
+	// --- Tuning: distance response ---
+
+	/** At or below this distance (m) the marker draws at MaxMarkerScale. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Distance", meta = (ClampMin = "0.0"))
+	float ScaleNearDistanceMeters = 8.f;
+
+	/** At or beyond this distance (m) the marker draws at MinMarkerScale. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Distance", meta = (ClampMin = "0.0"))
+	float ScaleFarDistanceMeters = 60.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Distance", meta = (ClampMin = "0.01"))
+	float MaxMarkerScale = 1.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Distance", meta = (ClampMin = "0.01"))
+	float MinMarkerScale = 0.65f;
+
+	/** Distance (m) at which the marker starts fading toward MinMarkerOpacity. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Distance", meta = (ClampMin = "0.0"))
+	float FadeStartDistanceMeters = 60.f;
+
+	/** Distance (m) at which the fade has fully reached MinMarkerOpacity. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Distance", meta = (ClampMin = "0.0"))
+	float FadeEndDistanceMeters = 150.f;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Distance", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float MinMarkerOpacity = 0.35f;
+
+	/** Scale and fade are a proximity read, so they apply on-screen only -- an off-screen chevron
+	 *  200 m out still has to be legible. Turn off to let distance drive both states. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Distance")
+	bool bDistanceVisualsOnScreenOnly = true;
+
+	/** When false this widget writes only its render TRANSLATION and leaves scale and opacity to the
+	 *  WBP. Turn it off if a UMG animation on the widget root drives either -- C++ writing them
+	 *  every tick would fight the animation. */
+	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Distance")
+	bool bDriveRenderTransform = true;
 
 private:
+	/** The frame's shared camera/viewport data, from the owning layer when there is one. Null when
+	 *  nothing usable could be resolved -- the caller must skip the frame rather than move. */
+	const FScreenMarkerViewContext* ResolveViewContext();
+
+	void ApplyProjection(const FScreenMarkerProjection& Projection, float DeltaTime);
+	void ApplyDistanceVisuals(float DeltaTime, bool bSnap);
+	void PushLabelToWidget();
+	void PushDistanceToWidget();
+
 	FObjectiveMarker Objective;
-	FVector2D SmoothedScreenPosition = FVector2D::ZeroVector;
-	bool bHasSmoothedScreenPosition = false;
-	bool bLastPositionWasValidProjection = false;
+
+	TWeakObjectPtr<UObjectiveMarkerLayer> OwningLayer;
+
+	/** Only used when this widget has no layer (standalone placement) -- otherwise the layer's
+	 *  once-per-frame context is shared instead. */
+	FScreenMarkerViewContext LocalViewContext;
+
+	FVector2D SmoothedPosition = FVector2D::ZeroVector;
+	FVector2D LastEdgeDirection = FVector2D(0.f, 1.f);
+	bool bHasSmoothedPosition = false;
+
+	/** Set by SetObjective, cleared by the first frame that resolves a position -- gates the pulse. */
+	bool bPendingAppearEvent = false;
+
+	/** Last values pushed to OnMarkerStateUpdated, so a stationary marker costs no BP calls. */
+	bool bLastBroadcastOffScreen = false;
+	float LastBroadcastAngle = 0.f;
+	float LastBroadcastDistance = 0.f;
+	bool bHasBroadcastState = false;
+
+	/** Last whole-metre value written to DistanceText -- the text only changes ~once per metre. */
+	int32 LastDisplayedMetres = -1;
 };

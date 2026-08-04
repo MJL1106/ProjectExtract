@@ -14,6 +14,10 @@ enum class EEnemyWeaponAnimType : uint8;
 /** Broadcast per actual shot with stealth exemption context. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerWeaponShot, bool, bStealthExempt);
 
+/** Broadcast when the EFFECTIVE active weapon changes. Null means "no C++ hitscan weapon in
+ *  hand" — an empty slot, a failed spawn, or the kit throwable being out. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnActiveWeaponChanged, AWeaponBase*, NewWeapon);
+
 UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
 class EXTRACTION_API UWeaponComponent : public UActorComponent
 {
@@ -71,6 +75,11 @@ public:
 	/** Per-shot relay with stealth discipline exemption flag. Authority-only. */
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FOnPlayerWeaponShot OnPlayerWeaponShot;
+
+	/** Edge-only relay of the effective active weapon — the HUD binds here instead of polling
+	 *  GetCurrentWeapon every frame. Fires with null when the hand empties. */
+	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
+	FOnActiveWeaponChanged OnActiveWeaponChanged;
 
 	// ---- Getters ----
 
@@ -165,6 +174,16 @@ private:
 	/** Authority: make NewWeapon the held weapon. Hides/silences the old slot, rebinds the fire
 	 *  delegate, syncs aim state, and fires the kit-visual equip flow. Never re-inits ammo. */
 	void SetActiveWeapon(AWeaponBase* NewWeapon);
+
+	/** Raises OnActiveWeaponChanged when the effective weapon actually moved. CurrentWeapon is not
+	 *  the only thing that decides what is in the player's hands — a nulled slot and the kit
+	 *  throwable both change the answer without a SetActiveWeapon call — so every writer routes
+	 *  through here and the diff below suppresses the duplicates that produces. */
+	void BroadcastActiveWeaponChanged();
+
+	/** Effective weapon as of the last OnActiveWeaponChanged broadcast. Weak: a destroyed weapon
+	 *  reads back as null, which is exactly the comparison the next broadcast wants. */
+	TWeakObjectPtr<AWeaponBase> LastBroadcastActiveWeapon;
 
 	// ---- Server RPCs ----
 

@@ -347,6 +347,14 @@ void AExtractionPlayer::Tick(float DeltaTime)
 	{
 		UpdateReviveCandidateScan(DeltaTime);
 		UpdateInteractCandidateScan(DeltaTime);
+
+		// After both scans: the resolved prompt reads one against the other, so resolving inside
+		// either would judge it against the other's previous-frame answer.
+		if (bPromptStateDirty)
+		{
+			bPromptStateDirty = false;
+			RefreshPromptState();
+		}
 	}
 
 	if (IsLocallyControlled() && IsValid(WeaponComponent))
@@ -1278,6 +1286,8 @@ bool AExtractionPlayer::TryWorldInteract()
 			InteractHoldDuration = HoldSeconds;
 			InteractHoldElapsed = 0.f;
 			bIsInteractHolding = true;
+			bPromptStateDirty = true;
+			OnPromptHoldStarted.Broadcast(HoldSeconds);
 
 			// The under-the-hold beat (scripted VO) is authority-side, like the interaction itself.
 			if (HasAuthority())
@@ -1390,7 +1400,7 @@ void AExtractionPlayer::UpdateInteractHold(float DeltaTime)
 	UE_LOG(LogExtraction, Log, TEXT("Interact hold complete: '%s' (%.2fs)"), *GetNameSafe(Target), InteractHoldDuration);
 
 	// State resets BEFORE the commit — WorldInteract can destroy or re-configure the target.
-	CancelInteractHold();
+	CancelInteractHold(/*bCompleted=*/ true);
 
 	if (HasAuthority())
 		CommitWorldInteract(Target);
@@ -1409,7 +1419,7 @@ void AExtractionPlayer::CommitWorldInteract(AActor* Target)
 	IWorldInteractable::Execute_WorldInteract(Target, this);
 }
 
-void AExtractionPlayer::CancelInteractHold()
+void AExtractionPlayer::CancelInteractHold(bool bCompleted)
 {
 	if (!bIsInteractHolding) return;
 
@@ -1417,6 +1427,9 @@ void AExtractionPlayer::CancelInteractHold()
 	InteractHoldElapsed = 0.f;
 	InteractHoldDuration = 0.f;
 	InteractHoldTarget = nullptr;
+
+	bPromptStateDirty = true;
+	OnPromptHoldEnded.Broadcast(bCompleted);
 }
 
 void AExtractionPlayer::UpdateInteractCandidateScan(float DeltaTime)
@@ -1435,6 +1448,42 @@ void AExtractionPlayer::UpdateInteractCandidateScan(float DeltaTime)
 	InteractCandidatePrompt = IsValid(Candidate)
 		? IWorldInteractable::Execute_GetWorldInteractionPrompt(Candidate, this)
 		: FText::GetEmpty();
+	InteractCandidateHoldSeconds = IsValid(Candidate)
+		? IWorldInteractable::Execute_GetWorldInteractHoldSeconds(Candidate, this)
+		: 0.f;
+
+	bPromptStateDirty = true;
+}
+
+void AExtractionPlayer::RefreshPromptState()
+{
+	// Revive outranks a world interactable when both are under the crosshair — a downed teammate
+	// is always the more urgent read.
+	AActor* Source = ReviveCandidate.Get();
+	EHudPromptKind Kind = EHudPromptKind::Revive;
+	if (!IsValid(Source))
+	{
+		Source = InteractCandidate.Get();
+		Kind = IsValid(Source) ? EHudPromptKind::Interact : EHudPromptKind::None;
+	}
+
+	// No revive copy lives in C++ — the downed teammate has no per-target verb the way an
+	// interactable does, so the HUD supplies that label itself.
+	const FText Prompt = (Kind == EHudPromptKind::Interact) ? InteractCandidatePrompt : FText::GetEmpty();
+	const float HoldDuration = (Kind == EHudPromptKind::Revive) ? ReviveDuration
+		: (Kind == EHudPromptKind::Interact) ? InteractCandidateHoldSeconds : 0.f;
+
+	const bool bSameSource = LastPromptKind == Kind && LastPromptSource.Get() == Source;
+	if (bSameSource
+		&& FMath::IsNearlyEqual(LastPromptHoldDuration, HoldDuration)
+		&& LastPromptText.EqualTo(Prompt))
+		return;
+
+	LastPromptKind = Kind;
+	LastPromptSource = Source;
+	LastPromptText = Prompt;
+	LastPromptHoldDuration = HoldDuration;
+	OnPromptStateChanged.Broadcast(Kind, Prompt, HoldDuration);
 }
 
 void AExtractionPlayer::TakedownInput(const FInputActionValue& Value)
@@ -2254,6 +2303,8 @@ void AExtractionPlayer::BeginReviveHold(AActor* Target)
 	ReviveTarget = Target;
 	ReviveElapsed = 0.f;
 	bIsReviving = true;
+	bPromptStateDirty = true;
+	OnPromptHoldStarted.Broadcast(ReviveDuration);
 
 	// Clear approach velocity, but keep a grounded movement mode so CMC consumes the revive
 	// montage's authored root motion. Input remains locked for the full hold.
@@ -2536,9 +2587,11 @@ void AExtractionPlayer::UpdateReviveCandidateScan(float DeltaTime)
 
 	// While the hold runs, the prompt tracks the held target (progress bar); a downed player
 	// can't revive anyone.
-	if (bIsReviving) { ReviveCandidate = ReviveTarget; return; }
-	if (bIsDBNO) { ReviveCandidate = nullptr; return; }
-	ReviveCandidate = FindReviveTarget();
+	if (bIsReviving) ReviveCandidate = ReviveTarget;
+	else if (bIsDBNO) ReviveCandidate = nullptr;
+	else ReviveCandidate = FindReviveTarget();
+
+	bPromptStateDirty = true;
 }
 
 void AExtractionPlayer::UpdateRevive(float DeltaTime)
@@ -2579,10 +2632,10 @@ void AExtractionPlayer::UpdateRevive(float DeltaTime)
 	if (ReviveElapsed < ReviveDuration) return;
 
 	TargetIface->ExitDBNO();
-	CancelRevive();
+	CancelRevive(/*bCompleted=*/ true);
 }
 
-void AExtractionPlayer::CancelRevive()
+void AExtractionPlayer::CancelRevive(bool bCompleted)
 {
 	if (!bIsReviving) return;
 
@@ -2626,6 +2679,9 @@ void AExtractionPlayer::CancelRevive()
 	bIsReviving = false;
 	ReviveElapsed = 0.f;
 	ReviveTarget = nullptr;
+
+	bPromptStateDirty = true;
+	OnPromptHoldEnded.Broadcast(bCompleted);
 }
 
 // ---- Companion Debug Exec Commands ----

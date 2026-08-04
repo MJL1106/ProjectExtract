@@ -191,6 +191,9 @@ After any scene change wait **4–5 s** before screenshots (viewport/HISM refres
 - **`manage_skills(action="load")` with several skills at once** can return ~68k chars (over the tool's
   output cap) and get dumped to a file. Load skills **one at a time**, or grep the saved file for the
   `vibeue_apis` / pattern blocks you need.
+- **Bash heredocs mangle Python destined for `execute_python_code`** — the script arrives corrupted and the
+  call returns empty output with no error. Author the script with the `Write` tool and read it back in, or
+  pass it as a single properly-escaped argument. (Cost two silent no-op scripts, 08-2026.)
 - **`set_component_property` silently fails for FName/class props.** Setting `CollisionProfileName`
   returns **False**; setting `ChildActorClass` returns **True** but does NOT reach pre-placed level
   instances (they keep the old value). Set these on the component **template subobject** instead
@@ -220,6 +223,16 @@ After any scene change wait **4–5 s** before screenshots (viewport/HISM refres
 - **Comparisons are NOT math ops.** `Greater`/`Less`/`GreaterEqual`/`Equal` via `add_math_node` fail →
   use `add_comparison_node(comparison_type, value_type)` (pins `A`, `B`, `ReturnValue` bool).
 - An **empty-string return** from any `add_*_node` = the node failed to spawn; check it before wiring.
+- **`K2Node_Select` cannot be typed through this API** — its wildcard Option pins never resolve, so the node
+  spawns and then throws a wall of compile errors (13, in the case that found this). Use explicit `Branch`
+  chains instead; verbose but it compiles.
+- **`K2Node_MakeStruct` spawns with ZERO pins** and no API exists to assign its struct type. To build or read
+  a struct, use `split_pin` / `recombine_pin` on an existing struct pin instead.
+- **Function-LOCAL variables are unreachable**: `add_get_variable_node` / `add_set_variable_node` both return
+  empty for them. Promote to a member variable if a node must touch it.
+- **`add_variable` type strings differ by kind**: UserDefinedStructs need the `F` prefix
+  (`FS_QuestObjectiveDefinition`), enums take the bare name (`E_QuestObjectiveState`), widget/BP classes need
+  the full package path. (All four found wiring the EHB HUD bridge, 08-2026.)
 
 ### 1.12 ⭐ Enhanced Input consumes mapped keys — raw InputKey won't fire
 A `K2Node_InputKey` for a key already bound in an **active** mapping context never fires (Enhanced
@@ -268,6 +281,11 @@ connect_nodes(wbp, "EventGraph", last, "then",            bind, "execute")    # 
   match `OnClicked`); leave its `self` pin unconnected (defaults to self). Compile must show 0 errors.
 - Belt-and-suspenders: set a full-screen dim overlay Image to **`Visibility="HitTestInvisible"`** so it can't
   eat clicks meant for the button.
+- ⚠️ **`add_create_delegate_node` is itself a silent no-op when the target is a CUSTOM EVENT** (as opposed to a
+  real function). It returns a node id, but the node comes back with an empty `function_name`, compiles 0/0, and
+  binds nothing — same trap class as `bind_event` above, one level deeper. Verify the created node's
+  `function_name` is non-empty before trusting it; if you need to invoke a custom event on a timer, route through
+  `K2_SetTimer` **by function name** instead of a delegate node. (Hit while wiring the EHB HUD bridge, 08-2026.)
 
 **Verifying a runtime binding without crashing:** `WidgetService.spawn_widget_in_pie(path)` FAILS mid-PIE
 (`valid:False`, "Widget Blueprint not found" — the load_asset-None-during-PIE issue, §3; note the handle
@@ -355,6 +373,60 @@ then `compile_material` + `save_asset`. Remove a stray output wire with
 - Swapping a `StaticMesh`'s slot material: `static_materials[i].set_editor_property("material_interface", …)`
   does **NOT persist** (structs returned by copy; `imported_material_slot_name` is read-only so you can't
   rebuild the array either). Use `sm.set_material(index, mat)` + `save_asset` instead.
+
+### 1.17 ⭐ EasyHudBuilder: a module missing the active **context** renders as empty space, silently
+
+`DA_ExtractionModules`' `HudModulesDefinition` map holds one entry per module, each with a `Contexts` sub-map
+keyed by HUD context enum. **`Contexts` is a whitelist, not just a layout override.** A module whose `Contexts`
+lacks the currently-active context still spawns — `GetModuleWidgetReference` returns a valid widget, the
+bridge caches a non-null ref, `InitializeSkillSlot` succeeds — but the widget is **never added to the canvas**.
+You get blank screen space and **no error, no warning, no log line**. This burned a full PIE cycle: the
+`Health Consumable`, `Projectile Consumable` and `Input Prompts` modules all carried only `NewEnumerator1`
+while gameplay runs **`NewEnumerator14`**.
+
+- **Tell:** `GetModuleWidgetReference("<name>")` returns a tuple whose **first element is `False`** for
+  out-of-context modules and `True` for in-context ones. Check that bool before blaming your wiring.
+- **Fix:** clone the existing `(NewEnumerator1, (…))` entry in the module's `Contexts_13_…` string as
+  `(NewEnumerator14, (…))` and `map_set` it back. Balance-match the parens — the value is a nested
+  struct-as-string, so splice on paren depth rather than a regex.
+- Modules already working (Health Status, Active Weapon, Quest, Pickup, Alerts) carry **both** keys; copy
+  their shape when adding any new module.
+
+### 1.18 ⭐ `set_pin` on a user enum wants the INTERNAL name, not the display name
+
+UserDefinedEnum pins reject the label shown in the editor. `E_InputPromptType` displays
+`Single Tap / Hold / Button Mash` but only accepts `NewEnumerator0 / 1 / 2`:
+
+```lua
+set_pin(h, "Input Prompt Type", "Hold")            -- FAIL: not a valid enumerant of '<E_InputPromptType>'
+set_pin(h, "Input Prompt Type", "NewEnumerator1")  -- OK  (= "Hold")
+```
+
+Read the mapping first with `open_asset("<enum path>"):list("values")` → `{index, display_name}`; the internal
+name is `NewEnumerator<index>`. **Native** enums are the opposite — they take the real name (`"Revive"`,
+`"None"` on `EHudPromptKind`), so check which kind you have. The error message names the enum, which is the
+quickest way to find the asset. Related: `E_IntegerUpdateOperationType`'s `Set Specified Value` is index 0,
+i.e. the default — no set needed.
+
+### 1.19 NeoStack `find_nodes` only indexes a class's members if a **variable** of that type exists in the BP
+
+Cross-class member functions and variable getters are missing from `find_nodes` results until the BP declares
+a variable of the owning type. A `Cast To X` node in the graph is **not** enough, and neither is force-loading
+the class with `open_asset`.
+
+- Symptom: `find_nodes("Notify Grenade Count Changed")` → 0 results, while `Cast To BP_ExtractionHudBridge`
+  resolves fine. Same for C++ members (`GetStimUseDuration`, `GetConsumableInventoryComponent`) and even
+  `GetComponentByClass`.
+- **Fix:** `bp:add_variable("BridgeRef", "BP_ExtractionHudBridge_C")` — the member actions appear immediately.
+  You usually want that variable anyway to cache the ref.
+- Where you genuinely cannot add one, `Get Class Defaults` reaches any `BlueprintReadOnly`/`EditDefaultsOnly`
+  property off the CDO. Its `Class` pin needs the **fully-qualified script path**
+  (`/Script/Extraction.ConsumableInventoryComponent`); the bare class name is rejected.
+- Two related `add_node` quirks: the returned node **title can be stale/wrong** while the pins are correct
+  (`Less ( < )` reports "Timespan < Timespan" but resolves to `integer < integer`) — trust `read_graph` pins,
+  not the title. And `find_nodes` is fuzzy enough to match a **different node in a different graph**
+  (`"Not Equal (integer)"` matched a `GetGrenadeDisplayText` call and placed it in `GetStimDisplayText`);
+  always check the returned `name` before wiring, and prefer the exact editor label (`"Not Equal ( != )"`).
 
 ---
 

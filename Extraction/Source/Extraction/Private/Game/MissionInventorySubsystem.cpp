@@ -42,8 +42,10 @@ bool UMissionInventorySubsystem::GrantStims(const FLootGrant& Grant, APawn* Reci
 		return false;
 	}
 
-	OnLootNotify.Broadcast(FText::Format(
-		NSLOCTEXT("Loot", "StimsGranted", "+{0} Stim"), FText::AsNumber(Added)));
+	const FText StimMessage = FText::Format(
+		NSLOCTEXT("Loot", "StimsGranted", "+{0} Stim"), FText::AsNumber(Added));
+	OnLootNotify.Broadcast(StimMessage);
+	OnLootGranted.Broadcast(ELootType::Stim, Added, StimMessage);
 	UE_LOG(LogMissionInventory, Log, TEXT("GrantStims: +%d to %s"), Added, *GetNameSafe(Recipient));
 	return true;
 }
@@ -68,8 +70,10 @@ bool UMissionInventorySubsystem::GrantAmmo(const FLootGrant& Grant, APawn* Recip
 	const int32 Added = Weapon->AddReserveAmmo(Grant.AmmoAmount);
 	if (Added <= 0) return false;
 
-	OnLootNotify.Broadcast(FText::Format(
-		NSLOCTEXT("Loot", "AmmoGranted", "+{0} {1} ammo"), Added, CategoryText));
+	const FText AmmoMessage = FText::Format(
+		NSLOCTEXT("Loot", "AmmoGranted", "+{0} {1} ammo"), Added, CategoryText);
+	OnLootNotify.Broadcast(AmmoMessage);
+	OnLootGranted.Broadcast(ELootType::Ammo, Added, AmmoMessage);
 	UE_LOG(LogMissionInventory, Log, TEXT("GrantAmmo: +%d %s to %s"),
 		Added, *CategoryText.ToString(), *GetNameSafe(Recipient));
 	return true;
@@ -83,9 +87,17 @@ void UMissionInventorySubsystem::RecordKeycard(FName KeycardId, bool bSilent)
 	HeldKeycards.Add(KeycardId, &bAlreadyHeld);
 	if (bAlreadyHeld) return; // no duplicate toast for a card already held
 
+	// Both announcement channels obey bSilent for the same reason: the checkpoint fast-forward
+	// re-grants cards the player already earned, and re-announcing them at level start is the
+	// exact bug bSilent exists to prevent. OnKeycardRecorded still fires — gating logic is not
+	// an announcement.
 	if (!bSilent)
-		OnLootNotify.Broadcast(FText::Format(
-			NSLOCTEXT("Loot", "KeycardAcquired", "Keycard acquired: {0}"), FText::FromName(KeycardId)));
+	{
+		const FText KeycardMessage = FText::Format(
+			NSLOCTEXT("Loot", "KeycardAcquired", "Keycard acquired: {0}"), FText::FromName(KeycardId));
+		OnLootNotify.Broadcast(KeycardMessage);
+		OnLootGranted.Broadcast(ELootType::Keycard, 1, KeycardMessage);
+	}
 	OnKeycardRecorded.Broadcast(KeycardId);
 	UE_LOG(LogMissionInventory, Log, TEXT("RecordKeycard: %s"), *KeycardId.ToString());
 }

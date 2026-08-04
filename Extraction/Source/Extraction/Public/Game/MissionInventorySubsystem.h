@@ -23,6 +23,10 @@ enum class EToastSeverity : uint8
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnToastNotify, const FText&, Message, EToastSeverity, Severity);
 
+/** Success-only acquisition channel. OnLootNotify carries refusals too ("Stims full", "no
+ *  compatible weapon"), so a pickup display fed from it announces things the player never got. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnLootGranted, ELootType, Type, int32, Amount, const FText&, Label);
+
 DECLARE_LOG_CATEGORY_EXTERN(LogMissionInventory, Log, All);
 
 UCLASS()
@@ -63,6 +67,11 @@ public:
 	 *  item criterion listen here. */
 	UPROPERTY(BlueprintAssignable, Category = "Loot|Keycard")
 	FOnKeycardRecorded OnKeycardRecorded;
+
+	/** Raised only where something was actually added to the player. The HUD pickup display binds
+	 *  here; OnLootNotify stays the plain message channel. */
+	UPROPERTY(BlueprintAssignable, Category = "Loot")
+	FOnLootGranted OnLootGranted;
 
 private:
 	bool GrantAmmo(const FLootGrant& Grant, APawn* Recipient);

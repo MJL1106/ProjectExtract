@@ -66,6 +66,13 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "UI|Tutorial")
 	TObjectPtr<UTutorialBriefingData> BriefingData;
 
+	/** Top-level widget class the briefing must leave alone — the HUD framework root, which owns
+	 *  its own visibility and fades. Collapsing it from here stomps that mid-transition and the
+	 *  restore then writes back a visibility the framework has since moved on from.
+	 *  Unset (the default) = every top-level widget is hidden, exactly as before. */
+	UPROPERTY(EditDefaultsOnly, Category = "UI|Tutorial")
+	TSubclassOf<UUserWidget> ExcludedRootClass;
+
 private:
 	/** Builds both columns, then applies the current key text to every row. */
 	void SyncColumns();

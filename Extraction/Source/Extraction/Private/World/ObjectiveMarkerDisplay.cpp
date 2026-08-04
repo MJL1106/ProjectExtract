@@ -68,15 +68,15 @@ void AObjectiveMarkerDisplay::Tick(float DeltaSeconds)
 	const FVector ResolvedLocation = Objective.ResolveLocation();
 	SetActorLocation(ResolvedLocation);
 
-	UpdateBillboardAndScale(DeltaSeconds);
-	UpdateDistance();
-}
-
-void AObjectiveMarkerDisplay::UpdateBillboardAndScale(float DeltaSeconds)
-{
 	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
 	if (!IsValid(PC)) return;
 
+	UpdateBillboardAndScale(PC);
+	UpdateDistance(PC);
+}
+
+void AObjectiveMarkerDisplay::UpdateBillboardAndScale(APlayerController* PC)
+{
 	FVector CameraLocation;
 	FRotator CameraRotation;
 	PC->GetPlayerViewPoint(CameraLocation, CameraRotation);
@@ -86,18 +86,19 @@ void AObjectiveMarkerDisplay::UpdateBillboardAndScale(float DeltaSeconds)
 	const FRotator LookAtRotation = ToCamera.Rotation();
 	SetActorRotation(FRotator(0.f, LookAtRotation.Yaw, 0.f));
 
-	// Distance-scale for consistent on-screen size.
+	// Distance-scale for consistent on-screen size. DistanceFalloffExponent == 1.0 (default) holds
+	// constant apparent size exactly as before; lower values let the marker shrink with distance.
+	// Fast path skips Pow entirely at the default so the common case pays nothing extra.
 	const float Distance = ToCamera.Size();
-	const float RawScale = Distance / FMath::Max(ReferenceDistance, 1.f);
+	float RawScale = Distance / FMath::Max(ReferenceDistance, 1.f);
+	if (!FMath::IsNearlyEqual(DistanceFalloffExponent, 1.f))
+		RawScale = FMath::Pow(RawScale, DistanceFalloffExponent);
 	const float ClampedScale = FMath::Clamp(RawScale, MinScale, MaxScale);
 	SetActorScale3D(FVector(ClampedScale));
 }
 
-void AObjectiveMarkerDisplay::UpdateDistance()
+void AObjectiveMarkerDisplay::UpdateDistance(APlayerController* PC)
 {
-	APlayerController* PC = UGameplayStatics::GetPlayerController(this, 0);
-	if (!IsValid(PC)) return;
-
 	APawn* Pawn = PC->GetPawn();
 	if (!IsValid(Pawn)) return;
 

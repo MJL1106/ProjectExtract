@@ -81,6 +81,15 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Inventory|Consumables")
 	int32 GetStimCount() const { return StimCount; }
 
+	/** Pouch capacity — the HUD slot draws Count/Max, so it needs the denominator too. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Consumables")
+	int32 GetMaxStims() const { return MaxStims; }
+
+	/** Length of the committed injection window. Drives the HUD slot's cooldown sweep, which must
+	 *  match the real lockout rather than a duplicated constant. */
+	UFUNCTION(BlueprintPure, Category = "Inventory|Consumables")
+	float GetStimUseDuration() const { return StimUseDurationSeconds; }
+
 	UPROPERTY(BlueprintAssignable, Category = "Inventory|Consumables")
 	FOnStimCountChanged OnStimCountChanged;
 

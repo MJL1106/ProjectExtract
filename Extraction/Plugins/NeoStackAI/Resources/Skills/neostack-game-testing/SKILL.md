@@ -160,9 +160,9 @@ blaming input targeting.
 ## Input
 
 ```lua
-playtest_key({pie_instance=0, key="Space", event="pressed"})
+playtest_key({pie_instance=0, key="SpaceBar", event="pressed"})
 playtest_wait_frames(1) -- let the player-input tick dispatch the edge
-playtest_key({pie_instance=0, key="Space", event="released"})
+playtest_key({pie_instance=0, key="SpaceBar", event="released"})
 playtest_axis({pie_instance=0, key="Gamepad_LeftX", value=1.0})
 playtest_click({pie_instance=0, x=0.5, y=0.5, normalized=true})
 playtest_console("stat fps", {pie_instance=0})
@@ -215,6 +215,7 @@ reading the resulting game state after at least one frame.
 | World map is `Untitled` or actor is `DefaultPawn` | The wrong editor world started. Stop PIE and restart with the exact `map` asset path. |
 | `actor_ambiguous` | Add an exact label, class, tag, or object path; inspect sorted `candidates`. |
 | `property_not_found` | Use the exact reflected property name and casing. |
+| `write_failed` says the property cannot be edited on instances | Keep the safety boundary. If runtime control is intentional, expose a one-input BlueprintCallable `Set<Property>` function with the same scalar type; `playtest_write_state` discovers it and reports `write_mode="runtime_setter"`. Only make a property instance-editable when designers should genuinely edit it. |
 | Key call succeeds but state does not change | Wait at least one frame, then inspect state; do not use `consumed` as the behavior assertion. |
 | Two instances exist but a client still reports a temporary map | Wait until every instance reports the requested map and a viewport. |
 | Correct client identity but gameplay does not change | Read the target pawn's `Controller` and role. An empty controller on a simulated proxy is a game spawn or possession problem. |

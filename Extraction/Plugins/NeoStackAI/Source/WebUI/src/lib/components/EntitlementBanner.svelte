@@ -70,10 +70,15 @@
 	const body = $derived(
 		entitlement?.status === 'network'
 			? entitlement.isBinaryBuild
-				? 'This binary build needs to verify your subscription on every launch. Tools are paused while we’re offline.'
+				? 'Tools are paused until we can verify access. Your licence is unaffected and we’re retrying automatically.'
 				: 'Reconnect to enable plugin updates and the cloud chat provider.'
 			: 'Sign in with NeoStack, connect your lifetime purchase, or activate a subscription.'
 	);
+
+	// An outage is not a billing problem. Sending someone to their billing page
+	// because a request timed out is what convinced a lifetime owner (and the
+	// agent driving his editor) that his licence had broken.
+	const offline = $derived(entitlement?.status === 'network');
 </script>
 
 {#if visible}
@@ -83,16 +88,17 @@
 			<span>{body}</span>
 		</div>
 		<div class="actions">
-			<a
-				class="primary"
-				href="https://neostack.dev/billing"
-				target="_blank"
-				rel="noopener noreferrer"
-			>
-				Open billing
-			</a>
-			{#if entitlement?.status === 'network'}
-				<button type="button" onclick={() => refresh()}>Retry</button>
+			{#if offline}
+				<button class="primary" type="button" onclick={() => refresh()}>Retry</button>
+			{:else}
+				<a
+					class="primary"
+					href="https://neostack.dev/billing"
+					target="_blank"
+					rel="noopener noreferrer"
+				>
+					Open billing
+				</a>
 			{/if}
 			<button type="button" class="ghost" onclick={() => (dismissed = true)} aria-label="Dismiss">
 				&times;
@@ -142,7 +148,9 @@
 		cursor: pointer;
 		text-decoration: none;
 	}
-	.actions a.primary {
+	/* Retry is the primary action during an outage, so it styles as one too. */
+	.actions a.primary,
+	.actions button.primary {
 		background: rgb(220, 38, 38);
 		color: white;
 		border-color: rgb(220, 38, 38);

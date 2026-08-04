@@ -881,9 +881,10 @@ void ALevelObjectiveFlow::UpdateOptionalSupplies()
 		{
 			// Optional objectives are text-only on the HUD objective panel — no world marker.
 			Objectives->AddObjective(OptionalSuppliesObjectiveId,
-				NSLOCTEXT("LevelFlow", "OptionalSupplies", "Optional: Search side rooms for supplies - Ping with MMB, press I to loot"),
+				NSLOCTEXT("LevelFlow", "OptionalSupplies", "Search side rooms for supplies - Ping with MMB, press I to loot"),
 				CurrentOptionalTarget->GetActorLocation(), CurrentOptionalTarget,
-				FVector::ZeroVector, /*bShowWorldMarker*/ false);
+				FVector::ZeroVector, /*bShowWorldMarker*/ false, /*HeightAboveBase*/ 170.f,
+				/*bOptional*/ true);
 		}
 		else
 		{
@@ -928,9 +929,10 @@ void ALevelObjectiveFlow::UpdateOptionalSupplies()
 
 	// Optional objectives are text-only on the HUD objective panel — no world marker.
 	Objectives->AddObjective(OptionalSuppliesObjectiveId,
-		NSLOCTEXT("LevelFlow", "OptionalSupplies", "Optional: Search side rooms for supplies - Ping with MMB, press I to loot"),
+		NSLOCTEXT("LevelFlow", "OptionalSupplies", "Search side rooms for supplies - Ping with MMB, press I to loot"),
 		CurrentOptionalTarget->GetActorLocation(), CurrentOptionalTarget,
-		FVector::ZeroVector, /*bShowWorldMarker*/ false);
+		FVector::ZeroVector, /*bShowWorldMarker*/ false, /*HeightAboveBase*/ 170.f,
+		/*bOptional*/ true);
 }
 ALootContainer* ALevelObjectiveFlow::FindNearestUnlootedSupply(const FVector& Origin) const
 {

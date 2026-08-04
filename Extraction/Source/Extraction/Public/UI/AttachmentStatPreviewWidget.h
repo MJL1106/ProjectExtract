@@ -73,7 +73,15 @@ public:
 
 protected:
 
+	/** Also registers this panel with the owning AExtractionPlayerController, which is how the
+	 *  Blueprint pickups reach it (GetAttachmentStatPreview). Self-registration rather than the
+	 *  controller creating the widget: the panel now lives inside a HUD module the controller
+	 *  neither owns nor can name without an asset path. */
 	virtual void NativeConstruct() override;
+
+	/** Releases the registration, but only if this instance still holds it — a module torn down
+	 *  after its replacement was built must not clear the live panel. */
+	virtual void NativeDestruct() override;
 
 	// --- Bound widgets (designer wires these in WBP) ---
 

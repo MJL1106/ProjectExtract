@@ -11,19 +11,15 @@ class UInputMappingContext;
 class UUserWidget;
 class UHitmarkerWidget;
 class UDamageNumberWidget;
-class UPlayerHealthWidget;
-class UAmmoWidget;
-class UCompanionModeWidget;
 class UObjectiveMarkerLayer;
-class UObjectiveTextPanelWidget;
 class AObjectiveMarkerDisplay;
-class ULootNotificationWidget;
 class ULevelCompleteWidget;
 class ULevelFailedWidget;
 class URevivePromptWidget;
 class UConsumableWidget;
 class UAttachmentStatPreviewWidget;
 class UTutorialBriefingWidget;
+class UExtractionHudBridgeComponent;
 
 /** Fired on the local player controller when the player's weapon deals damage. One event per
  *  trigger pull per victim (shotgun pellets aggregated). HeadshotDamage > 0 marks a headshot;
@@ -71,10 +67,17 @@ public:
 	 *  WHY THIS EXISTS — DO NOT DELETE AS UNUSED. Its only C++ caller is BeginPlay; the real caller is
 	 *  the pause/resume Blueprint flow. Any Blueprint "Remove All Widgets" node
 	 *  (UWidgetLayoutLibrary::RemoveAllWidgets) tears EVERY widget off the player screen, including
-	 *  the ten top-level widgets created here that no Blueprint knows how to rebuild — the pawn's
+	 *  the top-level widgets created here that no Blueprint knows how to rebuild — the pawn's
 	 *  CreateHUD only restores the three legacy kit widgets. Without this call on the resume path, one
-	 *  pause cycle permanently kills the ammo counter, hitmarkers, damage numbers, health, companion
-	 *  mode chip, objective layer, loot toast and revive prompt for the rest of the session. */
+	 *  pause cycle permanently kills hitmarkers, damage numbers, the objective marker layer and the
+	 *  revive prompt for the rest of the session.
+	 *
+	 *  Health, ammo, the objective text panel, the loot toast, the companion mode chip and the
+	 *  attachment stat preview are deliberately absent: they are HUD-actor modules now, and this
+	 *  controller must not re-create them. The first four are fed by UExtractionHudBridgeComponent;
+	 *  the companion mode chip binds itself to the pawn's command component and needs nothing from
+	 *  here; the attachment stat preview also drives itself but registers back so BP pickups can
+	 *  still reach it (see RegisterAttachmentStatPreview). */
 	UFUNCTION(BlueprintCallable, Category = "UI")
 	void RestoreHUD();
 
@@ -82,10 +85,44 @@ public:
 	 *  hands input back to the game, tears the screen down and records that it has been seen. */
 	void DismissTutorialBriefing();
 
-	/** Active attachment stat preview panel, or null before RestoreHUD runs. The pickup BP calls
-	 *  ShowForAttachment / HidePreview on this widget to drive the HUD panel. */
+	/** Hides or shows the screen-space overlay THIS controller owns, as one group: the objective
+	 *  marker layer, revive prompt, hitmarker, damage numbers and consumable panel.
+	 *
+	 *  One of three systems the pause screen has to quiet, and the only one C++ drives directly —
+	 *  the HUD modules answer to their own manager (UExtractionHudBridgeComponent::SetHudHidden)
+	 *  and the kit's own widgets are caught by the briefing's top-level sweep.
+	 *
+	 *  Idempotent, and null-safe against any member being absent. Prior visibility is captured on
+	 *  hide and put back on show, so a widget that manages its own visibility (the hitmarker is
+	 *  collapsed until a hit lands) is not forced visible by a restore. A widget already hidden for
+	 *  its own reasons is left alone and NOT recorded, so the restore cannot reveal it. */
+	UFUNCTION(BlueprintCallable, Category = "UI")
+	void SetScreenOverlayHidden(bool bInHidden);
+
+	/** True while SetScreenOverlayHidden(true) is in effect. */
+	UFUNCTION(BlueprintPure, Category = "UI")
+	bool IsScreenOverlayHidden() const { return bScreenOverlayHidden; }
+
+	/** Active attachment stat preview panel, or null when none is live. The pickup BP calls
+	 *  ShowForAttachment / ShowForWeapon / HidePreview on this widget to drive the HUD panel.
+	 *
+	 *  The controller no longer creates this panel — it lives inside a HUD module, which C++ cannot
+	 *  name without an asset path. UAttachmentStatPreviewWidget registers itself here on construct
+	 *  instead (see RegisterAttachmentStatPreview), so the getter's contract is unchanged: a live
+	 *  panel or null, never a stale one. */
 	UFUNCTION(BlueprintPure, Category = "UI|Attachments")
-	UAttachmentStatPreviewWidget* GetAttachmentStatPreview() const { return AttachmentStatPreviewWidget; }
+	UAttachmentStatPreviewWidget* GetAttachmentStatPreview() const { return AttachmentStatPreview.Get(); }
+
+	/** Called by UAttachmentStatPreviewWidget::NativeConstruct. Last construct wins — during a HUD
+	 *  context switch the incoming panel is built before the outgoing one is torn down, and the
+	 *  incoming one is the one the pickups should be driving. */
+	UFUNCTION(BlueprintCallable, Category = "UI|Attachments")
+	void RegisterAttachmentStatPreview(UAttachmentStatPreviewWidget* Widget);
+
+	/** Called by UAttachmentStatPreviewWidget::NativeDestruct. Ignores anything that is not the
+	 *  currently registered panel, so a late teardown cannot unregister its own replacement. */
+	UFUNCTION(BlueprintCallable, Category = "UI|Attachments")
+	void UnregisterAttachmentStatPreview(UAttachmentStatPreviewWidget* Widget);
 
 	/** Broadcast on the local controller for HUD hit feedback (hitmarker, damage numbers). */
 	UPROPERTY(BlueprintAssignable, Category = "UI|Events")
@@ -129,30 +166,6 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UUserWidget> MobileControlsWidget;
 
-	/** Health/Shield HUD widget class (set to WBP_PlayerHealth in BP defaults) */
-	UPROPERTY(EditDefaultsOnly, Category = "UI")
-	TSubclassOf<UPlayerHealthWidget> HUDWidgetClass;
-
-	/** Active HUD widget instance */
-	UPROPERTY()
-	TObjectPtr<UPlayerHealthWidget> HUDWidget;
-
-	/** Ammo display widget class */
-	UPROPERTY(EditDefaultsOnly, Category = "UI")
-	TSubclassOf<UAmmoWidget> AmmoWidgetClass;
-
-	/** Active ammo display widget instance */
-	UPROPERTY()
-	TObjectPtr<UAmmoWidget> AmmoWidget;
-
-	/** Companion mode HUD chip class (assigned in BP defaults — no C++ asset path). */
-	UPROPERTY(EditDefaultsOnly, Category = "UI")
-	TSubclassOf<UCompanionModeWidget> CompanionModeWidgetClass;
-
-	/** Active companion mode chip instance */
-	UPROPERTY()
-	TObjectPtr<UCompanionModeWidget> CompanionModeWidget;
-
 	/** Objective waypoint layer class (assigned in BP defaults — no C++ asset path). */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<UObjectiveMarkerLayer> ObjectiveLayerWidgetClass;
@@ -161,28 +174,14 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UObjectiveMarkerLayer> ObjectiveLayerWidget;
 
-	/** Screen-space objective text panel class (assigned in BP defaults — no C++ asset path). */
-	UPROPERTY(EditDefaultsOnly, Category = "UI")
-	TSubclassOf<UObjectiveTextPanelWidget> ObjectiveTextPanelWidgetClass;
-
-	/** Active objective text panel instance */
-	UPROPERTY()
-	TObjectPtr<UObjectiveTextPanelWidget> ObjectiveTextPanelWidget;
-
 	/** World-space marker display actor class (assigned in BP defaults — no C++ asset path).
 	 *  Supplied to UObjectiveSubsystem::SetMarkerDisplayClass during local player setup. */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<AObjectiveMarkerDisplay> MarkerDisplayClass;
 
-	/** Loot acquisition toast class (assigned in BP defaults — no C++ asset path). */
-	UPROPERTY(EditDefaultsOnly, Category = "UI")
-	TSubclassOf<ULootNotificationWidget> LootToastWidgetClass;
-
-	/** Active loot toast instance */
-	UPROPERTY()
-	TObjectPtr<ULootNotificationWidget> LootToastWidget;
-
-	/** "[F] Revive" prompt class (assigned in BP defaults — no C++ asset path). */
+	/** "[F] Revive" prompt class (assigned in BP defaults — no C++ asset path). Deliberately still
+	 *  here while the HUD module's revive label and interact-candidate switching are unproven —
+	 *  this is the fallback until they are. */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
 	TSubclassOf<URevivePromptWidget> RevivePromptWidgetClass;
 
@@ -214,13 +213,9 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UConsumableWidget> ConsumableWidget;
 
-	/** Attachment stat preview panel class (assigned in BP defaults — no C++ asset path). */
-	UPROPERTY(EditDefaultsOnly, Category = "UI")
-	TSubclassOf<UAttachmentStatPreviewWidget> AttachmentStatPreviewWidgetClass;
-
-	/** Active attachment stat preview panel instance */
-	UPROPERTY()
-	TObjectPtr<UAttachmentStatPreviewWidget> AttachmentStatPreviewWidget;
+	/** The HUD module's stat preview panel, registered by the widget itself. Weak: the module owns
+	 *  its lifetime and can tear it down on a context switch without telling this controller. */
+	TWeakObjectPtr<UAttachmentStatPreviewWidget> AttachmentStatPreview;
 
 	/** Controls briefing screen class (assigned in BP defaults — no C++ asset path). */
 	UPROPERTY(EditDefaultsOnly, Category = "UI|Tutorial")
@@ -234,6 +229,18 @@ protected:
 	 *  adding a second tutorial map is a defaults change, not a code change. */
 	UPROPERTY(EditDefaultsOnly, Category = "UI|Tutorial")
 	TArray<TSoftObjectPtr<UWorld>> TutorialMaps;
+
+	/** Fade passed to the HUD module manager when the pause screen hides it. 0 = instant. Kept
+	 *  short deliberately: the pause screen appears in the same frame and a long fade shows the
+	 *  HUD sliding out from underneath it.
+	 *
+	 *  ⚠ Raising this above 0 REQUIRES ExcludedRootClass to be assigned on the briefing widget.
+	 *  At 0 the module root collapses synchronously before the briefing's top-level sweep runs, so
+	 *  the sweep skips it. Mid-fade the root is still Visible, so the sweep captures and collapses
+	 *  it, and its restore on dismiss writes back a visibility the fade has already moved past --
+	 *  a flash, or a HUD stuck invisible if the fade had reached zero alpha. */
+	UPROPERTY(EditDefaultsOnly, Category = "UI", meta = (ClampMin = "0.0"))
+	float PauseHudFadeSeconds = 0.f;
 
 	/** If true, the player will use UMG touch controls even if not playing on mobile platforms */
 	UPROPERTY(EditAnywhere, Config, Category = "Input|Touch Controls")
@@ -267,4 +274,37 @@ private:
 	/** Escape handler. Re-opens the briefing as a pause screen, bypassing both the tutorial-map and
 	 *  already-seen gates that only apply to the automatic level-start show. */
 	void HandlePauseKeyPressed();
+
+	/** Quiets (or restores) the two HUD systems C++ can reach: this controller's overlay group and
+	 *  the HUD actor's module tree. The third — the kit's own top-level widgets — is the briefing
+	 *  widget's sweep, which runs from its own construct/destruct.
+	 *
+	 *  Called BEFORE the briefing is built on the way in, so the sweep finds the overlay already
+	 *  collapsed and does not record it a second time; and AFTER the briefing is torn down on the
+	 *  way out, so the sweep's restore and this one cannot fight over the same widgets. */
+	void SetPauseHudHidden(bool bInHidden);
+
+	/** The bridge component on the HUD actor, or null when there is no HUD actor (the HUD class is
+	 *  a GameMode setting and a level may legitimately run without one). Cached weakly — the HUD
+	 *  actor outlives the controller in practice but is not owned by it. */
+	UExtractionHudBridgeComponent* ResolveHudBridge() const;
+
+	mutable TWeakObjectPtr<UExtractionHudBridgeComponent> CachedHudBridge;
+
+	/** Fills OutWidgets with the overlay group, skipping any member that does not exist. */
+	void CollectScreenOverlayWidgets(TArray<UUserWidget*>& OutWidgets) const;
+
+	/** One entry per overlay widget SetScreenOverlayHidden collapsed, with the visibility to put
+	 *  back. Mirrors the briefing sweep's record so the two behave identically. */
+	struct FOverlayVisibilityRecord
+	{
+		TWeakObjectPtr<UUserWidget> Widget;
+		ESlateVisibility PriorVisibility;
+	};
+
+	TArray<FOverlayVisibilityRecord> HiddenOverlayWidgets;
+
+	/** Latch behind SetScreenOverlayHidden's idempotency. Without it a second hide would capture
+	 *  the already-collapsed state as the value to restore, and the overlay would never come back. */
+	bool bScreenOverlayHidden = false;
 };

@@ -32,8 +32,11 @@
 		expectsEmbeddedBridge,
 		startBridgeLifecycleMonitor,
 		onBridgeAvailabilityChanged,
-		capturePerformanceSnapshot
+		capturePerformanceSnapshot,
+		openUrl,
+		openPath
 	} from '$lib/bridge.js';
+	import { classifyLinkHref } from '$lib/linkPolicy.js';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
 	import { ModeWatcher } from 'mode-watcher';
 	import { Toaster } from 'svelte-sonner';
@@ -341,9 +344,47 @@
 		}
 		globalCtxVisible = false;
 	}
+
+	// ── Link clicks never navigate ──────────────────────────────────
+	// One handler for every anchor in the app — chat markdown, Studio job
+	// results, agent repository links, Discord. The panel has no address bar
+	// and no Back button, so a single same-frame navigation strands the user
+	// in unstyled DOM (see the reasoning in $lib/linkPolicy.js). Bubble phase
+	// with a defaultPrevented check, so a component that already handled its
+	// own click keeps winning; the browser's default navigation still happens
+	// after bubbling, so cancelling here is enough.
+	function handleGlobalLinkClick(e: MouseEvent) {
+		if (e.defaultPrevented) return;
+		const anchor = (e.target as Element | null)?.closest?.('a[href]');
+		if (!(anchor instanceof HTMLAnchorElement)) return;
+
+		// getAttribute, not .href: the DOM property resolves '/Game/BP' against
+		// the server origin and hands back 'http://localhost:PORT/Game/BP',
+		// which is the navigation we're here to stop, not the author's intent.
+		const target = classifyLinkHref(anchor.getAttribute('href'));
+
+		// An in-page anchor is the one click we must NOT cancel: it scrolls
+		// without a document load, so it strands nobody, and cancelling it just
+		// makes the link dead. Leave it entirely to the browser.
+		if (target.kind === 'fragment') return;
+
+		// Everything else is cancelled. An href we can't classify has nowhere
+		// useful to go, and letting it through is what breaks the panel.
+		e.preventDefault();
+
+		if (target.kind === 'external') {
+			void openUrl(target.url);
+		} else if (target.kind === 'local') {
+			void openPath(target.path, target.line);
+		}
+	}
 </script>
 
-<svelte:window onkeydown={handleGlobalKeydown} oncontextmenu={handleGlobalContextMenu} />
+<svelte:window
+	onkeydown={handleGlobalKeydown}
+	oncontextmenu={handleGlobalContextMenu}
+	onclick={handleGlobalLinkClick}
+/>
 
 <svelte:head>
 	<title>Agent Chat</title>

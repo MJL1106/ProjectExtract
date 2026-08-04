@@ -47,6 +47,8 @@ ALootContainer::ALootContainer()
 	LootMarker = CreateDefaultSubobject<ULootMarkerComponent>(TEXT("LootMarker"));
 	LootMarker->SetupAttachment(InteractVolume);
 	LootMarker->MarkerWorldZOffset = 60.f;
+	LootMarker->MarkerKind = ELootMarkerKind::Container;
+	// Label override left empty -- resolves through IWorldInteractable to InteractPrompt ("Search").
 }
 
 void ALootContainer::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

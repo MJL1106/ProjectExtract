@@ -95,11 +95,17 @@ void UWeaponComponent::EquipWeapon(TSubclassOf<AWeaponBase> WeaponClass)
 		PrimaryWeapon = nullptr;
 	}
 
-	if (!WeaponClass) return;
+	if (!WeaponClass)
+	{
+		BroadcastActiveWeaponChanged(); // hand emptied and nothing replaces it
+		return;
+	}
 
 	PrimaryWeapon = SpawnWeaponActor(WeaponClass);
 	if (IsValid(PrimaryWeapon))
 		SetActiveWeapon(PrimaryWeapon);
+
+	BroadcastActiveWeaponChanged(); // no-op after a successful activate; covers a failed spawn
 }
 
 AWeaponBase* UWeaponComponent::ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<AWeaponBase> NewWeaponClass, int32 Mag, int32 Reserve)
@@ -128,7 +134,11 @@ AWeaponBase* UWeaponComponent::ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<
 	}
 
 	Slot = SpawnWeaponActor(NewWeaponClass);
-	if (!IsValid(Slot)) return nullptr;
+	if (!IsValid(Slot))
+	{
+		BroadcastActiveWeaponChanged(); // the destroy above may have emptied the held slot
+		return nullptr;
+	}
 
 	if (Mag >= 0 || Reserve >= 0)
 		Slot->SetAmmoState(Mag, Reserve);
@@ -257,6 +267,25 @@ void UWeaponComponent::SetActiveWeapon(AWeaponBase* NewWeapon)
 		OwnerIface->NotifyWeaponEquipped(CurrentWeapon);
 		CurrentWeapon->ResyncVisualAmmo(); // fresh kit item starts with BP-default counts otherwise
 	}
+
+	BroadcastActiveWeaponChanged();
+}
+
+void UWeaponComponent::BroadcastActiveWeaponChanged()
+{
+	// The throwable slot hides the hitscan weapon entirely — the HUD should read "no gun out",
+	// not the stowed one it would otherwise still be showing.
+	AWeaponBase* Effective = bThrowableEquipped ? nullptr : CurrentWeapon.Get();
+
+	// A weapon destroyed since the last broadcast reads back as null through the weak pointer,
+	// which would compare equal to a null Effective and suppress the "hand emptied" edge this
+	// function exists to raise. An EXPLICIT null (nothing ever broadcast, or null already
+	// broadcast) is a genuine match, so the normal dedup is untouched.
+	const bool bStale = !LastBroadcastActiveWeapon.IsExplicitlyNull() && !LastBroadcastActiveWeapon.IsValid();
+	if (!bStale && LastBroadcastActiveWeapon.Get() == Effective) return;
+
+	LastBroadcastActiveWeapon = Effective;
+	OnActiveWeaponChanged.Broadcast(Effective);
 }
 
 void UWeaponComponent::SwitchToPrimary()
@@ -314,6 +343,7 @@ bool UWeaponComponent::SetThrowableEquipped(bool bEquipped)
 	}
 
 	bThrowableEquipped = bEquipped;
+	BroadcastActiveWeaponChanged();
 	return true;
 }
 
@@ -444,7 +474,11 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 		OwnerIface = Cast<IExtractionPlayerInterface>(OwnerActor);
 	}
 
-	if (!IsValid(CurrentWeapon) || !IsValid(OwnerActor) || !OwnerIface) return;
+	if (!IsValid(CurrentWeapon) || !IsValid(OwnerActor) || !OwnerIface)
+	{
+		BroadcastActiveWeaponChanged(); // a replicated null still has to reach the HUD
+		return;
+	}
 
 	// Detach previous weapon if the server swapped without destroying the old one
 	if (IsValid(PreviousWeapon) && PreviousWeapon != CurrentWeapon)
@@ -499,6 +533,8 @@ void UWeaponComponent::OnRep_CurrentWeapon()
 		if (IsValid(Slot) && Slot != CurrentWeapon)
 			Slot->SetWeaponHidden(true);
 	CurrentWeapon->SetWeaponHidden(false);
+
+	BroadcastActiveWeaponChanged();
 }
 
 void UWeaponComponent::OnRep_IsAiming()

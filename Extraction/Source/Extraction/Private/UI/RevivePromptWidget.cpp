@@ -28,39 +28,22 @@ void URevivePromptWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaT
 		return;
 	}
 
-	// Revive outranks a world interactable when both are under the crosshair.
-	const bool bRevive = IsValid(Player->GetReviveCandidate());
-	const bool bInteract = !bRevive && IsValid(Player->GetInteractCandidate());
-	if (!bRevive && !bInteract)
+	// Revive only. The world-interact prompt is owned by the HUD's own prompt container now, and
+	// this widget drawing it too put the same hint on screen twice.
+	if (!IsValid(Player->GetReviveCandidate()))
 	{
 		PromptContainer->SetVisibility(ESlateVisibility::Collapsed);
 		return;
 	}
 	PromptContainer->SetVisibility(ESlateVisibility::HitTestInvisible);
 
-	bool bHolding;
-	float Progress;
-	FText Text;
-	if (bRevive)
-	{
-		bHolding = Player->IsRevivingTarget();
-		Progress = Player->GetReviveProgress();
-		Text = bHolding ? RevivingHint : ReviveHint;
-	}
-	else
-	{
-		bHolding = Player->IsInteractHolding();
-		Progress = Player->GetInteractHoldProgress();
-		Text = (bHolding && !InteractHoldingHint.IsEmpty())
-			? InteractHoldingHint
-			: FText::Format(InteractHintFormat, Player->GetInteractPrompt());
-	}
+	const bool bHolding = Player->IsRevivingTarget();
 
 	if (PromptText)
-		PromptText->SetText(Text);
+		PromptText->SetText(bHolding ? RevivingHint : ReviveHint);
 	if (HoldProgressBar)
 	{
 		HoldProgressBar->SetVisibility(bHolding ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
-		HoldProgressBar->SetPercent(Progress);
+		HoldProgressBar->SetPercent(Player->GetReviveProgress());
 	}
 }

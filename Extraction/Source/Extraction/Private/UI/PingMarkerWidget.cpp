@@ -1,10 +1,17 @@
 // UPingMarkerWidget implementation.
 
 #include "UI/PingMarkerWidget.h"
-#include "Components/CompanionCommandComponent.h"
 #include "Components/Image.h"
-#include "Blueprint/WidgetLayoutLibrary.h"
-#include "GameFramework/PlayerController.h"
+#include "GameFramework/Actor.h"
+#include "GameFramework/Pawn.h"
+#include "Components/CompanionCommandComponent.h"
+
+namespace
+{
+	/** Below these thresholds the WBP has nothing new to react to -- see the objective marker. */
+	constexpr float AngleBroadcastEpsilon = 0.25f;
+	constexpr float DistanceBroadcastEpsilon = 0.05f;
+}
 
 void UPingMarkerWidget::NativeConstruct()
 {
@@ -39,72 +46,105 @@ void UPingMarkerWidget::NativeDestruct()
 	Super::NativeDestruct();
 }
 
-void UPingMarkerWidget::HandlePingChanged(ECompanionCommand PendingCommand, AActor* PingedTarget)
+void UPingMarkerWidget::HandlePingChanged(ECompanionCommand PendingCommand, AActor* /*PingedTarget*/)
 {
-	// TakeCover has no target actor -- track the resolved cover location instead.
-	if (PendingCommand == ECompanionCommand::TakeCover && CachedCommandComp.IsValid())
-	{
-		TrackedTarget.Reset();
-		TrackedLocation = CachedCommandComp->GetPendingCoverLocation();
-		bTrackingLocation = true;
-		SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-		return;
-	}
+	// Every path below re-arms tracking: a new ping must not inherit the previous one's smoothed
+	// position, or the marker slides across the screen from wherever the last target was.
+	bHasSmoothedPosition = false;
+	bHasBroadcastState = false;
+	bPendingAppearEvent = true;
+	SetRenderOpacity(1.f);
 
-	bTrackingLocation = false;
-	if (PendingCommand == ECompanionCommand::None || !IsValid(PingedTarget))
+	PingCommand = PendingCommand;
+
+	if (PendingCommand == ECompanionCommand::None)
 	{
-		TrackedTarget.Reset();
+		bPendingAppearEvent = false;
 		SetVisibility(ESlateVisibility::Collapsed);
 		return;
 	}
 
-	TrackedTarget = PingedTarget;
 	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+}
+
+bool UPingMarkerWidget::GetTrackedLocation(FVector& OutLocation) const
+{
+	return CachedCommandComp.IsValid() && CachedCommandComp->GetPingWorldLocation(OutLocation);
 }
 
 void UPingMarkerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
-	// Skip projection work when no target is active.
-	if (!TrackedTarget.IsValid() && !bTrackingLocation)
+	// Collapsing is only ever driven by "there is no ping" -- Slate does not tick invisible widgets,
+	// so anything this widget collapses itself for must be undone by an external event. Losing the
+	// target qualifies; going off-screen does NOT, which is why that case fades instead.
+	FVector WorldLocation = FVector::ZeroVector;
+	if (!GetTrackedLocation(WorldLocation))
 	{
 		if (GetVisibility() != ESlateVisibility::Collapsed)
-		{
 			SetVisibility(ESlateVisibility::Collapsed);
-		}
 		return;
 	}
 
-	APlayerController* PC = GetOwningPlayer();
-	if (!IsValid(PC)) return;
+	if (!FScreenMarkerViewContext::Build(this, ViewContext)) return;
 
-	const FVector WorldLoc = bTrackingLocation ? TrackedLocation : TrackedTarget->GetActorLocation();
-	FVector2D ScreenPos;
-	const bool bOnScreen = PC->ProjectWorldLocationToScreen(WorldLoc, ScreenPos, true);
+	FScreenMarkerClampParams Params;
+	Params.EdgeMargin = EdgeMargin;
+	Params.ReentryHysteresis = ReentryHysteresis;
+	Params.bWasOffScreen = bIsOffScreen;
 
-	if (!bOnScreen)
+	const FScreenMarkerProjection Projection = FScreenMarkerProjection::Project(
+		ViewContext, WorldLocation, Params);
+	if (!Projection.bIsValid) return;
+
+	ApplyProjection(Projection, InDeltaTime);
+}
+
+void UPingMarkerWidget::ApplyProjection(const FScreenMarkerProjection& Projection, float DeltaTime)
+{
+	const bool bBoundaryCrossed = bIsOffScreen != Projection.bIsOffScreen;
+	const bool bBearingReversed = bIsOffScreen && Projection.bIsOffScreen
+		&& FVector2D::DotProduct(LastEdgeDirection, Projection.EdgeDirection) < 0.0;
+	// On-screen the marker always snaps to the projected point -- interpolating it lags the world
+	// during turns. Smoothing is reserved for off-screen edge sliding, where it still helps.
+	const bool bSnap = !bHasSmoothedPosition || bBoundaryCrossed || bBearingReversed || !Projection.bIsOffScreen;
+
+	// The head offset is an on-screen affordance: an edge-clamped marker has no head to sit above,
+	// and applying it there would push the marker back outside the padded rectangle.
+	FVector2D TargetPosition = Projection.ScreenPosition;
+	if (!Projection.bIsOffScreen) TargetPosition.Y += VerticalScreenOffset;
+
+	SmoothedPosition = bSnap
+		? TargetPosition
+		: FScreenMarkerProjection::InterpolatePosition(SmoothedPosition, TargetPosition,
+			DeltaTime, PositionInterpSpeed);
+
+	bHasSmoothedPosition = true;
+	LastEdgeDirection = Projection.EdgeDirection;
+
+	bIsOffScreen = Projection.bIsOffScreen;
+	EdgeAngleDegrees = Projection.EdgeAngleDegrees;
+	DistanceMeters = Projection.DistanceMeters;
+
+	SetRenderTranslation(SmoothedPosition);
+	SetRenderOpacity(bIsOffScreen && !bClampWhenOffScreen ? 0.f : 1.f);
+
+	if (bPendingAppearEvent)
 	{
-		if (GetVisibility() != ESlateVisibility::Collapsed)
-		{
-			SetVisibility(ESlateVisibility::Collapsed);
-		}
-		return;
+		bPendingAppearEvent = false;
+		OnPingMarkerAppeared();
 	}
 
-	if (GetVisibility() != ESlateVisibility::SelfHitTestInvisible)
-	{
-		SetVisibility(ESlateVisibility::SelfHitTestInvisible);
-	}
+	const bool bChanged = !bHasBroadcastState
+		|| bLastBroadcastOffScreen != bIsOffScreen
+		|| FMath::Abs(LastBroadcastAngle - EdgeAngleDegrees) > AngleBroadcastEpsilon
+		|| FMath::Abs(LastBroadcastDistance - DistanceMeters) > DistanceBroadcastEpsilon;
+	if (!bChanged) return;
 
-	// Convert from absolute screen coords to DPI-scaled widget coords.
-	const float ViewportScale = UWidgetLayoutLibrary::GetViewportScale(this);
-	if (ViewportScale > KINDA_SMALL_NUMBER)
-	{
-		ScreenPos /= ViewportScale;
-	}
-
-	ScreenPos.Y += VerticalScreenOffset;
-	SetRenderTranslation(ScreenPos);
+	bHasBroadcastState = true;
+	bLastBroadcastOffScreen = bIsOffScreen;
+	LastBroadcastAngle = EdgeAngleDegrees;
+	LastBroadcastDistance = DistanceMeters;
+	OnPingMarkerUpdated(bIsOffScreen, EdgeAngleDegrees, DistanceMeters);
 }

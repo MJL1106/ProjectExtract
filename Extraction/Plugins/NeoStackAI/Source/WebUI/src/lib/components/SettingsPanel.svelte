@@ -53,6 +53,8 @@
 	} from '$lib/stores/settings.js';
 	import {
 		checkForPluginUpdate,
+		getPluginUpdateStatus,
+		type PluginUpdateStatus,
 		getProviderSettings,
 		addProvider,
 		removeProvider,
@@ -132,6 +134,7 @@
 
 	let isCheckingForUpdates = $state(false);
 	let updateCheckMessage = $state('');
+	let updateStatus = $state<PluginUpdateStatus | null>(null);
 
 	// ── Issue Report Settings ───────────────────────────────────────
 	let issueReportSettings = $state<IssueReportSettings>({ disabled: false });
@@ -602,6 +605,9 @@
 				void loadCrashHistory();
 			} else if (tab === 'general') {
 				void loadIssueReportSettings();
+			} else if (tab === 'about') {
+				// Show the installed version immediately; the check is manual.
+				void loadUpdateStatus();
 			}
 		});
 	});
@@ -629,13 +635,38 @@
 		}, 400);
 	}
 
+	async function loadUpdateStatus() {
+		try {
+			updateStatus = await getPluginUpdateStatus();
+		} catch (e) {
+			console.warn('Failed to read update status:', e);
+		}
+	}
+
+	/**
+	 * Trigger the check, then wait for the answer.
+	 *
+	 * The UE side is fire-and-forget and pushes nothing back, so we poll. It
+	 * used to just say "check started" and stop — and because the editor only
+	 * raises a toast when an update EXISTS, an up-to-date user saw nothing at
+	 * all and the button looked broken.
+	 */
 	async function handleCheckForUpdates() {
 		if (isCheckingForUpdates) return;
 		isCheckingForUpdates = true;
 		updateCheckMessage = '';
 		try {
 			await checkForPluginUpdate();
-			updateCheckMessage = $t('update_check_started');
+			// ~15s ceiling: the check is one request, and leaving the spinner
+			// up forever on a wedged network is worse than reporting timeout.
+			for (let attempt = 0; attempt < 30; attempt++) {
+				await new Promise((resolve) => setTimeout(resolve, 500));
+				await loadUpdateStatus();
+				if (updateStatus && updateStatus.state !== 'checking') break;
+			}
+			if (updateStatus?.state === 'checking') {
+				updateCheckMessage = $t('update_check_failed');
+			}
 		} catch (e) {
 			console.warn('Failed to trigger update check:', e);
 			updateCheckMessage = $t('update_check_failed');
@@ -1286,6 +1317,52 @@
 					>
 						{isCheckingForUpdates ? $t('checking') : $t('check_for_updates')}
 					</button>
+
+					{#if updateStatus?.currentVersion}
+						<p class="text-muted-foreground/70 mt-2 text-[12px]">
+							Installed: <span class="text-foreground">v{updateStatus.currentVersion}</span>
+						</p>
+					{/if}
+
+					<!-- The verdict, which used to exist only as an editor toast that
+					     never fires when you are already current. -->
+					<!-- Ordered so an in-flight download or install is never mistaken
+					     for "up to date": those states still carry latestVersion,
+					     so they have to be claimed before the up-to-date branch. -->
+					{#if updateStatus?.state === 'updateAvailable' && updateStatus.latestVersion}
+						<p class="mt-1 text-[12px] text-[var(--ue-accent)]">
+							Update available: v{updateStatus.latestVersion} — use the editor
+							notification to download and install.
+						</p>
+					{:else if updateStatus?.state === 'downloading'}
+						<p class="mt-1 text-[12px] text-[var(--ue-accent)]">
+							Downloading v{updateStatus.latestVersion}… {Math.round(
+								updateStatus.downloadProgress * 100
+							)}%
+						</p>
+					{:else if updateStatus?.state === 'downloaded'}
+						<p class="mt-1 text-[12px] text-[var(--ue-accent)]">
+							v{updateStatus.latestVersion} is ready to install — use the editor
+							notification.
+						</p>
+					{:else if updateStatus?.state === 'installing'}
+						<p class="mt-1 text-[12px] text-[var(--ue-accent)]">
+							Installing v{updateStatus.latestVersion} — the editor will restart.
+						</p>
+					{:else if updateStatus?.state === 'failed'}
+						<p class="mt-1 text-[12px] text-amber-400/80">
+							{updateStatus.error || 'The update check failed. Try again shortly.'}
+						</p>
+					{:else if updateStatus?.checked && updateStatus.latestVersion}
+						<p class="mt-1 text-[12px] text-emerald-500">You're on the latest version.</p>
+					{:else if updateStatus?.checked && !isCheckingForUpdates}
+						<!-- Server had no live build for this engine + platform — not the
+						     same as being up to date, and worth saying so plainly. A
+						     failed check no longer lands here: it reports state=failed. -->
+						<p class="text-muted-foreground/70 mt-1 text-[12px]">
+							No build published for this engine and platform yet.
+						</p>
+					{/if}
 
 					{#if updateCheckMessage}
 						<p class="text-muted-foreground/70 mt-2 text-[12px]">{updateCheckMessage}</p>

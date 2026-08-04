@@ -178,6 +178,7 @@ void UCompanionCommandComponent::IssuePing()
 		{
 			PendingCommand = ECompanionCommand::Breach;
 			PendingTarget  = HitActor;
+			CapturePingAnchor(HitActor, Hit.ImpactPoint);
 			SetPromptContextRegistered(false); // breach prompt confirms on B — no G/V shield needed
 			OnPingChanged.Broadcast(PendingCommand, HitActor);
 			PlayPingFeedback(true);
@@ -198,6 +199,7 @@ void UCompanionCommandComponent::IssuePing()
 			{
 				PendingCommand = ECompanionCommand::Explore;
 				PendingTarget  = HitActor; // marker rides the door
+				CapturePingAnchor(HitActor, Hit.ImpactPoint);
 				SetPromptContextRegistered(false); // explore confirms on the breach key — no G/V shield needed
 				OnPingChanged.Broadcast(PendingCommand, HitActor);
 				PlayPingFeedback(true);
@@ -223,6 +225,7 @@ void UCompanionCommandComponent::IssuePing()
 		}
 		PendingCommand = ECompanionCommand::Breach;
 		PendingTarget  = HitActor;
+		CapturePingAnchor(HitActor, Hit.ImpactPoint);
 		SetPromptContextRegistered(false);
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
 		PlayPingFeedback(true);
@@ -235,6 +238,7 @@ void UCompanionCommandComponent::IssuePing()
 	{
 		PendingCommand = ECompanionCommand::Loot;
 		PendingTarget  = HitActor;
+		CapturePingAnchor(HitActor, Hit.ImpactPoint);
 		SetPromptContextRegistered(false); // loot confirms on the breach key — no G/V shield needed
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
 		PlayPingFeedback(true);
@@ -252,6 +256,7 @@ void UCompanionCommandComponent::IssuePing()
 		{
 			PendingCommand = ECompanionCommand::Takedown;
 			PendingTarget  = Enemy;
+			CapturePingAnchor(Enemy, Hit.ImpactPoint);
 			SetPromptContextRegistered(true);
 			OnPingChanged.Broadcast(PendingCommand, Enemy);
 			PlayPingFeedback(true);
@@ -283,6 +288,8 @@ void UCompanionCommandComponent::IssuePing()
 			{
 				PendingCommand = ECompanionCommand::TakeCover;
 				PendingTarget.Reset(); // location-only command, no target actor
+				PendingPingOffset = FVector::ZeroVector; // stale offset from a prior ping -- not used by TakeCover, but don't leave it dangling
+				bPendingPingOffsetValid = false;
 				PendingCoverPingImpact = Hit.ImpactPoint;
 				PendingCoverPingNormal = Hit.ImpactNormal;
 				PendingCoverLocation = FoundCover.Data.Location;
@@ -314,8 +321,46 @@ void UCompanionCommandComponent::ClearPending()
 {
 	PendingCommand = ECompanionCommand::None;
 	PendingTarget.Reset();
+	PendingPingOffset = FVector::ZeroVector;
+	bPendingPingOffsetValid = false;
 	SetPromptContextRegistered(false);
 	OnPingChanged.Broadcast(ECompanionCommand::None, nullptr);
+}
+
+void UCompanionCommandComponent::CapturePingAnchor(AActor* TargetActor, const FVector& ImpactPoint)
+{
+	PendingPingOffset = IsValid(TargetActor)
+		? TargetActor->GetActorTransform().InverseTransformPosition(ImpactPoint)
+		: ImpactPoint;
+	bPendingPingOffsetValid = true;
+}
+
+bool UCompanionCommandComponent::GetPingWorldLocation(FVector& OutLocation) const
+{
+	if (PendingCommand == ECompanionCommand::TakeCover)
+	{
+		OutLocation = PendingCoverLocation;
+		return true;
+	}
+	if (PendingCommand == ECompanionCommand::None) return false;
+
+	AActor* Target = PendingTarget.Get();
+	if (IsValid(Target) && bPendingPingOffsetValid)
+	{
+		OutLocation = Target->GetActorTransform().TransformPosition(PendingPingOffset);
+		return true;
+	}
+	if (IsValid(Target))
+	{
+		OutLocation = Target->GetActorLocation();
+		return true;
+	}
+
+	// No live target: PendingPingOffset (when valid) is always actor-LOCAL -- every
+	// CapturePingAnchor call site passes a validated actor, so there is no bare-world-point
+	// case to fall back to. A target that dies mid-ping (looted pickup, killed enemy) must
+	// collapse the marker, not resolve a local offset as if it were a world position.
+	return false;
 }
 
 void UCompanionCommandComponent::ClearCommandedCoverIfActive()
