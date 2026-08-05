@@ -65,6 +65,11 @@ void UExtractionHudBridgeComponent::BeginPlay()
 
 void UExtractionHudBridgeComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	// Set before anything else below can call into UnbindPawnSources -- the only thing this flag
+	// exists to gate is the two BlueprintImplementableEvent pushes there, so it must be live before
+	// UnbindAll runs, not just before the specific push.
+	bTearingDown = true;
+
 	if (const UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(BindRetryTimerHandle);
@@ -261,11 +266,15 @@ bool UExtractionHudBridgeComponent::BindCompanionCommand(APawn& Pawn)
 	{
 		Old->OnCompanionModeChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleCompanionModeChanged);
 		Old->OnModeMenuChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleModeMenuChanged);
+		Old->OnPingChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleCompanionPromptChanged);
+		Old->OnPingCandidateChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandlePingCandidateChanged);
 	}
 
 	CachedCommandComponent = CommandComponent;
 	CommandComponent->OnCompanionModeChanged.AddUniqueDynamic(this, &UExtractionHudBridgeComponent::HandleCompanionModeChanged);
 	CommandComponent->OnModeMenuChanged.AddUniqueDynamic(this, &UExtractionHudBridgeComponent::HandleModeMenuChanged);
+	CommandComponent->OnPingChanged.AddUniqueDynamic(this, &UExtractionHudBridgeComponent::HandleCompanionPromptChanged);
+	CommandComponent->OnPingCandidateChanged.AddUniqueDynamic(this, &UExtractionHudBridgeComponent::HandlePingCandidateChanged);
 	RefreshCompanion();
 	return true;
 }
@@ -340,7 +349,23 @@ void UExtractionHudBridgeComponent::UnbindPawnSources()
 	{
 		CommandComponent->OnCompanionModeChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleCompanionModeChanged);
 		CommandComponent->OnModeMenuChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleModeMenuChanged);
+		CommandComponent->OnPingChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleCompanionPromptChanged);
+		CommandComponent->OnPingCandidateChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandlePingCandidateChanged);
 	}
+
+	// Outside the if above, on purpose: a component already gone through the weak pointer (marked
+	// garbage before the possession callback lands, or a RefreshAll -> TryBindAll after the pawn
+	// died) must still clear the HUD, not just one that unbound cleanly. Neither channel has a
+	// polling fallback like cover-me's timer, so this is the only place that can catch it.
+	// Suppressed during EndPlay -- bTearingDown -- since every other channel's teardown is silent
+	// and calling into the HUD Blueprint while the world is being torn down is the one thing this
+	// pair must not do.
+	if (!bTearingDown)
+	{
+		PushCompanionPrompt(ECompanionCommand::None, /*bForce=*/ false);
+		OnPingCandidateChangedBP(false, FVector::ZeroVector);
+	}
+
 	if (ACompanionCharacter* Companion = CachedCompanion.Get())
 		Companion->OnCoveringFireTick.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleCoveringFireTick);
 
@@ -530,10 +555,19 @@ void UExtractionHudBridgeComponent::RefreshCompanion()
 	UpdateCoverMeState(/*bForce=*/ true);
 
 	UCompanionCommandComponent* CommandComponent = CachedCommandComponent.Get();
-	if (!IsValid(CommandComponent)) return;
+	if (!IsValid(CommandComponent))
+	{
+		// A module built after the command component was already gone has heard nothing -- give it
+		// the unambiguous "no prompt" / "no candidate" state rather than leaving it on the WBP default.
+		PushCompanionPrompt(ECompanionCommand::None, /*bForce=*/ true);
+		OnPingCandidateChangedBP(false, FVector::ZeroVector);
+		return;
+	}
 
 	OnCompanionModeChangedBP(CommandComponent->GetCompanionMode());
 	OnCompanionMenuOpenChangedBP(CommandComponent->IsModeMenuOpen());
+	PushCompanionPrompt(CommandComponent->GetPendingCommand(), /*bForce=*/ true);
+	OnPingCandidateChangedBP(CommandComponent->HasPingCandidate(), CommandComponent->GetPingCandidateLocation());
 }
 
 void UExtractionHudBridgeComponent::UpdateCoverMeState(bool bForce)
@@ -560,6 +594,14 @@ void UExtractionHudBridgeComponent::UpdateCoverMeState(bool bForce)
 	bCoverMeStateEverPushed = true;
 
 	OnCoverMeStateChangedBP(bAvailable, CooldownRemaining, CooldownDuration);
+}
+
+void UExtractionHudBridgeComponent::PushCompanionPrompt(ECompanionCommand Command, bool bForce)
+{
+	if (!bForce && Command == LastPushedPrompt) return;
+
+	LastPushedPrompt = Command;
+	OnCompanionPromptChangedBP(Command);
 }
 
 void UExtractionHudBridgeComponent::PushObjectiveList()
@@ -836,4 +878,16 @@ void UExtractionHudBridgeComponent::HandleCoveringFireTick(float Remaining, bool
 	// telling the badge a lockout has begun -- a shorter version of the flash this channel exists to
 	// close. The delegate is already throttled to 10 Hz on the companion side, so this costs nothing.
 	UpdateCoverMeState(/*bForce=*/ true);
+}
+
+void UExtractionHudBridgeComponent::HandleCompanionPromptChanged(ECompanionCommand PendingCommand, AActor* PingedTarget)
+{
+	// PingedTarget deliberately dropped -- the HUD only needs the command kind to pick a panel/verb,
+	// never which actor it points at. Don't re-add it.
+	PushCompanionPrompt(PendingCommand, /*bForce=*/ false);
+}
+
+void UExtractionHudBridgeComponent::HandlePingCandidateChanged(bool bHasCandidate, FVector WorldLocation)
+{
+	OnPingCandidateChangedBP(bHasCandidate, WorldLocation);
 }

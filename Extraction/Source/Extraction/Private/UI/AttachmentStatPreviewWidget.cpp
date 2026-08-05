@@ -75,6 +75,17 @@ namespace
 		return IsValid(Attachment) ? Attachment->Modifiers : FWeaponStatModifiers();
 	}
 
+	/** Display name of one candidate option, for the panel header -- only ever asked for on the
+	 *  success path, so an out-of-range byte or an unnamed asset just leaves the header blank rather
+	 *  than blocking the rows it titles. */
+	FText ResolveOptionDisplayName(const FAttachmentOptions& Options, uint8 OptionByte)
+	{
+		if (!Options.IsValidIndex(OptionByte)) return FText::GetEmpty();
+
+		const UWeaponAttachmentDataAsset* Attachment = Options[OptionByte];
+		return IsValid(Attachment) ? Attachment->DisplayName : FText::GetEmpty();
+	}
+
 	/** Slot-isolated multiplicative delta as a signed percent. Multiplicative stats compose by
 	 *  PRODUCT across slots, so every other slot's contribution cancels exactly in this ratio --
 	 *  the number is the true end-to-end change, not an approximation.
@@ -200,6 +211,10 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 		return;
 	}
 
+	// Fetched here (not just inside BuildStatDeltas) because the header-naming branch below needs it
+	// too, and BuildStatDeltas has no way to hand its internal lookup back out to a static caller.
+	const UWeaponDataAsset* Data = Weapon->GetWeaponData();
+
 	// BuildStatDeltas is static and so labels from the CDO. Swap in this instance's designer text
 	// here, where "index N is EAttachmentStatRow N" is guaranteed by that builder emitting every
 	// row in enum order.
@@ -218,9 +233,20 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 	{
 		ShowMessageOnly(NoChangeMessage);
 	}
-	else if (IsValid(MessageText))
+	else
 	{
-		MessageText->SetVisibility(ESlateVisibility::Collapsed);
+		if (IsValid(MessageText))
+			MessageText->SetVisibility(ESlateVisibility::Collapsed);
+
+		// Same slot resolution BuildStatDeltas already did internally, repeated here (cheap) because
+		// that builder only surfaces stat modifiers, never the asset the header needs to name itself.
+		const FAttachmentOptions* Options = nullptr;
+		uint8 FittedByte = 0;
+		FText CandidateName;
+		if (IsValid(Data) && ResolveKitSlot(*Data, Weapon->GetAttachmentSelection(), KitSlotByte, Options, FittedByte))
+			CandidateName = ResolveOptionDisplayName(*Options, OptionByte);
+
+		SetItemHeader(CandidateName, AttachmentHeadingText);
 	}
 
 	// Cache after every path so the next frame skips the rebuild.
@@ -263,9 +289,12 @@ void UAttachmentStatPreviewWidget::ShowForWeapon(UWeaponDataAsset* CandidateData
 		{
 			ShowMessageOnly(NoChangeMessage);
 		}
-		else if (IsValid(MessageText))
+		else
 		{
-			MessageText->SetVisibility(ESlateVisibility::Collapsed);
+			if (IsValid(MessageText))
+				MessageText->SetVisibility(ESlateVisibility::Collapsed);
+
+			SetItemHeader(CandidateData->DisplayName, WeaponHeadingText);
 		}
 	}
 
@@ -326,6 +355,7 @@ TArray<FAttachmentStatDelta> UAttachmentStatPreviewWidget::BuildWeaponDeltas(
 void UAttachmentStatPreviewWidget::HidePreview()
 {
 	HideRowsFrom(0);
+	ClearItemHeader();
 	InvalidateCache();
 
 	if (IsValid(MessageText))
@@ -465,6 +495,7 @@ void UAttachmentStatPreviewWidget::HideRowsFrom(int32 FirstIndex)
 void UAttachmentStatPreviewWidget::ShowMessageOnly(const FText& Message)
 {
 	HideRowsFrom(0);
+	ClearItemHeader();
 
 	// MessageText is BindWidgetOptional. A WBP without it must not show a visible empty panel --
 	// "incompatible" is a common case, and a blank rectangle is worse than nothing.
@@ -476,6 +507,24 @@ void UAttachmentStatPreviewWidget::ShowMessageOnly(const FText& Message)
 
 	MessageText->SetText(Message);
 	MessageText->SetVisibility(ESlateVisibility::HitTestInvisible);
+}
+
+void UAttachmentStatPreviewWidget::SetItemHeader(const FText& ItemName, const FText& Heading)
+{
+	if (IsValid(ItemNameText))
+		ItemNameText->SetText(ItemName);
+
+	if (IsValid(HeadingText))
+		HeadingText->SetText(Heading);
+}
+
+void UAttachmentStatPreviewWidget::ClearItemHeader()
+{
+	if (IsValid(ItemNameText))
+		ItemNameText->SetText(FText::GetEmpty());
+
+	if (IsValid(HeadingText))
+		HeadingText->SetText(FText::GetEmpty());
 }
 
 bool UAttachmentStatPreviewWidget::IsCacheCurrent(AWeaponBase* Weapon, uint8 KitSlotByte, uint8 OptionByte, bool bCompatible) const

@@ -19,6 +19,7 @@
 #include "Components/ActorComponent.h"
 #include "Engine/TimerHandle.h"
 #include "Character/ExtractionPlayer.h"
+#include "Companion/CompanionCommandTypes.h"
 #include "Companion/CompanionTypes.h"
 #include "Game/MissionInventorySubsystem.h"
 #include "Game/ObjectiveSubsystem.h"
@@ -187,6 +188,19 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
 	void OnCoverMeStateChangedBP(bool bAvailable, float CooldownRemaining, float CooldownDuration);
 
+	/** The companion command the player's current ping is offering, or None when there is no live
+	 *  prompt. The HUD renders one compact panel per command -- Takedown is the one command that
+	 *  offers TWO actions and gets its own dual-choice panel, which is why the kind is relayed rather
+	 *  than a pre-baked string. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
+	void OnCompanionPromptChangedBP(ECompanionCommand PendingCommand);
+
+	/** "Would a ping land on something right now, and where" -- the aiming state, distinct from
+	 *  OnCompanionPromptChangedBP which only fires once a ping is committed. WorldLocation is
+	 *  meaningless while bHasCandidate is false. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
+	void OnPingCandidateChangedBP(bool bHasCandidate, FVector WorldLocation);
+
 	/** Implement with the module manager's HideOrShowEntireHud(bHidden, FadeDuration). The only
 	 *  event on this component that flows HUD-ward as a command rather than as gameplay data. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
@@ -297,6 +311,11 @@ private:
 	void RefreshPrompt();
 	void RefreshCompanion();
 
+	/** Pushes OnCompanionPromptChangedBP when Command differs from the last value pushed, or
+	 *  unconditionally when bForce. Backs both the live OnPingChanged relay and RefreshCompanion's
+	 *  forced replay/clear so the two paths can't drift into a different dedup rule. */
+	void PushCompanionPrompt(ECompanionCommand Command, bool bForce);
+
 	/** Reads the objective subsystem into FHudObjectiveEntry and raises OnObjectivesRebuiltBP. */
 	void PushObjectiveList();
 
@@ -390,6 +409,12 @@ private:
 	UFUNCTION()
 	void HandleCoveringFireTick(float Remaining, bool bPaused);
 
+	UFUNCTION()
+	void HandleCompanionPromptChanged(ECompanionCommand PendingCommand, AActor* PingedTarget);
+
+	UFUNCTION()
+	void HandlePingCandidateChanged(bool bHasCandidate, FVector WorldLocation);
+
 	// ---- Cached sources ----
 	// All weak: the bridge owns none of these, and a pawn respawn or companion death must read
 	// back as "gone" rather than as a dangling bind target.
@@ -423,6 +448,19 @@ private:
 	bool bLastCoverMeAvailable = false;
 	float LastCoverMeCooldownRemaining = 0.f;
 	bool bCoverMeStateEverPushed = false;
+
+	/** Dedup baseline for OnCompanionPromptChangedBP -- OnPingChanged itself re-broadcasts on every
+	 *  press even when the command didn't change (re-pinging the same door), so this lives on the
+	 *  bridge rather than relying on the source to have already deduped. */
+	ECompanionCommand LastPushedPrompt = ECompanionCommand::None;
+
+	/** Set at the top of EndPlay, before UnbindAll. Every other channel's teardown is silent;
+	 *  UnbindPawnSources' prompt/candidate clear is the one pair of pushes that would otherwise call
+	 *  into the HUD Blueprint while the world is being torn down (every PIE stop, every level
+	 *  transition). A flag checked at the push site, not a defaulted bool parameter on
+	 *  UnbindPawnSources -- EndPlay is the only caller that needs it suppressed, and a flag can't be
+	 *  got wrong at a call site the way a stray true/false argument could. */
+	bool bTearingDown = false;
 
 	/** The kit pushes grenade counts in; nothing to read them back from, so the last value is
 	 *  kept here purely so RefreshAll can replay it. */

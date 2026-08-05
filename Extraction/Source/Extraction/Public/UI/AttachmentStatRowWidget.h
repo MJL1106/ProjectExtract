@@ -5,6 +5,10 @@
 // WBP must contain:
 //   UTextBlock "StatLabel" -- the measured quantity, e.g. "Vertical Recoil"
 //   UTextBlock "StatValue" -- the signed percentage, e.g. "-15%"
+// WBP may also contain (optional -- collapsed and untouched when absent):
+//   UImage     "ArrowWorse"  -- shown alone when the change hurts; already styled red/up in the WBP
+//   UImage     "ArrowBetter" -- shown alone when the change helps; already styled green/down in the WBP
+//   UTextBlock "VerdictText" -- "BETTER" / "WORSE", the third redundant signal alongside colour and shape
 
 #pragma once
 
@@ -13,6 +17,7 @@
 #include "UI/AttachmentStatTypes.h"
 #include "AttachmentStatRowWidget.generated.h"
 
+class UImage;
 class UTextBlock;
 
 UCLASS(Abstract, Blueprintable)
@@ -36,4 +41,21 @@ protected:
 
 	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UTextBlock> StatValue;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UImage> ArrowWorse;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UImage> ArrowBetter;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> VerdictText;
+
+	// --- Designer-editable verdict words ---
+
+	UPROPERTY(EditDefaultsOnly, Category = "Attachments|Verdict")
+	FText BetterVerdictText = NSLOCTEXT("AttachmentStats", "Better", "BETTER");
+
+	UPROPERTY(EditDefaultsOnly, Category = "Attachments|Verdict")
+	FText WorseVerdictText = NSLOCTEXT("AttachmentStats", "Worse", "WORSE");
 };

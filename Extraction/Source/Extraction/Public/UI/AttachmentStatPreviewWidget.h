@@ -11,6 +11,10 @@
 //   UPanelWidget "StatContainer" -- MUST be a multi-child panel (VerticalBox / ScrollBox); rows
 //                                  are created into and reused inside this panel
 //   UTextBlock   "MessageText"   -- (optional) one-line state message (incompatible / no change / cosmetic)
+//   UTextBlock   "ItemNameText"  -- (optional) the focused attachment's or candidate weapon's name;
+//                                  only shown alongside populated rows, blank in every message state
+//   UTextBlock   "HeadingText"   -- (optional) "ATTACHMENT EFFECTS" or the weapon-compare heading;
+//                                  same populated-rows-only rule as ItemNameText
 
 #pragma once
 
@@ -91,6 +95,12 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> MessageText;
 
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> ItemNameText;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> HeadingText;
+
 	// --- Designer configuration ---
 
 	/** WBP row class created into StatContainer. Nothing renders until this is assigned. */
@@ -119,6 +129,11 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Attachments|Messages")
 	FText CosmeticOnlyMessage = NSLOCTEXT("AttachmentStats", "CosmeticOnly", "Cosmetic only");
+
+	/** Panel heading while comparing a candidate attachment. The same panel doubles as a weapon
+	 *  comparison (see WeaponHeadingText below), so this cannot be baked into the WBP as static text. */
+	UPROPERTY(EditDefaultsOnly, Category = "Attachments|Messages")
+	FText AttachmentHeadingText = NSLOCTEXT("AttachmentStats", "Heading", "ATTACHMENT EFFECTS");
 
 	// --- Designer-editable stat labels (one per EAttachmentStatRow, same order) ---
 
@@ -159,6 +174,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Weapons|Messages")
 	FText SameWeaponMessage = NSLOCTEXT("WeaponCompare", "SameWeapon", "Already equipped");
 
+	/** Panel heading while comparing a candidate weapon — see AttachmentHeadingText above. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapons|Messages")
+	FText WeaponHeadingText = NSLOCTEXT("WeaponCompare", "Heading", "WEAPON COMPARISON");
+
 	UPROPERTY(EditAnywhere, Category = "Weapons|Labels")
 	FText FireRateLabel = NSLOCTEXT("WeaponCompare", "FireRate", "Fire Rate");
 
@@ -190,6 +209,15 @@ private:
 
 	/** Shows a single state message with no rows. */
 	void ShowMessageOnly(const FText& Message);
+
+	/** Names the panel for the item the rows below it describe. Only called from a row-populated
+	 *  success path -- a message state has no single item to title (ShowForWeapon's SameWeapon
+	 *  message, for one, has two candidates and neither is "the" item). */
+	void SetItemHeader(const FText& ItemName, const FText& Heading);
+
+	/** Blanks ItemNameText/HeadingText. Called by every path that is NOT a row-populated success --
+	 *  otherwise a stale name from whatever was last focused survives under an unrelated message. */
+	void ClearItemHeader();
 
 	/** Builds the six weapon-vs-weapon rows. A member rather than a static because it reads this
 	 *  instance's designer labels directly — the attachment path's static builder has to fix labels
