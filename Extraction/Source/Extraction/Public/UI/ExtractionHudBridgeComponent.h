@@ -171,6 +171,20 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
 	void OnPromptHoldEndedBP(bool bCompleted);
 
+	/** WBP_PickupFocus's data source -- the 420x88 card anchored near a focused pickup. Sourced from
+	 *  the player's Interact kind/prompt (EHudPromptKind::Interact), not from
+	 *  UAttachmentStatPreviewWidget: that widget is fed raw kit bytes with no actor or location
+	 *  attached, and its focus lifecycle is driven by the kit's own BP-side detection, not anything
+	 *  this bridge can see. That also means this fires for ANY focused IWorldInteractable (a door, a
+	 *  terminal), not only item pickups -- there is no generic "this is a pickup" signal in C++.
+	 *  Category and ActionVerb have no source at all -- IWorldInteractable exposes one opaque prompt
+	 *  string, not a structured breakdown -- and ship empty. Icon likewise has no source (nothing on
+	 *  the interact path carries one) and ships null. ItemName carries that one opaque prompt string
+	 *  as the closest real signal available, not a true isolated name. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
+	void OnPickupFocusChangedBP(bool bFocused, const FText& Category, const FText& ItemName,
+		const FText& ActionVerb, UTexture2D* Icon, FVector WorldLocation);
+
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
 	void OnCompanionModeChangedBP(ECompanionMode Mode);
 
@@ -310,6 +324,12 @@ private:
 	void RefreshConsumables();
 	void RefreshPrompt();
 	void RefreshCompanion();
+
+	/** Derives OnPickupFocusChangedBP from an EHudPromptKind/Prompt pair and pushes it when the
+	 *  derived (bFocused, ItemName) differs from the last push, or unconditionally when bForce.
+	 *  Shared by HandlePromptStateChanged (live) and RefreshPrompt (replay/clear) for the same
+	 *  reason PushCompanionPrompt is shared between its two call sites. */
+	void PushPickupFocus(EHudPromptKind Kind, const FText& Prompt, bool bForce);
 
 	/** Pushes OnCompanionPromptChangedBP when Command differs from the last value pushed, or
 	 *  unconditionally when bForce. Backs both the live OnPingChanged relay and RefreshCompanion's
@@ -453,6 +473,12 @@ private:
 	 *  press even when the command didn't change (re-pinging the same door), so this lives on the
 	 *  bridge rather than relying on the source to have already deduped. */
 	ECompanionCommand LastPushedPrompt = ECompanionCommand::None;
+
+	/** Dedup baseline for OnPickupFocusChangedBP. bPickupFocusEverPushed starts false so the very
+	 *  first pass always pushes, same reasoning as bCoverMeStateEverPushed above. */
+	bool bLastPickupFocused = false;
+	FText LastPickupItemName;
+	bool bPickupFocusEverPushed = false;
 
 	/** Set at the top of EndPlay, before UnbindAll. Every other channel's teardown is silent;
 	 *  UnbindPawnSources' prompt/candidate clear is the one pair of pushes that would otherwise call

@@ -345,6 +345,13 @@ void UExtractionHudBridgeComponent::UnbindPawnSources()
 		Player->OnPromptHoldStarted.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandlePromptHoldStarted);
 		Player->OnPromptHoldEnded.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandlePromptHoldEnded);
 	}
+
+	// Outside the if above for the same reason the companion-command clear pair is: a stale weak
+	// pointer must still clear the focus card, and bTearingDown is the one thing that must suppress
+	// it (every other channel's teardown is silent).
+	if (!bTearingDown)
+		PushPickupFocus(EHudPromptKind::None, FText::GetEmpty(), /*bForce=*/ false);
+
 	if (UCompanionCommandComponent* CommandComponent = CachedCommandComponent.Get())
 	{
 		CommandComponent->OnCompanionModeChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleCompanionModeChanged);
@@ -540,9 +547,14 @@ void UExtractionHudBridgeComponent::RefreshConsumables()
 void UExtractionHudBridgeComponent::RefreshPrompt()
 {
 	AExtractionPlayer* Player = CachedPlayer.Get();
-	if (!IsValid(Player)) return;
+	if (!IsValid(Player))
+	{
+		PushPickupFocus(EHudPromptKind::None, FText::GetEmpty(), /*bForce=*/ true);
+		return;
+	}
 
 	OnPromptChangedBP(Player->GetHudPromptKind(), Player->GetHudPromptText(), Player->GetHudPromptHoldDuration());
+	PushPickupFocus(Player->GetHudPromptKind(), Player->GetHudPromptText(), /*bForce=*/ true);
 }
 
 void UExtractionHudBridgeComponent::RefreshCompanion()
@@ -602,6 +614,35 @@ void UExtractionHudBridgeComponent::PushCompanionPrompt(ECompanionCommand Comman
 
 	LastPushedPrompt = Command;
 	OnCompanionPromptChangedBP(Command);
+}
+
+void UExtractionHudBridgeComponent::PushPickupFocus(EHudPromptKind Kind, const FText& Prompt, bool bForce)
+{
+	const bool bFocused = Kind == EHudPromptKind::Interact;
+
+	// WorldLocation only matters while focused -- an unfocused push carries the zero vector, same
+	// "meaningless while the bool is false" contract as every other paired bool/data event on this
+	// component (e.g. PushActiveWeapon's -1 ammo sentinel).
+	FVector WorldLocation = FVector::ZeroVector;
+	if (bFocused)
+	{
+		AExtractionPlayer* Player = CachedPlayer.Get();
+		AActor* Candidate = IsValid(Player) ? Player->GetInteractCandidate() : nullptr;
+		if (IsValid(Candidate)) WorldLocation = Candidate->GetActorLocation();
+	}
+
+	// Prompt IS the only per-target text IWorldInteractable exposes -- see OnPickupFocusChangedBP's
+	// comment for why Category/ActionVerb/Icon have nothing to source and ship empty/null below.
+	const FText ItemName = bFocused ? Prompt : FText::GetEmpty();
+
+	const bool bUnchanged = bPickupFocusEverPushed && bFocused == bLastPickupFocused && ItemName.EqualTo(LastPickupItemName);
+	if (!bForce && bUnchanged) return;
+
+	bPickupFocusEverPushed = true;
+	bLastPickupFocused = bFocused;
+	LastPickupItemName = ItemName;
+
+	OnPickupFocusChangedBP(bFocused, FText::GetEmpty(), ItemName, FText::GetEmpty(), nullptr, WorldLocation);
 }
 
 void UExtractionHudBridgeComponent::PushObjectiveList()
@@ -846,6 +887,7 @@ void UExtractionHudBridgeComponent::HandleStimCountChanged(int32 NewStimCount)
 void UExtractionHudBridgeComponent::HandlePromptStateChanged(EHudPromptKind Kind, const FText& Prompt, float HoldDuration)
 {
 	OnPromptChangedBP(Kind, Prompt, HoldDuration);
+	PushPickupFocus(Kind, Prompt, /*bForce=*/ false);
 }
 
 void UExtractionHudBridgeComponent::HandlePromptHoldStarted(float Duration)

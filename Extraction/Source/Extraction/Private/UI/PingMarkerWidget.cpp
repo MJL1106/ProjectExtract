@@ -20,7 +20,7 @@ void UPingMarkerWidget::NativeConstruct()
 {
 	Super::NativeConstruct();
 
-	// Start hidden until a ping fires.
+	// Start hidden until a ping fires or the candidate probe finds something.
 	SetVisibility(ESlateVisibility::Collapsed);
 
 	APawn* Pawn = GetOwningPlayerPawn();
@@ -34,9 +34,15 @@ void UPingMarkerWidget::NativeConstruct()
 	{
 		Comp->OnPingChanged.AddDynamic(this, &UPingMarkerWidget::HandlePingChanged);
 	}
+	if (!Comp->OnPingCandidateChanged.IsAlreadyBound(this, &UPingMarkerWidget::HandlePingCandidateChanged))
+	{
+		Comp->OnPingCandidateChanged.AddDynamic(this, &UPingMarkerWidget::HandlePingCandidateChanged);
+	}
 
-	// Sync to current state.
+	// Sync to current state -- covers a widget constructed after the probe already found something,
+	// or after a ping was already committed, same reasoning as the HUD bridge's RefreshAll.
 	HandlePingChanged(Comp->GetPendingCommand(), Comp->GetPingedTarget());
+	HandlePingCandidateChanged(Comp->HasPingCandidate(), Comp->GetPingCandidateLocation());
 }
 
 void UPingMarkerWidget::NativeDestruct()
@@ -44,6 +50,7 @@ void UPingMarkerWidget::NativeDestruct()
 	if (CachedCommandComp.IsValid())
 	{
 		CachedCommandComp->OnPingChanged.RemoveDynamic(this, &UPingMarkerWidget::HandlePingChanged);
+		CachedCommandComp->OnPingCandidateChanged.RemoveDynamic(this, &UPingMarkerWidget::HandlePingCandidateChanged);
 	}
 
 	Super::NativeDestruct();
@@ -51,44 +58,111 @@ void UPingMarkerWidget::NativeDestruct()
 
 void UPingMarkerWidget::HandlePingChanged(ECompanionCommand PendingCommand, AActor* /*PingedTarget*/)
 {
-	// Every path below re-arms tracking: a new ping must not inherit the previous one's smoothed
-	// position, or the marker slides across the screen from wherever the last target was.
-	bHasSmoothedPosition = false;
-	bHasBroadcastState = false;
-	bPendingAppearEvent = true;
-	SetRenderOpacity(1.f);
-
 	PingCommand = PendingCommand;
 
-	if (PendingCommand == ECompanionCommand::None)
+	// Un-collapse only when a ping actually committed -- clearing (None) falls through to
+	// NativeTick's own per-frame check, which resolves the fallback candidate before deciding
+	// whether anything is left to track. Force-collapsing here on None would kill the marker for a
+	// player who cleared a ping while still aiming at a pingable target.
+	if (PendingCommand == ECompanionCommand::None) return;
+
+	if (GetVisibility() == ESlateVisibility::Collapsed)
+		SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+}
+
+void UPingMarkerWidget::HandlePingCandidateChanged(bool bHasCandidate, FVector /*WorldLocation*/)
+{
+	if (!bHasCandidate) return;
+
+	if (GetVisibility() == ESlateVisibility::Collapsed)
+		SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+}
+
+bool UPingMarkerWidget::GetTrackedLocation(FVector& OutLocation, bool& bOutAiming) const
+{
+	UCompanionCommandComponent* Comp = CachedCommandComp.Get();
+	if (!IsValid(Comp))
 	{
-		bPendingAppearEvent = false;
-		SetVisibility(ESlateVisibility::Collapsed);
+		bOutAiming = false;
+		return false;
+	}
+
+	// A committed ping always wins: EvaluatePingCandidate itself refuses to report a candidate while
+	// one is pending, so the two never legitimately disagree, but resolving committed first keeps
+	// this function correct even a frame ahead of that guarantee.
+	if (Comp->GetPingWorldLocation(OutLocation))
+	{
+		bOutAiming = false;
+		return true;
+	}
+
+	if (Comp->HasPingCandidate())
+	{
+		OutLocation = Comp->GetPingCandidateLocation();
+		bOutAiming = true;
+		return true;
+	}
+
+	bOutAiming = false;
+	return false;
+}
+
+void UPingMarkerWidget::TrackLocation(const FVector& NewLocation, bool bHasLocation)
+{
+	if (!bHasLocation)
+	{
+		bHasTrackedWorldLocation = false;
 		return;
 	}
 
-	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
+	const bool bSameTarget = bHasTrackedWorldLocation
+		&& FVector::DistSquared(NewLocation, LastTrackedWorldLocation) <= FMath::Square(TargetContinuityEpsilonCm);
+	if (!bSameTarget)
+	{
+		bHasSmoothedPosition = false;
+		bHasBroadcastState = false;
+		bPendingAppearEvent = true;
+		SetRenderOpacity(1.f);
+	}
+
+	LastTrackedWorldLocation = NewLocation;
+	bHasTrackedWorldLocation = true;
 }
 
-bool UPingMarkerWidget::GetTrackedLocation(FVector& OutLocation) const
+void UPingMarkerWidget::BroadcastAimingStateIfChanged(bool bAiming)
 {
-	return CachedCommandComp.IsValid() && CachedCommandComp->GetPingWorldLocation(OutLocation);
+	if (bHasBroadcastAiming && bLastAiming == bAiming) return;
+
+	bHasBroadcastAiming = true;
+	bLastAiming = bAiming;
+	OnPingAimingStateChanged(bAiming);
 }
 
 void UPingMarkerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
 
-	// Collapsing is only ever driven by "there is no ping" -- Slate does not tick invisible widgets,
-	// so anything this widget collapses itself for must be undone by an external event. Losing the
-	// target qualifies; going off-screen does NOT, which is why that case fades instead.
+	// Collapsing is only ever driven by "there is nothing to track" -- Slate does not tick invisible
+	// widgets, so anything this widget collapses itself for must be undone by an external event
+	// (HandlePingChanged / HandlePingCandidateChanged un-collapsing it). Losing the target qualifies;
+	// going off-screen does NOT, which is why that case fades instead.
 	FVector WorldLocation = FVector::ZeroVector;
-	if (!GetTrackedLocation(WorldLocation))
+	bool bAiming = false;
+	const bool bHasLocation = GetTrackedLocation(WorldLocation, bAiming);
+
+	// Ahead of the collapse branch: a lost target must reset the re-arm baseline too, or the next
+	// thing this marker tracks -- even a genuinely different target -- could land within the
+	// continuity epsilon of wherever this one was and wrongly skip its appear pulse.
+	TrackLocation(WorldLocation, bHasLocation);
+
+	if (!bHasLocation)
 	{
 		if (GetVisibility() != ESlateVisibility::Collapsed)
 			SetVisibility(ESlateVisibility::Collapsed);
 		return;
 	}
+
+	BroadcastAimingStateIfChanged(bAiming);
 
 	if (!FScreenMarkerViewContext::Build(this, ViewContext)) return;
 
