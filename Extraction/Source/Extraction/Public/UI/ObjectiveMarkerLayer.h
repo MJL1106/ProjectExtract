@@ -32,6 +32,28 @@ public:
 	 *  or the player controller could not be resolved. */
 	const FScreenMarkerViewContext& GetFrameViewContext();
 
+	/** Appends the slate-space screen position of every currently on-screen objective marker (resolved
+	 *  position, bIsOffScreen false) to OutPositions. An edge-clamped chevron is pinned to the frame
+	 *  edge, not something a ping needs to dodge, so off-screen markers are skipped. Appends rather
+	 *  than clears — the caller (the ping marker) owns a persistent array across frames and reuses it
+	 *  instead of allocating one per tick; reset the array yourself first if you want a clean read.
+	 *  A pure read with no side effects, so it is safe to call on any frame, including mid-reconcile. */
+	void GetOnScreenMarkerPositions(TArray<FVector2D>& OutPositions) const;
+
+	/** Finds the marker whose resolved world location is within RadiusCm of WorldLocation (the closest
+	 *  one, if several match), fires its OnObjectivePingFlash, and returns true. False when nothing is
+	 *  near. Skips off-screen markers — an edge-clamped chevron is not what the player is looking at,
+	 *  so a ping near a marker that has slid off-screen must not flash it or suppress the ping's own
+	 *  locator. This is how a ping resolves "the player pinged the objective itself". A pure read plus
+	 *  one Blueprint event fire — it never touches AddObjective/RemoveObjective, so it cannot re-enter
+	 *  ReconcileMarkers (see the bReconciling/bReconcilePending latch on RebuildMarkers, below). */
+	bool FlashMarkerNearWorldLocation(const FVector& WorldLocation, float RadiusCm);
+
+	/** Pure-read counterpart to FlashMarkerNearWorldLocation, for re-checking an already-suppressed
+	 *  ping every frame without re-firing the one-shot flash: true when an on-screen marker's resolved
+	 *  world location is currently within RadiusCm of WorldLocation, same off-screen skip as above. */
+	bool IsWorldLocationNearAnyMarker(const FVector& WorldLocation, float RadiusCm) const;
+
 protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
@@ -69,6 +91,12 @@ private:
 
 	UObjectiveMarkerWidget* FindMarker(FName Id) const;
 	void SpawnMarker(const FObjectiveMarker& Objective);
+
+	/** Shared search behind FlashMarkerNearWorldLocation and IsWorldLocationNearAnyMarker: the
+	 *  on-screen marker (bIsOffScreen false) whose resolved world location is closest to WorldLocation,
+	 *  among those within RadiusCm, or null if none qualify. Pure read — callers decide what to do
+	 *  with the result (fire the flash, or just report true/false). */
+	UObjectiveMarkerWidget* FindClosestOnScreenMarker(const FVector& WorldLocation, float RadiusCm) const;
 
 	TWeakObjectPtr<UObjectiveSubsystem> CachedSubsystem;
 

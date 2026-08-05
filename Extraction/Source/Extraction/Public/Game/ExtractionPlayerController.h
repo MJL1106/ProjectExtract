@@ -20,6 +20,7 @@ class UConsumableWidget;
 class UAttachmentStatPreviewWidget;
 class UTutorialBriefingWidget;
 class UExtractionHudBridgeComponent;
+class UPickupToastStackWidget;
 
 /** Fired on the local player controller when the player's weapon deals damage. One event per
  *  trigger pull per victim (shotgun pellets aggregated). HeadshotDamage > 0 marks a headshot;
@@ -124,6 +125,31 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "UI|Attachments")
 	void UnregisterAttachmentStatPreview(UAttachmentStatPreviewWidget* Widget);
 
+	/** The objective waypoint layer instance, or null before BeginPlay has created it. The ping marker
+	 *  needs this because it lives in the HUD widget tree while the objective layer is a separate
+	 *  PC-owned top-level widget — there is no parent/child path between the two, so this accessor is
+	 *  the only way across. */
+	UFUNCTION(BlueprintPure, Category = "UI")
+	UObjectiveMarkerLayer* GetObjectiveMarkerLayer() const { return ObjectiveLayerWidget.Get(); }
+
+	/** Active pickup toast stack, or null when none is live. It lives inside a HUD module, which C++
+	 *  cannot name without an asset path, and — unlike the objective layer — this controller has no
+	 *  BlueprintCallable path to the HUD bridge that owns that module (ResolveHudBridge is private and
+	 *  not a UFUNCTION). UPickupToastStackWidget registers itself here on construct instead (see
+	 *  RegisterPickupToastStack), which is what lets the kit's attachment pickup Blueprint reach it at
+	 *  all: this getter is the only route from BP_Attachment_Pickup to the toast widget. */
+	UFUNCTION(BlueprintPure, Category = "UI|Pickups")
+	UPickupToastStackWidget* GetPickupToastStack() const { return PickupToastStack.Get(); }
+
+	/** Called by UPickupToastStackWidget::NativeConstruct. Last construct wins — during a HUD context
+	 *  switch the incoming stack is built before the outgoing one is torn down, and the incoming one
+	 *  is the one pickups should be driving. */
+	void RegisterPickupToastStack(UPickupToastStackWidget* Widget);
+
+	/** Called by UPickupToastStackWidget::NativeDestruct. Ignores anything that is not the currently
+	 *  registered stack, so a late teardown cannot clear its own replacement. */
+	void ClearPickupToastStack(UPickupToastStackWidget* Widget);
+
 	/** Broadcast on the local controller for HUD hit feedback (hitmarker, damage numbers). */
 	UPROPERTY(BlueprintAssignable, Category = "UI|Events")
 	FOnPlayerDamageDealt OnDamageDealt;
@@ -216,6 +242,11 @@ protected:
 	/** The HUD module's stat preview panel, registered by the widget itself. Weak: the module owns
 	 *  its lifetime and can tear it down on a context switch without telling this controller. */
 	TWeakObjectPtr<UAttachmentStatPreviewWidget> AttachmentStatPreview;
+
+	/** The HUD module's pickup toast stack, registered by the widget itself. Weak, same reasoning as
+	 *  AttachmentStatPreview above — deliberately forward-declared only (see the class list at the top
+	 *  of this header): TWeakObjectPtr never needs a complete type to store, assign or Get() one. */
+	TWeakObjectPtr<UPickupToastStackWidget> PickupToastStack;
 
 	/** Controls briefing screen class (assigned in BP defaults — no C++ asset path). */
 	UPROPERTY(EditDefaultsOnly, Category = "UI|Tutorial")

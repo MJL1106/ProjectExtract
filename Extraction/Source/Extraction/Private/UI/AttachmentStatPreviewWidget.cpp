@@ -2,6 +2,7 @@
 
 #include "UI/AttachmentStatPreviewWidget.h"
 
+#include "Components/Image.h"
 #include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
 
@@ -10,6 +11,7 @@
 #include "Data/WeaponAttachmentDataAsset.h"
 #include "Data/WeaponDataAsset.h"
 #include "Game/ExtractionPlayerController.h"
+#include "UI/AttachmentIconSet.h"
 #include "UI/AttachmentStatRowWidget.h"
 #include "Weapon/WeaponBase.h"
 
@@ -191,6 +193,17 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 		return;
 	}
 
+	// Resolved unconditionally, ahead of the cache-hit return below -- AttachmentIcons can change
+	// (reassigned, or null on an early call and wired up later) without any of the five cached
+	// values moving, so gating this on the cache would leave a stale icon on screen. FindIcon is a
+	// ~9-entry linear scan, cheap enough to repeat on every call including a cache hit. Also feeds
+	// GetFocusedAttachmentIcon/GetFocusedAttachmentName, the world focus prompt's only route to a
+	// real per-attachment icon -- see those getters' comment.
+	FocusedAttachmentIcon = IsValid(AttachmentIcons) ? AttachmentIcons->FindIcon(KitSlotByte, OptionByte) : nullptr;
+	FocusedAttachmentName = IsValid(AttachmentIcons) ? AttachmentIcons->FindDisplayName(KitSlotByte, OptionByte) : FText::GetEmpty();
+	if (IsValid(ItemIcon))
+		ItemIcon->SetBrushFromTexture(FocusedAttachmentIcon, true);
+
 	// Content is a pure function of (weapon identity, its current selection, slot, option, compat).
 	// Skip the entire rebuild when all five match -- the crosshair may rest on the same pickup for
 	// many frames, and rebuilding per frame allocates ~10 FTexts and forces 10 STextBlock relayouts.
@@ -271,6 +284,15 @@ void UAttachmentStatPreviewWidget::ShowForWeapon(UWeaponDataAsset* CandidateData
 
 	const bool bCacheHit = bCacheValid && CachedCandidateData.Get() == CandidateData && CachedWeapon.Get() == Held;
 	if (bCacheHit) return;
+
+	// No icon source for a weapon-vs-weapon comparison -- clears whatever an earlier
+	// ShowForAttachment left behind rather than leaving that attachment's icon on screen, or
+	// readable through GetFocusedAttachmentIcon/GetFocusedAttachmentName (a weapon comparison is
+	// not an attachment).
+	FocusedAttachmentIcon = nullptr;
+	FocusedAttachmentName = FText::GetEmpty();
+	if (IsValid(ItemIcon))
+		ItemIcon->SetBrushFromTexture(nullptr, true);
 
 	SetVisibility(ESlateVisibility::HitTestInvisible);
 
@@ -357,6 +379,11 @@ void UAttachmentStatPreviewWidget::HidePreview()
 
 	if (IsValid(MessageText))
 		MessageText->SetVisibility(ESlateVisibility::Collapsed);
+
+	FocusedAttachmentIcon = nullptr;
+	FocusedAttachmentName = FText::GetEmpty();
+	if (IsValid(ItemIcon))
+		ItemIcon->SetBrushFromTexture(nullptr, true);
 
 	SetVisibility(ESlateVisibility::Collapsed);
 }

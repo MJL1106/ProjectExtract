@@ -113,17 +113,22 @@ public:
 	/** Icon and DisplayName come off the weapon's data asset; both may be unset while a weapon
 	 *  is still un-authored. Null weapon (hand empty / throwable out) raises empty text, a null
 	 *  icon and CurrentAmmo == -1 so the HUD can clear the readout from one unambiguous test —
-	 *  zero ammo cannot mean this, since a live weapon fired dry with no reserve reads 0/0. */
+	 *  zero ammo cannot mean this, since a live weapon fired dry with no reserve reads 0/0.
+	 *  SlotNumber is 1 for the primary slot, 2 for the secondary, 0 paired with the no-weapon
+	 *  sentinel above -- the dual-weapon HUD prints this as the panel's own keycap digit, and it is
+	 *  NOT simply 1 here: the player can be holding the secondary, so this is resolved by comparing
+	 *  the weapon against UWeaponComponent's slot pointers, never assumed from which event fired. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
-	void OnActiveWeaponChangedBP(const FText& DisplayName, UTexture2D* Icon, int32 CurrentAmmo, int32 ReserveAmmo);
+	void OnActiveWeaponChangedBP(const FText& DisplayName, UTexture2D* Icon, int32 CurrentAmmo, int32 ReserveAmmo, int32 SlotNumber);
 
 	/** The carried weapon that is NOT in hand -- the HUD's second row. Same contract as the active
 	 *  event: no stowed weapon (single-weapon loadout, empty second slot) raises empty text, a null
 	 *  icon and CurrentAmmo == -1, since a stowed weapon put away dry reads a genuine 0/0. Always
 	 *  raised alongside OnActiveWeaponChangedBP -- a swap does not change one weapon, it moves two,
-	 *  and a second row updated a frame later reads as the HUD showing the same gun twice. */
+	 *  and a second row updated a frame later reads as the HUD showing the same gun twice.
+	 *  SlotNumber follows the same 1/2/0 contract as OnActiveWeaponChangedBP's. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
-	void OnStowedWeaponChangedBP(const FText& DisplayName, UTexture2D* Icon, int32 CurrentAmmo, int32 ReserveAmmo);
+	void OnStowedWeaponChangedBP(const FText& DisplayName, UTexture2D* Icon, int32 CurrentAmmo, int32 ReserveAmmo, int32 SlotNumber);
 
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
 	void OnAmmoChangedBP(int32 Current, int32 Reserve);
@@ -147,7 +152,11 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
 	void OnObjectiveDistanceChangedBP(FName Id, float DistanceMeters);
 
-	/** Success-only acquisitions -- the pickup display. Refusals arrive on OnToastBP instead. */
+	/** Success-only acquisitions -- the pickup display. Refusals arrive on OnToastBP instead.
+	 *  Deliberately still 3-param: the new pickup toast stack reads FOnLootGranted directly from
+	 *  the subsystem rather than through this event, so widening this signature to carry the
+	 *  delegate's new trailing AmmoCategory would break the HUD Blueprint's existing event node
+	 *  for no consumer. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
 	void OnLootGrantedBP(ELootType Type, int32 Amount, const FText& Label);
 
@@ -268,10 +277,12 @@ private:
 
 	/** Swaps the ammo subscription onto NewWeapon, dropping the previous one first, and pushes
 	 *  the new weapon's readout. No-op when the weapon has not actually changed.
-	 *  bForcePush overrides that dedup for the one case it cannot see: a pawn swap where the new
-	 *  pawn's weapon is null while the HUD still shows the old pawn's. Deliberately not the
-	 *  default -- BindWeapon re-runs every retry tick on a companion-less map, and an
-	 *  unconditional push there would spam the Blueprint event. */
+	 *  bForcePush overrides that dedup for two cases it cannot see on its own: a pawn swap where
+	 *  the new pawn's weapon is null while the HUD still shows the old pawn's, and
+	 *  HandleActiveWeaponChanged's forced call for a stowed-slot-only replace, where NewWeapon is
+	 *  unchanged but the STOWED weapon underneath it is not -- see that handler's comment.
+	 *  Deliberately not the default -- BindWeapon re-runs every retry tick on a companion-less map,
+	 *  and an unconditional push there would spam the Blueprint event. */
 	void RebindActiveWeapon(AWeaponBase* NewWeapon, bool bForcePush = false);
 
 	/** Everything hanging off the pawn (and the companion reached through it). Run on every
@@ -358,6 +369,12 @@ private:
 	 *  subscribes to it, so the component is the only thing that knows the slot emptied. */
 	void PushStowedWeapon(AWeaponBase* Weapon);
 
+	/** 1 when Weapon is CachedWeaponComponent's primary slot, 2 when it's the secondary, 0 for null
+	 *  or a weapon that matches neither (component gone, or a stale pointer mid-teardown). Shared by
+	 *  PushActiveWeapon/PushStowedWeapon rather than each assuming its own slot, since the active
+	 *  weapon is not always the primary -- the player can be holding the secondary. */
+	int32 ResolveWeaponSlotNumber(const AWeaponBase* Weapon) const;
+
 	/** Raises OnToastBP for every loot message still queued at the end of the frame.
 	 *
 	 *  The dedup this exists for: the subsystem's three paired sites (stim, ammo, keycard grant)
@@ -386,6 +403,14 @@ private:
 	UFUNCTION()
 	void HandleAmmoChanged(int32 CurrentAmmo, int32 ReserveAmmo);
 
+	/** Independent of RebindActiveWeapon's own swap-triggered pushes: UMissionInventorySubsystem::
+	 *  GrantAmmo resolves through UWeaponComponent::FindWeaponByAmmoCategory, whose contract is held
+	 *  weapon first, THEN the stowed slot, so an ammo pickup routinely tops up the holstered gun with
+	 *  no swap involved at all. This is the only signal that catches that case and refreshes the
+	 *  stowed row instead of leaving it stale until the next swap. */
+	UFUNCTION()
+	void HandleStowedAmmoChanged(int32 CurrentAmmo, int32 ReserveAmmo);
+
 	UFUNCTION()
 	void HandleObjectivesChanged();
 
@@ -395,8 +420,10 @@ private:
 	UFUNCTION()
 	void HandleObjectiveStateChanged(FName Id, EObjectiveState NewState);
 
+	/** AmmoCategory is accepted only to match the now-4-param FOnLootGranted signature and is not
+	 *  read here -- OnLootGrantedBP stays 3-param, see its declaration comment. */
 	UFUNCTION()
-	void HandleLootGranted(ELootType Type, int32 Amount, const FText& Label);
+	void HandleLootGranted(ELootType Type, int32 Amount, const FText& Label, EEnemyWeaponAnimType AmmoCategory);
 
 	/** OnLootNotify carries every acquisition MESSAGE -- refusals ("Stims full", "no compatible
 	 *  weapon"), door/lift/extraction feedback and objective toasts -- and three of its messages
@@ -443,6 +470,11 @@ private:
 	TWeakObjectPtr<UHealthComponent> CachedHealth;
 	TWeakObjectPtr<UWeaponComponent> CachedWeaponComponent;
 	TWeakObjectPtr<AWeaponBase> CachedWeapon;
+
+	/** The carried weapon NOT in hand -- see HandleStowedAmmoChanged for why this needs its own
+	 *  ammo subscription independent of CachedWeapon's. */
+	TWeakObjectPtr<AWeaponBase> CachedStowedWeapon;
+
 	TWeakObjectPtr<UConsumableInventoryComponent> CachedConsumables;
 	TWeakObjectPtr<UCompanionCommandComponent> CachedCommandComponent;
 	TWeakObjectPtr<ACompanionCharacter> CachedCompanion;

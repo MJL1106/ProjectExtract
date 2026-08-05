@@ -178,8 +178,14 @@ private:
 	/** Raises OnActiveWeaponChanged when the effective weapon actually moved. CurrentWeapon is not
 	 *  the only thing that decides what is in the player's hands — a nulled slot and the kit
 	 *  throwable both change the answer without a SetActiveWeapon call — so every writer routes
-	 *  through here and the diff below suppresses the duplicates that produces. */
-	void BroadcastActiveWeaponChanged();
+	 *  through here and the diff below suppresses the duplicates that produces.
+	 *  bForce bypasses that diff entirely — ReplaceSlotWeapon's only caller for it — because a
+	 *  successful replace into the STOWED slot changes which AActor is sitting there without
+	 *  changing the effective (held) weapon at all, so the normal diff would never see anything to
+	 *  report. The broadcast still carries the unchanged held weapon; it exists purely as the
+	 *  signal that something about the loadout moved, which is what tells the HUD bridge to
+	 *  re-resolve and re-subscribe to whatever is in the stowed slot now. */
+	void BroadcastActiveWeaponChanged(bool bForce = false);
 
 	/** Effective weapon as of the last OnActiveWeaponChanged broadcast. Weak: a destroyed weapon
 	 *  reads back as null, which is exactly the comparison the next broadcast wants. */

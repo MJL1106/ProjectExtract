@@ -6,6 +6,14 @@
 // Fade/slide styling can be layered in the WBP animation -- C++ only drives text, tint,
 // visibility and the optional sting sound.
 //
+// The HUD's pickup toast stack (UPickupToastStackWidget) now renders every successful acquisition
+// off OnLootGranted too, so an OnLootNotify message that PAIRS with a grant (the subsystem raises
+// both, same FText, for every ammo/stim/keycard grant) must NOT also render here or the player sees
+// the same pickup twice. This widget subscribes to OnLootGranted purely to record which texts were
+// granted this frame -- see FlushPendingLootMessages for why that dedup has to happen at an
+// end-of-frame flush rather than on arrival. Refusals ("Stims full", "no compatible weapon"),
+// door/lift feedback and objective toasts have no matching grant and always render normally.
+//
 // WBP must contain:
 //   UTextBlock "MessageText" -- displays the notification line
 // WBP may optionally contain:
@@ -86,8 +94,24 @@ private:
 	UFUNCTION()
 	void HandleToastNotify(const FText& Message, EToastSeverity Severity);
 
+	/** Records this frame's granted item text; the flush below is what actually dedups against it.
+	 *  Only Label matters -- Type/Amount/AmmoCategory ride along to match the delegate signature. */
+	UFUNCTION()
+	void HandleLootGranted(ELootType Type, int32 Amount, const FText& Label, EEnemyWeaponAnimType AmmoCategory);
+
 	void ShowToast(const FText& Message, EToastSeverity Severity);
 	void HideNotification();
+
+	/** Shows every queued OnLootNotify message that did NOT show up in GrantedTextsThisFrame, then
+	 *  clears both arrays. Deferred to next tick rather than shown from HandleLootNotify directly:
+	 *  the subsystem raises OnLootNotify FIRST and OnLootGranted immediately after with the SAME
+	 *  FText (see UExtractionHudBridgeComponent::FlushPendingLootNotifies for the same fact), so an
+	 *  on-arrival filter can never see the grant that would identify it as a duplicate. Checking
+	 *  membership here rather than removing-on-arrival makes the dedup ordering-independent by
+	 *  construction: both arrays are already fully populated for the frame by the time this runs,
+	 *  regardless of which of the two broadcasts happened to fire first, so a future edit that
+	 *  swaps their order in the subsystem cannot silently reinstate the double render. */
+	void FlushPendingLootMessages();
 
 	float GetDisplayDuration(EToastSeverity Severity) const;
 	FSlateColor GetSeverityTextColor(EToastSeverity Severity) const;
@@ -96,6 +120,17 @@ private:
 
 	TWeakObjectPtr<UMissionInventorySubsystem> CachedSubsystem;
 	FTimerHandle HideTimerHandle;
+
+	/** OnLootNotify messages queued this frame, awaiting FlushPendingLootMessages. */
+	TArray<FText> PendingLootMessages;
+
+	/** OnLootGranted item texts recorded this frame -- cross-referenced against
+	 *  PendingLootMessages at flush time, then reset every flush alongside it. */
+	TArray<FText> GrantedTextsThisFrame;
+
+	/** Next-tick flush timer. IsTimerActive on this is the schedule-once guard, so N loot messages
+	 *  in one frame (a looted container) cost one flush rather than N. */
+	FTimerHandle PendingFlushTimerHandle;
 
 	/** Info restore target, captured once in NativeConstruct before any toast can touch the
 	 *  widgets -- so an Info toast that arrives after a Warning/Alert renders exactly as the

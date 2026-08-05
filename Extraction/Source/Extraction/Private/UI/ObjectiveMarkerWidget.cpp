@@ -54,6 +54,14 @@ void UObjectiveMarkerWidget::RefreshObjective(const FObjectiveMarker& InObjectiv
 		OnObjectiveStateUpdated(State);
 }
 
+bool UObjectiveMarkerWidget::GetScreenPosition(FVector2D& OutPosition) const
+{
+	if (!bHasSmoothedPosition) return false;
+
+	OutPosition = SmoothedPosition;
+	return true;
+}
+
 void UObjectiveMarkerWidget::UpdateLabel(const FText& NewLabel)
 {
 	if (Objective.Label.EqualTo(NewLabel)) return;

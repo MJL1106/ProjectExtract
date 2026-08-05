@@ -24,8 +24,14 @@ enum class EToastSeverity : uint8
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnToastNotify, const FText&, Message, EToastSeverity, Severity);
 
 /** Success-only acquisition channel. OnLootNotify carries refusals too ("Stims full", "no
- *  compatible weapon"), so a pickup display fed from it announces things the player never got. */
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnLootGranted, ELootType, Type, int32, Amount, const FText&, Label);
+ *  compatible weapon"), so a pickup display fed from it announces things the player never got.
+ *
+ *  AmmoCategory is only meaningful when Type == ELootType::Ammo -- it is the pool the ammo came
+ *  from (Rifle/SMG/Pistol/Sniper/etc), which the HUD pickup toast needs to pick a per-ammo icon.
+ *  For every other loot type it carries whatever FLootGrant::AmmoCategory happened to default to
+ *  (Rifle) and MUST be ignored -- a future reader must not read a keycard or stim grant as if it
+ *  were rifle ammo. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnLootGranted, ELootType, Type, int32, Amount, const FText&, Label, EEnemyWeaponAnimType, AmmoCategory);
 
 DECLARE_LOG_CATEGORY_EXTERN(LogMissionInventory, Log, All);
 

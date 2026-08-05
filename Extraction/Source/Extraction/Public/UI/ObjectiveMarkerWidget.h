@@ -51,6 +51,25 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Objective|Marker")
 	FText GetObjectiveLabel() const { return Objective.Label; }
 
+	/** The objective's current resolved WORLD location (target bounds-base + HeightAboveBase, or the
+	 *  static WorldLocation, plus Offset — see FObjectiveMarker::ResolveLocation). Recomputed on every
+	 *  call rather than cached, since a target-based objective's base moves every frame. */
+	UFUNCTION(BlueprintPure, Category = "Objective|Marker")
+	FVector GetObjectiveWorldLocation() const { return Objective.ResolveLocation(); }
+
+	/** Current smoothed screen position in DPI-SCALED SLATE UNITS — the same space SetRenderTranslation
+	 *  and FScreenMarkerProjection both work in. A caller that mixes this with raw viewport pixels gets
+	 *  an offset that silently scales with the player's DPI setting. Returns false, leaving OutPosition
+	 *  untouched, before this marker has resolved a position for the first time. Check bIsOffScreen
+	 *  separately (already public) if the caller needs to know whether the position is edge-clamped. */
+	UFUNCTION(BlueprintPure, Category = "Objective|Marker")
+	bool GetScreenPosition(FVector2D& OutPosition) const;
+
+	/** Called by the owning layer's FlashMarkerNearWorldLocation when the player pings this objective —
+	 *  fires OnObjectivePingFlash for the WBP. Guarded the same way RefreshObjective / UpdateLabel /
+	 *  UpdateState all guard their own BlueprintImplementableEvent calls. */
+	void PlayPingFlash() { if (IsConstructed()) OnObjectivePingFlash(); }
+
 	// --- Per-frame state the WBP reads ---
 
 	/** True while the target is behind the camera or outside the padded viewport rectangle. */
@@ -97,6 +116,13 @@ public:
 	/** Fired on setup and on every label rewrite (a defend beat re-labels itself once a second). */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Objective|Marker")
 	void OnObjectiveLabelUpdated(const FText& NewLabel);
+
+	/** One-shot cyan confirmation flash: the WBP plays it when the player pings THIS objective (see
+	 *  UObjectiveMarkerLayer::FlashMarkerNearWorldLocation). Purely additive — an unimplemented event
+	 *  does nothing, so a marker that is never the target of a ping renders byte-identical to before
+	 *  this was added. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "Objective|Marker")
+	void OnObjectivePingFlash();
 
 protected:
 	virtual void NativeConstruct() override;

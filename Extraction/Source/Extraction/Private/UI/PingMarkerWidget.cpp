@@ -5,6 +5,8 @@
 #include "GameFramework/Actor.h"
 #include "GameFramework/Pawn.h"
 #include "Components/CompanionCommandComponent.h"
+#include "Game/ExtractionPlayerController.h"
+#include "UI/ObjectiveMarkerLayer.h"
 
 namespace
 {
@@ -14,6 +16,11 @@ namespace
 	 *  two anonymous namespaces are the same namespace and unprefixed names collide. */
 	constexpr float PingAngleBroadcastEpsilon = 0.25f;
 	constexpr float PingDistanceBroadcastEpsilon = 0.05f;
+
+	/** Below this, the avoidance shift is not worth reporting as "displaced" -- it is close enough to
+	 *  the true point that a leader line would be a 1px flicker rather than a readable cue. Ping-
+	 *  prefixed for the same unity-build reason as the two constants above. */
+	constexpr float PingDisplacementEpsilon = 0.5f;
 }
 
 void UPingMarkerWidget::NativeConstruct()
@@ -112,6 +119,10 @@ void UPingMarkerWidget::TrackLocation(const FVector& NewLocation, bool bHasLocat
 	if (!bHasLocation)
 	{
 		bHasTrackedWorldLocation = false;
+		// The ping cleared -- EvaluatePlacedEdge's dedup must not carry over: a re-ping of the same
+		// target placed right after this one clears has to see a false->true PLACED transition, not a
+		// stale "already placed" left over from the ping that just ended.
+		bLastPlaced = false;
 		return;
 	}
 
@@ -122,6 +133,12 @@ void UPingMarkerWidget::TrackLocation(const FVector& NewLocation, bool bHasLocat
 		bHasSmoothedPosition = false;
 		bHasBroadcastState = false;
 		bPendingAppearEvent = true;
+		// Unlike the other resets removed from this branch last round, this one IS load-bearing:
+		// IssueCommand lets a fresh ping replace an in-flight one directly (target A -> target B with
+		// no frame in between where bHasLocation is false), so TrackLocation's ping-cleared branch
+		// never runs and never resets this latch on its own. Without the reset here, EvaluatePlacedEdge
+		// sees bLastPlaced already true from ping A and never fires B's confirm pulse or objective check.
+		bLastPlaced = false;
 		SetRenderOpacity(1.f);
 	}
 
@@ -136,6 +153,36 @@ void UPingMarkerWidget::BroadcastAimingStateIfChanged(bool bAiming)
 	bHasBroadcastAiming = true;
 	bLastAiming = bAiming;
 	OnPingAimingStateChanged(bAiming);
+}
+
+void UPingMarkerWidget::EvaluatePlacedEdge(bool bPlaced, const FVector& WorldLocation)
+{
+	const bool bJustPlaced = !bLastPlaced && bPlaced;
+	bLastPlaced = bPlaced;
+
+	if (!bJustPlaced) return;
+
+	// A one-shot decision, made only here on the commit frame -- the flash itself must not re-fire
+	// every tick. Whether the locator STAYS suppressed for the rest of this ping's life is a separate,
+	// continuously re-evaluated question (see bIsObjectivePing's own comment / ApplyObjectiveAvoidance).
+	UObjectiveMarkerLayer* Layer = ResolveObjectiveLayer();
+	const bool bPingedObjective = IsValid(Layer) && Layer->FlashMarkerNearWorldLocation(WorldLocation, ObjectivePingRadius);
+
+	// Suppressed entirely means entirely: the objective's own flash already told the player their
+	// ping landed, so this widget's separate confirmation pulse would be a second, redundant cue.
+	if (!bPingedObjective) OnPingConfirmed();
+}
+
+UObjectiveMarkerLayer* UPingMarkerWidget::ResolveObjectiveLayer()
+{
+	if (UObjectiveMarkerLayer* Cached = CachedObjectiveLayer.Get()) return Cached;
+
+	const AExtractionPlayerController* PC = Cast<AExtractionPlayerController>(GetOwningPlayer());
+	if (!IsValid(PC)) return nullptr;
+
+	UObjectiveMarkerLayer* Layer = PC->GetObjectiveMarkerLayer();
+	CachedObjectiveLayer = Layer;
+	return Layer;
 }
 
 void UPingMarkerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
@@ -163,6 +210,7 @@ void UPingMarkerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 	}
 
 	BroadcastAimingStateIfChanged(bAiming);
+	EvaluatePlacedEdge(!bAiming, WorldLocation);
 
 	if (!FScreenMarkerViewContext::Build(this, ViewContext)) return;
 
@@ -175,10 +223,10 @@ void UPingMarkerWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTim
 		ViewContext, WorldLocation, Params);
 	if (!Projection.bIsValid) return;
 
-	ApplyProjection(Projection, InDeltaTime);
+	ApplyProjection(Projection, WorldLocation, InDeltaTime);
 }
 
-void UPingMarkerWidget::ApplyProjection(const FScreenMarkerProjection& Projection, float DeltaTime)
+void UPingMarkerWidget::ApplyProjection(const FScreenMarkerProjection& Projection, const FVector& WorldLocation, float DeltaTime)
 {
 	const bool bBoundaryCrossed = bIsOffScreen != Projection.bIsOffScreen;
 	const bool bBearingReversed = bIsOffScreen && Projection.bIsOffScreen
@@ -204,7 +252,9 @@ void UPingMarkerWidget::ApplyProjection(const FScreenMarkerProjection& Projectio
 	EdgeAngleDegrees = Projection.EdgeAngleDegrees;
 	DistanceMeters = Projection.DistanceMeters;
 
-	SetRenderTranslation(SmoothedPosition);
+	ApplyObjectiveAvoidance(SmoothedPosition, WorldLocation, DeltaTime, bSnap);
+
+	SetRenderTranslation(DisplayedPosition);
 	SetRenderOpacity(bIsOffScreen && !bClampWhenOffScreen ? 0.f : 1.f);
 
 	if (bPendingAppearEvent)
@@ -224,4 +274,135 @@ void UPingMarkerWidget::ApplyProjection(const FScreenMarkerProjection& Projectio
 	LastBroadcastAngle = EdgeAngleDegrees;
 	LastBroadcastDistance = DistanceMeters;
 	OnPingMarkerUpdated(bIsOffScreen, EdgeAngleDegrees, DistanceMeters);
+}
+
+void UPingMarkerWidget::ApplyObjectiveAvoidance(const FVector2D& TruePosition, const FVector& WorldLocation, float DeltaTime, bool bSnap)
+{
+	UObjectiveMarkerLayer* Layer = ResolveObjectiveLayer();
+
+	// Re-evaluated every frame against the CURRENT distance, not latched at commit -- see
+	// bIsObjectivePing's own declaration. A target-following objective (escort/VIP) that walks away
+	// from the ping stops suppressing the locator instead of staying stuck suppressed for the rest of
+	// the ping's life. The one-shot flash decision (EvaluatePlacedEdge, fired once on commit) is
+	// independent of this and must stay that way -- this call never fires anything.
+	//
+	// Asymmetric radius, same convention as ReentryHysteresis's on/off-screen test: ENTERING
+	// suppression uses the narrow ObjectivePingRadius, LEAVING it requires clearing the wider
+	// ObjectivePingRadius * ObjectivePingExitRadiusMultiplier. Both sides of this proximity check move
+	// every tick, so without the gap an objective sitting near the boundary would flip the flag (and
+	// the WBP's show/hide of the locator with it) every single frame on bounds-query noise alone.
+	const float SuppressionRadius = bIsObjectivePing
+		? ObjectivePingRadius * ObjectivePingExitRadiusMultiplier
+		: ObjectivePingRadius;
+	bIsObjectivePing = IsValid(Layer) && Layer->IsWorldLocationNearAnyMarker(WorldLocation, SuppressionRadius);
+
+	// An objective-pinged ping shows no locator of its own -- the objective marker's flash is the
+	// feedback -- so there is nothing here to keep clear of anything else.
+	if (bIsObjectivePing)
+	{
+		AvoidanceOffset = FVector2D::ZeroVector;
+		bIsDisplaced = false;
+		LeaderLineOffset = FVector2D::ZeroVector;
+		DisplayedPosition = TruePosition;
+		return;
+	}
+
+	ScratchMarkerPositions.Reset();
+	if (IsValid(Layer)) Layer->GetOnScreenMarkerPositions(ScratchMarkerPositions);
+
+	// Same padded rectangle ApplyProjection's own clamp uses. A displaced position is TruePosition
+	// (already inside this rect) PLUS an offset added afterward, so it needs its own pass through the
+	// same bounds -- otherwise a locator displaced outward near an edge ends up rendered past it.
+	const FVector2D RectMin(EdgeMargin, EdgeMargin);
+	const FVector2D RectMax = ViewContext.ViewportSize - FVector2D(EdgeMargin, EdgeMargin);
+
+	const FVector2D ClearPosition = ScratchMarkerPositions.IsEmpty()
+		? TruePosition
+		: ResolveClearPosition(TruePosition, ScratchMarkerPositions, RectMin, RectMax);
+
+	// See AvoidanceOffset's declaration for why this eases the OFFSET rather than the absolute
+	// position. bSnap forces the offset to jump instead of ease, matching every other reset case
+	// ApplyProjection already defines (first frame, boundary crossed, bearing reversed, on-screen).
+	const FVector2D TargetOffset = ClearPosition - TruePosition;
+	AvoidanceOffset = bSnap
+		? TargetOffset
+		: FScreenMarkerProjection::InterpolatePosition(AvoidanceOffset, TargetOffset, DeltaTime, AvoidanceInterpSpeed);
+
+	// Final safety clamp: ClearPosition already stays inside the rect (see ResolveClearPosition), but
+	// TruePosition itself moves every frame while AvoidanceOffset eases toward its target from a PRIOR
+	// frame's value, so the sum of the two can still land outside the rect mid-ease even though both
+	// endpoints of that ease are inside it.
+	const FVector2D UnclampedDisplayed = TruePosition + AvoidanceOffset;
+	DisplayedPosition.X = FMath::Clamp(UnclampedDisplayed.X, RectMin.X, RectMax.X);
+	DisplayedPosition.Y = FMath::Clamp(UnclampedDisplayed.Y, RectMin.Y, RectMax.Y);
+
+	bIsDisplaced = !AvoidanceOffset.IsNearlyZero(PingDisplacementEpsilon);
+	// From the FINAL clamped position, not the pre-clamp one -- a leader line computed from
+	// UnclampedDisplayed would aim at empty space just past the edge instead of back at the locator
+	// that is actually rendered on screen.
+	LeaderLineOffset = TruePosition - DisplayedPosition;
+}
+
+FVector2D UPingMarkerWidget::ResolveClearPosition(const FVector2D& TruePosition, const TArray<FVector2D>& MarkerPositions,
+	const FVector2D& RectMin, const FVector2D& RectMax) const
+{
+	const float ClearanceSquared = FMath::Square(ObjectiveClearanceRadius);
+	auto IsClearOfAll = [&MarkerPositions, ClearanceSquared](const FVector2D& Candidate)
+	{
+		for (const FVector2D& MarkerPos : MarkerPositions)
+			if (FVector2D::DistSquared(Candidate, MarkerPos) < ClearanceSquared) return false;
+		return true;
+	};
+
+	auto IsInsideRect = [&RectMin, &RectMax](const FVector2D& Point)
+	{
+		return Point.X >= RectMin.X && Point.X <= RectMax.X && Point.Y >= RectMin.Y && Point.Y <= RectMax.Y;
+	};
+
+	if (IsClearOfAll(TruePosition)) return TruePosition;
+
+	// Fixed order (left, right, up, down): every candidate sits exactly ObjectiveClearanceRadius from
+	// TruePosition, so whenever more than one clears every marker, "shortest displacement" is a tie
+	// among all of them -- resolving that tie by always preferring the earliest entry in a fixed list
+	// is what keeps the locator from hopping between two equally-valid sides frame to frame. A
+	// candidate that clears every marker but pokes outside the padded rect is skipped, not returned --
+	// clamping it back in here could reintroduce the very overlap it was chosen to avoid.
+	const FVector2D Candidates[] =
+	{
+		TruePosition + FVector2D(-ObjectiveClearanceRadius, 0.f),
+		TruePosition + FVector2D(ObjectiveClearanceRadius, 0.f),
+		TruePosition + FVector2D(0.f, -ObjectiveClearanceRadius),
+		TruePosition + FVector2D(0.f, ObjectiveClearanceRadius),
+	};
+
+	for (const FVector2D& Candidate : Candidates)
+		if (IsInsideRect(Candidate) && IsClearOfAll(Candidate)) return Candidate;
+
+	// None of the four axis probes qualifies (boxed in by more than one marker, or every clear
+	// direction runs off the rect) -- fall back to stepping directly away from the single nearest
+	// marker. That is the one direction guaranteed to increase separation from the worst offender,
+	// even if it cannot promise to clear the rest.
+	const FVector2D* NearestMarker = nullptr;
+	float NearestDistSquared = 0.f;
+	for (const FVector2D& MarkerPos : MarkerPositions)
+	{
+		const float DistSquared = FVector2D::DistSquared(TruePosition, MarkerPos);
+		if (NearestMarker && DistSquared >= NearestDistSquared) continue;
+
+		NearestMarker = &MarkerPos;
+		NearestDistSquared = DistSquared;
+	}
+
+	if (!NearestMarker) return TruePosition;
+
+	FVector2D AwayDirection = TruePosition - *NearestMarker;
+	if (!AwayDirection.Normalize()) AwayDirection = FVector2D(0.f, -1.f);
+
+	// Arbitrary direction (away from whichever marker happens to be nearest), so unlike the four axis
+	// candidates above this one is clamped into the rect rather than skipped -- there is nothing left
+	// to fall back to.
+	FVector2D FallbackPosition = TruePosition + AwayDirection * ObjectiveClearanceRadius;
+	FallbackPosition.X = FMath::Clamp(FallbackPosition.X, RectMin.X, RectMax.X);
+	FallbackPosition.Y = FMath::Clamp(FallbackPosition.Y, RectMin.Y, RectMax.Y);
+	return FallbackPosition;
 }

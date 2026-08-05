@@ -37,6 +37,9 @@ void ULootNotificationWidget::NativeConstruct()
 
 	if (!Subsystem->OnToastNotify.IsAlreadyBound(this, &ULootNotificationWidget::HandleToastNotify))
 		Subsystem->OnToastNotify.AddDynamic(this, &ULootNotificationWidget::HandleToastNotify);
+
+	if (!Subsystem->OnLootGranted.IsAlreadyBound(this, &ULootNotificationWidget::HandleLootGranted))
+		Subsystem->OnLootGranted.AddDynamic(this, &ULootNotificationWidget::HandleLootGranted);
 }
 
 void ULootNotificationWidget::NativeDestruct()
@@ -45,22 +48,59 @@ void ULootNotificationWidget::NativeDestruct()
 	{
 		Subsystem->OnLootNotify.RemoveDynamic(this, &ULootNotificationWidget::HandleLootNotify);
 		Subsystem->OnToastNotify.RemoveDynamic(this, &ULootNotificationWidget::HandleToastNotify);
+		Subsystem->OnLootGranted.RemoveDynamic(this, &ULootNotificationWidget::HandleLootGranted);
 	}
 
 	if (UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(HideTimerHandle);
+		World->GetTimerManager().ClearTimer(PendingFlushTimerHandle);
+	}
+	PendingLootMessages.Reset();
+	GrantedTextsThisFrame.Reset();
 
 	Super::NativeDestruct();
 }
 
 void ULootNotificationWidget::HandleLootNotify(const FText& Message)
 {
-	ShowToast(Message, EToastSeverity::Info);
+	PendingLootMessages.Add(Message);
+
+	UWorld* World = GetWorld();
+	if (!IsValid(World))
+	{
+		// No world to schedule the flush against -- losing the dedup beats losing the message.
+		FlushPendingLootMessages();
+		return;
+	}
+
+	if (World->GetTimerManager().IsTimerActive(PendingFlushTimerHandle)) return;
+	PendingFlushTimerHandle = World->GetTimerManager().SetTimerForNextTick(this, &ULootNotificationWidget::FlushPendingLootMessages);
 }
 
 void ULootNotificationWidget::HandleToastNotify(const FText& Message, EToastSeverity Severity)
 {
 	ShowToast(Message, Severity);
+}
+
+void ULootNotificationWidget::HandleLootGranted(ELootType Type, int32 Amount, const FText& Label, EEnemyWeaponAnimType AmmoCategory)
+{
+	GrantedTextsThisFrame.Add(Label);
+}
+
+void ULootNotificationWidget::FlushPendingLootMessages()
+{
+	for (const FText& Message : PendingLootMessages)
+	{
+		const bool bWasGranted = GrantedTextsThisFrame.ContainsByPredicate(
+			[&Message](const FText& Granted) { return Granted.EqualTo(Message); });
+		if (bWasGranted) continue; // already shown as a pickup toast this frame -- see class comment
+
+		ShowToast(Message, EToastSeverity::Info);
+	}
+
+	PendingLootMessages.Reset();
+	GrantedTextsThisFrame.Reset();
 }
 
 void ULootNotificationWidget::ShowToast(const FText& Message, EToastSeverity Severity)

@@ -59,6 +59,66 @@ const FScreenMarkerViewContext& UObjectiveMarkerLayer::GetFrameViewContext()
 	return CachedViewContext;
 }
 
+void UObjectiveMarkerLayer::GetOnScreenMarkerPositions(TArray<FVector2D>& OutPositions) const
+{
+	if (!MarkerCanvas) return;
+
+	for (int32 Index = 0; Index < MarkerCanvas->GetChildrenCount(); ++Index)
+	{
+		const UObjectiveMarkerWidget* Marker = Cast<UObjectiveMarkerWidget>(MarkerCanvas->GetChildAt(Index));
+		if (!IsValid(Marker) || Marker->bIsOffScreen) continue;
+
+		FVector2D Position;
+		if (Marker->GetScreenPosition(Position)) OutPositions.Add(Position);
+	}
+}
+
+UObjectiveMarkerWidget* UObjectiveMarkerLayer::FindClosestOnScreenMarker(const FVector& WorldLocation, float RadiusCm) const
+{
+	if (!MarkerCanvas) return nullptr;
+
+	const float RadiusSquared = FMath::Square(RadiusCm);
+	UObjectiveMarkerWidget* Closest = nullptr;
+	float ClosestDistSquared = 0.f;
+
+	for (int32 Index = 0; Index < MarkerCanvas->GetChildrenCount(); ++Index)
+	{
+		UObjectiveMarkerWidget* Marker = Cast<UObjectiveMarkerWidget>(MarkerCanvas->GetChildAt(Index));
+		// Off-screen (edge-clamped chevron) is not "the objective the player is looking at" -- a ping
+		// near an objective whose marker has slid off-screen must place its own locator normally, not
+		// suppress it in favour of a flash on a chevron the player cannot see land.
+		if (!IsValid(Marker) || Marker->bIsOffScreen) continue;
+
+		const float DistSquared = FVector::DistSquared(Marker->GetObjectiveWorldLocation(), WorldLocation);
+		if (DistSquared > RadiusSquared) continue;
+		// Strictly-less, not <=, so an exact tie keeps the first (lowest canvas index) match instead
+		// of the last -- deterministic regardless of iteration order.
+		if (Closest && DistSquared >= ClosestDistSquared) continue;
+
+		Closest = Marker;
+		ClosestDistSquared = DistSquared;
+	}
+
+	return Closest;
+}
+
+bool UObjectiveMarkerLayer::FlashMarkerNearWorldLocation(const FVector& WorldLocation, float RadiusCm)
+{
+	UObjectiveMarkerWidget* Closest = FindClosestOnScreenMarker(WorldLocation, RadiusCm);
+	if (!Closest) return false;
+
+	// Fired only after the search above has finished, and only once -- if a Blueprint implementation
+	// of OnObjectivePingFlash mutated the canvas (it should not, but nothing stops it), that must not
+	// happen while this function is still walking MarkerCanvas's children.
+	Closest->PlayPingFlash();
+	return true;
+}
+
+bool UObjectiveMarkerLayer::IsWorldLocationNearAnyMarker(const FVector& WorldLocation, float RadiusCm) const
+{
+	return FindClosestOnScreenMarker(WorldLocation, RadiusCm) != nullptr;
+}
+
 void UObjectiveMarkerLayer::RebuildMarkers()
 {
 	// A reconcile runs Blueprint -- RefreshObjective raises label/state events, and AddChildToCanvas

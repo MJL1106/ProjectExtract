@@ -155,6 +155,16 @@ AWeaponBase* UWeaponComponent::ReplaceSlotWeapon(bool bPrimarySlot, TSubclassOf<
 			AudioSys->PlayFoleyFor(OwnerActor, AudioSys->GetBank()->PickupWeapon);
 	}
 
+	// Forced unconditionally, covering BOTH branches above: when bSlotWasHeld, SetActiveWeapon
+	// already raised this same event and the second broadcast is a harmless no-op duplicate; when
+	// the replaced slot is the STOWED one, CurrentWeapon (and therefore the effective weapon this
+	// event carries) never changes at all, so the normal diff in BroadcastActiveWeaponChanged would
+	// otherwise swallow it and no listener would ever learn the stowed AActor was just swapped for
+	// a different one. This does NOT disturb the held gun — SetActiveWeapon's own behaviour and the
+	// bSlotWasHeld guard above it are untouched; this only ensures the "something in the loadout
+	// moved" signal still reaches listeners when the held gun is the part that DIDN'T change.
+	BroadcastActiveWeaponChanged(/*bForce=*/ true);
+
 	return Slot;
 }
 
@@ -271,7 +281,7 @@ void UWeaponComponent::SetActiveWeapon(AWeaponBase* NewWeapon)
 	BroadcastActiveWeaponChanged();
 }
 
-void UWeaponComponent::BroadcastActiveWeaponChanged()
+void UWeaponComponent::BroadcastActiveWeaponChanged(bool bForce)
 {
 	// The throwable slot hides the hitscan weapon entirely — the HUD should read "no gun out",
 	// not the stowed one it would otherwise still be showing.
@@ -282,7 +292,7 @@ void UWeaponComponent::BroadcastActiveWeaponChanged()
 	// function exists to raise. An EXPLICIT null (nothing ever broadcast, or null already
 	// broadcast) is a genuine match, so the normal dedup is untouched.
 	const bool bStale = !LastBroadcastActiveWeapon.IsExplicitlyNull() && !LastBroadcastActiveWeapon.IsValid();
-	if (!bStale && LastBroadcastActiveWeapon.Get() == Effective) return;
+	if (!bForce && !bStale && LastBroadcastActiveWeapon.Get() == Effective) return;
 
 	LastBroadcastActiveWeapon = Effective;
 	OnActiveWeaponChanged.Broadcast(Effective);

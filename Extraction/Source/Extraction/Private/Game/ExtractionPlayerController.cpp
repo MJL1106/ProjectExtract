@@ -16,6 +16,7 @@
 #include "HitmarkerWidget.h"
 #include "DamageNumberWidget.h"
 #include "AttachmentStatPreviewWidget.h"
+#include "UI/PickupToastStackWidget.h"
 #include "ConsumableWidget.h"
 #include "TutorialBriefingWidget.h"
 #include "UI/ExtractionHudBridgeComponent.h"
@@ -325,6 +326,21 @@ void AExtractionPlayerController::UnregisterAttachmentStatPreview(UAttachmentSta
 	// otherwise unregister its own replacement.
 	if (AttachmentStatPreview.Get() != Widget) return;
 	AttachmentStatPreview.Reset();
+}
+
+void AExtractionPlayerController::RegisterPickupToastStack(UPickupToastStackWidget* Widget)
+{
+	if (!IsValid(Widget)) return;
+	PickupToastStack = Widget;
+}
+
+void AExtractionPlayerController::ClearPickupToastStack(UPickupToastStackWidget* Widget)
+{
+	// Identity check, not a blind clear: a module rebuilt on a context switch constructs the new
+	// stack before destructing the old one, so the old one's teardown arrives second and would
+	// otherwise clear its own replacement.
+	if (PickupToastStack.Get() != Widget) return;
+	PickupToastStack.Reset();
 }
 
 void AExtractionPlayerController::NotifyDamageDealt(AActor* Victim, float Damage, float HeadshotDamage, bool bKilled, const FVector& WorldLocation)

@@ -45,7 +45,7 @@ bool UMissionInventorySubsystem::GrantStims(const FLootGrant& Grant, APawn* Reci
 	const FText StimMessage = FText::Format(
 		NSLOCTEXT("Loot", "StimsGranted", "+{0} Stim"), FText::AsNumber(Added));
 	OnLootNotify.Broadcast(StimMessage);
-	OnLootGranted.Broadcast(ELootType::Stim, Added, StimMessage);
+	OnLootGranted.Broadcast(ELootType::Stim, Added, StimMessage, Grant.AmmoCategory);
 	UE_LOG(LogMissionInventory, Log, TEXT("GrantStims: +%d to %s"), Added, *GetNameSafe(Recipient));
 	return true;
 }
@@ -73,7 +73,7 @@ bool UMissionInventorySubsystem::GrantAmmo(const FLootGrant& Grant, APawn* Recip
 	const FText AmmoMessage = FText::Format(
 		NSLOCTEXT("Loot", "AmmoGranted", "+{0} {1} ammo"), Added, CategoryText);
 	OnLootNotify.Broadcast(AmmoMessage);
-	OnLootGranted.Broadcast(ELootType::Ammo, Added, AmmoMessage);
+	OnLootGranted.Broadcast(ELootType::Ammo, Added, AmmoMessage, Grant.AmmoCategory);
 	UE_LOG(LogMissionInventory, Log, TEXT("GrantAmmo: +%d %s to %s"),
 		Added, *CategoryText.ToString(), *GetNameSafe(Recipient));
 	return true;
@@ -96,7 +96,10 @@ void UMissionInventorySubsystem::RecordKeycard(FName KeycardId, bool bSilent)
 		const FText KeycardMessage = FText::Format(
 			NSLOCTEXT("Loot", "KeycardAcquired", "Keycard acquired: {0}"), FText::FromName(KeycardId));
 		OnLootNotify.Broadcast(KeycardMessage);
-		OnLootGranted.Broadcast(ELootType::Keycard, 1, KeycardMessage);
+		// RecordKeycard has no FLootGrant in scope (it's also called directly by the checkpoint
+		// fast-forward) -- AmmoCategory is meaningless for a keycard grant regardless (see
+		// FOnLootGranted's declaration comment), so the default value stands in for it.
+		OnLootGranted.Broadcast(ELootType::Keycard, 1, KeycardMessage, EEnemyWeaponAnimType::Rifle);
 	}
 	OnKeycardRecorded.Broadcast(KeycardId);
 	UE_LOG(LogMissionInventory, Log, TEXT("RecordKeycard: %s"), *KeycardId.ToString());

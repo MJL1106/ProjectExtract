@@ -323,7 +323,18 @@ void UExtractionHudBridgeComponent::RebindActiveWeapon(AWeaponBase* NewWeapon, b
 	// showing the gun that just came into the hand reads as the HUD listing it twice. Null when
 	// the component has gone (pawn torn down mid-swap) clears the row rather than stranding it.
 	UWeaponComponent* WeaponComponent = CachedWeaponComponent.Get();
-	PushStowedWeapon(IsValid(WeaponComponent) ? WeaponComponent->GetStowedWeapon() : nullptr);
+	AWeaponBase* NewStowed = IsValid(WeaponComponent) ? WeaponComponent->GetStowedWeapon() : nullptr;
+
+	// A SEPARATE ammo subscription from CachedWeapon's above -- see HandleStowedAmmoChanged for why
+	// the stowed row needs to hear about ammo changes that never touch the active weapon at all.
+	if (AWeaponBase* OldStowed = CachedStowedWeapon.Get())
+		OldStowed->OnAmmoChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleStowedAmmoChanged);
+
+	CachedStowedWeapon = NewStowed;
+	if (IsValid(NewStowed))
+		NewStowed->OnAmmoChanged.AddUniqueDynamic(this, &UExtractionHudBridgeComponent::HandleStowedAmmoChanged);
+
+	PushStowedWeapon(NewStowed);
 }
 
 void UExtractionHudBridgeComponent::UnbindPawnSources()
@@ -337,6 +348,8 @@ void UExtractionHudBridgeComponent::UnbindPawnSources()
 		WeaponComponent->OnActiveWeaponChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleActiveWeaponChanged);
 	if (AWeaponBase* Weapon = CachedWeapon.Get())
 		Weapon->OnAmmoChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleAmmoChanged);
+	if (AWeaponBase* StowedWeapon = CachedStowedWeapon.Get())
+		StowedWeapon->OnAmmoChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleStowedAmmoChanged);
 	if (UConsumableInventoryComponent* Consumables = CachedConsumables.Get())
 		Consumables->OnStimCountChanged.RemoveDynamic(this, &UExtractionHudBridgeComponent::HandleStimCountChanged);
 	if (AExtractionPlayer* Player = CachedPlayer.Get())
@@ -379,6 +392,7 @@ void UExtractionHudBridgeComponent::UnbindPawnSources()
 	CachedHealth.Reset();
 	CachedWeaponComponent.Reset();
 	CachedWeapon.Reset();
+	CachedStowedWeapon.Reset();
 	CachedConsumables.Reset();
 	CachedPlayer.Reset();
 	CachedCommandComponent.Reset();
@@ -744,11 +758,14 @@ bool UExtractionHudBridgeComponent::GetDistanceOrigin(FVector& OutLocation) cons
 
 void UExtractionHudBridgeComponent::PushActiveWeapon(AWeaponBase* Weapon)
 {
+	const int32 SlotNumber = ResolveWeaponSlotNumber(Weapon);
+
 	if (!IsValid(Weapon))
 	{
 		// -1 is the "no weapon" sentinel: a live weapon can legitimately read 0/0 when fired dry
-		// with no reserve, so zero ammo cannot be used to mean an empty hand.
-		OnActiveWeaponChangedBP(FText::GetEmpty(), nullptr, -1, -1);
+		// with no reserve, so zero ammo cannot be used to mean an empty hand. SlotNumber is 0 here
+		// too -- ResolveWeaponSlotNumber already returns 0 for a null weapon.
+		OnActiveWeaponChangedBP(FText::GetEmpty(), nullptr, -1, -1, SlotNumber);
 		return;
 	}
 
@@ -757,16 +774,19 @@ void UExtractionHudBridgeComponent::PushActiveWeapon(AWeaponBase* Weapon)
 		Data ? Data->DisplayName : FText::GetEmpty(),
 		Data ? Data->HudIcon.Get() : nullptr,
 		Weapon->GetCurrentAmmo(),
-		Weapon->GetReserveAmmo());
+		Weapon->GetReserveAmmo(),
+		SlotNumber);
 }
 
 void UExtractionHudBridgeComponent::PushStowedWeapon(AWeaponBase* Weapon)
 {
+	const int32 SlotNumber = ResolveWeaponSlotNumber(Weapon);
+
 	if (!IsValid(Weapon))
 	{
 		// Same -1 sentinel as the active row, for the same reason: a single-weapon loadout and a
 		// stowed weapon put away dry are different things, and only the sentinel separates them.
-		OnStowedWeaponChangedBP(FText::GetEmpty(), nullptr, -1, -1);
+		OnStowedWeaponChangedBP(FText::GetEmpty(), nullptr, -1, -1, SlotNumber);
 		return;
 	}
 
@@ -775,7 +795,20 @@ void UExtractionHudBridgeComponent::PushStowedWeapon(AWeaponBase* Weapon)
 		Data ? Data->DisplayName : FText::GetEmpty(),
 		Data ? Data->HudIcon.Get() : nullptr,
 		Weapon->GetCurrentAmmo(),
-		Weapon->GetReserveAmmo());
+		Weapon->GetReserveAmmo(),
+		SlotNumber);
+}
+
+int32 UExtractionHudBridgeComponent::ResolveWeaponSlotNumber(const AWeaponBase* Weapon) const
+{
+	if (!IsValid(Weapon)) return 0;
+
+	const UWeaponComponent* WeaponComponent = CachedWeaponComponent.Get();
+	if (!IsValid(WeaponComponent)) return 0;
+
+	if (WeaponComponent->GetPrimaryWeapon() == Weapon) return 1;
+	if (WeaponComponent->GetSecondaryWeapon() == Weapon) return 2;
+	return 0;
 }
 
 // ---- Delegate handlers ----
@@ -802,12 +835,27 @@ void UExtractionHudBridgeComponent::HandleShieldChanged(float CurrentShield, flo
 
 void UExtractionHudBridgeComponent::HandleActiveWeaponChanged(AWeaponBase* NewWeapon)
 {
-	RebindActiveWeapon(NewWeapon);
+	// Forced: UWeaponComponent::ReplaceSlotWeapon now also raises this event when only the STOWED
+	// slot changed (see its own comment), in which case NewWeapon is the SAME held weapon as
+	// before. RebindActiveWeapon's own dedup compares against exactly that, so an un-forced call
+	// here would swallow the signal before ever reaching its stowed-weapon rebind -- the one thing
+	// this particular broadcast exists to trigger. Harmless on a genuine swap: the active weapon
+	// would have failed that dedup anyway, so forcing through changes nothing there.
+	RebindActiveWeapon(NewWeapon, /*bForcePush=*/ true);
 }
 
 void UExtractionHudBridgeComponent::HandleAmmoChanged(int32 CurrentAmmo, int32 ReserveAmmo)
 {
 	OnAmmoChangedBP(CurrentAmmo, ReserveAmmo);
+}
+
+void UExtractionHudBridgeComponent::HandleStowedAmmoChanged(int32 CurrentAmmo, int32 ReserveAmmo)
+{
+	// Re-resolved live rather than trusting CachedStowedWeapon directly -- same pattern
+	// RebindActiveWeapon's own stowed push uses, so the two can't disagree about which weapon is
+	// currently stowed.
+	UWeaponComponent* WeaponComponent = CachedWeaponComponent.Get();
+	PushStowedWeapon(IsValid(WeaponComponent) ? WeaponComponent->GetStowedWeapon() : nullptr);
 }
 
 void UExtractionHudBridgeComponent::HandleObjectivesChanged()
@@ -828,7 +876,7 @@ void UExtractionHudBridgeComponent::HandleObjectiveStateChanged(FName Id, EObjec
 	OnObjectiveStateChangedBP(Id, NewState);
 }
 
-void UExtractionHudBridgeComponent::HandleLootGranted(ELootType Type, int32 Amount, const FText& Label)
+void UExtractionHudBridgeComponent::HandleLootGranted(ELootType Type, int32 Amount, const FText& Label, EEnemyWeaponAnimType AmmoCategory)
 {
 	// This grant's message is already queued as an alert (the subsystem raised OnLootNotify with
 	// the same text a line earlier). The pickup module is about to show it, so drop the alert
