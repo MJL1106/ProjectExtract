@@ -61,8 +61,9 @@ struct FObjectiveMarker
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	bool bOptional = false;
 
-	/** Owned by MarkObjectiveComplete, never by AddObjective — re-registering an id (a label
-	 *  rewrite, a marker move) must not resurrect a finished objective as Tracked. */
+	/** Tracked vs NotTracked is set once, from bOptional, the first time AddObjective registers this
+	 *  id. Past that it is owned by MarkObjectiveComplete alone — re-registering an EXISTING id (a
+	 *  label rewrite, a marker move) must not resurrect a finished objective back to Tracked. */
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	EObjectiveState State = EObjectiveState::Tracked;
 

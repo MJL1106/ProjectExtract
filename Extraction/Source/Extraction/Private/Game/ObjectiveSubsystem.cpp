@@ -84,6 +84,8 @@ void UObjectiveSubsystem::AddObjective(FName Id, FText Label, FVector WorldLocat
 	Marker.bShowWorldMarker = bShowWorldMarker;
 	Marker.HeightAboveBase = HeightAboveBase;
 	Marker.bOptional = bOptional;
+	// First registration only — see FObjectiveMarker::State on why an update-in-place never touches this.
+	Marker.State = bOptional ? EObjectiveState::NotTracked : EObjectiveState::Tracked;
 
 	OnObjectivesChanged.Broadcast();
 	RebuildDisplayActors();

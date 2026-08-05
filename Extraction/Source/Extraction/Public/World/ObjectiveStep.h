@@ -65,6 +65,8 @@ enum class EObjectiveCondition : uint8
 	 *  will. Pair it with a TripAlarm side effect: the Director's ambient pressure is what fills the
 	 *  time, and that is gated on the alarm being up. */
 	SurviveDuration,
+	/** The primary companion is switched into TargetCompanionMode. */
+	CompanionModeSet,
 };
 
 UENUM(BlueprintType)
@@ -446,6 +448,11 @@ protected:
 		meta = (EditCondition = "Condition == EObjectiveCondition::SurviveDuration", EditConditionHides, ClampMin = "1.0"))
 	float DefendSeconds = 90.f;
 
+	/** Mode the companion must be switched into for the CompanionModeSet condition. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Step|Completion",
+		meta = (EditCondition = "Condition == EObjectiveCondition::CompanionModeSet", EditConditionHides))
+	ECompanionMode TargetCompanionMode = ECompanionMode::Stealth;
+
 	// --- Marker presentation ---
 
 	/** The marker follows this actor. Null falls back, in order, to: the condition's derived anchor
@@ -472,9 +479,17 @@ protected:
 	float MarkerHeightAboveBase = 170.f;
 
 	/** False = text-only on the HUD objective panel: no world billboard, no edge indicator.
-	 *  This is what an optional objective looks like. */
+	 *  Independent of bOptional below — a mandatory beat can be text-only, and an optional one can
+	 *  still show a billboard. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Step|Marker")
 	bool bShowWorldMarker = true;
+
+	/** True marks this beat a side objective: the HUD renders it as the untracked/secondary line
+	 *  next to the mandatory one. Presentation only — an optional step still completes, still
+	 *  advances NextStep on completion, and still fires every one of its side effects exactly like
+	 *  any other step. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Step|Marker")
+	bool bOptional = false;
 
 	/** Raise an "Objective complete: <Label>" HUD toast on completion. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Objective Step|Marker")
@@ -616,6 +631,12 @@ private:
 	FTimerHandle SquadTeleportRetryHandle;
 	int32 SquadTeleportRetries = 0;
 
+	/** CompanionModeSet: poll cadence/cap mirrors CheckpointSpawnPollSeconds / MaxCheckpointSpawnRetries
+	 *  above — the companion is the same BeginPlay-order race as the player pawn, just with no
+	 *  checkpoint step around to trigger a wait for it. */
+	FTimerHandle CompanionModeBindRetryHandle;
+	int32 CompanionModeBindRetries = 0;
+
 	/** The side effect kept alive for the deferred player-only teleport. Companions already moved
 	 *  by the time the deferral begins — only the player destination is still needed. Reflected so
 	 *  the reference collector sees PlayerDestination — without UPROPERTY the TObjectPtr is not
@@ -630,6 +651,13 @@ private:
 
 	void BindConditionDelegates();
 	void UnbindConditionDelegates();
+
+	/** CompanionModeSet: binds Companion->OnModeChanged once the primary companion exists. Retries
+	 *  on CompanionModeBindRetryHandle when it does not exist yet — the companion can spawn after
+	 *  this step has already gone live. Re-evaluates the condition once a LATE bind succeeds, since
+	 *  by then the once-per-activation late-entry check in ActivateInternal has already run and
+	 *  missed a companion that was not there to see. */
+	void TryBindCompanionModeCondition();
 
 	/** Re-checks the condition and completes when satisfied. Also the late-entry catch-up path: a
 	 *  door breached before its step went live never re-broadcasts, so entry must re-read state. */
@@ -861,4 +889,7 @@ private:
 
 	UFUNCTION()
 	void HandleDirectorWaveBlocked(FName WaveId, FText Reason);
+
+	UFUNCTION()
+	void HandleCompanionModeChanged(ECompanionMode NewMode);
 };
