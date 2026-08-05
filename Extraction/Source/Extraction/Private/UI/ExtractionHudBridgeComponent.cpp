@@ -20,6 +20,36 @@
 
 DEFINE_LOG_CATEGORY(LogHudBridge);
 
+namespace
+{
+	/** Unreal units per metre, and the epsilon below which the rendered line cannot change. Half a
+	 *  metre, not a few centimetres: the readout itself rounds to whole metres, so anything finer
+	 *  just pushes every objective on every tick while the player walks -- pure BP-call spam with no
+	 *  visible effect.
+	 *
+	 *  HudBridge-prefixed because ScreenMarkerProjection.cpp and ObjectiveMarkerWidget.cpp declare
+	 *  these same two names in their own anonymous namespaces: under a unity build every
+	 *  Private/UI/*.cpp shares one translation unit, so those anonymous namespaces are the SAME
+	 *  namespace and unprefixed names are redefinitions. */
+	constexpr float HudBridgeUnrealUnitsPerMetre = 100.f;
+	constexpr float HudBridgeDistanceBroadcastEpsilon = 0.5f;
+
+	/** "No distance available" -- see FHudObjectiveEntry::DistanceMeters for why zero cannot mean it. */
+	constexpr float NoDistance = -1.f;
+
+	/** Metres from Origin to the marker's resolved position, or NoDistance when it cannot be
+	 *  resolved. ResolveLocation() falls back to the static WorldLocation when a target is gone,
+	 *  which for a marker authored to FOLLOW something is a location that was never set -- it would
+	 *  read as a confident distance to the map origin, so the sentinel is the only honest answer. */
+	float MeasureDistanceMeters(const FVector& Origin, const FObjectiveMarker& Marker)
+	{
+		const bool bStaleTarget = !Marker.TargetActor.IsExplicitlyNull() && !Marker.TargetActor.IsValid();
+		if (bStaleTarget) return NoDistance;
+
+		return FVector::Dist(Origin, Marker.ResolveLocation()) / HudBridgeUnrealUnitsPerMetre;
+	}
+}
+
 UExtractionHudBridgeComponent::UExtractionHudBridgeComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -38,12 +68,15 @@ void UExtractionHudBridgeComponent::EndPlay(const EEndPlayReason::Type EndPlayRe
 	if (const UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(BindRetryTimerHandle);
+		World->GetTimerManager().ClearTimer(ObjectiveDistanceTimerHandle);
+		World->GetTimerManager().ClearTimer(CoverMeStateTimerHandle);
 		// SetTimerForNextTick hands back no handle, so the pending-notify flush can only be
 		// cancelled object-wide.
 		World->GetTimerManager().ClearAllTimersForObject(this);
 	}
 	bLootNotifyFlushScheduled = false;
 	PendingLootNotifies.Reset();
+	LastPushedDistances.Reset();
 
 	UnbindAll();
 
@@ -110,6 +143,11 @@ bool UExtractionHudBridgeComponent::BindObjectiveSubsystem()
 	const UWorld* World = GetWorld();
 	UObjectiveSubsystem* Objectives = World ? World->GetSubsystem<UObjectiveSubsystem>() : nullptr;
 	if (!IsValid(Objectives)) return false;
+
+	// Armed on every pass, not just the first: it is idempotent, and the distance channel has no
+	// delegate to re-establish it if the timer is ever lost.
+	StartObjectiveDistanceUpdates();
+
 	if (CachedObjectiveSubsystem.Get() == Objectives) return true;
 
 	CachedObjectiveSubsystem = Objectives;
@@ -237,6 +275,11 @@ bool UExtractionHudBridgeComponent::BindCompanion()
 	UCompanionCommandComponent* CommandComponent = CachedCommandComponent.Get();
 	if (!IsValid(CommandComponent)) return false;
 
+	// Armed as soon as the command component exists, same as StartObjectiveDistanceUpdates below --
+	// IsCoverMeAvailable and the cooldown getters don't need Companion resolved, and UpdateCoverMeState
+	// reports "not available" on its own until the actor itself turns up.
+	StartCoverMeStateUpdates();
+
 	ACompanionCharacter* Companion = CommandComponent->GetCompanion();
 	if (!IsValid(Companion)) return false; // not spawned yet -- the retry timer keeps asking
 	if (CachedCompanion.Get() == Companion) return true;
@@ -356,6 +399,38 @@ void UExtractionHudBridgeComponent::RetryBind()
 	UE_LOG(LogHudBridge, Verbose, TEXT("HUD bridge fully bound on '%s'"), *GetNameSafe(GetOwner()));
 }
 
+void UExtractionHudBridgeComponent::StartObjectiveDistanceUpdates()
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+	if (World->GetTimerManager().IsTimerActive(ObjectiveDistanceTimerHandle)) return;
+
+	World->GetTimerManager().SetTimer(ObjectiveDistanceTimerHandle, this,
+		&UExtractionHudBridgeComponent::UpdateObjectiveDistances,
+		FMath::Max(ObjectiveDistanceInterval, MinObjectiveDistanceInterval), /*bLoop=*/ true);
+}
+
+void UExtractionHudBridgeComponent::UpdateObjectiveDistances()
+{
+	PushObjectiveDistances(/*bForce=*/ false);
+}
+
+void UExtractionHudBridgeComponent::StartCoverMeStateUpdates()
+{
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+	if (World->GetTimerManager().IsTimerActive(CoverMeStateTimerHandle)) return;
+
+	World->GetTimerManager().SetTimer(CoverMeStateTimerHandle, this,
+		&UExtractionHudBridgeComponent::TickCoverMeState,
+		FMath::Max(CoverMeStateInterval, MinCoverMeStateInterval), /*bLoop=*/ true);
+}
+
+void UExtractionHudBridgeComponent::TickCoverMeState()
+{
+	UpdateCoverMeState(/*bForce=*/ false);
+}
+
 // ---- HUD-facing API ----
 
 void UExtractionHudBridgeComponent::RefreshAll()
@@ -423,6 +498,10 @@ void UExtractionHudBridgeComponent::RefreshWeapon()
 void UExtractionHudBridgeComponent::RefreshObjectives()
 {
 	PushObjectiveList();
+
+	// The rebuilt list already carries DistanceMeters, but a module wired only to the distance
+	// channel has heard nothing on it -- RefreshAll's contract is that every channel replays.
+	PushObjectiveDistances(/*bForce=*/ true);
 }
 
 void UExtractionHudBridgeComponent::RefreshConsumables()
@@ -443,6 +522,13 @@ void UExtractionHudBridgeComponent::RefreshPrompt()
 
 void UExtractionHudBridgeComponent::RefreshCompanion()
 {
+	// Ahead of the early return: UpdateCoverMeState already reads its sources through weak pointers
+	// and reports "not available" when either is gone, so a map whose pawn never gets a
+	// UCompanionCommandComponent still gets one push instead of leaving the badge on the WBP default.
+	// Forced because RefreshAll's contract is every channel replays, and the epsilon dedup would
+	// otherwise report the badge unchanged to a module that has heard nothing yet.
+	UpdateCoverMeState(/*bForce=*/ true);
+
 	UCompanionCommandComponent* CommandComponent = CachedCommandComponent.Get();
 	if (!IsValid(CommandComponent)) return;
 
@@ -450,14 +536,64 @@ void UExtractionHudBridgeComponent::RefreshCompanion()
 	OnCompanionMenuOpenChangedBP(CommandComponent->IsModeMenuOpen());
 }
 
+void UExtractionHudBridgeComponent::UpdateCoverMeState(bool bForce)
+{
+	UCompanionCommandComponent* CommandComponent = CachedCommandComponent.Get();
+	ACompanionCharacter* Companion = CachedCompanion.Get();
+
+	bool bAvailable = false;
+	float CooldownRemaining = 0.f;
+	float CooldownDuration = 0.f;
+	if (IsValid(CommandComponent) && IsValid(Companion))
+	{
+		bAvailable = CommandComponent->IsCoverMeAvailable();
+		CooldownRemaining = Companion->GetCoveringFireCooldownRemaining();
+		CooldownDuration = Companion->GetCoveringFireCooldownDuration();
+	}
+
+	const bool bAvailabilityFlipped = bAvailable != bLastCoverMeAvailable;
+	const bool bRemainingMoved = FMath::Abs(CooldownRemaining - LastCoverMeCooldownRemaining) > CoverMeStateBroadcastEpsilon;
+	if (!bForce && bCoverMeStateEverPushed && !bAvailabilityFlipped && !bRemainingMoved) return;
+
+	bLastCoverMeAvailable = bAvailable;
+	LastCoverMeCooldownRemaining = CooldownRemaining;
+	bCoverMeStateEverPushed = true;
+
+	OnCoverMeStateChangedBP(bAvailable, CooldownRemaining, CooldownDuration);
+}
+
 void UExtractionHudBridgeComponent::PushObjectiveList()
 {
+	// OnObjectivesRebuiltBP below hands ObjectiveScratch to Blueprint by reference. A handler that
+	// adds/removes an objective (or calls RefreshAll) re-raises OnObjectivesChanged synchronously,
+	// which re-enters here while that same call is still executing -- and Reset()/Reserve() on the
+	// same array out from under it would reallocate the buffer the outer frame is still walking.
+	// Dropping the nested rebuild rather than letting it run is correct, not just safe: the label and
+	// state deltas it would carry already have their own dedicated events (HandleObjectiveLabelChanged
+	// / HandleObjectiveStateChanged) that fire independently of this latch, and RefreshObjectives'
+	// own PushObjectiveDistances(true) -- both the nested call's and, after this returns, the outer
+	// call's -- re-measures every currently-live marker regardless. The one gap a dropped nested pass
+	// leaves is a membership change (an objective added or removed mid-callback) not reaching
+	// OnObjectivesRebuiltBP until the next trigger -- acceptable here, unlike
+	// UObjectiveMarkerLayer::RebuildMarkers, because this bridge only relays to Blueprint and has no
+	// widget instances of its own that must reconcile to the new truth.
+	if (bPushingObjectives) return;
+	bPushingObjectives = true;
+
 	UObjectiveSubsystem* Objectives = CachedObjectiveSubsystem.Get();
-	if (!IsValid(Objectives)) return;
+	if (!IsValid(Objectives))
+	{
+		bPushingObjectives = false;
+		return;
+	}
+
+	FVector Origin;
+	const bool bHaveOrigin = GetDistanceOrigin(Origin);
 
 	const TArray<FObjectiveMarker>& Markers = Objectives->GetObjectives();
 	ObjectiveScratch.Reset();
 	ObjectiveScratch.Reserve(Markers.Num());
+	LastPushedDistances.Reset();
 
 	for (const FObjectiveMarker& Marker : Markers)
 	{
@@ -466,9 +602,61 @@ void UExtractionHudBridgeComponent::PushObjectiveList()
 		Entry.Label = Marker.Label;
 		Entry.bOptional = Marker.bOptional;
 		Entry.State = Marker.State;
+		Entry.DistanceMeters = bHaveOrigin ? MeasureDistanceMeters(Origin, Marker) : NoDistance;
+
+		// Only a measured value becomes the epsilon baseline. Seeding the sentinel would leave the
+		// timer comparing a real distance against -1 forever after, which reads as "changed" every
+		// single tick -- the exact spam the epsilon exists to stop.
+		if (bHaveOrigin)
+			LastPushedDistances.Add(Marker.Id, Entry.DistanceMeters);
 	}
 
 	OnObjectivesRebuiltBP(ObjectiveScratch);
+	bPushingObjectives = false;
+}
+
+void UExtractionHudBridgeComponent::PushObjectiveDistances(bool bForce)
+{
+	UObjectiveSubsystem* Objectives = CachedObjectiveSubsystem.Get();
+	if (!IsValid(Objectives)) return;
+
+	FVector Origin;
+	// Nothing to measure from is not a distance of zero. Holding the last pushed value beats
+	// blanking every line for the frame or two a possession change takes to hand the camera back.
+	if (!GetDistanceOrigin(Origin)) return;
+
+	const TArray<FObjectiveMarker>& Markers = Objectives->GetObjectives();
+
+	// Measured into a local, then broadcast: OnObjectiveDistanceChangedBP is a Blueprint call that
+	// may add or remove an objective, which would resize the array being walked.
+	TArray<TPair<FName, float>, TInlineAllocator<8>> Pending;
+	Pending.Reserve(Markers.Num());
+
+	for (const FObjectiveMarker& Marker : Markers)
+	{
+		const float Distance = MeasureDistanceMeters(Origin, Marker);
+
+		const float* Last = LastPushedDistances.Find(Marker.Id);
+		if (!bForce && Last && FMath::Abs(*Last - Distance) <= HudBridgeDistanceBroadcastEpsilon) continue;
+
+		LastPushedDistances.Add(Marker.Id, Distance);
+		Pending.Emplace(Marker.Id, Distance);
+	}
+
+	for (const TPair<FName, float>& Push : Pending)
+		OnObjectiveDistanceChangedBP(Push.Key, Push.Value);
+}
+
+bool UExtractionHudBridgeComponent::GetDistanceOrigin(FVector& OutLocation) const
+{
+	APlayerController* PC = CachedController.Get();
+	if (!IsValid(PC)) return false;
+
+	// The view point, not the pawn: the on-screen objective markers measure from here, and a card
+	// measuring from the pawn instead would print a different number for the same objective.
+	FRotator ViewRotation;
+	PC->GetPlayerViewPoint(OutLocation, ViewRotation);
+	return true;
 }
 
 void UExtractionHudBridgeComponent::PushActiveWeapon(AWeaponBase* Weapon)
@@ -541,7 +729,10 @@ void UExtractionHudBridgeComponent::HandleAmmoChanged(int32 CurrentAmmo, int32 R
 
 void UExtractionHudBridgeComponent::HandleObjectivesChanged()
 {
-	PushObjectiveList();
+	// The full refresh, not PushObjectiveList alone: an objective added here seeds its own epsilon
+	// baseline, so the next timer tick would report it unchanged and a card wired to the distance
+	// channel would sit blank until the player moved. Costs one forced push per add/remove.
+	RefreshObjectives();
 }
 
 void UExtractionHudBridgeComponent::HandleObjectiveLabelChanged(FName Id, const FText& NewLabel)
@@ -638,4 +829,11 @@ void UExtractionHudBridgeComponent::HandleModeMenuChanged(bool bOpen)
 void UExtractionHudBridgeComponent::HandleCoveringFireTick(float Remaining, bool bPaused)
 {
 	OnCoveringFireTickBP(Remaining, bPaused);
+
+	// Forced, not left to the next 10 Hz poll: ClearCoveringFire stamps the cooldown start and
+	// raises this same delegate in one call, so an un-forced push would let up to a whole poll
+	// interval pass with the active-window channel already at 0 and the cooldown channel not yet
+	// telling the badge a lockout has begun -- a shorter version of the flash this channel exists to
+	// close. The delegate is already throttled to 10 Hz on the companion side, so this costs nothing.
+	UpdateCoverMeState(/*bForce=*/ true);
 }

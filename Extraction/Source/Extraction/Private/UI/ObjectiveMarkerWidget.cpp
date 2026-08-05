@@ -122,15 +122,21 @@ const FScreenMarkerViewContext* UObjectiveMarkerWidget::ResolveViewContext()
 
 void UObjectiveMarkerWidget::ApplyProjection(const FScreenMarkerProjection& Projection, float DeltaTime)
 {
-	// Snap instead of sliding in the three cases where interpolation would drag the marker visibly
+	// Re-arm instead of sliding in the three cases where interpolation would drag the marker visibly
 	// across the screen: first appearance, an on/off-screen boundary crossing, and the bearing
 	// reversal as the target passes exactly behind the player.
 	const bool bBoundaryCrossed = bIsOffScreen != Projection.bIsOffScreen;
 	const bool bBearingReversed = bIsOffScreen && Projection.bIsOffScreen
 		&& FVector2D::DotProduct(LastEdgeDirection, Projection.EdgeDirection) < 0.0;
-	const bool bSnap = !bHasSmoothedPosition || bBoundaryCrossed || bBearingReversed;
+	const bool bReset = !bHasSmoothedPosition || bBoundaryCrossed || bBearingReversed;
 
-	SmoothedPosition = bSnap
+	// On screen the marker always snaps to the projected point. Interpolating it lags the world
+	// during a turn, so the marker swims around the object it is meant to be pinned to -- the whole
+	// screen's worth of travel per second of camera yaw is exactly what reads as nauseating.
+	// Smoothing is reserved for off-screen edge sliding, where it still helps. Matches the ping marker.
+	const bool bSnapPosition = bReset || !Projection.bIsOffScreen;
+
+	SmoothedPosition = bSnapPosition
 		? Projection.ScreenPosition
 		: FScreenMarkerProjection::InterpolatePosition(SmoothedPosition, Projection.ScreenPosition,
 			DeltaTime, PositionInterpSpeed);
@@ -146,7 +152,9 @@ void UObjectiveMarkerWidget::ApplyProjection(const FScreenMarkerProjection& Proj
 	// rectangle is convex, so every smoothed point is too.
 	SetRenderTranslation(SmoothedPosition);
 
-	ApplyDistanceVisuals(DeltaTime, bSnap);
+	// Scale and opacity keep interpolating even when the position snaps: they read as proximity, not
+	// as tracking, so smoothing them costs nothing in accuracy and stops the marker popping in size.
+	ApplyDistanceVisuals(DeltaTime, bReset);
 	PushDistanceToWidget();
 
 	if (bPendingAppearEvent)

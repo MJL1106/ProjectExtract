@@ -126,8 +126,9 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Layout", meta = (ClampMin = "0.0", ClampMax = "128.0"))
 	float ReentryHysteresis = 16.f;
 
-	/** Screen-space smoothing speed; higher tracks tighter. 0 snaps every frame. Also damps the
-	 *  sprint camera bob that made the old projection jitter. */
+	/** Off-screen edge-slide smoothing speed, and the interp rate for the distance scale/fade.
+	 *  Higher tracks tighter; 0 snaps every frame. Does NOT apply on-screen: there the marker always
+	 *  snaps to the exact projected point, because smoothing it lags the world during a turn. */
 	UPROPERTY(EditDefaultsOnly, Category = "Objective|Marker|Layout", meta = (ClampMin = "0.0"))
 	float PositionInterpSpeed = 14.f;
 

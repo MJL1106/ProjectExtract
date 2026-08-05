@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
   "Version": 8,
-  "VersionName": "3.1.8",
+  "VersionName": "3.1.13",
   "FriendlyName": "NeoStack AI",
   "Description": "AI agents inside the Unreal Editor for asset editing, creation, project indexing, and workflow automation via Lua, MCP, and ACP.",
   "Category": "Editor",

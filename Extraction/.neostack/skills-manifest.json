@@ -5,7 +5,7 @@
 		"neostack-animbp":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "4a80ed4fbf4c1daa26f28a6431ed4a0a848b3502",
 			"writtenDigest": "4a80ed4fbf4c1daa26f28a6431ed4a0a848b3502",
 			"conflictPending": false
@@ -13,7 +13,7 @@
 		"neostack-blueprint":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "b1be034487c182cfd6499b1c0ab979e0b70bd4b6",
 			"writtenDigest": "6487c4b927a7d293b434577d1786484dfe29ead1",
 			"conflictPending": false
@@ -21,7 +21,7 @@
 		"neostack-control-rig":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "23c934706fe8ddddac9fbe35ba419b745cf113f8",
 			"writtenDigest": "23c934706fe8ddddac9fbe35ba419b745cf113f8",
 			"conflictPending": false
@@ -29,7 +29,7 @@
 		"neostack-game-testing":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "8a131c9ab09eddd4b22a379b05c097b50b92e2c8",
 			"writtenDigest": "044661705dae5c390b5bc1a57b8ec8be41492a42",
 			"conflictPending": false
@@ -37,7 +37,7 @@
 		"neostack-hello":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "1d5423169ca8552bd65fbcab0444506bbe4d74a8",
 			"writtenDigest": "82406fae87b761be8eac8d68e445bc390755b306",
 			"conflictPending": false
@@ -45,7 +45,7 @@
 		"neostack-level-design":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "17d905fb02b00c900128c0b1be46b6c06a736e0a",
 			"writtenDigest": "17d905fb02b00c900128c0b1be46b6c06a736e0a",
 			"conflictPending": false
@@ -53,7 +53,7 @@
 		"neostack-material":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "7c86f680bffd5b4f5702e9d38025951c440d1c51",
 			"writtenDigest": "7c86f680bffd5b4f5702e9d38025951c440d1c51",
 			"conflictPending": false
@@ -61,7 +61,7 @@
 		"neostack-metasound":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "76ec3ab0e73efcbbd42ef0d18f2d49c0f6b46972",
 			"writtenDigest": "76ec3ab0e73efcbbd42ef0d18f2d49c0f6b46972",
 			"conflictPending": false
@@ -69,7 +69,7 @@
 		"neostack-movie-render-queue":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "bf9d21abf88c78035519251646b1fd9e092f8416",
 			"writtenDigest": "bf9d21abf88c78035519251646b1fd9e092f8416",
 			"conflictPending": false
@@ -77,7 +77,7 @@
 		"neostack-niagara":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "3b2a3c085e2cd0b35e8cd349518713ff5fa4eee5",
 			"writtenDigest": "3b2a3c085e2cd0b35e8cd349518713ff5fa4eee5",
 			"conflictPending": false
@@ -85,7 +85,7 @@
 		"neostack-niagara-design":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "cc150cec4a8593b85b0f5a3728f49c29d97f3d5f",
 			"writtenDigest": "cc150cec4a8593b85b0f5a3728f49c29d97f3d5f",
 			"conflictPending": false
@@ -93,7 +93,7 @@
 		"neostack-pcg":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "b9d6d90df916f180f19ee73b8575e7ac80b08b04",
 			"writtenDigest": "b9d6d90df916f180f19ee73b8575e7ac80b08b04",
 			"conflictPending": false
@@ -101,7 +101,7 @@
 		"neostack-sequencer":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "6e8f11e2af0e222717af4065e936266273217045",
 			"writtenDigest": "6e8f11e2af0e222717af4065e936266273217045",
 			"conflictPending": false
@@ -109,7 +109,7 @@
 		"neostack-umg-design":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "1b265ae26c33f6a4d9ff7b993321bf91a3219ce8",
 			"writtenDigest": "3f5150f20b1a9138932719d5e1b9a966ab0c9b12",
 			"conflictPending": false
@@ -117,7 +117,7 @@
 		"neostack-umg-widget":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "0f7aab2c704ed2455ff692d1dbecc993edad3325",
 			"writtenDigest": "0f7aab2c704ed2455ff692d1dbecc993edad3325",
 			"conflictPending": false
@@ -125,7 +125,7 @@
 		"neostack-widget":
 		{
 			"sourceId": "neostack.core",
-			"sourceVersion": "3.1.8",
+			"sourceVersion": "3.1.13",
 			"shippedDigest": "213d41b01ed405f813ba862d99b13f528d49b43a",
 			"writtenDigest": "02fe1f2a2dbe815e353c1332074c0f05c0c7df39",
 			"conflictPending": false

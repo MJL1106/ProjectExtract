@@ -54,6 +54,14 @@ struct EXTRACTION_API FHudObjectiveEntry
 
 	UPROPERTY(BlueprintReadOnly, Category = "HUD|Objectives")
 	EObjectiveState State = EObjectiveState::Tracked;
+
+	/** Metres from the player's view point to the objective's resolved marker location. -1 means no
+	 *  distance is available -- no marker, or a target-following marker whose target is gone -- so
+	 *  the HUD can collapse the line from one unambiguous test. Zero cannot carry that meaning:
+	 *  standing on an objective is a real distance. Only a snapshot; live movement arrives on
+	 *  OnObjectiveDistanceChangedBP rather than by re-raising the whole list. */
+	UPROPERTY(BlueprintReadOnly, Category = "HUD|Objectives")
+	float DistanceMeters = -1.f;
 };
 
 /** Blueprintable: the HUD events below are BlueprintImplementableEvents, which only a Blueprint
@@ -129,6 +137,15 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
 	void OnObjectiveStateChangedBP(FName Id, EObjectiveState State);
 
+	/** Live distance for one objective. Keyed by Id, never by index into the last rebuilt list --
+	 *  the list can be rebuilt between two pushes, and an index contract would then quietly hand a
+	 *  distance to the wrong line. -1 carries the same "no distance" meaning as
+	 *  FHudObjectiveEntry::DistanceMeters. Its own channel rather than a re-raise of
+	 *  OnObjectivesRebuiltBP because that event re-textures the card and recomputes its text wrap
+	 *  width, which is far too much work to repeat at walking pace. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
+	void OnObjectiveDistanceChangedBP(FName Id, float DistanceMeters);
+
 	/** Success-only acquisitions -- the pickup display. Refusals arrive on OnToastBP instead. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
 	void OnLootGrantedBP(ELootType Type, int32 Amount, const FText& Label);
@@ -162,6 +179,14 @@ public:
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
 	void OnCoveringFireTickBP(float Remaining, bool bPaused);
 
+	/** Cover-me readiness. bAvailable is the full command gate (UCompanionCommandComponent::
+	 *  IsCoverMeAvailable), not merely "cooldown expired". CooldownRemaining is seconds left on the
+	 *  post-use lockout, 0 when none is running; CooldownDuration is its configured length so the HUD
+	 *  can normalise a bar without duplicating the tuning value. Distinct from OnCoveringFireTickBP,
+	 *  which counts down the ACTIVE window -- the badge needs both and they never overlap. */
+	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
+	void OnCoverMeStateChangedBP(bool bAvailable, float CooldownRemaining, float CooldownDuration);
+
 	/** Implement with the module manager's HideOrShowEntireHud(bHidden, FadeDuration). The only
 	 *  event on this component that flows HUD-ward as a command rather than as gameplay data. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "HUD|Events")
@@ -175,6 +200,18 @@ protected:
 	 *  particular can spawn well after the HUD. */
 	UPROPERTY(EditDefaultsOnly, Category = "HUD|Bridge", meta = (ClampMin = "0.05"))
 	float BindRetryInterval = 0.25f;
+
+	/** How often objective distances are re-measured and pushed. Every pass resolves every marker,
+	 *  and a target-following marker costs a bounds query to resolve -- the clamp floor is what
+	 *  keeps that off the per-frame budget. 5Hz is under the rate at which a rounded metre readout
+	 *  visibly stutters and well over the rate a walking player outruns. */
+	UPROPERTY(EditDefaultsOnly, Category = "HUD|Bridge", meta = (ClampMin = "0.1"))
+	float ObjectiveDistanceInterval = 0.2f;
+
+	/** How often cover-me readiness is re-evaluated. Two cheap getter calls per pass, and the badge
+	 *  only needs to be right to the tenth of a second it renders. */
+	UPROPERTY(EditDefaultsOnly, Category = "HUD|Bridge", meta = (ClampMin = "0.05"))
+	float CoverMeStateInterval = 0.1f;
 
 private:
 	// ---- Binding ----
@@ -220,8 +257,36 @@ private:
 
 	void RetryBind();
 
+	/** (Re)arms the distance timer unless it is already running. */
+	void StartObjectiveDistanceUpdates();
+
+	void UpdateObjectiveDistances();
+
+	/** (Re)arms the cover-me readiness timer unless it is already running. */
+	void StartCoverMeStateUpdates();
+
+	/** No-arg timer callback; forwards to UpdateCoverMeState(false) since SetTimer needs an exact
+	 *  signature match and RefreshCompanion is the only other caller, which needs bForce. */
+	void TickCoverMeState();
+
+	/** Resolves CachedCompanion/CachedCommandComponent and raises OnCoverMeStateChangedBP when the
+	 *  gate flipped or the remaining cooldown moved past the broadcast epsilon. Either source gone
+	 *  pushes the unambiguous "not available, no cooldown" state once rather than freezing the badge
+	 *  on the last value a since-dead companion left behind. */
+	void UpdateCoverMeState(bool bForce);
+
 	/** SetTimer never fires on a rate of zero -- floor the retry interval above it. */
 	static constexpr float MinBindRetryInterval = 0.05f;
+
+	/** ClampMin only constrains the editor field; a value set from code still needs the floor. */
+	static constexpr float MinObjectiveDistanceInterval = 0.1f;
+
+	/** ClampMin only constrains the editor field; a value set from code still needs the floor. */
+	static constexpr float MinCoverMeStateInterval = 0.05f;
+
+	/** Below this, a countdown's last digit hasn't moved enough for the badge (which renders
+	 *  Ceil of the remaining seconds) to show a different number. */
+	static constexpr float CoverMeStateBroadcastEpsilon = 0.05f;
 
 	// ---- Refresh helpers (one per channel; RefreshAll fans out) ----
 
@@ -234,6 +299,17 @@ private:
 
 	/** Reads the objective subsystem into FHudObjectiveEntry and raises OnObjectivesRebuiltBP. */
 	void PushObjectiveList();
+
+	/** Re-measures every objective and raises OnObjectiveDistanceChangedBP for the ones that moved
+	 *  by more than the broadcast epsilon. bForce pushes all of them regardless -- RefreshAll needs
+	 *  that, since a module built after the last edge has heard nothing and the epsilon test would
+	 *  otherwise report every line as unchanged. */
+	void PushObjectiveDistances(bool bForce);
+
+	/** The point distances are measured FROM: the player view point, which is what the on-screen
+	 *  objective markers use. False when there is no controller to ask -- the caller then reports
+	 *  the no-distance sentinel rather than measuring from the world origin. */
+	bool GetDistanceOrigin(FVector& OutLocation) const;
 
 	/** Reads name/icon/ammo off Weapon (null-safe) and raises OnActiveWeaponChangedBP. */
 	void PushActiveWeapon(AWeaponBase* Weapon);
@@ -332,13 +408,41 @@ private:
 	/** Cleared in EndPlay. Retired as soon as TryBindAll reports everything bound. */
 	FTimerHandle BindRetryTimerHandle;
 
+	/** Cleared in EndPlay. Runs for the component's whole life once the objective subsystem is
+	 *  bound -- unlike the retry timer there is no terminal state to retire it on. */
+	FTimerHandle ObjectiveDistanceTimerHandle;
+
+	/** Cleared in EndPlay. Runs for the component's whole life once the companion command component
+	 *  is bound -- readiness can flip from either the active window or the cooldown timing out, and
+	 *  neither raises a delegate this component could subscribe to instead. */
+	FTimerHandle CoverMeStateTimerHandle;
+
+	/** Baseline the cover-me dedup is measured against. bCoverMeStateEverPushed starts false so the
+	 *  very first pass always pushes -- a false/0.f baseline would otherwise match a fresh companion
+	 *  read as "not available, 0 remaining" and swallow the initial state entirely. */
+	bool bLastCoverMeAvailable = false;
+	float LastCoverMeCooldownRemaining = 0.f;
+	bool bCoverMeStateEverPushed = false;
+
 	/** The kit pushes grenade counts in; nothing to read them back from, so the last value is
 	 *  kept here purely so RefreshAll can replay it. */
 	int32 LastGrenadeCount = 0;
 
+	/** Latches PushObjectiveList against re-entry -- see the comment at its early return. Without it,
+	 *  a BP handler of OnObjectivesRebuiltBP that mutates the objective list would re-enter while the
+	 *  outer call is still passing ObjectiveScratch to that same event by reference, and the nested
+	 *  Reset()/Reserve() can reallocate the buffer the outer frame is still reading. */
+	bool bPushingObjectives = false;
+
 	/** Rebuilt in place on every objective change -- the list is small and this runs on a
 	 *  designer-driven event, but the allocation is still worth keeping. */
 	TArray<FHudObjectiveEntry> ObjectiveScratch;
+
+	/** Last distance actually pushed per objective id -- the baseline the broadcast epsilon is
+	 *  measured against, so a stationary player costs nothing. Rebuilt wholesale by
+	 *  PushObjectiveList rather than pruned: a retired id must not leave a baseline behind that
+	 *  would swallow the first push if that id is ever registered again. */
+	TMap<FName, float> LastPushedDistances;
 
 	/** Loot messages raised this frame, awaiting the end-of-frame flush. A queue rather than one
 	 *  slot because looting a container grants several items in a single call and each raises its

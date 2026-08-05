@@ -8,9 +8,12 @@
 
 namespace
 {
-	/** Below these thresholds the WBP has nothing new to react to -- see the objective marker. */
-	constexpr float AngleBroadcastEpsilon = 0.25f;
-	constexpr float DistanceBroadcastEpsilon = 0.05f;
+	/** Below these thresholds the WBP has nothing new to react to -- see the objective marker.
+	 *  Ping-prefixed because the objective marker declares the same two constants in its own
+	 *  anonymous namespace: under a unity build both files share one translation unit, so the
+	 *  two anonymous namespaces are the same namespace and unprefixed names collide. */
+	constexpr float PingAngleBroadcastEpsilon = 0.25f;
+	constexpr float PingDistanceBroadcastEpsilon = 0.05f;
 }
 
 void UPingMarkerWidget::NativeConstruct()
@@ -138,8 +141,8 @@ void UPingMarkerWidget::ApplyProjection(const FScreenMarkerProjection& Projectio
 
 	const bool bChanged = !bHasBroadcastState
 		|| bLastBroadcastOffScreen != bIsOffScreen
-		|| FMath::Abs(LastBroadcastAngle - EdgeAngleDegrees) > AngleBroadcastEpsilon
-		|| FMath::Abs(LastBroadcastDistance - DistanceMeters) > DistanceBroadcastEpsilon;
+		|| FMath::Abs(LastBroadcastAngle - EdgeAngleDegrees) > PingAngleBroadcastEpsilon
+		|| FMath::Abs(LastBroadcastDistance - DistanceMeters) > PingDistanceBroadcastEpsilon;
 	if (!bChanged) return;
 
 	bHasBroadcastState = true;
