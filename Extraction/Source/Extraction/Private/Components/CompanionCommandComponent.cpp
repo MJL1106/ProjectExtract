@@ -16,6 +16,7 @@
 #include "Components/HealthComponent.h"
 #include "Audio/MusicSubsystem.h"
 #include "Character/ExtractionPlayer.h"
+#include "Components/WeaponComponent.h"
 #include "AI/CompanionAIController.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Camera/CameraComponent.h"
@@ -384,6 +385,12 @@ bool UCompanionCommandComponent::EvaluatePingCandidate(FVector& OutLocation)
 	// discovery (IssuePing, the confirm path) still calls ResolveCompanion(), which caches the result
 	// here too; by the time a ping can be usefully aimed the companion is long since found.
 	if (!CachedCompanion.IsValid()) return false;
+
+	// ADS is a combat stance, not a pinging one -- the ring/tag fighting the reticle down sights
+	// reads as clutter. Hip-fire keeps the affordance.
+	const AExtractionPlayer* Player = Cast<AExtractionPlayer>(GetOwner());
+	const UWeaponComponent* Weapon = IsValid(Player) ? Player->GetWeaponComponent() : nullptr;
+	if (IsValid(Weapon) && Weapon->IsAiming()) return false;
 
 	FHitResult Hit;
 	if (!ResolvePingHit(Hit)) return false;
