@@ -31,9 +31,11 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Overhead", meta = (ClampMin = "1.0"))
 	float ReferenceDistance = 400.f;
 
-	/** Smallest scale the widget shrinks to at long range. */
+	/** Smallest scale the widget shrinks to at long range. Floored at 70% of reference size by the
+	 *  approved marker design -- below that the plate's text stops being legible at all, so shrinking
+	 *  further only buys screen space at the cost of the thing being readable. */
 	UPROPERTY(EditAnywhere, Category = "Overhead", meta = (ClampMin = "0.0", ClampMax = "1.0"))
-	float MinScale = 0.5f;
+	float MinScale = 0.7f;
 
 	/** Largest scale when closer than ReferenceDistance. */
 	UPROPERTY(EditAnywhere, Category = "Overhead", meta = (ClampMin = "0.1"))

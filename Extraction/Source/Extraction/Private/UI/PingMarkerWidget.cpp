@@ -85,6 +85,11 @@ void UPingMarkerWidget::HandlePingCandidateChanged(bool bHasCandidate, FVector /
 		SetVisibility(ESlateVisibility::SelfHitTestInvisible);
 }
 
+bool UPingMarkerWidget::IsPlainPlacedPing() const
+{
+	return bLastPlaced && PingCommand == ECompanionCommand::None;
+}
+
 bool UPingMarkerWidget::GetTrackedLocation(FVector& OutLocation, bool& bOutAiming) const
 {
 	UCompanionCommandComponent* Comp = CachedCommandComp.Get();
@@ -168,9 +173,12 @@ void UPingMarkerWidget::EvaluatePlacedEdge(bool bPlaced, const FVector& WorldLoc
 	UObjectiveMarkerLayer* Layer = ResolveObjectiveLayer();
 	const bool bPingedObjective = IsValid(Layer) && Layer->FlashMarkerNearWorldLocation(WorldLocation, ObjectivePingRadius);
 
-	// Suppressed entirely means entirely: the objective's own flash already told the player their
-	// ping landed, so this widget's separate confirmation pulse would be a second, redundant cue.
-	if (!bPingedObjective) OnPingConfirmed();
+	// The flash only stands in for the confirm pulse when it says everything the pulse would -- i.e. for
+	// a plain "your ping landed there" with no order attached. A command ping's message is "the
+	// companion will breach/search/loot THIS", which no objective flash conveys, so it always pulses.
+	// IsPlainPlacedPing() is false for every ping this game can currently commit (see its declaration),
+	// so in practice this fires unconditionally today.
+	if (!bPingedObjective || !IsPlainPlacedPing()) OnPingConfirmed();
 }
 
 UObjectiveMarkerLayer* UPingMarkerWidget::ResolveObjectiveLayer()
@@ -291,10 +299,20 @@ void UPingMarkerWidget::ApplyObjectiveAvoidance(const FVector2D& TruePosition, c
 	// ObjectivePingRadius * ObjectivePingExitRadiusMultiplier. Both sides of this proximity check move
 	// every tick, so without the gap an objective sitting near the boundary would flip the flag (and
 	// the WBP's show/hide of the locator with it) every single frame on bounds-query noise alone.
+	//
+	// Only a plain PLACED ping may be suppressed -- and no such ping exists in this game today, so this
+	// resolves to false every frame and bIsObjectivePing never latches (retained as the WBP hook; see
+	// its declaration). Both halves of that predicate are load-bearing if a command-less ping is ever
+	// added: while merely AIMING the visuals are the crosshair's "this is pingable" affordance rather
+	// than a report that a ping landed -- nothing has committed, so no objective has flashed to stand in
+	// for them -- and a COMMAND ping carries "the companion will breach/search/loot THIS", which a flash
+	// cannot say, so hiding its locator, distance and command tag leaves the player nothing.
 	const float SuppressionRadius = bIsObjectivePing
 		? ObjectivePingRadius * ObjectivePingExitRadiusMultiplier
 		: ObjectivePingRadius;
-	bIsObjectivePing = IsValid(Layer) && Layer->IsWorldLocationNearAnyMarker(WorldLocation, SuppressionRadius);
+	bIsObjectivePing = IsPlainPlacedPing()
+		&& IsValid(Layer)
+		&& Layer->IsWorldLocationNearAnyMarker(WorldLocation, SuppressionRadius);
 
 	// An objective-pinged ping shows no locator of its own -- the objective marker's flash is the
 	// feedback -- so there is nothing here to keep clear of anything else.

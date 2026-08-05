@@ -41,8 +41,8 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ping|Marker")
 	float DistanceMeters = 0.f;
 
-	/** Command the live ping resolved to (breach/search/loot/takedown/cover/none). Hook for
-	 *  per-ping-type glyphs — nothing consumes it yet. */
+	/** Command the live ping resolved to (breach/search/loot/takedown/cover/none). Drives the WBP's
+	 *  per-ping-type glyph, and is read natively by IsPlainPlacedPing. */
 	UPROPERTY(BlueprintReadOnly, Category = "Ping|Marker")
 	ECompanionCommand PingCommand = ECompanionCommand::None;
 
@@ -58,12 +58,26 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Ping|Marker|Avoidance")
 	FVector2D LeaderLineOffset = FVector2D::ZeroVector;
 
-	/** True while this ping's world location is currently within ObjectivePingRadius of an on-screen
-	 *  objective marker -- the objective marker's own OnObjectivePingFlash IS the feedback for that, so
-	 *  the WBP should hide this widget's own locator and leader line entirely while this is set.
-	 *  Re-evaluated every tick (ApplyObjectiveAvoidance), NOT latched at commit: a target-following
-	 *  objective (escort/VIP) that walks away from the ping must stop suppressing the locator instead
-	 *  of leaving it suppressed for the rest of the ping's life. */
+	/** ALWAYS FALSE as the game currently stands -- retained deliberately, not live. Read the whole
+	 *  comment before wiring anything new to it.
+	 *
+	 *  Designed as: true while a plain "look here" ping sits within ObjectivePingRadius of an on-screen
+	 *  objective marker, on the rule that the objective's own OnObjectivePingFlash IS the feedback there,
+	 *  so the WBP hides this widget's locator and leader line and lets the flash speak. Re-evaluated
+	 *  every tick (ApplyObjectiveAvoidance), never latched at commit, so a target-following objective
+	 *  (escort/VIP) walking away from the ping releases the suppression instead of stranding it.
+	 *
+	 *  Why it cannot fire today: that rule only ever applied to a ping carrying no companion order, and
+	 *  UCompanionCommandComponent::IssuePing has no path that commits one -- every accepted ping resolves
+	 *  to Breach/Search/Loot/Takedown/TakeCover and every other outcome calls ClearPending(). A command
+	 *  ping is never suppressed (the flash cannot say WHICH order the companion took, so hiding the
+	 *  locator, distance and command tag leaves the player with no feedback at all), and an aiming ping
+	 *  is never suppressed either (those visuals are the crosshair's "this is pingable" affordance, and
+	 *  nothing has committed for an objective to have flashed for) -- between them, every state that
+	 *  reaches this flag is exempt. See IsPlainPlacedPing.
+	 *
+	 *  Kept because WBP_PingMarker binds it and because adding a command-less ping type would make it
+	 *  live again with no C++ change. The WBP's hide branch is therefore dead but correct -- leave it. */
 	UPROPERTY(BlueprintReadOnly, Category = "Ping|Marker|Objective")
 	bool bIsObjectivePing = false;
 
@@ -87,9 +101,11 @@ public:
 	/** Fired exactly once, on the aiming -> placed transition -- the same edge OnPingAimingStateChanged
 	 *  detects, and never on a placed ping that was already placed (a distance update, or the marker
 	 *  re-entering the screen). Drives a ~180ms one-shot broken-cyan pulse in the WBP. The pulse asset
-	 *  is one-shot: a repeat fire here would read on screen as a second ping. Does NOT fire when this
-	 *  ping resolved onto an objective (bIsObjectivePing) -- the objective's own flash already told the
-	 *  player their ping landed, and a second cue on top of it would be redundant. */
+	 *  is one-shot: a repeat fire here would read on screen as a second ping. Fires for every ping the
+	 *  game can currently commit, including one that landed on an objective: the suppression carve-out
+	 *  below it only withholds the pulse from a plain command-less ping, which cannot occur (see
+	 *  bIsObjectivePing / IsPlainPlacedPing). A command ping's pulse is not redundant with the
+	 *  objective's flash -- the flash says "your ping landed", never which order the companion took. */
 	UFUNCTION(BlueprintImplementableEvent, Category = "Ping|Marker")
 	void OnPingConfirmed();
 
@@ -143,7 +159,12 @@ protected:
 	/** World centimetres -- how close a ping's resolved world location must be to an objective's own
 	 *  resolved location before it counts as "the player pinged the objective itself" rather than a
 	 *  nearby point. Defaulted to roughly a doorway's width: tight enough that a ping meant for
-	 *  something merely near an objective does not get swallowed by it. */
+	 *  something merely near an objective does not get swallowed by it.
+	 *
+	 *  Governs two things, and only the first is live: it is the radius EvaluatePlacedEdge flashes the
+	 *  nearby objective within, which happens for every ping and is the only part of the objective-ping
+	 *  feature still doing anything; and it is the radius bIsObjectivePing would suppress this widget's
+	 *  own visuals within, which never triggers today -- see that flag's comment. Tune it for the flash. */
 	UPROPERTY(EditDefaultsOnly, Category = "Ping|Marker|Objective", meta = (ClampMin = "0.0"))
 	float ObjectivePingRadius = 300.f;
 
@@ -155,7 +176,8 @@ protected:
 	 *  this gap an objective sitting near the boundary flips bIsObjectivePing -- and the WBP's
 	 *  show/hide of the locator with it -- every single frame on bounds noise alone. ClampMin 1.0:
 	 *  below 1 would shrink the exit radius below the entry radius, inverting the hysteresis and
-	 *  making the strobe worse instead of fixing it. */
+	 *  making the strobe worse instead of fixing it. Dormant along with bIsObjectivePing itself -- the
+	 *  flag it debounces cannot currently be set, so nothing reads the wide radius. */
 	UPROPERTY(EditDefaultsOnly, Category = "Ping|Marker|Objective", meta = (ClampMin = "1.0"))
 	float ObjectivePingExitRadiusMultiplier = 1.25f;
 
@@ -169,6 +191,20 @@ private:
 	 *  one transition (nothing showing, now something is) that must be driven off the delegate. */
 	UFUNCTION()
 	void HandlePingCandidateChanged(bool bHasCandidate, FVector WorldLocation);
+
+	/** The one condition guarding everything the objective-ping feature suppresses: a ping that has
+	 *  actually been placed (not a live aiming candidate) AND carries no companion order. Both
+	 *  ApplyObjectiveAvoidance and EvaluatePlacedEdge read this single predicate rather than testing the
+	 *  two halves separately, so they cannot drift into disagreeing about what may be suppressed.
+	 *
+	 *  Returns false unconditionally as things stand -- every ping IssuePing commits carries a command,
+	 *  so placed implies command-carrying and the two halves are mutually exclusive. Kept as a named
+	 *  predicate rather than folded away because it is the exact condition a future command-less ping
+	 *  type would satisfy. bLastPlaced is safe to read here: NativeTick runs EvaluatePlacedEdge (which
+	 *  writes it) before the projection pass that leads to either caller, and PingCommand is written from
+	 *  OnPingChanged, which the component broadcasts synchronously inside IssuePing/ClearPending -- so
+	 *  neither half is ever a tick stale relative to the other. */
+	bool IsPlainPlacedPing() const;
 
 	/** Resolved world position of whatever this marker is tracking -- a committed ping if one
 	 *  exists, else a live candidate, else false. bOutAiming is true only for the candidate case:
