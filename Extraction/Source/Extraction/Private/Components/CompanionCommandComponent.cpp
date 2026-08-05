@@ -389,6 +389,18 @@ bool UCompanionCommandComponent::EvaluatePingCandidate(FVector& OutLocation)
 	if (!ResolvePingHit(Hit)) return false;
 	if (!IsActorPingable(Hit.GetActor())) return false;
 
+	// A confirmed order stays in flight (BB_CompanionCommand) well after PendingCommand clears --
+	// suppress only the actor that order is against, since IssueCommand explicitly lets a fresh ping
+	// replace one already in flight and a different target must still be offerable.
+	if (const ACompanionAIController* Controller = GetCompanionController())
+	{
+		const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
+		const bool bOrderInFlight = BB
+			&& BB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand) != static_cast<uint8>(ECompanionCommand::None);
+		if (bOrderInFlight && BB->GetValueAsObject(ACompanionAIController::BB_CommandTargetActor) == Hit.GetActor())
+			return false;
+	}
+
 	OutLocation = Hit.ImpactPoint;
 	return true;
 }

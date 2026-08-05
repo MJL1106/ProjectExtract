@@ -282,8 +282,12 @@ private:
 
 	/** True (with OutLocation set to the impact point) when a ping pressed right now would find
 	 *  something to consider. False while a ping is already pending -- the marker is already in its
-	 *  placed state and the probe must not contest it -- or before the companion has spawned, since
-	 *  a candidate with no command to send is not an aiming state worth showing. */
+	 *  placed state and the probe must not contest it -- before the companion has spawned, since a
+	 *  candidate with no command to send is not an aiming state worth showing -- or while an order is
+	 *  already in flight (BB_CompanionCommand) against this exact actor, so a confirmed ping stops
+	 *  re-offering its own prompt while the companion is still acting on it. Scoped to that one actor:
+	 *  IssueCommand lets a fresh ping replace an in-flight order, so aiming at a DIFFERENT target must
+	 *  still offer the prompt. */
 	bool EvaluatePingCandidate(FVector& OutLocation);
 
 	/** (Re)arms the ping-candidate probe timer unless it is already running. */

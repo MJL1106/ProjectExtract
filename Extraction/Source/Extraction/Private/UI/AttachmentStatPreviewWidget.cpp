@@ -198,9 +198,19 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 
 	SetVisibility(ESlateVisibility::HitTestInvisible);
 
+	// Fetched here (not just inside BuildStatDeltas) because every branch below -- including the
+	// message states -- needs the candidate's display name, and BuildStatDeltas has no way to hand
+	// its internal lookup back out to a static caller.
+	const UWeaponDataAsset* Data = Weapon->GetWeaponData();
+	const FAttachmentOptions* Options = nullptr;
+	uint8 FittedByte = 0;
+	FText CandidateName;
+	if (IsValid(Data) && ResolveKitSlot(*Data, Weapon->GetAttachmentSelection(), KitSlotByte, Options, FittedByte))
+		CandidateName = ResolveOptionDisplayName(*Options, OptionByte);
+
 	if (!bCompatible)
 	{
-		ShowMessageOnly(IncompatibleMessage);
+		ShowMessageOnly(IncompatibleMessage, AttachmentHeadingText, CandidateName);
 		CachedWeapon = Weapon;
 		CachedCandidateData.Reset();
 		CachedSelection = Weapon->GetAttachmentSelection();
@@ -210,10 +220,6 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 		bCacheValid = true;
 		return;
 	}
-
-	// Fetched here (not just inside BuildStatDeltas) because the header-naming branch below needs it
-	// too, and BuildStatDeltas has no way to hand its internal lookup back out to a static caller.
-	const UWeaponDataAsset* Data = Weapon->GetWeaponData();
 
 	// BuildStatDeltas is static and so labels from the CDO. Swap in this instance's designer text
 	// here, where "index N is EAttachmentStatRow N" is guaranteed by that builder emitting every
@@ -227,24 +233,16 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 
 	if (Deltas.Num() == 0)
 	{
-		ShowMessageOnly(CosmeticOnlyMessage);
+		ShowMessageOnly(CosmeticOnlyMessage, AttachmentHeadingText, CandidateName);
 	}
 	else if (PopulateRows(Deltas) == 0)
 	{
-		ShowMessageOnly(NoChangeMessage);
+		ShowMessageOnly(NoChangeMessage, AttachmentHeadingText, CandidateName);
 	}
 	else
 	{
 		if (IsValid(MessageText))
 			MessageText->SetVisibility(ESlateVisibility::Collapsed);
-
-		// Same slot resolution BuildStatDeltas already did internally, repeated here (cheap) because
-		// that builder only surfaces stat modifiers, never the asset the header needs to name itself.
-		const FAttachmentOptions* Options = nullptr;
-		uint8 FittedByte = 0;
-		FText CandidateName;
-		if (IsValid(Data) && ResolveKitSlot(*Data, Weapon->GetAttachmentSelection(), KitSlotByte, Options, FittedByte))
-			CandidateName = ResolveOptionDisplayName(*Options, OptionByte);
 
 		SetItemHeader(CandidateName, AttachmentHeadingText);
 	}
@@ -272,22 +270,21 @@ void UAttachmentStatPreviewWidget::ShowForWeapon(UWeaponDataAsset* CandidateData
 	}
 
 	const bool bCacheHit = bCacheValid && CachedCandidateData.Get() == CandidateData && CachedWeapon.Get() == Held;
-	UE_LOG(LogTemp, Warning, TEXT("[WpnCmp] held=%s (%s) candidate=%s cacheHit=%s"),
-		*GetNameSafe(Held), *GetNameSafe(HeldData), *GetNameSafe(CandidateData), bCacheHit ? TEXT("YES") : TEXT("no"));
 	if (bCacheHit) return;
 
 	SetVisibility(ESlateVisibility::HitTestInvisible);
 
 	if (CandidateData == HeldData)
 	{
-		ShowMessageOnly(SameWeaponMessage);
+		// Both candidates are the same weapon -- there is no single item to name.
+		ShowMessageOnly(SameWeaponMessage, WeaponHeadingText);
 	}
 	else
 	{
 		const TArray<FAttachmentStatDelta> Deltas = BuildWeaponDeltas(*HeldData, *CandidateData);
 		if (PopulateRows(Deltas) == 0)
 		{
-			ShowMessageOnly(NoChangeMessage);
+			ShowMessageOnly(NoChangeMessage, WeaponHeadingText, CandidateData->DisplayName);
 		}
 		else
 		{
@@ -492,10 +489,9 @@ void UAttachmentStatPreviewWidget::HideRowsFrom(int32 FirstIndex)
 	}
 }
 
-void UAttachmentStatPreviewWidget::ShowMessageOnly(const FText& Message)
+void UAttachmentStatPreviewWidget::ShowMessageOnly(const FText& Message, const FText& Heading, const FText& ItemName)
 {
 	HideRowsFrom(0);
-	ClearItemHeader();
 
 	// MessageText is BindWidgetOptional. A WBP without it must not show a visible empty panel --
 	// "incompatible" is a common case, and a blank rectangle is worse than nothing.
@@ -507,6 +503,10 @@ void UAttachmentStatPreviewWidget::ShowMessageOnly(const FText& Message)
 
 	MessageText->SetText(Message);
 	MessageText->SetVisibility(ESlateVisibility::HitTestInvisible);
+
+	// Message states keep the heading (and the item name when the caller has one) so the panel
+	// reads the same whether it's showing rows or a message.
+	SetItemHeader(ItemName, Heading);
 }
 
 void UAttachmentStatPreviewWidget::SetItemHeader(const FText& ItemName, const FText& Heading)

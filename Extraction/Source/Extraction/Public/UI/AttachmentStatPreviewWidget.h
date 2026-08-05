@@ -12,9 +12,11 @@
 //                                  are created into and reused inside this panel
 //   UTextBlock   "MessageText"   -- (optional) one-line state message (incompatible / no change / cosmetic)
 //   UTextBlock   "ItemNameText"  -- (optional) the focused attachment's or candidate weapon's name;
-//                                  only shown alongside populated rows, blank in every message state
+//                                  shown whenever it's known, including most message states -- blank
+//                                  only when a message genuinely has no single item (e.g. same-weapon)
 //   UTextBlock   "HeadingText"   -- (optional) "ATTACHMENT EFFECTS" or the weapon-compare heading;
-//                                  same populated-rows-only rule as ItemNameText
+//                                  stays populated across rows AND every message state; only
+//                                  HidePreview blanks it, since that's when the panel goes away
 
 #pragma once
 
@@ -207,16 +209,19 @@ private:
 	/** Collapses every pooled row from FirstIndex on -- reuse, never destroy. */
 	void HideRowsFrom(int32 FirstIndex);
 
-	/** Shows a single state message with no rows. */
-	void ShowMessageOnly(const FText& Message);
+	/** Shows a single state message with no rows. Heading is the caller's mode heading
+	 *  (AttachmentHeadingText or WeaponHeadingText) so the panel keeps its title even on a message
+	 *  state; ItemName is the specific item the message is about when the caller has one to give
+	 *  (left blank for a message with no single item, e.g. ShowForWeapon's SameWeapon). */
+	void ShowMessageOnly(const FText& Message, const FText& Heading, const FText& ItemName = FText::GetEmpty());
 
-	/** Names the panel for the item the rows below it describe. Only called from a row-populated
-	 *  success path -- a message state has no single item to title (ShowForWeapon's SameWeapon
-	 *  message, for one, has two candidates and neither is "the" item). */
+	/** Names the panel and sets its mode heading. Called from every row-populated success path and
+	 *  from ShowMessageOnly -- HidePreview is the only path that bypasses this, since the panel is
+	 *  leaving the screen entirely rather than showing a different state. */
 	void SetItemHeader(const FText& ItemName, const FText& Heading);
 
-	/** Blanks ItemNameText/HeadingText. Called by every path that is NOT a row-populated success --
-	 *  otherwise a stale name from whatever was last focused survives under an unrelated message. */
+	/** Blanks ItemNameText/HeadingText. Only HidePreview calls this now -- everything else keeps the
+	 *  heading up, so this exists purely for the panel-going-away case. */
 	void ClearItemHeader();
 
 	/** Builds the six weapon-vs-weapon rows. A member rather than a static because it reads this
