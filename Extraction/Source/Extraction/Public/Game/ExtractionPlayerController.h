@@ -256,8 +256,9 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UTutorialBriefingWidget> TutorialBriefingWidget;
 
-	/** Maps that open with the controls briefing. Designer assigns them — C++ names no level, so
-	 *  adding a second tutorial map is a defaults change, not a code change. */
+	/** Maps that open with the controls briefing. EMPTY (the default) = EVERY map opens with it; this
+	 *  is an opt-out allow-list, populated only to restrict the briefing to named levels. Designer
+	 *  assigns them — C++ names no level, so changing which maps qualify is a defaults change. */
 	UPROPERTY(EditDefaultsOnly, Category = "UI|Tutorial")
 	TArray<TSoftObjectPtr<UWorld>> TutorialMaps;
 
@@ -289,10 +290,12 @@ protected:
 	bool ShouldUseTouchControls() const;
 
 private:
-	/** Queues the briefing for next tick when this map is a tutorial map and it has not been seen. */
+	/** Queues the briefing for next tick when this map qualifies. Runs on every level start — there is
+	 *  no already-seen gate. */
 	void ArmTutorialBriefing();
 
-	/** True when the current world's package matches one of TutorialMaps. */
+	/** True when the current world's package matches one of TutorialMaps, or when TutorialMaps is
+	 *  empty (in which case every map qualifies). */
 	bool IsCurrentMapATutorialMap() const;
 
 	/** The current world's package name with any PIE prefix stripped. Used to level-key the seen
@@ -302,8 +305,10 @@ private:
 	/** Puts the briefing on screen, takes input UI-only and pauses the game. */
 	void ShowTutorialBriefing();
 
-	/** Escape handler. Re-opens the briefing as a pause screen, bypassing both the tutorial-map and
-	 *  already-seen gates that only apply to the automatic level-start show. */
+	/** Escape handler, and the OPEN half of the briefing toggle. Re-opens the briefing as a pause
+	 *  screen, bypassing the tutorial-map gate that only applies to the automatic level-start show.
+	 *  The close half cannot live here — the briefing holds UI-only input, so this binding never
+	 *  fires while it is up; UTutorialBriefingWidget::NativeOnKeyDown owns it. */
 	void HandlePauseKeyPressed();
 
 	/** Quiets (or restores) the two HUD systems C++ can reach: this controller's overlay group and

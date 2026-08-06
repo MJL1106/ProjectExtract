@@ -128,9 +128,8 @@ void AExtractionPlayerController::ArmTutorialBriefing()
 	if (!IsLocalPlayerController()) return;
 	if (!IsCurrentMapATutorialMap()) return;
 
-	const FName LevelName = GetCurrentLevelName();
-	const UExtractionGameInstance* GI = GetGameInstance<UExtractionGameInstance>();
-	if (IsValid(GI) && GI->HasSeenTutorialBriefing(LevelName)) return;
+	// No already-seen gate: the briefing is the level's controls reminder, not a one-time tutorial, so
+	// it opens on every level start. The seen flag is still written on dismiss for anything else reading it.
 
 	// Deliberately not shown inline: BP_ExtractionCharacter's BeginPlay graph ends with an
 	// unconditional Set Input Mode Game Only, and pawn-vs-controller BeginPlay order is not
@@ -150,7 +149,9 @@ FName AExtractionPlayerController::GetCurrentLevelName() const
 
 bool AExtractionPlayerController::IsCurrentMapATutorialMap() const
 {
-	if (TutorialMaps.IsEmpty()) return false;
+	// Empty list = every map qualifies. The briefing is the default level-start screen; TutorialMaps is
+	// the opt-out, an explicit allow-list a designer populates only to restrict it to named levels.
+	if (TutorialMaps.IsEmpty()) return true;
 
 	const FString CurrentPackage = GetCurrentLevelName().ToString();
 	if (CurrentPackage.IsEmpty()) return false;
@@ -182,8 +183,14 @@ void AExtractionPlayerController::ShowTutorialBriefing()
 	// restores never contend for the same widget.
 	SetPauseHudHidden(true);
 
-	if (!TutorialBriefingWidget->IsInViewport())
+	// IsInViewport() alone would be trusted here and it lies after a Blueprint "Remove All Widgets"
+	// (see IsWidgetLiveOnPlayerScreen). RemoveFromParent first releases the stale registration, or the
+	// re-add is refused as a duplicate and the game pauses behind a briefing nobody can see.
+	if (!IsWidgetLiveOnPlayerScreen(TutorialBriefingWidget))
+	{
+		TutorialBriefingWidget->RemoveFromParent();
 		TutorialBriefingWidget->AddToPlayerScreen(TutorialBriefingZOrder);
+	}
 
 	FInputModeUIOnly InputMode;
 	InputMode.SetWidgetToFocus(TutorialBriefingWidget->TakeWidget());
@@ -217,6 +224,22 @@ void AExtractionPlayerController::DismissTutorialBriefing()
 	// off underneath it. Creates and re-adds only — it never writes visibility, so it cannot undo
 	// the line above or reveal anything the HUD modules own.
 	RestoreHUD();
+
+	// The briefing forces an immediate mapping rebuild in its own construct, which now happens at
+	// level start — early enough that the pawn's contexts may not be applied yet. Any HUD key hint
+	// that resolved in that window latched the partial table (a gamepad key, or "[unbound]"), and
+	// the retry timers that would have corrected it do not tick while the briefing holds the pause.
+	// One forced rebuild here, after the unpause, republishes the complete table and re-broadcasts
+	// ControlMappingsRebuiltDelegate so every hint re-resolves against it.
+	if (const ULocalPlayer* LP = GetLocalPlayer())
+	{
+		if (UEnhancedInputLocalPlayerSubsystem* Input = LP->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
+		{
+			FModifyContextOptions RebuildOptions;
+			RebuildOptions.bForceImmediately = true;
+			Input->RequestRebuildControlMappings(RebuildOptions);
+		}
+	}
 
 	if (UExtractionGameInstance* GI = GetGameInstance<UExtractionGameInstance>())
 		GI->SetTutorialBriefingSeen(GetCurrentLevelName());
@@ -375,11 +398,14 @@ void AExtractionPlayerController::SetupInputComponent()
 		}
 
 		// Bound as a raw key rather than an Enhanced Input action so the pause screen needs no IA or
-		// IMC asset. The briefing takes UI-only input while it is up, so this never fires to close it —
-		// the Confirm button remains the only way out, exactly as at level start.
+		// IMC asset. This is the OPEN half of the toggle only: the briefing takes UI-only input while it
+		// is up, so this binding cannot fire to close it — UTutorialBriefingWidget::NativeOnKeyDown does.
 		if (IsValid(InputComponent))
 		{
 			InputComponent->BindKey(EKeys::Escape, IE_Pressed, this, &AExtractionPlayerController::HandlePauseKeyPressed);
+			// Pad parity with the widget's close key. Without it a pad player can dismiss the briefing
+			// once and has no way back to it.
+			InputComponent->BindKey(EKeys::Gamepad_Special_Right, IE_Pressed, this, &AExtractionPlayerController::HandlePauseKeyPressed);
 		}
 	}
 
@@ -387,9 +413,14 @@ void AExtractionPlayerController::SetupInputComponent()
 
 void AExtractionPlayerController::HandlePauseKeyPressed()
 {
-	// Re-entrancy guard, and it keeps Escape from stacking a briefing on top of the level-complete or
-	// level-failed screens — both of those pause the game themselves and own the restart path.
-	if (IsValid(TutorialBriefingWidget)) return;
+	// Open-only: the briefing swallows Escape once it is up and closes itself through its own key
+	// handler, so a live briefing here means the key leaked and the correct answer is to do nothing.
+	// Deliberately the liveness check and not IsValid — an instance torn off screen by a Blueprint
+	// "Remove All Widgets" is still a valid object, and refusing to re-show it there would leave the
+	// game paused with UI-only input and Escape permanently dead. The second guard keeps Escape from
+	// stacking a briefing on top of the level-complete or level-failed screens — both of those pause
+	// the game themselves and own the restart path.
+	if (IsWidgetLiveOnPlayerScreen(TutorialBriefingWidget)) return;
 	if (IsValid(LevelCompleteWidget) || IsValid(LevelFailedWidget)) return;
 
 	ShowTutorialBriefing();

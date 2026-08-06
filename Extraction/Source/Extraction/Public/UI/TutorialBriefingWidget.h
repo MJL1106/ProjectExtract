@@ -34,6 +34,13 @@ protected:
 	virtual void NativeConstruct() override;
 	virtual void NativeDestruct() override;
 
+	/** Escape (and gamepad Special Right) closes the briefing. This lives on the widget rather than on
+	 *  the controller's Escape binding because the briefing takes FInputModeUIOnly — no PlayerController
+	 *  key binding can fire while it is up, so the controller only ever owns the open half of the
+	 *  toggle. Routed through HandleConfirmClicked so the close is byte-for-byte the confirm click and
+	 *  the controller's dismiss cleanup runs exactly once. */
+	virtual FReply NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
+
 	/** Required. The only way out of the briefing. */
 	UPROPERTY(meta = (BindWidget))
 	TObjectPtr<UButton> ConfirmButton;
