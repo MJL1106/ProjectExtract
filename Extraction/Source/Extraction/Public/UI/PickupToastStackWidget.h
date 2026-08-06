@@ -161,6 +161,25 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "PickupToast|Ammo")
 	FText SniperAmmoCategoryText = NSLOCTEXT("PickupToast", "SniperAmmo", "SNIPER AMMUNITION");
 
+	/** The row's BARE ITEM NAME line, under the category header ("RIFLE AMMUNITION" / "5.56 NATO" /
+	 *  "+60"). Owned here rather than taken from OnLootGranted's Label because that Label carries the
+	 *  alert-channel SENTENCE ("+30 Rifle ammo") and cannot also be the display name -- see
+	 *  HandleLootGranted's comment. Rifle/LMG/Shotgun share one entry exactly as ResolveAmmoIcon
+	 *  groups them; ResolveAmmoName must keep that grouping identical.
+	 *  "5.56 NATO" is verbatim from the director's approved preview art (preview 04); the SMG/pistol/
+	 *  sniper/stim names below are PLACEHOLDERS pending a call, and are overridable on the WBP. */
+	UPROPERTY(EditAnywhere, Category = "PickupToast|Ammo")
+	FText RifleAmmoNameText = NSLOCTEXT("PickupToast", "RifleAmmoName", "5.56 NATO");
+
+	UPROPERTY(EditAnywhere, Category = "PickupToast|Ammo")
+	FText SmgAmmoNameText = NSLOCTEXT("PickupToast", "SmgAmmoName", "9MM PARABELLUM");
+
+	UPROPERTY(EditAnywhere, Category = "PickupToast|Ammo")
+	FText PistolAmmoNameText = NSLOCTEXT("PickupToast", "PistolAmmoName", ".45 ACP");
+
+	UPROPERTY(EditAnywhere, Category = "PickupToast|Ammo")
+	FText SniperAmmoNameText = NSLOCTEXT("PickupToast", "SniperAmmoName", ".338 LAPUA MAGNUM");
+
 	UPROPERTY(EditAnywhere, Category = "PickupToast|Attachments")
 	FText AttachmentCategoryText = NSLOCTEXT("PickupToast", "AttachmentAcquired", "ATTACHMENT ACQUIRED");
 
@@ -181,6 +200,11 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "PickupToast|Stim")
 	TObjectPtr<UTexture2D> StimIcon;
 
+	/** Bare item name for the stim row, for the same reason as the ammo name texts above -- the
+	 *  granted Label is the alert sentence ("+1 Stim"), not a display name. */
+	UPROPERTY(EditAnywhere, Category = "PickupToast|Stim")
+	FText StimNameText = NSLOCTEXT("PickupToast", "StimName", "STIM INJECTOR");
+
 private:
 	UFUNCTION()
 	void HandleLootGranted(ELootType Type, int32 Amount, const FText& Label, EEnemyWeaponAnimType AmmoCategory);
@@ -192,6 +216,13 @@ private:
 	 *  the same on screen. */
 	UTexture2D* ResolveAmmoIcon(EEnemyWeaponAnimType AmmoCategory) const;
 	const FText& ResolveAmmoCategoryText(EEnemyWeaponAnimType AmmoCategory) const;
+
+	/** The bare item name for the row's middle line. Groups the categories EXACTLY as ResolveAmmoIcon
+	 *  does -- LMG and Shotgun deliberately fall through to the RIFLE entry there, so they must fall
+	 *  through to the rifle NAME here too, or a row would read "LMG AMMUNITION" over a name the icon
+	 *  and category text disagree with. Display-only, like the icon: BuildAmmoConsolidationKey still
+	 *  keys on the real category, so those pools never merge into one row. */
+	const FText& ResolveAmmoName(EEnemyWeaponAnimType AmmoCategory) const;
 
 	/** Keyed on the raw AmmoCategory value, never on the (possibly shared) display category --
 	 *  see ResolveAmmoIcon's comment for why two different pools must not consolidate. */

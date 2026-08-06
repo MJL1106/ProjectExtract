@@ -109,12 +109,17 @@ void UPickupToastStackWidget::ShowPickup(const FText& Category, const FText& Ite
 
 void UPickupToastStackWidget::HandleLootGranted(ELootType Type, int32 Amount, const FText& Label, EEnemyWeaponAnimType AmmoCategory)
 {
-	// Label is the ITEM NAME (e.g. "5.56 NATO"); the CATEGORY text/icon below are this widget's
-	// own, resolved from Type and, for Ammo, AmmoCategory.
+	// Label is DELIBERATELY IGNORED for Ammo and Stim -- do not "fix" this by using it. For those two
+	// types the subsystem broadcasts the ALERT-CHANNEL SENTENCE ("+30 Rifle ammo", "+1 Stim"), not a
+	// name: two dedup layers pair a grant to its alert copy by FText::EqualTo against that exact
+	// string (UExtractionHudBridgeComponent and ULootNotificationWidget), so it must stay a sentence
+	// and therefore cannot also be the row's display name -- rendering it produced "RIFLE AMMUNITION /
+	// +30 Rifle ammo / +30". The bare name comes from this widget's own designer-facing texts instead.
+	// Keycards still use Label: that path already carries a real card name.
 	switch (Type)
 	{
 	case ELootType::Ammo:
-		ShowPickup(ResolveAmmoCategoryText(AmmoCategory), Label, Amount, ResolveAmmoIcon(AmmoCategory), BuildAmmoConsolidationKey(AmmoCategory));
+		ShowPickup(ResolveAmmoCategoryText(AmmoCategory), ResolveAmmoName(AmmoCategory), Amount, ResolveAmmoIcon(AmmoCategory), BuildAmmoConsolidationKey(AmmoCategory));
 		break;
 
 	case ELootType::Keycard:
@@ -128,7 +133,7 @@ void UPickupToastStackWidget::HandleLootGranted(ELootType Type, int32 Amount, co
 	case ELootType::Stim:
 		// A single shared key, unlike keycards above -- stims ARE fungible, so repeated grants
 		// should consolidate into one running total.
-		ShowPickup(StimCategoryText, Label, Amount, StimIcon, FName(TEXT("PickupToastStim")));
+		ShowPickup(StimCategoryText, StimNameText, Amount, StimIcon, FName(TEXT("PickupToastStim")));
 		break;
 
 	default:
@@ -164,6 +169,24 @@ const FText& UPickupToastStackWidget::ResolveAmmoCategoryText(EEnemyWeaponAnimTy
 	case EEnemyWeaponAnimType::Shotgun:
 	default:
 		return RifleAmmoCategoryText;
+	}
+}
+
+const FText& UPickupToastStackWidget::ResolveAmmoName(EEnemyWeaponAnimType AmmoCategory) const
+{
+	switch (AmmoCategory)
+	{
+	case EEnemyWeaponAnimType::SMG:    return SmgAmmoNameText;
+	case EEnemyWeaponAnimType::Pistol: return PistolAmmoNameText;
+	case EEnemyWeaponAnimType::Sniper: return SniperAmmoNameText;
+	// Rifle, LMG and Shotgun share the rifle NAME, matching ResolveAmmoIcon/ResolveAmmoCategoryText
+	// above exactly -- the three lines of a row must agree, so this grouping is not independently
+	// tunable. Display-only: BuildAmmoConsolidationKey still keys on the real category.
+	case EEnemyWeaponAnimType::Rifle:
+	case EEnemyWeaponAnimType::LMG:
+	case EEnemyWeaponAnimType::Shotgun:
+	default:
+		return RifleAmmoNameText;
 	}
 }
 
