@@ -52,9 +52,18 @@ public:
 
 	/** bSilent suppresses the acquisition toast only — OnKeycardRecorded still fires, so anything
 	 *  gating on the card stays correct. Used by the checkpoint fast-forward, which re-grants cards
-	 *  the player already earned and must not re-announce them at level start. */
+	 *  the player already earned and must not re-announce them at level start.
+	 *
+	 *  DisplayName is the player-facing card name (FLootGrant::KeycardDisplayName) and is the only
+	 *  keycard string that may reach a toast — it is broadcast BARE as OnLootGranted's label, which
+	 *  the toast row pairs with its own category header and quantity. KeycardId is a machine id: it
+	 *  is logged, never shown. Trails the signature with a default so the silent fast-forward
+	 *  callers, which have no FLootGrant in scope and raise no toast, keep calling this unchanged.
+	 *  Empty DisplayName degrades to a generic "Keycard" rather than leaking the id.
+	 *
+	 *  A successful keycard grant raises OnLootGranted ONLY — see the note in the .cpp. */
 	UFUNCTION(BlueprintCallable, Category = "Loot|Keycard")
-	void RecordKeycard(FName KeycardId, bool bSilent = false);
+	void RecordKeycard(FName KeycardId, bool bSilent = false, const FText& DisplayName = FText::GetEmpty());
 
 	UFUNCTION(BlueprintPure, Category = "Loot|Keycard")
 	bool HasKeycard(FName KeycardId) const { return KeycardId != NAME_None && HeldKeycards.Contains(KeycardId); }
