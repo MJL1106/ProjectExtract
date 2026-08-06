@@ -2,10 +2,41 @@
 
 #include "Game/ObjectiveSubsystem.h"
 #include "World/ObjectiveMarkerDisplay.h"
+#include "Components/CapsuleComponent.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Character.h"
 #include "Engine/World.h"
 
 // --- FObjectiveMarker ---
+
+FVector FObjectiveMarker::ResolveTargetBase(const AActor* Target)
+{
+	// Callers resolve their own target first; the guard only stops a bad pointer reaching the casts.
+	if (!IsValid(Target)) return FVector::ZeroVector;
+
+	// Characters anchor on their capsule -- it is the authority for where a character actually
+	// stands, and unlike actor bounds it ignores held/attached meshes. A bounds centroid gets
+	// dragged sideways by a carried rifle, which puts the marker out on the barrel.
+	if (const ACharacter* TargetCharacter = Cast<ACharacter>(Target))
+	{
+		const UCapsuleComponent* Capsule = TargetCharacter->GetCapsuleComponent();
+		if (IsValid(Capsule))
+		{
+			const FVector ActorLocation = Target->GetActorLocation();
+			return FVector(ActorLocation.X, ActorLocation.Y,
+				ActorLocation.Z - Capsule->GetScaledCapsuleHalfHeight());
+		}
+	}
+
+	// Everything else resolves from the bounds BASE so markers read at one consistent height
+	// regardless of target shape (floor crate vs door vs prop). Bounds stay non-colliding-
+	// inclusive: a visual-only prop with no collision would otherwise collapse to zero extents
+	// and snap the marker to the actor origin.
+	FVector Origin;
+	FVector Extents;
+	Target->GetActorBounds(false, Origin, Extents);
+	return FVector(Origin.X, Origin.Y, Origin.Z - Extents.Z);
+}
 
 FVector FObjectiveMarker::ResolveLocation() const
 {
@@ -13,12 +44,7 @@ FVector FObjectiveMarker::ResolveLocation() const
 	if (!Target)
 		return WorldLocation + Offset;
 
-	// Resolve from the bounds BASE plus a standard height so markers read at one consistent
-	// height regardless of target shape (floor crate vs door vs enemy).
-	FVector Origin;
-	FVector Extents;
-	Target->GetActorBounds(false, Origin, Extents);
-	return FVector(Origin.X, Origin.Y, Origin.Z - Extents.Z + HeightAboveBase) + Offset;
+	return ResolveTargetBase(Target) + FVector(0.f, 0.f, HeightAboveBase) + Offset;
 }
 
 // --- UObjectiveSubsystem ---

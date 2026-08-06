@@ -696,9 +696,10 @@ private:
 	AActor* ResolveMarkerTarget() const;
 	FVector ResolveStaticMarkerLocation() const;
 
-	/** Where bFreezeMarkerAtActivation pins. A live target is sampled through the same bounds-base
-	 *  rule the following marker uses, so the pin lands exactly where the marker read on the frame
-	 *  it froze rather than at the target's capsule centre. */
+	/** Where bFreezeMarkerAtActivation pins. A live target is sampled through
+	 *  FObjectiveMarker::ResolveTargetBase — the same anchor rule the following marker uses
+	 *  (capsule base for characters, bounds base otherwise) — so the pin lands exactly where the
+	 *  marker read on the frame it froze rather than at the target's capsule centre. */
 	FVector CaptureFrozenMarkerLocation() const;
 	UObjectiveSubsystem* GetObjectiveSubsystem() const;
 	void RaiseCompletionToast() const;

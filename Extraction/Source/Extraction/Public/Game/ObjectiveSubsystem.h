@@ -45,9 +45,9 @@ struct FObjectiveMarker
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	FVector Offset = FVector::ZeroVector;
 
-	/** Target-based markers resolve at the target's bounds BASE plus this height, so a floor
-	 *  crate, a door and an enemy all read at the same marker height. Ignored for static
-	 *  (no-target) markers. */
+	/** Target-based markers resolve at the target's BASE plus this height, so a floor crate, a
+	 *  door and an enemy all read at the same marker height. The base is the capsule bottom for
+	 *  characters, the bounds bottom otherwise. Ignored for static (no-target) markers. */
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	float HeightAboveBase = 170.f;
 
@@ -67,7 +67,15 @@ struct FObjectiveMarker
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	EObjectiveState State = EObjectiveState::Tracked;
 
-	/** Resolved marker position this frame: target bounds-base + HeightAboveBase (or static
+	/** The BASE POINT a target-following marker hangs off: the XY the marker sits over, at the Z of
+	 *  the target's bottom. Characters take their horizontal from the actor location and their base
+	 *  from the capsule bottom -- the capsule is the authority on where a character stands, and it
+	 *  ignores held meshes that drag an actor-bounds centroid sideways. Other targets use actor
+	 *  bounds. Callers add HeightAboveBase and any offset themselves. Sole writer of this rule --
+	 *  anything that needs a target's marker anchor calls here rather than re-deriving it. */
+	static FVector ResolveTargetBase(const AActor* Target);
+
+	/** Resolved marker position this frame: ResolveTargetBase + HeightAboveBase (or static
 	 *  WorldLocation) plus the per-objective Offset. */
 	FVector ResolveLocation() const;
 };

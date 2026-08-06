@@ -854,13 +854,10 @@ FVector AObjectiveStep::CaptureFrozenMarkerLocation() const
 	const AActor* Target = ResolveMarkerTarget();
 	if (!IsValid(Target)) return ResolveStaticMarkerLocation();
 
-	// Same bounds-base rule FObjectiveMarker applies to a following marker, sampled once. Taking
-	// the raw actor location instead would drop the pin at capsule centre and the marker would
-	// visibly sink the moment it froze.
-	FVector Origin = FVector::ZeroVector;
-	FVector Extents = FVector::ZeroVector;
-	Target->GetActorBounds(false, Origin, Extents);
-	return FVector(Origin.X, Origin.Y, Origin.Z - Extents.Z + MarkerHeightAboveBase);
+	// Same base rule FObjectiveMarker applies to a following marker, sampled once. Taking the raw
+	// actor location instead would drop the pin at capsule centre and the marker would visibly
+	// sink the moment it froze.
+	return FObjectiveMarker::ResolveTargetBase(Target) + FVector(0.f, 0.f, MarkerHeightAboveBase);
 }
 
 UObjectiveSubsystem* AObjectiveStep::GetObjectiveSubsystem() const
