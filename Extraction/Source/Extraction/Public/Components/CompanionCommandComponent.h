@@ -17,10 +17,15 @@ class UCameraComponent;
 class UHealthComponent;
 class UInputMappingContext;
 class USoundBase;
+struct FHitResult;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPingChanged, ECompanionCommand, PendingCommand, AActor*, PingedTarget);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnCompanionModeChangedRelay, ECompanionMode, NewMode);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnModeMenuChanged, bool, bOpen);
+
+/** Edge-only: "would a ping land on something right now, and where" -- the aiming-state probe.
+ *  Distinct from OnPingChanged, which only fires once a ping is actually committed. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPingCandidateChanged, bool, bHasCandidate, FVector, WorldLocation);
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanionCommand, Log, All);
 
@@ -44,6 +49,13 @@ public:
 	/** Search radius (cm) around the ping impact for cover-point candidates. */
 	UPROPERTY(EditAnywhere, Category = "Companion|Command")
 	float CoverPingRadius = 400.f;
+
+	/** How often the "can ping" probe re-traces while idle. Matches UExtractionHudBridgeComponent's
+	 *  timer idiom: EditDefaultsOnly interval + a static constexpr floor, since SetTimer never fires
+	 *  at 0. ~10Hz is enough for the aiming-state ring/tag to feel responsive without tracing every
+	 *  frame. */
+	UPROPERTY(EditAnywhere, Category = "Companion|Command", meta = (ClampMin = "0.02"))
+	float PingCandidateInterval = 0.1f;
 
 	/** Duration (seconds) of the covering-fire sustained-peek window. */
 	UPROPERTY(EditAnywhere, Category = "Companion|CoveringFire", meta = (ClampMin = "1.0"))
@@ -171,15 +183,34 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|Command")
 	FVector GetPendingCoverLocation() const { return PendingCoverLocation; }
 
+	/** Resolves the world location the ping marker should track this frame. False when no ping is
+	 *  live. TakeCover resolves to the cover location; every other command resolves through the
+	 *  ping anchor captured at ping time (actor + local offset, or a bare world point). */
+	UFUNCTION(BlueprintPure, Category = "Companion|Command")
+	bool GetPingWorldLocation(FVector& OutLocation) const;
+
 	/** Returns the resolved companion, or null if not yet spawned. */
 	UFUNCTION(BlueprintPure, Category = "Companion|Command")
 	ACompanionCharacter* GetCompanion() { return ResolveCompanion(); }
+
+	/** Cached result of the last "can ping" probe tick. Lets a late binder (the HUD bridge's
+	 *  RefreshAll) replay the live aiming state instead of waiting for the next edge, since
+	 *  OnPingCandidateChanged only fires on change. */
+	UFUNCTION(BlueprintPure, Category = "Companion|Command")
+	bool HasPingCandidate() const { return bLastPingCandidate; }
+
+	UFUNCTION(BlueprintPure, Category = "Companion|Command")
+	FVector GetPingCandidateLocation() const { return LastPingCandidateLocation; }
 
 	// ---- Delegates ----
 
 	/** Broadcast whenever the pending target or command changes (including clears). */
 	UPROPERTY(BlueprintAssignable, Category = "Companion|Command")
 	FOnPingChanged OnPingChanged;
+
+	/** Broadcast on change only -- see FOnPingCandidateChanged. */
+	UPROPERTY(BlueprintAssignable, Category = "Companion|Command")
+	FOnPingCandidateChanged OnPingCandidateChanged;
 
 	/** Relay of the companion's OnModeChanged — HUD widgets subscribe here (player-side, same
 	 *  pattern as OnPingChanged) instead of hunting for the companion actor themselves. */
@@ -203,6 +234,12 @@ private:
 	/** Resolved cover point location for the ping marker (TakeCover). */
 	FVector PendingCoverLocation = FVector::ZeroVector;
 
+	/** Ping impact anchor for the marker, captured at ping time: local-space offset from
+	 *  PendingTarget (via CapturePingAnchor) when a target exists, or the raw world point when
+	 *  it doesn't. Resolved back to world space by GetPingWorldLocation. */
+	FVector PendingPingOffset = FVector::ZeroVector;
+	bool bPendingPingOffsetValid = false;
+
 	/** Lazily resolved on first use; valid for the lifetime of the level. */
 	TWeakObjectPtr<ACompanionCharacter> CachedCompanion;
 
@@ -222,6 +259,41 @@ private:
 
 	void ConfirmTakedown(ETakedownMethod Method);
 	void ClearPending();
+
+	/** Captures the ping impact as the marker anchor: local-space offset from TargetActor when
+	 *  valid, raw world point otherwise. Called once from each ping-accept branch in IssuePing. */
+	void CapturePingAnchor(AActor* TargetActor, const FVector& ImpactPoint);
+
+	/** Factored out of IssuePing: the two-channel (Visibility, then Interact) trace that resolves
+	 *  what the crosshair is over, picking the nearer hit. Returns false when nothing valid was hit.
+	 *  Shared with the "can ping" probe so it can never answer a different question than a real ping
+	 *  press would -- only IssuePing's command-priority resolution stays out of this function. */
+	bool ResolvePingHit(FHitResult& OutHit);
+
+	/** Whether a ping landing on this actor would resolve to any command at all. Mirrors the
+	 *  eligibility half of IssuePing's priority branches and nothing else: the commit half fuses
+	 *  pending-state mutation, the prompt input-context registration, OnPingChanged and the audio
+	 *  cue into each branch, so a probe cannot share that path without a rewrite of the command
+	 *  pipeline. Kept deliberately coarse -- it answers "pingable", not "which command". IssuePing
+	 *  itself does not call this and stays exactly as verified; it could adopt this predicate later
+	 *  if the pipeline is ever split into resolve/commit phases, so the duplication of the
+	 *  eligibility half is visible here rather than silently drifting apart. */
+	bool IsActorPingable(const AActor* Actor) const;
+
+	/** True (with OutLocation set to the impact point) when a ping pressed right now would find
+	 *  something to consider. False while a ping is already pending -- the marker is already in its
+	 *  placed state and the probe must not contest it -- before the companion has spawned, since a
+	 *  candidate with no command to send is not an aiming state worth showing -- or while an order is
+	 *  already in flight (BB_CompanionCommand) against this exact actor, so a confirmed ping stops
+	 *  re-offering its own prompt while the companion is still acting on it. Scoped to that one actor:
+	 *  IssueCommand lets a fresh ping replace an in-flight order, so aiming at a DIFFERENT target must
+	 *  still offer the prompt. */
+	bool EvaluatePingCandidate(FVector& OutLocation);
+
+	/** (Re)arms the ping-candidate probe timer unless it is already running. */
+	void StartPingCandidateUpdates();
+
+	void UpdatePingCandidate();
 
 	/** Audible ping feedback — confirm blip on an accepted ping, fail blip on a dead one.
 	 *  Only IssuePing calls this; ClearPending stays silent (it also runs on command completion). */
@@ -260,4 +332,21 @@ private:
 	 *  and the re-issue (frame N+1) must be in separate frames so the BT decorator sees a
 	 *  genuine None->TakeCover edge. Cleared in EndPlay. */
 	FTimerHandle CoverReissueTimerHandle;
+
+	/** Ping-candidate probe state -- see EvaluatePingCandidate/UpdatePingCandidate. Starts at
+	 *  "no candidate": nothing is under the crosshair until the first probe tick runs. */
+	bool bLastPingCandidate = false;
+	FVector LastPingCandidateLocation = FVector::ZeroVector;
+
+	/** Cleared in EndPlay. Runs for the component's whole life -- there is no terminal state to
+	 *  retire it on, unlike the bind-retry timers elsewhere in this module. */
+	FTimerHandle PingCandidateTimerHandle;
+
+	/** SetTimer never fires on a rate of zero -- floor the configured interval above it. */
+	static constexpr float MinPingCandidateInterval = 0.02f;
+
+	/** Below this, the trace hit moved by less than aim jitter -- the probe's trace is otherwise
+	 *  deterministic for a stationary aim, so this exists purely to absorb float noise, not to
+	 *  throttle a genuinely moving reticle. */
+	static constexpr float PingCandidateLocationEpsilon = 2.f;
 };

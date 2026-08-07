@@ -15,6 +15,7 @@ class UNiagaraSystem;
 class UDamageMitigationSettings;
 class UWeaponAttachmentDataAsset;
 class USoundBase;
+class UTexture2D;
 
 /**
  * Per-weapon animation slot set — every montage the enemy anim instance can play for this weapon.
@@ -139,6 +140,19 @@ public:
 	 *  enemies don't inherit the forgiveness. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|Fire", meta = (ClampMin = "0.0", ClampMax = "10.0"))
 	float BulletSweepRadius = 2.f;
+
+	// ---- HUD ----
+
+	/** Weapon name shown on the HUD's active-weapon readout. Empty = the HUD falls back to
+	 *  whatever it displays for an unnamed weapon (the C++ side never substitutes an asset name). */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|HUD")
+	FText DisplayName;
+
+	/** Weapon silhouette shown next to the name on the HUD. Null = icon slot stays empty.
+	 *  Hard reference, same as every other asset field on this DA — the whole asset is already
+	 *  resident whenever a weapon of this archetype exists. */
+	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Weapon|HUD")
+	TObjectPtr<UTexture2D> HudIcon;
 
 	// ---- Attachments ----
 

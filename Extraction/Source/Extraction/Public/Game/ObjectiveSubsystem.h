@@ -10,6 +10,17 @@
 
 class AObjectiveMarkerDisplay;
 
+/** Lifecycle of one objective line. Objectives used to vanish on completion (RemoveObjective was
+ *  the only exit); a completed objective can now stay on the panel wearing its outcome instead. */
+UENUM(BlueprintType)
+enum class EObjectiveState : uint8
+{
+	NotTracked,
+	Tracked,
+	Succeeded,
+	Failed
+};
+
 USTRUCT(BlueprintType)
 struct FObjectiveMarker
 {
@@ -34,9 +45,9 @@ struct FObjectiveMarker
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	FVector Offset = FVector::ZeroVector;
 
-	/** Target-based markers resolve at the target's bounds BASE plus this height, so a floor
-	 *  crate, a door and an enemy all read at the same marker height. Ignored for static
-	 *  (no-target) markers. */
+	/** Target-based markers resolve at the target's BASE plus this height, so a floor crate, a
+	 *  door and an enemy all read at the same marker height. The base is the capsule bottom for
+	 *  characters, the bounds bottom otherwise. Ignored for static (no-target) markers. */
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	float HeightAboveBase = 170.f;
 
@@ -45,13 +56,33 @@ struct FObjectiveMarker
 	UPROPERTY(BlueprintReadOnly, Category = "Objective")
 	bool bShowWorldMarker = true;
 
-	/** Resolved marker position this frame: target bounds-base + HeightAboveBase (or static
+	/** Side objective — the HUD renders it as secondary. Independent of bShowWorldMarker: an
+	 *  optional objective may still want a world billboard, and a text-only mandatory one exists. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective")
+	bool bOptional = false;
+
+	/** Tracked vs NotTracked is set once, from bOptional, the first time AddObjective registers this
+	 *  id. Past that it is owned by MarkObjectiveComplete alone — re-registering an EXISTING id (a
+	 *  label rewrite, a marker move) must not resurrect a finished objective back to Tracked. */
+	UPROPERTY(BlueprintReadOnly, Category = "Objective")
+	EObjectiveState State = EObjectiveState::Tracked;
+
+	/** The BASE POINT a target-following marker hangs off: the XY the marker sits over, at the Z of
+	 *  the target's bottom. Characters take their horizontal from the actor location and their base
+	 *  from the capsule bottom -- the capsule is the authority on where a character stands, and it
+	 *  ignores held meshes that drag an actor-bounds centroid sideways. Other targets use actor
+	 *  bounds. Callers add HeightAboveBase and any offset themselves. Sole writer of this rule --
+	 *  anything that needs a target's marker anchor calls here rather than re-deriving it. */
+	static FVector ResolveTargetBase(const AActor* Target);
+
+	/** Resolved marker position this frame: ResolveTargetBase + HeightAboveBase (or static
 	 *  WorldLocation) plus the per-objective Offset. */
 	FVector ResolveLocation() const;
 };
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnObjectivesChanged);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnObjectiveLabelChanged, FName, Id, const FText&, NewLabel);
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnObjectiveStateChanged, FName, Id, EObjectiveState, NewState);
 
 UCLASS()
 class EXTRACTION_API UObjectiveSubsystem : public UWorldSubsystem
@@ -67,7 +98,8 @@ public:
 	 *  HeightAboveBase applies to target-based markers only (see FObjectiveMarker). */
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void AddObjective(FName Id, FText Label, FVector WorldLocation, AActor* TargetActor = nullptr,
-		FVector Offset = FVector::ZeroVector, bool bShowWorldMarker = true, float HeightAboveBase = 170.f);
+		FVector Offset = FVector::ZeroVector, bool bShowWorldMarker = true, float HeightAboveBase = 170.f,
+		bool bOptional = false);
 
 	/** Rewrites an existing objective's HUD line and nothing else — no marker move, no display
 	 *  respawn. This is the cheap path a live countdown needs: a defend beat re-labels itself once a
@@ -75,6 +107,12 @@ public:
 	 *  Silent when the id is not registered or the label already reads the same. */
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void UpdateObjectiveLabel(FName Id, FText NewLabel);
+
+	/** Marks an objective finished in place. The line stays on the panel wearing Succeeded/Failed
+	 *  instead of disappearing — RemoveObjective is still the way to retire one outright.
+	 *  Silent when the id is not registered or already holds that outcome. */
+	UFUNCTION(BlueprintCallable, Category = "Objective")
+	void MarkObjectiveComplete(FName Id, bool bSucceeded = true);
 
 	UFUNCTION(BlueprintCallable, Category = "Objective")
 	void RemoveObjective(FName Id);
@@ -99,6 +137,11 @@ public:
 	 *  smoothing state is never reset. */
 	UPROPERTY(BlueprintAssignable, Category = "Objective")
 	FOnObjectiveLabelChanged OnObjectiveLabelChanged;
+
+	/** Same narrow-path reasoning as OnObjectiveLabelChanged: a completion recolours one line and
+	 *  must not cost the panel a full rebuild. Raised on every genuine state transition. */
+	UPROPERTY(BlueprintAssignable, Category = "Objective")
+	FOnObjectiveStateChanged OnObjectiveStateChanged;
 
 private:
 	TArray<FObjectiveMarker> Objectives;

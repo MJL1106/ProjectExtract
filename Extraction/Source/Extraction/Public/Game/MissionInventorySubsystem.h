@@ -23,6 +23,16 @@ enum class EToastSeverity : uint8
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnToastNotify, const FText&, Message, EToastSeverity, Severity);
 
+/** Success-only acquisition channel. OnLootNotify carries refusals too ("Stims full", "no
+ *  compatible weapon"), so a pickup display fed from it announces things the player never got.
+ *
+ *  AmmoCategory is only meaningful when Type == ELootType::Ammo -- it is the pool the ammo came
+ *  from (Rifle/SMG/Pistol/Sniper/etc), which the HUD pickup toast needs to pick a per-ammo icon.
+ *  For every other loot type it carries whatever FLootGrant::AmmoCategory happened to default to
+ *  (Rifle) and MUST be ignored -- a future reader must not read a keycard or stim grant as if it
+ *  were rifle ammo. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FOnLootGranted, ELootType, Type, int32, Amount, const FText&, Label, EEnemyWeaponAnimType, AmmoCategory);
+
 DECLARE_LOG_CATEGORY_EXTERN(LogMissionInventory, Log, All);
 
 UCLASS()
@@ -42,9 +52,18 @@ public:
 
 	/** bSilent suppresses the acquisition toast only — OnKeycardRecorded still fires, so anything
 	 *  gating on the card stays correct. Used by the checkpoint fast-forward, which re-grants cards
-	 *  the player already earned and must not re-announce them at level start. */
+	 *  the player already earned and must not re-announce them at level start.
+	 *
+	 *  DisplayName is the player-facing card name (FLootGrant::KeycardDisplayName) and is the only
+	 *  keycard string that may reach a toast — it is broadcast BARE as OnLootGranted's label, which
+	 *  the toast row pairs with its own category header and quantity. KeycardId is a machine id: it
+	 *  is logged, never shown. Trails the signature with a default so the silent fast-forward
+	 *  callers, which have no FLootGrant in scope and raise no toast, keep calling this unchanged.
+	 *  Empty DisplayName degrades to a generic "Keycard" rather than leaking the id.
+	 *
+	 *  A successful keycard grant raises OnLootGranted ONLY — see the note in the .cpp. */
 	UFUNCTION(BlueprintCallable, Category = "Loot|Keycard")
-	void RecordKeycard(FName KeycardId, bool bSilent = false);
+	void RecordKeycard(FName KeycardId, bool bSilent = false, const FText& DisplayName = FText::GetEmpty());
 
 	UFUNCTION(BlueprintPure, Category = "Loot|Keycard")
 	bool HasKeycard(FName KeycardId) const { return KeycardId != NAME_None && HeldKeycards.Contains(KeycardId); }
@@ -63,6 +82,11 @@ public:
 	 *  item criterion listen here. */
 	UPROPERTY(BlueprintAssignable, Category = "Loot|Keycard")
 	FOnKeycardRecorded OnKeycardRecorded;
+
+	/** Raised only where something was actually added to the player. The HUD pickup display binds
+	 *  here; OnLootNotify stays the plain message channel. */
+	UPROPERTY(BlueprintAssignable, Category = "Loot")
+	FOnLootGranted OnLootGranted;
 
 private:
 	bool GrantAmmo(const FLootGrant& Grant, APawn* Recipient);

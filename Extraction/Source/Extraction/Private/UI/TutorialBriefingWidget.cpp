@@ -8,6 +8,7 @@
 #include "Components/VerticalBox.h"
 #include "EnhancedInputSubsystemInterface.h"
 #include "EnhancedInputSubsystems.h"
+#include "InputCoreTypes.h"
 #include "Kismet/GameplayStatics.h"
 
 #include "Game/ExtractionPlayerController.h"
@@ -49,6 +50,11 @@ void UTutorialBriefingWidget::NativeConstruct()
 	ApplyHeaderCopy();
 	SyncColumns();
 	HideOtherWidgets();
+
+	// NativeOnKeyDown is the only way out on a keyboard, and it needs focus to fire. The controller's
+	// FInputModeUIOnly focuses this root through the deferred SlateOperations reply, which lands a
+	// frame late — this takes focus now so no key press in that window is lost.
+	SetKeyboardFocus();
 }
 
 void UTutorialBriefingWidget::NativeDestruct()
@@ -62,6 +68,21 @@ void UTutorialBriefingWidget::NativeDestruct()
 	BoundInputSubsystem.Reset();
 
 	Super::NativeDestruct();
+}
+
+FReply UTutorialBriefingWidget::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
+{
+	const FKey Key = InKeyEvent.GetKey();
+	if (Key == EKeys::Escape || Key == EKeys::Gamepad_Special_Right)
+	{
+		// The confirm click's path, not a parallel one: everything that tears the briefing down lives
+		// behind the controller's DismissTutorialBriefing, and its idempotency gate is what keeps a
+		// key-repeat or a click landing in the same frame from unpausing twice.
+		HandleConfirmClicked();
+		return FReply::Handled();
+	}
+
+	return Super::NativeOnKeyDown(InGeometry, InKeyEvent);
 }
 
 void UTutorialBriefingWidget::HandleControlMappingsRebuilt()
@@ -146,6 +167,9 @@ void UTutorialBriefingWidget::HideOtherWidgets()
 	{
 		if (!IsValid(Widget)) continue;
 		if (Widget == this) continue;
+		// Skipped at CAPTURE, not at restore: an excluded widget must never enter HiddenWidgets,
+		// or a later restore hands it a visibility it never asked for.
+		if (ExcludedRootClass && Widget->IsA(ExcludedRootClass)) continue;
 
 		const ESlateVisibility Current = Widget->GetVisibility();
 		// Already hidden for its own reasons — leave it alone, and do not record it so restore

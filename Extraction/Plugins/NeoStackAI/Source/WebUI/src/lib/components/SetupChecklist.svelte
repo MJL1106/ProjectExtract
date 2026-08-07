@@ -53,13 +53,18 @@
 			state:
 				neostackSignedIn || entitlement?.entitled
 					? 'ready'
-					: entitlement?.status === 'unknown'
-						? 'loading'
-						: 'action',
+					: // 'network' means we couldn't reach NeoStack, not that the
+						// user still has to do something — the plugin retries on
+						// its own, so this is pending, never an action item.
+						entitlement?.status === 'unknown' ||
+							entitlement?.status === 'network' ||
+							$neostackAuth.unreachable
+							? 'loading'
+							: 'action',
 			detail: neostackSignedIn
 				? 'Signed in to NeoStack.'
-				: entitlement?.status === 'network'
-					? 'Could not reach NeoStack Cloud. Check your connection, then retry.'
+				: entitlement?.status === 'network' || $neostackAuth.unreachable
+					? 'Couldn’t reach NeoStack — retrying automatically. Your licence is unaffected.'
 					: 'Sign in with NeoStack to unlock the easiest path.'
 		},
 		{

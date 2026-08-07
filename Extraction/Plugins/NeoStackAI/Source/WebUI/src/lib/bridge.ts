@@ -1657,6 +1657,37 @@ export async function checkForPluginUpdate(): Promise<void> {
 	}
 }
 
+export type PluginUpdateStatus = {
+	/** Installed version, straight off the .uplugin descriptor. */
+	currentVersion: string;
+	state:
+		| 'none'
+		| 'checking'
+		| 'updateAvailable'
+		| 'downloading'
+		| 'downloaded'
+		| 'installing'
+		| 'failed';
+	checked: boolean;
+	updateAvailable: boolean;
+	downloadAvailable: boolean;
+	downloadProgress: number;
+	/** Empty when the server has no live build for this engine + platform.
+	 *  Equal to currentVersion means "you are on the latest". */
+	latestVersion: string;
+	changelog: string;
+	error: string;
+};
+
+/** Result of the last update check. Poll after checkForPluginUpdate — the
+ *  UE side is fire-and-forget and pushes nothing back. */
+export async function getPluginUpdateStatus(): Promise<PluginUpdateStatus | null> {
+	const bridge = getBridge();
+	if (!bridge) return null;
+	const result = await bridge.getpluginupdatestatus();
+	return parseResult<PluginUpdateStatus>(result);
+}
+
 // ── Model & Reasoning ───────────────────────────────────────────────
 
 export type ModelInfo = {
@@ -2752,6 +2783,10 @@ export interface NeoStackAuthState {
 	activeOrgId?: string;
 	entitlement?: NeoStackEntitlement;
 	error?: string;
+	/** `status` is 'signedOut' ONLY because NeoStack couldn't be reached — the
+	 *  credential is still on disk and the plugin is still retrying. Never
+	 *  render a sign-in form for this; the user has nothing to fix. */
+	unreachable?: boolean;
 }
 
 export interface NeoStackOrg {

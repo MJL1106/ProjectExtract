@@ -574,11 +574,12 @@ void ALevelObjectiveFlow::FastForwardToStep(ELevelObjectiveStep TargetStep)
 	if (StepDone(ELevelObjectiveStep::FindOfficeKeycard))
 	{
 		// Keycards are kept, not consumed — re-granting is correct at every later step, and the
-		// UnlockStairwellDoor step needs it back in the mission inventory.
+		// UnlockStairwellDoor step needs it back in the mission inventory. Silent, like the other
+		// two fast-forward sites: a resume is not an acquisition and must raise no pickup toast.
 		if (const ABreachableDoor* LockedDoor = Cast<ABreachableDoor>(Room1ExitDoor.Get()))
 			if (UMissionInventorySubsystem* Inventory = GetWorld()->GetSubsystem<UMissionInventorySubsystem>())
 				if (LockedDoor->GetRequiredKeycardId() != NAME_None)
-					Inventory->RecordKeycard(LockedDoor->GetRequiredKeycardId());
+					Inventory->RecordKeycard(LockedDoor->GetRequiredKeycardId(), /*bSilent=*/true);
 	}
 	if (StepDone(ELevelObjectiveStep::UnlockStairwellDoor))
 		OpenDoor(Room1ExitDoor);
@@ -881,9 +882,10 @@ void ALevelObjectiveFlow::UpdateOptionalSupplies()
 		{
 			// Optional objectives are text-only on the HUD objective panel — no world marker.
 			Objectives->AddObjective(OptionalSuppliesObjectiveId,
-				NSLOCTEXT("LevelFlow", "OptionalSupplies", "Optional: Search side rooms for supplies - Ping with MMB, press I to loot"),
+				NSLOCTEXT("LevelFlow", "OptionalSupplies", "Search side rooms for supplies - Ping with MMB, press I to loot"),
 				CurrentOptionalTarget->GetActorLocation(), CurrentOptionalTarget,
-				FVector::ZeroVector, /*bShowWorldMarker*/ false);
+				FVector::ZeroVector, /*bShowWorldMarker*/ false, /*HeightAboveBase*/ 170.f,
+				/*bOptional*/ true);
 		}
 		else
 		{
@@ -928,9 +930,10 @@ void ALevelObjectiveFlow::UpdateOptionalSupplies()
 
 	// Optional objectives are text-only on the HUD objective panel — no world marker.
 	Objectives->AddObjective(OptionalSuppliesObjectiveId,
-		NSLOCTEXT("LevelFlow", "OptionalSupplies", "Optional: Search side rooms for supplies - Ping with MMB, press I to loot"),
+		NSLOCTEXT("LevelFlow", "OptionalSupplies", "Search side rooms for supplies - Ping with MMB, press I to loot"),
 		CurrentOptionalTarget->GetActorLocation(), CurrentOptionalTarget,
-		FVector::ZeroVector, /*bShowWorldMarker*/ false);
+		FVector::ZeroVector, /*bShowWorldMarker*/ false, /*HeightAboveBase*/ 170.f,
+		/*bOptional*/ true);
 }
 ALootContainer* ALevelObjectiveFlow::FindNearestUnlootedSupply(const FVector& Origin) const
 {

@@ -11,6 +11,17 @@
 //   UPanelWidget "StatContainer" -- MUST be a multi-child panel (VerticalBox / ScrollBox); rows
 //                                  are created into and reused inside this panel
 //   UTextBlock   "MessageText"   -- (optional) one-line state message (incompatible / no change / cosmetic)
+//   UTextBlock   "ItemNameText"  -- (optional) the focused attachment's or candidate weapon's name;
+//                                  shown whenever it's known, including most message states -- blank
+//                                  only when a message genuinely has no single item (e.g. same-weapon)
+//   UTextBlock   "HeadingText"   -- (optional) "ATTACHMENT EFFECTS" or the weapon-compare heading;
+//                                  stays populated across rows AND every message state; only
+//                                  HidePreview blanks it, since that's when the panel goes away
+//   UImage       "ItemIcon"      -- (optional) the attachment's icon, resolved through
+//                                  AttachmentIcons (UAttachmentIconSet) -- the same asset the HUD
+//                                  pickup toast reads, so an attachment can't look different in the
+//                                  two places. Null on ShowForWeapon (no icon source for a weapon
+//                                  comparison) and on any AttachmentIcons miss.
 
 #pragma once
 
@@ -21,7 +32,9 @@
 #include "AttachmentStatPreviewWidget.generated.h"
 
 class AWeaponBase;
+class UAttachmentIconSet;
 class UAttachmentStatRowWidget;
+class UImage;
 class UPanelWidget;
 class UTextBlock;
 class UWeaponDataAsset;
@@ -39,6 +52,11 @@ public:
 	 * pickup carries -- do NOT pre-convert them to EAttachmentSlot, the orders differ.
 	 * bCompatible is the pickup's own answer (the weapon DA's Accepted*Options check).
 	 * Cheap enough to call every frame the crosshair rests on a pickup: rows are reused, not rebuilt.
+	 * ItemIcon is resolved through AttachmentIcons on every call, deliberately outside the row-rebuild
+	 * cache below -- that cache tracks (weapon, selection, slot, option, compat) only, and the icon can
+	 * change independently of all five (AttachmentIcons reassigned, or null on an early call and wired
+	 * up later), so gating it behind the same cache would leave a stale icon on screen once those five
+	 * happened to match again.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "UI|Attachments")
 	void ShowForAttachment(uint8 KitSlotByte, uint8 OptionByte, bool bCompatible);
@@ -57,6 +75,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "UI|Attachments")
 	void HidePreview();
 
+	/** The icon/name UAttachmentIconSet resolved for the attachment ShowForAttachment is CURRENTLY
+	 *  previewing -- the world focus prompt (WBP_PickupFocus) has no icon of its own on the
+	 *  interact path (see UExtractionHudBridgeComponent::OnPickupFocusChangedBP) and reads these
+	 *  instead, via GetAttachmentStatPreview(). Null / empty whenever this panel is not showing an
+	 *  attachment: before the first ShowForAttachment, after HidePreview, and while ShowForWeapon's
+	 *  comparison is on screen instead -- a weapon comparison is not an attachment and must not
+	 *  leave a stale attachment icon readable through these. Resolved unconditionally, same as
+	 *  ItemIcon above, never gated behind the row-rebuild cache. */
+	UFUNCTION(BlueprintPure, Category = "UI|Attachments")
+	UTexture2D* GetFocusedAttachmentIcon() const { return FocusedAttachmentIcon; }
+
+	UFUNCTION(BlueprintPure, Category = "UI|Attachments")
+	FText GetFocusedAttachmentName() const { return FocusedAttachmentName; }
+
 	/**
 	 * The maths with no UI attached, reusable by a future loadout screen.
 	 * Returns AttachmentStatRowCount entries in EAttachmentStatRow order -- INCLUDING unchanged
@@ -73,7 +105,15 @@ public:
 
 protected:
 
+	/** Also registers this panel with the owning AExtractionPlayerController, which is how the
+	 *  Blueprint pickups reach it (GetAttachmentStatPreview). Self-registration rather than the
+	 *  controller creating the widget: the panel now lives inside a HUD module the controller
+	 *  neither owns nor can name without an asset path. */
 	virtual void NativeConstruct() override;
+
+	/** Releases the registration, but only if this instance still holds it — a module torn down
+	 *  after its replacement was built must not clear the live panel. */
+	virtual void NativeDestruct() override;
 
 	// --- Bound widgets (designer wires these in WBP) ---
 
@@ -83,11 +123,26 @@ protected:
 	UPROPERTY(meta = (BindWidgetOptional))
 	TObjectPtr<UTextBlock> MessageText;
 
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> ItemNameText;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UTextBlock> HeadingText;
+
+	UPROPERTY(meta = (BindWidgetOptional))
+	TObjectPtr<UImage> ItemIcon;
+
 	// --- Designer configuration ---
 
 	/** WBP row class created into StatContainer. Nothing renders until this is assigned. */
 	UPROPERTY(EditAnywhere, Category = "Attachments|Preview")
 	TSubclassOf<UAttachmentStatRowWidget> RowWidgetClass;
+
+	/** Same asset the HUD pickup toast reads (UPickupToastStackWidget::AttachmentIcons) -- the one
+	 *  source of attachment icon identity, so this panel and the toast can't disagree. Null while
+	 *  unassigned; ShowForAttachment then resolves no icon rather than a wrong one. */
+	UPROPERTY(EditAnywhere, Category = "Attachments|Preview")
+	TObjectPtr<UAttachmentIconSet> AttachmentIcons;
 
 	UPROPERTY(EditAnywhere, Category = "Attachments|Preview")
 	FLinearColor BetterColour = FLinearColor(0.35f, 0.85f, 0.40f, 1.f);
@@ -111,6 +166,11 @@ protected:
 
 	UPROPERTY(EditAnywhere, Category = "Attachments|Messages")
 	FText CosmeticOnlyMessage = NSLOCTEXT("AttachmentStats", "CosmeticOnly", "Cosmetic only");
+
+	/** Panel heading while comparing a candidate attachment. The same panel doubles as a weapon
+	 *  comparison (see WeaponHeadingText below), so this cannot be baked into the WBP as static text. */
+	UPROPERTY(EditDefaultsOnly, Category = "Attachments|Messages")
+	FText AttachmentHeadingText = NSLOCTEXT("AttachmentStats", "Heading", "ATTACHMENT EFFECTS");
 
 	// --- Designer-editable stat labels (one per EAttachmentStatRow, same order) ---
 
@@ -151,6 +211,10 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Weapons|Messages")
 	FText SameWeaponMessage = NSLOCTEXT("WeaponCompare", "SameWeapon", "Already equipped");
 
+	/** Panel heading while comparing a candidate weapon — see AttachmentHeadingText above. */
+	UPROPERTY(EditDefaultsOnly, Category = "Weapons|Messages")
+	FText WeaponHeadingText = NSLOCTEXT("WeaponCompare", "Heading", "WEAPON COMPARISON");
+
 	UPROPERTY(EditAnywhere, Category = "Weapons|Labels")
 	FText FireRateLabel = NSLOCTEXT("WeaponCompare", "FireRate", "Fire Rate");
 
@@ -180,8 +244,20 @@ private:
 	/** Collapses every pooled row from FirstIndex on -- reuse, never destroy. */
 	void HideRowsFrom(int32 FirstIndex);
 
-	/** Shows a single state message with no rows. */
-	void ShowMessageOnly(const FText& Message);
+	/** Shows a single state message with no rows. Heading is the caller's mode heading
+	 *  (AttachmentHeadingText or WeaponHeadingText) so the panel keeps its title even on a message
+	 *  state; ItemName is the specific item the message is about when the caller has one to give
+	 *  (left blank for a message with no single item, e.g. ShowForWeapon's SameWeapon). */
+	void ShowMessageOnly(const FText& Message, const FText& Heading, const FText& ItemName = FText::GetEmpty());
+
+	/** Names the panel and sets its mode heading. Called from every row-populated success path and
+	 *  from ShowMessageOnly -- HidePreview is the only path that bypasses this, since the panel is
+	 *  leaving the screen entirely rather than showing a different state. */
+	void SetItemHeader(const FText& ItemName, const FText& Heading);
+
+	/** Blanks ItemNameText/HeadingText. Only HidePreview calls this now -- everything else keeps the
+	 *  heading up, so this exists purely for the panel-going-away case. */
+	void ClearItemHeader();
 
 	/** Builds the six weapon-vs-weapon rows. A member rather than a static because it reads this
 	 *  instance's designer labels directly — the attachment path's static builder has to fix labels
@@ -192,6 +268,13 @@ private:
 	 *  crosshair sweeps between pickups; surplus entries are collapsed, never destroyed. */
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UAttachmentStatRowWidget>> RowWidgets;
+
+	/** Backing store for GetFocusedAttachmentIcon/GetFocusedAttachmentName -- see those getters'
+	 *  comment for the exact clear contract. */
+	UPROPERTY(Transient)
+	TObjectPtr<UTexture2D> FocusedAttachmentIcon;
+
+	FText FocusedAttachmentName;
 
 	// --- Per-frame cache (ShowForAttachment is a pure function of these four) ---
 

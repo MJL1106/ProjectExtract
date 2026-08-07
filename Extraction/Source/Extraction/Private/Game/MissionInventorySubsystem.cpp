@@ -17,7 +17,7 @@ bool UMissionInventorySubsystem::GrantLoot(const FLootGrant& Grant, APawn* Recip
 
 	case ELootType::Keycard:
 		if (Grant.KeycardId == NAME_None) return false;
-		RecordKeycard(Grant.KeycardId);
+		RecordKeycard(Grant.KeycardId, /*bSilent=*/false, Grant.KeycardDisplayName);
 		return true;
 
 	case ELootType::Stim:
@@ -42,8 +42,10 @@ bool UMissionInventorySubsystem::GrantStims(const FLootGrant& Grant, APawn* Reci
 		return false;
 	}
 
-	OnLootNotify.Broadcast(FText::Format(
-		NSLOCTEXT("Loot", "StimsGranted", "+{0} Stim"), FText::AsNumber(Added)));
+	const FText StimMessage = FText::Format(
+		NSLOCTEXT("Loot", "StimsGranted", "+{0} Stim"), FText::AsNumber(Added));
+	OnLootNotify.Broadcast(StimMessage);
+	OnLootGranted.Broadcast(ELootType::Stim, Added, StimMessage, Grant.AmmoCategory);
 	UE_LOG(LogMissionInventory, Log, TEXT("GrantStims: +%d to %s"), Added, *GetNameSafe(Recipient));
 	return true;
 }
@@ -68,14 +70,16 @@ bool UMissionInventorySubsystem::GrantAmmo(const FLootGrant& Grant, APawn* Recip
 	const int32 Added = Weapon->AddReserveAmmo(Grant.AmmoAmount);
 	if (Added <= 0) return false;
 
-	OnLootNotify.Broadcast(FText::Format(
-		NSLOCTEXT("Loot", "AmmoGranted", "+{0} {1} ammo"), Added, CategoryText));
+	const FText AmmoMessage = FText::Format(
+		NSLOCTEXT("Loot", "AmmoGranted", "+{0} {1} ammo"), Added, CategoryText);
+	OnLootNotify.Broadcast(AmmoMessage);
+	OnLootGranted.Broadcast(ELootType::Ammo, Added, AmmoMessage, Grant.AmmoCategory);
 	UE_LOG(LogMissionInventory, Log, TEXT("GrantAmmo: +%d %s to %s"),
 		Added, *CategoryText.ToString(), *GetNameSafe(Recipient));
 	return true;
 }
 
-void UMissionInventorySubsystem::RecordKeycard(FName KeycardId, bool bSilent)
+void UMissionInventorySubsystem::RecordKeycard(FName KeycardId, bool bSilent, const FText& DisplayName)
 {
 	if (KeycardId == NAME_None) return;
 
@@ -83,9 +87,29 @@ void UMissionInventorySubsystem::RecordKeycard(FName KeycardId, bool bSilent)
 	HeldKeycards.Add(KeycardId, &bAlreadyHeld);
 	if (bAlreadyHeld) return; // no duplicate toast for a card already held
 
+	// The acquisition announcement obeys bSilent: the checkpoint fast-forward re-grants cards the
+	// player already earned, and re-announcing them at level start is the exact bug bSilent exists
+	// to prevent. OnKeycardRecorded still fires — gating logic is not an announcement.
 	if (!bSilent)
-		OnLootNotify.Broadcast(FText::Format(
-			NSLOCTEXT("Loot", "KeycardAcquired", "Keycard acquired: {0}"), FText::FromName(KeycardId)));
+	{
+		// Label is the BARE card name. The toast row is header + item name + quantity ("KEYCARD
+		// ACQUIRED / Office Keycard / +1"), so a sentence here rendered the word "keycard" twice.
+		// KeycardId is a machine id doors and objective steps match on and must never be shown —
+		// an unauthored display name degrades to a generic "Keycard", never the id.
+		const FText KeycardLabel = DisplayName.IsEmptyOrWhitespace()
+			? NSLOCTEXT("Loot", "KeycardGeneric", "Keycard")
+			: DisplayName;
+
+		// Keycards deliberately do NOT raise OnLootNotify: the pickup toast stack is their pickup
+		// display now, and a notify copy announces the same acquisition a second time. Do not
+		// "restore" it. Failure notifies below (stims full, incompatible ammo) still fire — they
+		// have no grant to pair with.
+		//
+		// RecordKeycard has no FLootGrant in scope (it's also called directly by the checkpoint
+		// fast-forward) -- AmmoCategory is meaningless for a keycard grant regardless (see
+		// FOnLootGranted's declaration comment), so the default value stands in for it.
+		OnLootGranted.Broadcast(ELootType::Keycard, 1, KeycardLabel, EEnemyWeaponAnimType::Rifle);
+	}
 	OnKeycardRecorded.Broadcast(KeycardId);
 	UE_LOG(LogMissionInventory, Log, TEXT("RecordKeycard: %s"), *KeycardId.ToString());
 }

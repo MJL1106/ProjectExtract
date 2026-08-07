@@ -158,7 +158,11 @@ ACompanionCharacter::ACompanionCharacter()
 	HealthWidgetComponent->SetupAttachment(GetMesh(), TEXT("head"));
 	HealthWidgetComponent->SetRelativeLocation(FVector(0.f, 0.f, 30.f));
 	HealthWidgetComponent->SetWidgetSpace(EWidgetSpace::Screen);
-	HealthWidgetComponent->SetDrawSize(FVector2D(150.f, 40.f));
+	// Must match WBP_CompanionWorldHealth's own size exactly (180x42, the two-resource armor-over-health
+	// plate) -- a DrawSize smaller than the widget squeezes it, and one of a different aspect ratio
+	// throws the SetPivot(0.5, 0.5) centring off since the pivot is relative to THIS rectangle, not the
+	// widget's.
+	HealthWidgetComponent->SetDrawSize(FVector2D(180.f, 42.f));
 	HealthWidgetComponent->SetPivot(FVector2D(0.5f, 0.5f));
 	HealthWidgetComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	HealthWidgetComponent->SetTwoSided(false);

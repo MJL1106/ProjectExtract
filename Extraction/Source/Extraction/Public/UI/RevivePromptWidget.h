@@ -1,9 +1,10 @@
-// URevivePromptWidget -- the player's hold-prompt HUD. Serves two sources: a downed teammate in
-// revive range ("[F] Revive"), and an IWorldInteractable under the crosshair (its own prompt
-// text, e.g. "Rescue"). Fills a progress bar during either hold. Polls the owning pawn each
-// tick (no delegate plumbing), same self-managed pattern as the other HUD widgets.
+// URevivePromptWidget -- the player's revive hold-prompt ("[F] Revive"), filling a progress bar
+// during the hold. Polls the owning pawn each tick (no delegate plumbing), same self-managed
+// pattern as the other legacy HUD widgets.
 //
-// Revive wins when both are live -- a downed teammate is always the more urgent read.
+// SCOPE: revive ONLY. It used to serve IWorldInteractable prompts as well; the HUD's own prompt
+// container owns those now, and this widget kept drawing a second copy of the same hint. This
+// class survives purely as the fallback until the HUD module's revive label is proven in play.
 //
 // WBP must contain:
 //   UPanelWidget  "PromptContainer"  -- root of the hint; toggled visible/collapsed
@@ -48,13 +49,12 @@ protected:
 	UPROPERTY(EditAnywhere, Category = "Revive|Hints")
 	FText RevivingHint = NSLOCTEXT("RevivePrompt", "Reviving", "Reviving...");
 
-	/** Wraps the interactable's own prompt text as "[F] {0}" — the actor supplies the verb
-	 *  ("Rescue"), the widget supplies the key. Revive and world-interact share IA_Interact, so
-	 *  one key spelling serves both hints. */
+	// INERT: kept only so the WBP's authored values are not lost while this class waits to be
+	// retired. Nothing reads them since the interact branch moved to the HUD prompt container.
+
 	UPROPERTY(EditAnywhere, Category = "Interaction|Hints")
 	FText InteractHintFormat = NSLOCTEXT("RevivePrompt", "InteractFormat", "[F] {0}");
 
-	/** Shown while a hold-to-interact is filling. Empty = keep showing the wrapped prompt. */
 	UPROPERTY(EditAnywhere, Category = "Interaction|Hints")
 	FText InteractHoldingHint = NSLOCTEXT("RevivePrompt", "InteractHolding", "Hold F...");
 };

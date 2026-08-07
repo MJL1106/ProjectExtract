@@ -25,6 +25,22 @@ Materials do not add a separate `mat:*` graph API. Combine:
 6. Call `mat:save()` to copy the editor preview graph back to the source asset.
 7. Verify in a fresh call with `read_graph`, `read_log`, and `screenshot`.
 
+### Keep animated color layers visually separable
+
+When a design needs a persistent dark base, moving bright bands, and a second
+color pulse, do not add both bright colors across the whole surface. Build one
+bounded band mask, apply the primary color through that mask, and apply the
+secondary pulse through a complementary mask such as `OneMinus(band_mask)`.
+Add both contributions over the dark base with independently tunable
+intensities. This keeps the base readable and prevents the two emissive layers
+from washing into white.
+
+Choose the motion and pulse periods before capturing evidence. Capture from one
+fixed camera at deliberately separated phases rather than taking repeated
+screenshots at arbitrary delays; a delay can alias back to the same phase even
+when the graph is animated. Record both timestamps and hashes, then inspect both
+images for a visible pattern or color change.
+
 ### Set source properties before graph edits
 
 Set source-side properties before the first `add_node`:

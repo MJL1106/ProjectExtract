@@ -155,6 +155,7 @@ void AObjectiveStep::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		World->GetTimerManager().ClearTimer(CheckpointHealPollHandle);
 		World->GetTimerManager().ClearTimer(CheckpointSpawnRetryHandle);
 		World->GetTimerManager().ClearTimer(SquadTeleportRetryHandle);
+		World->GetTimerManager().ClearTimer(CompanionModeBindRetryHandle);
 	}
 	StopDefendCountdown();
 	Deactivate();
@@ -269,6 +270,7 @@ void AObjectiveStep::Deactivate()
 	{
 		World->GetTimerManager().ClearTimer(WaveRetryHandle);
 		World->GetTimerManager().ClearTimer(CheckpointHealPollHandle);
+		World->GetTimerManager().ClearTimer(CompanionModeBindRetryHandle);
 	}
 	PendingWaveRequests.Reset();
 
@@ -453,6 +455,13 @@ void AObjectiveStep::BindConditionDelegates()
 		StartDefendCountdown();
 		break;
 
+	case EObjectiveCondition::CompanionModeSet:
+		// Fresh attempt count per activation: a step that gave up waiting on a previous activation
+		// and is later reactivated (ActivateActor) gets its full retry budget again.
+		CompanionModeBindRetries = 0;
+		TryBindCompanionModeCondition();
+		break;
+
 	case EObjectiveCondition::ReachLocation:
 	case EObjectiveCondition::Manual:
 	default:
@@ -495,6 +504,10 @@ void AObjectiveStep::UnbindConditionDelegates()
 	if (IsValid(TrackedExtractee))
 		TrackedExtractee->OnRescued.RemoveDynamic(this, &AObjectiveStep::HandleExtracteeRescued);
 
+	ACompanionCharacter* BoundCompanion = CachedCompanion.Get();
+	if (IsValid(BoundCompanion))
+		BoundCompanion->OnModeChanged.RemoveDynamic(this, &AObjectiveStep::HandleCompanionModeChanged);
+
 	if (UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>())
 	{
 		Director->OnDirectorWaveCompleted.RemoveDynamic(this, &AObjectiveStep::HandleDirectorWaveCompleted);
@@ -506,6 +519,38 @@ void AObjectiveStep::UnbindConditionDelegates()
 	// !bActive guard, so this is redundant but future-proof: a caller that unbinds without
 	// deactivating must not leave a 1Hz writer running.
 	StopDefendCountdown();
+}
+
+void AObjectiveStep::TryBindCompanionModeCondition()
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	ACompanionCharacter* Companion = ResolvePrimaryCompanion();
+	if (!IsValid(Companion))
+	{
+		// Same BeginPlay-order race the checkpoint spawn poll exists for, just with no checkpoint
+		// step around to have already started a wait for it.
+		if (++CompanionModeBindRetries <= MaxCheckpointSpawnRetries)
+		{
+			World->GetTimerManager().SetTimer(CompanionModeBindRetryHandle, this,
+				&AObjectiveStep::TryBindCompanionModeCondition, CheckpointSpawnPollSeconds, /*bLoop=*/false);
+			return;
+		}
+		UE_LOG(LogObjectiveStep, Warning,
+			TEXT("'%s' (step '%s'): no companion in level after %d polls — CompanionModeSet can never complete"),
+			*GetName(), *GetEffectiveStepId().ToString(), CompanionModeBindRetries);
+		return;
+	}
+
+	// CompanionModeBindRetries > 0 only when this call came off the poll timer above — strictly
+	// after ActivateInternal's own once-per-activation late-entry EvaluateCondition already ran and
+	// found no companion to check. Re-run it now, or a companion that reached the target mode while
+	// this step was still waiting to bind would have no edge left to fire.
+	const bool bBoundLate = CompanionModeBindRetries > 0;
+
+	Companion->OnModeChanged.AddUniqueDynamic(this, &AObjectiveStep::HandleCompanionModeChanged);
+	if (bBoundLate) EvaluateCondition();
 }
 
 void AObjectiveStep::EvaluateCondition()
@@ -545,6 +590,14 @@ bool AObjectiveStep::IsConditionSatisfied() const
 		// a beat after the VIP stands up. Polling on captive alone would complete the same beat one
 		// stage early depending on which path got there first.
 		return IsValid(TrackedExtractee) && !TrackedExtractee->IsCaptive() && TrackedExtractee->IsArmed();
+
+	case EObjectiveCondition::CompanionModeSet:
+	{
+		// Read via the cache directly rather than ResolvePrimaryCompanion — this method is const,
+		// and a read-only check has no business mutating the one companion-lookup cache.
+		const ACompanionCharacter* Companion = CachedCompanion.Get();
+		return IsValid(Companion) && Companion->GetMode() == TargetCompanionMode;
+	}
 
 	// ReachLocation, RouteCompleted, Interacted, WaveCompleted, SurviveDuration and Manual have no
 	// queryable world state — their one-shot delegate or timer (or an explicit CompleteStep) is the
@@ -736,14 +789,14 @@ void AObjectiveStep::UpdateMarker()
 		// Registered with NO target: handing one over would let the subsystem re-resolve against a
 		// mover every frame, which is the whole thing this flag exists to stop.
 		Objectives->AddObjective(GetEffectiveStepId(), DisplayLabel, FrozenMarkerLocation, nullptr,
-			MarkerOffset, bShowWorldMarker, MarkerHeightAboveBase);
+			MarkerOffset, bShowWorldMarker, MarkerHeightAboveBase, bOptional);
 		return;
 	}
 
 	AActor* Target = ResolveMarkerTarget();
 	const FVector Location = IsValid(Target) ? Target->GetActorLocation() : ResolveStaticMarkerLocation();
 	Objectives->AddObjective(GetEffectiveStepId(), DisplayLabel, Location, Target,
-		MarkerOffset, bShowWorldMarker, MarkerHeightAboveBase);
+		MarkerOffset, bShowWorldMarker, MarkerHeightAboveBase, bOptional);
 }
 
 void AObjectiveStep::RemoveMarker()
@@ -801,13 +854,10 @@ FVector AObjectiveStep::CaptureFrozenMarkerLocation() const
 	const AActor* Target = ResolveMarkerTarget();
 	if (!IsValid(Target)) return ResolveStaticMarkerLocation();
 
-	// Same bounds-base rule FObjectiveMarker applies to a following marker, sampled once. Taking
-	// the raw actor location instead would drop the pin at capsule centre and the marker would
-	// visibly sink the moment it froze.
-	FVector Origin = FVector::ZeroVector;
-	FVector Extents = FVector::ZeroVector;
-	Target->GetActorBounds(false, Origin, Extents);
-	return FVector(Origin.X, Origin.Y, Origin.Z - Extents.Z + MarkerHeightAboveBase);
+	// Same base rule FObjectiveMarker applies to a following marker, sampled once. Taking the raw
+	// actor location instead would drop the pin at capsule centre and the marker would visibly
+	// sink the moment it froze.
+	return FObjectiveMarker::ResolveTargetBase(Target) + FVector(0.f, 0.f, MarkerHeightAboveBase);
 }
 
 UObjectiveSubsystem* AObjectiveStep::GetObjectiveSubsystem() const
@@ -1522,6 +1572,15 @@ void AObjectiveStep::ApplyCompletedWorldState()
 		}
 		break;
 
+	case EObjectiveCondition::CompanionModeSet:
+		// A resume past the stealth beat must not hand the player a Normal companion in the section
+		// the mission just told them to go quiet in. SetMode early-returns when the mode already
+		// matches, so a resume that did not skip this beat costs nothing. It does bark on replay --
+		// there is no silent SetMode the way RecordKeycard and ForceOpenInstant have one.
+		if (ACompanionCharacter* Companion = ResolvePrimaryCompanion())
+			Companion->SetMode(TargetCompanionMode);
+		break;
+
 	case EObjectiveCondition::EnemiesDead:
 		for (AEnemyCharacter* Enemy : TrackedEnemies)
 			if (IsValid(Enemy)) Enemy->Destroy();
@@ -1973,6 +2032,7 @@ bool AObjectiveStep::DerivesWorldState() const
 	case EObjectiveCondition::ContainerLooted:
 	case EObjectiveCondition::AcquireKeycard:
 	case EObjectiveCondition::ExtracteeRescued:
+	case EObjectiveCondition::CompanionModeSet:
 		return true;
 	default:
 		return false;
@@ -2128,6 +2188,12 @@ void AObjectiveStep::HandleDirectorWaveBlocked(FName WaveId, FText Reason)
 
 	UE_LOG(LogObjectiveStep, Warning, TEXT("'%s' (step '%s'): watched wave '%s' blocked: %s"),
 		*GetName(), *GetEffectiveStepId().ToString(), *WaveId.ToString(), *Reason.ToString());
+}
+
+void AObjectiveStep::HandleCompanionModeChanged(ECompanionMode NewMode)
+{
+	if (!bActive || NewMode != TargetCompanionMode) return;
+	CompleteStep();
 }
 
 #if WITH_DEV_AUTOMATION_TESTS

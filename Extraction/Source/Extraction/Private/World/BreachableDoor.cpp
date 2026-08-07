@@ -117,9 +117,11 @@ void ABreachableDoor::TryUnlock(AActor* UnlockInstigator)
 
 	if (!Subsystem->HasKeycard(RequiredKeycardId))
 	{
-		Subsystem->OnLootNotify.Broadcast(FText::Format(
-			NSLOCTEXT("Door", "RequiresKeycard", "Locked (requires keycard: {0})"),
-			FText::FromName(RequiredKeycardId)));
+		// Deliberately names no card. RequiredKeycardId is a machine id and must never be shown,
+		// and the door does NOT get its own display-name field: two designer-authored names for one
+		// card (here and on FLootGrant::KeycardDisplayName) drift apart, and with a single card in
+		// the level there is nothing to disambiguate. Add one only when doors take multiple cards.
+		Subsystem->OnLootNotify.Broadcast(NSLOCTEXT("Door", "RequiresKeycard", "Locked (requires keycard)"));
 		return;
 	}
 

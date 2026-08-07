@@ -31,9 +31,18 @@ struct EXTRACTION_API FLootGrant
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot", meta = (EditCondition = "Type == ELootType::Ammo", EditConditionHides, ClampMin = "0"))
 	int32 AmmoAmount = 30;
 
-	/** Keycard identity — doors reference the same id in their RequiredKeycardId. */
+	/** Keycard identity — doors reference the same id in their RequiredKeycardId. Machine-only:
+	 *  it is matched against, never shown. Author it for lookup, not for reading. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot", meta = (EditCondition = "Type == ELootType::Keycard", EditConditionHides))
 	FName KeycardId = NAME_None;
+
+	/** Player-facing card name, shown BARE as the pickup toast's item name ("KEYCARD ACQUIRED /
+	 *  Office Keycard / +1") — author it as a noun, not a sentence. This is the ONLY keycard string
+	 *  the player ever sees; KeycardId stays the machine id doors, objective markers and objective
+	 *  steps match on, and must never reach the HUD. Left empty, the row falls back to a generic
+	 *  "Keycard" with no id in it. */
+	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot", meta = (EditCondition = "Type == ELootType::Keycard", EditConditionHides))
+	FText KeycardDisplayName;
 
 	/** Number of player health stims granted, clamped by the player's consumable capacity. */
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Loot", meta = (EditCondition = "Type == ELootType::Stim", EditConditionHides, ClampMin = "1"))

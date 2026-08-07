@@ -5,7 +5,7 @@
 #if WITH_EDITOR && WITH_DEV_AUTOMATION_TESTS
 
 #include "World/LevelObjectiveFlow.h"
-#include "UI/ObjectiveMarkerWidget.h"
+#include "UI/ScreenMarkerProjection.h"
 #include "UObject/UnrealType.h"
 #include "Tests/AutomationEditorCommon.h"
 #include "World/ScriptedDoor.h"
@@ -109,18 +109,48 @@ bool FObjectiveMarkerMathTest::RunTest(const FString& Parameters)
 {
 	const FVector2D Start(0.f, 0.f);
 	const FVector2D Target(100.f, 100.f);
-	const FVector2D OneFrame = UObjectiveMarkerWidget::InterpolateScreenPosition(Start, Target, 1.f, 4.f);
+	const FVector2D OneFrame = FScreenMarkerProjection::InterpolatePosition(Start, Target, 1.f, 4.f);
 	FVector2D TenFrames = Start;
 	for (int32 Index = 0; Index < 10; ++Index)
 	{
-		TenFrames = UObjectiveMarkerWidget::InterpolateScreenPosition(TenFrames, Target, 0.1f, 4.f);
+		TenFrames = FScreenMarkerProjection::InterpolatePosition(TenFrames, Target, 0.1f, 4.f);
 	}
 	TestTrue(TEXT("convergence is frame-rate independent"), OneFrame.Equals(TenFrames, 0.01f));
 
-	const FVector2D Clamped = UObjectiveMarkerWidget::ClampToViewport(
-		FVector2D(-50.f, 900.f), FVector2D(1280.f, 720.f), 60.f);
-	TestEqual(TEXT("left edge clamps"), Clamped.X, 60.0);
-	TestEqual(TEXT("bottom edge clamps"), Clamped.Y, 660.0);
+	// 1280x720 inset by a 60 px margin: centre (640, 360), half extents (580, 300).
+	const FVector2D Viewport(1280.f, 720.f);
+	constexpr float Margin = 60.f;
+
+	const FVector2D Right = FScreenMarkerProjection::EdgeIntersection(FVector2D(1.f, 0.f), Viewport, Margin);
+	TestTrue(TEXT("due right lands on the right edge"), Right.Equals(FVector2D(1220.0, 360.0), 0.01));
+
+	const FVector2D Up = FScreenMarkerProjection::EdgeIntersection(FVector2D(0.f, -1.f), Viewport, Margin);
+	TestTrue(TEXT("due up lands on the top edge"), Up.Equals(FVector2D(640.0, 60.0), 0.01));
+
+	// Down-right diagonal exits through the SHORTER axis -- the marker slides along the bottom edge
+	// rather than parking in the corner, which a circular clamp would have done.
+	const FVector2D Diagonal = FScreenMarkerProjection::EdgeIntersection(FVector2D(1.f, 1.f), Viewport, Margin);
+	TestTrue(TEXT("diagonal slides along the bottom edge"), Diagonal.Equals(FVector2D(940.0, 660.0), 0.01));
+
+	// A bearing aimed exactly at the corner must resolve both axes at once, not overshoot one.
+	const FVector2D Corner = FScreenMarkerProjection::EdgeIntersection(FVector2D(580.f, 300.f), Viewport, Margin);
+	TestTrue(TEXT("corner bearing lands exactly on the corner"), Corner.Equals(FVector2D(1220.0, 660.0), 0.01));
+
+	// Degenerate bearing must not produce NaN -- it falls back to straight down.
+	const FVector2D Degenerate = FScreenMarkerProjection::EdgeIntersection(FVector2D::ZeroVector, Viewport, Margin);
+	TestTrue(TEXT("zero-length bearing falls back downward"), Degenerate.Equals(FVector2D(640.0, 660.0), 0.01));
+
+	// The behind-camera guarantee: bearing ignores forward distance entirely, so a target 100 uu to
+	// the right reads as "right" whether it is in front of the camera or behind it. A raw
+	// ProjectWorldLocationToScreen mirrors the second case onto the left edge.
+	const FVector2D InFront = FScreenMarkerProjection::BearingFromCameraSpace(FVector(500.f, 100.f, 0.f));
+	const FVector2D Behind = FScreenMarkerProjection::BearingFromCameraSpace(FVector(-500.f, 100.f, 0.f));
+	TestTrue(TEXT("behind-camera bearing points right, not mirrored"), Behind.Equals(FVector2D(1.0, 0.0), 0.01));
+	TestTrue(TEXT("bearing is continuous across the camera plane"), InFront.Equals(Behind, 0.01));
+
+	// Dead centre behind the camera has no meaningful bearing -- must resolve, not divide by zero.
+	const FVector2D DeadBehind = FScreenMarkerProjection::BearingFromCameraSpace(FVector(-500.f, 0.f, 0.f));
+	TestTrue(TEXT("dead-centre-behind falls back downward"), DeadBehind.Equals(FVector2D(0.0, 1.0), 0.01));
 	return true;
 }
 

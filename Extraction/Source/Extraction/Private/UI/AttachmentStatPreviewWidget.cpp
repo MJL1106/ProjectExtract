@@ -2,6 +2,7 @@
 
 #include "UI/AttachmentStatPreviewWidget.h"
 
+#include "Components/Image.h"
 #include "Components/PanelWidget.h"
 #include "Components/TextBlock.h"
 
@@ -9,8 +10,12 @@
 #include "Components/WeaponComponent.h"
 #include "Data/WeaponAttachmentDataAsset.h"
 #include "Data/WeaponDataAsset.h"
+#include "Game/ExtractionPlayerController.h"
+#include "UI/AttachmentIconSet.h"
 #include "UI/AttachmentStatRowWidget.h"
 #include "Weapon/WeaponBase.h"
+
+DEFINE_LOG_CATEGORY_STATIC(LogAttachmentPreview, Log, All);
 
 namespace
 {
@@ -70,6 +75,17 @@ namespace
 
 		const UWeaponAttachmentDataAsset* Attachment = Options[OptionByte];
 		return IsValid(Attachment) ? Attachment->Modifiers : FWeaponStatModifiers();
+	}
+
+	/** Display name of one candidate option, for the panel header -- only ever asked for on the
+	 *  success path, so an out-of-range byte or an unnamed asset just leaves the header blank rather
+	 *  than blocking the rows it titles. */
+	FText ResolveOptionDisplayName(const FAttachmentOptions& Options, uint8 OptionByte)
+	{
+		if (!Options.IsValidIndex(OptionByte)) return FText::GetEmpty();
+
+		const UWeaponAttachmentDataAsset* Attachment = Options[OptionByte];
+		return IsValid(Attachment) ? Attachment->DisplayName : FText::GetEmpty();
 	}
 
 	/** Slot-isolated multiplicative delta as a signed percent. Multiplicative stats compose by
@@ -144,6 +160,23 @@ void UAttachmentStatPreviewWidget::NativeConstruct()
 	// from one pickup to the next.
 	RowWidgets.Reserve(AttachmentStatRowCount);
 	HidePreview();
+
+	AExtractionPlayerController* PC = Cast<AExtractionPlayerController>(GetOwningPlayer());
+	// Registration is the only binding in the HUD that gets a single attempt -- there is no
+	// construct-time retry to fall back on. Failing it leaves GetAttachmentStatPreview() null
+	// forever and every pickup silently does nothing, so say so rather than fail invisibly.
+	UE_CLOG(!PC, LogAttachmentPreview, Warning,
+		TEXT("%s: no AExtractionPlayerController -- attachment pickups will not drive this panel"), *GetName());
+	if (PC)
+		PC->RegisterAttachmentStatPreview(this);
+}
+
+void UAttachmentStatPreviewWidget::NativeDestruct()
+{
+	if (AExtractionPlayerController* PC = Cast<AExtractionPlayerController>(GetOwningPlayer()))
+		PC->UnregisterAttachmentStatPreview(this);
+
+	Super::NativeDestruct();
 }
 
 // ---- Public API ----
@@ -160,6 +193,17 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 		return;
 	}
 
+	// Resolved unconditionally, ahead of the cache-hit return below -- AttachmentIcons can change
+	// (reassigned, or null on an early call and wired up later) without any of the five cached
+	// values moving, so gating this on the cache would leave a stale icon on screen. FindIcon is a
+	// ~9-entry linear scan, cheap enough to repeat on every call including a cache hit. Also feeds
+	// GetFocusedAttachmentIcon/GetFocusedAttachmentName, the world focus prompt's only route to a
+	// real per-attachment icon -- see those getters' comment.
+	FocusedAttachmentIcon = IsValid(AttachmentIcons) ? AttachmentIcons->FindIcon(KitSlotByte, OptionByte) : nullptr;
+	FocusedAttachmentName = IsValid(AttachmentIcons) ? AttachmentIcons->FindDisplayName(KitSlotByte, OptionByte) : FText::GetEmpty();
+	if (IsValid(ItemIcon))
+		ItemIcon->SetBrushFromTexture(FocusedAttachmentIcon, true);
+
 	// Content is a pure function of (weapon identity, its current selection, slot, option, compat).
 	// Skip the entire rebuild when all five match -- the crosshair may rest on the same pickup for
 	// many frames, and rebuilding per frame allocates ~10 FTexts and forces 10 STextBlock relayouts.
@@ -167,9 +211,19 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 
 	SetVisibility(ESlateVisibility::HitTestInvisible);
 
+	// Fetched here (not just inside BuildStatDeltas) because every branch below -- including the
+	// message states -- needs the candidate's display name, and BuildStatDeltas has no way to hand
+	// its internal lookup back out to a static caller.
+	const UWeaponDataAsset* Data = Weapon->GetWeaponData();
+	const FAttachmentOptions* Options = nullptr;
+	uint8 FittedByte = 0;
+	FText CandidateName;
+	if (IsValid(Data) && ResolveKitSlot(*Data, Weapon->GetAttachmentSelection(), KitSlotByte, Options, FittedByte))
+		CandidateName = ResolveOptionDisplayName(*Options, OptionByte);
+
 	if (!bCompatible)
 	{
-		ShowMessageOnly(IncompatibleMessage);
+		ShowMessageOnly(IncompatibleMessage, AttachmentHeadingText, CandidateName);
 		CachedWeapon = Weapon;
 		CachedCandidateData.Reset();
 		CachedSelection = Weapon->GetAttachmentSelection();
@@ -192,15 +246,18 @@ void UAttachmentStatPreviewWidget::ShowForAttachment(uint8 KitSlotByte, uint8 Op
 
 	if (Deltas.Num() == 0)
 	{
-		ShowMessageOnly(CosmeticOnlyMessage);
+		ShowMessageOnly(CosmeticOnlyMessage, AttachmentHeadingText, CandidateName);
 	}
 	else if (PopulateRows(Deltas) == 0)
 	{
-		ShowMessageOnly(NoChangeMessage);
+		ShowMessageOnly(NoChangeMessage, AttachmentHeadingText, CandidateName);
 	}
-	else if (IsValid(MessageText))
+	else
 	{
-		MessageText->SetVisibility(ESlateVisibility::Collapsed);
+		if (IsValid(MessageText))
+			MessageText->SetVisibility(ESlateVisibility::Collapsed);
+
+		SetItemHeader(CandidateName, AttachmentHeadingText);
 	}
 
 	// Cache after every path so the next frame skips the rebuild.
@@ -226,26 +283,37 @@ void UAttachmentStatPreviewWidget::ShowForWeapon(UWeaponDataAsset* CandidateData
 	}
 
 	const bool bCacheHit = bCacheValid && CachedCandidateData.Get() == CandidateData && CachedWeapon.Get() == Held;
-	UE_LOG(LogTemp, Warning, TEXT("[WpnCmp] held=%s (%s) candidate=%s cacheHit=%s"),
-		*GetNameSafe(Held), *GetNameSafe(HeldData), *GetNameSafe(CandidateData), bCacheHit ? TEXT("YES") : TEXT("no"));
 	if (bCacheHit) return;
+
+	// No icon source for a weapon-vs-weapon comparison -- clears whatever an earlier
+	// ShowForAttachment left behind rather than leaving that attachment's icon on screen, or
+	// readable through GetFocusedAttachmentIcon/GetFocusedAttachmentName (a weapon comparison is
+	// not an attachment).
+	FocusedAttachmentIcon = nullptr;
+	FocusedAttachmentName = FText::GetEmpty();
+	if (IsValid(ItemIcon))
+		ItemIcon->SetBrushFromTexture(nullptr, true);
 
 	SetVisibility(ESlateVisibility::HitTestInvisible);
 
 	if (CandidateData == HeldData)
 	{
-		ShowMessageOnly(SameWeaponMessage);
+		// Both candidates are the same weapon -- there is no single item to name.
+		ShowMessageOnly(SameWeaponMessage, WeaponHeadingText);
 	}
 	else
 	{
 		const TArray<FAttachmentStatDelta> Deltas = BuildWeaponDeltas(*HeldData, *CandidateData);
 		if (PopulateRows(Deltas) == 0)
 		{
-			ShowMessageOnly(NoChangeMessage);
+			ShowMessageOnly(NoChangeMessage, WeaponHeadingText, CandidateData->DisplayName);
 		}
-		else if (IsValid(MessageText))
+		else
 		{
-			MessageText->SetVisibility(ESlateVisibility::Collapsed);
+			if (IsValid(MessageText))
+				MessageText->SetVisibility(ESlateVisibility::Collapsed);
+
+			SetItemHeader(CandidateData->DisplayName, WeaponHeadingText);
 		}
 	}
 
@@ -306,10 +374,16 @@ TArray<FAttachmentStatDelta> UAttachmentStatPreviewWidget::BuildWeaponDeltas(
 void UAttachmentStatPreviewWidget::HidePreview()
 {
 	HideRowsFrom(0);
+	ClearItemHeader();
 	InvalidateCache();
 
 	if (IsValid(MessageText))
 		MessageText->SetVisibility(ESlateVisibility::Collapsed);
+
+	FocusedAttachmentIcon = nullptr;
+	FocusedAttachmentName = FText::GetEmpty();
+	if (IsValid(ItemIcon))
+		ItemIcon->SetBrushFromTexture(nullptr, true);
 
 	SetVisibility(ESlateVisibility::Collapsed);
 }
@@ -442,7 +516,7 @@ void UAttachmentStatPreviewWidget::HideRowsFrom(int32 FirstIndex)
 	}
 }
 
-void UAttachmentStatPreviewWidget::ShowMessageOnly(const FText& Message)
+void UAttachmentStatPreviewWidget::ShowMessageOnly(const FText& Message, const FText& Heading, const FText& ItemName)
 {
 	HideRowsFrom(0);
 
@@ -456,6 +530,28 @@ void UAttachmentStatPreviewWidget::ShowMessageOnly(const FText& Message)
 
 	MessageText->SetText(Message);
 	MessageText->SetVisibility(ESlateVisibility::HitTestInvisible);
+
+	// Message states keep the heading (and the item name when the caller has one) so the panel
+	// reads the same whether it's showing rows or a message.
+	SetItemHeader(ItemName, Heading);
+}
+
+void UAttachmentStatPreviewWidget::SetItemHeader(const FText& ItemName, const FText& Heading)
+{
+	if (IsValid(ItemNameText))
+		ItemNameText->SetText(ItemName);
+
+	if (IsValid(HeadingText))
+		HeadingText->SetText(Heading);
+}
+
+void UAttachmentStatPreviewWidget::ClearItemHeader()
+{
+	if (IsValid(ItemNameText))
+		ItemNameText->SetText(FText::GetEmpty());
+
+	if (IsValid(HeadingText))
+		HeadingText->SetText(FText::GetEmpty());
 }
 
 bool UAttachmentStatPreviewWidget::IsCacheCurrent(AWeaponBase* Weapon, uint8 KitSlotByte, uint8 OptionByte, bool bCompatible) const

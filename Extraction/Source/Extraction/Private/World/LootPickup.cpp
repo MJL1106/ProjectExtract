@@ -27,6 +27,9 @@ ALootPickup::ALootPickup()
 	LootMarker = CreateDefaultSubobject<ULootMarkerComponent>(TEXT("LootMarker"));
 	LootMarker->SetupAttachment(SceneRoot);
 	LootMarker->MarkerWorldZOffset = 25.f;
+	LootMarker->MarkerKind = ELootMarkerKind::Pickup;
+	// ILootable carries no label surface -- override is the only source here.
+	LootMarker->MarkerLabelOverride = NSLOCTEXT("Loot", "PickupLabel", "Pick Up");
 }
 
 bool ALootPickup::CanLoot_Implementation() const

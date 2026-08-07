@@ -324,6 +324,9 @@ public:
 	/** True while the cooldown is active (covers just ended, not yet ready again). */
 	bool IsCoveringFireOnCooldown() const;
 
+	/** Configured length of the post-use covering-fire cooldown, so the HUD can normalise a bar. */
+	float GetCoveringFireCooldownDuration() const { return CoveringFireCooldown; }
+
 	/** Record that the companion currently holds a live combat target. Called per service tick
 	 *  while BB_CombatTarget is valid; the stamp stays fresh for as long as a target is held.
 	 *  Not reset anywhere — liveness is gated separately by callers. */

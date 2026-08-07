@@ -16,6 +16,7 @@
 #include "Components/HealthComponent.h"
 #include "Audio/MusicSubsystem.h"
 #include "Character/ExtractionPlayer.h"
+#include "Components/WeaponComponent.h"
 #include "AI/CompanionAIController.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "Camera/CameraComponent.h"
@@ -39,6 +40,7 @@ UCompanionCommandComponent::UCompanionCommandComponent()
 void UCompanionCommandComponent::BeginPlay()
 {
 	Super::BeginPlay();
+	StartPingCandidateUpdates();
 }
 
 void UCompanionCommandComponent::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -47,7 +49,10 @@ void UCompanionCommandComponent::EndPlay(const EEndPlayReason::Type EndPlayReaso
 	SetPromptContextRegistered(false);
 
 	if (UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(CoverReissueTimerHandle);
+		World->GetTimerManager().ClearTimer(PingCandidateTimerHandle);
+	}
 
 	if (ACompanionCharacter* Companion = CachedCompanion.Get())
 		Companion->OnModeChanged.RemoveDynamic(this, &UCompanionCommandComponent::HandleCompanionModeChanged);
@@ -96,17 +101,16 @@ bool UCompanionCommandComponent::IsCompanionRouteActive()
 
 // ---- Ping ----
 
-void UCompanionCommandComponent::IssuePing()
+bool UCompanionCommandComponent::ResolvePingHit(FHitResult& OutHit)
 {
 	UWorld* World = GetWorld();
-	if (!World) return;
+	if (!World) return false;
 
 	ACharacter* Owner = Cast<ACharacter>(GetOwner());
-	if (!IsValid(Owner)) return;
+	if (!IsValid(Owner)) return false;
 
-	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] IssuePing: owner=%s range=%.0f"), *GetNameSafe(Owner), PingTraceRange);
-
-	// Lazily cache the camera component — avoids FindComponentByClass every ping press.
+	// Lazily cache the camera component — avoids FindComponentByClass every ping press (and every
+	// probe tick, now that EvaluatePingCandidate calls this too).
 	if (!CachedCamera.IsValid())
 		CachedCamera = Owner->FindComponentByClass<UCameraComponent>();
 	UCameraComponent* Cam = CachedCamera.Get();
@@ -140,12 +144,28 @@ void UCompanionCommandComponent::IssuePing()
 
 	const bool bPreferInteract = bHitInteract && (!bHitVisibility || InteractHit.Distance <= VisibilityHit.Distance);
 	const bool bHit = bHitVisibility || bHitInteract;
-	const FHitResult Hit = bPreferInteract ? InteractHit : VisibilityHit;
+	OutHit = bPreferInteract ? InteractHit : VisibilityHit;
+
+	return bHit && IsValid(OutHit.GetActor());
+}
+
+void UCompanionCommandComponent::IssuePing()
+{
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	ACharacter* Owner = Cast<ACharacter>(GetOwner());
+	if (!IsValid(Owner)) return;
+
+	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] IssuePing: owner=%s range=%.0f"), *GetNameSafe(Owner), PingTraceRange);
+
+	FHitResult Hit;
+	const bool bHit = ResolvePingHit(Hit);
 
 	UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] trace hit=%d actor=%s class=%s"), bHit,
 		*GetNameSafe(Hit.GetActor()), Hit.GetActor() ? *Hit.GetActor()->GetClass()->GetName() : TEXT("None"));
 
-	if (!bHit || !IsValid(Hit.GetActor()))
+	if (!bHit)
 	{
 		UE_LOG(LogCompanionCommand, Warning, TEXT("[Ping] no hit -> clear"));
 		PlayPingFeedback(false);
@@ -178,6 +198,7 @@ void UCompanionCommandComponent::IssuePing()
 		{
 			PendingCommand = ECompanionCommand::Breach;
 			PendingTarget  = HitActor;
+			CapturePingAnchor(HitActor, Hit.ImpactPoint);
 			SetPromptContextRegistered(false); // breach prompt confirms on B — no G/V shield needed
 			OnPingChanged.Broadcast(PendingCommand, HitActor);
 			PlayPingFeedback(true);
@@ -198,6 +219,7 @@ void UCompanionCommandComponent::IssuePing()
 			{
 				PendingCommand = ECompanionCommand::Explore;
 				PendingTarget  = HitActor; // marker rides the door
+				CapturePingAnchor(HitActor, Hit.ImpactPoint);
 				SetPromptContextRegistered(false); // explore confirms on the breach key — no G/V shield needed
 				OnPingChanged.Broadcast(PendingCommand, HitActor);
 				PlayPingFeedback(true);
@@ -223,6 +245,7 @@ void UCompanionCommandComponent::IssuePing()
 		}
 		PendingCommand = ECompanionCommand::Breach;
 		PendingTarget  = HitActor;
+		CapturePingAnchor(HitActor, Hit.ImpactPoint);
 		SetPromptContextRegistered(false);
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
 		PlayPingFeedback(true);
@@ -235,6 +258,7 @@ void UCompanionCommandComponent::IssuePing()
 	{
 		PendingCommand = ECompanionCommand::Loot;
 		PendingTarget  = HitActor;
+		CapturePingAnchor(HitActor, Hit.ImpactPoint);
 		SetPromptContextRegistered(false); // loot confirms on the breach key — no G/V shield needed
 		OnPingChanged.Broadcast(PendingCommand, HitActor);
 		PlayPingFeedback(true);
@@ -252,6 +276,7 @@ void UCompanionCommandComponent::IssuePing()
 		{
 			PendingCommand = ECompanionCommand::Takedown;
 			PendingTarget  = Enemy;
+			CapturePingAnchor(Enemy, Hit.ImpactPoint);
 			SetPromptContextRegistered(true);
 			OnPingChanged.Broadcast(PendingCommand, Enemy);
 			PlayPingFeedback(true);
@@ -283,6 +308,8 @@ void UCompanionCommandComponent::IssuePing()
 			{
 				PendingCommand = ECompanionCommand::TakeCover;
 				PendingTarget.Reset(); // location-only command, no target actor
+				PendingPingOffset = FVector::ZeroVector; // stale offset from a prior ping -- not used by TakeCover, but don't leave it dangling
+				bPendingPingOffsetValid = false;
 				PendingCoverPingImpact = Hit.ImpactPoint;
 				PendingCoverPingNormal = Hit.ImpactNormal;
 				PendingCoverLocation = FoundCover.Data.Location;
@@ -308,14 +335,155 @@ void UCompanionCommandComponent::PlayPingFeedback(bool bAccepted) const
 		UGameplayStatics::PlaySound2D(GetWorld(), Sound);
 }
 
+// ---- Ping candidate probe ----
+
+bool UCompanionCommandComponent::IsActorPingable(const AActor* Actor) const
+{
+	if (!IsValid(Actor)) return false;
+
+	// Door branch: breach doors mirror IssuePing's CanBreach test; every other door mirrors its
+	// class-level reachability gate only (IsExternalGateLocked/CanAutoOpenForAI). IssuePing itself
+	// also runs IBreachable::Execute_GetPostBreachPoint here before accepting a search ping -- left
+	// out because it needs a companion argument and does real pathing work, not a boolean
+	// class/interface check, so a door that fails only that query reads as pingable here when a
+	// real ping on it would not be. IssuePing's IsCompanionRouteActive() suppression is left out of
+	// every branch below for the same reason it's left out here: it walks the non-const
+	// ResolveCompanion chain, which this const predicate cannot call.
+	if (const ADoorBase* Door = Cast<ADoorBase>(Actor))
+	{
+		if (Door->IsA<ABreachableDoor>())
+			return IBreachable::Execute_CanBreach(Door);
+
+		return !Door->IsExternalGateLocked() && Door->CanAutoOpenForAI();
+	}
+
+	if (Actor->Implements<UBreachable>())
+		return IBreachable::Execute_CanBreach(Actor);
+
+	if (Actor->Implements<ULootable>())
+		return ILootable::Execute_CanLoot(Actor);
+
+	if (const AEnemyCharacter* Enemy = Cast<AEnemyCharacter>(Actor))
+		return Enemy->IsTakedownEligible();
+
+	// Priority 4 in IssuePing (cover-on-wall) has no actor-based test at all -- it resolves from the
+	// hit point/normal via an octree query (CompanionCover::FindCoverOnPingedWall), so there is
+	// nothing for an actor-only predicate to mirror. A ping over bare cover geometry reports
+	// "not pingable" here even though a real ping would resolve to TakeCover.
+	return false;
+}
+
+bool UCompanionCommandComponent::EvaluatePingCandidate(FVector& OutLocation)
+{
+	// A placed ping already owns the marker -- probing over it would have the aiming-state ring
+	// fight the placed-state diamond for the same frame.
+	if (PendingCommand != ECompanionCommand::None) return false;
+
+	// Direct weak-pointer check, not ResolveCompanion() -- resolving falls through to
+	// GetPrimaryCompanion's TActorIterator scan when the cache is empty, and this probe has no
+	// business being the thing that discovers the companion at 10Hz. Everything that actually needs
+	// discovery (IssuePing, the confirm path) still calls ResolveCompanion(), which caches the result
+	// here too; by the time a ping can be usefully aimed the companion is long since found.
+	if (!CachedCompanion.IsValid()) return false;
+
+	// ADS is a combat stance, not a pinging one -- the ring/tag fighting the reticle down sights
+	// reads as clutter. Hip-fire keeps the affordance.
+	const AExtractionPlayer* Player = Cast<AExtractionPlayer>(GetOwner());
+	const UWeaponComponent* Weapon = IsValid(Player) ? Player->GetWeaponComponent() : nullptr;
+	if (IsValid(Weapon) && Weapon->IsAiming()) return false;
+
+	FHitResult Hit;
+	if (!ResolvePingHit(Hit)) return false;
+	if (!IsActorPingable(Hit.GetActor())) return false;
+
+	// A confirmed order stays in flight (BB_CompanionCommand) well after PendingCommand clears --
+	// suppress only the actor that order is against, since IssueCommand explicitly lets a fresh ping
+	// replace one already in flight and a different target must still be offerable.
+	if (const ACompanionAIController* Controller = GetCompanionController())
+	{
+		const UBlackboardComponent* BB = Controller->GetBlackboardComponent();
+		const bool bOrderInFlight = BB
+			&& BB->GetValueAsEnum(ACompanionAIController::BB_CompanionCommand) != static_cast<uint8>(ECompanionCommand::None);
+		if (bOrderInFlight && BB->GetValueAsObject(ACompanionAIController::BB_CommandTargetActor) == Hit.GetActor())
+			return false;
+	}
+
+	OutLocation = Hit.ImpactPoint;
+	return true;
+}
+
+void UCompanionCommandComponent::StartPingCandidateUpdates()
+{
+	UWorld* World = GetWorld();
+	if (!IsValid(World)) return;
+	if (World->GetTimerManager().IsTimerActive(PingCandidateTimerHandle)) return;
+
+	World->GetTimerManager().SetTimer(PingCandidateTimerHandle, this,
+		&UCompanionCommandComponent::UpdatePingCandidate,
+		FMath::Max(PingCandidateInterval, MinPingCandidateInterval), /*bLoop=*/ true);
+}
+
+void UCompanionCommandComponent::UpdatePingCandidate()
+{
+	FVector NewLocation = FVector::ZeroVector;
+	const bool bHasCandidate = EvaluatePingCandidate(NewLocation);
+
+	const bool bFlipped = bHasCandidate != bLastPingCandidate;
+	const bool bMoved = bHasCandidate && bLastPingCandidate
+		&& FVector::DistSquared(NewLocation, LastPingCandidateLocation) > FMath::Square(PingCandidateLocationEpsilon);
+	if (!bFlipped && !bMoved) return;
+
+	bLastPingCandidate = bHasCandidate;
+	LastPingCandidateLocation = bHasCandidate ? NewLocation : FVector::ZeroVector;
+	OnPingCandidateChanged.Broadcast(bLastPingCandidate, LastPingCandidateLocation);
+}
+
 // ---- Confirm helpers ----
 
 void UCompanionCommandComponent::ClearPending()
 {
 	PendingCommand = ECompanionCommand::None;
 	PendingTarget.Reset();
+	PendingPingOffset = FVector::ZeroVector;
+	bPendingPingOffsetValid = false;
 	SetPromptContextRegistered(false);
 	OnPingChanged.Broadcast(ECompanionCommand::None, nullptr);
+}
+
+void UCompanionCommandComponent::CapturePingAnchor(AActor* TargetActor, const FVector& ImpactPoint)
+{
+	PendingPingOffset = IsValid(TargetActor)
+		? TargetActor->GetActorTransform().InverseTransformPosition(ImpactPoint)
+		: ImpactPoint;
+	bPendingPingOffsetValid = true;
+}
+
+bool UCompanionCommandComponent::GetPingWorldLocation(FVector& OutLocation) const
+{
+	if (PendingCommand == ECompanionCommand::TakeCover)
+	{
+		OutLocation = PendingCoverLocation;
+		return true;
+	}
+	if (PendingCommand == ECompanionCommand::None) return false;
+
+	AActor* Target = PendingTarget.Get();
+	if (IsValid(Target) && bPendingPingOffsetValid)
+	{
+		OutLocation = Target->GetActorTransform().TransformPosition(PendingPingOffset);
+		return true;
+	}
+	if (IsValid(Target))
+	{
+		OutLocation = Target->GetActorLocation();
+		return true;
+	}
+
+	// No live target: PendingPingOffset (when valid) is always actor-LOCAL -- every
+	// CapturePingAnchor call site passes a validated actor, so there is no bare-world-point
+	// case to fall back to. A target that dies mid-ping (looted pickup, killed enemy) must
+	// collapse the marker, not resolve a local offset as if it were a world position.
+	return false;
 }
 
 void UCompanionCommandComponent::ClearCommandedCoverIfActive()

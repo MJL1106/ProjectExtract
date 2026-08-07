@@ -468,7 +468,10 @@ public class NeoStackAI : ModuleRules
 /// Shared availability gate used by every folded integration module. This is a
 /// build-time source-availability check only; runtime enablement is handled by
 /// FNeoStackIntegrationManager through IPluginManager::FindEnabledPlugin.
-public static class NeoStackIntegrationRules
+// Keep this internal. UE 5.5 compiles plugin rules once into the plugin rules
+// assembly and again while composing HostProjectModuleRules; a public helper is
+// then visible from both assemblies and produces CS0436 for every integration.
+internal static class NeoStackIntegrationRules
 {
 	private static readonly Dictionary<string, bool> DescriptorCache =
 		new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);

@@ -60,6 +60,32 @@
 			Sign out
 		</button>
 	</div>
+{:else if auth.unreachable}
+	<!-- Signed out only because NeoStack was unreachable. The credential is
+	     still valid and the plugin is retrying on its own, so this must not
+	     look like a logout — a paying user asked to "sign in again" during an
+	     outage reasonably concludes their licence broke. Sign-in stays
+	     available as an escape hatch, just not as the headline. -->
+	<div class="flex items-center gap-2.5">
+		<div
+			class="border-muted-foreground/20 border-t-muted-foreground/70 h-4 w-4 shrink-0 animate-spin rounded-full border-2"
+		></div>
+		<div class="min-w-0 leading-tight">
+			<p class="truncate text-[13px] font-medium text-foreground">
+				{auth.user?.email ? `Reconnecting ${auth.user.email}…` : 'Reconnecting to NeoStack…'}
+			</p>
+			<p class="text-muted-foreground/60 truncate text-[11px]">
+				Couldn’t reach NeoStack. Your licence is unaffected — retrying automatically.
+			</p>
+		</div>
+		<button
+			type="button"
+			onclick={handleRetry}
+			class="hover:bg-card/70 shrink-0 rounded-md border border-border bg-card px-2.5 py-1 text-[12px] font-medium text-foreground"
+		>
+			Sign in
+		</button>
+	</div>
 {:else if auth.status === 'signingIn'}
 	<div class="flex items-center gap-2.5">
 		<div

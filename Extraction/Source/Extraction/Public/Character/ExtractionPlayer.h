@@ -44,6 +44,26 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnPlayerTakedownCommitted);
 /** Broadcast the moment the player pulls their fire trigger. Companion shoot-takedowns listen here for sync. */
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnPlayerFiredWeapon);
 
+/** Which source owns the hold-prompt line. Revive outranks a world interactable when both sit
+ *  under the crosshair — same precedence the prompt widget applied by polling. */
+UENUM(BlueprintType)
+enum class EHudPromptKind : uint8
+{
+	None,
+	Revive,
+	Interact
+};
+
+/** Edge-only prompt state: raised when the resolved source, its text or its hold length moves,
+ *  never per tick. HoldDuration is 0 for a press-only prompt. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(FOnPromptStateChanged, EHudPromptKind, Kind, const FText&, Prompt, float, HoldDuration);
+
+/** A hold actually started, with the duration the fill has to span. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPromptHoldStarted, float, Duration);
+
+/** A hold ended — completed (the interaction fired) or abandoned. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPromptHoldEnded, bool, bCompleted);
+
 /**
  * Minimal C++ base for the kit-reparented player Blueprint.
  * The BP (duplicate of BP_FPCharacter) owns mesh, camera, spring arm, slide,
@@ -93,6 +113,17 @@ public:
 	/** Fires the moment the player pulls their fire trigger. Companion shoot-takedowns listen here for sync. */
 	UPROPERTY(BlueprintAssignable, Category = "Weapon|Events")
 	FOnPlayerFiredWeapon OnPlayerFiredWeapon;
+
+	/** The HUD prompt line's whole state, pushed on change. Replaces the per-tick poll the old
+	 *  prompt widget ran against the getters below. */
+	UPROPERTY(BlueprintAssignable, Category = "Interaction|Events")
+	FOnPromptStateChanged OnPromptStateChanged;
+
+	UPROPERTY(BlueprintAssignable, Category = "Interaction|Events")
+	FOnPromptHoldStarted OnPromptHoldStarted;
+
+	UPROPERTY(BlueprintAssignable, Category = "Interaction|Events")
+	FOnPromptHoldEnded OnPromptHoldEnded;
 
 	// ---- BlueprintImplementableEvents ----
 
@@ -234,6 +265,10 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Revive")
 	float GetReviveProgress() const { return ReviveDuration > 0.f ? FMath::Clamp(ReviveElapsed / ReviveDuration, 0.f, 1.f) : 0.f; }
 
+	/** Seconds a revive hold takes. The HUD's fill has to span the real value, not a copy of it. */
+	UFUNCTION(BlueprintPure, Category = "Revive")
+	float GetReviveDuration() const { return ReviveDuration; }
+
 	// ---- World-interact prompt (local-only; URevivePromptWidget polls these) ----
 
 	/** IWorldInteractable under the crosshair and currently interactable (low-rate local scan),
@@ -255,6 +290,24 @@ public:
 	{
 		return InteractHoldDuration > 0.f ? FMath::Clamp(InteractHoldElapsed / InteractHoldDuration, 0.f, 1.f) : 0.f;
 	}
+
+	/** Length of the hold currently running, copied from the target at hold start. 0 when no hold
+	 *  is in progress — the candidate's own advertised length is on the prompt state instead. */
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	float GetInteractHoldDuration() const { return InteractHoldDuration; }
+
+	// ---- Prompt state (last values pushed on OnPromptStateChanged) ----
+	// The HUD re-reads these whenever it rebuilds itself: an edge-only channel has nothing to
+	// replay, and the framework silently drops anything raised before it finished initializing.
+
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	EHudPromptKind GetHudPromptKind() const { return LastPromptKind; }
+
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	FText GetHudPromptText() const { return LastPromptText; }
+
+	UFUNCTION(BlueprintPure, Category = "Interaction")
+	float GetHudPromptHoldDuration() const { return LastPromptHoldDuration; }
 
 	/**
 	 * Every live ally an interaction trace must step past, with this player itself at index 0 so the
@@ -811,8 +864,10 @@ private:
 	 *  interaction once InteractHoldDuration elapses. */
 	void UpdateInteractHold(float DeltaTime);
 
-	/** Single teardown for every exit (release, completion, target lost, DBNO). Idempotent. */
-	void CancelInteractHold();
+	/** Single teardown for every exit (release, completion, target lost, DBNO). Idempotent.
+	 *  bCompleted distinguishes the clock running out from an abandoned hold — only the completion
+	 *  site passes true, and it is the only difference the HUD's fill needs. */
+	void CancelInteractHold(bool bCompleted = false);
 
 	/** The one authority-side commit for a world interaction, shared by the press, the hold and the
 	 *  server RPC. Raises no completion event of its own — see the note on the implementation. */
@@ -1062,7 +1117,9 @@ private:
 
 	void UpdateRevive(float DeltaTime);
 	AActor* FindReviveTarget() const;
-	void CancelRevive();
+
+	/** See CancelInteractHold for the bCompleted contract — same split, revive side. */
+	void CancelRevive(bool bCompleted = false);
 
 	UPROPERTY()
 	TObjectPtr<AActor> ReviveTarget;
@@ -1096,6 +1153,29 @@ private:
 	TWeakObjectPtr<AActor> InteractCandidate;
 	FText InteractCandidatePrompt;
 	float InteractCandidateScanAccumulator = 0.f;
+
+	/** The candidate's advertised hold length, sampled by the scan so the prompt can show a hold
+	 *  ring before the press. 0 = press-only interactable. */
+	float InteractCandidateHoldSeconds = 0.f;
+
+	// ---- Prompt state (edge-only broadcast) ----
+
+	/** Resolves the two candidate scans into one prompt line and raises OnPromptStateChanged only
+	 *  when the answer moved. Called once per scan pass, never per frame — see bPromptStateDirty. */
+	void RefreshPromptState();
+
+	/** Set by anything that can move the prompt (both candidate scans, hold start/stop); consumed
+	 *  by Tick AFTER both scans have run, so a frame where one candidate clears as the other
+	 *  appears resolves once, in the right order. */
+	bool bPromptStateDirty = false;
+
+	EHudPromptKind LastPromptKind = EHudPromptKind::None;
+	FText LastPromptText;
+	float LastPromptHoldDuration = 0.f;
+
+	/** The actor the last prompt described. Text alone is a poor edge: the interact prompt is
+	 *  re-formatted from scratch on every scan, so comparing FText instances would fire at 10Hz. */
+	TWeakObjectPtr<AActor> LastPromptSource;
 
 	/** Mirror of BTTask_RevivePlayer's first-tick gate: guards, patient montage + AI-stop via
 	 *  SetBeingRevived, rotation-only AlignForRevive on the target, reviver MESH seat at the

@@ -36,6 +36,9 @@ AWeaponCase::AWeaponCase()
 	// nothing is stamped here — the BP subclass owns the look.
 	LootMarker = CreateDefaultSubobject<ULootMarkerComponent>(TEXT("LootMarker"));
 	LootMarker->SetupAttachment(SceneRoot);
+	LootMarker->MarkerKind = ELootMarkerKind::WeaponCase;
+	// AWeaponCase implements neither ILootable nor IWorldInteractable -- override is the only source.
+	LootMarker->MarkerLabelOverride = NSLOCTEXT("Loot", "WeaponCaseLabel", "Weapon Case");
 }
 
 void AWeaponCase::OnConstruction(const FTransform& Transform)
