@@ -1,0 +1,1 @@
+@keyframes svelte-leaxeg-shimmer{0%{background-position:100% center}to{background-position:0% center}}.animate-shimmer{animation:svelte-leaxeg-shimmer var(--shimmer-duration, 2s) linear infinite}@media(prefers-reduced-motion:reduce){.animate-shimmer{animation:none}}.context-icon.svelte-1ufxso5 svg{width:14px;height:14px}

@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en" class="dark">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		
+		<link href="./_app/immutable/assets/0.BdaVrcH2.css" rel="stylesheet">
+		<link href="./_app/immutable/assets/2.CeUyaEr0.css" rel="stylesheet">
+		<link rel="modulepreload" href="./_app/immutable/entry/start.DV1ApFFC.js">
+		<link rel="modulepreload" href="./_app/immutable/chunks/BhWnF_9W.js">
+		<link rel="modulepreload" href="./_app/immutable/chunks/C3ThQVW4.js">
+		<link rel="modulepreload" href="./_app/immutable/entry/app.D1tzyPZ5.js">
+		<link rel="modulepreload" href="./_app/immutable/chunks/PPVm8Dsz.js">
+		<link rel="modulepreload" href="./_app/immutable/chunks/66wtWdfl.js">
+		<link rel="modulepreload" href="./_app/immutable/chunks/BSK1oHq_.js">
+		<link rel="modulepreload" href="./_app/immutable/nodes/0.DLUi4IsE.js">
+		<link rel="modulepreload" href="./_app/immutable/chunks/Botvzh_2.js">
+		<link rel="modulepreload" href="./_app/immutable/chunks/CfQSXbOl.js">
+		<link rel="modulepreload" href="./_app/immutable/chunks/1FuQry-k.js">
+		<link rel="modulepreload" href="./_app/immutable/nodes/2.AHVWPY5L.js">
+		<link rel="modulepreload" href="./_app/immutable/chunks/BdKLb6zP.js"><!--12qhfyh--><!----><!--1funsus--><!--[!--><!--]--> <!----><script>(function setInitialMode({ defaultMode = "system", themeColors: themeColors2, darkClassNames: darkClassNames2 = ["dark"], lightClassNames: lightClassNames2 = [], defaultTheme = "", modeStorageKey: modeStorageKey2 = "mode-watcher-mode", themeStorageKey: themeStorageKey2 = "mode-watcher-theme" }) {
+  const rootEl = document.documentElement;
+  const mode = localStorage.getItem(modeStorageKey2) ?? defaultMode;
+  const theme = localStorage.getItem(themeStorageKey2) ?? defaultTheme;
+  const light = mode === "light" || mode === "system" && window.matchMedia("(prefers-color-scheme: light)").matches;
+  if (light) {
+    if (darkClassNames2.length)
+      rootEl.classList.remove(...darkClassNames2.filter(Boolean));
+    if (lightClassNames2.length)
+      rootEl.classList.add(...lightClassNames2.filter(Boolean));
+  } else {
+    if (lightClassNames2.length)
+      rootEl.classList.remove(...lightClassNames2.filter(Boolean));
+    if (darkClassNames2.length)
+      rootEl.classList.add(...darkClassNames2.filter(Boolean));
+  }
+  rootEl.style.colorScheme = light ? "light" : "dark";
+  if (themeColors2) {
+    const themeMetaEl = document.querySelector('meta[name="theme-color"]');
+    if (themeMetaEl) {
+      themeMetaEl.setAttribute("content", mode === "light" ? themeColors2.light : themeColors2.dark);
+    }
+  }
+  if (theme) {
+    rootEl.setAttribute("data-theme", theme);
+    localStorage.setItem(themeStorageKey2, theme);
+  }
+  localStorage.setItem(modeStorageKey2, mode);
+})({"defaultMode":"dark","darkClassNames":["dark"],"lightClassNames":[],"defaultTheme":"","modeStorageKey":"mode-watcher-mode","themeStorageKey":"mode-watcher-theme"});</script><!----><!----><title>Agent Chat</title>
+		<script>
+			/* Polyfills for older Chromium (CEF) that lack ES2023 Array methods */
+			if (!Array.prototype.findLast) {
+				Array.prototype.findLast = function (fn, thisArg) {
+					for (var i = this.length - 1; i >= 0; i--) {
+						if (fn.call(thisArg, this[i], i, this)) return this[i];
+					}
+				};
+			}
+			if (!Array.prototype.findLastIndex) {
+				Array.prototype.findLastIndex = function (fn, thisArg) {
+					for (var i = this.length - 1; i >= 0; i--) {
+						if (fn.call(thisArg, this[i], i, this)) return i;
+					}
+					return -1;
+				};
+			}
+		</script>
+		<script>
+			(function () {
+				function enableLegacyUiIfNeeded() {
+					try {
+						const probe = document.createElement('div');
+						probe.className = 'flex';
+						probe.style.position = 'absolute';
+						probe.style.visibility = 'hidden';
+						probe.style.pointerEvents = 'none';
+						document.body.appendChild(probe);
+
+						const hasTailwindUtilities = window.getComputedStyle(probe).display === 'flex';
+						probe.remove();
+
+						if (!hasTailwindUtilities) {
+							document.documentElement.classList.add('legacy-ui');
+						}
+					} catch {
+						document.documentElement.classList.add('legacy-ui');
+					}
+				}
+
+				if (document.readyState === 'complete') {
+					enableLegacyUiIfNeeded();
+				} else {
+					window.addEventListener('load', enableLegacyUiIfNeeded, { once: true });
+				}
+			})();
+		</script>
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents"><!--[--><!--[--><!----><!--[!--><!--]--><!----> <section aria-label="Notifications alt+T" tabindex="-1" aria-live="polite" aria-relevant="additions text" aria-atomic="false" class="svelte-nbs0zk"><!--[!--><!--]--></section><!----> <!----><!----><div class="flex h-screen w-screen flex-col overflow-hidden"><nav class="flex h-[34px] shrink-0 items-center border-b border-border bg-sidebar"><div class="flex h-full items-center gap-0 pl-2"><!--[--><button class="focus-ring relative flex h-full items-center gap-1.5 px-3 text-[11px] font-medium transition-colors duration-100 text-foreground"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" color="currentColor" style="display: inline-block; vertical-align: middle;"><!----><path d="M7.5 12H13.5M7.5 8H10.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M8.5 20C9.55038 20.8697 10.8145 21.4238 12.2635 21.5188C13.4052 21.5937 14.5971 21.5936 15.7365 21.5188C16.1288 21.4931 16.5565 21.4007 16.9248 21.251C17.3345 21.0845 17.5395 21.0012 17.6437 21.0138C17.7478 21.0264 17.8989 21.1364 18.2011 21.3563C18.7339 21.744 19.4051 22.0225 20.4005 21.9986C20.9038 21.9865 21.1555 21.9804 21.2681 21.7909C21.3808 21.6013 21.2405 21.3389 20.9598 20.8141C20.5706 20.0862 20.324 19.2529 20.6977 18.5852C21.3413 17.6315 21.8879 16.5021 21.9678 15.2823C22.0107 14.6269 22.0107 13.9481 21.9678 13.2927C21.9146 12.4799 21.7173 11.7073 21.4012 11" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M12.345 17.4868C15.9006 17.2526 18.7328 14.4069 18.9658 10.8344C19.0114 10.1353 19.0114 9.41131 18.9658 8.71219C18.7328 5.13969 15.9006 2.29401 12.345 2.05985C11.132 1.97997 9.86553 1.98013 8.65499 2.05985C5.09943 2.29401 2.26725 5.13969 2.0342 8.71219C1.9886 9.41131 1.9886 10.1353 2.0342 10.8344C2.11908 12.1356 2.69992 13.3403 3.38372 14.3576C3.78076 15.0697 3.51873 15.9586 3.10518 16.735C2.807 17.2948 2.65791 17.5747 2.77762 17.7769C2.89732 17.9791 3.16472 17.9856 3.69951 17.9985C4.75712 18.024 5.47028 17.7269 6.03638 17.3134C6.35744 17.0788 6.51798 16.9615 6.62862 16.9481C6.73926 16.9346 6.957 17.0234 7.39241 17.2011C7.78374 17.3608 8.23812 17.4593 8.65499 17.4868C9.86553 17.5665 11.132 17.5666 12.345 17.4868Z" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/><!----></svg><!----> Chat <span class="absolute bottom-0 left-2 right-2 h-[2px] rounded-t-full bg-[var(--ue-accent)] transition-all duration-150 ease-out" style="opacity: 1; transform: scaleX(1);"></span></button><button class="focus-ring relative flex h-full items-center gap-1.5 px-3 text-[11px] font-medium transition-colors duration-100 text-muted-foreground hover:text-foreground"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" color="currentColor" style="display: inline-block; vertical-align: middle;"><!----><path d="M3 16L7.46967 11.5303C7.80923 11.1908 8.26978 11 8.75 11C9.23022 11 9.69077 11.1908 10.0303 11.5303L14 15.5M15.5 17L14 15.5M21 16L18.5303 13.5303C18.1908 13.1908 17.7302 13 17.25 13C16.7698 13 16.3092 13.1908 15.9697 13.5303L14 15.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M15.5 8C15.7761 8 16 7.77614 16 7.5C16 7.22386 15.7761 7 15.5 7M15.5 8C15.2239 8 15 7.77614 15 7.5C15 7.22386 15.2239 7 15.5 7M15.5 8V7" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M3.69797 19.7472C2.5 18.3446 2.5 16.2297 2.5 12C2.5 7.77027 2.5 5.6554 3.69797 4.25276C3.86808 4.05358 4.05358 3.86808 4.25276 3.69797C5.6554 2.5 7.77027 2.5 12 2.5C16.2297 2.5 18.3446 2.5 19.7472 3.69797C19.9464 3.86808 20.1319 4.05358 20.302 4.25276C21.5 5.6554 21.5 7.77027 21.5 12C21.5 16.2297 21.5 18.3446 20.302 19.7472C20.1319 19.9464 19.9464 20.1319 19.7472 20.302C18.3446 21.5 16.2297 21.5 12 21.5C7.77027 21.5 5.6554 21.5 4.25276 20.302C4.05358 20.1319 3.86808 19.9464 3.69797 19.7472Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><!----></svg><!----> Studio <span class="absolute bottom-0 left-2 right-2 h-[2px] rounded-t-full bg-[var(--ue-accent)] transition-all duration-150 ease-out" style="opacity: 0; transform: scaleX(0.6);"></span></button><button class="focus-ring relative flex h-full items-center gap-1.5 px-3 text-[11px] font-medium transition-colors duration-100 text-muted-foreground hover:text-foreground"><svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" color="currentColor" style="display: inline-block; vertical-align: middle;"><!----><path d="M7 7L8.22654 8.05719C8.74218 8.50163 9 8.72386 9 9C9 9.27614 8.74218 9.49836 8.22654 9.94281L7 11" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M11 11H14" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M12 21C15.7497 21 17.6246 21 18.9389 20.0451C19.3634 19.7367 19.7367 19.3634 20.0451 18.9389C21 17.6246 21 15.7497 21 12C21 8.25027 21 6.3754 20.0451 5.06107C19.7367 4.6366 19.3634 4.26331 18.9389 3.95491C17.6246 3 15.7497 3 12 3C8.25027 3 6.3754 3 5.06107 3.95491C4.6366 4.26331 4.26331 4.6366 3.95491 5.06107C3 6.3754 3 8.25027 3 12C3 15.7497 3 17.6246 3.95491 18.9389C4.26331 19.3634 4.6366 19.7367 5.06107 20.0451C6.3754 21 8.25027 21 12 21Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><!----></svg><!----> Terminal <span class="absolute bottom-0 left-2 right-2 h-[2px] rounded-t-full bg-[var(--ue-accent)] transition-all duration-150 ease-out" style="opacity: 0; transform: scaleX(0.6);"></span></button><!--]--></div> <div class="ml-auto flex select-none items-center pr-3"><span class="text-[10px] font-medium tracking-wider text-muted-foreground opacity-60">NEOSTACK</span></div></nav><!----> <!--[!--><!--]--><!----> <!--[!--><!--]--><!----> <div class="flex min-h-0 flex-1 overflow-hidden"><!----><!--[!--><!--]--> <!--[!--><!--]--> <!--[!--><!--]--> <!--[--><div class="relative flex min-w-0 flex-1"><!--[--><button class="sidebar-mobile-backdrop absolute inset-0 z-30 bg-black/45" aria-label="Close sidebar"></button><!--]--> <div class="chat-sidebar shrink-0 overflow-hidden chat-sidebar-open "><div class="h-full w-[280px]"><aside class="flex h-full w-[280px] shrink-0 flex-col border-r border-border bg-sidebar"><div class="px-3 pb-1 pt-2.5"><!--[--><button class="border-border/80 flex w-full items-center justify-center gap-2 rounded-lg border border-dashed px-3 py-2.5 text-[13px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"><span>Set up agents in Settings</span></button><!--]--></div> <div class="flex items-center justify-between px-4 pb-1 pt-3"><span class="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Sessions</span> <button class="text-muted-foreground/50 hover:bg-sidebar-accent/60 flex h-10 w-10 items-center justify-center rounded transition-colors hover:text-muted-foreground" title="Refresh session list" aria-label="Refresh session list"><svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" color="currentColor" style="display: inline-block; vertical-align: middle;"><!----><path d="M15.1667 0.999756L15.7646 2.11753C16.1689 2.87322 16.371 3.25107 16.2374 3.41289C16.1037 3.57471 15.6635 3.44402 14.7831 3.18264C13.9029 2.92131 12.9684 2.78071 12 2.78071C6.75329 2.78071 2.5 6.90822 2.5 11.9998C2.5 13.6789 2.96262 15.2533 3.77093 16.6093M8.83333 22.9998L8.23536 21.882C7.83108 21.1263 7.62894 20.7484 7.7626 20.5866C7.89627 20.4248 8.33649 20.5555 9.21689 20.8169C10.0971 21.0782 11.0316 21.2188 12 21.2188C17.2467 21.2188 21.5 17.0913 21.5 11.9998C21.5 10.3206 21.0374 8.74623 20.2291 7.39023" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><!----></svg><!----></button></div> <!--[!--><!--]--> <!--[!--><!--]--> <div class="min-h-0 flex-1 overflow-y-auto px-2 pb-2"><!--[2--><div class="text-muted-foreground/50 flex flex-col items-center justify-center gap-3 py-8"><svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" color="currentColor" style="display: inline-block; vertical-align: middle;"><!----><path d="M7.5 12H13.5M7.5 8H10.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M8.5 20C9.55038 20.8697 10.8145 21.4238 12.2635 21.5188C13.4052 21.5937 14.5971 21.5936 15.7365 21.5188C16.1288 21.4931 16.5565 21.4007 16.9248 21.251C17.3345 21.0845 17.5395 21.0012 17.6437 21.0138C17.7478 21.0264 17.8989 21.1364 18.2011 21.3563C18.7339 21.744 19.4051 22.0225 20.4005 21.9986C20.9038 21.9865 21.1555 21.9804 21.2681 21.7909C21.3808 21.6013 21.2405 21.3389 20.9598 20.8141C20.5706 20.0862 20.324 19.2529 20.6977 18.5852C21.3413 17.6315 21.8879 16.5021 21.9678 15.2823C22.0107 14.6269 22.0107 13.9481 21.9678 13.2927C21.9146 12.4799 21.7173 11.7073 21.4012 11" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M12.345 17.4868C15.9006 17.2526 18.7328 14.4069 18.9658 10.8344C19.0114 10.1353 19.0114 9.41131 18.9658 8.71219C18.7328 5.13969 15.9006 2.29401 12.345 2.05985C11.132 1.97997 9.86553 1.98013 8.65499 2.05985C5.09943 2.29401 2.26725 5.13969 2.0342 8.71219C1.9886 9.41131 1.9886 10.1353 2.0342 10.8344C2.11908 12.1356 2.69992 13.3403 3.38372 14.3576C3.78076 15.0697 3.51873 15.9586 3.10518 16.735C2.807 17.2948 2.65791 17.5747 2.77762 17.7769C2.89732 17.9791 3.16472 17.9856 3.69951 17.9985C4.75712 18.024 5.47028 17.7269 6.03638 17.3134C6.35744 17.0788 6.51798 16.9615 6.62862 16.9481C6.73926 16.9346 6.957 17.0234 7.39241 17.2011C7.78374 17.3608 8.23812 17.4593 8.65499 17.4868C9.86553 17.5665 11.132 17.5666 12.345 17.4868Z" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/><!----></svg><!----> <span class="text-[12px]">No sessions yet</span> <button class="text-muted-foreground/60 text-[11px] underline underline-offset-2 transition-colors hover:text-muted-foreground">Retry loading</button></div><!--]--></div> <div class="flex items-center gap-1 border-t border-border px-2 py-1.5"><div class="min-w-0 flex-1"><!--[2--><button type="button" class="hover:bg-sidebar-accent/40 flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors"><div class="bg-muted-foreground/10 text-muted-foreground/60 flex h-7 w-7 shrink-0 items-center justify-center rounded-full"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" color="currentColor" style="display: inline-block; vertical-align: middle;"><!----><path d="M17 8.5C17 5.73858 14.7614 3.5 12 3.5C9.23858 3.5 7 5.73858 7 8.5C7 11.2614 9.23858 13.5 12 13.5C14.7614 13.5 17 11.2614 17 8.5Z" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><path d="M19 20.5C19 16.634 15.866 13.5 12 13.5C8.13401 13.5 5 16.634 5 20.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><!----></svg><!----></div> <div class="min-w-0 flex-1 leading-tight"><p class="truncate text-[12px] font-medium text-foreground"><!--[!-->NeoStack Cloud<!--]--></p> <p class="text-muted-foreground/55 truncate text-[10.5px]"><!--[!-->Not signed in<!--]--></p></div></button><!--]--><!----></div> <a href="https://discord.gg/betide" target="_blank" rel="noopener noreferrer" class="focus-ring text-sidebar-foreground/70 flex h-10 w-10 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground" title="Discord" aria-label="Discord"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" class="shrink-0"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"></path></svg></a> <button class="focus-ring text-sidebar-foreground/70 flex h-10 w-10 shrink-0 items-center justify-center rounded-md transition-colors hover:bg-sidebar-accent hover:text-sidebar-foreground" title="Settings" aria-label="Settings"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" color="currentColor" style="display: inline-block; vertical-align: middle;"><!----><path d="M15.5 12C15.5 13.933 13.933 15.5 12 15.5C10.067 15.5 8.5 13.933 8.5 12C8.5 10.067 10.067 8.5 12 8.5C13.933 8.5 15.5 10.067 15.5 12Z" stroke="currentColor" stroke-width="1.5"/><path d="M21.011 14.0965C21.5329 13.9558 21.7939 13.8854 21.8969 13.7508C22 13.6163 22 13.3998 22 12.9669V11.0332C22 10.6003 22 10.3838 21.8969 10.2493C21.7938 10.1147 21.5329 10.0443 21.011 9.90358C19.0606 9.37759 17.8399 7.33851 18.3433 5.40087C18.4817 4.86799 18.5509 4.60156 18.4848 4.44529C18.4187 4.28902 18.2291 4.18134 17.8497 3.96596L16.125 2.98673C15.7528 2.77539 15.5667 2.66972 15.3997 2.69222C15.2326 2.71472 15.0442 2.90273 14.6672 3.27873C13.208 4.73448 10.7936 4.73442 9.33434 3.27864C8.95743 2.90263 8.76898 2.71463 8.60193 2.69212C8.43489 2.66962 8.24877 2.77529 7.87653 2.98663L6.15184 3.96587C5.77253 4.18123 5.58287 4.28891 5.51678 4.44515C5.45068 4.6014 5.51987 4.86787 5.65825 5.4008C6.16137 7.3385 4.93972 9.37763 2.98902 9.9036C2.46712 10.0443 2.20617 10.1147 2.10308 10.2492C2 10.3838 2 10.6003 2 11.0332V12.9669C2 13.3998 2 13.6163 2.10308 13.7508C2.20615 13.8854 2.46711 13.9558 2.98902 14.0965C4.9394 14.6225 6.16008 16.6616 5.65672 18.5992C5.51829 19.1321 5.44907 19.3985 5.51516 19.5548C5.58126 19.7111 5.77092 19.8188 6.15025 20.0341L7.87495 21.0134C8.24721 21.2247 8.43334 21.3304 8.6004 21.3079C8.76746 21.2854 8.95588 21.0973 9.33271 20.7213C10.7927 19.2644 13.2088 19.2643 14.6689 20.7212C15.0457 21.0973 15.2341 21.2853 15.4012 21.3078C15.5682 21.3303 15.7544 21.2246 16.1266 21.0133L17.8513 20.034C18.2307 19.8187 18.4204 19.711 18.4864 19.5547C18.5525 19.3984 18.4833 19.132 18.3448 18.5991C17.8412 16.6616 19.0609 14.6226 21.011 14.0965Z" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/><!----></svg><!----></button></div></aside> <!--[!--><!--]--><!----></div></div> <main class="flex min-w-0 flex-1 flex-col"><header class="flex h-10 shrink-0 items-center justify-between border-b border-border bg-surface-bar px-3"><div class="flex min-w-0 flex-1 items-center gap-2 text-[13px]"><button class="focus-ring flex h-10 w-10 shrink-0 items-center justify-center rounded text-muted-foreground transition-colors hover:bg-accent hover:text-foreground" title="Hide sidebar" aria-label="Hide sidebar"><svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" color="currentColor" style="display: inline-block; vertical-align: middle;"><!----><path d="M2 12C2 8.31087 2 6.4663 2.81382 5.15877C3.1149 4.67502 3.48891 4.25427 3.91891 3.91554C5.08116 3 6.72077 3 10 3H14C17.2792 3 18.9188 3 20.0811 3.91554C20.5111 4.25427 20.8851 4.67502 21.1862 5.15877C22 6.4663 22 8.31087 22 12C22 15.6891 22 17.5337 21.1862 18.8412C20.8851 19.325 20.5111 19.7457 20.0811 20.0845C18.9188 21 17.2792 21 14 21H10C6.72077 21 5.08116 21 3.91891 20.0845C3.48891 19.7457 3.1149 19.325 2.81382 18.8412C2 17.5337 2 15.6891 2 12Z" stroke="currentColor" stroke-width="1.5"/><path d="M9.5 3L9.5 21" stroke="currentColor" stroke-linejoin="round" stroke-width="1.5"/><path d="M5 7H6M5 10H6" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"/><!----></svg><!----></button> <div class="flex min-w-0 flex-1 items-center gap-2"><span class="min-w-0 flex-1 truncate font-medium text-foreground" title="Agent Chat">Agent Chat</span> <!--[!--><!--]--></div> <!--[!--><!--]--> <!--[!--><!--]--></div> <div class="ml-2 flex shrink-0 items-center gap-2"><!--[!--><!--]--><!----> <!--[!--><!--]--> <!--[!--><!--]--></div></header> <div class="shrink-0 px-6 pt-3"><!--[!--><!--]--><!----> <!--[!--><!--]--><!----></div> <!--[!--><div class="flex flex-1 flex-col items-center justify-center gap-8 px-6"><div class="flex flex-col items-center gap-3"><!--[!--><!--]--> <h2 class="text-foreground/70 text-balance text-center text-lg font-light">Start a new conversation</h2> <p class="text-muted-foreground/50 text-pretty text-center text-[13px]">Choose an agent below to begin</p></div> <div class="flex flex-wrap justify-center gap-2.5"><!--[--><!--]--></div> <!--[!--><!--]--></div><!--]--> <!----><!----><!--[!--><!--]--><!----><!----><!----></main></div><!--]--><!----><!----></div></div><!----><!----><!----> <!--[!--><!--]--><!----><!--]--> <!--[!--><!--]--><!--]-->
+			
+			<script>
+				{
+					__sveltekit_z18sdw = {
+						base: new URL(".", location).pathname.slice(0, -1)
+					};
+
+					const element = document.currentScript.parentElement;
+
+					Promise.all([
+						import("./_app/immutable/entry/start.DV1ApFFC.js"),
+						import("./_app/immutable/entry/app.D1tzyPZ5.js")
+					]).then(([kit, app]) => {
+						kit.start(app, element, {
+							node_ids: [0, 2],
+							data: [null,null],
+							form: null,
+							error: null
+						});
+					});
+				}
+			</script>
+		</div>
+	</body>
+</html>
