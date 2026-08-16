@@ -44,7 +44,6 @@
 #include "AnimNotify_TakedownKill.h"
 #include "AIController.h"
 #include "BrainComponent.h"
-#include "EnemyDebug.h"
 #include "World/Lootable.h"
 #include "World/BreachableDoor.h"
 #include "Audio/GameAudioSubsystem.h"
@@ -131,24 +130,6 @@ UAISense_Sight::EVisibilityResult AExtractionPlayer::CanBeSeenFrom(
 
 	if (bVisible)
 		OutSightStrength = 1.f;
-
-#if !UE_BUILD_SHIPPING
-	if (GetDetectionLogLevel() > 0)
-	{
-		TWeakObjectPtr<const AActor> ObsKey(Context.IgnoreActor);
-		const bool* LastResult = DebugLastCanBeSeenResult.Find(ObsKey);
-		if (!LastResult || *LastResult != bVisible)
-		{
-			DebugLastCanBeSeenResult.Add(ObsKey, bVisible);
-			UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] CanBeSeenFrom obs=%s result=%s seenZ=%.0f playerZ=%.0f crouched=%d"),
-				*GetNameSafe(Context.IgnoreActor),
-				bVisible ? TEXT("VISIBLE") : TEXT("NOT-VISIBLE"),
-				bVisible ? OutSeenLocation.Z : -1.f,
-				GetActorLocation().Z,
-				bIsCrouched ? 1 : 0);
-		}
-	}
-#endif
 
 	return bVisible ? UAISense_Sight::EVisibilityResult::Visible : UAISense_Sight::EVisibilityResult::NotVisible;
 }
@@ -240,10 +221,6 @@ void AExtractionPlayer::BeginPlay()
 
 void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-#if !UE_BUILD_SHIPPING
-	DebugLastCanBeSeenResult.Empty();
-#endif
-
 	if (IsValid(TraversalComponent))
 	{
 		TraversalComponent->OnTraversalStarted.RemoveAll(this);

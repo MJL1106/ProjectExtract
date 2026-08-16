@@ -1029,11 +1029,6 @@ private:
 	/** Releases the audio suppression failsafe. */
 	void ReleaseAudioSuppressionFailsafe();
 
-#if !UE_BUILD_SHIPPING
-	// Edge-triggered map: tracks the last logged CanBeSeenFrom result per observer to avoid log spam.
-	TMap<TWeakObjectPtr<const AActor>, bool> DebugLastCanBeSeenResult;
-#endif
-
 	// ---- Companion Debug Exec Commands ----
 	// (UHT forbids UFUNCTION inside preprocessor blocks — kept unguarded; console exec is dev-only at runtime.)
 

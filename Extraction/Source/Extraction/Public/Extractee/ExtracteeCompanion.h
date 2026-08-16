@@ -176,9 +176,6 @@ private:
 	 *  drift; the captive-kneel pose is NOT the cause -- the socketToBone term cancels because the
 	 *  weapon's attach socket is parented to the align bone).
 	 *
-	 *  To verify: companion.AlignDebug 1, compare the socketToBone term between the BeginPlay
-	 *  bake and the post-arming bake -- identical means the baseline was never the cause.
-	 *
 	 *  Deferred, not immediate: the anim instance waits until the pose the bake reads has stopped
 	 *  moving, so this never trades one baseline for a mid-transition one. */
 	void RebaselineWeaponAlign();

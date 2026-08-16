@@ -656,12 +656,6 @@ private:
 	 *  Setup*Align, before that setup reads GetRelativeTransform() for its own rest target. */
 	void CaptureAlignRestPoseOnce();
 
-	/** companion.AlignDebug one-shot bake dump. SocketToBone is TRest * TBone.Inverse() — the ONLY
-	 *  pose-dependent term in the composition, so comparing it across two bakes says whether the
-	 *  pose at bake time affects the result at all (it cancels when the weapon's attach socket is
-	 *  parented to the align bone). */
-	void LogCoverAlignBake(FName RestSocket, FName AlignBone, const FTransform& SocketToBone) const;
-
 	// ---- Recoil offset runtime state ----
 
 	/**
@@ -772,12 +766,6 @@ private:
 	/** Recombines CombinedModifiers/suppressed/flash-override from the current selection.
 	 *  Drops the pooled muzzle-flash components when the effective flash FX changed. */
 	void RecalculateAttachmentEffects();
-
-	/** Dumps the current selection, the attachment assets it resolved to, and the resulting
-	 *  effective stats. Gated on weapon.AttachmentDebug — the whole point is to prove whether a
-	 *  picked-up attachment actually reached the weapon, so it re-resolves rather than trusting
-	 *  the cached modifiers. Costs nothing while the CVar is 0. */
-	void LogAttachmentDebug() const;
 
 	/** Product/sum of all mounted attachments' modifiers. Neutral defaults when nothing mounted. */
 	FWeaponStatModifiers CombinedModifiers;

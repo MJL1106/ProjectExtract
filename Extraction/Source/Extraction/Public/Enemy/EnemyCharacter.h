@@ -46,6 +46,10 @@ class UEnemySquad;
 class UAmmoDropTableDataAsset;
 class UNiagaraSystem;
 
+// Published combat-fire phase (declared in AI/Tasks/BTTask_EnemyCombatFire.h). Forward-declared so
+// this header stays free of the BT/cover include chain; readers include the task header themselves.
+enum class EFireTaskPhase : uint8;
+
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnTakedownExecuted, AActor*, Instigator);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FOnMeleePerformed);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEnemyHitReact, EHitRegion, Region);
@@ -147,6 +151,29 @@ public:
 
 	void SetHasTargetLOS(bool bInLOS) { bHasTargetLOS = bInLOS; }
 	bool HasTargetLOS() const { return bHasTargetLOS; }
+
+	// --- Combat fire phase (published by UBTTask_EnemyCombatFire, read by overlays/debug) ---
+
+	/** Publishes the fire task's phase for this frame. Called once per TickTask while the task is
+	 *  active. Plain AI-side state — never replicated. */
+	void SetOverlayFirePhase(EFireTaskPhase Phase, float WorldTime, bool bBlindFiring);
+
+	/** Resets the published phase to its never-published state. Called from the fire task's cleanup. */
+	void ClearOverlayFirePhase();
+
+	/** Last phase published. Only meaningful alongside GetOverlayFirePhaseTime — check freshness first. */
+	EFireTaskPhase GetOverlayFirePhase() const { return OverlayFirePhase; }
+
+	/** World seconds of the last publish; large negative when never published or cleared.
+	 *  Readers MUST discard the phase once this goes stale: a task that aborts hard stops
+	 *  publishing without necessarily reaching the cleanup path. */
+	float GetOverlayFirePhaseTime() const { return OverlayFirePhaseTime; }
+
+	/** True when the phase was published within MaxAgeSeconds of now. False when never published. */
+	bool HasFreshOverlayFirePhase(float MaxAgeSeconds) const;
+
+	/** True when the last published phase was a blind-fire burst (suppressed, firing without LOS). */
+	bool IsOverlayBlindFiring() const { return bOverlayBlindFiring; }
 
 	/** Resolves which hit region a damage event maps to (used by armour component and internal hitbox path). */
 	EHitRegion ResolveHitRegion(const FDamageEvent& DamageEvent) const;
@@ -526,6 +553,17 @@ private:
 
 	/** True while the combat service's eye-to-target trace is clear. AI-side only (not replicated). */
 	bool bHasTargetLOS = false;
+
+	// --- Combat fire phase publish (see SetOverlayFirePhase). AI-side only, not replicated. ---
+
+	/** Sentinel for "no phase published" — older than any freshness window a reader can ask for. */
+	static constexpr float OverlayFirePhaseNeverPublished = -1e9f;
+
+	/** Initialised in the constructor: EFireTaskPhase is forward-declared here, so its enumerators
+	 *  aren't visible for an in-class initialiser. */
+	EFireTaskPhase OverlayFirePhase;
+	float OverlayFirePhaseTime = OverlayFirePhaseNeverPublished;
+	bool bOverlayBlindFiring = false;
 
 	TWeakObjectPtr<AActor> CurrentAimTarget;
 	TWeakObjectPtr<AController> LastDamageInstigator;

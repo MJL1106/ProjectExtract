@@ -36,9 +36,6 @@
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
 #include "EngineUtils.h"
-#include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
-#include "DrawDebugHelpers.h"
-#include "EnemyDebug.h"
 
 // WITH_EDITOR is load-bearing, not belt-and-braces: WITH_DEV_AUTOMATION_TESTS is 1 in a packaged
 // Development build, and these tests reach for editor-only API (FProperty::GetMetaData), so the
@@ -409,26 +406,6 @@ void ACompanionCharacter::Tick(float DeltaTime)
 
 	TickPlayerSoftSeparation();
 	TickAllySoftSeparation();
-
-#if ENABLE_DRAW_DEBUG
-	if (GetDrawDistancesLevel() > 0 && bIsPrimaryCompanion)
-	{
-		constexpr float PressureLabelOffset = 60.f;
-		constexpr float FallbackHalfHeight = 90.f;
-		constexpr float StaleThreshold = 0.5f;
-		const float HH = GetCapsuleComponent()
-			? GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : FallbackHalfHeight;
-		const FVector LabelPos = GetActorLocation() + FVector(0.f, 0.f, HH + PressureLabelOffset);
-		const UWorld* DrawWorld = GetWorld();
-		const float Age = IsValid(DrawWorld) ? (DrawWorld->GetTimeSeconds() - CachedPressure01Time) : 0.f;
-		const bool bStale = Age > StaleThreshold;
-		const FString Label = bStale
-			? FString::Printf(TEXT("p01 %.2f (stale)"), CachedPressure01)
-			: FString::Printf(TEXT("p01 %.2f"), CachedPressure01);
-		const FColor LabelColor = bStale ? FColor(128, 128, 128) : FColor::Green;
-		DrawDebugString(GetWorld(), LabelPos, Label, nullptr, LabelColor, DeltaTime * 2.f, true);
-	}
-#endif
 }
 
 void ACompanionCharacter::Bark(ECompanionBarkType Type, FName Context) const
@@ -1086,11 +1063,6 @@ void ACompanionCharacter::SetLowReadyAim(bool bNewLowReady)
 	if (bLowReadyAim == bNewLowReady) return;
 	bLowReadyAim = bNewLowReady;
 
-	// AimLog diagnostics (companion.AimLog 1): change-only, so cost is the edge, not per call.
-	if (const IConsoleVariable* AimLogCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AimLog"));
-		AimLogCVar && AimLogCVar->GetInt() != 0)
-		UE_LOG(LogCompanion, Display, TEXT("[AimLog] SetLowReadyAim -> %d"), (int32)bNewLowReady);
-
 	OnRep_LowReadyAim();
 }
 
@@ -1578,12 +1550,6 @@ void ACompanionCharacter::SetAimTarget(AActor* NewTarget)
 {
 	if (NewTarget != CurrentAimTarget.Get())
 	{
-		// AimLog diagnostics (companion.AimLog 1): change-only.
-		if (const IConsoleVariable* AimLogCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AimLog"));
-			AimLogCVar && AimLogCVar->GetInt() != 0)
-			UE_LOG(LogCompanion, Display, TEXT("[AimLog] SetAimTarget %s -> %s"),
-				*GetNameSafe(CurrentAimTarget.Get()), *GetNameSafe(NewTarget));
-
 		CurrentAimTarget = NewTarget;
 		TimeAimingAtCurrentTarget = 0.0f;
 	}

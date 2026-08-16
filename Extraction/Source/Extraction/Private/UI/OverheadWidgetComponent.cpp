@@ -13,12 +13,6 @@ static TAutoConsoleVariable<int32> CVarOverheadOcclusion(
 	TEXT("If 0, overhead widgets skip the wall-occlusion hide entirely (diagnostic kill-switch)."),
 	ECVF_Cheat);
 
-static TAutoConsoleVariable<int32> CVarOverheadDebug(
-	TEXT("ui.OverheadWidgetDebug"),
-	0,
-	TEXT("If non-zero, log each overhead widget's occlusion trace result and applied render scale."),
-	ECVF_Cheat);
-
 void UOverheadWidgetComponent::ResetOcclusionState()
 {
 	TimeSinceOcclusionTrace = OcclusionTraceInterval;
@@ -75,8 +69,6 @@ void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 		// (takedown OverlapBoxes) and hidden helper meshes (cover-slot markers) share the
 		// WorldDynamic/WorldStatic object types but must not hide the widget — skip past them.
 		bOccluded = false;
-		bool bInCover = false;
-		bool bCoverExempt = false;
 		FHitResult OcclusionHit;
 		constexpr int32 MaxSkips = 8;
 		for (int32 Skip = 0; Skip < MaxSkips; ++Skip)
@@ -100,8 +92,7 @@ void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 				}
 
 				const UCoverPoseComponent* CoverPose = CachedCoverPose.Get();
-				bInCover = IsValid(CoverPose) && CoverPose->bInCover;
-				bCoverExempt = bInCover
+				const bool bCoverExempt = IsValid(CoverPose) && CoverPose->bInCover
 					&& CoverPose->CoverHeight == ECoverHeight::Crouch
 					&& FVector::Dist(OcclusionHit.ImpactPoint, WidgetLocation) <= CoverOccluderMaxDistance;
 
@@ -112,12 +103,6 @@ void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 			}
 			TraceParams.AddIgnoredComponent(HitComp);
 		}
-
-		if (CVarOverheadDebug.GetValueOnGameThread() != 0)
-			UE_LOG(LogTemp, Log, TEXT("[OverheadWidget] %s occluded=%d inCover=%d coverExempt=%d hitActor=%s hitComp=%s widgetLoc=%s camDist=%.0f"),
-				*GetNameSafe(GetOwner()), (int32)bOccluded, (int32)bInCover, (int32)bCoverExempt,
-				*GetNameSafe(OcclusionHit.GetActor()), *GetNameSafe(OcclusionHit.GetComponent()),
-				*WidgetLocation.ToCompactString(), FVector::Dist(CameraLocation, WidgetLocation));
 	}
 
 	float Scale = 0.f;

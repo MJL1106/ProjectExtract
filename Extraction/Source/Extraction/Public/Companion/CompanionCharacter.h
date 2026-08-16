@@ -184,7 +184,7 @@ public:
 
 	// --- Pressure01 mirror (BTTask_CompanionCombat-written) ---
 	// Live pressure signal [0,1] including both distance and incoming-fire terms. Written by the
-	// combat task each pressure sample; consumed by the debug distance overlay (enemy.DrawDistances).
+	// combat task each pressure sample; no in-tree consumer — phase-2 overlay feed.
 
 	void SetPressure01(float Value, float WorldTime) { CachedPressure01 = Value; CachedPressure01Time = WorldTime; }
 	float GetPressure01() const { return CachedPressure01; }

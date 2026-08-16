@@ -204,8 +204,6 @@ private:
 	void SetState(EEnemyAwarenessState NewState);
 	void SetCombatTarget(AActor* NewTarget);
 	void UpdateAwareness();
-	/** Distance/pressure overlay drawn by enemy.DrawDistances. Extracted from UpdateAwareness. */
-	void DrawDistanceOverlay(const AEnemyCharacter* MyChar, UWorld* World) const;
 	void UpdateCombat();
 	void UpdateSuspicion();
 	void ApplySuspicionState(float MaxSuspicion, const FVector& StimulusLocation);
@@ -319,10 +317,6 @@ private:
 	 *  LOS edge. Only ever written by a cloaked companion, so the primary cannot evict the VIP. */
 	TWeakObjectPtr<ACompanionCharacter> AlwaysCloakedCompanion;
 
-	/** Cached primary companion for the distance overlay — refreshed when stale to avoid
-	 *  a TActorIterator scan every measurement tick. Mutable: written from const draw helper. */
-	mutable TWeakObjectPtr<ACompanionCharacter> CachedPrimaryCompanion;
-
 	uint32 LastSeededSearchRoomExposureGeneration = 0;
 	uint32 LastStartledSearchRoomExposureGeneration = 0;
 
@@ -433,7 +427,4 @@ private:
 	static constexpr float RecentDamageWindow = 4.f;
 
 	FTimerHandle UpdateTimerHandle;
-
-	// Throttle accumulator for the [SIGHTDIAG] log (enemy.SightDiag cvar)
-	float SightDiagAccum = 0.f;
 };

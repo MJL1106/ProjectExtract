@@ -28,6 +28,13 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = Generator)
 	FAIDataProviderFloatValue QueryBoundHeight;
 
+	/** Max |Z| delta (cm) between a cover point and the context location. Covers past this are
+	 *  dropped even when inside the query box — keeps autonomous cover picks on the context's
+	 *  storey (spacing ~400cm). 0 disables the filter. Applied at generation time so existing
+	 *  query assets (serialized before this property existed) inherit the default. */
+	UPROPERTY(EditDefaultsOnly, Category = Generator)
+	FAIDataProviderFloatValue MaxZDeltaFromContext;
+
 	/** Context(s) that is used as origin of generation bounds */
 	UPROPERTY(EditDefaultsOnly, Category = Generator)
 	TSubclassOf<UEnvQueryContext> GenerateAround;

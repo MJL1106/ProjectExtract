@@ -27,12 +27,12 @@
 #include "GameFramework/Character.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/World.h"
+#include "Misc/ScopeExit.h"
 #include "EnemyMoraleComponent.h"
 #include "EnemyPostureComponent.h"
 #include "Squad/EnemySquad.h"
-#include "EnemyDebug.h"
+#include "EnemyTestKnobs.h"
 #include "EnemyAnimInstance.h"
-#include "DrawDebugHelpers.h"
 #include "GameFramework/CharacterMovementComponent.h"
 
 // ExposePhaseDuration / RecoverPhaseDuration promoted to DA fields (ExposePhaseMin/Max, RecoverPhaseMin/Max).
@@ -50,6 +50,12 @@ static constexpr float BodyProtectChestHeight = 60.f;
  *  Shared by FindShuffleCover and FindSidePeekCover. */
 static constexpr float SameWallMaxPerpOffset = 150.f;
 
+/** Vertical half-extent (cm) for enemy cover-candidate searches. Autonomous enemy cover is
+ *  same-storey by design; the full-radius Z extent these boxes used before let a reseek pick
+ *  auto-scanned points one floor up (storey spacing ~400cm) and walk the enemy out of the fight.
+ *  250 clears in-floor ramps and the pawn-center-to-floor offset (~90cm) with margin. */
+static constexpr float CoverSearchZExtent = 250.f;
+
 // --- Hunkered timing scalars (Broken morale) ---
 /** Multiplier on ExposePhaseDuration when hunkered — shorter peeks. */
 static constexpr float HunkerExposeScale = 0.7f;
@@ -58,13 +64,6 @@ static constexpr float HunkerBurstScale = 0.7f;
 /** Multiplier on pause duration (BurstPauseMin/Max) when hunkered — longer pauses between peeks. */
 static constexpr float HunkerPauseScale = 1.5f;
 
-// --- Debug: enemy.ForceCoverHeight ---
-/** Returns the forced cover height (0=auto, 1=crouch-only, 2=stand-only). Cached cvar pointer. */
-static int32 GetForceCoverHeightLocal()
-{
-	static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("enemy.ForceCoverHeight"));
-	return CVar ? CVar->GetInt() : 0;
-}
 /** True when the candidate should be skipped due to forced height.
  *  Uses the derived height (GetCoverHeight), not the raw bCrouchedCover flag. */
 static bool ShouldSkipForForcedHeight(const FCoverData& Data, int32 ForcedHeight)
@@ -105,16 +104,6 @@ static float RollPauseDuration(const UEnemyArchetypeData* DA, bool bHunkered)
 	if (DA->LongHideChance > 0.f && FMath::FRand() < DA->LongHideChance)
 		Duration *= DA->LongHideMultiplier;
 	return Duration;
-}
-
-/** [COVERSTATE] tattletale: logs every AI-issued move with the current pose flag — a move
- *  logged with posed=1 is a montage-slide caught red-handed. */
-static void LogCoverMove(const TCHAR* Reason, const APawn* Pawn, const AEnemyCharacter* Enemy)
-{
-	if (GetCoverAnimLogLevel() == 0 || !IsValid(Enemy)) return;
-	const UCoverPoseComponent* Pose = Enemy->GetCoverPoseComponent();
-	UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s MOVE(%s) posed=%d"),
-		*GetNameSafe(Pawn), Reason, (IsValid(Pose) && Pose->bInCover) ? 1 : 0);
 }
 
 /** Faces the enemy back-to-cover: yaw = the cover's outward fire direction (away from the wall,
@@ -298,10 +287,10 @@ static FCover FindProtectiveCover(UWorld* World, const APawn* Pawn, AActor* Targ
 
 	TArray<FCover> Candidates;
 	Candidates.Reserve(64);
-	const FBoxSphereBounds SearchBounds(PawnLoc, FVector(DA->CoverSearchRadius), DA->CoverSearchRadius);
+	const FBoxSphereBounds SearchBounds(PawnLoc, FVector(DA->CoverSearchRadius, DA->CoverSearchRadius, CoverSearchZExtent), DA->CoverSearchRadius);
 	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
 
-	const int32 ForcedHeight = GetForceCoverHeightLocal();
+	const int32 ForcedHeight = GetForceCoverHeightLevel();
 	const float FlankArcCos = FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg));
 	const AEnemyCharacter* ScoringEnemy = Cast<const AEnemyCharacter>(Pawn);
 	const FCoverScoreParams ScoreParams = UCoverScoringStatics::MakeParamsForEnemy(ScoringEnemy);
@@ -520,7 +509,6 @@ bool UBTTask_EnemyCombatFire::TryLadderSwapMove(UBehaviorTreeComponent& OwnerCom
 	const FVector HopArrival = UCoverGeometryStatics::GetEdgeAlignedHunkerPosition(
 		World, HopDest.Data, Standoff, CapRadius, DA->CoverCornerGap, Pawn);
 
-	LogCoverMove(TEXT("ladder-swap"), Pawn, Enemy);
 	const EPathFollowingRequestResult::Type MoveResult =
 		Controller->MoveToLocation(HopArrival, 25.f, false, true, true, true);
 	if (MoveResult != EPathFollowingRequestResult::RequestSuccessful
@@ -618,7 +606,6 @@ bool UBTTask_EnemyCombatFire::ExecuteShuffleMove(UBehaviorTreeComponent& OwnerCo
 
 	// Move-first: issue the request BEFORE committing the cover swap so a refusal
 	// does not strand the pawn with both covers on post-vacate cooldown.
-	LogCoverMove(TEXT("shuffle"), Pawn, Enemy);
 	const EPathFollowingRequestResult::Type MoveResult =
 		Controller->MoveToLocation(ShuffleArrival, 25.f, false, true, true, true);
 	if (MoveResult != EPathFollowingRequestResult::RequestSuccessful
@@ -797,9 +784,6 @@ bool UBTTask_EnemyCombatFire::CommitSameWallShuffle(UBehaviorTreeComponent& Owne
 	Mem->Phase = EFireTaskPhase::Pause;
 	Mem->PhaseTimer = DA->CoverMoveSideSwapDelay + 0.05f;
 
-	if (GetCoverAnimLogLevel() > 0)
-		UE_LOG(LogEnemyAI, Log, TEXT("[COVERSTATE] %s shuffle pending side-swap hold=%.2f dir=%d"),
-			*Pawn->GetName(), DA->CoverMoveSideSwapDelay, static_cast<int32>(MoveDirection));
 	return true;
 }
 
@@ -970,9 +954,6 @@ bool UBTTask_EnemyCombatFire::ValidateCoverStillHeld(UBlackboardComponent* BB, A
 	}
 	if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
 
-	if (GetCoverAnimLogLevel() > 0)
-		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s STALE cover cleared (dist=%.0f) — was acting in-cover in the open"),
-			*GetNameSafe(Pawn), StaleDist);
 	return false;
 }
 
@@ -1060,8 +1041,6 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 			}
 			return EBTNodeResult::InProgress;
 		}
-		if (GetCoverAnimLogLevel() > 0)
-			UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s CombatFire FAIL (awareness!=Combat) — selector falls to siblings"), *GetNameSafe(Pawn));
 		return EBTNodeResult::Failed;
 	}
 
@@ -1109,8 +1088,6 @@ EBTNodeResult::Type UBTTask_EnemyCombatFire::ExecuteTask(UBehaviorTreeComponent&
 			}
 			return EBTNodeResult::InProgress;
 		}
-		if (GetCoverAnimLogLevel() > 0)
-			UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s CombatFire FAIL (awareness!=Combat) — selector falls to siblings"), *GetNameSafe(Pawn));
 		return EBTNodeResult::Failed;
 	}
 
@@ -1152,6 +1129,17 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	}
 	const float TickNow = TickWorld ? TickWorld->GetTimeSeconds() : 0.f;
 
+	// Phase publish for overlays: one push per tick, on every exit path — the phase machine below
+	// leaves through ~25 returns, so a tail-of-function write would miss most ticks. Skipped when
+	// this tick finished the task, so a dead task can't leave a fresh-looking stamp behind
+	// (readers age it out via AEnemyCharacter::HasFreshOverlayFirePhase). Node memory is not
+	// released inside FinishLatentTask — the tree defers its execution update — so Mem is live here.
+	ON_SCOPE_EXIT
+	{
+		if (TickWorld && IsValid(Enemy) && OwnerComp.GetTaskStatus(this) == EBTTaskStatus::Active)
+			Enemy->SetOverlayFirePhase(Mem->Phase, TickNow, Mem->bBlindFiringNow);
+	};
+
 	// Stale-cover correction: BB_HasCover must mean "AT my cover" every tick, not "arrived once".
 	// Skipped during SeekingCover — a reseek/ladder transit is legitimately far from the old point.
 	if (Mem->Phase != EFireTaskPhase::SeekingCover)
@@ -1176,7 +1164,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		else
 		{
 			ApplyCoverFacing(Controller, Pawn, Mem->DriftFacingCover);
-			Mem->bFacingReassertedThisTick = true;
 		}
 	}
 
@@ -1202,118 +1189,8 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		else
 		{
 			ApplyCoverFacing(Controller, Pawn, Mem->CoverMoveFacingData);
-			Mem->bFacingReassertedThisTick = true;
 		}
 	}
-
-	// --- Cover-move diagnostic (enemy.CoverMoveDebug) ---
-	if (GetCoverMoveDebugLevel() > 0)
-	{
-		const float PostArrivalSoak = 2.f;
-		const bool bInSoakWindow = (TickNow - Mem->CoverMoveArrivalTime) < PostArrivalSoak;
-		const bool bShouldLog = Mem->bShufflePending
-			|| Mem->bCoverMoveFacingActive
-			|| Mem->Phase == EFireTaskPhase::SeekingCover
-			|| bInSoakWindow;
-
-		if (bShouldLog)
-		{
-			const float ActorYaw = Pawn->GetActorRotation().Yaw;
-			const float CtrlYaw = Controller->GetControlRotation().Yaw;
-
-			float WallYaw = -999.f;
-			if (Mem->bCoverMoveFacingActive)
-				WallYaw = UCoverGeometryStatics::GetFireArcForward(Mem->CoverMoveFacingData).Rotation().Yaw;
-			else if (Mem->bDriftCorrecting)
-				WallYaw = UCoverGeometryStatics::GetFireArcForward(Mem->DriftFacingCover).Rotation().Yaw;
-
-			const FVector FocG = Controller->GetFocalPointForPriority(EAIFocusPriority::Gameplay);
-			const FVector FocM = Controller->GetFocalPointForPriority(EAIFocusPriority::Move);
-			const FVector FocD = Controller->GetFocalPointForPriority(EAIFocusPriority::Default);
-			const FVector FocResolved = Controller->GetFocalPoint();
-			const bool bFocGValid = FAISystem::IsValidLocation(FocG);
-			const bool bFocMValid = FAISystem::IsValidLocation(FocM);
-			const bool bFocDValid = FAISystem::IsValidLocation(FocD);
-
-			const bool bReasserted = Mem->bFacingReassertedThisTick;
-
-			const EPathFollowingStatus::Type PathStatus = Controller->GetMoveStatus();
-			const FVector Vel2D = FVector(Pawn->GetVelocity().X, Pawn->GetVelocity().Y, 0.f);
-			const float Speed2D = Vel2D.Size();
-			const float VelYaw = (Speed2D > 5.f) ? Vel2D.Rotation().Yaw : -999.f;
-
-			const UCoverPoseComponent* PoseDbg = Enemy->GetCoverPoseComponent();
-			const bool bInCov = IsValid(PoseDbg) && PoseDbg->bInCover;
-			const int32 Height = IsValid(PoseDbg) ? static_cast<int32>(PoseDbg->CoverHeight) : -1;
-			const int32 Lean = IsValid(PoseDbg) ? static_cast<int32>(PoseDbg->LeanDirection) : -1;
-			const bool bMoving = IsValid(PoseDbg) && PoseDbg->bCoverMoving;
-
-			FString CoverMontName = TEXT("none");
-			FString MoveMontName = TEXT("none");
-			if (USkeletalMeshComponent* MeshComp = Enemy->GetMesh())
-			{
-				if (UEnemyAnimInstance* AnimInst = Cast<UEnemyAnimInstance>(MeshComp->GetAnimInstance()))
-				{
-					if (IsValid(AnimInst->GetActiveCoverMontage()))
-						CoverMontName = AnimInst->GetActiveCoverMontage()->GetName();
-					if (IsValid(AnimInst->GetActiveCoverMoveMontage()))
-						MoveMontName = AnimInst->GetActiveCoverMoveMontage()->GetName();
-				}
-			}
-
-			UE_LOG(LogEnemyAI, Log,
-				TEXT("[COVERMOVEDBG] %s yaw=%.1f ctrl=%.1f wall=%.1f focG=%d focM=%d focD=%d focLoc=(%.0f,%.0f) reassert=%d path=%d velYaw=%.1f speed=%.0f inCov=%d h=%d lean=%d moving=%d pend=%d phase=%d covMont=%s moveMont=%s"),
-				*Pawn->GetName(),
-				ActorYaw, CtrlYaw, WallYaw,
-				bFocGValid ? 1 : 0, bFocMValid ? 1 : 0, bFocDValid ? 1 : 0,
-				FocResolved.X, FocResolved.Y,
-				bReasserted ? 1 : 0,
-				static_cast<int32>(PathStatus),
-				VelYaw, Speed2D,
-				bInCov ? 1 : 0, Height, Lean, bMoving ? 1 : 0,
-				Mem->bShufflePending ? 1 : 0,
-				static_cast<int32>(Mem->Phase),
-				*CoverMontName, *MoveMontName);
-
-			// Directional arrows: green=forward, blue=controlRot, red=focalPoint, yellow=wallTarget
-			if (TickWorld)
-			{
-				const FVector ChestLoc = Pawn->GetActorLocation() + FVector(0.f, 0.f, 80.f);
-				const float ArrowLen = 80.f;
-				const float Life = -1.f; // single frame
-
-				// Green: actor forward
-				DrawDebugDirectionalArrow(TickWorld, ChestLoc,
-					ChestLoc + Pawn->GetActorForwardVector() * ArrowLen,
-					8.f, FColor::Green, false, Life);
-
-				// Blue: control rotation
-				const FVector CtrlFwd = Controller->GetControlRotation().Vector();
-				DrawDebugDirectionalArrow(TickWorld, ChestLoc,
-					ChestLoc + CtrlFwd * ArrowLen,
-					8.f, FColor::Blue, false, Life);
-
-				// Red: line to focal point (when valid)
-				if (FAISystem::IsValidLocation(FocResolved))
-				{
-					const FVector ToFocal = (FocResolved - ChestLoc).GetSafeNormal() * ArrowLen;
-					DrawDebugDirectionalArrow(TickWorld, ChestLoc,
-						ChestLoc + ToFocal,
-						8.f, FColor::Red, false, Life);
-				}
-
-				// Yellow: wall-facing target
-				if (WallYaw > -998.f)
-				{
-					const FVector WallFwd = FRotator(0.f, WallYaw, 0.f).Vector();
-					DrawDebugDirectionalArrow(TickWorld, ChestLoc,
-						ChestLoc + WallFwd * ArrowLen,
-						8.f, FColor::Yellow, false, Life);
-				}
-			}
-		}
-	}
-	Mem->bFacingReassertedThisTick = false;
 
 	// --- Pending shuffle hold-expiry: pre-move idle-side swap wait ---
 	if (Mem->bShufflePending)
@@ -1335,8 +1212,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				const UEnemyMoraleComponent* MC = Enemy->GetMoraleComponent();
 				const bool bHunk = IsValid(MC) && MC->GetMoraleState() == EMoraleState::Broken;
 				Mem->PhaseTimer = RollPauseDuration(DA, bHunk);
-				if (GetCoverAnimLogLevel() > 0)
-					UE_LOG(LogEnemyAI, Log, TEXT("[COVERSTATE] %s pending shuffle aborted (%s)"), *Pawn->GetName(), Reason);
 			};
 
 			// Gate: phase must still be Pause and current cover must match the origin.
@@ -1398,35 +1273,11 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 								const UEnemyMoraleComponent* MC = Enemy->GetMoraleComponent();
 								const bool bHunk = IsValid(MC) && MC->GetMoraleState() == EMoraleState::Broken;
 								Mem->PhaseTimer = RollPauseDuration(DA, bHunk);
-								if (GetCoverAnimLogLevel() > 0)
-									UE_LOG(LogEnemyAI, Log, TEXT("[COVERSTATE] %s pending shuffle aborted (move refused)"), *Pawn->GetName());
 							}
 						}
 					}
 				}
 			}
-		}
-	}
-
-	// In-world cover debug (enemy.CoverAnimLog): line pawn→its BB cover point, sphere at the
-	// hunker position, phase/side/cycles text overhead. Makes enemy↔diamond mapping visible.
-	if (GetCoverAnimLogLevel() > 0 && TickWorld && BB->GetValueAsBool(AEnemyAIController::BB_HasCover))
-	{
-		const FCover DbgCover = ReadCoverFromBB(BB);
-		if (DbgCover.IsValid())
-		{
-			const FVector PawnLoc = Pawn->GetActorLocation();
-			const FVector HunkerDbg = UCoverGeometryStatics::GetHunkerPosition(DbgCover.Data, 50.f);
-			DrawDebugLine(TickWorld, PawnLoc, DbgCover.Data.Location + FVector(0, 0, 30), FColor::Green, false, 0.1f, 0, 2.f);
-			DrawDebugSphere(TickWorld, HunkerDbg + FVector(0, 0, 30), 18.f, 8, FColor::Cyan, false, 0.1f);
-			const UCoverPoseComponent* DbgPose = Enemy->GetCoverPoseComponent();
-			DrawDebugString(TickWorld, PawnLoc + FVector(0, 0, 120),
-				FString::Printf(TEXT("ph=%d lean=%d cyc=%d posed=%d"),
-					static_cast<int32>(Mem->Phase),
-					DbgPose ? static_cast<int32>(DbgPose->LeanDirection) : -1,
-					Mem->PeekCyclesAtCover,
-					(DbgPose && DbgPose->bInCover) ? 1 : 0),
-				nullptr, FColor::Yellow, 0.1f, true);
 		}
 	}
 
@@ -1531,15 +1382,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				const float DotFwd = FVector::DotProduct(FireFwd2D, ToTarget2D);
 				bTargetInPeekCone = (DotFwd >= Mem->CachedConeHalfCos);
 
-				if (!bTargetInPeekCone && GetFlankBreakLogLevel() > 0)
-				{
-					const float AngleDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(DotFwd, -1.f, 1.f)));
-					if (FMath::Fmod(TickNow, 1.f) < (TickWorld ? TickWorld->GetDeltaSeconds() : 0.016f))
-						UE_LOG(LogEnemyAI, Log,
-							TEXT("[FLANKDBG] %s coneBlocked angle=%.1f halfCone=%.1f lean=%d"),
-							*Pawn->GetName(), AngleDeg, DA->CoverPeekConeHalfAngleDeg,
-							static_cast<int32>(PoseConeComp->LeanDirection));
-				}
 			}
 		}
 	}
@@ -1581,8 +1423,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			PendCover = ReadCoverFromBB(BB);
 			if (PendCover.IsValid()) { PendHandle = PendCover.Handle; PendCoverData = PendCover.Data; }
 		}
-		if (GetFlankBreakLogLevel() > 0)
-			UE_LOG(LogEnemyAI, Log, TEXT("[FLANKDBG] %s pending-relocate timeout — force-executing"), *Pawn->GetName());
 		// RelocatePendingSetTime and bRelocatePending cleared inside ExecuteRelocate.
 		ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
 			PendHandle, PendCoverData, DA, bHasLOS);
@@ -1843,13 +1683,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			Mem->bShufflePending = false;
 			Mem->ShuffleHoldTimer = 0.f;
 			Mem->SeekStallBestDist = TNumericLimits<float>::Max(); Mem->SeekStallAccum = 0.f;
-			Mem->CoverMoveArrivalTime = TickNow;
-
-			if (GetCoverAnimLogLevel() > 0)
-				UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s ARRIVE dist=%.0f coverLoc=(%.0f,%.0f,%.0f)"),
-					*GetNameSafe(Pawn),
-					FVector::Dist2D(Pawn->GetActorLocation(), Mem->ReseekArrivalPos),
-					ArrivalData.Location.X, ArrivalData.Location.Y, ArrivalData.Location.Z);
 
 			Enemy->SetAimTarget(Target);
 			// Wall-aligned facing while posed — target-tracking yaw would spin the montage pose.
@@ -2020,26 +1853,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				const bool bEvalDue    = Mem->CompromiseEvalTimer >= DA->CoverCompromiseEvalInterval;
 				const bool bCooledDown = (Now - Mem->LastRelocateCompletedTime) >= DA->CoverRelocateCooldown;
 
-				// ~1 Hz gate-state log so we see WHY the eval doesn't fire (before the eval gate).
-				if (GetFlankBreakLogLevel() > 0 && FMath::Fmod(Now, 1.0f) < DeltaSeconds)
-				{
-					const float CooldownRem = DA->CoverRelocateCooldown - (Now - Mem->LastRelocateCompletedTime);
-					UE_LOG(LogEnemyAI, Log,
-						TEXT("[FLANKDBG-GATE] %s flankEnabled=%d hasCover=%d cover=(%.0f,%.0f,%.0f) bCrouch=%d arrived=%d dwell=%.2f dwellMet=%d evalTimer=%.2f cooldownRem=%.2f cooledDown=%d phase=%d"),
-						*Pawn->GetName(),
-						DA->bCoverFlankBreakEnabled ? 1 : 0,
-						bHasCoverNow ? 1 : 0,
-						CurCoverData.Location.X, CurCoverData.Location.Y, CurCoverData.Location.Z,
-						(UCoverGeometryStatics::GetCoverHeight(CurCoverData) == ECoverHeight::Crouch) ? 1 : 0,
-						Mem->bArrivedAtSlot ? 1 : 0,
-						Mem->SlotDwellTime,
-						bDwellMet ? 1 : 0,
-						Mem->CompromiseEvalTimer,
-						CooldownRem,
-						bCooledDown ? 1 : 0,
-						static_cast<int32>(Mem->Phase));
-				}
-
 				// FIX 2 — Detection: runs every eval interval regardless of phase / firing state
 				// so flank compromise is detected even mid-burst. Cooldown gates the SLOW
 				// relocate decision, not the detection itself — the fast path bypasses cooldown.
@@ -2099,26 +1912,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					else
 						Mem->CompromiseConsecutiveCount = FMath::Max(0, Mem->CompromiseConsecutiveCount - 1);
 
-					if (GetFlankBreakLogLevel() > 0)
-					{
-						const float CooldownRemaining = DA->CoverRelocateCooldown - (Now - Mem->LastRelocateCompletedTime);
-						UE_LOG(LogEnemyAI, Log,
-							TEXT("[FLANKDBG] %s cover=(%.0f,%.0f,%.0f)(bCrouch=%d) angle=%.1f bOutsideArc=%d bBodyProtected=%d extraExposed=%d hostileAdj=%d consec=%d cooldownRem=%.2f phase=%d arrived=%d eLOS=%d"),
-							*Pawn->GetName(),
-							CurCoverData.Location.X, CurCoverData.Location.Y, CurCoverData.Location.Z,
-							(UCoverGeometryStatics::GetCoverHeight(CurCoverData) == ECoverHeight::Crouch) ? 1 : 0,
-							AngleDeg,
-							bOutsideArc ? 1 : 0,
-							bBodyExposed ? 0 : 1,
-							bExtraExposed ? 1 : 0,
-							bHostileAdjacent ? 1 : 0,
-							Mem->CompromiseConsecutiveCount,
-							CooldownRemaining,
-							static_cast<int32>(Mem->Phase),
-							Mem->bArrivedAtSlot ? 1 : 0,
-							bEffectiveLOS ? 1 : 0);
-					}
-
 					// Fast path: instant break when compromised (flanked, or a hostile standing on
 					// the cover) + enemy sees the threat.
 					// Bypasses safe-phase/not-firing/cooldown/min-peek-cycles gates.
@@ -2128,9 +1921,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					if ((bCompromised || bHostileAdjacent) && DA->bCoverInstantBreakWithLOS && GetForceCoverLevel() == 0
 						&& Mem->CompromiseConsecutiveCount >= 2 && bEffectiveLOS)
 					{
-						if (GetFlankBreakLogLevel() > 0)
-							UE_LOG(LogEnemyAI, Log, TEXT("[FLANKDBG] %s INSTANT BREAK (compromised + LOS)"), *Pawn->GetName());
-
 						Mem->CompromiseConsecutiveCount = 0;
 						Mem->bRelocatePending = false;
 
@@ -2190,14 +1980,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			Mem->bArrivedAtSlot = false;
 			Mem->SlotDwellTime = 0.f;
 			Mem->CompromiseConsecutiveCount = 0;
-
-			if (GetFlankBreakLogLevel() > 0 && FMath::Fmod(Now, 1.0f) < DeltaSeconds)
-			{
-				UE_LOG(LogEnemyAI, Log,
-					TEXT("[FLANKDBG-GATE] %s NO COVER (hasCover=%d)"),
-					*Pawn->GetName(),
-					bHasCoverNow ? 1 : 0);
-			}
 
 			if (bSafePhase && bNotFiring && bHasLOS && !IsGrenadeTelegraphing(Enemy))
 			{
@@ -2400,8 +2182,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 							&& ExpCoverData.bFrontCoverCrouched
 							&& FMath::FRand() < DA->CoverEndpointStandPeekChance)
 						{
-							if (GetCoverAnimLogLevel() > 0)
-								UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s Feature4 roll: side->over-top"), *GetNameSafe(Pawn));
 							PeekSide = ECoverLean::Front;
 						}
 
@@ -2439,7 +2219,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 						// accepted — committing first strands the pawn in the open when the corner
 						// hunker turns out unpathable (old cover vacated, new one unreachable, both
 						// on post-vacate cooldown for the reseek).
-						LogCoverMove(TEXT("side-peek-hop"), Pawn, Enemy);
 						const EPathFollowingRequestResult::Type HopResult =
 							Controller->MoveToLocation(HopArrival, 25.f, false, true, true, true);
 						if (HopResult == EPathFollowingRequestResult::RequestSuccessful
@@ -2526,11 +2305,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				// PoseComp invalid but we still need wall-facing.
 				ApplyCoverFacing(Controller, Pawn, ExpCoverData);
 			}
-
-			if (GetCoverAnimLogLevel() > 0)
-				UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s EXPOSE side=%d crouch=%d cycles=%d"),
-					*GetNameSafe(Pawn), static_cast<int32>(PeekSide),
-					(bHasCoverObj && UCoverGeometryStatics::GetCoverHeight(ExpCoverData) == ECoverHeight::Crouch) ? 1 : 0, Mem->PeekCyclesAtCover);
 
 			Mem->ExposeLosWaitTimer = 0.f;
 			Mem->Phase = EFireTaskPhase::Expose;
@@ -2644,9 +2418,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 										bSwCrouched, GetPerceivedThreatLoc(Controller, Target), Target, Pawn, BakedSide);
 									if (OppSide != ECoverLean::None)
 									{
-										if (GetCoverAnimLogLevel() > 0)
-											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=%d action=swap-inplace side=%d"),
-												*GetNameSafe(Pawn), Mem->LadderStage, static_cast<int32>(OppSide));
 										Mem->bLadderForceOppositeSide = true;
 										Mem->LadderOppositeSide = OppSide;
 										Mem->LadderStage = 2;
@@ -2673,9 +2444,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 									if (TryLadderSwapMove(OwnerComp, Mem, Controller, Pawn, Enemy,
 										LadderCover, WalkSide, Target, DA))
 									{
-										if (GetCoverAnimLogLevel() > 0)
-											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=%d action=swap-move side=%d"),
-												*GetNameSafe(Pawn), Mem->LadderStage, static_cast<int32>(WalkSide));
 										return true; // move in flight — break below
 									}
 								}
@@ -2683,16 +2451,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 								// 3) Neither possible — relocate (or ForceCover-skip + reset).
 								if (GetForceCoverLevel() != 0)
 								{
-									if (GetCoverAnimLogLevel() > 0)
-										UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=%d action=relocate skipped (ForceCover)"),
-											*GetNameSafe(Pawn), Mem->LadderStage);
 									Mem->LadderStage = 0;
 									Mem->ExposeLosTimeoutCount = 0;
 									return true; // fall through to Recover
 								}
-								if (GetCoverAnimLogLevel() > 0)
-									UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=%d action=relocate"),
-										*GetNameSafe(Pawn), Mem->LadderStage);
 								ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
 									LadderCover.Handle, LadderCoverData, DA, bHasLOS);
 								return false; // break handled by caller (relocate already changes phase)
@@ -2710,8 +2472,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 								case 0:
 									if (bHasOverTop)
 									{
-										if (GetCoverAnimLogLevel() > 0)
-											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=0 action=overtop"), *GetNameSafe(Pawn));
 										Mem->bLadderForceOverTop = true;
 										Mem->LadderStage = 1;
 										bLadderHandled = true;
@@ -2734,8 +2494,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 								case 2:
 									if (bHasOverTop)
 									{
-										if (GetCoverAnimLogLevel() > 0)
-											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=overtop"), *GetNameSafe(Pawn));
 										Mem->bLadderForceOverTop = true;
 										Mem->LadderStage = 3;
 										bLadderHandled = true;
@@ -2745,16 +2503,12 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 										// No over-top: relocate directly.
 										if (GetForceCoverLevel() != 0)
 										{
-											if (GetCoverAnimLogLevel() > 0)
-												UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=relocate skipped (ForceCover)"), *GetNameSafe(Pawn));
 											Mem->LadderStage = 0;
 											Mem->ExposeLosTimeoutCount = 0;
 											bLadderHandled = true;
 										}
 										else
 										{
-											if (GetCoverAnimLogLevel() > 0)
-												UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=relocate"), *GetNameSafe(Pawn));
 											ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
 												LadderCover.Handle, LadderCoverData, DA, bHasLOS);
 											bLadderBreak = true;
@@ -2765,16 +2519,12 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 									// Over-top B done → relocate.
 									if (GetForceCoverLevel() != 0)
 									{
-										if (GetCoverAnimLogLevel() > 0)
-											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=3 action=relocate skipped (ForceCover)"), *GetNameSafe(Pawn));
 										Mem->LadderStage = 0;
 										Mem->ExposeLosTimeoutCount = 0;
 										bLadderHandled = true;
 									}
 									else
 									{
-										if (GetCoverAnimLogLevel() > 0)
-											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=3 action=relocate"), *GetNameSafe(Pawn));
 										ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
 											LadderCover.Handle, LadderCoverData, DA, bHasLOS);
 										bLadderBreak = true;
@@ -2798,16 +2548,12 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 								case 2:
 									if (GetForceCoverLevel() != 0)
 									{
-										if (GetCoverAnimLogLevel() > 0)
-											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=relocate skipped (ForceCover)"), *GetNameSafe(Pawn));
 										Mem->LadderStage = 0;
 										Mem->ExposeLosTimeoutCount = 0;
 										bLadderHandled = true;
 									}
 									else
 									{
-										if (GetCoverAnimLogLevel() > 0)
-											UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s LADDER stage=2 action=relocate"), *GetNameSafe(Pawn));
 										ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
 											LadderCover.Handle, LadderCoverData, DA, bHasLOS);
 										bLadderBreak = true;
@@ -2980,9 +2726,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 
 				// One full peek-fire cycle completed at this cover — relocate/shuffle unlock.
 				++Mem->PeekCyclesAtCover;
-				if (GetCoverAnimLogLevel() > 0)
-					UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s RECOVER cycles=%d"),
-						*GetNameSafe(Pawn), Mem->PeekCyclesAtCover);
 			}
 
 			// Pose component: entering Recover
@@ -3158,8 +2901,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					{
 						AWeaponBase* W = Enemy->GetCurrentWeapon();
 						if (IsValid(W) && W->IsFiring()) W->StopFiring();
-						if (GetCoverAnimLogLevel() > 0)
-							UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s FORCED reposition (mode=%d)"), *GetNameSafe(Pawn), ForceRepo);
 						ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
 							ForceCover.Handle, ForceCover.Data, DA, bHasLOS);
 						break;
@@ -3258,18 +2999,10 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 							&& !(bBoostedRoll && ForceRepo != 1 && !UCoverGeometryStatics::HasThreatFacingSideFlag(
 								ShuffleDest.Data, ThreatLoc,
 								UCoverGeometryStatics::GetCoverHeight(ShuffleDest.Data) == ECoverHeight::Crouch));
-						if (bShuffleValid)
-						{
-							if (GetCoverAnimLogLevel() > 0 && ForceRepo == 1)
-								UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s FORCED reposition (mode=%d)"), *GetNameSafe(Pawn), ForceRepo);
-							if (CommitSameWallShuffle(OwnerComp, Mem, Controller, Pawn, Enemy,
+						if (bShuffleValid
+							&& CommitSameWallShuffle(OwnerComp, Mem, Controller, Pawn, Enemy,
 								PauseCover, ShuffleDest, Target, DA))
-								break;
-						}
-						else if (ForceRepo == 1 && GetCoverAnimLogLevel() > 0)
-						{
-							UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s FORCED shuffle: no valid dest"), *GetNameSafe(Pawn));
-						}
+							break;
 					}
 				}
 			}
@@ -3296,7 +3029,6 @@ void UBTTask_EnemyCombatFire::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 							TickWorld, DriftCover.Data, DriftStandoff, DriftCapRadius, DA->CoverCornerGap, Pawn);
 						if (FVector::Dist2D(Pawn->GetActorLocation(), DriftHunker) > SeekCoverArrivalIdleRadius)
 						{
-							LogCoverMove(TEXT("drift-correct"), Pawn, Enemy);
 							// Keep the body tucked facing out while the move steers toward the wall:
 							// the per-tick re-assert (top of TickTask) overrides path-following's facing.
 							Mem->bDriftCorrecting = true;
@@ -3369,6 +3101,10 @@ void UBTTask_EnemyCombatFire::StopFireAndCleanUp(UBehaviorTreeComponent& OwnerCo
 
 	Enemy->SetAimTarget(nullptr);
 	Enemy->SetHasTargetLOS(false);
+
+	// Drop the published phase. When the task continues after this (target lost → pursue), the
+	// tick-end publish re-stamps the new phase; when it ends here, the overlay reads "not firing".
+	Enemy->ClearOverlayFirePhase();
 
 	if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
 
@@ -3476,14 +3212,14 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 	// Query AICS for covers within search radius
 	TArray<FCover> Candidates;
 	Candidates.Reserve(64);
-	const FBoxSphereBounds SearchBounds(Pawn->GetActorLocation(), FVector(DA->CoverSearchRadius), DA->CoverSearchRadius);
+	const FBoxSphereBounds SearchBounds(Pawn->GetActorLocation(), FVector(DA->CoverSearchRadius, DA->CoverSearchRadius, CoverSearchZExtent), DA->CoverSearchRadius);
 	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
 
 	// Best-score pick using the shared scoring formula.
 	const FVector PawnLoc = Pawn->GetActorLocation();
 	const FVector ThreatLoc = GetPerceivedThreatLoc(Controller, Target);
 
-	const int32 ReseekForcedHeight = GetForceCoverHeightLocal();
+	const int32 ReseekForcedHeight = GetForceCoverHeightLevel();
 	const float FlankArcCos = FMath::Cos(FMath::DegreesToRadians(DA->CoverFlankArcHalfAngleDeg));
 	const FCoverScoreParams ScoreParams = UCoverScoringStatics::MakeParamsForEnemy(Enemy);
 
@@ -3600,7 +3336,6 @@ bool UBTTask_EnemyCombatFire::TryReseekCover(UBehaviorTreeComponent& OwnerComp, 
 
 	if (ACharacter* Char = Cast<ACharacter>(Pawn)) Char->UnCrouch();
 
-	LogCoverMove(TEXT("reseek"), Pawn, Enemy);
 	Controller->MoveToLocation(ArrivalPos, 25.f, false, true, true, true);
 
 	if (bHasLOS)
@@ -3712,7 +3447,6 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 		Mem->bArrivedAtSlot = false;
 		Mem->SlotDwellTime = 0.f;
 		Mem->LastRelocateCompletedTime = Now;
-		LogCoverMove(TEXT("relocate"), Pawn, Enemy);
 		Controller->MoveToLocation(ArrivalPos, 25.f, false, true, true, true);
 
 		AWeaponBase* MoveW = Enemy->GetCurrentWeapon();
@@ -3721,16 +3455,12 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 		Mem->SeekStallBestDist = TNumericLimits<float>::Max(); Mem->SeekStallAccum = 0.f;
 		Mem->Phase = EFireTaskPhase::SeekingCover;
 
-		if (GetFlankBreakLogLevel() > 0)
-			UE_LOG(LogEnemyAI, Log, TEXT("[FLANKDBG] %s relocate -> protective cover (%.0f,%.0f,%.0f)"),
-				*Pawn->GetName(), NewData.Location.X, NewData.Location.Y, NewData.Location.Z);
 	}
 	else
 	{
 		FVector StrafePoint;
 		if (TryOpenGroundStrafe(Pawn, Target, DA->OpenGroundStrafeRadius, StrafePoint, DA->FlankBreakRetreatBias))
 		{
-			LogCoverMove(TEXT("strafe"), Pawn, Enemy);
 			Controller->MoveToLocation(StrafePoint, 80.f, false, true, false, true);
 		}
 		Mem->LastRelocateCompletedTime = Now;
@@ -3744,8 +3474,6 @@ void UBTTask_EnemyCombatFire::ExecuteRelocate(UBehaviorTreeComponent& OwnerComp,
 			Mem->PhaseTimer = RollPauseDuration(DA, bHunk);
 		}
 
-		if (GetFlankBreakLogLevel() > 0)
-			UE_LOG(LogEnemyAI, Log, TEXT("[FLANKDBG] %s relocate -> no protective cover, strafe / hold standing"), *Pawn->GetName());
 	}
 }
 
@@ -3793,10 +3521,6 @@ bool UBTTask_EnemyCombatFire::TryAdvanceRelocate(UBehaviorTreeComponent& OwnerCo
 			Standoff, BodyProtectChestHeight, Pawn, ExtraThreats, DA->MultiThreatExposurePenalty);
 		if (NewScore < CurScore + Params.StickinessMargin) return false;
 	}
-
-	if (GetFlankBreakLogLevel() > 0)
-		UE_LOG(LogEnemyAI, Log, TEXT("[POSTURE] %s ADVANCE relocate: %.0fcm -> %.0fcm from threat"),
-			*Pawn->GetName(), CurDist, NewDist);
 
 	ExecuteRelocate(OwnerComp, Mem, Controller, Pawn, Enemy, Target,
 		CurCover.Handle, CurCover.Data, DA, bHasLOS, &NewCover);
@@ -3891,7 +3615,7 @@ FCover UBTTask_EnemyCombatFire::FindShuffleCover(UWorld* World, const APawn* Paw
 
 	TArray<FCover> Candidates;
 	Candidates.Reserve(32);
-	const FBoxSphereBounds SearchBounds(PawnLoc, FVector(SearchDistMax), SearchDistMax);
+	const FBoxSphereBounds SearchBounds(PawnLoc, FVector(SearchDistMax, SearchDistMax, FMath::Min(SearchDistMax, CoverSearchZExtent)), SearchDistMax);
 	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
 
 	// Precompute current-point angle to threat for improvement scoring
@@ -3917,7 +3641,7 @@ FCover UBTTask_EnemyCombatFire::FindShuffleCover(UWorld* World, const APawn* Paw
 	FCover BestCover;
 	float BestScore = -FLT_MAX;
 
-	const int32 ShuffleForcedHeight = GetForceCoverHeightLocal();
+	const int32 ShuffleForcedHeight = GetForceCoverHeightLevel();
 
 	for (const FCover& Candidate : Candidates)
 	{
@@ -4015,7 +3739,7 @@ FCover UBTTask_EnemyCombatFire::FindSidePeekCover(UWorld* World, const APawn* Pa
 
 	TArray<FCover> Candidates;
 	Candidates.Reserve(32);
-	const FBoxSphereBounds SearchBounds(PawnLoc, FVector(SearchDist), SearchDist);
+	const FBoxSphereBounds SearchBounds(PawnLoc, FVector(SearchDist, SearchDist, FMath::Min(SearchDist, CoverSearchZExtent)), SearchDist);
 	CoverSys->GetCoverDataWithinBounds(SearchBounds, Candidates);
 
 	// Side direction: Right lean = +Lateral, Left = -Lateral (GetLeanPeekPosition convention).
@@ -4036,7 +3760,7 @@ FCover UBTTask_EnemyCombatFire::FindSidePeekCover(UWorld* World, const APawn* Pa
 	// current cover's wall plane.
 	const FVector WallNormal2D = CurrentCover.Data.DirectionToWall.GetSafeNormal2D();
 
-	const int32 SidePeekForcedHeight = GetForceCoverHeightLocal();
+	const int32 SidePeekForcedHeight = GetForceCoverHeightLevel();
 
 	// Hostile anchors for the claim-collision reject (same rule as the EQS CoverIntent filter).
 	FHostileAnchors SidePeekHostileAnchors;

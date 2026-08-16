@@ -8,6 +8,7 @@
 #include "ExtractionCameraManager.h"
 #include "Blueprint/UserWidget.h"
 #include "ObjectiveMarkerLayer.h"
+#include "UI/AIOverlayLayer.h"
 #include "Game/ObjectiveSubsystem.h"
 #include "World/ObjectiveMarkerDisplay.h"
 #include "LevelCompleteWidget.h"
@@ -20,6 +21,7 @@
 #include "ConsumableWidget.h"
 #include "TutorialBriefingWidget.h"
 #include "UI/ExtractionHudBridgeComponent.h"
+#include "UI/LowHealthVignetteWidget.h"
 #include "GameFramework/HUD.h"
 #include "ExtractionGameMode.h"
 #include "ExtractionGameInstance.h"
@@ -87,6 +89,10 @@ AExtractionPlayerController::AExtractionPlayerController()
 {
 	// set the player camera manager class
 	PlayerCameraManagerClass = AExtractionCameraManager::StaticClass();
+
+	// Code-built widget with no required BP subclass — defaulting the class here means the vignette
+	// works with zero designer wiring, while a BP subclass assigned in defaults still overrides it.
+	LowHealthVignetteWidgetClass = ULowHealthVignetteWidget::StaticClass();
 }
 
 void AExtractionPlayerController::BeginPlay()
@@ -251,6 +257,9 @@ void AExtractionPlayerController::RestoreHUD()
 
 	// Add order is layer order — every widget here shares HUDLayerZOrder, so the viewport stacks
 	// them in the order they are added. Keep this sequence as-is; it is BeginPlay's original order.
+	// The vignette goes first on purpose: a screen-wide tint belongs under every HUD element.
+	EnsureOnPlayerScreen(this, LowHealthVignetteWidget, LowHealthVignetteWidgetClass, HUDLayerZOrder);
+
 	if (ShouldUseTouchControls())
 	{
 		EnsureOnPlayerScreen(this, MobileControlsWidget, MobileControlsWidgetClass, HUDLayerZOrder);
@@ -259,6 +268,10 @@ void AExtractionPlayerController::RestoreHUD()
 	}
 
 	EnsureOnPlayerScreen(this, ObjectiveLayerWidget, ObjectiveLayerWidgetClass, HUDLayerZOrder);
+	// Rebuilt by the sweep rather than exempted from it: the layer holds no state worth preserving —
+	// it reconciles its cards from the subsystem snapshot every RefreshInterval — and EnsureOnPlayerScreen
+	// re-adds the surviving instance anyway, so a briefing/pause round-trip costs at most one refresh.
+	EnsureOnPlayerScreen(this, AIOverlayWidget, AIOverlayWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, RevivePromptWidget, RevivePromptWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, HitmarkerWidget, HitmarkerWidgetClass, HUDLayerZOrder);
 	EnsureOnPlayerScreen(this, DamageNumberWidget, DamageNumberWidgetClass, HUDLayerZOrder);
@@ -271,8 +284,9 @@ void AExtractionPlayerController::CollectScreenOverlayWidgets(TArray<UUserWidget
 	// UI-only input anyway. Nor anything EHB owns — that tree answers to its own manager.
 	UUserWidget* const Group[] =
 	{
-		ObjectiveLayerWidget.Get(), RevivePromptWidget.Get(), HitmarkerWidget.Get(),
-		DamageNumberWidget.Get(), ConsumableWidget.Get()
+		ObjectiveLayerWidget.Get(), AIOverlayWidget.Get(), RevivePromptWidget.Get(),
+		HitmarkerWidget.Get(), DamageNumberWidget.Get(), ConsumableWidget.Get(),
+		LowHealthVignetteWidget.Get()
 	};
 
 	OutWidgets.Reset();
@@ -437,6 +451,10 @@ void AExtractionPlayerController::ClientShowLevelComplete_Implementation()
 		LevelCompleteWidget = CreateWidget<ULevelCompleteWidget>(this, LevelCompleteWidgetClass);
 	if (!IsValid(LevelCompleteWidget)) return;
 
+	// The overlays (low-health vignette included) must not keep painting under the end screen.
+	// No restore path needed: leaving this popup reloads the level either way.
+	SetScreenOverlayHidden(true);
+
 	if (!LevelCompleteWidget->IsInViewport())
 		LevelCompleteWidget->AddToPlayerScreen(LevelEndPopupZOrder);
 
@@ -457,6 +475,9 @@ void AExtractionPlayerController::ClientShowLevelFailed_Implementation(const FTe
 	if (!IsValid(LevelFailedWidget)) return;
 
 	LevelFailedWidget->SetFailReason(Reason);
+
+	// Same rule as the completion screen: no overlay paints under the end screen.
+	SetScreenOverlayHidden(true);
 
 	if (!LevelFailedWidget->IsInViewport())
 		LevelFailedWidget->AddToPlayerScreen(LevelEndPopupZOrder);

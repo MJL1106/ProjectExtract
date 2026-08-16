@@ -3,7 +3,7 @@
 #include "BTTask_EnemyFlank.h"
 #include "CoverPoseComponent.h"
 #include "EnemyAIController.h"
-#include "EnemyDebug.h"
+#include "EnemyTestKnobs.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
 #include "EnemySquad.h"
@@ -86,9 +86,6 @@ EBTNodeResult::Type UBTTask_EnemyFlank::ExecuteTask(UBehaviorTreeComponent& Owne
 
 	// Cover-pose hygiene: leaving cover for the flank — a latched pose would montage-slide the run.
 	if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
-	if (GetCoverAnimLogLevel() > 0)
-		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s TASK(Flank) start"), *GetNameSafe(Pawn));
-
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 	Enemy->SetAimTarget(Target);
 	Controller->SetFocus(Target);

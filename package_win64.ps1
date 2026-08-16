@@ -25,7 +25,7 @@ if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Force $OutDir | Ou
 
 & "$EngineDir\Engine\Build\BatchFiles\RunUAT.bat" BuildCookRun `
     -project="$Project" `
-    -noP4 -platform=Win64 -clientconfig=$Config `
+    -noP4 -platform=Win64 -clientconfig="$Config" `
     -cook -build -stage -pak -archive -archivedirectory="$OutDir" `
     -prereqs -applocaldirectory="$EngineDir\Engine\Binaries\ThirdParty\AppLocalDependencies" `
     -CrashReporter -nocompileeditor -unattended -utf8output

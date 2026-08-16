@@ -3,7 +3,7 @@
 #include "BTTask_EnemySuppressFire.h"
 #include "CoverPoseComponent.h"
 #include "EnemyAIController.h"
-#include "EnemyDebug.h"
+#include "EnemyTestKnobs.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
 #include "EnemyMoraleComponent.h"
@@ -51,9 +51,6 @@ EBTNodeResult::Type UBTTask_EnemySuppressFire::ExecuteTask(UBehaviorTreeComponen
 
 	// Cover-pose hygiene: suppressing is its own stance — a latched pose would fight the fire loop.
 	if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
-	if (GetCoverAnimLogLevel() > 0)
-		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s TASK(SuppressFire) start"), *GetNameSafe(Pawn));
-
 	// Anchor in place
 	Controller->StopMovement();
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);

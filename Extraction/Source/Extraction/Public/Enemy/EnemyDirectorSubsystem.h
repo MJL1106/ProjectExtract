@@ -170,6 +170,12 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Enemy|Director|Wave")
 	int32 GetWaveRemainingMembers() const { return WaveProgress.RemainingMembers; }
 
+	/** Wave roster membership. Used by the morale component to exempt wave members from
+	 *  death-driven losses — a wave's tail must fight like its start. The roster is emptied on
+	 *  completion/cancel, and completion requires every member dead, so nothing live outlives
+	 *  its exemption. */
+	bool IsWaveMember(const AEnemyCharacter* Enemy) const;
+
 	/** Registered corpses (capped at MaxCorpses). Read by the awareness component's proximity body
 	 *  notice -- a bounded list beats iterating every enemy in the level per awareness tick. */
 	const TArray<TWeakObjectPtr<AEnemyCharacter>>& GetCorpses() const { return Corpses; }

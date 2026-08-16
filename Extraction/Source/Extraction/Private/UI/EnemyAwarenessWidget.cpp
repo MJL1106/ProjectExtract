@@ -4,7 +4,6 @@
 #include "EnemyCharacter.h"
 #include "EnemyAIController.h"
 #include "EnemyAwarenessComponent.h"
-#include "Enemy/Debug/EnemyDebug.h"
 #include "AI/Cover/CoverPoseComponent.h"
 #include "Components/Image.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -28,8 +27,6 @@ void UEnemyAwarenessWidget::NativeConstruct()
 	SetVisibility(ESlateVisibility::SelfHitTestInvisible);
 	SetRenderOpacity(0.f);
 
-	if (GetAwarenessMeterLogLevel() > 0) UE_LOG(LogTemp, Log, TEXT("[AwarenessMeter] NativeConstruct ran"));
-
 	if (!IsValid(FillImage)) return;
 
 	FillMID = FillImage->GetDynamicMaterial();
@@ -43,16 +40,12 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	if (TimeSinceLastUpdate < UpdateInterval) return;
 	TimeSinceLastUpdate = 0.f;
 
-	// Sentinel for "not yet resolved" in the diagnostic log.
-	static constexpr int32 DiagUnknown = -1;
-
 	// Resolve awareness component lazily — controller may possess after widget construction.
 	if (!CachedAwareness.IsValid())
 	{
 		if (!Enemy.IsValid())
 		{
 			SetRenderOpacity(0.f);
-			EmitDiagLog(DiagUnknown, 0.f, DisplayMeter);
 			return;
 		}
 
@@ -60,7 +53,6 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 		if (!AIC)
 		{
 			SetRenderOpacity(0.f);
-			EmitDiagLog(DiagUnknown, 0.f, DisplayMeter);
 			return;
 		}
 
@@ -68,7 +60,6 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 		if (!IsValid(Comp))
 		{
 			SetRenderOpacity(0.f);
-			EmitDiagLog(DiagUnknown, 0.f, DisplayMeter);
 			return;
 		}
 
@@ -99,7 +90,6 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	if (DisplayMeter <= VisibleMeterThreshold)
 	{
 		SetRenderOpacity(0.f);
-		EmitDiagLog(static_cast<int32>(State), TargetMeter, DisplayMeter);
 		return;
 	}
 
@@ -107,11 +97,7 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	// giving a real fade-in on spawn and a fade-out as the meter drains near zero, then dim for cover.
 	SetRenderOpacity(FMath::Clamp(DisplayMeter / FadeInThreshold, 0.f, 1.f) * CoverDimAlpha * CombatHideAlpha);
 
-	if (!IsValid(FillMID))
-	{
-		EmitDiagLog(static_cast<int32>(State), TargetMeter, DisplayMeter);
-		return;
-	}
+	if (!IsValid(FillMID)) return;
 
 	// Change-detection: skip MID writes when the smoothed value has settled (perf: 20 enemies × 10Hz).
 	const bool bMeterChanged = !FMath::IsNearlyEqual(DisplayMeter, LastWrittenMeter, KINDA_SMALL_NUMBER);
@@ -137,28 +123,6 @@ void UEnemyAwarenessWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 		FillMID->SetScalarParameterValue(ParamPulse, NewPulse);
 		LastWrittenPulse = NewPulse;
 	}
-
-	EmitDiagLog(static_cast<int32>(State), TargetMeter, DisplayMeter);
-}
-
-void UEnemyAwarenessWidget::EmitDiagLog(int32 State, float Target, float Display)
-{
-	if (GetAwarenessMeterLogLevel() <= 0) return;
-
-	DiagLogAccumulator += UpdateInterval;
-	if (DiagLogAccumulator < DiagLogInterval) return;
-	DiagLogAccumulator = 0.f;
-
-	UE_LOG(LogTemp, Log,
-		TEXT("[AwarenessMeter] %s enemyValid=%d awareValid=%d state=%d target=%.2f display=%.2f vis=%d opacity=%.2f"),
-		Enemy.IsValid() ? *Enemy->GetName() : TEXT("<null>"),
-		Enemy.IsValid() ? 1 : 0,
-		CachedAwareness.IsValid() ? 1 : 0,
-		State,
-		Target,
-		Display,
-		static_cast<int32>(GetVisibility()),
-		GetRenderOpacity());
 }
 
 FLinearColor UEnemyAwarenessWidget::ResolveColor(EEnemyAwarenessState State, float Meter) const

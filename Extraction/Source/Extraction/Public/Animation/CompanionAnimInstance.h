@@ -572,18 +572,6 @@ private:
 	/** True once the starvation diagnostic has fired for this rebake request, so it emits once. */
 	bool bAlignRebakeStarvationLogged = false;
 
-	/** Throttle accumulator for the [ALIGN] writer-race diagnostic (companion.AlignDebug). */
-	float AlignDebugLogAccum = 0.f;
-
-	/** companion.AlignDebug: names the align writer that actually wrote the weapon mesh this frame.
-	 *  All three write an ABSOLUTE relative transform, so only the last one to write is visible. */
-	void LogWeaponAlignWriters(const AWeaponBase* Weapon, bool bFireWriting, bool bPatrolWriting,
-		int32 CoverScenario, float DeltaSeconds);
-
-	/** companion.AlignDebug: one-shot dump of the ABP-side align config on equip — the values that
-	 *  follow an ABP duplicate and so are shared between the two allies regardless of weapon. */
-	void LogAlignSetupConfig() const;
-
 	// --- Cover pose cache (resolved at init, re-resolved if stale) ---
 	TWeakObjectPtr<UCoverPoseComponent> CachedCoverPoseComponent;
 
@@ -605,9 +593,6 @@ private:
 
 	EPeekSide ActivePeekSide = EPeekSide::Right;
 	bool bPrevIsReloading = false;
-
-	/** Throttle accumulator for the [RELOADTUCK] cover-reload-spine diagnostic line. */
-	float CoverReloadTuckLogAccum = 0.f;
 
 	/** Eased 0..1 — fades aim pitch/yaw while the service-written HasTargetLOS mirror is false
 	 *  outside cover. Separate from CoverAimTrackAlpha (that alpha's reset-to-1-outside-cover

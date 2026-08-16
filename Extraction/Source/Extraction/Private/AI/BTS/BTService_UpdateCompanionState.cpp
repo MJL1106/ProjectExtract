@@ -38,42 +38,6 @@
 #include "TraversalComponent.h"     // stealth-pin enforcement must not crouch mid-traversal
 #include "Navigation/PathFollowingComponent.h" // ready-only threat stance yields facing to an active move
 #include "AI/CompanionAimValidation.h" // the one seam every threat-derived aim bearing is proven through
-#include "HAL/IConsoleManager.h" // companion.AimLog diagnostics CVar
-#include "DrawDebugHelpers.h"    // companion.RouteFacingDebug heading arrow
-
-// companion.AimLog 1 — per-service-tick dump of everything that drives the companion's aim/facing
-// (target pick + provenance, ready-only threat, takedown/route yields, focal point, low-ready).
-// Diagnostic for the stuck-ADS / aims-through-walls reports; Display severity so it shows untagged.
-static TAutoConsoleVariable<int32> CVarCompanionAimLog(
-	TEXT("companion.AimLog"), 0,
-	TEXT("1 = log companion aim/stance state each UpdateCompanionState tick."));
-
-// companion.RouteFacingDebug 1 — draws the heading the route facing tier is actually applying (cyan
-// along the route line, magenta while the backtrack latch holds). Its own CVar rather than a re-use
-// of companion.RouteDebug, which CompanionRoute.cpp already registers — registering the same name
-// twice asserts. Read via GetValueOnGameThread() AT THE POINT OF USE, never through a cached
-// IConsoleVariable*: a Live Coding patch left exactly that cached pointer dangling and crashed
-// ACompanionRoute::BeginPlay on 2026-06-26 (see CompanionRoute.cpp:53-57).
-static TAutoConsoleVariable<int32> CVarCompanionRouteFacingDebug(
-	TEXT("companion.RouteFacingDebug"), 0,
-	TEXT("1 = draw the companion's applied route-facing heading (cyan = route, magenta = backtracking)."),
-	ECVF_Cheat);
-
-// companion.ReviveLog 1 — per-tick revive-window state (body heat, fight-live, hot-dwell, bleedout).
-// Read via GetValueOnGameThread() at the point of use, never through a cached IConsoleVariable*:
-// a Live Coding patch left exactly that cached pointer dangling (see comment above).
-static TAutoConsoleVariable<int32> CVarCompanionReviveLog(
-	TEXT("companion.ReviveLog"), 0,
-	TEXT("1 = log companion revive-window gating state each tick."));
-
-// companion.FireDebug is registered once in WeaponBase.cpp — re-query by name here to avoid a
-// duplicate CVar registration across translation units.
-static bool IsCompanionFireDebugEnabled()
-{
-	static const IConsoleVariable* CVar =
-		IConsoleManager::Get().FindConsoleVariable(TEXT("companion.FireDebug"));
-	return CVar && CVar->GetInt() != 0;
-}
 
 namespace
 {
@@ -814,16 +778,6 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 			|| (StealthNow - PlayerDamageTime) < LiveFightWindow
 			|| IsValid(Companion->GetRecentAttacker(LiveFightWindow));
 
-		if (IsCompanionFireDebugEnabled() && !Companion->IsStealthBroken())
-		{
-			UE_LOG(LogCompanionDiag, Warning,
-				TEXT("%s: [FireDebug] STEALTH unbroken: break=%d (dbno=%d dirCombat=%d envelope=%d playerHit=%d companionHit=%d heard=%d) pinAge=%.1f -> %s"),
-				*Companion->GetName(), (int32)bStealthBreakEvent, (int32)bPlayerDBNO,
-				(int32)(DirectorCombatTime > StealthPinTime), (int32)bFreshEnvelopeCombatEntry,
-				(int32)(PlayerDamageTime > StealthPinTime), (int32)bCompanionHitSincePin,
-				(int32)bHeardEnemy, PinAge,
-				bStealthBreakEvent ? TEXT("BREAKING (targets allowed next tick)") : TEXT("holding fire (no auto-targets)"));
-		}
 	}
 
 	if (Mode == ECompanionMode::Stealth && !Companion->IsStealthBroken())
@@ -1782,27 +1736,6 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 	// Runs after the posture chain so it sees this tick's settled bHasTarget. See UpdateStanceBackstop.
 	UpdateStanceBackstop(*Companion, *BB, bHasTarget, DeltaSeconds);
 
-	// --- AimLog diagnostics (companion.AimLog 1) ---
-	if (CVarCompanionAimLog.GetValueOnGameThread() != 0)
-	{
-		const TCHAR* PickSrc = !TargetAfterUpdate ? TEXT("none")
-			: (TargetAfterUpdate == BestVisible) ? TEXT("visible")
-			: (TargetAfterUpdate == BestAny) ? TEXT("OCCLUDED-ANY")
-			: TEXT("kept");
-		const UPathFollowingComponent* LogPF = Controller->GetPathFollowingComponent();
-		const bool bLogMoving = IsValid(LogPF) && LogPF->GetStatus() == EPathFollowingStatus::Moving;
-		UE_LOG(LogCompanionAI, Display,
-			TEXT("[AimLog] mode=%d posture=%s lowReady=%d aimTarget=%s | bbTarget=%s src=%s losBlocked=%d losBlockT=%.1f | readyOnly=%d alertEnemy=%s alertDist=%.0f | moving=%d route=%d tdArmed=%d tdExec=%d tdMont=%d latch=%d | focusActor=%s focal=%s"),
-			(int32)Mode, PostureName(Companion->GetPosture()), (int32)Companion->IsLowReadyAim(),
-			*GetNameSafe(Companion->GetAimTarget()),
-			*GetNameSafe(TargetAfterUpdate), PickSrc, (int32)bWasLosBlocked, OpenLosBlockedTime,
-			(int32)bReadyOnlyThreat, *GetNameSafe(AlertedThreatEnemy),
-			bHasAlertedThreat ? FMath::Sqrt(BestAlertDistSq) : -1.f,
-			(int32)bLogMoving, (int32)BB->GetValueAsBool(ACompanionAIController::BB_RouteActive),
-			(int32)Companion->IsCommandedTakedownArmed(), (int32)Companion->IsCommandedTakedownExecuting(),
-			(int32)Companion->IsTakedownMontagePlaying(), (int32)bLoweredOnTargetLoss,
-			*GetNameSafe(Controller->GetFocusActor()), *Controller->GetFocalPoint().ToCompactString());
-	}
 	TRACE_CPUPROFILER_EVENT_MANUAL_END();
 
 	// --- Revive window computation (threat-gated revive) ---
@@ -2115,7 +2048,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 
 			if (bBail || bHotDwellAbort)
 			{
-				if (bDebugLogging || CVarCompanionReviveLog.GetValueOnGameThread() != 0)
+				if (bDebugLogging)
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: RESCUE %s hp=%.0f%% hotDwell=%.2fs -- re-fighting until safer"),
 						*Companion->GetName(), bBail ? TEXT("BAIL") : TEXT("HOT-ABORT"),
 						CompanionHealthFrac * 100.f, ReviveHotAccumulator);
@@ -2166,7 +2099,7 @@ void UBTService_UpdateCompanionState::TickNode(UBehaviorTreeComponent& OwnerComp
 		// Never-stamped contact reads as TNumericLimits<float>::Max(); clamped for the log so the line
 		// stays a readable age instead of a sentinel-sized float.
 		constexpr float ContactAgeLogCap = 999.f;
-		if ((bDebugLogging || CVarCompanionReviveLog.GetValueOnGameThread() != 0) && bReviveWindowOpen != bLastReviveWindowOpen)
+		if (bDebugLogging && bReviveWindowOpen != bLastReviveWindowOpen)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: REVIVE WINDOW %s (latched=%d bleedout=%.1fs safeAccum=%.2fs hotDwell=%.2fs bodyHot=%d fightLive=%d desp=%d contactAge=%.1fs areaClear=%d)"),
 				*Companion->GetName(), bReviveWindowOpen ? TEXT("OPEN") : TEXT("SHUT"),
 				(int32)Companion->IsRevivingPlayer(), PlayerIface->GetBleedoutTimeRemaining(),
@@ -2428,12 +2361,6 @@ namespace
 	constexpr float RouteFacingMinHeadingSpeedFallback = 120.f; // cm/s below which travel direction is not honest
 	constexpr float RouteFacingBacktrackEnterDotFallback = -0.15f; // travel vs route alignment that latches backtracking
 	constexpr float RouteFacingBacktrackExitDotFallback = 0.35f;   // and the wider one that releases it
-
-	// companion.RouteFacingDebug arrow geometry. The lifetime spans one service tick (Interval 0.25 +
-	// RandomDeviation 0.05) so the arrow reads as continuous rather than strobing.
-	constexpr float RouteFacingDebugArrowSize = 24.f;
-	constexpr float RouteFacingDebugThickness = 3.f;
-	constexpr float RouteFacingDebugLifetime = 0.35f;
 
 	// Consecutive failed aim-point refreshes before the hold is dropped. A refusal is one trace
 	// sample on a ~1s cadence, so ending on the first one had no debounce at all: anything transient
@@ -3542,16 +3469,6 @@ bool UBTService_UpdateCompanionState::ApplyRouteFacingReference(
 	Focal.Z = Companion.GetPawnViewLocation().Z; // level gaze — the controller preserves focal pitch
 	SetNonCombatFocalDeduped(Controller, Focal);
 	bRouteFacingOwnsFocal = true;
-
-#if ENABLE_DRAW_DEBUG
-	if (CVarCompanionRouteFacingDebug.GetValueOnGameThread() != 0)
-	{
-		if (const UWorld* DebugWorld = Companion.GetWorld())
-			DrawDebugDirectionalArrow(DebugWorld, Companion.GetPawnViewLocation(), Focal,
-				RouteFacingDebugArrowSize, bBacktracking ? FColor::Magenta : FColor::Cyan,
-				false, RouteFacingDebugLifetime, 0, RouteFacingDebugThickness);
-	}
-#endif
 
 	return true;
 }

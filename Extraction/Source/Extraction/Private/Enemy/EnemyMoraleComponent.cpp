@@ -13,6 +13,18 @@
 #include "TimerManager.h"
 #include "Engine/World.h"
 
+/** True when the enemy is on the Director's active wave roster. Wave morale is deliberately flat
+ *  against deaths: a kill-all wave is fought down to its last members by design, so ally/officer
+ *  loss would guarantee every wave's tail goes Broken and camps instead of finishing the fight.
+ *  Suppression, low-HP and flank losses are unaffected — only death-driven loss is exempt. */
+static bool IsDirectorWaveMember(UWorld* World, const AEnemyCharacter* Enemy)
+{
+	if (!IsValid(World) || !IsValid(Enemy)) return false;
+
+	const UEnemyDirectorSubsystem* Director = World->GetSubsystem<UEnemyDirectorSubsystem>();
+	return Director && Director->IsWaveMember(Enemy);
+}
+
 UEnemyMoraleComponent::UEnemyMoraleComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -138,6 +150,7 @@ void UEnemyMoraleComponent::NotifySquadAllyDied(bool bWasOfficer, const FVector&
 	if (bFearless) return;
 	if (!OwnerEnemy.IsValid()) return;
 	if (CachedHealthComp.IsValid() && CachedHealthComp->IsDead()) return;
+	if (IsDirectorWaveMember(GetWorld(), OwnerEnemy.Get())) return;
 
 	const float Loss = bWasOfficer ? LossOfficerDied : LossAllyDied;
 	ApplyMoraleDelta(-Loss);
@@ -216,6 +229,7 @@ void UEnemyMoraleComponent::HandleEnemyDied(AEnemyCharacter* DeadEnemy, FVector 
 	if (!OwnerEnemy.IsValid()) return;
 	if (CachedHealthComp.IsValid() && CachedHealthComp->IsDead()) return;
 	if (DeadEnemy == OwnerEnemy.Get()) return;
+	if (IsDirectorWaveMember(GetWorld(), OwnerEnemy.Get())) return;
 
 	// Phase 5: skip radius path when the dead enemy shares the owner's squad. Same-squad deaths
 	// arrive via NotifySquadAllyDied (exactly-once). FName comparison is used because the subsystem

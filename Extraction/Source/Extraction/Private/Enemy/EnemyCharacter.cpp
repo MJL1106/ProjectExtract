@@ -1,6 +1,7 @@
 // AEnemyCharacter — single character class for all enemy archetypes.
 
 #include "EnemyCharacter.h"
+#include "BTTask_EnemyCombatFire.h"
 #include "EnemyAnimInstance.h"
 #include "AI/AITargetingStatics.h"
 #include "Perception/AISense_Sight.h"
@@ -29,6 +30,7 @@
 #include "EnemyPostureComponent.h"
 #include "EnemySquadSubsystem.h"
 #include "Components/CapsuleComponent.h"
+#include "UI/AIOverlaySubsystem.h"
 #include "UI/OverheadWidgetComponent.h"
 #include "Components/WidgetComponent.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -69,6 +71,9 @@ AEnemyCharacter::AEnemyCharacter()
 
 	AIControllerClass = AEnemyAIController::StaticClass();
 	AutoPossessAI = EAutoPossessAI::PlacedInWorldOrSpawned;
+
+	// Fire-phase publish starts unpublished (enumerators aren't visible in the header — see EnemyCharacter.h).
+	ClearOverlayFirePhase();
 
 	// Bug 8: enable crouching for NavAgent so Crouch()/UnCrouch() works.
 	GetCharacterMovement()->GetNavAgentPropertiesRef().bCanCrouch = true;
@@ -215,6 +220,11 @@ void AEnemyCharacter::BeginPlay()
 		CachedAnimInstance = Cast<UEnemyAnimInstance>(MeshComp->GetAnimInstance());
 	}
 
+	// Debug overlay registry — before the ArchetypeData bail-out, so a misconfigured enemy still
+	// shows up on the overlay (that is exactly the case worth seeing).
+	if (UAIOverlaySubsystem* Overlay = UAIOverlaySubsystem::Get(this))
+		Overlay->RegisterEnemy(this);
+
 	if (!IsValid(ArchetypeData))
 	{
 		UE_LOG(LogEnemyAI, Error, TEXT("%s: ArchetypeData not assigned — character will idle harmlessly."), *GetName());
@@ -289,6 +299,9 @@ void AEnemyCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 		if (UEnemySquadSubsystem* SquadSys = World->GetSubsystem<UEnemySquadSubsystem>())
 			SquadSys->UnregisterMember(this);
 	}
+
+	if (UAIOverlaySubsystem* Overlay = UAIOverlaySubsystem::Get(this))
+		Overlay->UnregisterEnemy(this);
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -567,6 +580,32 @@ void AEnemyCharacter::SetCommandSpreadMultiplier(float Multiplier)
 void AEnemyCharacter::SetExtraSpreadDegrees(float Degrees)
 {
 	ExtraSpreadDegrees = FMath::Max(Degrees, 0.f);
+}
+
+// --- Combat fire phase publish ---
+
+void AEnemyCharacter::SetOverlayFirePhase(EFireTaskPhase Phase, float WorldTime, bool bBlindFiring)
+{
+	OverlayFirePhase = Phase;
+	OverlayFirePhaseTime = WorldTime;
+	bOverlayBlindFiring = bBlindFiring;
+}
+
+void AEnemyCharacter::ClearOverlayFirePhase()
+{
+	OverlayFirePhase = EFireTaskPhase::Acquire;
+	OverlayFirePhaseTime = OverlayFirePhaseNeverPublished;
+	bOverlayBlindFiring = false;
+}
+
+bool AEnemyCharacter::HasFreshOverlayFirePhase(float MaxAgeSeconds) const
+{
+	if (OverlayFirePhaseTime <= OverlayFirePhaseNeverPublished) return false;
+
+	const UWorld* World = GetWorld();
+	if (!IsValid(World)) return false;
+
+	return (World->GetTimeSeconds() - OverlayFirePhaseTime) <= MaxAgeSeconds;
 }
 
 // --- Melee ---
@@ -919,6 +958,11 @@ void AEnemyCharacter::HandleDeath()
 
 	if (IsValid(AwarenessWidgetComponent))
 		AwarenessWidgetComponent->SetVisibility(false);
+
+	// Same beat as the awareness meter: the overlay card must go with the pawn, not linger over
+	// the ragdoll for the seconds the corpse persists.
+	if (UAIOverlaySubsystem* Overlay = UAIOverlaySubsystem::Get(this))
+		Overlay->UnregisterEnemy(this);
 
 	if (AWeaponBase* Weapon = CurrentWeapon.Get())
 	{

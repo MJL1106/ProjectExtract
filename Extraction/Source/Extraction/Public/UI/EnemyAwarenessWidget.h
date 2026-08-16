@@ -113,16 +113,9 @@ private:
 	TWeakObjectPtr<AEnemyCharacter> Enemy;
 	TWeakObjectPtr<UEnemyAwarenessComponent> CachedAwareness;
 
-	/** Accumulator for the diagnostic log throttle (logs once per DiagLogInterval). */
-	float DiagLogAccumulator = 0.f;
-	static constexpr float DiagLogInterval = 1.f;
-
 	UPROPERTY()
 	TObjectPtr<UMaterialInstanceDynamic> FillMID;
 
 	/** Returns the colour to push to the MID for the given state and meter fill. */
 	FLinearColor ResolveColor(EEnemyAwarenessState State, float Meter) const;
-
-	/** Diagnostic helper — emits a 1Hz log line when enemy.AwarenessMeterLog > 0. */
-	void EmitDiagLog(int32 State, float Target, float Display);
 };

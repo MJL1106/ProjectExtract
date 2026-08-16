@@ -5,7 +5,7 @@
 #include "EnemyAIController.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
-#include "EnemyDebug.h"
+#include "EnemyTestKnobs.h"
 #include "SuppressionComponent.h"
 #include "WeaponBase.h"
 #include "AICoverSlot.h"
@@ -79,9 +79,6 @@ EBTNodeResult::Type UBTTask_EnemyMoveAndShoot::ExecuteTask(UBehaviorTreeComponen
 	// Cover-pose hygiene: this task moves/aims independently of the cover system — a latched
 	// pose would montage-slide the strafe and pin the body while focus tracks the target.
 	if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
-	if (GetCoverAnimLogLevel() > 0)
-		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s TASK(MoveAndShoot) start"), *GetNameSafe(Pawn));
-
 	// Set strafe speed via the canonical single-writer API
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Strafe);
 

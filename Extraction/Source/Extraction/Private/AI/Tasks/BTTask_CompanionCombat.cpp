@@ -30,14 +30,12 @@
 #include "WeaponBase.h"
 #include "HealthComponent.h"
 #include "SuppressionComponent.h"
-#include "DrawDebugHelpers.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "NavigationSystem.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "TimerManager.h"
-#include "HAL/IConsoleManager.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
 #include "GameplayTagAssetInterface.h"
@@ -48,26 +46,6 @@ namespace
 	/** Chest height (cm) for the body-protection trace from a candidate's hunker position — matches the enemy's BodyProtectChestHeight. */
 	constexpr float ShuffleBodyProtectChestHeight = 60.f;
 
-	/** companion.CoverDebug 1 — deep [COVDBG]/[COVMOVE] logging: every cover decision attempt with
-	 *  full counter state, and every position change stamped with its cause. */
-	TAutoConsoleVariable<int32> CVarCompanionCoverDebug(
-		TEXT("companion.CoverDebug"), 0,
-		TEXT("1 = verbose companion cover decision/movement logging ([COVDBG] decisions, [COVMOVE] position changes)."));
-
-	bool CovDbg() { return CVarCompanionCoverDebug.GetValueOnGameThread() > 0; }
-
-	// companion.FireDebug is registered once in WeaponBase.cpp — re-query by name to avoid a
-	// duplicate CVar registration across translation units.
-	bool FireDbg()
-	{
-		static const IConsoleVariable* CVar =
-			IConsoleManager::Get().FindConsoleVariable(TEXT("companion.FireDebug"));
-		return CVar && CVar->GetInt() != 0;
-	}
-}
-
-namespace
-{
 	struct FCombatContext
 	{
 		ACompanionCharacter* Companion = nullptr;
@@ -685,10 +663,6 @@ void UBTTask_CompanionCombat::CommitSilentReposition(ACompanionCharacter* Compan
 				IntentStampSub->SetIntendedCover(IntentStampCtrl, ShuffleTarget.Handle);
 		}
 	}
-
-	if (CovDbg())
-		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s SILENT-REPO-COMMIT to=%s cyclesAtOld=%d strikes=%d"),
-			*Companion->GetName(), *ShuffleTarget.Data.Location.ToCompactString(), PeekCyclesAtCover, NoPeekLosStrikes);
 
 	// Silent reposition: stay crouched, no montage, no aim, low-ready weapon.
 	Companion->StopWeaponFire();
@@ -1557,7 +1531,7 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 	{
 		Companion->StopWeaponFire();
 		bStandBurstFireHeld = true;
-		if (bDebugLogging || FireDbg())
+		if (bDebugLogging)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst FIRE HELD — muzzle blocked by %s"),
 				*Companion->GetName(), *GetNameSafe(MuzzleHit.GetActor()));
 		return;
@@ -1585,7 +1559,7 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 		Companion->StartWeaponFire();
 		bStandBurstFireHeld = false;
 		LastStandBurstResumeFireTime = Now;
-		if (bDebugLogging || FireDbg())
+		if (bDebugLogging)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst FIRE RESUMED — muzzle clear"),
 				*Companion->GetName());
 	}
@@ -1914,7 +1888,7 @@ bool UBTTask_CompanionCombat::TickAngleSeek(UBehaviorTreeComponent& OwnerComp, A
 		* (bCombatMode ? Tuning->AngleSeekCombatBiasMultiplier : 1.f);
 	bAngleSeekActive = true;
 	AngleSeekTimeActive = 0.f;
-	if (bDebugLogging || CovDbg())
+	if (bDebugLogging)
 		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK start mode=%s focused=%d supp01=%.2f side=%+.0f bias=%.0f"),
 			*Companion->GetName(), bCombatMode ? TEXT("Combat") : TEXT("Normal"),
 			FocusedCount, Supp01, AngleSeekSideSign, AngleSeekBiasResolved);
@@ -1930,7 +1904,7 @@ void UBTTask_CompanionCombat::EndAngleSeek(const ACompanionCharacter* Companion,
 	const ACompanionAIController* AIC = IsValid(Companion) ? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
 	const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
 	AngleSeekCooldownRemaining = Tuning ? Tuning->AngleSeekCooldown : 5.f;
-	if ((bDebugLogging || CovDbg()) && IsValid(Companion))
+	if (bDebugLogging && IsValid(Companion))
 		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK end reason=%s"), *Companion->GetName(), Reason);
 }
 
@@ -2993,10 +2967,6 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 			PeekCycleCarryHandle = Cover.Handle;
 			PeekCycleCarryCount = 0;
 		}
-		if (CovDbg())
-			UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s CLAIM (ExecuteTask) loc=%s lean=%d"),
-				*Companion->GetName(), *Cover.Data.Location.ToCompactString(), (int32)CurrentLean);
-
 		const UCapsuleComponent* Cap = Companion->GetCapsuleComponent();
 		const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : 34.f) + 10.f;
 		const FVector HunkerLoc = CompanionCover::CompanionHunkerPosition(*Companion, Cover.Data, Standoff);
@@ -3438,9 +3408,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	{
 		// Task-internal commits pre-update LastTickCoverHandle, so reaching here = an EXTERNAL
 		// writer (the switch monitor) replaced our cover point.
-		if (CovDbg())
-			UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s EXTERNAL-SWAP (monitor) newLoc=%s cyclesAtOld=%d"),
-				*Ctx.Companion->GetName(), *Cover.Data.Location.ToCompactString(), PeekCyclesAtCover);
 		ResolvePeekSideForCover(Ctx.Companion, Ctx.Target, Cover.Data, TargetSightLoc);
 		ResetPeekCycleCounters(Ctx.Companion);
 		BlockedRecheckHits = 0;
@@ -3632,27 +3599,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		const FVector HunkerLoc = CachedIdleHunkerLoc;
 
-#if ENABLE_DRAW_DEBUG
-		// CovDbg-only (NOT bDebugLogging - that flag ships enabled on the BT asset for the log
-		// stream, and these spheres render as gameplay markers to a playtester).
-		if (CovDbg())
-		{
-			const FVector HunkerPt = HunkerLoc + FVector(0.f, 0.f, 10.f);
-			DrawDebugSphere(Ctx.Companion->GetWorld(), HunkerPt, 22.f, 8, FColor::Red, false, 0.f, 0, 1.5f);
-			// Corner leans only — Front (over-the-top) has no lateral peek point; GetLeanPeekPosition
-			// degenerates to the cover location and the line reads as a bogus corner pointer mid-wall.
-			if (CurrentLean == ECoverLean::Left || CurrentLean == ECoverLean::Right)
-			{
-				const FVector PeekPt = UCoverGeometryStatics::GetLeanPeekPosition(Cover.Data, CurrentLean) + FVector(0.f, 0.f, 20.f);
-				DrawDebugSphere(Ctx.Companion->GetWorld(), PeekPt, 14.f, 12, FColor::Magenta, false, 0.f, 0, 1.5f);
-				DrawDebugLine(Ctx.Companion->GetWorld(), HunkerPt, PeekPt, FColor::Magenta, false, 0.f, 0, 2.5f);
-			}
-			// Eye-height marker showing where stand-fire LoS trace originates.
-			const FVector EyeMarker = HunkerLoc + FVector(0.f, 0.f, StandFireEyeHeight);
-			DrawDebugSphere(Ctx.Companion->GetWorld(), EyeMarker, 6.f, 6, FColor::Cyan, false, 0.f, 0, 1.f);
-		}
-#endif
-
 		const FVector SubSlotLoc = HunkerLoc;
 
 		// Refresh peek side only when geometry has changed beyond threshold.
@@ -3737,11 +3683,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					// blind EQS pick. Clamp strikes below threshold so the escape re-tries next eval;
 					// the switch monitor's blind-current bypass covers the cross-wall escape.
 					NoPeekLosStrikes = DebounceRequired - 1;
-					if (bDebugLogging || CovDbg())
+					if (bDebugLogging)
 						UE_LOG(LogCompanionAI, Log, TEXT("%s: no-peek-los HOLD — no verified-LoS shuffle candidate (dwell=%.1f)"),
 							*Ctx.Companion->GetName(), TimeAtCurrentCover);
 				}
-				else if (bDebugLogging || CovDbg())
+				else if (bDebugLogging)
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: no-peek-los strike %d/%d — holding"),
 						*Ctx.Companion->GetName(), NoPeekLosStrikes, DebounceRequired);
 			}
@@ -3809,7 +3755,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					&& PeekCyclesAtCover < (TickTuning ? TickTuning->MinPeekCyclesBeforeRelocate : 1))
 				{
 					CoverCompromiseConsecutiveCount = DebounceRequired;
-					if (bDebugLogging || CovDbg())
+					if (bDebugLogging)
 						UE_LOG(LogCompanionAI, Log, TEXT("%s: compromise tripped but cycles=%d < min — holding invalidate"),
 							*Ctx.Companion->GetName(), PeekCyclesAtCover);
 				}
@@ -3921,7 +3867,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				PreviousNearestThreatDist = (NearestDist < TNumericLimits<float>::Max()) ? NearestDist : -1.f;
 
 				// Peek-now impulse: 2 consecutive closing samples crossing impulse distance, unsuppressed.
-				bool bImpulseFired = false;
 				if (!bSuppressed && PeekImpulseCooldownRemaining <= 0.f
 					&& bClosingConfirmed && NearestDist < TNumericLimits<float>::Max()
 					&& NearestDist <= TickTuning->PeekImpulseDistance)
@@ -3933,19 +3878,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					{
 						TimeInCoverIdle = WaitGateThreshold;
 						PeekImpulseCooldownRemaining = TickTuning->PeekImpulseRearmSeconds;
-						bImpulseFired = true;
 					}
-				}
-
-				if (CovDbg())
-				{
-					UE_LOG(LogCompanionAI, Log,
-						TEXT("[COVDBG] %s PRESSURE p01=%.2f distTerm=%.2f fireTerm=%.2f(supp=%.2f w=%.1f dmg=%d/%d) nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
-						*Ctx.Companion->GetName(), Pressure01, DistanceTerm, FireTerm,
-						Supp01, TickTuning->PressureSuppressionWeight, RecentHits, DmgHitsMax,
-						NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
-						ModePeekConfidenceScale(Ctx.Companion, TickTuning, false, Pressure01),
-						(int32)bImpulseFired);
 				}
 			}
 		}
@@ -3987,21 +3920,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			LastDecisionTime = Now;
 		}
 
-		// Deep-debug: one line per decision ATTEMPT with the full counter state — with this plus
-		// the [COVMOVE] trail, every reposition-without-firing has a named cause in the log.
-		if (CovDbg())
-		{
-			UE_LOG(LogCompanionAI, Log,
-				TEXT("[COVDBG] %s DECISION suppRaw=%d(gated=%d) supp01=%.2f hits4s=%d focused=%d cycles=%d strikes=%d holds=%d/%d dwellAtCover=%.1f idle=%.1f justRepo=%d lean=%d ammo=%d hp=%.2f"),
-				*Ctx.Companion->GetName(), (int32)bSuppressedRaw, (int32)bSuppressed,
-				Ctx.Companion->GetSuppression01(),
-				Ctx.Companion->GetRecentDamageCount(TickTuning ? TickTuning->CoverCommitUnderFireWindow : 4.f),
-				Ctx.Companion->GetPlayerFocusedEnemyCount(),
-				PeekCyclesAtCover, NoPeekLosStrikes, ConsecutiveHolds, GetEffectiveMaxHolds(Ctx.Companion),
-				TimeAtCurrentCover, TimeInCoverIdle, (int32)bJustRepositioned,
-				(int32)CurrentLean, Ctx.Companion->GetCurrentAmmo(), Ctx.Companion->GetHealthFraction());
-		}
-
 		// Gate 1: suppression. Covering fire bypasses the stay-down.
 		if (bSuppressed && !bCoveringFire)
 		{
@@ -4039,9 +3957,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		if (!bLosFromCover)
 		{
-			if (CovDbg())
-				UE_LOG(LogCompanionAI, Log, TEXT("[COVDBG] %s GATE2 cover-LoS blocked hits=%d cycles=%d"),
-					*Ctx.Companion->GetName(), BlockedRecheckHits, PeekCyclesAtCover);
 			// Skip re-pick while a movement action owns its own positioning.
 			if (CurrentBurstAction == EPeekAction::Reposition
 				|| CurrentBurstAction == EPeekAction::StandUpAndReposition
@@ -4139,7 +4054,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				}
 			}
 			if (!bSpeculativePeek) return;
-			if (bDebugLogging || CovDbg())
+			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: SPECULATIVE-PEEK roll passed — peeking without verified LoS"),
 					*Ctx.Companion->GetName());
 		}
@@ -4183,7 +4098,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 			TimeInCoverIdle = 0.f;
-			if (bDebugLogging || CovDbg())
+			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: STAY DOWN reason=stand-cover-no-side-gap"),
 					*Ctx.Companion->GetName());
 			return;
@@ -4211,7 +4126,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 				TimeInCoverIdle = 0.f;
-				if (bDebugLogging || CovDbg())
+				if (bDebugLogging)
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: STAY DOWN reason=target-out-of-arc"), *Ctx.Companion->GetName());
 				return;
 			}
@@ -4225,7 +4140,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 			TimeInCoverIdle = 0.f;
-			if (bDebugLogging || CovDbg())
+			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: STAY DOWN reason=target-out-of-peek-cone"), *Ctx.Companion->GetName());
 			return;
 		}
@@ -4356,53 +4271,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				ResolvedPeekSide = ResolveSideFromLean(CurrentLean, Cover.Data, TargetLocation);
 			}
 
-#if ENABLE_DRAW_DEBUG
-			// CovDbg-only (NOT bDebugLogging — that flag ships enabled on the BT asset, and these
-			// long target lines read as gameplay tracers to a playtester).
-			if (CovDbg())
-			{
-				const FVector BaseHunker = UCoverGeometryStatics::GetHunkerPosition(Cover.Data, ScoreStandoff);
-				const FVector OverTopEye = BaseHunker + FVector(0.f, 0.f, 150.f);
-				auto DrawCandidate = [&](const FVector& Eye, bool bViable, const FColor& Color)
-				{
-					DrawDebugSphere(TickWorld, Eye, 10.f, 8, Color, false, 2.f, 0, 1.5f);
-					const FColor LineColor = bViable ? FColor::Green : FColor::Red;
-					DrawDebugLine(TickWorld, Eye, TargetSightLoc, LineColor, false, 2.f, 0, 1.f);
-				};
-				const FVector LeftEyeDraw = UCoverGeometryStatics::GetLeanPeekPosition(Cover.Data, ECoverLean::Left) + FVector(0.f, 0.f, 90.f);
-				const FVector RightEyeDraw = UCoverGeometryStatics::GetLeanPeekPosition(Cover.Data, ECoverLean::Right) + FVector(0.f, 0.f, 90.f);
-				if (bCachedCornerLeftFound)
-					DrawCandidate(LeftEyeDraw, Scores.bCornerLeftViable, FColor::Blue);
-				if (bCachedCornerRightFound)
-					DrawCandidate(RightEyeDraw, Scores.bCornerRightViable, FColor::Orange);
-				DrawCandidate(OverTopEye, Scores.bOverTopViable, FColor::Cyan);
-
-				for (AActor* const Extra : ExtraThreats)
-				{
-					if (!IsValid(Extra)) continue;
-					const FVector ExtraLoc = Extra->GetActorLocation() + FVector(0.f, 0.f, 90.f);
-					if (Scores.bCornerLeftViable && bCachedCornerLeftFound)
-						DrawDebugLine(TickWorld, LeftEyeDraw, ExtraLoc, FColor(128, 128, 255), false, 2.f, 0, 0.5f);
-					if (Scores.bCornerRightViable && bCachedCornerRightFound)
-						DrawDebugLine(TickWorld, RightEyeDraw, ExtraLoc, FColor(255, 178, 102), false, 2.f, 0, 0.5f);
-					if (Scores.bOverTopViable)
-						DrawDebugLine(TickWorld, OverTopEye, ExtraLoc, FColor(128, 255, 255), false, 2.f, 0, 0.5f);
-				}
-			}
-#endif
-
-			if (CovDbg())
-			{
-				UE_LOG(LogCompanionAI, Log,
-					TEXT("[COVDBG] %s WALLHACK cL=%.1f(%d) cR=%.1f(%d) oT=%.1f(%d) bestCorner=%d geo=%d spec=%d extra=%d action=%d side=%d"),
-					*Ctx.Companion->GetName(),
-					Scores.CornerLeftScore, (int32)Scores.bCornerLeftViable,
-					Scores.CornerRightScore, (int32)Scores.bCornerRightViable,
-					Scores.OverTopScore, (int32)Scores.bOverTopViable,
-					(int32)Scores.BestCornerSide, (int32)Scores.GeometricFallbackSide,
-					(int32)ScoreParams.bSpeculative, ExtraThreats.Num(),
-					(int32)Action, (int32)CurrentLean);
-			}
 		}
 		else if (bSideGap)
 		{
@@ -4583,9 +4451,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 
 			// StandUpAndReposition: stand up, start burst in place (Phase A), then walk-and-fire (Phase B).
-			if (CovDbg())
-				UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s STANDUP-REPO-COMMIT to=%s cyclesAtOld=%d"),
-					*GetNameSafe(Ctx.Companion), *ShuffleTarget.Data.Location.ToCompactString(), PeekCyclesAtCover);
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=StandUpAndReposition ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
 			CurrentBurstAction = EPeekAction::StandUpAndReposition;
 			LastDecisionTime = Now;
@@ -4687,16 +4552,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				*GetNameSafe(Ctx.Companion),
 				*CornerPeekHomeLocation.ToString(), *CornerPeekApexLocation.ToString(),
 				BurstTimer, Ctx.Companion->GetCurrentAmmo());
-#if ENABLE_DRAW_DEBUG
-			// CovDbg-only (NOT bDebugLogging) - same playtester-visibility rule as the idle draws.
-			if (CovDbg())
-			{
-				DrawDebugLine(Ctx.Companion->GetWorld(), CornerPeekHomeLocation + FVector(0, 0, 20.f),
-					CornerPeekApexLocation + FVector(0, 0, 20.f), FColor::Magenta, false, 3.f, 0, 4.f);
-				DrawDebugSphere(Ctx.Companion->GetWorld(), CornerPeekApexLocation + FVector(0, 0, 20.f),
-					18.f, 12, FColor::Magenta, false, 3.f, 0, 2.f);
-			}
-#endif
 			DebugBurstLosCheckTimer = 0.f;
 			CornerPeekLosCheckTimer = 0.f;
 			TimeInCoverIdle = 0.f;
