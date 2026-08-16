@@ -362,8 +362,19 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Actor);
 	StampTrack(Track, Stimulus.StimulusLocation);
 
-	// During Combat, only update track bookkeeping (location) — suspicion gain is irrelevant
-	if (CurrentState == EEnemyAwarenessState::Combat) return;
+	// During Combat, hearing the combat target himself fight (gunfire or a sprint — both already
+	// acoustics-gated above) is live contact: it stamps the noise hold so a blind enemy
+	// mid-firefight doesn't run its lost-contact clock while the player is audibly still there.
+	// Otherwise track bookkeeping only — suspicion gain is irrelevant in Combat.
+	if (CurrentState == EEnemyAwarenessState::Combat)
+	{
+		if (Actor == CombatTarget.Get()
+			&& (Stimulus.Tag == WeaponFireTag || Stimulus.Tag == SprintFootstepTag))
+		{
+			if (const UWorld* W = GetWorld()) LastTargetNoiseTime = W->GetTimeSeconds();
+		}
+		return;
+	}
 
 	// Close-range Combat slam. A gunshot or a sprint heard from right beside you is not "something to
 	// look into" — it is a fight already happening, so skip the meter and turn onto the source. Sits
@@ -1105,6 +1116,29 @@ void UEnemyAwarenessComponent::UpdateCombat()
 						bHoldContact = true;
 				}
 			}
+
+			// 4) A squadmate can currently see the target (sighting relay stamps this at 1 Hz
+			// while any member holds sight). The relay also live-refreshes LastKnownLocation,
+			// so a held member pursues real data — safe for director-seeded members too.
+			if (!bHoldContact)
+			{
+				const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+				if ((WorldTime - LastSquadSightTime) < SquadSightHoldWindow)
+					bHoldContact = true;
+			}
+
+			// 5) We recently HEARD the target fight — gunfire or sprint, acoustics-gated at the
+			// stimulus. This is what keeps a long drawn-out fight honest: an enemy pinned blind
+			// behind cover doesn't "forget" a player who is audibly still shooting, yet a player
+			// who goes quiet and slips away is searched for on the normal grace. Director-seeded
+			// members that never gained real LOS skip it (same reason as suppression) so the
+			// seed-arrival quit can still fire.
+			if (!bHoldContact && !(bDirectorSeeded && !bHadLOS))
+			{
+				const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+				if ((WorldTime - LastTargetNoiseTime) < TargetNoiseHoldWindow)
+					bHoldContact = true;
+			}
 		}
 
 		if (bHoldContact)
@@ -1362,6 +1396,15 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 
 	for (auto& Pair : SuspicionTracks)
 		Pair.Value.Suspicion = 0.f;
+
+	// Fight-liveness stamps are per-target: a swap must not inherit the old target's holds.
+	// Same-target re-entries (damage re-lock mid-fight) keep theirs — resetting those would
+	// drop a live hold.
+	if (CombatTarget.Get() != Target)
+	{
+		LastSquadSightTime = -1e9f;
+		LastTargetNoiseTime = -1e9f;
+	}
 
 	SetCombatTarget(Target);
 	if (CurrentState != EEnemyAwarenessState::Combat)
@@ -2140,7 +2183,7 @@ void UEnemyAwarenessComponent::BroadcastSightingToSquad()
 	AActor* Target = CombatTarget.Get();
 	if (!IsValid(Target)) return;
 
-	Squad->ReportSighting(Target, LastKnownLocation);
+	Squad->ReportSighting(Target, LastKnownLocation, MyChar);
 }
 
 // --- Squad Sighting Ingress ---
@@ -2164,6 +2207,9 @@ void UEnemyAwarenessComponent::ReportSquadSighting(AActor* Target, const FVector
 		if (CombatTarget.Get() == Target)
 		{
 			LastKnownLocation = LastKnown;
+			// A mate is live-sighting our target right now — stamp the fight-liveness hold so
+			// our own lost-contact clock doesn't run while the squad still has him.
+			if (const UWorld* W = GetWorld()) LastSquadSightTime = W->GetTimeSeconds();
 			WriteBBVectors();
 		}
 		return;

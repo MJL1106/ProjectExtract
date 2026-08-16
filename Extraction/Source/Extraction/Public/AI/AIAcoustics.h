@@ -35,8 +35,9 @@ namespace AIAcoustics
 
 	/** Audibility (0..1) of a noise at StimLoc for a listener whose ears are at ListenerEye.
 	 *  1 = clear line or open door; ThroughDoorMult = closed-but-openable door on the line, or
-	 *  reachable as a portal when the direct line is walled; 0 = no openable-door path at all
-	 *  (solid walls, the floor slab between storeys, locked keycard doors). */
+	 *  reachable as a portal when the direct line is walled; NavDetourMult = no door, but a
+	 *  same-storey nav route within the detour budget connects the spaces (open-ended walls);
+	 *  0 = acoustically sealed (solid rooms, the floor slab between storeys, locked keycard doors). */
 	EXTRACTION_API float ComputeMultiplier(UWorld* World, const FVector& ListenerEye, const FVector& StimLoc,
 		const AActor* Listener, const AActor* Instigator, float ThroughDoorMult);
 
@@ -45,4 +46,23 @@ namespace AIAcoustics
 
 	/** Stacked pawns a single trace may step past before degrading to "blocked". */
 	inline constexpr int32 MaxPawnSkips = 4;
+
+	// --- Doorless-route fallback (open-ended walls, corridor corners) ---
+	// When the direct line is walled and no door connects the spaces, a same-storey nav route
+	// can still carry the sound. The Z gate is what keeps a multistory building quiet: the
+	// slab always walls the direct line, and a stair route to another floor crosses the gate.
+
+	/** Max |Z| between noise and listener feet for the nav-route fallback to run at all —
+	 *  below one storey, so a floor slab always keeps blocking. */
+	inline constexpr float SameStoreyZThreshold = 260.f;
+
+	/** Route length budget: path must be <= direct * ratio + slack, else the detour is big
+	 *  enough that the spaces don't read as acoustically connected. */
+	inline constexpr float NavDetourRatioMax = 2.5f;
+	inline constexpr float NavDetourSlack = 300.f;
+
+	/** Audibility through a doorless open route. Deliberately above the closed-door multiplier
+	 *  (~0.6) — an open gap is nearly clear air, and a sprint heard around a wall end must still
+	 *  clear its investigate threshold. */
+	inline constexpr float NavDetourMult = 0.85f;
 }

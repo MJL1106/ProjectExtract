@@ -204,8 +204,10 @@ void UAIOverlayCardWidget::PushCoverAndMorale(const FEnemyOverlaySnapshot& Snaps
 	if (CoverStateText)
 	{
 		FText Label;
-		// Priority order: the loudest cover behaviour wins the single-line slot.
+		// Priority order: the loudest cover behaviour wins the single-line slot. Blind fire
+		// outranks SUPPRESSED because it IS the suppressed response — the more specific read.
 		if (Snapshot.bBlindFiring) Label = FText::FromString(TEXT("BLIND FIRING"));
+		else if (Snapshot.bSuppressed) Label = FText::FromString(TEXT("SUPPRESSED"));
 		else if (Snapshot.bPeeking) Label = FText::FromString(TEXT("PEEKING"));
 		else if (Snapshot.bCoverMoving) Label = FText::FromString(TEXT("MOVING"));
 		else if (Snapshot.bInCover) Label = FText::FromString(TEXT("IN COVER"));

@@ -93,8 +93,12 @@ private:
 	/** Interp speed applied to CoverDimAlpha each UpdateInterval tick. */
 	static constexpr float CoverDimInterpSpeed = 8.f;
 
-	/** Interp speed applied to CombatHideAlpha each UpdateInterval tick. */
-	static constexpr float CombatHideInterpSpeed = 8.f;
+	/** Interp speed applied to CombatHideAlpha each UpdateInterval tick. Deliberately slow — the
+	 *  locked red ring should read as a clear "they've got you" beat, not vanish the same frame. */
+	static constexpr float CombatHideInterpSpeed = 2.f;
+
+	/** Seconds the locked full ring holds at full opacity on Combat entry before the fade starts. */
+	static constexpr float CombatHideHoldSeconds = 0.8f;
 
 	/** Smoothed display value — interps toward the raw awareness meter, drives all visuals. */
 	float DisplayMeter = 0.f;
@@ -104,6 +108,9 @@ private:
 
 	/** Smoothed opacity multiplier — interps toward 0 while in Combat (bHideInCombat), 1 otherwise. */
 	float CombatHideAlpha = 1.f;
+
+	/** Remaining hold time before the combat-hide fade begins; reset whenever not combat-hidden. */
+	float CombatHideHoldRemaining = 0.f;
 
 	/** Change-detection caches — MID writes are skipped when nothing has changed. */
 	float LastWrittenMeter = -1.f;

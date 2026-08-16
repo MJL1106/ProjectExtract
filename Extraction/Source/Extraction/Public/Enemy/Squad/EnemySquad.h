@@ -41,8 +41,11 @@ public:
 
 	// --- Shared sightings ---
 
-	/** Called by awareness component on Combat entry + LOS updates. Rate-limited per squad. */
-	void ReportSighting(AActor* Target, const FVector& LastKnown);
+	/** Called by awareness component on Combat entry + LOS updates. Rate-limited per squad.
+	 *  Reporter (when the call comes from a member's own broadcast) is skipped in the relay loop —
+	 *  a member's sighting is knowledge for its MATES; relaying it back would let a lone survivor
+	 *  stamp its own squad-sight contact hold off its own eyes. Director-driven calls pass null. */
+	void ReportSighting(AActor* Target, const FVector& LastKnown, const AEnemyCharacter* Reporter = nullptr);
 
 	/** One-shot Combat seed for every living member (Director wave spawns). Unlike ReportSighting,
 	 *  forces full Combat entry rather than Searching, and skips the relay throttle. */

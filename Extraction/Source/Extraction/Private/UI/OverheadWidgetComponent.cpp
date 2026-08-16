@@ -45,7 +45,18 @@ void UOverheadWidgetComponent::TickComponent(float DeltaTime, ELevelTick TickTyp
 	const FVector CameraLocation = Camera->GetCameraLocation();
 	const FVector WidgetLocation = GetComponentLocation();
 
-	const bool bOcclusionEnabled = bHideWhenOccluded && CVarOverheadOcclusion.GetValueOnGameThread() != 0;
+	// Ejected/cinematic view (demo cams set a non-pawn view target): a wall or roof between the
+	// shot camera and the actor is composition, not hidden information — skip the occlusion hide
+	// so meters stay visible from top-down and exterior angles. Distance scaling still applies,
+	// floored at MinScale so wide shots keep them readable.
+	bool bCinematicView = false;
+	if (const APlayerController* PC = Camera->GetOwningPlayerController())
+	{
+		const AActor* ViewTarget = PC->GetViewTarget();
+		bCinematicView = IsValid(ViewTarget) && ViewTarget != PC->GetPawn();
+	}
+
+	const bool bOcclusionEnabled = !bCinematicView && bHideWhenOccluded && CVarOverheadOcclusion.GetValueOnGameThread() != 0;
 
 	TimeSinceOcclusionTrace += DeltaTime;
 	if (bOcclusionEnabled && TimeSinceOcclusionTrace >= OcclusionTraceInterval)

@@ -176,10 +176,10 @@ protected:
 	float CardMinDistanceScale = 0.45f;
 
 	/** Beyond this (cm) the enemy gets no card at all this frame -- same treatment as off-screen.
-	 *  Debug reach, not gameplay: past ~45m the card text is unreadable anyway and the slab only
-	 *  occludes the fight. */
+	 *  Debug reach, not gameplay: far enough that the gym's cinematic cams still see every card,
+	 *  near enough that a cross-map slab cannot occlude a first-person fight. */
 	UPROPERTY(EditDefaultsOnly, Category = "AIOverlay|Tuning|Distance", meta = (ClampMin = "500.0"))
-	float CardMaxDistance = 4500.f;
+	float CardMaxDistance = 6000.f;
 
 	// --- Tuning: focus flash ---
 

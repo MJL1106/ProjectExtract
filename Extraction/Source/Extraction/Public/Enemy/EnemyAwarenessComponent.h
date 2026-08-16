@@ -426,5 +426,23 @@ private:
 	/** Seconds within which damage from a target counts for the RecentDamage threat weight. */
 	static constexpr float RecentDamageWindow = 4.f;
 
+	// Fight-liveness contact holds: signals that keep Combat alive while the fight is demonstrably
+	// still on around a member who has personally gone blind. Both decay on their own, so the
+	// moment the squad truly loses the target the normal LostContactGrace takes over — this is
+	// what lets the grace be short without enemies "forgetting" mid-firefight.
+
+	/** World time a squadmate last relayed live sight of our current combat target. */
+	float LastSquadSightTime = -1e9f;
+
+	/** World time we last heard our combat target (gunfire or sprint, acoustics-gated). */
+	float LastTargetNoiseTime = -1e9f;
+
+	/** Hold window after a squad sighting relay (relay fires at 1 Hz while a mate has sight —
+	 *  3s bridges the gaps without outliving real loss by much). */
+	static constexpr float SquadSightHoldWindow = 3.f;
+
+	/** Hold window after hearing the combat target fight. */
+	static constexpr float TargetNoiseHoldWindow = 5.f;
+
 	FTimerHandle UpdateTimerHandle;
 };

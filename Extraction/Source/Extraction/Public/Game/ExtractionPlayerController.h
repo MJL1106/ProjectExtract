@@ -332,6 +332,17 @@ private:
 	 *  fires while it is up; UTutorialBriefingWidget::NativeOnKeyDown owns it. */
 	void HandlePauseKeyPressed();
 
+public:
+	/** TEMP (demo recording): F10 hard-restarts the current level so a take can be redone without
+	 *  quitting to the menu. Public so the Slate pre-processor below can reach it. Remove after the
+	 *  demo video is captured. */
+	void HandleDemoRestartKeyPressed();
+
+private:
+	/** TEMP (demo recording): Slate pre-processor so F10 fires even while an end/pause screen holds
+	 *  UI-only input (death screen) or the game is paused. Remove with the rest of the demo hotkey. */
+	TSharedPtr<class IInputProcessor> DemoRestartInputProcessor;
+
 	/** Quiets (or restores) the two HUD systems C++ can reach: this controller's overlay group and
 	 *  the HUD actor's module tree. The third — the kit's own top-level widgets — is the briefing
 	 *  widget's sweep, which runs from its own construct/destruct.

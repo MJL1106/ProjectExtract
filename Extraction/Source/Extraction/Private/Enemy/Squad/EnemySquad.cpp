@@ -129,7 +129,7 @@ AEnemyCharacter* UEnemySquad::GetOfficer() const
 // Shared sightings
 // ---------------------------------------------------------------------------
 
-void UEnemySquad::ReportSighting(AActor* Target, const FVector& LastKnown)
+void UEnemySquad::ReportSighting(AActor* Target, const FVector& LastKnown, const AEnemyCharacter* Reporter)
 {
 	if (!IsValid(Target)) return;
 
@@ -164,6 +164,7 @@ void UEnemySquad::ReportSighting(AActor* Target, const FVector& LastKnown)
 	for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
 	{
 		if (!IsMemberAlive(M)) continue;
+		if (M.Get() == Reporter) continue;
 
 		AEnemyAIController* AIC = Cast<AEnemyAIController>(M->GetController());
 		if (!IsValid(AIC)) continue;
