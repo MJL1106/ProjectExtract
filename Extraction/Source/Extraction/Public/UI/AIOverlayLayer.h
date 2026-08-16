@@ -163,6 +163,24 @@ protected:
 	UPROPERTY(EditDefaultsOnly, Category = "AIOverlay|Tuning|Declutter", meta = (ClampMin = "1.0"))
 	float MinCardVerticalSpacing = 64.f;
 
+	// --- Tuning: distance attenuation ---
+
+	/** Distance (cm) at which a card renders at full scale; nearer never grows past 1, farther
+	 *  shrinks as Reference/Distance. Without this every card renders authored-size regardless of
+	 *  range and a room of patrollers fills the screen with same-size slabs. */
+	UPROPERTY(EditDefaultsOnly, Category = "AIOverlay|Tuning|Distance", meta = (ClampMin = "50.0"))
+	float CardReferenceDistance = 600.f;
+
+	/** Floor of the distance shrink, so a far card stays legible instead of vanishing into a dot. */
+	UPROPERTY(EditDefaultsOnly, Category = "AIOverlay|Tuning|Distance", meta = (ClampMin = "0.05", ClampMax = "1.0"))
+	float CardMinDistanceScale = 0.45f;
+
+	/** Beyond this (cm) the enemy gets no card at all this frame -- same treatment as off-screen.
+	 *  Debug reach, not gameplay: past ~45m the card text is unreadable anyway and the slab only
+	 *  occludes the fight. */
+	UPROPERTY(EditDefaultsOnly, Category = "AIOverlay|Tuning|Distance", meta = (ClampMin = "500.0"))
+	float CardMaxDistance = 4500.f;
+
 	// --- Tuning: focus flash ---
 
 	UPROPERTY(EditDefaultsOnly, Category = "AIOverlay|Tuning|Banner", meta = (ClampMin = "0.1"))
@@ -204,6 +222,9 @@ private:
 		const FEnemyOverlaySnapshot* Snapshot = nullptr;
 		FVector2D AnchorScreenPos = FVector2D::ZeroVector;
 		FVector2D CardScreenPos = FVector2D::ZeroVector;
+
+		/** Per-card distance attenuation, multiplied into the global overlay scale on push. */
+		float DistanceScale = 1.f;
 
 		/** True when this enemy resolved an on-screen projection THIS frame. False entries (enemy
 		 *  still alive, just off-screen or behind camera) are hidden, never ranked or decluttered --

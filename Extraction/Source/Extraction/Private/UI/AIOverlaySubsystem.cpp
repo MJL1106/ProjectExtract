@@ -85,8 +85,9 @@ static FAutoConsoleVariable CVarAIOverlay(
 	ECVF_Default);
 
 static FAutoConsoleVariable CVarAIOverlayScale(
-	TEXT("ai.Overlay.Scale"), 1.f,
-	TEXT("Uniform scale applied to the AI overlay widgets."),
+	TEXT("ai.Overlay.Scale"), 0.7f,
+	TEXT("Uniform scale applied to the AI overlay widgets. The card WBP is authored large enough "
+	     "to read in screenshots; 0.7 is the in-game size, on top of per-card distance shrink."),
 	ECVF_Default);
 
 static FAutoConsoleVariable CVarAIOverlaySquadEventMaxAge(

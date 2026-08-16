@@ -239,6 +239,7 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (const UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+		World->GetTimerManager().ClearTimer(SquadWipePollHandle);
 		World->GetTimerManager().ClearTimer(LoadoutRestoreTimerHandle);
 		World->GetTimerManager().ClearTimer(LoadoutVerifyTimerHandle);
 		World->GetTimerManager().ClearTimer(AudioSuppressionFailsafeHandle);
@@ -1919,6 +1920,14 @@ void AExtractionPlayer::EnterDBNO()
 			if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
 				GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
 		}
+		else if (IsValid(World))
+		{
+			// The squad can still turn — but only as it stands RIGHT NOW. Keep re-asking while
+			// down, or a companion who dies during the bleedout leaves an unwinnable minute with
+			// no fail screen (see PollSquadWipeWhileDBNO).
+			World->GetTimerManager().SetTimer(SquadWipePollHandle, this,
+				&AExtractionPlayer::PollSquadWipeWhileDBNO, 1.f, /*bLoop=*/true);
+		}
 	}
 
 	SetDBNOCameraFreeLook(true);
@@ -1937,7 +1946,10 @@ void AExtractionPlayer::ExitDBNO()
 	// clearing first made every revive stand-up play crouch cloth.
 
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+		World->GetTimerManager().ClearTimer(SquadWipePollHandle);
+	}
 
 	BleedoutTimeRemaining = 0.f;
 
@@ -1984,6 +1996,23 @@ void AExtractionPlayer::OnBleedoutExpired()
 	FullDeath();
 }
 
+void AExtractionPlayer::PollSquadWipeWhileDBNO()
+{
+	UWorld* World = GetWorld();
+
+	if (!bIsDBNO || !HasAuthority())
+	{
+		if (World) World->GetTimerManager().ClearTimer(SquadWipePollHandle);
+		return;
+	}
+
+	if (ACompanionCharacter::IsAnyCompanionReviveCapable(World, nullptr)) return;
+
+	if (World) World->GetTimerManager().ClearTimer(SquadWipePollHandle);
+	if (AExtractionGameMode* GM = World ? World->GetAuthGameMode<AExtractionGameMode>() : nullptr)
+		GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
+}
+
 void AExtractionPlayer::FullDeath()
 {
 	BleedoutTimeRemaining = 0.f;
@@ -2003,7 +2032,10 @@ void AExtractionPlayer::FullDeath()
 	SetDBNOMovementProfile(false);
 
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+		World->GetTimerManager().ClearTimer(SquadWipePollHandle);
+	}
 
 	UE_LOG(LogExtraction, Log, TEXT("'%s' is fully dead"), *GetNameSafe(this));
 

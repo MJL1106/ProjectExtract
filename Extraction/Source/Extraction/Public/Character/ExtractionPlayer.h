@@ -927,6 +927,12 @@ private:
 
 	void EnterDBNO();
 	void OnBleedoutExpired();
+
+	/** Re-runs EnterDBNO's squad-wipe check while down. The entry-time check only sees the squad as
+	 *  it stood at the moment of the down — a companion who dies six seconds later left the player
+	 *  bleeding out a full minute with nobody alive to revive them and no fail screen. 1Hz poll,
+	 *  armed in EnterDBNO, cleared on revive/death/EndPlay. */
+	void PollSquadWipeWhileDBNO();
 	void FullDeath();
 
 	/** While downed outside a revive, switch the BP spring arm to pawn-control free look. */
@@ -997,6 +1003,7 @@ private:
 	float LastReviveWorldTime = -1e9f;
 
 	FTimerHandle BleedoutTimerHandle;
+	FTimerHandle SquadWipePollHandle;
 
 	/** One-tick deferral for the loadout restore so it lands after the character BP's
 	 *  BeginPlay spine (Load/SwapWeapon) has finished. Cleared in EndPlay. */

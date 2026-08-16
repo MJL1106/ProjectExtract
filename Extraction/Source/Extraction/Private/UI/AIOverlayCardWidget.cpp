@@ -77,7 +77,12 @@ void UAIOverlayCardWidget::UpdateProjection(const FVector2D& CardPosition, const
 	SetRenderTranslation(CardPosition);
 	SetRenderScale(FVector2D(OverlayScale, OverlayScale));
 
-	AnchorOffsetFromCard = AnchorPosition - CardPosition;
+	// Anchor geometry is stored in the widget's LOCAL frame, not screen pixels: the diamond and the
+	// leader line are children of a widget whose render scale is OverlayScale, so their transforms
+	// get multiplied by it on the way to the screen. Dividing the screen-space offset back out is
+	// what keeps the diamond ON the enemy for any scale — at scale 1 this is the old behaviour.
+	const float SafeScale = FMath::Max(OverlayScale, 0.05f);
+	AnchorOffsetFromCard = (AnchorPosition - CardPosition) / SafeScale;
 	LeaderLineLength = static_cast<float>(AnchorOffsetFromCard.Size());
 	LeaderLineAngleDegrees = static_cast<float>(FMath::RadiansToDegrees(
 		FMath::Atan2(AnchorOffsetFromCard.Y, AnchorOffsetFromCard.X)));

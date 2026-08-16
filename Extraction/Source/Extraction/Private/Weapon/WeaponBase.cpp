@@ -943,6 +943,17 @@ void AWeaponBase::PerformHitscan()
 		FVector CameraLoc;
 		FRotator CameraRot;
 		PC->GetPlayerViewPoint(CameraLoc, CameraRot);
+
+		// Ejected to a demo/cinematic camera the pawn is no longer the view target, so the view
+		// point above is the SPECTATOR lens — a shot would leave the camera, not the gun. Input
+		// still steers the pawn's control rotation and the PiP shows the pawn's first-person view,
+		// so the pawn's eyes + control rotation are the aim the player is actually looking down.
+		if (PC->GetViewTarget() != OwnerChar)
+		{
+			CameraLoc = OwnerChar->GetPawnViewLocation();
+			CameraRot = PC->GetControlRotation();
+		}
+
 		TraceStart = CameraLoc;
 		AimDirection = CameraRot.Vector();
 

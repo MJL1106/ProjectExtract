@@ -259,14 +259,23 @@ void UAIOverlayLayer::TickProjection()
 
 		const FScreenMarkerProjection Projection = FScreenMarkerProjection::Project(Context, Snapshot.WorldAnchor, ClampParams);
 
+		// Range cull rides the same flag as off-screen: a beyond-range enemy is hidden below, never
+		// ranked or decluttered, so it also cannot displace a near enemy from the card cap.
+		const float Distance = FVector::Dist(Context.ViewLocation, Snapshot.WorldAnchor);
+
 		FCardRank& Rank = ScratchRanks.AddDefaulted_GetRef();
 		Rank.Card = Card;
 		Rank.Snapshot = &Snapshot;
-		Rank.bTouched = Projection.bIsValid && !Projection.bIsOffScreen;
+		Rank.bTouched = Projection.bIsValid && !Projection.bIsOffScreen && Distance <= CardMaxDistance;
 		if (Rank.bTouched)
 		{
+			Rank.DistanceScale = FMath::Clamp(
+				CardReferenceDistance / FMath::Max(Distance, 1.f), CardMinDistanceScale, 1.f);
 			Rank.AnchorScreenPos = Projection.ScreenPosition;
-			Rank.CardScreenPos = Projection.ScreenPosition - FVector2D(0.f, CardHeightAboveAnchor);
+			// The float height rides the card's own scale so a shrunken far card hugs its anchor
+			// instead of hovering a full-size gap above a half-size body.
+			Rank.CardScreenPos = Projection.ScreenPosition
+				- FVector2D(0.f, CardHeightAboveAnchor * Rank.DistanceScale);
 		}
 	}
 
@@ -275,71 +284,22 @@ void UAIOverlayLayer::TickProjection()
 
 void UAIOverlayLayer::DeclutterAndPush(TArray<FCardRank>& Ranks, float OverlayScale)
 {
-	if (Ranks.Num() == 0) return;
-
-	const FVector2D ScreenCentre = CachedViewContext.ViewportSize * 0.5;
-
-	// Touched (on-screen) entries sort first; within that group, cap ranking is awareness state desc,
-	// then |suspicion rate| desc, then proximity to screen centre asc. Untouched (off-screen, but
-	// still-live) entries trail in arbitrary order -- they are hidden below, never ranked or
-	// decluttered. Strict weak ordering throughout: the AbsRateA/AbsRateB branch compares by !=, not
-	// IsNearlyEqual (whose equivalence is not transitive, which introsort's unguarded inner loops
-	// assume it is).
-	Ranks.Sort([ScreenCentre](const FCardRank& A, const FCardRank& B)
+	// No sort, no cap demotion, no push — every in-range on-screen enemy gets its full card pinned
+	// directly above its head, and overlap is allowed. The ranked declutter this replaced re-ordered
+	// and re-pushed cards every frame as ranks and positions shifted, which read as cards jumping
+	// around the screen; a head-pinned card only ever moves with its own enemy.
+	for (FCardRank& Rank : Ranks)
 	{
-		if (A.bTouched != B.bTouched) return A.bTouched;
-		if (!A.bTouched) return false; // Both untouched -- no ordering needed among hidden entries.
-
-		if (A.Snapshot->AwarenessState != B.Snapshot->AwarenessState)
-			return A.Snapshot->AwarenessState > B.Snapshot->AwarenessState;
-
-		const float AbsRateA = FMath::Abs(A.Snapshot->SuspicionRate);
-		const float AbsRateB = FMath::Abs(B.Snapshot->SuspicionRate);
-		if (AbsRateA != AbsRateB)
-			return AbsRateA > AbsRateB;
-
-		return FVector2D::DistSquared(A.AnchorScreenPos, ScreenCentre) < FVector2D::DistSquared(B.AnchorScreenPos, ScreenCentre);
-	});
-
-	int32 TouchedCount = 0;
-	while (TouchedCount < Ranks.Num() && Ranks[TouchedCount].bTouched) ++TouchedCount;
-
-	// After the sort above, index < MaxSimultaneousCards (among touched entries) IS the full-card
-	// test -- no separate set needed.
-	const int32 FullCount = FMath::Min(TouchedCount, MaxSimultaneousCards);
-
-	// Declutter only the full cards -- a bare-anchor entry has no body to collide with. Sorting the
-	// [0, FullCount) sub-range of Ranks IN PLACE via a view avoids a second array entirely.
-	TArrayView<FCardRank> FullView(Ranks.GetData(), FullCount);
-	FullView.Sort([](const FCardRank& A, const FCardRank& B) { return A.CardScreenPos.Y < B.CardScreenPos.Y; });
-
-	// Bounded single pass, top to bottom: push any card whose Y sits too close to the previous one
-	// straight down by the shortfall. Not an iterative solver -- a genuinely crowded frame stacks
-	// rather than converging perfectly; the leader line (computed below from the UNMOVED anchor) is
-	// what sells the difference.
-	for (int32 Index = 1; Index < FullCount; ++Index)
-	{
-		FCardRank& Prev = Ranks[Index - 1];
-		FCardRank& Curr = Ranks[Index];
-
-		const float MinY = Prev.CardScreenPos.Y + MinCardVerticalSpacing;
-		if (Curr.CardScreenPos.Y < MinY)
-			Curr.CardScreenPos.Y = MinY;
-	}
-
-	for (int32 Index = 0; Index < Ranks.Num(); ++Index)
-	{
-		FCardRank& Rank = Ranks[Index];
 		if (!Rank.Card) continue;
 
-		if (Index >= TouchedCount)
+		if (!Rank.bTouched)
 		{
 			Rank.Card->SetOffScreenHidden(true);
 			continue;
 		}
 
-		const bool bBareAnchorOnly = (Index >= FullCount);
-		Rank.Card->UpdateProjection(Rank.CardScreenPos, Rank.AnchorScreenPos, bBareAnchorOnly, OverlayScale);
+		Rank.Card->UpdateProjection(Rank.CardScreenPos, Rank.AnchorScreenPos, /*bInBareAnchorOnly=*/false,
+			OverlayScale * Rank.DistanceScale);
 	}
 }
 
