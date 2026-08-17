@@ -30,6 +30,9 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "UI/OverheadWidgetComponent.h"
+#include "NiagaraFunctionLibrary.h" // blood burst on bullet impact
+#include "NiagaraSystem.h"
+#include "Engine/DamageEvents.h"   // FPointDamageEvent — blood burst needs the concrete event type
 #include "UI/CompanionModeIndicatorWidget.h"
 #include "Game/ExtractionGameMode.h"
 #include "GameFramework/CharacterMovementComponent.h"
@@ -481,7 +484,39 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 		Bark(ECompanionBarkType::CompanionHurt);
 	}
 
+	SpawnBloodImpactFX(DamageEvent);
+
 	return ActualDamage;
+}
+
+void ACompanionCharacter::PlayCosmeticBulletImpact(const FHitResult& Hit, const FVector& ShotDirection) const
+{
+	if (bIsDBNO) return;
+	if (IsValid(HealthComponent) && HealthComponent->IsDead()) return;
+
+	FPointDamageEvent CosmeticEvent;
+	CosmeticEvent.Damage = 0.f;
+	CosmeticEvent.HitInfo = Hit;
+	CosmeticEvent.ShotDirection = ShotDirection;
+
+	SpawnBloodImpactFX(CosmeticEvent);
+}
+
+void ACompanionCharacter::SpawnBloodImpactFX(const FDamageEvent& DamageEvent) const
+{
+	if (!IsValid(BloodImpactFX)) return;
+	if (!DamageEvent.IsOfType(FPointDamageEvent::ClassID)) return;
+
+	const FPointDamageEvent& PointDamage = static_cast<const FPointDamageEvent&>(DamageEvent);
+	const FHitResult& Hit = PointDamage.HitInfo;
+	if (Hit.ImpactPoint.IsNearlyZero()) return;
+
+	// Face the burst back along the surface normal; fall back to opposing the shot when the normal
+	// is unset (e.g. hand-built damage events).
+	const FVector BurstDir = Hit.ImpactNormal.IsNearlyZero() ? -PointDamage.ShotDirection : FVector(Hit.ImpactNormal);
+	UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		GetWorld(), BloodImpactFX, Hit.ImpactPoint, BurstDir.Rotation(),
+		FVector(1.f), /*bAutoDestroy=*/true, /*bAutoActivate=*/true, ENCPoolMethod::AutoRelease);
 }
 
 bool ACompanionCharacter::IsSuppressed(float Window) const

@@ -32,6 +32,7 @@ class AExtractionPlayer;
 class UCompanionTuningDataAsset;
 class UEnemyGrenadierComponent;
 class AEnemyCharacter;
+class UNiagaraSystem;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
 
@@ -886,6 +887,18 @@ protected:
 	float InaccuracySettleTime = 1.5f;
 
 public:
+	/** Blood burst spawned at the bullet impact point on point-damage hits, matching the enemy's.
+	 *  Assign NS_EnemyBloodImpact (or a companion-specific system) in the companion BP defaults —
+	 *  null simply means no burst. Inherited by the extraction VIP. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|FX")
+	TObjectPtr<UNiagaraSystem> BloodImpactFX;
+
+	/** Blood burst for a round that visibly struck this companion but dealt no damage, because the
+	 *  shooter's AI damage-mitigation gate suppressed it. Same reasoning as the enemy's: enemy
+	 *  weapons run the same gate, so without this the companion soaks visible fire showing nothing.
+	 *  Cosmetic only — no damage, no hit-react, no bark. */
+	void PlayCosmeticBulletImpact(const FHitResult& Hit, const FVector& ShotDirection) const;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
 	float MaxEngageRange = 3500.0f;
 
@@ -1171,6 +1184,10 @@ protected:
 	float TakedownWindowRefreshSeconds = 0.75f;
 
 private:
+	/** Spawns BloodImpactFX at the hit location for point-damage events. Shared by the real damage
+	 *  path and the cosmetic gated-round path. */
+	void SpawnBloodImpactFX(const FDamageEvent& DamageEvent) const;
+
 	UPROPERTY(ReplicatedUsing = OnRep_LowReadyAim)
 	bool bLowReadyAim = false;
 

@@ -1147,11 +1147,15 @@ void AWeaponBase::PerformHitscan()
 		if (bGateActive && VR && !VR->bGateAllowsDamage)
 		{
 			// The round visibly struck the target — only the damage was suppressed. Show the blood
-			// anyway, or the companion reads as firing blanks: its 0.15s per-victim cadence cap
-			// gates out roughly every other round of a rifle firing faster than that.
+			// anyway, or the shooter reads as firing blanks: a 0.15s per-victim cadence cap gates
+			// out roughly every other round of a rifle firing faster than that. Both directions
+			// need it — the companion's gate eats its rounds into enemies, the enemies' gates eat
+			// theirs into the companion.
 			// VFX only, deliberately not the flesh SFX — that would squelch at the full fire rate.
 			if (const AEnemyCharacter* GatedEnemy = Cast<AEnemyCharacter>(HitActor))
 				GatedEnemy->PlayCosmeticBulletImpact(PR.Hit, PR.Dir);
+			else if (const ACompanionCharacter* GatedAlly = Cast<ACompanionCharacter>(HitActor))
+				GatedAlly->PlayCosmeticBulletImpact(PR.Hit, PR.Dir);
 			continue;
 		}
 
