@@ -122,6 +122,42 @@ void UAIOverlayLayer::Refresh()
 	if (!Subsystem) return;
 
 	ReconcileCards(Subsystem->GetSnapshots());
+	ReconcileCompanionCard(Subsystem->GetCompanionSnapshot());
+}
+
+void UAIOverlayLayer::ReconcileCompanionCard(const FEnemyOverlaySnapshot* Snapshot)
+{
+	if (!CardCanvas || !CardWidgetClass) return;
+
+	if (!Snapshot)
+	{
+		if (IsValid(CompanionCard))
+		{
+			CardCanvas->RemoveChild(CompanionCard);
+			CompanionCard = nullptr;
+		}
+		return;
+	}
+
+	if (IsValid(CompanionCard))
+	{
+		CompanionCard->UpdateSnapshot(*Snapshot);
+		return;
+	}
+
+	CompanionCard = CreateWidget<UAIOverlayCardWidget>(this, CardWidgetClass);
+	if (!IsValid(CompanionCard)) return;
+
+	CompanionCard->InitializeForEnemy(*Snapshot);
+	CompanionCard->SetOffScreenHidden(true);
+
+	UCanvasPanelSlot* CanvasSlot = CardCanvas->AddChildToCanvas(CompanionCard);
+	if (!CanvasSlot) return;
+
+	CanvasSlot->SetAnchors(FAnchors(0.f, 0.f));
+	CanvasSlot->SetAutoSize(true);
+	CanvasSlot->SetAlignment(FVector2D(0.5f, 0.5f));
+	CanvasSlot->SetPosition(FVector2D::ZeroVector);
 }
 
 void UAIOverlayLayer::ReconcileCards(const TArray<FEnemyOverlaySnapshot>& Snapshots)
@@ -280,6 +316,31 @@ void UAIOverlayLayer::TickProjection()
 	}
 
 	DeclutterAndPush(ScratchRanks, OverlayScale);
+
+	// Companion card: projected with identical math but outside the enemy rank set — its identity
+	// is the single held widget, and it must never compete with the enemy cards.
+	if (IsValid(CompanionCard))
+	{
+		const FEnemyOverlaySnapshot* CompSnap = Subsystem->GetCompanionSnapshot();
+		bool bShown = false;
+		if (CompSnap)
+		{
+			const FScreenMarkerProjection Projection =
+				FScreenMarkerProjection::Project(Context, CompSnap->WorldAnchor, ClampParams);
+			const float Distance = FVector::Dist(Context.ViewLocation, CompSnap->WorldAnchor);
+			if (Projection.bIsValid && !Projection.bIsOffScreen && Distance <= CardMaxDistance)
+			{
+				const float DistanceScale = FMath::Clamp(
+					CardReferenceDistance / FMath::Max(Distance, 1.f), CardMinDistanceScale, 1.f);
+				const FVector2D CardPos = Projection.ScreenPosition
+					- FVector2D(0.f, CardHeightAboveAnchor * DistanceScale);
+				CompanionCard->UpdateProjection(CardPos, Projection.ScreenPosition,
+					/*bInBareAnchorOnly=*/false, OverlayScale * DistanceScale);
+				bShown = true;
+			}
+		}
+		if (!bShown) CompanionCard->SetOffScreenHidden(true);
+	}
 }
 
 void UAIOverlayLayer::DeclutterAndPush(TArray<FCardRank>& Ranks, float OverlayScale)

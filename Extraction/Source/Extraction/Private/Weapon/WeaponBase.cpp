@@ -1238,11 +1238,14 @@ void AWeaponBase::PerformHitscan()
 	if (!bAIOwned && AudioSys)
 		AudioSys->PlayShellDrop(OwnerChar->GetActorLocation());
 
-	// FX and noise — one per shot, using the center pellet.
-	ReportNearMisses(TraceStart, CenterImpactOrEnd, CenterHitActor);
+	// FX and noise — one per shot, using the center pellet. Demo-mute (warp-cam showcase fire)
+	// keeps the audible FX but skips the AI-facing signals — hearing stimulus and near-miss
+	// suppression — so one lane's showcase can't alert or suppress the neighbouring pens.
+	if (!bDemoMuteNoise)
+		ReportNearMisses(TraceStart, CenterImpactOrEnd, CenterHitActor);
 	Multicast_PlayFireFX(GetMuzzleLocation(), CenterImpactOrEnd, bCenterHit);
 
-	if (GetEffectiveNoiseRange() > 0.f)
+	if (!bDemoMuteNoise && GetEffectiveNoiseRange() > 0.f)
 		UAISense_Hearing::ReportNoiseEvent(World, GetMuzzleLocation(), GetEffectiveNoiseLoudness(), OwnerChar, GetEffectiveNoiseRange(), TEXT("WeaponFire"));
 }
 
@@ -1795,7 +1798,7 @@ void AWeaponBase::Reload()
 	{
 		CurrentState = EWeaponState::Reloading;
 
-		if (IsValid(WeaponData) && WeaponData->ReloadNoiseRange > 0.f)
+		if (!bDemoMuteNoise && IsValid(WeaponData) && WeaponData->ReloadNoiseRange > 0.f)
 			UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetActorLocation(), WeaponData->ReloadNoiseLoudness, GetOwner(), WeaponData->ReloadNoiseRange, TEXT("Reload"));
 	}
 

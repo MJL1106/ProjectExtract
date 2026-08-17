@@ -897,12 +897,28 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "0.0"))
 	float AngleSeekCooldown = 5.f;
 
+	// Flank-cover commit range (cm) — how far the companion will RUN to a flanking cover when the
+	// seek arms. Deliberately much longer than CoverCommitMaxDistance: a flank is worth a real
+	// reposition, and the general commit cap (650) made this path near-dead on open arenas.
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "0.0"))
+	float AngleSeekCommitMaxDistance = 1800.f;
+
+	// Flank ANGLE (deg) off the player->attackers axis for the route-mode flank goal: 90 = dead
+	// side-on, above 90 curls behind the attackers. Shallower fallbacks (-20, -40) are tried when
+	// the map can't route the full angle.
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "30.0", ClampMax = "150.0"))
+	float AngleSeekFlankAngleDeg = 105.f;
+
+	// Standoff (cm) from the attacker centroid at the flank goal.
+	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "300.0"))
+	float AngleSeekFlankStandoff = 900.f;
+
 	// Lateral ORBIT RATE: cm added to the move-shoot drift anchor per drift cycle (~1.5s),
 	// perpendicular to the target axis away from the player's firing line — the companion keeps
 	// circling for the crossfire angle for as long as the seek stays active (up to AngleSeekMaxTime).
 	// Combat mode scales this up (see multiplier below).
 	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "0.0"))
-	float AngleSeekLateralBias = 300.f;
+	float AngleSeekLateralBias = 550.f;
 
 	// Combat-mode multiplier on AngleSeekLateralBias — the aggressive open flank.
 	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "1.0", ClampMax = "4.0"))
@@ -911,7 +927,7 @@ public:
 	// Max duration (s) of one angle-seek before it stands down (also exits when the focus count
 	// drops below AngleSeekMinFocusedEnemies).
 	UPROPERTY(EditAnywhere, Category = "Companion|AngleSeek", meta = (ClampMin = "0.0"))
-	float AngleSeekMaxTime = 6.f;
+	float AngleSeekMaxTime = 9.f;
 
 	// --- Multi-threat cover scoring ---
 

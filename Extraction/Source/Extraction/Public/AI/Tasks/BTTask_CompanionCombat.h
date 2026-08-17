@@ -617,6 +617,22 @@ private:
 	/** Lateral bias magnitude resolved at activation (DA field x Combat-mode multiplier). */
 	float AngleSeekBiasResolved = 0.f;
 
+	/** Route-mode flank: nav path points to the flank-angle goal, walked via the move-shoot anchor.
+	 *  Index INDEX_NONE = no route (tangent-drift fallback, or arrived and holding the angle). */
+	TArray<FVector> AngleSeekPath;
+	int32 AngleSeekPathIndex = INDEX_NONE;
+
+	/** Side stickiness across re-arms — a fresh arm reuses the last side for a while so
+	 *  interrupted flanks resume the same way around instead of ping-ponging. */
+	float LastFlankSideSign = 0.f;
+	float LastFlankSideWorldTime = -1e9f;
+
+	/** Armed via companion.ForceFlank: activation and abort gates are bypassed until this seek ends. */
+	bool bForcedSeek = false;
+
+	/** Throttle for the [ANGLE-DBG] status line. */
+	float AngleSeekDbgLogTimer = 0.f;
+
 	/** Angle-seek driver for the open-engage clear-LoS path: cooldown/abort/exit while active,
 	 *  activation roll while idle (cover-first in Normal, move-shoot flank in Combat). Returns true
 	 *  when it finished the task (cover commit handed to MoveToCoverPoint) — caller returns. */
@@ -624,7 +640,7 @@ private:
 		const FVector& MyLocation, bool bPlayerTooFar, float DeltaSeconds);
 
 	/** Deactivates angle-seek and arms the cooldown. Safe when already inactive. */
-	void EndAngleSeek(const ACompanionCharacter* Companion, const TCHAR* Reason);
+	void EndAngleSeek(ACompanionCharacter* Companion, const TCHAR* Reason);
 
 	/** Cover-first variant: nearest reachable cover with a verified firing line on at least one of
 	 *  the focused attackers (arc/shield tested against their centroid). On success stamps

@@ -9,6 +9,7 @@
 #include "AIOverlayTypes.h"
 #include "AIOverlaySubsystem.generated.h"
 
+class ACompanionCharacter;
 class AEnemyCharacter;
 class UEnemySquad;
 
@@ -52,6 +53,13 @@ public:
 
 	const TArray<FEnemyOverlaySnapshot>& GetSnapshots() const { return Snapshots; }
 
+	/** Companion card data, same struct/cadence as the enemy snapshots (Enemy field is null —
+	 *  the layer holds its card separately). Null while the overlay is off or no live companion. */
+	const FEnemyOverlaySnapshot* GetCompanionSnapshot() const
+	{
+		return bCompanionSnapshotValid ? &CompanionSnapshot : nullptr;
+	}
+
 	// --- Squad banner events (queue depth 3, oldest dropped on overflow) ---
 
 	/** Pops the oldest queued event, discarding any that have gone stale first (see
@@ -84,6 +92,7 @@ private:
 	void TickSnapshots();
 	void BuildSnapshot(FOverlayEnemyEntry& Entry, AEnemyCharacter* Enemy, float WorldTime,
 		float DeltaTime, FEnemyOverlaySnapshot& Out);
+	void BuildCompanionSnapshot();
 
 	/** Drops entries whose pawn is gone or dead — backstop for a missed HandleDeath unregister. */
 	void PruneRegistry();
@@ -99,6 +108,10 @@ private:
 	TArray<FOverlayEnemyEntry> Entries;
 
 	TArray<FEnemyOverlaySnapshot> Snapshots;
+
+	FEnemyOverlaySnapshot CompanionSnapshot;
+	bool bCompanionSnapshotValid = false;
+	TWeakObjectPtr<ACompanionCharacter> TrackedCompanion;
 
 	TArray<FSquadOverlayEvent> SquadEventQueue;
 

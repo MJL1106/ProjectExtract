@@ -7,9 +7,11 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "GameFramework/Pawn.h"
 #include "HAL/IConsoleManager.h"
 #include "TimerManager.h"
+#include "Weapon/WeaponBase.h"
 
 #include "AI/BlackboardKeyType_Cover.h"
 #include "CoverSystemPublicData.h"
@@ -40,16 +42,17 @@ namespace
 	/** Skeleton socket the card anchors to. Matches AEnemyCharacter's awareness widget attach. */
 	const FName OverlayHeadSocket(TEXT("head"));
 
-	/** Head socket location, or capsule top when the skeleton has no head socket. */
-	FVector ResolveHeadAnchor(const AEnemyCharacter* Enemy)
+	/** Head socket location, or capsule top when the skeleton has no head socket.
+	 *  ACharacter-typed so the companion card anchors the same way as the enemies'. */
+	FVector ResolveHeadAnchor(const ACharacter* Character)
 	{
-		const USkeletalMeshComponent* Mesh = Enemy->GetMesh();
+		const USkeletalMeshComponent* Mesh = Character->GetMesh();
 		if (IsValid(Mesh) && Mesh->DoesSocketExist(OverlayHeadSocket))
 			return Mesh->GetSocketLocation(OverlayHeadSocket);
 
-		const UCapsuleComponent* Capsule = Enemy->GetCapsuleComponent();
+		const UCapsuleComponent* Capsule = Character->GetCapsuleComponent();
 		const float HalfHeight = IsValid(Capsule) ? Capsule->GetScaledCapsuleHalfHeight() : 0.f;
-		return Enemy->GetActorLocation() + FVector(0.f, 0.f, HalfHeight);
+		return Character->GetActorLocation() + FVector(0.f, 0.f, HalfHeight);
 	}
 
 	EOverlayTargetKind ClassifyTarget(const AActor* Target)
@@ -295,6 +298,7 @@ void UAIOverlaySubsystem::TickSnapshots()
 	{
 		Snapshots.Reset();
 		SquadEventQueue.Reset();
+		bCompanionSnapshotValid = false;
 		return;
 	}
 
@@ -314,6 +318,83 @@ void UAIOverlaySubsystem::TickSnapshots()
 		FEnemyOverlaySnapshot& Snap = Snapshots.AddDefaulted_GetRef();
 		BuildSnapshot(Entry, Enemy, WorldTime, DeltaTime, Snap);
 	}
+
+	BuildCompanionSnapshot();
+}
+
+void UAIOverlaySubsystem::BuildCompanionSnapshot()
+{
+	bCompanionSnapshotValid = false;
+
+	ACompanionCharacter* Companion = TrackedCompanion.Get();
+	if (!IsValid(Companion))
+	{
+		UWorld* World = GetWorld();
+		if (!IsValid(World)) return;
+		for (TActorIterator<ACompanionCharacter> It(World); It; ++It) { Companion = *It; break; }
+		TrackedCompanion = Companion;
+	}
+	if (!IsValid(Companion)) return;
+
+	// DBNO reads as dead on the health component but the card must stay up saying DOWN —
+	// only a true (non-revivable) death drops it.
+	const UHealthComponent* Health = Companion->GetHealthComponent();
+	if (IsValid(Health) && Health->IsDead() && !Companion->GetIsCompanionDBNO()) return;
+
+	FEnemyOverlaySnapshot& Out = CompanionSnapshot;
+	Out = FEnemyOverlaySnapshot();
+	Out.WorldAnchor = ResolveHeadAnchor(Companion);
+
+	// Identity line carries the live mode — the card's archetype slot is the natural home for it.
+	const TCHAR* ModeStr = TEXT("DEFENSIVE");
+	switch (Companion->GetMode())
+	{
+	case ECompanionMode::Combat:  ModeStr = TEXT("COMBAT"); break;
+	case ECompanionMode::Stealth: ModeStr = TEXT("STEALTH"); break;
+	default: break;
+	}
+	Out.ArchetypeLabel = FText::FromString(FString::Printf(TEXT("COMPANION - %s"), ModeStr));
+
+	// bFearless collapses the morale line; zeroed suspicion collapses the fill bar; TargetKind::None
+	// collapses the target chip — the card renders only the rows that mean something for an ally.
+	Out.bFearless = true;
+
+	const AWeaponBase* Weapon = Companion->GetCurrentWeapon();
+	const bool bFiring = IsValid(Weapon) && Weapon->IsFiring();
+	const bool bFlanking = Companion->IsAngleSeekingForOverlay();
+
+	// Chevrons double as an engagement read: full stack in a fight, two while threats are pressing
+	// the player, none when calm.
+	if (bFiring || bFlanking)                              Out.AwarenessState = 3;
+	else if (Companion->GetPlayerFocusedEnemyCount() > 0)  Out.AwarenessState = 2;
+
+	if (const UCoverPoseComponent* Pose = Companion->GetCoverPoseComponent())
+	{
+		Out.bInCover      = Pose->bInCover;
+		Out.bPeeking      = Pose->bPeeking;
+		Out.bBlindFiring  = Pose->bBlindFiring;
+		Out.bCoverMoving  = Pose->bCoverMoving;
+		Out.CoverHeight   = static_cast<uint8>(Pose->CoverHeight);
+		Out.LeanDirection = LeanToSigned(Pose->LeanDirection);
+	}
+
+	if (const USuppressionComponent* Suppression = Companion->FindComponentByClass<USuppressionComponent>())
+	{
+		Out.Suppression01 = Suppression->GetSuppression01();
+		Out.bSuppressed   = Suppression->IsSuppressed();
+	}
+
+	// Action line, loudest first: downed beats everything, the crossfire flank is the star read
+	// this card exists for, then plain fire, then locomotion.
+	FString Action;
+	if (Companion->GetIsCompanionDBNO())  Action = TEXT("DOWN");
+	else if (bFlanking)                   Action = TEXT("FLANKING");
+	else if (bFiring)                     Action = TEXT("FIRING");
+	else if (Companion->GetVelocity().Size2D() > 150.f) Action = TEXT("MOVING");
+	else                                  Action = TEXT("HOLDING");
+	Out.ActionLabel = FText::FromString(Action);
+
+	bCompanionSnapshotValid = true;
 }
 
 void UAIOverlaySubsystem::BuildSnapshot(FOverlayEnemyEntry& Entry, AEnemyCharacter* Enemy,

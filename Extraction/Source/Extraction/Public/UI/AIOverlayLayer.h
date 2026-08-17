@@ -208,6 +208,13 @@ private:
 	 *  costs an O(N) Cast<> walk of CardCanvas. */
 	TMap<TWeakObjectPtr<AEnemyCharacter>, TObjectPtr<UAIOverlayCardWidget>> CardsByEnemy;
 
+	/** The companion's card — held apart from CardsByEnemy (keyed on enemies) and exempt from
+	 *  the enemy declutter path so it can never be displaced by the card set. */
+	UPROPERTY(Transient)
+	TObjectPtr<UAIOverlayCardWidget> CompanionCard;
+
+	void ReconcileCompanionCard(const FEnemyOverlaySnapshot* Snapshot);
+
 	// --- Per-frame cadence ---
 
 	/** No position smoothing, deliberately -- cards snap to the projected point every frame, same

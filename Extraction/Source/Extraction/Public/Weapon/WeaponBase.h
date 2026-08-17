@@ -82,6 +82,11 @@ public:
 	 *  Used by the companion shoot takedown so the 2 visual shots never call NotifyDamaged->EnterCombat. */
 	void FireCosmetic(const FVector& AimEndPoint);
 
+	/** Demo showcase mute (set by ADemoWarpCamRig): fire/reload skip the AI hearing stimulus and
+	 *  near-miss suppression so a demonstrated enemy can't alert or suppress neighbouring pens.
+	 *  Audible/visual FX are unaffected. */
+	bool bDemoMuteNoise = false;
+
 	// ---- Reload ----
 
 	void Reload();

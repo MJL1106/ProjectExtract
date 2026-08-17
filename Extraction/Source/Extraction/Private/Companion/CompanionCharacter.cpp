@@ -506,6 +506,28 @@ float ACompanionCharacter::GetSuppression01() const
 	return IsValid(SuppressionComponent) ? SuppressionComponent->GetSuppression01() : 0.f;
 }
 
+void ACompanionCharacter::SetAngleSeekOverlayActive(bool bActive)
+{
+	if (bAngleSeekOverlayActive != bActive)
+		UE_LOG(LogCompanionAI, Log, TEXT("[ANGLE-DBG] %s overlay FLANKING flag %s"),
+			*GetName(), bActive ? TEXT("SET") : TEXT("CLEARED"));
+	bAngleSeekOverlayActive = bActive;
+}
+
+void ACompanionCharacter::MarkAngleSeekOverlayFor(float Seconds)
+{
+	UE_LOG(LogCompanionAI, Log, TEXT("[ANGLE-DBG] %s overlay FLANKING timed hold %.1fs"), *GetName(), Seconds);
+	if (const UWorld* World = GetWorld())
+		AngleSeekOverlayHoldUntil = World->GetTimeSeconds() + Seconds;
+}
+
+bool ACompanionCharacter::IsAngleSeekingForOverlay() const
+{
+	if (bAngleSeekOverlayActive) return true;
+	const UWorld* World = GetWorld();
+	return World && World->GetTimeSeconds() < AngleSeekOverlayHoldUntil;
+}
+
 AActor* ACompanionCharacter::GetRecentAttacker(float Window) const
 {
 	if (Window <= 0.f || !GetWorld()) return nullptr;

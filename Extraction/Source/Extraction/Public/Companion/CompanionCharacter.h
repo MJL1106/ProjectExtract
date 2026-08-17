@@ -729,6 +729,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|DBNO")
 	bool GetIsCompanionDBNO() const { return bIsDBNO; }
 
+	// --- Angle-seek overlay readout (AI overlay card only — no gameplay reads these) ---
+
+	/** Set by BTTask_CompanionCombat while the crossfire drift is live; cleared on EndAngleSeek. */
+	void SetAngleSeekOverlayActive(bool bActive);
+
+	/** Timed variant for the flank-cover commit, which finishes the task immediately — holds the
+	 *  FLANKING readout while the companion travels to the committed cover. */
+	void MarkAngleSeekOverlayFor(float Seconds);
+
+	bool IsAngleSeekingForOverlay() const;
+
 	/** True while the player's revive hold is active on this companion. The downed-retreat BT task
 	 *  stops issuing crawl movement so only the paired montage's root motion moves the body. */
 	bool IsBeingRevived() const { return bBeingRevived; }
@@ -822,6 +833,10 @@ protected:
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
 	TObjectPtr<UHealthComponent> HealthComponent;
+
+	/** Overlay-only angle-seek state — see SetAngleSeekOverlayActive/MarkAngleSeekOverlayFor. */
+	bool bAngleSeekOverlayActive = false;
+	double AngleSeekOverlayHoldUntil = 0.0;
 
 	/** Audible surface-aware footsteps only — AI-noise emission is disabled at construction. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
