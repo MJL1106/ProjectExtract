@@ -33,32 +33,6 @@
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/Input/SVirtualJoystick.h"
 
-// TEMP (demo recording): catches F10 ahead of Slate focus, so the restart hotkey still works while
-// the death / level-complete screen owns input in UI-only mode. Remove with the rest of the hotkey.
-namespace
-{
-	class FDemoRestartInputProcessor : public IInputProcessor
-	{
-	public:
-		explicit FDemoRestartInputProcessor(AExtractionPlayerController* InOwner) : Owner(InOwner) {}
-
-		virtual void Tick(const float, FSlateApplication&, TSharedRef<ICursor>) override {}
-
-		virtual bool HandleKeyDownEvent(FSlateApplication&, const FKeyEvent& InKeyEvent) override
-		{
-			if (InKeyEvent.GetKey() != EKeys::F10 || InKeyEvent.IsRepeat()) return false;
-			if (AExtractionPlayerController* PC = Owner.Get())
-			{
-				PC->HandleDemoRestartKeyPressed();
-				return true;
-			}
-			return false;
-		}
-
-	private:
-		TWeakObjectPtr<AExtractionPlayerController> Owner;
-	};
-}
 #include "Widgets/SWidget.h"
 
 namespace
@@ -134,13 +108,6 @@ void AExtractionPlayerController::BeginPlay()
 
 	ArmTutorialBriefing();
 
-	// TEMP (demo recording): remove with the rest of the F10 hotkey.
-	if (FSlateApplication::IsInitialized())
-	{
-		DemoRestartInputProcessor = MakeShared<FDemoRestartInputProcessor>(this);
-		FSlateApplication::Get().RegisterInputPreProcessor(DemoRestartInputProcessor);
-	}
-
 	// Supply world-space marker display class to the objective subsystem. Deliberately NOT part of
 	// RestoreHUD: the subsystem keeps the class for the level's lifetime, and re-supplying it on
 	// every rebuild would be redundant work on a path that must stay side-effect free.
@@ -161,11 +128,6 @@ void AExtractionPlayerController::EndPlay(const EEndPlayReason::Type EndPlayReas
 	// the object-scoped clear is the one that covers it. Nothing else on this controller uses timers.
 	if (const UWorld* World = GetWorld())
 		World->GetTimerManager().ClearAllTimersForObject(this);
-
-	// TEMP (demo recording): remove with the rest of the F10 hotkey.
-	if (DemoRestartInputProcessor.IsValid() && FSlateApplication::IsInitialized())
-		FSlateApplication::Get().UnregisterInputPreProcessor(DemoRestartInputProcessor);
-	DemoRestartInputProcessor.Reset();
 
 	Super::EndPlay(EndPlayReason);
 }
@@ -467,14 +429,6 @@ void AExtractionPlayerController::SetupInputComponent()
 		}
 	}
 
-}
-
-void AExtractionPlayerController::HandleDemoRestartKeyPressed()
-{
-	// TEMP (demo recording). Routes through the failure screen's own restart path, so it clears the
-	// end-screen flags, unpauses, restores game input and travels by full package path.
-	if (!IsLocalPlayerController()) return;
-	RequestRestartLevel();
 }
 
 void AExtractionPlayerController::HandlePauseKeyPressed()
