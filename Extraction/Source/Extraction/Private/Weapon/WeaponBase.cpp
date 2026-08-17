@@ -1144,7 +1144,16 @@ void AWeaponBase::PerformHitscan()
 		{
 			if (V.Victim.Get() == HitActor) { VR = &V; break; }
 		}
-		if (bGateActive && VR && !VR->bGateAllowsDamage) continue;
+		if (bGateActive && VR && !VR->bGateAllowsDamage)
+		{
+			// The round visibly struck the target — only the damage was suppressed. Show the blood
+			// anyway, or the companion reads as firing blanks: its 0.15s per-victim cadence cap
+			// gates out roughly every other round of a rifle firing faster than that.
+			// VFX only, deliberately not the flesh SFX — that would squelch at the full fire rate.
+			if (const AEnemyCharacter* GatedEnemy = Cast<AEnemyCharacter>(HitActor))
+				GatedEnemy->PlayCosmeticBulletImpact(PR.Hit, PR.Dir);
+			continue;
+		}
 
 		FPointDamageEvent DamageEvent;
 		DamageEvent.Damage = PR.Damage;
@@ -1229,8 +1238,24 @@ void AWeaponBase::PerformHitscan()
 	// positional at the victim.
 	if (AudioSys)
 	{
+		APawn* LocalPlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
 		for (const FVictimRecord& VR : VictimRecords)
-			if (VR.Health) AudioSys->PlayFleshImpact(VR.FirstImpact, /*bAsLocal2D*/ !bAIOwned, VR.HeadshotDamage > 0.f);
+		{
+			AActor* Victim = VR.Victim.Get();
+			if (!VR.Health || !IsValid(Victim)) continue;
+
+			// Anything with health that is not an enemy is on our side — player, companion, the
+			// extraction VIP. Those get the bank's quieter Ally* crack so "I hit something" and
+			// "we are being hit" never blur into the same noise.
+			const bool bAllyVictim = !Victim->IsA<AEnemyCharacter>();
+
+			// 2D for the player's own hit-confirm, and for rounds landing on the player themselves —
+			// both must read at any range. A hit on the COMPANION stays positional on purpose: that
+			// is how the player locates them when they are taking fire off-screen.
+			const bool bLocal2D = !bAIOwned || Victim == LocalPlayerPawn;
+
+			AudioSys->PlayFleshImpact(VR.FirstImpact, bLocal2D, VR.HeadshotDamage > 0.f, bAllyVictim);
+		}
 	}
 
 	// Brass tinkle for player shots — scheduled with a short delay so it reads as the shell

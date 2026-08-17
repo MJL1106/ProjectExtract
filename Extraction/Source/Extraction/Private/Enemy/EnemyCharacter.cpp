@@ -918,6 +918,20 @@ float AEnemyCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Damage
 	return FinalDamage;
 }
 
+void AEnemyCharacter::PlayCosmeticBulletImpact(const FHitResult& Hit, const FVector& ShotDirection) const
+{
+	if (IsValid(HealthComponent) && HealthComponent->IsDead()) return;
+
+	// Rebuild the same event shape SpawnBloodImpactFX/ResolveHitRegion expect. Damage stays 0 and
+	// this is never handed to TakeDamage — the gate suppressed the shot and that decision stands.
+	FPointDamageEvent CosmeticEvent;
+	CosmeticEvent.Damage = 0.f;
+	CosmeticEvent.HitInfo = Hit;
+	CosmeticEvent.ShotDirection = ShotDirection;
+
+	SpawnBloodImpactFX(CosmeticEvent, ResolveHitRegion(CosmeticEvent));
+}
+
 void AEnemyCharacter::SpawnBloodImpactFX(const FDamageEvent& DamageEvent, EHitRegion HitRegion) const
 {
 	if (!IsValid(BloodImpactFX)) return;

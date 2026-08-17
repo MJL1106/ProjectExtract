@@ -38,8 +38,12 @@ public:
 
 	/** Bullet-into-body crack + meat-thump layer, once per victim per shot. bAsLocal2D = the local
 	 *  player is the shooter: play as 2D hit-confirm so feedback reads at any range. bHeadshot
-	 *  swaps the crack for the bank's HeadshotImpact when one is set. */
-	void PlayFleshImpact(const FVector& Location, bool bAsLocal2D = false, bool bHeadshot = false);
+	 *  swaps the crack for the bank's HeadshotImpact when one is set. bAllyVictim = the player or
+	 *  the companion was hit, not an enemy: swaps to the bank's quieter Ally* cues so the two
+	 *  directions of fire stay tellable apart. Headshot is ignored for ally victims — a distinct
+	 *  headshot crack on the player reads as feedback for a hit they landed. */
+	void PlayFleshImpact(const FVector& Location, bool bAsLocal2D = false, bool bHeadshot = false,
+		bool bAllyVictim = false);
 
 	/** AI fire report with the bank's gunfire attenuation forced on (fire cues are 2D-authored). */
 	void PlayAIFireReport(USoundBase* Sound, const FVector& Location) const;

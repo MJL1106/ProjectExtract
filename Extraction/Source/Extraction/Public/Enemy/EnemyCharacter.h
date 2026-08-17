@@ -528,6 +528,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|FX")
 	TObjectPtr<UNiagaraSystem> BloodImpactFX;
 
+	/** Blood burst for a bullet that visibly struck this enemy but dealt no damage, because the AI
+	 *  damage-mitigation gate suppressed the shot. Without this the companion's suppressed rounds —
+	 *  roughly every other one at its 0.15s per-victim cadence cap — land with no feedback at all
+	 *  and read as shooting blanks. Cosmetic only: no damage, no hit-react, no morale. */
+	void PlayCosmeticBulletImpact(const FHitResult& Hit, const FVector& ShotDirection) const;
+
 	/** Uniform scale applied to BloodImpactFX on head-region hits — headshots bleed bigger. */
 	UPROPERTY(EditDefaultsOnly, Category = "Enemy|FX", meta = (ClampMin = "1.0"))
 	float HeadshotBloodScale = 1.6f;

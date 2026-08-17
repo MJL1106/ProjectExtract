@@ -81,6 +81,23 @@ public:
 	UPROPERTY(EditDefaultsOnly, Category = "Bullets", meta = (ClampMin = "0.0", ClampMax = "1.0"))
 	float FleshFeedbackVolume = 0.7f;
 
+	/** Bullet-into-body crack when the victim is the PLAYER or the companion rather than an enemy.
+	 *  Deliberately a near-copy of FleshImpact (duplicate + pitch-shift) so it reads as the same
+	 *  material event, but distinct enough that "I hit something" and "something hit us" never blur.
+	 *  Null = fall back to FleshImpact. */
+	UPROPERTY(EditDefaultsOnly, Category = "Bullets")
+	TObjectPtr<USoundBase> AllyFleshImpact;
+
+	/** Low thump layered under AllyFleshImpact. Null = no layer (NOT FleshImpactLayer — pairing the
+	 *  ally crack with the enemy thump puts the difference back where it started). */
+	UPROPERTY(EditDefaultsOnly, Category = "Bullets")
+	TObjectPtr<USoundBase> AllyFleshImpactLayer;
+
+	/** Volume for ally flesh hits. Sits under FleshFeedbackVolume on purpose: taking fire should be
+	 *  legible without competing with the player's own hit confirm. */
+	UPROPERTY(EditDefaultsOnly, Category = "Bullets", meta = (ClampMin = "0.0", ClampMax = "1.0"))
+	float AllyFleshFeedbackVolume = 0.5f;
+
 	/** Crack of an enemy shot passing the player's head (near-miss hook). */
 	UPROPERTY(EditDefaultsOnly, Category = "Bullets")
 	TObjectPtr<USoundBase> Flyby;
