@@ -32,7 +32,16 @@ class EXTRACTION_API UKeybindHintLibrary : public UBlueprintFunctionLibrary
 public:
 	/** Display text for the key currently bound to Action for the local player. Never empty — an
 	 *  unassigned action, an unbound action, or no local player all return GetUnboundKeyText(), so a
-	 *  caller substituting this into a prompt can never render a hint with a hole in it. */
+	 *  caller substituting this into a prompt can never render a hint with a hole in it.
+	 *
+	 *  MONOTONIC per action: the best answer yet seen is remembered, and a later query that resolves
+	 *  to something strictly less informative (gamepad-only where a keyboard key was known, or
+	 *  nothing at all) returns the remembered one instead. That is not an optimisation — the mapping
+	 *  table rebuilds asynchronously after every AddMappingContext/RemoveMappingContext, and the
+	 *  companion mode-select and takedown-prompt contexts register and unregister throughout normal
+	 *  play, so an unlucky poll reads a half-built table and cannot tell that from a real unbinding.
+	 *  Without this, hints resolved correctly on the first pass and then degraded a second into the
+	 *  level. A genuine rebind reports at the same quality and so still writes through. */
 	UFUNCTION(BlueprintPure, Category = "UI|Keybind Hint", meta = (WorldContext = "WorldContextObject"))
 	static FText GetActionKeyText(const UObject* WorldContextObject, const UInputAction* Action);
 
