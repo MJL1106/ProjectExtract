@@ -1087,6 +1087,17 @@ private:
 	UFUNCTION(Exec)
 	void VipRescue();
 
+	/** console: ObjSkip <StepId> — fast-forward the objective chain to that beat and teleport there.
+	 *  Applies every earlier beat's end-state, so doors, keycards and spawns land as if played.
+	 *  ObjSkip ReachExtractionTarget drops you at the extraction target; ObjSkip DefendPosition goes
+	 *  straight into the Room 2 defence wave. Run ObjList for the ids. */
+	UFUNCTION(Exec)
+	void ObjSkip(const FString& StepId);
+
+	/** console: ObjList — print every objective step id in chain order, marking the live one. */
+	UFUNCTION(Exec)
+	void ObjList();
+
 	/** console: VipDebug 1 — pause the VIP's AI so forced poses stick; VipDebug 0 — resume. */
 	UFUNCTION(Exec)
 	void VipDebug(bool bFreeze);

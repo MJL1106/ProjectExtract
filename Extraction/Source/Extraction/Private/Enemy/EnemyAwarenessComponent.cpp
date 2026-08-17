@@ -33,6 +33,17 @@
 #include "NavigationSystem.h"
 #include "EngineUtils.h" // TActorIterator — DBNO combat-handoff companion lookup
 
+namespace
+{
+	/** Vertical slack allowed when snapping a search / rally point onto the navmesh.
+	 *  MUST stay well under the level's storey pitch (400uu on DemoMap): at 400 the
+	 *  projection box reaches the floor above, so a candidate landing over a stairwell
+	 *  void or balcony lip snaps up a storey and the enemy walks upstairs to "search"
+	 *  a point the player was never near. Failing the projection instead is correct —
+	 *  both callers degrade to the un-offset last-known location, which is reachable. */
+	constexpr float EnemyNavProjectZExtent = 150.f;
+}
+
 UEnemyAwarenessComponent::UEnemyAwarenessComponent()
 {
 	PrimaryComponentTick.bCanEverTick = false;
@@ -751,7 +762,7 @@ void UEnemyAwarenessComponent::ForceEngage(AActor* Target)
 			if (IsValid(NavSys))
 			{
 				FNavLocation NavLoc;
-				const FVector NavExtent(200.f, 200.f, 400.f);
+				const FVector NavExtent(200.f, 200.f, EnemyNavProjectZExtent);
 				if (NavSys->ProjectPointToNavigation(OffsetTarget, NavLoc, NavExtent))
 				{
 					OffsetTarget = NavLoc.Location;
@@ -1485,7 +1496,7 @@ void UEnemyAwarenessComponent::TransitionToSearching(bool bContactLost)
 					// the full ring (doorways, balcony edges) would otherwise re-clump
 					// several members onto the centre.
 					UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
-					const FVector NavExtent(200.f, 200.f, 400.f);
+					const FVector NavExtent(200.f, 200.f, EnemyNavProjectZExtent);
 					bool bProjected = false;
 					if (IsValid(NavSys))
 					{

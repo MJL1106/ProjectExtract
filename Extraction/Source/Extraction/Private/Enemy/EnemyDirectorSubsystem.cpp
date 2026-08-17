@@ -20,6 +20,8 @@
 #include "TimerManager.h"
 #include "EngineUtils.h"
 #include "EnemyMoraleComponent.h"
+#include "BehaviorTree/BlackboardComponent.h"       // [UPSTAIRS] diagnostic — remove with the log below
+#include "Navigation/PathFollowingComponent.h"      // [UPSTAIRS] diagnostic — remove with the log below
 
 // ============================================================
 // Lifecycle
@@ -1413,6 +1415,30 @@ void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
 		AEnemyAIController* AIC = Cast<AEnemyAIController>(Member->GetController());
 		UEnemyAwarenessComponent* Awareness = AIC ? AIC->GetAwarenessComponent() : nullptr;
 		if (!Awareness) continue;
+
+		// [UPSTAIRS] TEMPORARY DIAGNOSTIC — remove once the storey-snap fix is confirmed in play.
+		// Fires once per director tick for any living wave member standing a storey off the player.
+		// Discriminates the three candidate causes in a single run: a bad InvestigateLocation Z means
+		// the nav projection snapped up a floor; Unaware/Idle means he is stranded in guard-scan;
+		// Combat + Moving with a good LastKnownLocation means the path itself is going wrong.
+		if (FMath::Abs(Member->GetActorLocation().Z - PlayerPawn->GetActorLocation().Z) > 200.f)
+		{
+			const UBlackboardComponent* BB = AIC->GetBlackboardComponent();
+			const FVector BBInvestigate = BB ? BB->GetValueAsVector(AEnemyAIController::BB_InvestigateLocation) : FVector::ZeroVector;
+			const UPathFollowingComponent* PF = AIC->GetPathFollowingComponent();
+			const FVector PathEnd = (PF && PF->HasValidPath()) ? PF->GetPathDestination() : FVector::ZeroVector;
+
+			UE_LOG(LogEnemyAI, Log,
+				TEXT("[UPSTAIRS] %s state=%s hunting=%d selfZ=%.0f playerZ=%.0f lastKnown=(%.0f,%.0f,%.0f) investigate=(%.0f,%.0f,%.0f) moveStatus=%d pathEnd=(%.0f,%.0f,%.0f)"),
+				*Member->GetName(),
+				*UEnum::GetValueAsString(Awareness->GetAwarenessState()),
+				Awareness->IsLastManHunting() ? 1 : 0,
+				Member->GetActorLocation().Z, PlayerPawn->GetActorLocation().Z,
+				Awareness->GetLastKnownLocation().X, Awareness->GetLastKnownLocation().Y, Awareness->GetLastKnownLocation().Z,
+				BBInvestigate.X, BBInvestigate.Y, BBInvestigate.Z,
+				PF ? static_cast<int32>(PF->GetStatus()) : -1,
+				PathEnd.X, PathEnd.Y, PathEnd.Z);
+		}
 
 		// Original logic: re-seed Combat on any member that fully gave up (decayed to Unaware).
 		if (Awareness->GetAwarenessState() == EEnemyAwarenessState::Unaware)

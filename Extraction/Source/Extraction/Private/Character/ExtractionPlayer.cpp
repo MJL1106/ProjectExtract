@@ -46,6 +46,7 @@
 #include "BrainComponent.h"
 #include "World/Lootable.h"
 #include "World/BreachableDoor.h"
+#include "World/ObjectiveStep.h" // ObjSkip / ObjList console fast-forward
 #include "Audio/GameAudioSubsystem.h"
 #include "Audio/SurfaceAudioBank.h"
 #include "World/WorldInteractable.h"
@@ -2824,6 +2825,41 @@ void AExtractionPlayer::VipRescue()
 
 	Extractee->ForceRescue();
 	UE_LOG(LogCompanion, Log, TEXT("VipRescue: forced rescue on %s"), *Extractee->GetName());
+}
+
+void AExtractionPlayer::ObjSkip(const FString& StepId)
+{
+	if (StepId.IsEmpty())
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("ObjSkip: usage 'ObjSkip <StepId>' — run ObjList for the ids"));
+		return;
+	}
+
+	if (!AObjectiveStep::DebugSkipToStep(this, FName(*StepId)))
+		UE_LOG(LogCompanion, Warning, TEXT("ObjSkip: '%s' is not on any objective chain — run ObjList"), *StepId);
+}
+
+void AExtractionPlayer::ObjList()
+{
+	TArray<FName> Ids;
+	TArray<bool> Active;
+	TArray<bool> Completed;
+	AObjectiveStep::DebugCollectChain(this, Ids, Active, Completed);
+
+	if (Ids.Num() == 0)
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("ObjList: no objective chain in this level"));
+		return;
+	}
+
+	UE_LOG(LogCompanion, Log, TEXT("ObjList: %d step(s) — '*' live, 'x' done"), Ids.Num());
+	for (int32 Index = 0; Index < Ids.Num(); ++Index)
+	{
+		UE_LOG(LogCompanion, Log, TEXT("  %s%s %2d  %s"),
+			Active.IsValidIndex(Index) && Active[Index] ? TEXT("*") : TEXT(" "),
+			Completed.IsValidIndex(Index) && Completed[Index] ? TEXT("x") : TEXT(" "),
+			Index + 1, *Ids[Index].ToString());
+	}
 }
 
 void AExtractionPlayer::VipDebug(bool bFreeze)

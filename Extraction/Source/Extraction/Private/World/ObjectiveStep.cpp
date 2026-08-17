@@ -12,6 +12,7 @@
 #include "EnhancedInputSubsystems.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Engine/Engine.h" // GEngine->GetWorldFromContextObject — DebugSkipToStep/DebugCollectChain
 #include "Enemy/EnemyCharacter.h"
 #include "Enemy/EnemyDirectorSubsystem.h"
 #include "Extractee/ExtracteeCharacter.h"
@@ -1517,6 +1518,77 @@ bool AObjectiveStep::TryResumeFromCheckpoint()
 	Resume->BeginCheckpointSpawn();
 	Resume->Activate();
 	return true;
+}
+
+bool AObjectiveStep::DebugSkipToStep(const UObject* WorldContext, FName TargetId)
+{
+	if (TargetId.IsNone()) return false;
+
+	UWorld* World = GEngine ? GEngine->GetWorldFromContextObject(WorldContext, EGetWorldErrorMode::ReturnNull) : nullptr;
+	if (!World) return false;
+
+	// Find the entry step of whichever chain carries the target. Parallel chains are legitimate, so
+	// the first entry step in iteration order is not necessarily the right one.
+	AObjectiveStep* Resume = nullptr;
+	TArray<AObjectiveStep*> Earlier;
+	for (TActorIterator<AObjectiveStep> It(World); It; ++It)
+	{
+		if (!It->bIsEntryStep) continue;
+
+		TArray<AObjectiveStep*> Prefix;
+		if (AObjectiveStep* Found = FObjectiveChainWalker::SplitAtId(*It, &NextOf, &IdOf, TargetId, Prefix))
+		{
+			Resume = Found;
+			Earlier = MoveTemp(Prefix);
+			break;
+		}
+	}
+
+	if (!IsValid(Resume))
+	{
+		UE_LOG(LogObjectiveStep, Warning, TEXT("ObjSkip: no step with id '%s' on any chain"), *TargetId.ToString());
+		return false;
+	}
+
+	// Stand down whatever is live first. Skipping FORWARD, the active beat is in Earlier and
+	// ApplyCompletedWorldState would stand it down anyway; skipping BACKWARD it is in the tail and
+	// nothing else would ever touch it, leaving two live beats and two HUD objective lines.
+	for (TActorIterator<AObjectiveStep> It(World); It; ++It)
+		if (It->bActive && *It != Resume) It->Deactivate();
+
+	UE_LOG(LogObjectiveStep, Log, TEXT("ObjSkip: jumping to '%s' (%d earlier beat(s) applied)"),
+		*TargetId.ToString(), Earlier.Num());
+
+	Resume->ReplayEarlierSteps(Earlier, Resume);
+	Resume->BeginCheckpointSpawn();
+	Resume->Activate();
+	return true;
+}
+
+void AObjectiveStep::DebugCollectChain(const UObject* WorldContext, TArray<FName>& OutIds, TArray<bool>& OutActive,
+	TArray<bool>& OutCompleted)
+{
+	OutIds.Reset();
+	OutActive.Reset();
+	OutCompleted.Reset();
+
+	UWorld* World = GEngine ? GEngine->GetWorldFromContextObject(WorldContext, EGetWorldErrorMode::ReturnNull) : nullptr;
+	if (!World) return;
+
+	for (TActorIterator<AObjectiveStep> It(World); It; ++It)
+	{
+		if (!It->bIsEntryStep) continue;
+
+		TArray<AObjectiveStep*> Order;
+		FObjectiveChainWalker::Walk(*It, &NextOf, Order);
+		for (const AObjectiveStep* Step : Order)
+		{
+			if (!IsValid(Step)) continue;
+			OutIds.Add(Step->GetEffectiveStepId());
+			OutActive.Add(Step->bActive);
+			OutCompleted.Add(Step->bCompleted);
+		}
+	}
 }
 
 void AObjectiveStep::ReplayEarlierSteps(const TArray<AObjectiveStep*>& Earlier, AObjectiveStep* Resume)
