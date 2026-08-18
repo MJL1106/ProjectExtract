@@ -17,8 +17,6 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "KismetAnimationLibrary.h"
 #include "Components/SkeletalMeshComponent.h"
-#include "Engine/Engine.h"
-#include "EnemyDebug.h"
 
 // ---------------------------------------------------------------------------
 // Helpers — cached awareness resolve
@@ -545,15 +543,6 @@ void UEnemyAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 	if (bIsReloading && !bPrevIsReloading)
 	{
-		if (IsReloadDebugEnabled())
-		{
-			const FString EnemyName = IsValid(OwningEnemy) ? OwningEnemy->GetName() : TEXT("?");
-			UE_LOG(LogTemp, Warning, TEXT("[RELOADDBG] %s reload detected -> PlayReloadMontage"), *EnemyName);
-			if (GEngine)
-				GEngine->AddOnScreenDebugMessage(
-					static_cast<uint64>(GetTypeHash(FString::Printf(TEXT("ReloadTrig_%s"), *EnemyName))), 4.f, FColor::Cyan,
-					FString::Printf(TEXT("[RELOADDBG] %s reload detected"), *EnemyName));
-		}
 		PlayReloadMontage();
 	}
 	bPrevIsReloading = bIsReloading;
@@ -922,33 +911,7 @@ void UEnemyAnimInstance::PlayReloadMontage(float PlayRate)
 	// NB: in cover this full-body reload (DefaultSlot, downstream of CoverSlot) visually overrides
 	// the tucked pose for its duration — accepted; a body-less reload read worse (gun reloading
 	// itself). A cover-authored reload montage is the eventual fix if the twist bothers.
-	const float PlayResult = Montage_Play(Montage, EffectiveRate, EMontagePlayReturnType::MontageLength, 0.f, false);
-
-	if (IsReloadDebugEnabled())
-	{
-		const FName SlotName = (Montage->SlotAnimTracks.Num() > 0)
-			? Montage->SlotAnimTracks[0].SlotName : NAME_None;
-		const UWeaponDataAsset* DA = BoundFireWeapon.IsValid() ? BoundFireWeapon->GetWeaponData() : nullptr;
-		const FString EnemyName = IsValid(OwningEnemy) ? OwningEnemy->GetName() : TEXT("?");
-		const FString MontageName = GetNameSafe(Montage);
-		const FString WeaponName = GetNameSafe(BoundFireWeapon.Get());
-		const FString DAName = GetNameSafe(DA);
-		const FString PerWeaponReload = DA ? GetNameSafe(DA->EnemyAnimSet.Reload) : TEXT("null");
-
-		UE_LOG(LogTemp, Warning,
-			TEXT("[RELOADDBG] %s PlayReloadMontage: montage=%s slot=%s weapon=%s DA=%s DA.Reload=%s rate=%.2f playResult=%.2f"),
-			*EnemyName, *MontageName, *SlotName.ToString(), *WeaponName, *DAName, *PerWeaponReload,
-			EffectiveRate, PlayResult);
-
-		if (GEngine)
-		{
-			const FString Msg = FString::Printf(
-				TEXT("[RELOADDBG] %s montage=%s slot=%s DA.Reload=%s play=%.2f"),
-				*EnemyName, *MontageName, *SlotName.ToString(), *PerWeaponReload, PlayResult);
-			GEngine->AddOnScreenDebugMessage(
-				static_cast<uint64>(GetTypeHash(FString::Printf(TEXT("ReloadDbg_%s"), *EnemyName))), 4.f, FColor::Yellow, Msg);
-		}
-	}
+	Montage_Play(Montage, EffectiveRate, EMontagePlayReturnType::MontageLength, 0.f, false);
 
 	if (BoundFireWeapon.IsValid())
 	{
@@ -1242,9 +1205,6 @@ namespace
 	/** spine_01 is the bone captured/replaced — its parent chain carries the tucked torso, its
 	 *  children carry the reload arms, so a Replace here = idle torso + reload arms. */
 	const FName CoverReloadSpineBone = TEXT("spine_01");
-
-	/** Throttle for the [RELOADTUCK] diagnostic so it prints ~2Hz instead of per-frame. */
-	constexpr float CoverReloadTuckLogInterval = 0.5f;
 }
 
 void UEnemyAnimInstance::UpdateCoverReloadSpine(float DeltaSeconds)
@@ -1259,21 +1219,6 @@ void UEnemyAnimInstance::UpdateCoverReloadSpine(float DeltaSeconds)
 
 	const float TargetAlpha = (bInCover && bIsReloading) ? 1.f : 0.f;
 	CoverReloadSpineAlpha = FMath::FInterpTo(CoverReloadSpineAlpha, TargetAlpha, DeltaSeconds, CoverReloadSpineBlendSpeed);
-
-	if (GetCoverAnimLogLevel() > 0 && bInCover)
-	{
-		CoverReloadTuckLogAccum += DeltaSeconds;
-		if (CoverReloadTuckLogAccum >= CoverReloadTuckLogInterval)
-		{
-			CoverReloadTuckLogAccum = 0.f;
-			const FRotator Now = Mesh->GetSocketTransform(CoverReloadSpineBone, RTS_Component).Rotator();
-			UE_LOG(LogTemp, Log,
-				TEXT("[RELOADTUCK] %s reloading=%d alpha=%.2f spineNow=(P%.1f Y%.1f R%.1f) ref=(P%.1f Y%.1f R%.1f)"),
-				*GetNameSafe(OwningEnemy.Get()), bIsReloading ? 1 : 0, CoverReloadSpineAlpha,
-				Now.Pitch, Now.Yaw, Now.Roll,
-				CoverReloadSpineRefRotation.Pitch, CoverReloadSpineRefRotation.Yaw, CoverReloadSpineRefRotation.Roll);
-		}
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1322,14 +1267,7 @@ void UEnemyAnimInstance::StopCoverMontages(float BlendOut)
 void UEnemyAnimInstance::PlayCoverIdleMontage(float BlendIn, FName PreferredSection)
 {
 	UAnimMontage* Idle = SelectCoverIdleMontage();
-	if (!IsValid(Idle))
-	{
-		if (GetCoverAnimLogLevel() > 0)
-			UE_LOG(LogTemp, Warning, TEXT("[COVERANIM] %s idle slot EMPTY (height=%s)"),
-				*GetNameSafe(OwningEnemy.Get()),
-				CoverHeight == ECoverHeight::Crouch ? TEXT("Crouch") : TEXT("Stand"));
-		return;
-	}
+	if (!IsValid(Idle)) return;
 
 	// Already looping this exact idle — bail rather than stacking a second instance on the slot.
 	if (ActiveCoverMontage == Idle && Montage_IsPlaying(Idle))
@@ -1342,31 +1280,19 @@ void UEnemyAnimInstance::PlayCoverIdleMontage(float BlendIn, FName PreferredSect
 	if (IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage))
 		Montage_Stop(BlendIn, ActiveCoverMontage);
 
-	const float PlayLen = Montage_PlayWithBlendIn(Idle, FAlphaBlendArgs(BlendIn), 1.f,
+	Montage_PlayWithBlendIn(Idle, FAlphaBlendArgs(BlendIn), 1.f,
 		EMontagePlayReturnType::MontageLength, 0.f, false);
 	if (Idle->GetSectionIndex(PreferredSection) != INDEX_NONE)
 		Montage_JumpToSection(PreferredSection, Idle);
 	else if (Idle->GetSectionIndex(TEXT("Loop")) != INDEX_NONE)
 		Montage_JumpToSection(TEXT("Loop"), Idle);
 	ActiveCoverMontage = Idle;
-
-	if (GetCoverAnimLogLevel() > 0)
-		UE_LOG(LogTemp, Log, TEXT("[COVERANIM] %s idle play %s section=%s result=%.2f"),
-			*GetNameSafe(OwningEnemy.Get()), *Idle->GetName(), *PreferredSection.ToString(), PlayLen);
 }
 
 void UEnemyAnimInstance::PlayCoverPeekMontage(FName PreferredSection)
 {
 	UAnimMontage* Peek = SelectCoverPeekMontage();
-	if (!IsValid(Peek))
-	{
-		if (GetCoverAnimLogLevel() > 0)
-			UE_LOG(LogTemp, Warning, TEXT("[COVERANIM] %s peek slot EMPTY (height=%s lean=%d)"),
-				*GetNameSafe(OwningEnemy.Get()),
-				CoverHeight == ECoverHeight::Crouch ? TEXT("Crouch") : TEXT("Stand"),
-				static_cast<int32>(CoverLeanDirection));
-		return;
-	}
+	if (!IsValid(Peek)) return;
 
 	// Stop the tucked idle (or a stale peek) explicitly — bStopAllMontages=false does NOT
 	// auto-stop same-group montages, so without this the looping idle keeps full weight on
@@ -1376,7 +1302,7 @@ void UEnemyAnimInstance::PlayCoverPeekMontage(FName PreferredSection)
 	if (IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage))
 		Montage_Stop(0.2f, ActiveCoverMontage);
 
-	const float PlayLen = Montage_PlayWithBlendIn(Peek, FAlphaBlendArgs(0.2f), 1.f,
+	Montage_PlayWithBlendIn(Peek, FAlphaBlendArgs(0.2f), 1.f,
 		EMontagePlayReturnType::MontageLength, 0.f, false);
 	if (Peek->GetSectionIndex(PreferredSection) != INDEX_NONE)
 		Montage_JumpToSection(PreferredSection, Peek);
@@ -1385,10 +1311,6 @@ void UEnemyAnimInstance::PlayCoverPeekMontage(FName PreferredSection)
 	// Clear any running full-body fire loop — it plays downstream of the Cover slot and would
 	// visually override the peek (see the in-cover gate at the fire auto-trigger).
 	StopFireMontage(0.15f);
-
-	if (GetCoverAnimLogLevel() > 0)
-		UE_LOG(LogTemp, Log, TEXT("[COVERANIM] %s peek play %s section=%s result=%.2f"),
-			*GetNameSafe(OwningEnemy.Get()), *Peek->GetName(), *PreferredSection.ToString(), PlayLen);
 }
 
 void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
@@ -1444,40 +1366,6 @@ void UEnemyAnimInstance::UpdateCoverAnimation(float DeltaSeconds)
 	else
 		CoverSettleAccum = FMath::Min(CoverSettleAccum + DeltaSeconds, CoverAnimSettleTime);
 	const bool bCoverAnimActive = bInCover && CoverSettleAccum >= CoverAnimSettleTime;
-
-	if (GetCoverAnimLogLevel() > 0 && bCoverAnimActive != bPrevCoverAnimActive)
-		UE_LOG(LogTemp, Log, TEXT("[COVERANIM] %s gate %s (bInCover=%d speed=%.0f peek=%d height=%s)"),
-			*GetNameSafe(OwningEnemy.Get()), bCoverAnimActive ? TEXT("OPEN") : TEXT("CLOSED"),
-			bInCover ? 1 : 0, Speed, bCoverPeeking ? 1 : 0,
-			CoverHeight == ECoverHeight::Crouch ? TEXT("Crouch") : TEXT("Stand"));
-
-	// 1Hz twist/slide diagnostic: who owns the yaw (actor vs control vs focus), how much the aim
-	// offset contributes, whether root motion is live, and what the Cover slot is playing.
-	if (GetCoverAnimLogLevel() > 0 && bInCover)
-	{
-		CoverStateLogAccum += DeltaSeconds;
-		if (CoverStateLogAccum >= 1.f)
-		{
-			CoverStateLogAccum = 0.f;
-			const AController* Ctrl = OwningEnemy->GetController();
-			const AAIController* AIC = Cast<AAIController>(Ctrl);
-			const AActor* FocusActor = AIC ? AIC->GetFocusActor() : nullptr;
-			const FVector Focal = AIC ? AIC->GetFocalPoint() : FVector::ZeroVector;
-			const bool bMontagePlaying = IsValid(ActiveCoverMontage) && Montage_IsPlaying(ActiveCoverMontage);
-			UE_LOG(LogTemp, Log,
-				TEXT("[COVERSTATE] %s yaw=%.0f ctrlYaw=%.0f focus=%s focalValid=%d aimYaw=%.1f aimPitch=%.1f gate=%.2f speed=%.0f rootMotion=%d peek=%d lean=%d montage=%s pos=%.2f"),
-				*GetNameSafe(OwningEnemy.Get()),
-				OwningEnemy->GetActorRotation().Yaw,
-				Ctrl ? Ctrl->GetControlRotation().Yaw : 0.f,
-				*GetNameSafe(FocusActor),
-				FAISystem::IsValidLocation(Focal) ? 1 : 0,
-				AimYaw, AimPitch, CoverAimGate, Speed,
-				bRootMotionDriven ? 1 : 0, bCoverPeeking ? 1 : 0,
-				static_cast<int32>(CoverLeanDirection),
-				bMontagePlaying ? *ActiveCoverMontage->GetName() : TEXT("NONE"),
-				bMontagePlaying ? Montage_GetPosition(ActiveCoverMontage) : -1.f);
-		}
-	}
 
 	// --- Gate fall or death: stop everything ---
 	if ((!bCoverAnimActive && bPrevCoverAnimActive) || !bIsAlive)

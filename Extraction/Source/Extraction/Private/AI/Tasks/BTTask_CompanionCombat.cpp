@@ -4,6 +4,7 @@
 #include "BTTask_CompanionCombat.h"
 #include "AI/AITargetingStatics.h"
 #include "AI/CompanionDiag.h"
+#include "EngineUtils.h"
 #include "WeaponDataAsset.h"
 #include "Character/ExtractionPlayerInterface.h"
 #include "WeaponComponent.h"
@@ -30,14 +31,12 @@
 #include "WeaponBase.h"
 #include "HealthComponent.h"
 #include "SuppressionComponent.h"
-#include "DrawDebugHelpers.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "NavigationSystem.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "TimerManager.h"
-#include "HAL/IConsoleManager.h"
 #include "Perception/AIPerceptionComponent.h"
 #include "Perception/AISense_Sight.h"
 #include "GameplayTagAssetInterface.h"
@@ -48,26 +47,6 @@ namespace
 	/** Chest height (cm) for the body-protection trace from a candidate's hunker position — matches the enemy's BodyProtectChestHeight. */
 	constexpr float ShuffleBodyProtectChestHeight = 60.f;
 
-	/** companion.CoverDebug 1 — deep [COVDBG]/[COVMOVE] logging: every cover decision attempt with
-	 *  full counter state, and every position change stamped with its cause. */
-	TAutoConsoleVariable<int32> CVarCompanionCoverDebug(
-		TEXT("companion.CoverDebug"), 0,
-		TEXT("1 = verbose companion cover decision/movement logging ([COVDBG] decisions, [COVMOVE] position changes)."));
-
-	bool CovDbg() { return CVarCompanionCoverDebug.GetValueOnGameThread() > 0; }
-
-	// companion.FireDebug is registered once in WeaponBase.cpp — re-query by name to avoid a
-	// duplicate CVar registration across translation units.
-	bool FireDbg()
-	{
-		static const IConsoleVariable* CVar =
-			IConsoleManager::Get().FindConsoleVariable(TEXT("companion.FireDebug"));
-		return CVar && CVar->GetInt() != 0;
-	}
-}
-
-namespace
-{
 	struct FCombatContext
 	{
 		ACompanionCharacter* Companion = nullptr;
@@ -685,10 +664,6 @@ void UBTTask_CompanionCombat::CommitSilentReposition(ACompanionCharacter* Compan
 				IntentStampSub->SetIntendedCover(IntentStampCtrl, ShuffleTarget.Handle);
 		}
 	}
-
-	if (CovDbg())
-		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s SILENT-REPO-COMMIT to=%s cyclesAtOld=%d strikes=%d"),
-			*Companion->GetName(), *ShuffleTarget.Data.Location.ToCompactString(), PeekCyclesAtCover, NoPeekLosStrikes);
 
 	// Silent reposition: stay crouched, no montage, no aim, low-ready weapon.
 	Companion->StopWeaponFire();
@@ -1557,7 +1532,7 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 	{
 		Companion->StopWeaponFire();
 		bStandBurstFireHeld = true;
-		if (bDebugLogging || FireDbg())
+		if (bDebugLogging)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst FIRE HELD — muzzle blocked by %s"),
 				*Companion->GetName(), *GetNameSafe(MuzzleHit.GetActor()));
 		return;
@@ -1585,7 +1560,7 @@ void UBTTask_CompanionCombat::TickStandBurstMuzzleWithhold(ACompanionCharacter* 
 		Companion->StartWeaponFire();
 		bStandBurstFireHeld = false;
 		LastStandBurstResumeFireTime = Now;
-		if (bDebugLogging || FireDbg())
+		if (bDebugLogging)
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: stand-burst FIRE RESUMED — muzzle clear"),
 				*Companion->GetName());
 	}
@@ -1688,6 +1663,15 @@ bool UBTTask_CompanionCombat::ShouldRepickMoveShoot(ACompanionCharacter* Compani
 
 void UBTTask_CompanionCombat::RerollJiggleOffset(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace)
 {
+	// Route-live flank: no LoS-seeking offsets — every candidate below is LoS-validated, which
+	// drags the walk back toward sight lines. The route wants clean waypoint-to-waypoint legs.
+	if (bAngleSeekActive && AngleSeekPathIndex != INDEX_NONE)
+	{
+		JiggleOffset = FVector::ZeroVector;
+		JiggleRetargetTimer = JiggleRetargetInterval;
+		return;
+	}
+
 	// Try up to JiggleLosRetryCount random ground-plane offsets. Loose cover bias: among LoS-valid
 	// candidates, prefer the one with a baked cover point nearest — the companion fights NEAR cover
 	// (a trigger firing mid-burst has a duck spot) without locking into the cover anim loop.
@@ -1763,6 +1747,10 @@ UBTTask_CompanionCombat::EJiggleDrift UBTTask_CompanionCombat::RollJiggleDrift()
 
 void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AActor* Target, TArrayView<AActor* const> IgnoredForFireTrace, float DeltaSeconds)
 {
+	// A live flank route owns the anchor — the drift's range clamp would drag the waypoint
+	// anchor back into the ideal band and fight the route every cycle.
+	if (bAngleSeekActive && AngleSeekPathIndex != INDEX_NONE) return;
+
 	JiggleDriftTimer -= DeltaSeconds;
 	if (JiggleDriftTimer > 0.f) return;
 	JiggleDriftTimer = JiggleDriftInterval;
@@ -1838,6 +1826,11 @@ void UBTTask_CompanionCombat::TickJiggleDrift(ACompanionCharacter* Companion, AA
 
 // --- Angle-seek (get an angle on enemies hard-focusing the player) ---
 
+static TAutoConsoleVariable<int32> CVarCompanionForceFlank(
+	TEXT("companion.ForceFlank"), 0,
+	TEXT("1 = force the companion's angle-seek flank to arm now, bypassing focus/pressure/cooldown gates. One-shot: self-resets on arm."),
+	ECVF_Cheat);
+
 bool UBTTask_CompanionCombat::TickAngleSeek(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion,
 	AActor* Target, const FVector& MyLocation, bool bPlayerTooFar, float DeltaSeconds)
 {
@@ -1851,30 +1844,99 @@ bool UBTTask_CompanionCombat::TickAngleSeek(UBehaviorTreeComponent& OwnerComp, A
 		return false;
 	}
 
+	const bool bForceRequested = CVarCompanionForceFlank.GetValueOnGameThread() != 0;
 	const int32 FocusedCount = Companion->GetPlayerFocusedEnemyCount();
 	const float Supp01 = Companion->GetSuppression01();
 
 	if (bAngleSeekActive)
 	{
-		AngleSeekTimeActive += DeltaSeconds;
-		// Rising suppression = the flank drew fire off the player — mission accomplished, stand down.
-		if (Supp01 > Tuning->AngleSeekPressureFrac) EndAngleSeek(Companion, TEXT("drawing-fire"));
-		else if (FocusedCount < Tuning->AngleSeekMinFocusedEnemies) EndAngleSeek(Companion, TEXT("focus-dropped"));
-		else if (Tuning->AngleSeekMaxTime > 0.f && AngleSeekTimeActive >= Tuning->AngleSeekMaxTime) EndAngleSeek(Companion, TEXT("max-time"));
-		else if (bPlayerTooFar) EndAngleSeek(Companion, TEXT("leash"));
+		// Route legs don't consume the seek budget — MaxTime clocks only while holding the angle,
+		// so a long run around a wall can't expire itself mid-route.
+		if (AngleSeekPathIndex == INDEX_NONE)
+			AngleSeekTimeActive += DeltaSeconds;
+
+		// [ANGLE-DBG] Half-second heartbeat while the seek lives: where the route stands, where the
+		// companion actually is, and the gate inputs — read alongside the REGAIN-LOS / PLAYER-PULL /
+		// re-anchor lines to see which system is fighting the route.
+		AngleSeekDbgLogTimer -= DeltaSeconds;
+		if (AngleSeekDbgLogTimer <= 0.f)
+		{
+			AngleSeekDbgLogTimer = 0.5f;
+			const bool bOnRoute = AngleSeekPathIndex != INDEX_NONE && AngleSeekPath.IsValidIndex(AngleSeekPathIndex);
+			UE_LOG(LogCompanionAI, Log,
+				TEXT("[ANGLE-DBG] %s node=%p ACTIVE hold-t=%.1f pathIdx=%d/%d wpDist=%.0f pos=%s home=%s focused=%d supp=%.2f forced=%d"),
+				*Companion->GetName(), this, AngleSeekTimeActive, AngleSeekPathIndex, AngleSeekPath.Num(),
+				bOnRoute ? FVector::Dist2D(MyLocation, AngleSeekPath[AngleSeekPathIndex]) : -1.f,
+				*MyLocation.ToCompactString(), *JiggleHome.ToCompactString(), FocusedCount, Supp01, (int32)bForcedSeek);
+		}
+
+		// A forced (filmed) seek ignores the tactical stand-downs — it ends on arrival hold-out or leash.
+		// The leash abort skips ROUTE legs entirely: a flank arc legitimately swings past the leash
+		// radius for a few seconds (seen live: the seek leash-died 0.1s after arming, twice in a row,
+		// at the boundary). The route is self-bounding — fixed goal, arrival hold, MaxTime after.
+		if (!bForcedSeek && Supp01 > Tuning->AngleSeekPressureFrac) EndAngleSeek(Companion, TEXT("drawing-fire"));
+		else if (!bForcedSeek && FocusedCount < Tuning->AngleSeekMinFocusedEnemies) EndAngleSeek(Companion, TEXT("focus-dropped"));
+		else if (Tuning->AngleSeekMaxTime > 0.f && AngleSeekTimeActive >= Tuning->AngleSeekMaxTime)
+		{
+			EndAngleSeek(Companion, TEXT("max-time"));
+			// A seek that ran its full hold re-arms on a long gap — with enemies that never drop
+			// the player (forced or entrenched), the 5s cooldown chained flank after flank and the
+			// companion never settled into fighting the angle it had just earned.
+			AngleSeekCooldownRemaining = 15.f;
+		}
+		// Arrival-hold (negative time budget) is leash-exempt like route legs — the earned angle
+		// sits outside the leash by construction, and the pull dragging him straight home was the
+		// "fired a little then ran off again" loop.
+		else if (bPlayerTooFar && AngleSeekPathIndex == INDEX_NONE && AngleSeekTimeActive >= 0.f)
+			EndAngleSeek(Companion, TEXT("leash"));
+
+		// Route-mode flank: drive the move-shoot anchor along the precomputed nav path. The
+		// move-shoot tick chases the anchor, so the companion follows the route while firing
+		// whenever it has a line. On arrival it holds the flank angle until the seek's own
+		// timers stand it down.
+		if (bAngleSeekActive && AngleSeekPathIndex != INDEX_NONE)
+		{
+			constexpr float RouteAcceptRadius = 220.f;
+			if (!AngleSeekPath.IsValidIndex(AngleSeekPathIndex))
+			{
+				AngleSeekPathIndex = INDEX_NONE;
+				AngleSeekSideSign = 0.f;
+			}
+			else
+			{
+				JiggleHome = AngleSeekPath[AngleSeekPathIndex];
+				if (FVector::DistSquared2D(MyLocation, AngleSeekPath[AngleSeekPathIndex]) < FMath::Square(RouteAcceptRadius))
+				{
+					++AngleSeekPathIndex;
+					if (!AngleSeekPath.IsValidIndex(AngleSeekPathIndex))
+					{
+						// Arrived on the flank angle — hold it and FIGHT from here. The negative
+						// time is earned hold budget on top of MaxTime (no new tuning field so
+						// this stays live-codable); leash/pull stay suppressed while it runs.
+						AngleSeekPathIndex = INDEX_NONE;
+						AngleSeekSideSign = 0.f;
+						AngleSeekTimeActive = -12.f;
+						UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK flank route ARRIVED — holding the angle"), *Companion->GetName());
+					}
+				}
+			}
+		}
 		return false;
 	}
 
-	AngleSeekEvalTimer -= DeltaSeconds;
-	if (AngleSeekEvalTimer > 0.f) return false;
-	AngleSeekEvalTimer = OpenEngageCoverReseekInterval;
+	if (!bForceRequested)
+	{
+		AngleSeekEvalTimer -= DeltaSeconds;
+		if (AngleSeekEvalTimer > 0.f) return false;
+		AngleSeekEvalTimer = OpenEngageCoverReseekInterval;
 
-	// Activation: player hard-focused, companion unpressured, in leash, not unbroken-Stealth.
-	if (AngleSeekCooldownRemaining > 0.f || bPlayerTooFar) return false;
-	if (Companion->IsStealthActive()) return false;
-	if (FocusedCount < Tuning->AngleSeekMinFocusedEnemies) return false;
-	if (Supp01 >= Tuning->AngleSeekPressureFrac) return false;
-	if (Companion->IsSuppressed(Tuning->AngleSeekSmallWindow)) return false;
+		// Activation: player hard-focused, companion unpressured, in leash, not unbroken-Stealth.
+		if (AngleSeekCooldownRemaining > 0.f || bPlayerTooFar) return false;
+		if (Companion->IsStealthActive()) return false;
+		if (FocusedCount < Tuning->AngleSeekMinFocusedEnemies) return false;
+		if (Supp01 >= Tuning->AngleSeekPressureFrac) return false;
+		if (Companion->IsSuppressed(Tuning->AngleSeekSmallWindow)) return false;
+	}
 
 	UWorld* World = Companion->GetWorld();
 	APawn* PlayerPawn = AIC->GetPlayerCharacter();
@@ -1882,26 +1944,39 @@ bool UBTTask_CompanionCombat::TickAngleSeek(UBehaviorTreeComponent& OwnerComp, A
 
 	TArray<AActor*, TInlineAllocator<8>> Attackers;
 	GatherPlayerFocusedAttackers(World, PlayerPawn, Companion, Tuning->PlayerThreatAwarenessRadius, Attackers);
-	if (Attackers.Num() < Tuning->AngleSeekMinFocusedEnemies) return false;
+
+	// Forced arm (companion.ForceFlank): consume the one-shot, and if the strict player-focused
+	// gather comes up short, fall back to any live enemies near the player so the flank always
+	// has a centroid to curl around.
+	if (bForceRequested)
+	{
+		CVarCompanionForceFlank->Set(0, ECVF_SetByConsole);
+		if (Attackers.Num() < 1)
+		{
+			for (TActorIterator<AEnemyCharacter> It(World); It; ++It)
+			{
+				AEnemyCharacter* Enemy = *It;
+				const UHealthComponent* Health = IsValid(Enemy) ? Enemy->GetHealthComponent() : nullptr;
+				if (!IsValid(Health) || Health->IsDead()) continue;
+				if (FVector::DistSquared(Enemy->GetActorLocation(), PlayerPawn->GetActorLocation())
+					> FMath::Square(Tuning->PlayerThreatAwarenessRadius)) continue;
+				Attackers.Add(Enemy);
+				if (Attackers.Num() >= 8) break;
+			}
+		}
+		if (Attackers.Num() < 1) return false;
+		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK FORCED (attackers=%d)"),
+			*Companion->GetName(), Attackers.Num());
+	}
+	else if (Attackers.Num() < Tuning->AngleSeekMinFocusedEnemies) return false;
 
 	FVector Centroid = FVector::ZeroVector;
 	for (const AActor* Attacker : Attackers) Centroid += Attacker->GetActorLocation();
 	Centroid /= static_cast<float>(Attackers.Num());
 
-	// Normal / broken-Stealth: prefer a logical cover with a firing line on the attackers.
+	// Side pick: away from the player's firing line, so the arc opens a crossfire rather than
+	// stacking on the player's angle.
 	const bool bCombatMode = Companion->GetMode() == ECompanionMode::Combat;
-	if (!bCombatMode && TryAngleSeekCoverCommit(OwnerComp, Companion, Target, MyLocation, Centroid, Attackers, *Tuning))
-	{
-		AngleSeekCooldownRemaining = Tuning->AngleSeekCooldown;
-		Companion->StopWeaponFire();
-		EndOpenAreaMoveShoot(Companion);
-		FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded);
-		return true;
-	}
-
-	// Move-shoot flank (Combat mode primary; Normal fallback when no cover qualifies): drift the
-	// jiggle anchor laterally AWAY from the player->attackers axis so the companion opens a
-	// crossfire angle instead of sharing the player's.
 	FVector ToTarget = Target->GetActorLocation() - MyLocation;
 	ToTarget.Z = 0.f;
 	if (ToTarget.SizeSquared() <= KINDA_SMALL_NUMBER) return false;
@@ -1910,28 +1985,158 @@ bool UBTTask_CompanionCombat::TickAngleSeek(UBehaviorTreeComponent& OwnerComp, A
 		- FMath::ClosestPointOnInfiniteLine(PlayerPawn->GetActorLocation(), Centroid, MyLocation);
 	AwayFromPlayerLine.Z = 0.f;
 	AngleSeekSideSign = FVector::DotProduct(Perp, AwayFromPlayerLine.GetSafeNormal()) >= 0.f ? 1.f : -1.f;
+
+	// Side stickiness: an interrupted flank re-arms the same way around for a while instead of
+	// ping-ponging sides every attempt as the companion's own position shifts mid-fight.
+	const float NowSeconds = World->GetTimeSeconds();
+	if (LastFlankSideSign != 0.f && (NowSeconds - LastFlankSideWorldTime) < 20.f)
+		AngleSeekSideSign = LastFlankSideSign;
+	LastFlankSideSign = AngleSeekSideSign;
+	LastFlankSideWorldTime = NowSeconds;
+
+	// Route-mode flank: a flank is an ANGLE, not a cover point. Pick a goal
+	// AngleSeekFlankAngleDeg off the player->attackers axis at standoff range — side-on to
+	// behind — and nav-route there. Preferred side first, then the mirror; shallower angles
+	// as fallbacks when the map can't route the full curl.
+	FVector CentroidToPlayer = PlayerPawn->GetActorLocation() - Centroid;
+	CentroidToPlayer.Z = 0.f;
+	if (CentroidToPlayer.SizeSquared() > KINDA_SMALL_NUMBER)
+	{
+		CentroidToPlayer.Normalize();
+		UNavigationSystemV1* NavSys = UNavigationSystemV1::GetCurrent(World);
+		const ANavigationData* NavData = NavSys ? NavSys->GetDefaultNavDataInstance() : nullptr;
+
+		// Wide route builder: two-leg path through an outward bulge (arcs AROUND the battle space
+		// instead of hugging its inside), falling back to the direct nav path when unreachable.
+		auto BuildRoute = [&](const FVector& Goal, TArray<FVector>& Out)
+		{
+			Out.Reset();
+			const FVector MidPoint = (MyLocation + Goal) * 0.5f;
+			FVector AwayFromFight = MidPoint - Centroid;
+			AwayFromFight.Z = 0.f;
+			FVector Bulge;
+			if (AwayFromFight.SizeSquared() > KINDA_SMALL_NUMBER
+				&& ProjectToNav(World, MidPoint + AwayFromFight.GetSafeNormal() * 800.f,
+					MoveShootNavProjectExtent, Bulge))
+			{
+				FPathFindingQuery LegOne(Companion, *NavData, MyLocation, Bulge);
+				LegOne.bAllowPartialPaths = false;
+				const FPathFindingResult ResultOne = NavSys->FindPathSync(LegOne, EPathFindingMode::Regular);
+				if (ResultOne.IsSuccessful() && ResultOne.Path.IsValid() && !ResultOne.Path->IsPartial())
+				{
+					FPathFindingQuery LegTwo(Companion, *NavData, Bulge, Goal);
+					LegTwo.bAllowPartialPaths = false;
+					const FPathFindingResult ResultTwo = NavSys->FindPathSync(LegTwo, EPathFindingMode::Regular);
+					if (ResultTwo.IsSuccessful() && ResultTwo.Path.IsValid() && !ResultTwo.Path->IsPartial())
+					{
+						for (const FNavPathPoint& Point : ResultOne.Path->GetPathPoints())
+							Out.Add(Point.Location);
+						const TArray<FNavPathPoint>& LegTwoPoints = ResultTwo.Path->GetPathPoints();
+						for (int32 PointIdx = 1; PointIdx < LegTwoPoints.Num(); ++PointIdx)
+							Out.Add(LegTwoPoints[PointIdx].Location);
+					}
+				}
+			}
+			if (Out.Num() < 2)
+			{
+				Out.Reset();
+				FPathFindingQuery Query(Companion, *NavData, MyLocation, Goal);
+				Query.bAllowPartialPaths = false;
+				const FPathFindingResult Result = NavSys->FindPathSync(Query, EPathFindingMode::Regular);
+				if (Result.IsSuccessful() && Result.Path.IsValid() && !Result.Path->IsPartial())
+					for (const FNavPathPoint& Point : Result.Path->GetPathPoints())
+						Out.Add(Point.Location);
+			}
+		};
+
+		// Every viable (angle, side) goal is routed and the SHORTEST run wins — first-fit kept
+		// the preferred side even when that meant running around the whole floor for the angle.
+		TArray<FVector> BestPath;
+		float BestLength = TNumericLimits<float>::Max();
+		float BestAngleDeg = 0.f;
+		float BestSide = 0.f;
+		const float AngleSteps[] = { 0.f, -20.f, -40.f };
+		const float Sides[] = { AngleSeekSideSign, -AngleSeekSideSign };
+		if (NavData)
+		{
+			for (const float AngleDelta : AngleSteps)
+			{
+				for (const float Side : Sides)
+				{
+					const float AngleDeg = (Tuning->AngleSeekFlankAngleDeg + AngleDelta) * Side;
+					const FVector GoalDir = CentroidToPlayer.RotateAngleAxis(AngleDeg, FVector::UpVector);
+					FVector Goal;
+					if (!ProjectToNav(World, Centroid + GoalDir * Tuning->AngleSeekFlankStandoff,
+						MoveShootNavProjectExtent, Goal))
+						continue;
+
+					TArray<FVector> Candidate;
+					BuildRoute(Goal, Candidate);
+					if (Candidate.Num() < 2) continue;
+
+					float Length = 0.f;
+					for (int32 PointIdx = 1; PointIdx < Candidate.Num(); ++PointIdx)
+						Length += FVector::Dist(Candidate[PointIdx - 1], Candidate[PointIdx]);
+					if (Length < BestLength)
+					{
+						BestLength = Length;
+						BestPath = MoveTemp(Candidate);
+						BestAngleDeg = AngleDeg;
+						BestSide = Side;
+					}
+				}
+			}
+		}
+
+		if (BestPath.Num() >= 2)
+		{
+			AngleSeekPath = MoveTemp(BestPath);
+			AngleSeekPathIndex = 1; // [0] is the start
+			AngleSeekSideSign = BestSide;
+			LastFlankSideSign = BestSide;
+			LastFlankSideWorldTime = NowSeconds;
+			bAngleSeekActive = true;
+			bForcedSeek = bForceRequested;
+			AngleSeekTimeActive = 0.f;
+			AngleSeekBiasResolved = 0.f;
+			Companion->SetAngleSeekOverlayActive(true);
+			UE_LOG(LogCompanionAI, Log,
+				TEXT("[COVMOVE] %s node=%p ANGLE-SEEK flank route start angle=%.0f side=%+.0f len=%.0f pts=%d attackers=%d centroid=%s"),
+				*Companion->GetName(), this, BestAngleDeg, BestSide, BestLength,
+				AngleSeekPath.Num(), Attackers.Num(), *Centroid.ToCompactString());
+			return false;
+		}
+	}
+
+	// No routable flank goal: tangent-drift fallback — nudge the anchor laterally off the axis.
 	AngleSeekBiasResolved = Tuning->AngleSeekLateralBias
 		* (bCombatMode ? Tuning->AngleSeekCombatBiasMultiplier : 1.f);
 	bAngleSeekActive = true;
+	bForcedSeek = bForceRequested;
 	AngleSeekTimeActive = 0.f;
-	if (bDebugLogging || CovDbg())
-		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK start mode=%s focused=%d supp01=%.2f side=%+.0f bias=%.0f"),
-			*Companion->GetName(), bCombatMode ? TEXT("Combat") : TEXT("Normal"),
-			FocusedCount, Supp01, AngleSeekSideSign, AngleSeekBiasResolved);
+	AngleSeekPathIndex = INDEX_NONE;
+	Companion->SetAngleSeekOverlayActive(true);
+	UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK drift fallback (no routable flank) mode=%s focused=%d supp01=%.2f side=%+.0f bias=%.0f"),
+		*Companion->GetName(), bCombatMode ? TEXT("Combat") : TEXT("Normal"),
+		FocusedCount, Supp01, AngleSeekSideSign, AngleSeekBiasResolved);
 	return false;
 }
 
-void UBTTask_CompanionCombat::EndAngleSeek(const ACompanionCharacter* Companion, const TCHAR* Reason)
+void UBTTask_CompanionCombat::EndAngleSeek(ACompanionCharacter* Companion, const TCHAR* Reason)
 {
 	if (!bAngleSeekActive) return;
 	bAngleSeekActive = false;
+	bForcedSeek = false;
 	AngleSeekTimeActive = 0.f;
 	AngleSeekSideSign = 0.f;
+	AngleSeekPath.Reset();
+	AngleSeekPathIndex = INDEX_NONE;
+	if (IsValid(Companion)) Companion->SetAngleSeekOverlayActive(false);
 	const ACompanionAIController* AIC = IsValid(Companion) ? Cast<ACompanionAIController>(Companion->GetController()) : nullptr;
 	const UCompanionTuningDataAsset* Tuning = AIC ? AIC->GetTuning() : nullptr;
 	AngleSeekCooldownRemaining = Tuning ? Tuning->AngleSeekCooldown : 5.f;
-	if ((bDebugLogging || CovDbg()) && IsValid(Companion))
-		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s ANGLE-SEEK end reason=%s"), *Companion->GetName(), Reason);
+	if (IsValid(Companion))
+		UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s node=%p ANGLE-SEEK end reason=%s"), *Companion->GetName(), this, Reason);
 }
 
 bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& OwnerComp, ACompanionCharacter* Companion,
@@ -1945,7 +2150,10 @@ bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& Ow
 	if (!World || !CoverSys || !BB || !Controller) return false;
 	UCoverReservationSubsystem* ResSub = World->GetSubsystem<UCoverReservationSubsystem>();
 
-	const float CommitRadius = FMath::Min(Tuning.CoverSearchRadius, Tuning.CoverCommitMaxDistance);
+	// Angle-seek gets its own commit range: the general min(search, commit) cap of 650cm meant no
+	// open-arena flank cover could ever qualify from where the companion actually fights — the
+	// whole point of the seek is a LONGER run than an ordinary cover pick.
+	const float CommitRadius = Tuning.AngleSeekCommitMaxDistance;
 	TArray<FCover> Candidates;
 	Candidates.Reserve(32);
 	const FBoxSphereBounds SearchBounds(MyLocation, FVector(CommitRadius), CommitRadius);
@@ -1955,30 +2163,46 @@ bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& Ow
 	const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : 34.f) + 10.f;
 	const float ArcCos = FMath::Cos(FMath::DegreesToRadians(Tuning.CoverFlankArcHalfAngleDeg));
 	const UDoorRegistrySubsystem* DoorRegistry = World->GetSubsystem<UDoorRegistrySubsystem>();
+
+	// A flank must sit OFF the player's firing line — a nearby cover that merely faces the
+	// attackers shares the player's angle and reads as ordinary cover, not a crossfire.
+	constexpr float MinFlankLateralOffset = 500.f;
+	const ACompanionAIController* SeekAIC = Cast<ACompanionAIController>(Companion->GetController());
+	const APawn* SeekPlayer = SeekAIC ? SeekAIC->GetPlayerCharacter() : nullptr;
 	// Line tests run per real attacker (a virtual-centroid trace reads a clustered attacker's own
 	// body as a blocker and rejects exactly the covers this feature wants). Bounded per candidate.
 	const int32 MaxLineTests = FMath::Min(Attackers.Num(), 3);
 
 	FCover Best;
 	float BestDistSq = TNumericLimits<float>::Max();
+	int32 RejDist = 0, RejClaim = 0, RejDoor = 0, RejAxis = 0, RejArc = 0, RejLine = 0, RejProt = 0;
 	for (const FCover& Candidate : Candidates)
 	{
 		if (!Candidate.IsValid()) continue;
 		const float DistSq = FVector::DistSquared(MyLocation, Candidate.Data.Location);
-		if (DistSq > FMath::Square(CommitRadius) || DistSq >= BestDistSq) continue;
+		if (DistSq > FMath::Square(CommitRadius) || DistSq >= BestDistSq) { ++RejDist; continue; }
 		AController* Occupant = CoverSys->GetOccupyingController(Candidate.Handle);
-		if (Occupant && Occupant != Controller) continue;
+		if (Occupant && Occupant != Controller) { ++RejClaim; continue; }
 		if (IsValid(ResSub) && ResSub->IsOnPostVacateCooldown(Candidate.Handle, Controller, Tuning.CoverSwitchPostVacateCooldown))
-			continue;
-		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller)) continue;
+			{ ++RejClaim; continue; }
+		if (IsValid(ResSub) && ResSub->IsCoverIntendedByOther(Candidate.Handle, Controller)) { ++RejClaim; continue; }
 		// A candidate behind a closed door is never a valid pick (same rule as the EQS DoorCrossing filter).
-		if (IsValid(DoorRegistry) && DoorRegistry->AnyClosedDoorBlocksSegment(MyLocation, Candidate.Data.Location)) continue;
+		if (IsValid(DoorRegistry) && DoorRegistry->AnyClosedDoorBlocksSegment(MyLocation, Candidate.Data.Location))
+			{ ++RejDoor; continue; }
+
+		if (IsValid(SeekPlayer))
+		{
+			const FVector OnLine = FMath::ClosestPointOnInfiniteLine(
+				SeekPlayer->GetActorLocation(), AttackerCentroid, Candidate.Data.Location);
+			if (FVector::DistSquared2D(Candidate.Data.Location, OnLine) < FMath::Square(MinFlankLateralOffset))
+				{ ++RejAxis; continue; }
+		}
 
 		// The line must be on the ATTACKERS, not the companion's own current target: arc toward
 		// their centroid, then a verified peek-shot on at least one real attacker.
 		const FVector ToCentroid2D = (AttackerCentroid - Candidate.Data.Location).GetSafeNormal2D();
 		if (FVector::DotProduct(UCoverGeometryStatics::GetFireArcForward(Candidate.Data), ToCentroid2D) < ArcCos)
-			continue;
+			{ ++RejArc; continue; }
 		const bool bCandidateCrouch = UCoverGeometryStatics::GetCoverHeight(Candidate.Data) == ECoverHeight::Crouch;
 		bool bLineOnAttacker = false;
 		for (int32 i = 0; i < MaxLineTests && !bLineOnAttacker; ++i)
@@ -1988,16 +2212,24 @@ bool UBTTask_CompanionCombat::TryAngleSeekCoverCommit(UBehaviorTreeComponent& Ow
 			bLineOnAttacker = UCoverGeometryStatics::CanPeekShoot(World, Candidate.Data, bCandidateCrouch,
 				AITargeting::GetSightLocation(Attacker), StandFireEyeHeight, Attacker, Companion);
 		}
-		if (!bLineOnAttacker) continue;
+		if (!bLineOnAttacker) { ++RejLine; continue; }
 		if (Tuning.bCoverRequiresBodyProtection
 			&& !UCoverGeometryStatics::IsThreatCovered(World, Candidate.Data, AttackerCentroid,
 				Standoff, Tuning.CoverProtectionChestHeight, Target, Companion))
-			continue;
+			{ ++RejProt; continue; }
 
 		Best = Candidate;
 		BestDistSq = DistSq;
 	}
-	if (!Best.IsValid()) return false;
+	if (!Best.IsValid())
+	{
+		// Diagnostic, throttled by the caller's eval cadence: names the gate that starved the
+		// commit so a "shows FLANKING but never flanks" report is answerable from the log.
+		UE_LOG(LogCompanionAI, Log,
+			TEXT("[COVMOVE] %s ANGLE-SEEK commit: no candidate (%d found: dist=%d claim=%d door=%d axis=%d arc=%d line=%d prot=%d)"),
+			*Companion->GetName(), Candidates.Num(), RejDist, RejClaim, RejDoor, RejAxis, RejArc, RejLine, RejProt);
+		return false;
+	}
 
 	// Stamp intent so MoveToCoverPoint's intent-restore wins over the BT loop's EQS re-pick (the
 	// monitor-swap-stomp mechanism), and grant the companion so the commit gate skips the trigger
@@ -2177,6 +2409,12 @@ void UBTTask_CompanionCombat::TickCombatJiggle(ACompanionCharacter* Companion, A
 	if (!bJiggleActive)
 	{
 		AIC->StopMovement();
+		// [ANGLE-DBG] Move-shoot re-anchor snaps JiggleHome back to the pawn — if a flank route is
+		// live this stomps its current waypoint (the route re-asserts next tick, but a re-anchor
+		// loop here would explain a companion vibrating in place instead of walking the route).
+		if (bAngleSeekActive && AngleSeekPathIndex != INDEX_NONE)
+			UE_LOG(LogCompanionAI, Log, TEXT("[ANGLE-DBG] %s node=%p move-shoot RE-ANCHOR stomps route waypoint (home was %s)"),
+				*Companion->GetName(), this, *JiggleHome.ToCompactString());
 		JiggleHome = Companion->GetActorLocation();
 		if (IsValid(KOPlayer))
 		{
@@ -2342,6 +2580,12 @@ void UBTTask_CompanionCombat::TickRegainLosReposition(ACompanionCharacter* Compa
 	MoveShootDestination = Dest;
 	LogCombatMoveDiag(Companion, Target,
 		*FString::Printf(TEXT("regain-los:%s%s"), FanDirName, bWideStep ? TEXT("(x2)") : TEXT("")), MoveShootDestination);
+	// [ANGLE-DBG] The regain-LoS fan steers toward sight lines — the exact opposite of a flank
+	// route's blind leg. If this prints while a route is live, THIS is what's dragging the
+	// companion back into the fight.
+	if (bAngleSeekActive && AngleSeekPathIndex != INDEX_NONE)
+		UE_LOG(LogCompanionAI, Log, TEXT("[ANGLE-DBG] %s node=%p REGAIN-LOS fan OVERRIDES flank route (dest=%s)"),
+			*Companion->GetName(), this, *MoveShootDestination.ToCompactString());
 	AIC->MoveToLocation(MoveShootDestination, MoveShootAcceptRadius, false, true, false, true);
 }
 
@@ -2530,6 +2774,11 @@ void UBTTask_CompanionCombat::TickMoveShootTowardPlayer(ACompanionCharacter* Com
 	bMoveShootHolding = false;
 	MoveShootDestination = Projected;
 	LogCombatMoveDiag(Companion, Target, TEXT("player-pull"), MoveShootDestination);
+	// [ANGLE-DBG] Player-pull outranks everything by design — if this prints mid-route, the
+	// flank died to the leash, not to a bug.
+	if (bAngleSeekActive && AngleSeekPathIndex != INDEX_NONE)
+		UE_LOG(LogCompanionAI, Log, TEXT("[ANGLE-DBG] %s node=%p PLAYER-PULL overrides flank route (dest=%s)"),
+			*Companion->GetName(), this, *MoveShootDestination.ToCompactString());
 	AIC->MoveToLocation(MoveShootDestination, MoveShootAcceptRadius, false, true, false, true);
 }
 
@@ -2735,13 +2984,24 @@ void UBTTask_CompanionCombat::ResetTaskState(ACompanionCharacter* Companion, UBl
 	bHasLastKnownTargetLocation = false;
 	LastKnownTargetLocation = FVector::ZeroVector;
 	GrenadeLosBlockedAccum = 0.f;
-	// Angle-seek: deactivate but keep AngleSeekCooldownRemaining — target churn restarts this task
-	// several times per fight, and a reset cooldown would let the flank re-arm instantly after
-	// every kill (the exact ping-pong the cooldown exists to stop).
-	bAngleSeekActive = false;
-	AngleSeekTimeActive = 0.f;
-	AngleSeekSideSign = 0.f;
-	AngleSeekBiasResolved = 0.f;
+	// Angle-seek: deactivate the DRIFT variant but keep AngleSeekCooldownRemaining — target churn
+	// restarts this task several times per fight, and a reset cooldown would let the flank re-arm
+	// instantly after every kill (the exact ping-pong the cooldown exists to stop).
+	// A mid-flight ROUTE is the exception: killing it here orphaned the run on every target swap
+	// (seen live: restart at waypoint 1/8, again at 3/8 — the flank re-planned forever and never
+	// arrived). The route resumes across restarts; its own timers/leash still end it.
+	if (AngleSeekPathIndex == INDEX_NONE)
+	{
+		bAngleSeekActive = false;
+		AngleSeekTimeActive = 0.f;
+		AngleSeekSideSign = 0.f;
+		AngleSeekBiasResolved = 0.f;
+	}
+	else if (bAngleSeekActive)
+	{
+		UE_LOG(LogCompanionAI, Log, TEXT("[ANGLE-DBG] task reset: flank route RESUMES at waypoint %d/%d"),
+			AngleSeekPathIndex, AngleSeekPath.Num());
+	}
 	AngleSeekEvalTimer = 0.f;
 	// Pressure tracking: reset distance sample so first tick after re-entry doesn't false-detect closing.
 	PreviousNearestThreatDist = -1.f;
@@ -2952,6 +3212,14 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 	// Full state reset without releasing the cover we're about to occupy.
 	// Don't reset posture — preserves anticipatory crouch from MoveToCoverPoint.
 	ResetTaskState(Companion, BB, FCoverHandle(), false, false);
+
+	// [ANGLE-DBG] Task (re)start with the angle-seek state this NODE INSTANCE carries — separate
+	// BT nodes of this task class hold separate seek state, and the companion-side overlay flag
+	// outlives task restarts; this line is the leak detector for both.
+	UE_LOG(LogCompanionAI, Log,
+		TEXT("[ANGLE-DBG] %s ExecuteTask node=%s(%p) seekActive=%d pathIdx=%d cooldown=%.1f overlayFlag=%d"),
+		*Companion->GetName(), *GetNodeName(), this, (int32)bAngleSeekActive, AngleSeekPathIndex,
+		AngleSeekCooldownRemaining, (int32)Companion->IsAngleSeekingForOverlay());
 	bWasCoveringFireLastTick = false;
 	bHasCoveringFireLastSeen = false;
 	CoveringFireLastSeenLoc = FVector::ZeroVector;
@@ -2993,10 +3261,6 @@ EBTNodeResult::Type UBTTask_CompanionCombat::ExecuteTask(UBehaviorTreeComponent&
 			PeekCycleCarryHandle = Cover.Handle;
 			PeekCycleCarryCount = 0;
 		}
-		if (CovDbg())
-			UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s CLAIM (ExecuteTask) loc=%s lean=%d"),
-				*Companion->GetName(), *Cover.Data.Location.ToCompactString(), (int32)CurrentLean);
-
 		const UCapsuleComponent* Cap = Companion->GetCapsuleComponent();
 		const float Standoff = (Cap ? Cap->GetScaledCapsuleRadius() : 34.f) + 10.f;
 		const FVector HunkerLoc = CompanionCover::CompanionHunkerPosition(*Companion, Cover.Data, Standoff);
@@ -3438,9 +3702,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	{
 		// Task-internal commits pre-update LastTickCoverHandle, so reaching here = an EXTERNAL
 		// writer (the switch monitor) replaced our cover point.
-		if (CovDbg())
-			UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s EXTERNAL-SWAP (monitor) newLoc=%s cyclesAtOld=%d"),
-				*Ctx.Companion->GetName(), *Cover.Data.Location.ToCompactString(), PeekCyclesAtCover);
 		ResolvePeekSideForCover(Ctx.Companion, Ctx.Target, Cover.Data, TargetSightLoc);
 		ResetPeekCycleCounters(Ctx.Companion);
 		BlockedRecheckHits = 0;
@@ -3632,27 +3893,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		const FVector HunkerLoc = CachedIdleHunkerLoc;
 
-#if ENABLE_DRAW_DEBUG
-		// CovDbg-only (NOT bDebugLogging - that flag ships enabled on the BT asset for the log
-		// stream, and these spheres render as gameplay markers to a playtester).
-		if (CovDbg())
-		{
-			const FVector HunkerPt = HunkerLoc + FVector(0.f, 0.f, 10.f);
-			DrawDebugSphere(Ctx.Companion->GetWorld(), HunkerPt, 22.f, 8, FColor::Red, false, 0.f, 0, 1.5f);
-			// Corner leans only — Front (over-the-top) has no lateral peek point; GetLeanPeekPosition
-			// degenerates to the cover location and the line reads as a bogus corner pointer mid-wall.
-			if (CurrentLean == ECoverLean::Left || CurrentLean == ECoverLean::Right)
-			{
-				const FVector PeekPt = UCoverGeometryStatics::GetLeanPeekPosition(Cover.Data, CurrentLean) + FVector(0.f, 0.f, 20.f);
-				DrawDebugSphere(Ctx.Companion->GetWorld(), PeekPt, 14.f, 12, FColor::Magenta, false, 0.f, 0, 1.5f);
-				DrawDebugLine(Ctx.Companion->GetWorld(), HunkerPt, PeekPt, FColor::Magenta, false, 0.f, 0, 2.5f);
-			}
-			// Eye-height marker showing where stand-fire LoS trace originates.
-			const FVector EyeMarker = HunkerLoc + FVector(0.f, 0.f, StandFireEyeHeight);
-			DrawDebugSphere(Ctx.Companion->GetWorld(), EyeMarker, 6.f, 6, FColor::Cyan, false, 0.f, 0, 1.f);
-		}
-#endif
-
 		const FVector SubSlotLoc = HunkerLoc;
 
 		// Refresh peek side only when geometry has changed beyond threshold.
@@ -3737,11 +3977,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					// blind EQS pick. Clamp strikes below threshold so the escape re-tries next eval;
 					// the switch monitor's blind-current bypass covers the cross-wall escape.
 					NoPeekLosStrikes = DebounceRequired - 1;
-					if (bDebugLogging || CovDbg())
+					if (bDebugLogging)
 						UE_LOG(LogCompanionAI, Log, TEXT("%s: no-peek-los HOLD — no verified-LoS shuffle candidate (dwell=%.1f)"),
 							*Ctx.Companion->GetName(), TimeAtCurrentCover);
 				}
-				else if (bDebugLogging || CovDbg())
+				else if (bDebugLogging)
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: no-peek-los strike %d/%d — holding"),
 						*Ctx.Companion->GetName(), NoPeekLosStrikes, DebounceRequired);
 			}
@@ -3809,7 +4049,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					&& PeekCyclesAtCover < (TickTuning ? TickTuning->MinPeekCyclesBeforeRelocate : 1))
 				{
 					CoverCompromiseConsecutiveCount = DebounceRequired;
-					if (bDebugLogging || CovDbg())
+					if (bDebugLogging)
 						UE_LOG(LogCompanionAI, Log, TEXT("%s: compromise tripped but cycles=%d < min — holding invalidate"),
 							*Ctx.Companion->GetName(), PeekCyclesAtCover);
 				}
@@ -3921,7 +4161,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				PreviousNearestThreatDist = (NearestDist < TNumericLimits<float>::Max()) ? NearestDist : -1.f;
 
 				// Peek-now impulse: 2 consecutive closing samples crossing impulse distance, unsuppressed.
-				bool bImpulseFired = false;
 				if (!bSuppressed && PeekImpulseCooldownRemaining <= 0.f
 					&& bClosingConfirmed && NearestDist < TNumericLimits<float>::Max()
 					&& NearestDist <= TickTuning->PeekImpulseDistance)
@@ -3933,19 +4172,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 					{
 						TimeInCoverIdle = WaitGateThreshold;
 						PeekImpulseCooldownRemaining = TickTuning->PeekImpulseRearmSeconds;
-						bImpulseFired = true;
 					}
-				}
-
-				if (CovDbg())
-				{
-					UE_LOG(LogCompanionAI, Log,
-						TEXT("[COVDBG] %s PRESSURE p01=%.2f distTerm=%.2f fireTerm=%.2f(supp=%.2f w=%.1f dmg=%d/%d) nearDist=%.0f closing=%d confirmed=%d cooldownScale=%.2f impulse=%d"),
-						*Ctx.Companion->GetName(), Pressure01, DistanceTerm, FireTerm,
-						Supp01, TickTuning->PressureSuppressionWeight, RecentHits, DmgHitsMax,
-						NearestDist, (int32)bClosingNow, (int32)bClosingConfirmed,
-						ModePeekConfidenceScale(Ctx.Companion, TickTuning, false, Pressure01),
-						(int32)bImpulseFired);
 				}
 			}
 		}
@@ -3987,21 +4214,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			LastDecisionTime = Now;
 		}
 
-		// Deep-debug: one line per decision ATTEMPT with the full counter state — with this plus
-		// the [COVMOVE] trail, every reposition-without-firing has a named cause in the log.
-		if (CovDbg())
-		{
-			UE_LOG(LogCompanionAI, Log,
-				TEXT("[COVDBG] %s DECISION suppRaw=%d(gated=%d) supp01=%.2f hits4s=%d focused=%d cycles=%d strikes=%d holds=%d/%d dwellAtCover=%.1f idle=%.1f justRepo=%d lean=%d ammo=%d hp=%.2f"),
-				*Ctx.Companion->GetName(), (int32)bSuppressedRaw, (int32)bSuppressed,
-				Ctx.Companion->GetSuppression01(),
-				Ctx.Companion->GetRecentDamageCount(TickTuning ? TickTuning->CoverCommitUnderFireWindow : 4.f),
-				Ctx.Companion->GetPlayerFocusedEnemyCount(),
-				PeekCyclesAtCover, NoPeekLosStrikes, ConsecutiveHolds, GetEffectiveMaxHolds(Ctx.Companion),
-				TimeAtCurrentCover, TimeInCoverIdle, (int32)bJustRepositioned,
-				(int32)CurrentLean, Ctx.Companion->GetCurrentAmmo(), Ctx.Companion->GetHealthFraction());
-		}
-
 		// Gate 1: suppression. Covering fire bypasses the stay-down.
 		if (bSuppressed && !bCoveringFire)
 		{
@@ -4039,9 +4251,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		if (!bLosFromCover)
 		{
-			if (CovDbg())
-				UE_LOG(LogCompanionAI, Log, TEXT("[COVDBG] %s GATE2 cover-LoS blocked hits=%d cycles=%d"),
-					*Ctx.Companion->GetName(), BlockedRecheckHits, PeekCyclesAtCover);
 			// Skip re-pick while a movement action owns its own positioning.
 			if (CurrentBurstAction == EPeekAction::Reposition
 				|| CurrentBurstAction == EPeekAction::StandUpAndReposition
@@ -4139,7 +4348,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				}
 			}
 			if (!bSpeculativePeek) return;
-			if (bDebugLogging || CovDbg())
+			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: SPECULATIVE-PEEK roll passed — peeking without verified LoS"),
 					*Ctx.Companion->GetName());
 		}
@@ -4183,7 +4392,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 			TimeInCoverIdle = 0.f;
-			if (bDebugLogging || CovDbg())
+			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: STAY DOWN reason=stand-cover-no-side-gap"),
 					*Ctx.Companion->GetName());
 			return;
@@ -4211,7 +4420,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			{
 				PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 				TimeInCoverIdle = 0.f;
-				if (bDebugLogging || CovDbg())
+				if (bDebugLogging)
 					UE_LOG(LogCompanionAI, Log, TEXT("%s: STAY DOWN reason=target-out-of-arc"), *Ctx.Companion->GetName());
 				return;
 			}
@@ -4225,7 +4434,7 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		{
 			PeekCooldown = FMath::RandRange(MinPeekCooldown, MaxPeekCooldown);
 			TimeInCoverIdle = 0.f;
-			if (bDebugLogging || CovDbg())
+			if (bDebugLogging)
 				UE_LOG(LogCompanionAI, Log, TEXT("%s: STAY DOWN reason=target-out-of-peek-cone"), *Ctx.Companion->GetName());
 			return;
 		}
@@ -4356,53 +4565,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				ResolvedPeekSide = ResolveSideFromLean(CurrentLean, Cover.Data, TargetLocation);
 			}
 
-#if ENABLE_DRAW_DEBUG
-			// CovDbg-only (NOT bDebugLogging — that flag ships enabled on the BT asset, and these
-			// long target lines read as gameplay tracers to a playtester).
-			if (CovDbg())
-			{
-				const FVector BaseHunker = UCoverGeometryStatics::GetHunkerPosition(Cover.Data, ScoreStandoff);
-				const FVector OverTopEye = BaseHunker + FVector(0.f, 0.f, 150.f);
-				auto DrawCandidate = [&](const FVector& Eye, bool bViable, const FColor& Color)
-				{
-					DrawDebugSphere(TickWorld, Eye, 10.f, 8, Color, false, 2.f, 0, 1.5f);
-					const FColor LineColor = bViable ? FColor::Green : FColor::Red;
-					DrawDebugLine(TickWorld, Eye, TargetSightLoc, LineColor, false, 2.f, 0, 1.f);
-				};
-				const FVector LeftEyeDraw = UCoverGeometryStatics::GetLeanPeekPosition(Cover.Data, ECoverLean::Left) + FVector(0.f, 0.f, 90.f);
-				const FVector RightEyeDraw = UCoverGeometryStatics::GetLeanPeekPosition(Cover.Data, ECoverLean::Right) + FVector(0.f, 0.f, 90.f);
-				if (bCachedCornerLeftFound)
-					DrawCandidate(LeftEyeDraw, Scores.bCornerLeftViable, FColor::Blue);
-				if (bCachedCornerRightFound)
-					DrawCandidate(RightEyeDraw, Scores.bCornerRightViable, FColor::Orange);
-				DrawCandidate(OverTopEye, Scores.bOverTopViable, FColor::Cyan);
-
-				for (AActor* const Extra : ExtraThreats)
-				{
-					if (!IsValid(Extra)) continue;
-					const FVector ExtraLoc = Extra->GetActorLocation() + FVector(0.f, 0.f, 90.f);
-					if (Scores.bCornerLeftViable && bCachedCornerLeftFound)
-						DrawDebugLine(TickWorld, LeftEyeDraw, ExtraLoc, FColor(128, 128, 255), false, 2.f, 0, 0.5f);
-					if (Scores.bCornerRightViable && bCachedCornerRightFound)
-						DrawDebugLine(TickWorld, RightEyeDraw, ExtraLoc, FColor(255, 178, 102), false, 2.f, 0, 0.5f);
-					if (Scores.bOverTopViable)
-						DrawDebugLine(TickWorld, OverTopEye, ExtraLoc, FColor(128, 255, 255), false, 2.f, 0, 0.5f);
-				}
-			}
-#endif
-
-			if (CovDbg())
-			{
-				UE_LOG(LogCompanionAI, Log,
-					TEXT("[COVDBG] %s WALLHACK cL=%.1f(%d) cR=%.1f(%d) oT=%.1f(%d) bestCorner=%d geo=%d spec=%d extra=%d action=%d side=%d"),
-					*Ctx.Companion->GetName(),
-					Scores.CornerLeftScore, (int32)Scores.bCornerLeftViable,
-					Scores.CornerRightScore, (int32)Scores.bCornerRightViable,
-					Scores.OverTopScore, (int32)Scores.bOverTopViable,
-					(int32)Scores.BestCornerSide, (int32)Scores.GeometricFallbackSide,
-					(int32)ScoreParams.bSpeculative, ExtraThreats.Num(),
-					(int32)Action, (int32)CurrentLean);
-			}
 		}
 		else if (bSideGap)
 		{
@@ -4583,9 +4745,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			}
 
 			// StandUpAndReposition: stand up, start burst in place (Phase A), then walk-and-fire (Phase B).
-			if (CovDbg())
-				UE_LOG(LogCompanionAI, Log, TEXT("[COVMOVE] %s STANDUP-REPO-COMMIT to=%s cyclesAtOld=%d"),
-					*GetNameSafe(Ctx.Companion), *ShuffleTarget.Data.Location.ToCompactString(), PeekCyclesAtCover);
 			UE_LOG(LogCompanionAI, Log, TEXT("%s: PEEK-ACTION=StandUpAndReposition ammo=%d"), *GetNameSafe(Ctx.Companion), Ctx.Companion->GetCurrentAmmo());
 			CurrentBurstAction = EPeekAction::StandUpAndReposition;
 			LastDecisionTime = Now;
@@ -4687,16 +4846,6 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 				*GetNameSafe(Ctx.Companion),
 				*CornerPeekHomeLocation.ToString(), *CornerPeekApexLocation.ToString(),
 				BurstTimer, Ctx.Companion->GetCurrentAmmo());
-#if ENABLE_DRAW_DEBUG
-			// CovDbg-only (NOT bDebugLogging) - same playtester-visibility rule as the idle draws.
-			if (CovDbg())
-			{
-				DrawDebugLine(Ctx.Companion->GetWorld(), CornerPeekHomeLocation + FVector(0, 0, 20.f),
-					CornerPeekApexLocation + FVector(0, 0, 20.f), FColor::Magenta, false, 3.f, 0, 4.f);
-				DrawDebugSphere(Ctx.Companion->GetWorld(), CornerPeekApexLocation + FVector(0, 0, 20.f),
-					18.f, 12, FColor::Magenta, false, 3.f, 0, 2.f);
-			}
-#endif
 			DebugBurstLosCheckTimer = 0.f;
 			CornerPeekLosCheckTimer = 0.f;
 			TimeInCoverIdle = 0.f;
@@ -5086,8 +5235,12 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	// Cover priority: while move-shooting in the open, periodically check for reachable cover and,
 	// if any exists, finish the task so the BT re-runs MoveToCover and routes us into cover.
 	// Suppressed while catching up to a distant player (player-pull wins per design).
+	// Also suppressed while an angle-seek flank ROUTE is live: this re-seek finishing the task was
+	// yanking the companion off the flank mid-run to any nearby ordinary cover — the flank owns
+	// the companion until it arrives or the seek stands down.
 	TimeInOpenEngageNoCover += DeltaSeconds;
-	if (OpenEngageCoverReseekInterval > 0.f && !bPlayerTooFar
+	const bool bFlankRouteLive = bAngleSeekActive && AngleSeekPathIndex != INDEX_NONE;
+	if (OpenEngageCoverReseekInterval > 0.f && !bPlayerTooFar && !bFlankRouteLive
 		&& TimeInOpenEngageNoCover >= OpenEngageCoverReseekInterval)
 	{
 		TimeInOpenEngageNoCover = 0.f;
@@ -5222,14 +5375,11 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 		}
 		LosBlockedAccum += DeltaSeconds;
 
-		// An active angle-seek can't work a blocked line — its Combat-mode motor is the
-		// jiggle-drift lateral bias, and jiggle is latched off below while LoS is blocked. All it
-		// does here is hard-gate TickCombatAdvanceHop, the one system that CAN route around the
-		// blocker; and because ResetTaskState clears the flag without stamping the cooldown, the
-		// seek re-armed on every abandon/restart and the companion stood in a permanent
-		// hold/abandon loop. End it (stamps AngleSeekCooldown) once the block outlives a
-		// transient corner-clip.
-		if (bAngleSeekActive && LosBlockedAccum >= AimDropOnLosBlockedSeconds)
+		// An active DRIFT-mode angle-seek can't work a blocked line — its motor is the jiggle-drift
+		// lateral bias, latched off below while LoS is blocked — so end it once the block outlives
+		// a transient corner-clip. A ROUTE-mode flank is the opposite: the blind leg IS the flank
+		// (breaking sight to come around behind), so the block is expected and must not end it.
+		if (bAngleSeekActive && AngleSeekPathIndex == INDEX_NONE && LosBlockedAccum >= AimDropOnLosBlockedSeconds)
 			EndAngleSeek(Ctx.Companion, TEXT("los-blocked"));
 
 		// --- Grenade lob (enemy-grenadier parity): the target has stayed hidden — flush it out.
@@ -5272,7 +5422,20 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 			Ctx.Companion->SetLowReadyAim(true);
 			if (AAIController* RegainAIC = Cast<AAIController>(Ctx.Companion->GetController()))
 			{
-				if (bPlayerTooFar)
+				if (bAngleSeekActive && AngleSeekPathIndex != INDEX_NONE)
+				{
+					// Flank route owns movement while blind — the blind leg IS the flank. Walk the
+					// current waypoint; skip both the player-pull and the regain fan (each would
+					// steer back toward the fight). Issue once per waypoint, not per tick.
+					if (!MoveShootDestination.Equals(JiggleHome, 50.f))
+					{
+						MoveShootDestination = JiggleHome;
+						UE_LOG(LogCompanionAI, Log, TEXT("[ANGLE-DBG] %s node=%p blind route leg -> wp %s"),
+							*Ctx.Companion->GetName(), this, *JiggleHome.ToCompactString());
+						RegainAIC->MoveToLocation(JiggleHome, MoveShootAcceptRadius, false, true, false, true);
+					}
+				}
+				else if (bPlayerTooFar && !bAngleSeekActive)
 					TickMoveShootTowardPlayer(Ctx.Companion, RegainAIC, Ctx.Target, DeltaSeconds);
 				else
 					TickRegainLosReposition(Ctx.Companion, RegainAIC, Ctx.Target, TickFireTraceIgnored, DeltaSeconds);
@@ -5371,7 +5534,9 @@ void UBTTask_CompanionCombat::TickTask(UBehaviorTreeComponent& OwnerComp, uint8*
 	{
 		if (AAIController* MoveAIC = Cast<AAIController>(Ctx.Companion->GetController()))
 		{
-			if (bPlayerTooFar)
+			// Any live seek outranks the player-pull — the route swings past the leash, and the
+			// arrival-hold FIGHTS from past it; the pull dragging him home was the flank-loop.
+			if (bPlayerTooFar && !bAngleSeekActive)
 				TickMoveShootTowardPlayer(Ctx.Companion, MoveAIC, Ctx.Target, DeltaSeconds);
 			else
 				TickCombatJiggle(Ctx.Companion, MoveAIC, Ctx.Target, TickFireTraceIgnored, DeltaSeconds);

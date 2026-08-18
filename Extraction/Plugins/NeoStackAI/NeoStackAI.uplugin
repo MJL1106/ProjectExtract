@@ -1,7 +1,7 @@
 {
   "FileVersion": 3,
   "Version": 8,
-  "VersionName": "3.1.13",
+  "VersionName": "3.1.49",
   "FriendlyName": "NeoStack AI",
   "Description": "AI agents inside the Unreal Editor for asset editing, creation, project indexing, and workflow automation via Lua, MCP, and ACP.",
   "Category": "Editor",
@@ -649,6 +649,16 @@
         "Mac",
         "Linux"
       ]
+    },
+    {
+      "Name": "NSAI_PixelStreaming2_Integration",
+      "Type": "EditorNoCommandlet",
+      "LoadingPhase": "None",
+      "PlatformAllowList": [
+        "Win64",
+        "Mac",
+        "Linux"
+      ]
     }
   ],
   "Plugins": [
@@ -1029,6 +1039,10 @@
     },
     {
       "Name": "ZoneGraph",
+      "Enabled": false
+    },
+    {
+      "Name": "PixelStreaming2",
       "Enabled": false
     }
   ]

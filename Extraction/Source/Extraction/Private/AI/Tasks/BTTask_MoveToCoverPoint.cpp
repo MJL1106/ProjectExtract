@@ -23,7 +23,7 @@
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
 #include "Navigation/PathFollowingComponent.h"
-#include "EnemyDebug.h"
+#include "EnemyTestKnobs.h"
 #include "GameFramework/Character.h"
 #include "Components/CapsuleComponent.h"
 #include "Engine/World.h"
@@ -455,12 +455,6 @@ EBTNodeResult::Type UBTTask_MoveToCoverPoint::ExecuteTask(UBehaviorTreeComponent
 	if (IsValid(ResSub)) ResSub->SetIntendedCover(Controller, Cover.Handle);
 
 	// Issue move
-	if (GetCoverAnimLogLevel() > 0 && IsValid(Enemy))
-	{
-		const UCoverPoseComponent* PoseDbg = Enemy->GetCoverPoseComponent();
-		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s MOVE(to-cover) posed=%d"),
-			*GetNameSafe(Pawn), (IsValid(PoseDbg) && PoseDbg->bInCover) ? 1 : 0);
-	}
 	// Companion counterpart of the enemy pose reset at pick time: a pose latched at a previous cover
 	// plays the full-body cover montage for the whole transit and the montage suppresses locomotion,
 	// so the companion floor-slides in the crouched idle instead of walking. Deliberately down here,
@@ -989,12 +983,6 @@ void UBTTask_MoveToCoverPoint::HandleArrival(UBehaviorTreeComponent& OwnerComp,
 		}
 		PoseComp->SetInCover(true, DerivedHeight);
 	}
-
-	if (GetCoverAnimLogLevel() > 0 && Enemy)
-		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s ARRIVE dist=%.0f coverLoc=(%.0f,%.0f,%.0f)"),
-			*GetNameSafe(Pawn),
-			FVector::Dist2D(Pawn->GetActorLocation(), Mem->ArrivalPos),
-			Data.Location.X, Data.Location.Y, Data.Location.Z);
 
 	// Enemy: face back-to-cover (yaw = outward fire direction, companion SlotYawRot convention)
 	// and clear focus so nothing fights the peek montages' root-motion rotation. Target focus

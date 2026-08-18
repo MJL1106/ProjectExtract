@@ -35,7 +35,6 @@
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
 #include "Extraction.h"
-#include "EnemyDebug.h"
 #include "DamageMitigationSettings.h"
 #include "World/ImpactDecalSubsystem.h"
 #include "Audio/GameAudioSubsystem.h"
@@ -127,48 +126,6 @@ static TAutoConsoleVariable<int32> CVarShowBulletTracers(
 	TEXT("weapon.ShowTracers"),
 	0,
 	TEXT("If non-zero, draw a tracer from muzzle to impact and an impact marker for every shot (player + AI)."),
-	ECVF_Cheat);
-
-static TAutoConsoleVariable<int32> CVarAIWeaponTraceDebug(
-	TEXT("companion.WeaponTraceDebug"),
-	0,
-	TEXT("If non-zero, log AI weapon hitscan trace details (start, end, hit actor, distance)."),
-	ECVF_Cheat);
-
-static TAutoConsoleVariable<int32> CVarPlayerTraceDebug(
-	TEXT("weapon.PlayerTraceDebug"),
-	0,
-	TEXT("If non-zero, log player weapon hitscan trace details (start, end, hit actor, component, distance, health check)."),
-	ECVF_Cheat);
-
-static TAutoConsoleVariable<int32> CVarAttachmentDebug(
-	TEXT("weapon.AttachmentDebug"),
-	0,
-	TEXT("If non-zero, log every attachment selection change: the per-slot kit bytes, which attachment assets resolved, ")
-	TEXT("and the resulting effective stats (damage, recoil, ADS time, hip spread, noise, falloff, ADS FOV). ")
-	TEXT("2 or higher also prints to screen. Proves whether a picked-up attachment actually reached the weapon."),
-	ECVF_Cheat);
-
-static TAutoConsoleVariable<int32> CVarFireAlignDebug(
-	TEXT("weapon.FireAlignDebug"),
-	0,
-	TEXT("If non-zero, log enemy weapon fire-align: SetupFireAlign captures (rest/fire relative, sockets, fire offset) and SetFireAlignAlpha (alpha + resulting WeaponMesh relative/world transform). Diagnoses misalignment from the WeaponSocket_Fire blend. Default 0 = no logging, no behavior change."),
-	ECVF_Cheat);
-
-// Single definition — UCompanionAnimInstance re-queries this by name via
-// IConsoleManager::Get().FindConsoleVariable to avoid duplicate CVar registration.
-static TAutoConsoleVariable<int32> CVarCompanionAlignDebug(
-	TEXT("companion.AlignDebug"),
-	0,
-	TEXT("If non-zero, log the weapon-align writer race: which of fire-align / patrol-align / cover-align actually wrote the weapon mesh this frame (they all write an ABSOLUTE relative transform, so the last writer is the only visible one), plus a one-shot dump of each align bake (sockets, the pose-dependent socket-to-bone term, per-scenario offsets). Use during a cover peek-fire to identify the visible writer. Default 0 = no logging, no behavior change."),
-	ECVF_Cheat);
-
-// Single definition — other translation units (companion BT service/task) re-query this by name
-// via IConsoleManager::Get().FindConsoleVariable to avoid duplicate CVar registration.
-static TAutoConsoleVariable<int32> CVarCompanionFireDebug(
-	TEXT("companion.FireDebug"),
-	0,
-	TEXT("If non-zero, log companion fire-decision denials (state/ammo), stealth-break signal state, and burst fire-withhold transitions."),
 	ECVF_Cheat);
 
 AWeaponBase::AWeaponBase()
@@ -378,10 +335,6 @@ void AWeaponBase::SetAttachmentSlotOption(uint8 KitSlotByte, uint8 OptionByte)
 		return;
 	}
 
-	if (CVarAttachmentDebug.GetValueOnAnyThread() > 0)
-		UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s: kit slot %u -> %s, option byte %u"),
-			*GetName(), KitSlotByte, *UEnum::GetValueAsString(Slot), OptionByte);
-
 	// Read-modify-write: the pickup only knows its own slot, so the other four must survive.
 	FWeaponAttachmentSelection NewSelection = AttachmentSelection;
 	switch (Slot)
@@ -455,8 +408,6 @@ void AWeaponBase::RecalculateAttachmentEffects()
 		Accumulate(WeaponData->HandguardAttachments, AttachmentSelection.Handguard);
 	}
 
-	LogAttachmentDebug();
-
 	// Flash FX changed — drop the pooled components so the next shot rebuilds with the new system.
 	if (GetEffectiveMuzzleFlashFX() != OldFlash)
 	{
@@ -470,56 +421,6 @@ void AWeaponBase::RecalculateAttachmentEffects()
 			FirstPersonMuzzleFlashComponent->DestroyComponent();
 			FirstPersonMuzzleFlashComponent = nullptr;
 		}
-	}
-}
-
-void AWeaponBase::LogAttachmentDebug() const
-{
-	const int32 DebugLevel = CVarAttachmentDebug.GetValueOnAnyThread();
-	if (DebugLevel <= 0) return;
-
-	if (!IsValid(WeaponData))
-	{
-		UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s has NO WeaponData — no attachment can have any effect."), *GetName());
-		return;
-	}
-
-	// Re-resolve per slot so the log names the actual asset, not just the byte. A byte that
-	// resolves to "(none)" while the mesh visibly changed is the signature of a pickup whose
-	// option index has no entry in the weapon's stat array — cosmetic fit, no stats.
-	auto SlotLine = [](const TCHAR* Label, const TArray<TObjectPtr<UWeaponAttachmentDataAsset>>& Options, uint8 Byte)
-	{
-		const UWeaponAttachmentDataAsset* A = Options.IsValidIndex(Byte) ? Options[Byte].Get() : nullptr;
-		return FString::Printf(TEXT("%s=%u:%s"), Label, Byte, IsValid(A) ? *A->GetName() : TEXT("(none)"));
-	};
-
-	const FString Slots = FString::Printf(TEXT("%s %s %s %s %s"),
-		*SlotLine(TEXT("Sight"), WeaponData->SightAttachments, AttachmentSelection.Sight),
-		*SlotLine(TEXT("Muzzle"), WeaponData->MuzzleAttachments, AttachmentSelection.Muzzle),
-		*SlotLine(TEXT("Laser"), WeaponData->LaserAttachments, AttachmentSelection.Laser),
-		*SlotLine(TEXT("Grip"), WeaponData->GripAttachments, AttachmentSelection.Grip),
-		*SlotLine(TEXT("Handguard"), WeaponData->HandguardAttachments, AttachmentSelection.Handguard));
-
-	// Base -> effective for every stat an attachment can move, so a change is self-evidently
-	// attributable: identical pairs mean the modifier layer did nothing.
-	const FString Stats = FString::Printf(
-		TEXT("Dmg %.1f->%.1f | ADSTime %.3f->%.3f | ADSMove %.0f->%.0f | HipSpread %.2f->%.2f | ")
-		TEXT("Falloff %.0f->%.0f | ADSFOV %.1f->%.1f | RecoilMult P%.2f Y%.2f | Suppressed %s"),
-		WeaponData->BaseDamage, GetEffectiveDamage(),
-		WeaponData->ADSTransitionTime, GetEffectiveADSTransitionTime(),
-		WeaponData->ADSMovementSpeed, GetEffectiveADSMovementSpeed(),
-		WeaponData->HipFireSpreadDeg, GetEffectiveHipFireSpreadDeg(),
-		WeaponData->DamageFalloffStartRange, WeaponData->DamageFalloffStartRange * CombinedModifiers.FalloffStartMult,
-		WeaponData->ADSFOV, GetEffectiveADSFOV(),
-		CombinedModifiers.RecoilPitchMult, CombinedModifiers.RecoilYawMult,
-		IsSuppressedEffective() ? TEXT("YES") : TEXT("no"));
-
-	UE_LOG(LogTemp, Warning, TEXT("[AttachDbg] %s | %s | %s"), *GetName(), *Slots, *Stats);
-
-	if (DebugLevel >= 2 && GEngine)
-	{
-		GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Cyan, FString::Printf(TEXT("[Attach] %s"), *Slots));
-		GEngine->AddOnScreenDebugMessage(-1, 8.f, FColor::Yellow, FString::Printf(TEXT("[Attach] %s"), *Stats));
 	}
 }
 
@@ -720,16 +621,6 @@ void AWeaponBase::StartFiring()
 
 	if (!CanFire())
 	{
-		if (CVarCompanionFireDebug.GetValueOnGameThread() != 0
-			&& IsValid(GetOwner()) && GetOwner()->IsA<ACompanionCharacter>())
-		{
-			const float FireReadyIn = (FireReadyTimeSeconds > 0.f && GetWorld())
-				? FireReadyTimeSeconds - GetWorld()->GetTimeSeconds() : 0.f;
-			UE_LOG(LogCompanionDiag, Warning,
-				TEXT("%s: [FireDebug] StartFiring DENIED state=%d ammo=%d reserve=%d fireReadyIn=%.2f dataValid=%d"),
-				*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, ReserveAmmo,
-				FireReadyIn, IsValid(WeaponData) ? 1 : 0);
-		}
 		// Dry trigger press on an empty mag — kick the reload instead of silently no-oping.
 		if (bAutoReloadOnEmpty && CurrentAmmo <= 0 && CanReload())
 			Reload();
@@ -806,15 +697,6 @@ void AWeaponBase::OnAutoFireTimer()
 {
 	if (!bWantsToFire || !CanFire())
 	{
-		if (bWantsToFire && CVarCompanionFireDebug.GetValueOnGameThread() != 0
-			&& IsValid(GetOwner()) && GetOwner()->IsA<ACompanionCharacter>())
-		{
-			UE_LOG(LogCompanionDiag, Warning,
-				TEXT("%s: [FireDebug] AutoFire DENIED state=%d ammo=%d reserve=%d dataValid=%d"),
-				*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, ReserveAmmo,
-				IsValid(WeaponData) ? 1 : 0);
-		}
-
 		if (const UWorld* World = GetWorld())
 			World->GetTimerManager().ClearTimer(AutoFireTimerHandle);
 
@@ -1061,6 +943,17 @@ void AWeaponBase::PerformHitscan()
 		FVector CameraLoc;
 		FRotator CameraRot;
 		PC->GetPlayerViewPoint(CameraLoc, CameraRot);
+
+		// Ejected to a demo/cinematic camera the pawn is no longer the view target, so the view
+		// point above is the SPECTATOR lens — a shot would leave the camera, not the gun. Input
+		// still steers the pawn's control rotation and the PiP shows the pawn's first-person view,
+		// so the pawn's eyes + control rotation are the aim the player is actually looking down.
+		if (PC->GetViewTarget() != OwnerChar)
+		{
+			CameraLoc = OwnerChar->GetPawnViewLocation();
+			CameraRot = PC->GetControlRotation();
+		}
+
 		TraceStart = CameraLoc;
 		AimDirection = CameraRot.Vector();
 
@@ -1251,7 +1144,20 @@ void AWeaponBase::PerformHitscan()
 		{
 			if (V.Victim.Get() == HitActor) { VR = &V; break; }
 		}
-		if (bGateActive && VR && !VR->bGateAllowsDamage) continue;
+		if (bGateActive && VR && !VR->bGateAllowsDamage)
+		{
+			// The round visibly struck the target — only the damage was suppressed. Show the blood
+			// anyway, or the shooter reads as firing blanks: a 0.15s per-victim cadence cap gates
+			// out roughly every other round of a rifle firing faster than that. Both directions
+			// need it — the companion's gate eats its rounds into enemies, the enemies' gates eat
+			// theirs into the companion.
+			// VFX only, deliberately not the flesh SFX — that would squelch at the full fire rate.
+			if (const AEnemyCharacter* GatedEnemy = Cast<AEnemyCharacter>(HitActor))
+				GatedEnemy->PlayCosmeticBulletImpact(PR.Hit, PR.Dir);
+			else if (const ACompanionCharacter* GatedAlly = Cast<ACompanionCharacter>(HitActor))
+				GatedAlly->PlayCosmeticBulletImpact(PR.Hit, PR.Dir);
+			continue;
+		}
 
 		FPointDamageEvent DamageEvent;
 		DamageEvent.Damage = PR.Damage;
@@ -1301,30 +1207,6 @@ void AWeaponBase::PerformHitscan()
 		}
 	}
 
-	// Debug logging — tied to the center pellet.
-	if (bAIOwned && CVarAIWeaponTraceDebug.GetValueOnGameThread() != 0)
-	{
-		const IAIShooterInterface* DebugShooter = Cast<IAIShooterInterface>(OwnerChar);
-		const AActor* AILogAimTarget = DebugShooter ? DebugShooter->GetAIAimTarget() : nullptr;
-		UE_LOG(LogExtraction, Verbose,
-			TEXT("AI-FIRE owner=%s eye=%s end=%s aimTarget=%s bHit=%d hitActor=%s hitDist=%.0f"),
-			*GetNameSafe(OwnerChar), *TraceStart.ToCompactString(),
-			*(TraceStart + AimDirection * WeaponData->MaxRange).ToCompactString(),
-			*GetNameSafe(AILogAimTarget), (int32)bCenterHit,
-			*GetNameSafe(CenterHitActor), bCenterHit ? FVector::Dist(TraceStart, CenterImpactOrEnd) : 0.f);
-	}
-	if (!bAIOwned && CVarPlayerTraceDebug.GetValueOnGameThread() != 0)
-	{
-		UE_LOG(LogExtraction, Log,
-			TEXT("PLAYER-FIRE start=%s end=%s bHit=%d hitActor=%s dist=%.0f"),
-			*TraceStart.ToCompactString(),
-			*(TraceStart + AimDirection * WeaponData->MaxRange).ToCompactString(),
-			(int32)bCenterHit, *GetNameSafe(CenterHitActor),
-			bCenterHit ? FVector::Dist(TraceStart, CenterImpactOrEnd) : 0.f);
-		if (bCenterHit && IsValid(CenterHitActor) && !CenterHitActor->FindComponentByClass<UHealthComponent>())
-			UE_LOG(LogExtraction, Verbose, TEXT("PLAYER-FIRE hit %s but it has NO UHealthComponent — damage will be ignored"), *GetNameSafe(CenterHitActor));
-	}
-
 	// World impact FX — bullet hole (pooled decal ring) + surface puff (pooled Niagara) per pellet.
 	UGameAudioSubsystem* AudioSys = World->GetSubsystem<UGameAudioSubsystem>();
 	if (WorldImpacts.Num() > 0)
@@ -1360,8 +1242,24 @@ void AWeaponBase::PerformHitscan()
 	// positional at the victim.
 	if (AudioSys)
 	{
+		APawn* LocalPlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
 		for (const FVictimRecord& VR : VictimRecords)
-			if (VR.Health) AudioSys->PlayFleshImpact(VR.FirstImpact, /*bAsLocal2D*/ !bAIOwned, VR.HeadshotDamage > 0.f);
+		{
+			AActor* Victim = VR.Victim.Get();
+			if (!VR.Health || !IsValid(Victim)) continue;
+
+			// Anything with health that is not an enemy is on our side — player, companion, the
+			// extraction VIP. Those get the bank's quieter Ally* crack so "I hit something" and
+			// "we are being hit" never blur into the same noise.
+			const bool bAllyVictim = !Victim->IsA<AEnemyCharacter>();
+
+			// 2D for the player's own hit-confirm, and for rounds landing on the player themselves —
+			// both must read at any range. A hit on the COMPANION stays positional on purpose: that
+			// is how the player locates them when they are taking fire off-screen.
+			const bool bLocal2D = !bAIOwned || Victim == LocalPlayerPawn;
+
+			AudioSys->PlayFleshImpact(VR.FirstImpact, bLocal2D, VR.HeadshotDamage > 0.f, bAllyVictim);
+		}
 	}
 
 	// Brass tinkle for player shots — scheduled with a short delay so it reads as the shell
@@ -1369,11 +1267,14 @@ void AWeaponBase::PerformHitscan()
 	if (!bAIOwned && AudioSys)
 		AudioSys->PlayShellDrop(OwnerChar->GetActorLocation());
 
-	// FX and noise — one per shot, using the center pellet.
-	ReportNearMisses(TraceStart, CenterImpactOrEnd, CenterHitActor);
+	// FX and noise — one per shot, using the center pellet. Demo-mute (warp-cam showcase fire)
+	// keeps the audible FX but skips the AI-facing signals — hearing stimulus and near-miss
+	// suppression — so one lane's showcase can't alert or suppress the neighbouring pens.
+	if (!bDemoMuteNoise)
+		ReportNearMisses(TraceStart, CenterImpactOrEnd, CenterHitActor);
 	Multicast_PlayFireFX(GetMuzzleLocation(), CenterImpactOrEnd, bCenterHit);
 
-	if (GetEffectiveNoiseRange() > 0.f)
+	if (!bDemoMuteNoise && GetEffectiveNoiseRange() > 0.f)
 		UAISense_Hearing::ReportNoiseEvent(World, GetMuzzleLocation(), GetEffectiveNoiseLoudness(), OwnerChar, GetEffectiveNoiseRange(), TEXT("WeaponFire"));
 }
 
@@ -1568,19 +1469,6 @@ void AWeaponBase::SetupFireAlign(USkeletalMeshComponent* EnemyMesh, FName FireSo
 	FireAlignFireRelative = FireAlignRestRelative * (TFire * TRest.Inverse());
 
 	bFireAlignReady = true;
-
-	if (CVarFireAlignDebug.GetValueOnGameThread() != 0)
-	{
-		const FTransform FireOffset = FireAlignFireRelative.GetRelativeTransform(FireAlignRestRelative);
-		const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : -1.f;
-		UE_LOG(LogExtraction, Warning,
-			TEXT("[FIREALIGN] %s SetupFireAlign t=%.2f restSock='%s' fireSock='%s' | restLoc=%s restRot=%s | fireLoc=%s fireRot=%s | fireOffsetLoc=%s fireOffsetRotDeg=%s"),
-			*GetNameSafe(this), Now,
-			*RestSocket.ToString(), *FireSocket.ToString(),
-			*FireAlignRestRelative.GetLocation().ToString(), *FireAlignRestRelative.Rotator().ToString(),
-			*FireAlignFireRelative.GetLocation().ToString(), *FireAlignFireRelative.Rotator().ToString(),
-			*FireOffset.GetLocation().ToString(), *FireOffset.Rotator().ToString());
-	}
 }
 
 void AWeaponBase::SetFireAlignAlpha(float Alpha)
@@ -1597,16 +1485,6 @@ void AWeaponBase::SetFireAlignAlpha(float Alpha)
 	Blended.SetScale3D(FMath::Lerp(FireAlignRestRelative.GetScale3D(), FireAlignFireRelative.GetScale3D(), Alpha));
 
 	WeaponMesh->SetRelativeTransform(Blended);
-
-	if (CVarFireAlignDebug.GetValueOnGameThread() != 0 &&
-		(GFrameCounter % 10 == 0 || Alpha <= KINDA_SMALL_NUMBER || Alpha >= 1.f - KINDA_SMALL_NUMBER))
-	{
-		UE_LOG(LogExtraction, Warning,
-			TEXT("[FIREALIGN] %s Alpha=%.3f relLoc=%s relRotDeg=%s worldLoc=%s"),
-			*GetNameSafe(this), Alpha,
-			*Blended.GetLocation().ToString(), *Blended.Rotator().ToString(),
-			*WeaponMesh->GetComponentLocation().ToString());
-	}
 }
 
 // ---- Weapon cover alignment ----
@@ -1647,31 +1525,6 @@ void AWeaponBase::SetupCoverAlign(USkeletalMeshComponent* EnemyMesh, FName Socke
 	}
 
 	CoverAlignCurrent = CoverAlignRestRelative;
-	if (CVarCompanionAlignDebug.GetValueOnGameThread() != 0)
-		LogCoverAlignBake(RestSocket, SocketSpaceBone, TRest * TBone.Inverse());
-}
-
-void AWeaponBase::LogCoverAlignBake(FName RestSocket, FName AlignBone, const FTransform& SocketToBone) const
-{
-	static const TCHAR* ScenarioNames[CoverAlignScenarioCount] = {
-		TEXT("Idle"), TEXT("OverTop"), TEXT("PeekLeft"), TEXT("PeekRight"),
-		TEXT("StandIdleLeft"), TEXT("StandIdleRight"), TEXT("StandPeekLeft"), TEXT("StandPeekRight")
-	};
-
-	UE_LOG(LogExtraction, Warning,
-		TEXT("[ALIGN-BAKE] %s restSock='%s' alignBone='%s' | socketToBone loc=%s rotDeg=%s | rest loc=%s rotDeg=%s"),
-		*GetNameSafe(this), *RestSocket.ToString(), *AlignBone.ToString(),
-		*SocketToBone.GetLocation().ToString(), *SocketToBone.Rotator().ToString(),
-		*CoverAlignRestRelative.GetLocation().ToString(), *CoverAlignRestRelative.Rotator().ToString());
-
-	for (int32 i = 0; i < CoverAlignScenarioCount; ++i)
-	{
-		if (!bCoverAlignTargetReady[i]) continue;
-		const FTransform Offset = CoverAlignTargets[i].GetRelativeTransform(CoverAlignRestRelative);
-		UE_LOG(LogExtraction, Warning, TEXT("[ALIGN-BAKE] %s scenario=%s offsetLoc=%s offsetRotDeg=%s"),
-			*GetNameSafe(this), ScenarioNames[i],
-			*Offset.GetLocation().ToString(), *Offset.Rotator().ToString());
-	}
 }
 
 void AWeaponBase::UpdateCoverAlign(ECoverWeaponAlign Scenario, float DeltaSeconds, float InterpSpeed)
@@ -1770,15 +1623,6 @@ void AWeaponBase::SetupPatrolAlign()
 	if (!IsValid(WeaponMesh)) return;
 	CaptureAlignRestPoseOnce();
 	if (!IsValid(WeaponData)) return;
-
-	// Patrol offsets come from the weapon's OWN DataAsset, so a pistol and a rifle never share
-	// them — unlike the cover/fire align values, which live on the ABP and follow a duplicate.
-	if (CVarCompanionAlignDebug.GetValueOnGameThread() != 0)
-		UE_LOG(LogExtraction, Warning,
-			TEXT("[ALIGN-BAKE] %s patrol-align DA='%s' locOffset=%s rotOffsetDeg=%s"),
-			*GetNameSafe(this), *GetNameSafe(WeaponData),
-			*WeaponData->PatrolAlignLocationOffset.ToString(),
-			*WeaponData->PatrolAlignRotationOffset.ToString());
 
 	// Zero offsets = no patrol-carry pose. Weapon stays at ADS — skip entirely.
 	if (WeaponData->PatrolAlignLocationOffset.IsNearlyZero() &&
@@ -1963,19 +1807,6 @@ void AWeaponBase::Reload()
 {
 	if (!CanReload()) return;
 
-	if (IsReloadDebugEnabled())
-	{
-		const FString OwnerName = GetNameSafe(GetOwner());
-		const int32 MagSize = IsValid(WeaponData) ? WeaponData->MagazineSize : -1;
-		UE_LOG(LogTemp, Warning,
-			TEXT("[RELOADDBG] %s Reload() entry: owner=%s ammo=%d/%d -> state=Reloading"),
-			*GetName(), *OwnerName, CurrentAmmo, MagSize);
-		if (GEngine)
-			GEngine->AddOnScreenDebugMessage(
-				static_cast<uint64>(GetTypeHash(FString::Printf(TEXT("WepReload_%s"), *GetName()))), 4.f, FColor::Orange,
-				FString::Printf(TEXT("[RELOADDBG] %s ammo=%d/%d -> Reloading"), *OwnerName, CurrentAmmo, MagSize));
-	}
-
 	if (const UWorld* World = GetWorld())
 	{
 		ReloadStartTimeSeconds = World->GetTimeSeconds();
@@ -1996,7 +1827,7 @@ void AWeaponBase::Reload()
 	{
 		CurrentState = EWeaponState::Reloading;
 
-		if (IsValid(WeaponData) && WeaponData->ReloadNoiseRange > 0.f)
+		if (!bDemoMuteNoise && IsValid(WeaponData) && WeaponData->ReloadNoiseRange > 0.f)
 			UAISense_Hearing::ReportNoiseEvent(GetWorld(), GetActorLocation(), WeaponData->ReloadNoiseLoudness, GetOwner(), WeaponData->ReloadNoiseRange, TEXT("Reload"));
 	}
 
@@ -2106,14 +1937,6 @@ void AWeaponBase::HandleShellInserted()
 
 	const bool bMore = CurrentAmmo < WeaponData->MagazineSize
 		&& (WeaponData->bInfiniteReserve || ReserveAmmo > 0);
-
-	if (IsReloadDebugEnabled())
-	{
-		UE_LOG(LogTemp, Warning,
-			TEXT("[RELOADDBG] %s HandleShellInserted: owner=%s ammo=%d/%d reserve=%d more=%d"),
-			*GetName(), *GetNameSafe(GetOwner()),
-			CurrentAmmo, WeaponData->MagazineSize, ReserveAmmo, (int32)bMore);
-	}
 
 	AdvanceShellReloadSection(bMore);
 	if (!bMore) FinishShellReload();
@@ -2497,19 +2320,6 @@ void AWeaponBase::KitFire_HitScan_Implementation()
 	// One shot per kit dispatch — kit calls this on its own fire-rate cadence.
 	if (!CanFire())
 	{
-		// Bug 6b: throttled diagnostic — log once per second why CanFire failed.
-		if (CVarPlayerTraceDebug.GetValueOnGameThread() != 0)
-		{
-			static float LastKitFireFailLogTime = -1e9f;
-			const float Now = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
-			if ((Now - LastKitFireFailLogTime) >= 1.f)
-			{
-				LastKitFireFailLogTime = Now;
-				UE_LOG(LogExtraction, Warning,
-					TEXT("KitFire_HitScan BLOCKED: owner=%s state=%d ammo=%d WeaponData=%s"),
-					*GetNameSafe(GetOwner()), (int32)CurrentState, CurrentAmmo, *GetNameSafe(WeaponData));
-			}
-		}
 		// Dry click once per trigger press — only when truly dry and idle (not mid-reload).
 		// Reuses the bDryFireLogged once-per-cycle latch (reset by KitBeginFire / reload finish).
 		if (!bDryFireLogged && CurrentAmmo <= 0 && CurrentState == EWeaponState::Idle

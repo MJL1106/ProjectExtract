@@ -807,6 +807,18 @@
       ],
       "requiredIntegrations": [],
       "metadataPath": "WaveTable/ExtensionUI.json"
+    },
+    {
+      "extensionId": "neostack.pixel_streaming2",
+      "legacyPluginName": "NeoStackAI_PixelStreaming2",
+      "legacyModuleName": "NSAI_PixelStreaming2",
+      "moduleName": "NSAI_PixelStreaming2_Integration",
+      "moduleType": "EditorNoCommandlet",
+      "requiredPlugins": [
+        "PixelStreaming2"
+      ],
+      "requiredIntegrations": [],
+      "metadataPath": "PixelStreaming2/ExtensionUI.json"
     }
   ]
 }

@@ -44,9 +44,9 @@
 #include "AnimNotify_TakedownKill.h"
 #include "AIController.h"
 #include "BrainComponent.h"
-#include "EnemyDebug.h"
 #include "World/Lootable.h"
 #include "World/BreachableDoor.h"
+#include "World/ObjectiveStep.h" // ObjSkip / ObjList console fast-forward
 #include "Audio/GameAudioSubsystem.h"
 #include "Audio/SurfaceAudioBank.h"
 #include "World/WorldInteractable.h"
@@ -131,24 +131,6 @@ UAISense_Sight::EVisibilityResult AExtractionPlayer::CanBeSeenFrom(
 
 	if (bVisible)
 		OutSightStrength = 1.f;
-
-#if !UE_BUILD_SHIPPING
-	if (GetDetectionLogLevel() > 0)
-	{
-		TWeakObjectPtr<const AActor> ObsKey(Context.IgnoreActor);
-		const bool* LastResult = DebugLastCanBeSeenResult.Find(ObsKey);
-		if (!LastResult || *LastResult != bVisible)
-		{
-			DebugLastCanBeSeenResult.Add(ObsKey, bVisible);
-			UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] CanBeSeenFrom obs=%s result=%s seenZ=%.0f playerZ=%.0f crouched=%d"),
-				*GetNameSafe(Context.IgnoreActor),
-				bVisible ? TEXT("VISIBLE") : TEXT("NOT-VISIBLE"),
-				bVisible ? OutSeenLocation.Z : -1.f,
-				GetActorLocation().Z,
-				bIsCrouched ? 1 : 0);
-		}
-	}
-#endif
 
 	return bVisible ? UAISense_Sight::EVisibilityResult::Visible : UAISense_Sight::EVisibilityResult::NotVisible;
 }
@@ -240,10 +222,6 @@ void AExtractionPlayer::BeginPlay()
 
 void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-#if !UE_BUILD_SHIPPING
-	DebugLastCanBeSeenResult.Empty();
-#endif
-
 	if (IsValid(TraversalComponent))
 	{
 		TraversalComponent->OnTraversalStarted.RemoveAll(this);
@@ -262,6 +240,7 @@ void AExtractionPlayer::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (const UWorld* World = GetWorld())
 	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+		World->GetTimerManager().ClearTimer(SquadWipePollHandle);
 		World->GetTimerManager().ClearTimer(LoadoutRestoreTimerHandle);
 		World->GetTimerManager().ClearTimer(LoadoutVerifyTimerHandle);
 		World->GetTimerManager().ClearTimer(AudioSuppressionFailsafeHandle);
@@ -1942,6 +1921,14 @@ void AExtractionPlayer::EnterDBNO()
 			if (AExtractionGameMode* GM = GetWorld()->GetAuthGameMode<AExtractionGameMode>())
 				GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
 		}
+		else if (IsValid(World))
+		{
+			// The squad can still turn — but only as it stands RIGHT NOW. Keep re-asking while
+			// down, or a companion who dies during the bleedout leaves an unwinnable minute with
+			// no fail screen (see PollSquadWipeWhileDBNO).
+			World->GetTimerManager().SetTimer(SquadWipePollHandle, this,
+				&AExtractionPlayer::PollSquadWipeWhileDBNO, 1.f, /*bLoop=*/true);
+		}
 	}
 
 	SetDBNOCameraFreeLook(true);
@@ -1960,7 +1947,10 @@ void AExtractionPlayer::ExitDBNO()
 	// clearing first made every revive stand-up play crouch cloth.
 
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+		World->GetTimerManager().ClearTimer(SquadWipePollHandle);
+	}
 
 	BleedoutTimeRemaining = 0.f;
 
@@ -2007,6 +1997,23 @@ void AExtractionPlayer::OnBleedoutExpired()
 	FullDeath();
 }
 
+void AExtractionPlayer::PollSquadWipeWhileDBNO()
+{
+	UWorld* World = GetWorld();
+
+	if (!bIsDBNO || !HasAuthority())
+	{
+		if (World) World->GetTimerManager().ClearTimer(SquadWipePollHandle);
+		return;
+	}
+
+	if (ACompanionCharacter::IsAnyCompanionReviveCapable(World, nullptr)) return;
+
+	if (World) World->GetTimerManager().ClearTimer(SquadWipePollHandle);
+	if (AExtractionGameMode* GM = World ? World->GetAuthGameMode<AExtractionGameMode>() : nullptr)
+		GM->FailLevel(NSLOCTEXT("Extraction", "BothDownReason", "Your squad was wiped out."));
+}
+
 void AExtractionPlayer::FullDeath()
 {
 	BleedoutTimeRemaining = 0.f;
@@ -2026,7 +2033,10 @@ void AExtractionPlayer::FullDeath()
 	SetDBNOMovementProfile(false);
 
 	if (const UWorld* World = GetWorld())
+	{
 		World->GetTimerManager().ClearTimer(BleedoutTimerHandle);
+		World->GetTimerManager().ClearTimer(SquadWipePollHandle);
+	}
 
 	UE_LOG(LogExtraction, Log, TEXT("'%s' is fully dead"), *GetNameSafe(this));
 
@@ -2815,6 +2825,41 @@ void AExtractionPlayer::VipRescue()
 
 	Extractee->ForceRescue();
 	UE_LOG(LogCompanion, Log, TEXT("VipRescue: forced rescue on %s"), *Extractee->GetName());
+}
+
+void AExtractionPlayer::ObjSkip(const FString& StepId)
+{
+	if (StepId.IsEmpty())
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("ObjSkip: usage 'ObjSkip <StepId>' — run ObjList for the ids"));
+		return;
+	}
+
+	if (!AObjectiveStep::DebugSkipToStep(this, FName(*StepId)))
+		UE_LOG(LogCompanion, Warning, TEXT("ObjSkip: '%s' is not on any objective chain — run ObjList"), *StepId);
+}
+
+void AExtractionPlayer::ObjList()
+{
+	TArray<FName> Ids;
+	TArray<bool> Active;
+	TArray<bool> Completed;
+	AObjectiveStep::DebugCollectChain(this, Ids, Active, Completed);
+
+	if (Ids.Num() == 0)
+	{
+		UE_LOG(LogCompanion, Warning, TEXT("ObjList: no objective chain in this level"));
+		return;
+	}
+
+	UE_LOG(LogCompanion, Log, TEXT("ObjList: %d step(s) — '*' live, 'x' done"), Ids.Num());
+	for (int32 Index = 0; Index < Ids.Num(); ++Index)
+	{
+		UE_LOG(LogCompanion, Log, TEXT("  %s%s %2d  %s"),
+			Active.IsValidIndex(Index) && Active[Index] ? TEXT("*") : TEXT(" "),
+			Completed.IsValidIndex(Index) && Completed[Index] ? TEXT("x") : TEXT(" "),
+			Index + 1, *Ids[Index].ToString());
+	}
 }
 
 void AExtractionPlayer::VipDebug(bool bFreeze)

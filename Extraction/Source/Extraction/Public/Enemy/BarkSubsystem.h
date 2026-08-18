@@ -70,12 +70,9 @@ private:
 	enum class EBarkChannel : uint8 { Enemy, Companion };
 
 	void RequestBarkInternal(const AActor* Speaker, const FBarkDefinition* Def, USoundAttenuation* Attenuation,
-		float VolumeMultiplier, EBarkChannel Channel, uint8 RawType, const FString& TypeStr, FName Context);
+		float VolumeMultiplier, EBarkChannel Channel, uint8 RawType, FName Context);
 
 	void HandleVoiceFinished(UAudioComponent* Voice);
-
-	/** Shows a coalescing on-screen debug message for a bark event (gated by caller). */
-	void ShowBarkScreenMessage(const AActor* Speaker, uint16 TypeKey, const FString& Message, const FColor& Color);
 
 	static uint16 MakeTypeKey(EBarkChannel Channel, uint8 RawType)
 	{

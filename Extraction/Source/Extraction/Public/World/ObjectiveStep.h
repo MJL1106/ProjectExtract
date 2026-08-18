@@ -290,6 +290,18 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Objective Step|Events")
 	FOnObjectiveStepCompleted OnStepCompleted;
 
+	/** Debug fast-forward to TargetId from wherever the chain currently is: stands down whatever is
+	 *  live, applies every earlier beat's end-state, teleports the party to the target's
+	 *  CheckpointSpawn, then activates it. Same machinery as a checkpoint resume, so there is no
+	 *  second body of skip code to keep in sync with the chain. False when TargetId is not on a chain.
+	 *  Console entry point is ObjSkip on AExtractionPlayer. */
+	static bool DebugSkipToStep(const UObject* WorldContext, FName TargetId);
+
+	/** Every step id on every chain, in walk order, with a flag for the one that is live right now.
+	 *  Backs the ObjList console command. */
+	static void DebugCollectChain(const UObject* WorldContext, TArray<FName>& OutIds, TArray<bool>& OutActive,
+		TArray<bool>& OutCompleted);
+
 #if WITH_DEV_AUTOMATION_TESTS
 	void TestSetStepId(FName InStepId) { StepId = InStepId; }
 	/** Refreshes the token flag exactly as PostInitializeComponents does — a test sets the label after

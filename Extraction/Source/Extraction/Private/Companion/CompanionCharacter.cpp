@@ -30,15 +30,15 @@
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "UI/OverheadWidgetComponent.h"
+#include "NiagaraFunctionLibrary.h" // blood burst on bullet impact
+#include "NiagaraSystem.h"
+#include "Engine/DamageEvents.h"   // FPointDamageEvent — blood burst needs the concrete event type
 #include "UI/CompanionModeIndicatorWidget.h"
 #include "Game/ExtractionGameMode.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "Kismet/GameplayStatics.h"
 #include "Net/UnrealNetwork.h"
 #include "EngineUtils.h"
-#include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
-#include "DrawDebugHelpers.h"
-#include "EnemyDebug.h"
 
 // WITH_EDITOR is load-bearing, not belt-and-braces: WITH_DEV_AUTOMATION_TESTS is 1 in a packaged
 // Development build, and these tests reach for editor-only API (FProperty::GetMetaData), so the
@@ -409,26 +409,6 @@ void ACompanionCharacter::Tick(float DeltaTime)
 
 	TickPlayerSoftSeparation();
 	TickAllySoftSeparation();
-
-#if ENABLE_DRAW_DEBUG
-	if (GetDrawDistancesLevel() > 0 && bIsPrimaryCompanion)
-	{
-		constexpr float PressureLabelOffset = 60.f;
-		constexpr float FallbackHalfHeight = 90.f;
-		constexpr float StaleThreshold = 0.5f;
-		const float HH = GetCapsuleComponent()
-			? GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : FallbackHalfHeight;
-		const FVector LabelPos = GetActorLocation() + FVector(0.f, 0.f, HH + PressureLabelOffset);
-		const UWorld* DrawWorld = GetWorld();
-		const float Age = IsValid(DrawWorld) ? (DrawWorld->GetTimeSeconds() - CachedPressure01Time) : 0.f;
-		const bool bStale = Age > StaleThreshold;
-		const FString Label = bStale
-			? FString::Printf(TEXT("p01 %.2f (stale)"), CachedPressure01)
-			: FString::Printf(TEXT("p01 %.2f"), CachedPressure01);
-		const FColor LabelColor = bStale ? FColor(128, 128, 128) : FColor::Green;
-		DrawDebugString(GetWorld(), LabelPos, Label, nullptr, LabelColor, DeltaTime * 2.f, true);
-	}
-#endif
 }
 
 void ACompanionCharacter::Bark(ECompanionBarkType Type, FName Context) const
@@ -504,7 +484,39 @@ float ACompanionCharacter::TakeDamage(float DamageAmount, const FDamageEvent& Da
 		Bark(ECompanionBarkType::CompanionHurt);
 	}
 
+	SpawnBloodImpactFX(DamageEvent);
+
 	return ActualDamage;
+}
+
+void ACompanionCharacter::PlayCosmeticBulletImpact(const FHitResult& Hit, const FVector& ShotDirection) const
+{
+	if (bIsDBNO) return;
+	if (IsValid(HealthComponent) && HealthComponent->IsDead()) return;
+
+	FPointDamageEvent CosmeticEvent;
+	CosmeticEvent.Damage = 0.f;
+	CosmeticEvent.HitInfo = Hit;
+	CosmeticEvent.ShotDirection = ShotDirection;
+
+	SpawnBloodImpactFX(CosmeticEvent);
+}
+
+void ACompanionCharacter::SpawnBloodImpactFX(const FDamageEvent& DamageEvent) const
+{
+	if (!IsValid(BloodImpactFX)) return;
+	if (!DamageEvent.IsOfType(FPointDamageEvent::ClassID)) return;
+
+	const FPointDamageEvent& PointDamage = static_cast<const FPointDamageEvent&>(DamageEvent);
+	const FHitResult& Hit = PointDamage.HitInfo;
+	if (Hit.ImpactPoint.IsNearlyZero()) return;
+
+	// Face the burst back along the surface normal; fall back to opposing the shot when the normal
+	// is unset (e.g. hand-built damage events).
+	const FVector BurstDir = Hit.ImpactNormal.IsNearlyZero() ? -PointDamage.ShotDirection : FVector(Hit.ImpactNormal);
+	UNiagaraFunctionLibrary::SpawnSystemAtLocation(
+		GetWorld(), BloodImpactFX, Hit.ImpactPoint, BurstDir.Rotation(),
+		FVector(1.f), /*bAutoDestroy=*/true, /*bAutoActivate=*/true, ENCPoolMethod::AutoRelease);
 }
 
 bool ACompanionCharacter::IsSuppressed(float Window) const
@@ -527,6 +539,28 @@ int32 ACompanionCharacter::GetRecentDamageCount(float Window) const
 float ACompanionCharacter::GetSuppression01() const
 {
 	return IsValid(SuppressionComponent) ? SuppressionComponent->GetSuppression01() : 0.f;
+}
+
+void ACompanionCharacter::SetAngleSeekOverlayActive(bool bActive)
+{
+	if (bAngleSeekOverlayActive != bActive)
+		UE_LOG(LogCompanionAI, Log, TEXT("[ANGLE-DBG] %s overlay FLANKING flag %s"),
+			*GetName(), bActive ? TEXT("SET") : TEXT("CLEARED"));
+	bAngleSeekOverlayActive = bActive;
+}
+
+void ACompanionCharacter::MarkAngleSeekOverlayFor(float Seconds)
+{
+	UE_LOG(LogCompanionAI, Log, TEXT("[ANGLE-DBG] %s overlay FLANKING timed hold %.1fs"), *GetName(), Seconds);
+	if (const UWorld* World = GetWorld())
+		AngleSeekOverlayHoldUntil = World->GetTimeSeconds() + Seconds;
+}
+
+bool ACompanionCharacter::IsAngleSeekingForOverlay() const
+{
+	if (bAngleSeekOverlayActive) return true;
+	const UWorld* World = GetWorld();
+	return World && World->GetTimeSeconds() < AngleSeekOverlayHoldUntil;
 }
 
 AActor* ACompanionCharacter::GetRecentAttacker(float Window) const
@@ -1086,11 +1120,6 @@ void ACompanionCharacter::SetLowReadyAim(bool bNewLowReady)
 	if (bLowReadyAim == bNewLowReady) return;
 	bLowReadyAim = bNewLowReady;
 
-	// AimLog diagnostics (companion.AimLog 1): change-only, so cost is the edge, not per call.
-	if (const IConsoleVariable* AimLogCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AimLog"));
-		AimLogCVar && AimLogCVar->GetInt() != 0)
-		UE_LOG(LogCompanion, Display, TEXT("[AimLog] SetLowReadyAim -> %d"), (int32)bNewLowReady);
-
 	OnRep_LowReadyAim();
 }
 
@@ -1578,12 +1607,6 @@ void ACompanionCharacter::SetAimTarget(AActor* NewTarget)
 {
 	if (NewTarget != CurrentAimTarget.Get())
 	{
-		// AimLog diagnostics (companion.AimLog 1): change-only.
-		if (const IConsoleVariable* AimLogCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AimLog"));
-			AimLogCVar && AimLogCVar->GetInt() != 0)
-			UE_LOG(LogCompanion, Display, TEXT("[AimLog] SetAimTarget %s -> %s"),
-				*GetNameSafe(CurrentAimTarget.Get()), *GetNameSafe(NewTarget));
-
 		CurrentAimTarget = NewTarget;
 		TimeAimingAtCurrentTarget = 0.0f;
 	}

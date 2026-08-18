@@ -10,6 +10,7 @@
 #include "PatrolRoute.h"
 #include "BehaviorTree/BlackboardComponent.h"
 #include "AIController.h"
+#include "AITypes.h" // FAISystem::IsValidLocation — BB vector keys read back FLT_MAX when unset
 #include "GameFramework/Pawn.h"
 #include "Navigation/PathFollowingComponent.h"
 #include "NavigationSystem.h"
@@ -78,9 +79,11 @@ EBTNodeResult::Type UBTTask_EnemyPatrol::ExecuteTask(UBehaviorTreeComponent& Own
 	{
 		Controller->ClearFocus(EAIFocusPriority::Gameplay);
 
-		// Read post location from BB; fallback to pawn API if the key is unset (zero vector)
+		// Read post location from BB; fallback to pawn API if the key is unset. An absent
+		// or unset vector key reads back FLT_MAX, not zero — IsZero() never fired, so the
+		// fallback was dead and MoveToLocation(FLT_MAX) was rejected before pathfinding.
 		FVector PostLocation = BB->GetValueAsVector(AEnemyAIController::BB_PostLocation);
-		if (PostLocation.IsZero() && IsValid(Enemy))
+		if (!FAISystem::IsValidLocation(PostLocation) && IsValid(Enemy))
 			PostLocation = Enemy->GetGuardPostLocation();
 
 		const float DistToPost = FVector::Dist(Pawn->GetActorLocation(), PostLocation);
@@ -160,7 +163,7 @@ void UBTTask_EnemyPatrol::TickTask(UBehaviorTreeComponent& OwnerComp, uint8* Nod
 
 			const AEnemyCharacter* Enemy = Mem->CachedEnemy.Get();
 			FVector PostLocation = BB->GetValueAsVector(AEnemyAIController::BB_PostLocation);
-			if (PostLocation.IsZero() && IsValid(Enemy))
+			if (!FAISystem::IsValidLocation(PostLocation) && IsValid(Enemy))
 				PostLocation = Enemy->GetGuardPostLocation();
 
 			const float DistToPostSq = FVector::DistSquared(Pawn->GetActorLocation(), PostLocation);

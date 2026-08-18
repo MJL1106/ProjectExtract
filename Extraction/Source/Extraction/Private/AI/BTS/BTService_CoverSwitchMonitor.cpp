@@ -23,7 +23,6 @@
 #include "HealthComponent.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/Character.h"
-#include "HAL/IConsoleManager.h"
 
 namespace
 {
@@ -40,12 +39,6 @@ namespace
 	 *  default 0.4 s cadence) — same anti-flicker bar as the enemy flank-break. */
 	constexpr int32 CompromiseDebounceRequired = 2;
 
-	/** Shared with the combat task's companion.CoverDebug cvar (defined in BTTask_CompanionCombat.cpp). */
-	bool MonitorCovDbg()
-	{
-		static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.CoverDebug"));
-		return CVar && CVar->GetInt() > 0;
-	}
 }
 // Threat gathering lives in CompanionCover:: (AI/CompanionCoverStatics.h) — shared with the
 // first-pick multi-threat re-rank in BTTask_MoveToCoverPoint so both test the same threat set.
@@ -282,12 +275,6 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 				|| (World->GetTimeSeconds() - HitCompanion->GetLastCompromiseBreakTime()) >= Tuning->CoverCompromiseBreakCooldown;
 			bCompromiseBreak = bFlankerHit
 				|| (Mem.CompromiseConsecutiveCount >= CompromiseDebounceRequired && bGeoCooledDown);
-
-			if (bCompromiseBreak && MonitorCovDbg())
-				UE_LOG(LogCompanionAI, Log,
-					TEXT("[COVDBG] %s COMPROMISE-BREAK hit=%d geo=%d extra=%d consec=%d"),
-					*GetNameSafe(Pawn), bFlankerHit ? 1 : 0, bCompromised ? 1 : 0, bExtraExposed ? 1 : 0,
-					Mem.CompromiseConsecutiveCount);
 		}
 	}
 	else
@@ -826,10 +813,6 @@ void UBTService_CoverSwitchMonitor::TickNode(UBehaviorTreeComponent& OwnerComp, 
 	// would deadlock it. Reset the pending debounce so a stale candidate can't insta-commit later.
 	if (!bCurrentBlind && Companion && Companion->GetPeekCyclesAtCurrentCover() < Tuning->MinPeekCyclesBeforeRelocate)
 	{
-		if (MonitorCovDbg())
-			UE_LOG(LogCompanionAI, Log, TEXT("[COVDBG] %s MONITOR G5-skip cycles=%d < %d (best=%.2f cur=%.2f)"),
-				*GetNameSafe(Pawn), Companion->GetPeekCyclesAtCurrentCover(),
-				Tuning->MinPeekCyclesBeforeRelocate, BestScore, CurrentScore);
 		Mem.PendingBestCover = FCoverHandle();
 		Mem.ConsecutiveBetterCount = 0;
 		return;

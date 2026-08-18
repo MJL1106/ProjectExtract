@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "UObject/NoExportTypes.h"
 #include "EnemyTypes.h"
+#include "UI/AIOverlayTypes.h"
 #include "EnemySquad.generated.h"
 
 class AEnemyCharacter;
@@ -40,8 +41,11 @@ public:
 
 	// --- Shared sightings ---
 
-	/** Called by awareness component on Combat entry + LOS updates. Rate-limited per squad. */
-	void ReportSighting(AActor* Target, const FVector& LastKnown);
+	/** Called by awareness component on Combat entry + LOS updates. Rate-limited per squad.
+	 *  Reporter (when the call comes from a member's own broadcast) is skipped in the relay loop —
+	 *  a member's sighting is knowledge for its MATES; relaying it back would let a lone survivor
+	 *  stamp its own squad-sight contact hold off its own eyes. Director-driven calls pass null. */
+	void ReportSighting(AActor* Target, const FVector& LastKnown, const AEnemyCharacter* Reporter = nullptr);
 
 	/** One-shot Combat seed for every living member (Director wave spawns). Unlike ReportSighting,
 	 *  forces full Combat entry rather than Searching, and skips the relay throttle. */
@@ -142,7 +146,24 @@ public:
 	/** Squad-level bark rate limiter. Returns true if the bark is allowed. */
 	bool TryClaimSquadBark(EBarkType Type, float Window = 3.f);
 
+	// --- Overlay events ---
+
+	/** Fired on focus calls, rallies, officer deaths and bounding start/stop. Push-only: everything
+	 *  an observer needs is in the FSquadOverlayEvent payload, so nothing has to poll the squad back
+	 *  (GetFocusTarget in particular mutates state and must not be called from an observer).
+	 *  Non-dynamic — listeners MUST unbind before they are destroyed. */
+	FOnSquadOverlayEvent OnSquadOverlayEvent;
+
+	/** True when something is listening. Test this BEFORE composing event text: C++ evaluates
+	 *  arguments before the call, so the broadcaster's own early-out is too late to save the work. */
+	bool HasOverlayListener() const { return OnSquadOverlayEvent.IsBound(); }
+
 private:
+
+	/** Fills an FSquadOverlayEvent and broadcasts it. No-op with no listeners.
+	 *  TimeStamp is left at zero — the overlay subsystem stamps it on receipt. */
+	void BroadcastOverlayEvent(EOverlaySquadEventKind Kind, AEnemyCharacter* Instigator,
+		const FText& Headline, const FText& Detail);
 
 	FName SquadId = NAME_None;
 

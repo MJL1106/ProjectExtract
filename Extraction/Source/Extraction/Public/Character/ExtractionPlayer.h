@@ -927,6 +927,12 @@ private:
 
 	void EnterDBNO();
 	void OnBleedoutExpired();
+
+	/** Re-runs EnterDBNO's squad-wipe check while down. The entry-time check only sees the squad as
+	 *  it stood at the moment of the down — a companion who dies six seconds later left the player
+	 *  bleeding out a full minute with nobody alive to revive them and no fail screen. 1Hz poll,
+	 *  armed in EnterDBNO, cleared on revive/death/EndPlay. */
+	void PollSquadWipeWhileDBNO();
 	void FullDeath();
 
 	/** While downed outside a revive, switch the BP spring arm to pawn-control free look. */
@@ -997,6 +1003,7 @@ private:
 	float LastReviveWorldTime = -1e9f;
 
 	FTimerHandle BleedoutTimerHandle;
+	FTimerHandle SquadWipePollHandle;
 
 	/** One-tick deferral for the loadout restore so it lands after the character BP's
 	 *  BeginPlay spine (Load/SwapWeapon) has finished. Cleared in EndPlay. */
@@ -1028,11 +1035,6 @@ private:
 
 	/** Releases the audio suppression failsafe. */
 	void ReleaseAudioSuppressionFailsafe();
-
-#if !UE_BUILD_SHIPPING
-	// Edge-triggered map: tracks the last logged CanBeSeenFrom result per observer to avoid log spam.
-	TMap<TWeakObjectPtr<const AActor>, bool> DebugLastCanBeSeenResult;
-#endif
 
 	// ---- Companion Debug Exec Commands ----
 	// (UHT forbids UFUNCTION inside preprocessor blocks — kept unguarded; console exec is dev-only at runtime.)
@@ -1084,6 +1086,17 @@ private:
 	/** console: VipRescue — instantly free + arm the VIP (checkpoint fast-forward, no VO). */
 	UFUNCTION(Exec)
 	void VipRescue();
+
+	/** console: ObjSkip <StepId> — fast-forward the objective chain to that beat and teleport there.
+	 *  Applies every earlier beat's end-state, so doors, keycards and spawns land as if played.
+	 *  ObjSkip ReachExtractionTarget drops you at the extraction target; ObjSkip DefendPosition goes
+	 *  straight into the Room 2 defence wave. Run ObjList for the ids. */
+	UFUNCTION(Exec)
+	void ObjSkip(const FString& StepId);
+
+	/** console: ObjList — print every objective step id in chain order, marking the live one. */
+	UFUNCTION(Exec)
+	void ObjList();
 
 	/** console: VipDebug 1 — pause the VIP's AI so forced poses stick; VipDebug 0 — resume. */
 	UFUNCTION(Exec)

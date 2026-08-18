@@ -1358,6 +1358,14 @@ void UEnemyDirectorSubsystem::PruneStaleWaveMembers()
 	}
 }
 
+bool UEnemyDirectorSubsystem::IsWaveMember(const AEnemyCharacter* Enemy) const
+{
+	if (!IsValid(Enemy)) return false;
+
+	const TWeakObjectPtr<AEnemyCharacter> WeakEnemy(const_cast<AEnemyCharacter*>(Enemy));
+	return WaveMembers.Contains(WeakEnemy);
+}
+
 void UEnemyDirectorSubsystem::ReassertWaveMemberEngagement()
 {
 	if (!WaveProgress.IsActive() || !ActiveWaveRequest.bAutoEngage) return;

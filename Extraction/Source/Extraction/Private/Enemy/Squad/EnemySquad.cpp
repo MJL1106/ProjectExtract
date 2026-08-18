@@ -7,10 +7,69 @@
 #include "EnemySquadSubsystem.h"
 #include "HealthComponent.h"
 #include "BarkSubsystem.h"
-#include "EnemyDebug.h"
+#include "Companion/CompanionCharacter.h"
 #include "WeaponBase.h"
 #include "BehaviorTree/BlackboardComponent.h"
-#include "Engine/Engine.h"
+
+// ---------------------------------------------------------------------------
+// Overlay events
+// ---------------------------------------------------------------------------
+
+namespace
+{
+	/** PLAYER / COMPANION wording for a focus target — never an object name, matching the rule the
+	 *  card widget enforces on its own target chip. Anything else stays generic. */
+	FText OverlayTargetWording(const AActor* Target)
+	{
+		if (!IsValid(Target)) return NSLOCTEXT("AIOverlay", "SquadTargetGeneric", "TARGET");
+		if (Target->IsA<ACompanionCharacter>())
+			return NSLOCTEXT("AIOverlay", "SquadTargetCompanion", "COMPANION");
+
+		const APawn* Pawn = Cast<APawn>(Target);
+		if (Pawn && Pawn->IsPlayerControlled())
+			return NSLOCTEXT("AIOverlay", "SquadTargetPlayer", "PLAYER");
+
+		return NSLOCTEXT("AIOverlay", "SquadTargetGeneric", "TARGET");
+	}
+
+	/** Maps StopBounding's internal reason token to banner prose. The token itself is never shown. */
+	FText OverlayBoundingStopWording(const TCHAR* Reason)
+	{
+		static const FName OfficerDied(TEXT("OfficerDied"));
+		static const FName MemberDied(TEXT("ManeuverMemberDied"));
+		static const FName MemberBlocked(TEXT("MemberBlocked"));
+		static const FName StaleState(TEXT("StaleState"));
+		static const FName SwapInvalid(TEXT("SwapFailed_InvalidMember"));
+		static const FName SwapConflict(TEXT("SwapFailed_TokenConflict"));
+
+		const FName Key = Reason ? FName(Reason) : NAME_None;
+
+		if (Key == OfficerDied)   return NSLOCTEXT("AIOverlay", "SquadBoundingStopOfficer", "Officer killed");
+		if (Key == MemberDied)    return NSLOCTEXT("AIOverlay", "SquadBoundingStopDead", "Element killed");
+		if (Key == MemberBlocked) return NSLOCTEXT("AIOverlay", "SquadBoundingStopBlocked", "Flanker broke off");
+		if (Key == StaleState)    return NSLOCTEXT("AIOverlay", "SquadBoundingStopStale", "Contact lost");
+		if (Key == SwapInvalid || Key == SwapConflict)
+			return NSLOCTEXT("AIOverlay", "SquadBoundingStopSwap", "Handover failed");
+
+		return NSLOCTEXT("AIOverlay", "SquadBoundingStopGeneric", "Maneuver ended");
+	}
+}
+
+void UEnemySquad::BroadcastOverlayEvent(EOverlaySquadEventKind Kind, AEnemyCharacter* Instigator,
+	const FText& Headline, const FText& Detail)
+{
+	if (!OnSquadOverlayEvent.IsBound()) return;
+
+	FSquadOverlayEvent Event;
+	Event.Kind = Kind;
+	Event.SquadId = SquadId;
+	Event.Headline = Headline;
+	Event.Detail = Detail;
+	Event.Instigator = Instigator;
+	// TimeStamp deliberately left at 0 — the overlay subsystem stamps it on receipt.
+
+	OnSquadOverlayEvent.Broadcast(Event);
+}
 
 // ---------------------------------------------------------------------------
 // Membership
@@ -70,7 +129,7 @@ AEnemyCharacter* UEnemySquad::GetOfficer() const
 // Shared sightings
 // ---------------------------------------------------------------------------
 
-void UEnemySquad::ReportSighting(AActor* Target, const FVector& LastKnown)
+void UEnemySquad::ReportSighting(AActor* Target, const FVector& LastKnown, const AEnemyCharacter* Reporter)
 {
 	if (!IsValid(Target)) return;
 
@@ -105,6 +164,7 @@ void UEnemySquad::ReportSighting(AActor* Target, const FVector& LastKnown)
 	for (const TWeakObjectPtr<AEnemyCharacter>& M : Members)
 	{
 		if (!IsMemberAlive(M)) continue;
+		if (M.Get() == Reporter) continue;
 
 		AEnemyAIController* AIC = Cast<AEnemyAIController>(M->GetController());
 		if (!IsValid(AIC)) continue;
@@ -264,6 +324,11 @@ void UEnemySquad::SetFocusTarget(AActor* Target, AEnemyCharacter* Caller, bool b
 		FocusTarget = Target;
 		bFocusSetByOfficer = true;
 		UE_LOG(LogEnemySquad, Verbose, TEXT("[%s] FocusTarget set to %s (officer command)"), *SquadId.ToString(), *Target->GetName());
+		if (HasOverlayListener())
+			BroadcastOverlayEvent(EOverlaySquadEventKind::FocusTarget, Caller,
+				NSLOCTEXT("AIOverlay", "SquadFocusFire", "OFFICER: FOCUS FIRE"),
+				FText::Format(NSLOCTEXT("AIOverlay", "SquadFocusFireDetail", "All units → {0}"),
+					OverlayTargetWording(Target)));
 		return;
 	}
 
@@ -304,7 +369,14 @@ void UEnemySquad::ClearFocusTarget()
 
 void UEnemySquad::NotifyMemberDied(AEnemyCharacter* Dead, bool bWasOfficer)
 {
-	if (bWasOfficer) ClearFocusTarget();
+	if (bWasOfficer)
+	{
+		ClearFocusTarget();
+		if (HasOverlayListener())
+			BroadcastOverlayEvent(EOverlaySquadEventKind::OfficerDown, Dead,
+				NSLOCTEXT("AIOverlay", "SquadOfficerDown", "OFFICER DOWN"),
+				NSLOCTEXT("AIOverlay", "SquadOfficerDownDetail", "Command aura lost — focus fire cleared"));
+	}
 
 	if (bBoundingActive)
 	{
@@ -355,6 +427,11 @@ void UEnemySquad::Rally(AEnemyCharacter* Officer)
 	}
 
 	UE_LOG(LogEnemySquad, Log, TEXT("[%s] Officer %s rallied squad (boost=%.0f, floor+=%.0f)"), *SquadId.ToString(), *Officer->GetName(), MoraleBoost, FloorRaise);
+
+	if (HasOverlayListener())
+		BroadcastOverlayEvent(EOverlaySquadEventKind::Rally, Officer,
+			NSLOCTEXT("AIOverlay", "SquadRally", "RALLY"),
+			NSLOCTEXT("AIOverlay", "SquadRallyDetail", "Officer steadies the squad"));
 }
 
 // ---------------------------------------------------------------------------
@@ -437,22 +514,8 @@ bool UEnemySquad::TryClaimSquadBark(EBarkType Type, float Window)
 	if (!IsValid(World)) return true;
 
 	const float Now = World->GetTimeSeconds();
-	float* LastTime = LastSquadBarkTime.Find(Type);
-	if (LastTime && (Now - *LastTime) < Window)
-	{
-		if (IsEnemyBarkDebugEnabled())
-		{
-			const float Since = Now - *LastTime;
-			const FString TypeStr = UEnum::GetValueAsString(Type);
-			UE_LOG(LogEnemyBark, Log, TEXT("DROP SquadClaim type=%s (since=%.2fs < window=%.2fs)"), *TypeStr, Since, Window);
-			if (GEngine)
-			{
-				const FString Msg = FString::Printf(TEXT("DROP SquadClaim %s (%.1fs<%.1fs)"), *TypeStr, Since, Window);
-				GEngine->AddOnScreenDebugMessage(-1, 4.f, FColor::Silver, Msg);
-			}
-		}
-		return false;
-	}
+	const float* LastTime = LastSquadBarkTime.Find(Type);
+	if (LastTime && (Now - *LastTime) < Window) return false;
 
 	LastSquadBarkTime.FindOrAdd(Type) = Now;
 	return true;
@@ -505,6 +568,11 @@ bool UEnemySquad::StartBounding(AEnemyCharacter* Officer)
 	UE_LOG(LogEnemySquad, Log, TEXT("[%s] Bounding started — Suppressor=%s, Flanker=%s"),
 		*SquadId.ToString(), *Suppressor->GetName(), *Flanker->GetName());
 
+	if (HasOverlayListener())
+		BroadcastOverlayEvent(EOverlaySquadEventKind::BoundingStarted, Officer,
+			NSLOCTEXT("AIOverlay", "SquadBoundingStart", "BOUNDING OVERWATCH"),
+			NSLOCTEXT("AIOverlay", "SquadBoundingStartDetail", "One pins, one flanks"));
+
 	return true;
 }
 
@@ -514,6 +582,7 @@ void UEnemySquad::StopBounding(const TCHAR* Reason)
 
 	AEnemyCharacter* Supp = BoundingSuppressor.Get();
 	AEnemyCharacter* Flank = BoundingFlanker.Get();
+	AEnemyCharacter* Off = BoundingOfficer.Get(); // captured before the reset below (overlay subject)
 
 	if (IsValid(Supp))
 	{
@@ -535,6 +604,12 @@ void UEnemySquad::StopBounding(const TCHAR* Reason)
 	BoundingFlanker.Reset();
 
 	UE_LOG(LogEnemySquad, Log, TEXT("[%s] Bounding stopped — Reason=%s"), *SquadId.ToString(), Reason);
+
+	// Broadcast last: the maneuver state is already torn down, so a listener can't observe a half-stopped squad.
+	if (HasOverlayListener())
+		BroadcastOverlayEvent(EOverlaySquadEventKind::BoundingStopped, Off,
+			NSLOCTEXT("AIOverlay", "SquadBoundingStop", "BOUNDING ENDED"),
+			OverlayBoundingStopWording(Reason));
 }
 
 bool UEnemySquad::IsBoundingActive()

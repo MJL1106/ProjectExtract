@@ -49,5 +49,10 @@ void AExtractionGameMode::RestartCurrentLevel()
 	bLevelCompleted = false;
 	bLevelFailed = false;
 	UGameplayStatics::SetGamePaused(this, false);
-	UGameplayStatics::OpenLevel(this, FName(*UGameplayStatics::GetCurrentLevelName(this, true)));
+
+	// Full package path, not the short level name: short-name travel resolves by a disk search,
+	// and this project ships more than one map called "DemoMap" — the marketplace packs carry
+	// their own. The world's own package is unambiguous on every play path.
+	const FString LevelPackage = UWorld::RemovePIEPrefix(GetWorld()->GetOutermost()->GetName());
+	UGameplayStatics::OpenLevel(this, FName(*LevelPackage));
 }

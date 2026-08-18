@@ -32,6 +32,7 @@ class AExtractionPlayer;
 class UCompanionTuningDataAsset;
 class UEnemyGrenadierComponent;
 class AEnemyCharacter;
+class UNiagaraSystem;
 
 DECLARE_LOG_CATEGORY_EXTERN(LogCompanion, Log, All);
 
@@ -184,7 +185,7 @@ public:
 
 	// --- Pressure01 mirror (BTTask_CompanionCombat-written) ---
 	// Live pressure signal [0,1] including both distance and incoming-fire terms. Written by the
-	// combat task each pressure sample; consumed by the debug distance overlay (enemy.DrawDistances).
+	// combat task each pressure sample; no in-tree consumer — phase-2 overlay feed.
 
 	void SetPressure01(float Value, float WorldTime) { CachedPressure01 = Value; CachedPressure01Time = WorldTime; }
 	float GetPressure01() const { return CachedPressure01; }
@@ -729,6 +730,17 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Companion|DBNO")
 	bool GetIsCompanionDBNO() const { return bIsDBNO; }
 
+	// --- Angle-seek overlay readout (AI overlay card only — no gameplay reads these) ---
+
+	/** Set by BTTask_CompanionCombat while the crossfire drift is live; cleared on EndAngleSeek. */
+	void SetAngleSeekOverlayActive(bool bActive);
+
+	/** Timed variant for the flank-cover commit, which finishes the task immediately — holds the
+	 *  FLANKING readout while the companion travels to the committed cover. */
+	void MarkAngleSeekOverlayFor(float Seconds);
+
+	bool IsAngleSeekingForOverlay() const;
+
 	/** True while the player's revive hold is active on this companion. The downed-retreat BT task
 	 *  stops issuing crawl movement so only the paired montage's root motion moves the body. */
 	bool IsBeingRevived() const { return bBeingRevived; }
@@ -823,6 +835,10 @@ protected:
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
 	TObjectPtr<UHealthComponent> HealthComponent;
 
+	/** Overlay-only angle-seek state — see SetAngleSeekOverlayActive/MarkAngleSeekOverlayFor. */
+	bool bAngleSeekOverlayActive = false;
+	double AngleSeekOverlayHoldUntil = 0.0;
+
 	/** Audible surface-aware footsteps only — AI-noise emission is disabled at construction. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Companion|Components")
 	TObjectPtr<UFootstepNoiseComponent> FootstepAudioComponent;
@@ -871,6 +887,18 @@ protected:
 	float InaccuracySettleTime = 1.5f;
 
 public:
+	/** Blood burst spawned at the bullet impact point on point-damage hits, matching the enemy's.
+	 *  Assign NS_EnemyBloodImpact (or a companion-specific system) in the companion BP defaults —
+	 *  null simply means no burst. Inherited by the extraction VIP. */
+	UPROPERTY(EditDefaultsOnly, Category = "Companion|FX")
+	TObjectPtr<UNiagaraSystem> BloodImpactFX;
+
+	/** Blood burst for a round that visibly struck this companion but dealt no damage, because the
+	 *  shooter's AI damage-mitigation gate suppressed it. Same reasoning as the enemy's: enemy
+	 *  weapons run the same gate, so without this the companion soaks visible fire showing nothing.
+	 *  Cosmetic only — no damage, no hit-react, no bark. */
+	void PlayCosmeticBulletImpact(const FHitResult& Hit, const FVector& ShotDirection) const;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Companion|Combat", meta = (ClampMin = "0.0"))
 	float MaxEngageRange = 3500.0f;
 
@@ -1156,6 +1184,10 @@ protected:
 	float TakedownWindowRefreshSeconds = 0.75f;
 
 private:
+	/** Spawns BloodImpactFX at the hit location for point-damage events. Shared by the real damage
+	 *  path and the cosmetic gated-round path. */
+	void SpawnBloodImpactFX(const FDamageEvent& DamageEvent) const;
+
 	UPROPERTY(ReplicatedUsing = OnRep_LowReadyAim)
 	bool bLowReadyAim = false;
 

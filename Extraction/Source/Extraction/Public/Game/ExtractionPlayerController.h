@@ -15,12 +15,14 @@ class UObjectiveMarkerLayer;
 class AObjectiveMarkerDisplay;
 class ULevelCompleteWidget;
 class ULevelFailedWidget;
+class ULowHealthVignetteWidget;
 class URevivePromptWidget;
 class UConsumableWidget;
 class UAttachmentStatPreviewWidget;
 class UTutorialBriefingWidget;
 class UExtractionHudBridgeComponent;
 class UPickupToastStackWidget;
+class UAIOverlayLayer;
 
 /** Fired on the local player controller when the player's weapon deals damage. One event per
  *  trigger pull per victim (shotgun pellets aggregated). HeadshotDamage > 0 marks a headshot;
@@ -200,6 +202,16 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UObjectiveMarkerLayer> ObjectiveLayerWidget;
 
+	/** AI debug overlay layer class (assigned in BP defaults — no C++ asset path). The layer itself
+	 *  gates on ai.Overlay, so it is created unconditionally alongside the objective layer and costs
+	 *  one getter call per frame while the cvar is off. */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<UAIOverlayLayer> AIOverlayWidgetClass;
+
+	/** Active AI overlay layer instance */
+	UPROPERTY()
+	TObjectPtr<UAIOverlayLayer> AIOverlayWidget;
+
 	/** World-space marker display actor class (assigned in BP defaults — no C++ asset path).
 	 *  Supplied to UObjectiveSubsystem::SetMarkerDisplayClass during local player setup. */
 	UPROPERTY(EditDefaultsOnly, Category = "UI")
@@ -238,6 +250,15 @@ protected:
 	/** Active consumable HUD instance */
 	UPROPERTY()
 	TObjectPtr<UConsumableWidget> ConsumableWidget;
+
+	/** Low-health warning vignette. Defaults to the C++ class in the constructor — the widget is
+	 *  entirely code-built, so no BP subclass is required; assign one here only to retune it. */
+	UPROPERTY(EditDefaultsOnly, Category = "UI")
+	TSubclassOf<ULowHealthVignetteWidget> LowHealthVignetteWidgetClass;
+
+	/** Active low-health vignette instance */
+	UPROPERTY()
+	TObjectPtr<ULowHealthVignetteWidget> LowHealthVignetteWidget;
 
 	/** The HUD module's stat preview panel, registered by the widget itself. Weak: the module owns
 	 *  its lifetime and can tear it down on a context switch without telling this controller. */
@@ -311,6 +332,7 @@ private:
 	 *  fires while it is up; UTutorialBriefingWidget::NativeOnKeyDown owns it. */
 	void HandlePauseKeyPressed();
 
+private:
 	/** Quiets (or restores) the two HUD systems C++ can reach: this controller's overlay group and
 	 *  the HUD actor's module tree. The third — the kit's own top-level widgets — is the briefing
 	 *  widget's sweep, which runs from its own construct/destruct.

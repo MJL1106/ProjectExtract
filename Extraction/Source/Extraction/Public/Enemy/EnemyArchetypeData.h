@@ -145,9 +145,12 @@ public:
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "1.0"))
 	float SearchDuration = 8.f;
 
-	/** Seconds of no LOS before transitioning from Combat to Searching. */
+	/** Seconds of no LOS before transitioning from Combat to Searching. Active fights are held
+	 *  open by the contact-hold signals (FOV LOS, recent damage, suppression, squad sighting,
+	 *  heard target gunfire/sprint) regardless — this only starts counting once the whole fight
+	 *  has genuinely lost the target. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Combat", meta = (ClampMin = "0.0"))
-	float LostContactGrace = 45.f;
+	float LostContactGrace = 8.f;
 
 	// --- Director Seed (reinforcement dispatch) ---
 
@@ -204,7 +207,7 @@ public:
 
 	/** Fill multiplier at point-blank (0 cm), tapering linearly to 1 at NearFillBoostRange. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "1.0"))
-	float NearFillBoostMax = 3.f;
+	float NearFillBoostMax = 6.f;
 
 	/** Suspicion added per unit of noise-event loudness. Noise alone never confirms Combat. */
 	UPROPERTY(EditDefaultsOnly, BlueprintReadOnly, Category = "Enemy|Suspicion", meta = (ClampMin = "0.0"))

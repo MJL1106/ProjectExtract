@@ -133,19 +133,40 @@ void UGameAudioSubsystem::PlayWorldImpact(const FHitResult& Hit)
 	if (Set) PlayAt(Set->BulletImpact, Hit.ImpactPoint);
 }
 
-void UGameAudioSubsystem::PlayFleshImpact(const FVector& Location, bool bAsLocal2D, bool bHeadshot)
+void UGameAudioSubsystem::PlayFleshImpact(const FVector& Location, bool bAsLocal2D, bool bHeadshot, bool bAllyVictim)
 {
 	StampCombatActivity();
 	if (!IsValid(Bank)) return;
-	USoundBase* Crack = (bHeadshot && IsValid(Bank->HeadshotImpact)) ? Bank->HeadshotImpact.Get() : Bank->FleshImpact.Get();
+
+	USoundBase* Crack = nullptr;
+	USoundBase* Layer = nullptr;
+	float Volume2D = Bank->FleshFeedbackVolume;
+	// Enemy hits keep their historical unattenuated 3D volume; only ally hits are pulled down.
+	float Volume3D = 1.f;
+
+	if (bAllyVictim)
+	{
+		// Fall back to the enemy crack when no ally variant is authored: a silent hit on the player
+		// is worse than an indistinct one.
+		Crack = IsValid(Bank->AllyFleshImpact) ? Bank->AllyFleshImpact.Get() : Bank->FleshImpact.Get();
+		Layer = Bank->AllyFleshImpactLayer.Get();
+		Volume2D = Bank->AllyFleshFeedbackVolume;
+		Volume3D = Bank->AllyFleshFeedbackVolume;
+	}
+	else
+	{
+		Crack = (bHeadshot && IsValid(Bank->HeadshotImpact)) ? Bank->HeadshotImpact.Get() : Bank->FleshImpact.Get();
+		Layer = Bank->FleshImpactLayer.Get();
+	}
+
 	if (bAsLocal2D)
 	{
-		Play2D(Crack, Bank->FleshFeedbackVolume);
-		Play2D(Bank->FleshImpactLayer, Bank->FleshFeedbackVolume);
+		Play2D(Crack, Volume2D);
+		Play2D(Layer, Volume2D);
 		return;
 	}
-	PlayAt(Crack, Location);
-	PlayAt(Bank->FleshImpactLayer, Location);
+	PlayAt(Crack, Location, Volume3D);
+	PlayAt(Layer, Location, Volume3D);
 }
 
 void UGameAudioSubsystem::PlayAIFireReport(USoundBase* Sound, const FVector& Location) const

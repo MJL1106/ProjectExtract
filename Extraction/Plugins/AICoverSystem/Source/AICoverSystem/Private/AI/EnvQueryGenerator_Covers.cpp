@@ -17,6 +17,7 @@ UEnvQueryGenerator_Covers::UEnvQueryGenerator_Covers()
 
 	QueryBoundSize.DefaultValue = 2048.0f;
 	QueryBoundHeight.DefaultValue = 512.f;
+	MaxZDeltaFromContext.DefaultValue = 250.f;
 
 	IncludeLeftCoverStanding.DefaultValue = true;
 	IncludeRightCoverStanding.DefaultValue = true;
@@ -35,6 +36,9 @@ void UEnvQueryGenerator_Covers::GenerateItems(FEnvQueryInstance& QueryInstance) 
 
 	QueryBoundHeight.BindData(QueryOwner, QueryInstance.QueryID);
 	const float BoundsZ = QueryBoundHeight.GetValue();
+
+	MaxZDeltaFromContext.BindData(QueryOwner, QueryInstance.QueryID);
+	const float MaxZ = MaxZDeltaFromContext.GetValue();
 
 	const FVector SearchBounds = FVector(BoundsXY, BoundsXY, BoundsZ);
 
@@ -59,6 +63,19 @@ void UEnvQueryGenerator_Covers::GenerateItems(FEnvQueryInstance& QueryInstance) 
 		CoverSystem->GetCoversAndDataWithinBounds(FBoxCenterAndExtent(ContextLocations[ContextIdx], SearchBounds), Covers);
 
 		FilterCovers(Covers);
+
+		// Drop covers on another storey. The octree query box is generous in Z (and shipped query
+		// assets bake their own QueryBoundHeight), so without this a querier can be handed cover a
+		// floor above or below and walk off the fight to reach it.
+		if (MaxZ > 0.f)
+		{
+			const float ContextZ = ContextLocations[ContextIdx].Z;
+			Covers.RemoveAllSwap([ContextZ, MaxZ](const FCover& Cover)
+			{
+				return FMath::Abs(Cover.Data.Location.Z - ContextZ) > MaxZ;
+			}, EAllowShrinking::No);
+		}
+
 		QueryInstance.AddItemData<UEnvQueryItemType_CoverBase>(Covers);
 	}
 }

@@ -3,7 +3,7 @@
 #include "BTTask_EnemyBoundingAdvance.h"
 #include "CoverPoseComponent.h"
 #include "EnemyAIController.h"
-#include "EnemyDebug.h"
+#include "EnemyTestKnobs.h"
 #include "EnemyArchetypeData.h"
 #include "EnemyCharacter.h"
 #include "EnemyMoraleComponent.h"
@@ -78,9 +78,6 @@ EBTNodeResult::Type UBTTask_EnemyBoundingAdvance::ExecuteTask(UBehaviorTreeCompo
 
 	// Cover-pose hygiene: leaving cover for the bound — a latched pose would montage-slide the run.
 	if (UCoverPoseComponent* PoseComp = Enemy->GetCoverPoseComponent()) PoseComp->ResetCoverPose();
-	if (GetCoverAnimLogLevel() > 0)
-		UE_LOG(LogTemp, Log, TEXT("[COVERSTATE] %s TASK(BoundingAdvance) start"), *GetNameSafe(Pawn));
-
 	Enemy->SetMoveSpeedMode(EEnemyMoveSpeedMode::Combat);
 	Enemy->SetAimTarget(Target);
 	Controller->SetFocus(Target);

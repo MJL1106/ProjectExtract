@@ -4,7 +4,7 @@
 #include "EnvQueryTest_CoverPeekable.h"
 #include "AI/EnvQueryItemType_CoverBase.h"
 #include "CoverGeometryStatics.h"
-#include "HAL/IConsoleManager.h"
+#include "EnemyTestKnobs.h"
 
 UEnvQueryTest_CoverPeekable::UEnvQueryTest_CoverPeekable()
 {
@@ -21,8 +21,7 @@ void UEnvQueryTest_CoverPeekable::RunTest(FEnvQueryInstance& QueryInstance) cons
 	const bool bWantPeekable = BoolValue.GetValue();
 
 	// enemy.ForceCoverHeight debug filter (0=auto, 1=crouch-only, 2=stand-only)
-	static IConsoleVariable* ForceCoverHeightCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("enemy.ForceCoverHeight"));
-	const int32 ForcedHeight = ForceCoverHeightCVar ? ForceCoverHeightCVar->GetInt() : 0;
+	const int32 ForcedHeight = GetForceCoverHeightLevel();
 
 	for (FEnvQueryInstance::ItemIterator It(this, QueryInstance); It; ++It)
 	{

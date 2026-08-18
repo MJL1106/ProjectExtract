@@ -679,12 +679,6 @@ private:
 	/** Seconds the speed has been continuously <= CoverAnimMaxSpeed (velocity-gate settle accumulator). */
 	float CoverSettleAccum = 0.f;
 
-	/** Throttle accumulator for the 1Hz [COVERSTATE] diagnostic line. */
-	float CoverStateLogAccum = 0.f;
-
-	/** Throttle accumulator for the [RELOADTUCK] cover-reload-spine diagnostic line. */
-	float CoverReloadTuckLogAccum = 0.f;
-
 	/** Tracks last committed lean side so cover-idle has a valid direction when ECoverLean::None. */
 	ECoverLean LastCoverSide = ECoverLean::Right;
 

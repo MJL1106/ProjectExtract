@@ -13,8 +13,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "KismetAnimationLibrary.h"
 #include "CompanionAIController.h"
-#include "Enemy/Debug/EnemyDebug.h"
-#include "HAL/IConsoleManager.h" // companion.AimLog diagnostics
+#include "HAL/IConsoleManager.h" // companion.DebugLoco* blendspace probe
 
 #if !UE_BUILD_SHIPPING
 // Locomotion blendspace probe: drive the Speed/Direction inputs directly so any cell can be
@@ -42,9 +41,6 @@ static TAutoConsoleVariable<float> CVarCompanionDebugLocoSweep(
 namespace CompanionAnimConstants
 {
 	static constexpr float DirectionInterpSpeed = 15.0f;
-
-	/** Throttle for the [ALIGN] writer-race diagnostic so it prints ~4Hz instead of per-frame. */
-	static constexpr float AlignDebugLogInterval = 0.25f;
 }
 
 void UCompanionAnimInstance::NativeInitializeAnimation()
@@ -330,28 +326,6 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 		bIsAiming = false;
 	}
 
-	// AimLog diagnostics (companion.AimLog 1): edge-log which branch is driving the ADS pose.
-	// Function-local static is fine — there is a single companion instance.
-	if (const IConsoleVariable* AimLogCVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AimLog"));
-		AimLogCVar && AimLogCVar->GetInt() != 0)
-	{
-		const int32 AimBranch = IsValid(AimTarget) ? 1
-			: !bIsAiming ? 0
-			: OwningCompanion->IsScriptedAiming() ? 2
-			: 3;
-		static int32 LastLoggedAimBranch = -1;
-		if (AimBranch != LastLoggedAimBranch)
-		{
-			static const TCHAR* BranchNames[] = { TEXT("None"), TEXT("ActorTarget"), TEXT("Scripted"), TEXT("CombatFocal") };
-			UE_LOG(LogCompanionAI, Display,
-				TEXT("[AimLog][Anim] branch=%s aimTarget=%s posture=%d lowReady=%d focusLive=%d yaw=%.0f pitch=%.0f losAlpha=%.2f los=%d"),
-				BranchNames[AimBranch], *GetNameSafe(AimTarget), (int32)CurrentPosture,
-				(int32)OwningCompanion->IsLowReadyAim(), (int32)bFocusLive, AimYaw, AimPitch,
-				TargetLosAimAlpha, (int32)OwningCompanion->HasTargetLOS());
-			LastLoggedAimBranch = AimBranch;
-		}
-	}
-
 	// Pre-clamp yaw for the cover track-limit test below, then clamp both axes to the AO's sane
 	// range — raw deltas reach ±180 while the body lags the focal bearing (route legs down a
 	// switchback), extrapolating the spine past the AO's authored samples. Enemy parity.
@@ -571,8 +545,6 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 					Weapon->SetupCoverAlign(GetOwningComponent(), CoverAlignBoneName, Poses);
 					bCoverAlignSetup = Weapon->IsCoverAlignReady();
 				}
-
-				LogAlignSetupConfig();
 			}
 			else
 			{
@@ -587,13 +559,6 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 				CoverReloadSpineAlpha = 0.f;
 			}
 		}
-
-		// --- Align-writer diagnostics (companion.AlignDebug) — each writer records that it wrote ---
-		// Fire-, patrol- and cover-align all write an ABSOLUTE relative transform to the same mesh,
-		// in that order, so only the last writer of the frame is visible. These name it.
-		bool bFireAlignWriting = false;
-		bool bPatrolAlignWriting = false;
-		int32 DiagCoverScenario = 0;
 
 		// Fire-align setup: run once after an equip when the socket name is configured.
 		if (IsValid(Weapon) && !FireAlignSocketName.IsNone() && !bFireAlignSetup)
@@ -611,10 +576,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 			// Skip the call when fully settled at rest to avoid fighting the rest transform each frame.
 			if (FireAlignAlpha > KINDA_SMALL_NUMBER || bFirePlaying)
-			{
 				Weapon->SetFireAlignAlpha(FireAlignAlpha);
-				bFireAlignWriting = true;
-			}
 		}
 
 		// --- Patrol-align (idle-carry): ease weapon between relaxed idle and ADS pose ---
@@ -627,10 +589,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 
 			const bool bAlphaSettled = FMath::IsNearlyEqual(PatrolAlignAlpha, PrevAlpha, KINDA_SMALL_NUMBER);
 			if (!bAlphaSettled || PatrolAlignAlpha > KINDA_SMALL_NUMBER)
-			{
 				Weapon->SetPatrolAlignAlpha(PatrolAlignAlpha);
-				bPatrolAlignWriting = true;
-			}
 		}
 
 		// Hoisted once: both cover-align and LHIK suppress during the reload pose (weapon state
@@ -682,10 +641,7 @@ void UCompanionAnimInstance::NativeUpdateAnimation(float DeltaSeconds)
 			}
 
 			Weapon->UpdateCoverAlign(Scenario, DeltaSeconds, CoverAlignBlendSpeed);
-			DiagCoverScenario = static_cast<int32>(Scenario);
 		}
-
-		LogWeaponAlignWriters(Weapon, bFireAlignWriting, bPatrolAlignWriting, DiagCoverScenario, DeltaSeconds);
 
 		// --- Left-Hand IK (socket transform — cheap once validity is cached) ---
 		// Disabled while a reload pose is active (weapon state or montage tail) so the left
@@ -1110,9 +1066,6 @@ namespace
 	/** spine_01 is the bone captured/replaced — its parent chain carries the tucked torso, its
 	 *  children carry the reload arms, so a Replace here = idle torso + reload arms. */
 	const FName CompanionCoverReloadSpineBone = TEXT("spine_01");
-
-	/** Throttle for the [RELOADTUCK] diagnostic so it prints ~2Hz instead of per-frame. */
-	constexpr float CompanionCoverReloadTuckLogInterval = 0.5f;
 }
 
 void UCompanionAnimInstance::UpdateCoverReloadSpine(float DeltaSeconds)
@@ -1128,35 +1081,9 @@ void UCompanionAnimInstance::UpdateCoverReloadSpine(float DeltaSeconds)
 
 	const float TargetAlpha = (bInCover && bIsReloading) ? 1.f : 0.f;
 	CoverReloadSpineAlpha = FMath::FInterpTo(CoverReloadSpineAlpha, TargetAlpha, DeltaSeconds, CoverReloadSpineBlendSpeed);
-
-	if (GetCoverAnimLogLevel() > 0 && bInCover)
-	{
-		CoverReloadTuckLogAccum += DeltaSeconds;
-		if (CoverReloadTuckLogAccum >= CompanionCoverReloadTuckLogInterval)
-		{
-			CoverReloadTuckLogAccum = 0.f;
-			const FRotator Now = Mesh->GetSocketTransform(CompanionCoverReloadSpineBone, RTS_Component).Rotator();
-			UE_LOG(LogCompanionDiag, Log,
-				TEXT("[RELOADTUCK] %s reloading=%d alpha=%.2f spineNow=(P%.1f Y%.1f R%.1f) ref=(P%.1f Y%.1f R%.1f)"),
-				*GetNameSafe(OwningCompanion.Get()), bIsReloading ? 1 : 0, CoverReloadSpineAlpha,
-				Now.Pitch, Now.Yaw, Now.Roll,
-				CoverReloadSpineRefRotation.Pitch, CoverReloadSpineRefRotation.Yaw, CoverReloadSpineRefRotation.Roll);
-		}
-	}
 }
 
-// --- Weapon-Align Re-baseline + Diagnostics ---
-
-namespace
-{
-	/** companion.AlignDebug is registered in WeaponBase.cpp (single definition, alongside the other
-	 *  weapon CVars) — look it up by name once, the pattern the rest of the companion code uses. */
-	bool IsAlignDebugEnabled()
-	{
-		static IConsoleVariable* CVar = IConsoleManager::Get().FindConsoleVariable(TEXT("companion.AlignDebug"));
-		return CVar && CVar->GetInt() != 0;
-	}
-}
+// --- Weapon-Align Re-baseline ---
 
 void UCompanionAnimInstance::RequestWeaponAlignRebake()
 {
@@ -1281,51 +1208,6 @@ bool UCompanionAnimInstance::TryConsumeAlignRebake(AWeaponBase* Weapon, float De
 	AlignRebakeGatedWallTime = 0.f;
 	bAlignRebakeStarvationLogged = false;
 	return true;
-}
-
-void UCompanionAnimInstance::LogWeaponAlignWriters(const AWeaponBase* Weapon, bool bFireWriting,
-	bool bPatrolWriting, int32 CoverScenario, float DeltaSeconds)
-{
-	if (!IsAlignDebugEnabled() || !IsValid(Weapon)) return;
-
-	AlignDebugLogAccum += DeltaSeconds;
-	if (AlignDebugLogAccum < CompanionAnimConstants::AlignDebugLogInterval) return;
-	AlignDebugLogAccum = 0.f;
-
-	// Writers run fire -> patrol -> cover in NativeUpdateAnimation and each writes an ABSOLUTE
-	// relative transform, so the last one to write is the only one visible. winner names it.
-	const bool bCoverWriting = Weapon->IsCoverAlignWriting();
-	const TCHAR* Winner = bCoverWriting ? TEXT("cover")
-		: bPatrolWriting ? TEXT("patrol")
-		: bFireWriting ? TEXT("fire")
-		: TEXT("none(rest)");
-
-	const USkeletalMeshComponent* WeaponMesh = Weapon->GetWeaponMesh();
-	const FTransform Rel = IsValid(WeaponMesh) ? WeaponMesh->GetRelativeTransform() : FTransform::Identity;
-
-	UE_LOG(LogCompanionDiag, Log,
-		TEXT("[ALIGN] %s winner=%s | fire(a=%.2f w=%d sock='%s') patrol(a=%.2f w=%d) cover(scen=%d w=%d) | peek=%d inCover=%d aiming=%d reloading=%d | rel loc=%s rotDeg=%s"),
-		*GetNameSafe(OwningCompanion.Get()), Winner,
-		FireAlignAlpha, (int32)bFireWriting, *FireAlignSocketName.ToString(),
-		PatrolAlignAlpha, (int32)bPatrolWriting,
-		CoverScenario, (int32)bCoverWriting,
-		(int32)IsAnyCoverPeekMontagePlaying(), (int32)bInCover, (int32)bIsAiming, (int32)bIsReloading,
-		*Rel.GetLocation().ToString(), *Rel.Rotator().ToString());
-}
-
-void UCompanionAnimInstance::LogAlignSetupConfig() const
-{
-	if (!IsAlignDebugEnabled()) return;
-
-	// These live on the ABP, not on the weapon or its DataAsset — an ABP duplicated from another
-	// character's inherits every one of them, so both allies carry identical values until retuned.
-	UE_LOG(LogCompanionDiag, Warning,
-		TEXT("[ALIGN-CFG] %s alignBone='%s' fireAlignSocket='%s' | blend cover=%.1f fire=%.1f patrol=%.1f | peekL loc=%s rot=%s | peekR loc=%s rot=%s | overTop loc=%s rot=%s"),
-		*GetNameSafe(OwningCompanion.Get()), *CoverAlignBoneName.ToString(), *FireAlignSocketName.ToString(),
-		CoverAlignBlendSpeed, FireAlignBlendSpeed, PatrolAlignBlendSpeed,
-		*CoverAlignPeekLeftTransform.GetLocation().ToString(), *CoverAlignPeekLeftTransform.Rotator().ToString(),
-		*CoverAlignPeekRightTransform.GetLocation().ToString(), *CoverAlignPeekRightTransform.Rotator().ToString(),
-		*CoverAlignOverTopTransform.GetLocation().ToString(), *CoverAlignOverTopTransform.Rotator().ToString());
 }
 
 // --- Recoil Solver ---

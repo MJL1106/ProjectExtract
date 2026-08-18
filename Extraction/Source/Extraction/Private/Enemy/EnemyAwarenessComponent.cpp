@@ -32,13 +32,17 @@
 #include "Engine/World.h"
 #include "NavigationSystem.h"
 #include "EngineUtils.h" // TActorIterator — DBNO combat-handoff companion lookup
-#include "EnemyDebug.h"
 
-#if ENABLE_DRAW_DEBUG
-#include "DrawDebugHelpers.h"
-#include "BehaviorTree/BehaviorTreeComponent.h"
-#include "Components/WidgetComponent.h" // AwarenessWidgetComponent is only dereferenced by the distance overlay
-#endif
+namespace
+{
+	/** Vertical slack allowed when snapping a search / rally point onto the navmesh.
+	 *  MUST stay well under the level's storey pitch (400uu on DemoMap): at 400 the
+	 *  projection box reaches the floor above, so a candidate landing over a stairwell
+	 *  void or balcony lip snaps up a storey and the enemy walks upstairs to "search"
+	 *  a point the player was never near. Failing the projection instead is correct —
+	 *  both callers degrade to the un-offset last-known location, which is reachable. */
+	constexpr float EnemyNavProjectZExtent = 150.f;
+}
 
 UEnemyAwarenessComponent::UEnemyAwarenessComponent()
 {
@@ -117,12 +121,6 @@ void UEnemyAwarenessComponent::OnTargetPerceptionUpdated(AActor* Actor, FAIStimu
 			AlwaysCloakedCompanion = Companion;
 	}
 
-	if (GetDetectionLogLevel() > 0 && Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>())
-		if (const AEnemyCharacter* EC = Cast<AEnemyCharacter>(Actor))
-			UE_LOG(LogTemp, Warning, TEXT("[BODYDBG] %s sight-stim from enemy %s sensed=%d alive=%d state=%s"),
-				*GetNameSafe(GetOwner()), *GetNameSafe(Actor), Stimulus.WasSuccessfullySensed() ? 1 : 0,
-				IsActorAlive(EC) ? 1 : 0, *UEnum::GetValueAsString(CurrentState));
-
 	// Dead allies arrive as neutral stimuli — body discovery runs before the hostility filter.
 	if (Stimulus.Type == UAISense::GetSenseID<UAISense_Sight>() && Stimulus.WasSuccessfullySensed())
 	{
@@ -170,11 +168,6 @@ void UEnemyAwarenessComponent::OnTargetPerceptionUpdated(AActor* Actor, FAIStimu
 
 void UEnemyAwarenessComponent::HandleBodySighted(AEnemyCharacter* Body)
 {
-	if (GetDetectionLogLevel() > 0)
-		UE_LOG(LogTemp, Warning, TEXT("[BODYDBG] %s HandleBodySighted body=%s state=%s alreadyDiscovered=%d"),
-			*GetNameSafe(GetOwner()), *GetNameSafe(Body), *UEnum::GetValueAsString(CurrentState),
-			DiscoveredBodies.Contains(Body) ? 1 : 0);
-
 	if (CurrentState == EEnemyAwarenessState::Combat) return;
 
 	const bool bAlreadyDiscovered = DiscoveredBodies.Contains(Body);
@@ -299,11 +292,6 @@ void UEnemyAwarenessComponent::HandleSightStimulus(AActor* Actor, const FAIStimu
 		if (ACompanionCharacter* Companion = Cast<ACompanionCharacter>(Actor))
 			ApplySilentSearchRoomStartle(Companion, Track);
 
-	if (GetDetectionLogLevel() > 0)
-		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] SightStim tgt=%s success=%d state=%s stimLoc=(%.0f,%.0f,%.0f)"),
-			*GetNameSafe(Actor), Stimulus.WasSuccessfullySensed() ? 1 : 0, *UEnum::GetValueAsString(CurrentState),
-			Stimulus.StimulusLocation.X, Stimulus.StimulusLocation.Y, Stimulus.StimulusLocation.Z);
-
 	// Searching fast-track: re-acquire combat on clean sight (own perception only, not squad relay)
 	if (CurrentState == EEnemyAwarenessState::Searching && Stimulus.WasSuccessfullySensed() && IsActorAlive(Actor))
 	{
@@ -382,15 +370,22 @@ void UEnemyAwarenessComponent::HandleHearingStimulus(AActor* Actor, const FAISti
 	const float AcousticMult = GetCachedAcousticMultiplier(Stimulus.StimulusLocation, Actor);
 	if (AcousticMult <= KINDA_SMALL_NUMBER) return;
 
-	if (GetDetectionLogLevel() > 0)
-		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] HearStim actor=%s strength=%.2f acoustic=%.2f state=%s"),
-			*Actor->GetName(), Stimulus.Strength, AcousticMult, *UEnum::GetValueAsString(CurrentState));
-
 	FSuspicionTrack& Track = SuspicionTracks.FindOrAdd(Actor);
 	StampTrack(Track, Stimulus.StimulusLocation);
 
-	// During Combat, only update track bookkeeping (location) — suspicion gain is irrelevant
-	if (CurrentState == EEnemyAwarenessState::Combat) return;
+	// During Combat, hearing the combat target himself fight (gunfire or a sprint — both already
+	// acoustics-gated above) is live contact: it stamps the noise hold so a blind enemy
+	// mid-firefight doesn't run its lost-contact clock while the player is audibly still there.
+	// Otherwise track bookkeeping only — suspicion gain is irrelevant in Combat.
+	if (CurrentState == EEnemyAwarenessState::Combat)
+	{
+		if (Actor == CombatTarget.Get()
+			&& (Stimulus.Tag == WeaponFireTag || Stimulus.Tag == SprintFootstepTag))
+		{
+			if (const UWorld* W = GetWorld()) LastTargetNoiseTime = W->GetTimeSeconds();
+		}
+		return;
+	}
 
 	// Close-range Combat slam. A gunshot or a sprint heard from right beside you is not "something to
 	// look into" — it is a fight already happening, so skip the meter and turn onto the source. Sits
@@ -521,10 +516,6 @@ void UEnemyAwarenessComponent::HandleAllyGunfireHeard(AEnemyCharacter* Shooter, 
 			FSuspicionTrack& JoinTrack = SuspicionTracks.FindOrAdd(AimTarget);
 			StampTrack(JoinTrack, AimTarget->GetActorLocation());
 
-			if (GetDetectionLogLevel() > 0)
-				UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] AllyFire JOIN shooter=%s tgt=%s state=%s"),
-					*GetNameSafe(Shooter), *GetNameSafe(AimTarget), *UEnum::GetValueAsString(CurrentState));
-
 			EnterCombat(AimTarget, /*bConfirmedVisual=*/false);
 			return;
 		}
@@ -538,10 +529,6 @@ void UEnemyAwarenessComponent::HandleAllyGunfireHeard(AEnemyCharacter* Shooter, 
 	const float Gain = Stimulus.Strength * ArchetypeData->NoiseSuspicionGain * AcousticMult;
 	Track.Suspicion = FMath::Min(
 		FMath::Max(Track.Suspicion + Gain, ArchetypeData->SuspiciousThreshold), NoiseSuspicionCap);
-
-	if (GetDetectionLogLevel() > 0)
-		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] AllyFire shooter=%s aim=%s susp=%.0f state=%s"),
-			*GetNameSafe(Shooter), *GetNameSafe(AimTarget), Track.Suspicion, *UEnum::GetValueAsString(CurrentState));
 }
 
 // --- Damage Notification ---
@@ -775,7 +762,7 @@ void UEnemyAwarenessComponent::ForceEngage(AActor* Target)
 			if (IsValid(NavSys))
 			{
 				FNavLocation NavLoc;
-				const FVector NavExtent(200.f, 200.f, 400.f);
+				const FVector NavExtent(200.f, 200.f, EnemyNavProjectZExtent);
 				if (NavSys->ProjectPointToNavigation(OffsetTarget, NavLoc, NavExtent))
 				{
 					OffsetTarget = NavLoc.Location;
@@ -809,10 +796,6 @@ void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVecto
 	if (!IsHostile(InstigatorPawn)) return;
 	if (!IsValid(ArchetypeData) || !ArchetypeData->bReactsToBeingShotAt) return;
 
-	if (GetDetectionLogLevel() > 0)
-		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] ShotAt instigator=%s state=%s"),
-			*InstigatorPawn->GetName(), *UEnum::GetValueAsString(CurrentState));
-
 	// Already in Combat — only refresh the track location; let the existing loop run.
 	if (CurrentState == EEnemyAwarenessState::Combat)
 	{
@@ -843,9 +826,6 @@ void UEnemyAwarenessComponent::NotifyShotAt(AActor* InstigatorPawn, const FVecto
 	QueryParams.AddIgnoredActor(InstigatorPawn);
 
 	const bool bLOSClear = !GetWorld()->LineTraceTestByChannel(EyeLocation, InstigatorPawn->GetActorLocation(), ECC_Visibility, QueryParams);
-	if (GetDetectionLogLevel() > 0)
-		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] ShotAt %s LOS-to-center=%s"),
-			*InstigatorPawn->GetName(), bLOSClear ? TEXT("CLEAR->COMBAT") : TEXT("BLOCKED->SEARCHING"));
 	if (bLOSClear)
 	{
 		EnterCombat(InstigatorPawn, /*bConfirmedVisual=*/true);
@@ -881,19 +861,6 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 
 	RefreshSearchRoomExposure();
 	RefreshAlwaysCloakedCompanion();
-
-#if ENABLE_DRAW_DEBUG
-	// Distance overlay runs before the debug-auto-engage early return so force-engaged enemies
-	// still render their P/C labels (force-engage is the standard staging tool for tuning).
-	{
-		const AAIController* EarlyCtrl = Cast<AAIController>(GetOwner());
-		const AEnemyCharacter* EarlyChar = EarlyCtrl ? Cast<AEnemyCharacter>(EarlyCtrl->GetPawn()) : nullptr;
-		if (IsValid(EarlyChar))
-		{
-			DrawDistanceOverlay(EarlyChar, GetWorld());
-		}
-	}
-#endif
 
 	// Debug auto-engage: force Combat with the player pawn every tick while the flag is set.
 	// Runs before the normal Combat/Suspicion branch so it re-asserts target and state even if
@@ -1015,202 +982,6 @@ void UEnemyAwarenessComponent::UpdateAwareness()
 			}
 		}
 	}
-
-#if ENABLE_DRAW_DEBUG
-	{
-		const int32 DebugLevel = GetEnemyDrawDebugLevel();
-		if (DebugLevel > 0)
-		{
-			const AAIController* MyController = Cast<AAIController>(GetOwner());
-			const AEnemyCharacter* MyChar = MyController ? Cast<AEnemyCharacter>(MyController->GetPawn()) : nullptr;
-			UWorld* World = GetWorld();
-			if (IsValid(MyChar) && IsValid(World))
-			{
-				const float HalfHeight = MyChar->GetCapsuleComponent()
-					? MyChar->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 90.f;
-				constexpr float HeadOffset = 30.f;
-				const FVector HeadLocation = MyChar->GetActorLocation() + FVector(0.f, 0.f, HalfHeight + HeadOffset);
-
-				// --- Level 1+: head tag ---
-				const FString ArchetypeShort = UEnum::GetDisplayValueAsText(ArchetypeData->Archetype).ToString().ToUpper();
-				const FString StateShort = UEnum::GetDisplayValueAsText(CurrentState).ToString().ToUpper();
-				FString Tag = FString::Printf(TEXT("%s | %s | %.0f"), *ArchetypeShort, *StateShort, GetHighestSuspicion());
-
-				if (DebugLevel >= 2)
-				{
-					// Append active BT task name
-					const UBehaviorTreeComponent* BTComp = Cast<UBehaviorTreeComponent>(MyController->GetBrainComponent());
-					const FString TaskName = IsValid(BTComp) ? BTComp->DescribeActiveTasks() : TEXT("No BT");
-					Tag += FString::Printf(TEXT("\n%s"), *TaskName);
-
-					// Append combat target name
-					AActor* Target = CombatTarget.Get();
-					if (IsValid(Target))
-						Tag += FString::Printf(TEXT("\nTgt: %s"), *Target->GetName());
-
-					// Morale state + value
-					if (const UEnemyMoraleComponent* Morale = MyChar->GetMoraleComponent())
-					{
-						const FString MoraleStateStr = UEnum::GetDisplayValueAsText(Morale->GetMoraleState()).ToString();
-						Tag += FString::Printf(TEXT("\nMorale: %s %.0f%%"), *MoraleStateStr, Morale->GetMorale01() * 100.f);
-					}
-
-					// Suppression value
-					if (const USuppressionComponent* Supp = MyChar->GetSuppressionComponent())
-					{
-						Tag += FString::Printf(TEXT("\nSupp: %.0f%%%s"), Supp->GetSuppression01() * 100.f,
-							Supp->IsSuppressed() ? TEXT(" [SUPPRESSED]") : TEXT(""));
-					}
-
-					// Threshold context line
-					if (IsValid(ArchetypeData))
-					{
-						Tag += FString::Printf(TEXT("\nSusp %.0f (susp>=%.0f search>=%.0f)"),
-							GetHighestSuspicion(), ArchetypeData->SuspiciousThreshold, ArchetypeData->SearchingThreshold);
-					}
-				}
-
-				DrawDebugString(World, HeadLocation, Tag, nullptr, FColor::Cyan, UpdateInterval, true);
-			}
-		}
-	}
-#endif
-
-	// --- Sight-gate diagnostic (enemy.SightDiag) ---
-	if (GetSightDiagLevel() > 0)
-	{
-		SightDiagAccum += UpdateInterval;
-		if (SightDiagAccum >= 0.5f)
-		{
-			SightDiagAccum = 0.f;
-
-			if (CurrentState != EEnemyAwarenessState::Combat)
-			{
-				const AAIController* DiagController = Cast<AAIController>(GetOwner());
-				const APawn* DiagPawn = DiagController ? DiagController->GetPawn() : nullptr;
-				if (IsValid(DiagPawn) && IsValid(ArchetypeData))
-				{
-					FString DiagName;
-#if WITH_EDITOR
-					DiagName = DiagPawn->GetActorLabel();
-#else
-					DiagName = GetNameSafe(DiagPawn);
-#endif
-					const FString DiagFilter = GetSightDiagFilter();
-					if (DiagFilter.IsEmpty() || DiagName.Contains(DiagFilter, ESearchCase::IgnoreCase))
-					{
-						APawn* PlayerPawn = nullptr;
-						if (UWorld* W = GetWorld())
-						{
-							if (APlayerController* PC = W->GetFirstPlayerController())
-								PlayerPawn = PC->GetPawn();
-						}
-
-						if (IsValid(PlayerPawn))
-						{
-							const FVector MyLoc = DiagPawn->GetActorLocation();
-							const FVector PlayerLoc = PlayerPawn->GetActorLocation();
-							const float Dist = FVector::Dist(MyLoc, PlayerLoc);
-
-							if (Dist <= ArchetypeData->LoseSightRadius)
-							{
-								const FVector Eye = DiagPawn->GetPawnViewLocation();
-
-								// Cone check
-								const FVector ToTarget = (PlayerLoc - MyLoc).GetSafeNormal();
-								const float Dot = FVector::DotProduct(DiagPawn->GetActorForwardVector(), ToTarget);
-								const float CosHalfFOV = FMath::Cos(FMath::DegreesToRadians(ArchetypeData->PeripheralVisionDeg * 0.5f));
-								const bool bInCone = Dot >= CosHalfFOV;
-
-								// Body LOS (head-excluded — the detection gate)
-								FVector BodyPt;
-								const bool bBodyVisible = AITargeting::GetVisibleBodyPoint(PlayerPawn, Eye, DiagPawn, BodyPt);
-
-								// Head clear (contrast — proves head-exclusion is the cause when body blocked)
-								const FVector HeadLoc = AITargeting::GetSightLocation(PlayerPawn);
-								FCollisionQueryParams HeadTraceParams(SCENE_QUERY_STAT(SightDiagHead), false);
-								HeadTraceParams.AddIgnoredActor(DiagPawn);
-								HeadTraceParams.AddIgnoredActor(PlayerPawn);
-								const bool bHeadClear = !GetWorld()->LineTraceTestByChannel(Eye, HeadLoc, ECC_Visibility, HeadTraceParams);
-
-								// Engine sighted state from suspicion tracks
-								const FSuspicionTrack* Tr = SuspicionTracks.Find(PlayerPawn);
-								const bool bEngineSighted = Tr && Tr->bSighted;
-								const float Susp = Tr ? Tr->Suspicion : 0.f;
-
-								UE_LOG(LogTemp, Warning,
-									TEXT("[SIGHTDIAG] %s dist=%.0f inRange=%d inCone=%d(dot=%.2f cos=%.2f) bodyLOS=%d headClear=%d engineSighted=%d susp=%.0f state=%s"),
-									*DiagName, Dist,
-									(int32)(Dist <= ArchetypeData->SightRadius),
-									(int32)bInCone, Dot, CosHalfFOV,
-									(int32)bBodyVisible, (int32)bHeadClear, (int32)bEngineSighted,
-									Susp, *UEnum::GetValueAsString(CurrentState));
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-}
-
-// --- Distance/pressure overlay (enemy.DrawDistances) ---
-
-void UEnemyAwarenessComponent::DrawDistanceOverlay(const AEnemyCharacter* MyChar, UWorld* World) const
-{
-#if ENABLE_DRAW_DEBUG
-	if (GetDrawDistancesLevel() <= 0) return;
-	if (!IsValid(MyChar) || !IsValid(World)) return;
-	if (!IsValid(MyChar->GetHealthComponent()) || !MyChar->GetHealthComponent()->IsAlive()) return;
-
-	// Refresh the cached companion when stale to avoid a TActorIterator per enemy per tick.
-	if (!CachedPrimaryCompanion.IsValid())
-	{
-		CachedPrimaryCompanion = ACompanionCharacter::GetPrimaryCompanion(World);
-	}
-
-	constexpr float WidgetLabelGap = 30.f;
-	constexpr float FallbackLabelOffset = 60.f;
-	constexpr float FallbackHalfHeight = 90.f;
-	constexpr float OverlayDurationScale = 1.5f;
-
-	const APawn* PlayerPawn = UGameplayStatics::GetPlayerPawn(World, 0);
-	const ACompanionCharacter* Companion = CachedPrimaryCompanion.Get();
-
-	// Position above the awareness widget so the label stacks above the meter.
-	FVector LabelPos = MyChar->GetActorLocation();
-	if (IsValid(MyChar->AwarenessWidgetComponent))
-	{
-		LabelPos = MyChar->AwarenessWidgetComponent->GetComponentLocation()
-			+ FVector(0.f, 0.f, WidgetLabelGap);
-	}
-	else
-	{
-		const float HH = MyChar->GetCapsuleComponent()
-			? MyChar->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : FallbackHalfHeight;
-		LabelPos.Z += HH + FallbackLabelOffset;
-	}
-
-	const float PDist = IsValid(PlayerPawn)
-		? FVector::Dist2D(MyChar->GetActorLocation(), PlayerPawn->GetActorLocation()) : -1.f;
-	const float CDist = IsValid(Companion)
-		? FVector::Dist2D(MyChar->GetActorLocation(), Companion->GetActorLocation()) : -1.f;
-
-	FString Label;
-	if (PDist >= 0.f) Label += FString::Printf(TEXT("P %.0f"), PDist);
-	if (CDist >= 0.f)
-	{
-		if (Label.Len() > 0) Label += TEXT("  ");
-		Label += FString::Printf(TEXT("C %.0f"), CDist);
-	}
-	if (Label.Len() > 0)
-	{
-		// const, not constexpr: FColor::Yellow is a dllimported out-of-line object, not a constant expression.
-		const FColor DistanceColor = FColor::Yellow;
-		DrawDebugString(World, LabelPos, Label, nullptr, DistanceColor,
-			UpdateInterval * OverlayDurationScale, true);
-	}
-#endif
 }
 
 void UEnemyAwarenessComponent::UpdateCombat()
@@ -1355,6 +1126,29 @@ void UEnemyAwarenessComponent::UpdateCombat()
 					if (IsValid(SupprComp) && SupprComp->IsSuppressed())
 						bHoldContact = true;
 				}
+			}
+
+			// 4) A squadmate can currently see the target (sighting relay stamps this at 1 Hz
+			// while any member holds sight). The relay also live-refreshes LastKnownLocation,
+			// so a held member pursues real data — safe for director-seeded members too.
+			if (!bHoldContact)
+			{
+				const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+				if ((WorldTime - LastSquadSightTime) < SquadSightHoldWindow)
+					bHoldContact = true;
+			}
+
+			// 5) We recently HEARD the target fight — gunfire or sprint, acoustics-gated at the
+			// stimulus. This is what keeps a long drawn-out fight honest: an enemy pinned blind
+			// behind cover doesn't "forget" a player who is audibly still shooting, yet a player
+			// who goes quiet and slips away is searched for on the normal grace. Director-seeded
+			// members that never gained real LOS skip it (same reason as suppression) so the
+			// seed-arrival quit can still fire.
+			if (!bHoldContact && !(bDirectorSeeded && !bHadLOS))
+			{
+				const float WorldTime = GetWorld() ? GetWorld()->GetTimeSeconds() : 0.f;
+				if ((WorldTime - LastTargetNoiseTime) < TargetNoiseHoldWindow)
+					bHoldContact = true;
 			}
 		}
 
@@ -1602,15 +1396,6 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 	// re-arms it AFTER this call returns, so no conditional logic is needed here.
 	bDirectorSeeded = false;
 
-	if (CurrentState != EEnemyAwarenessState::Combat && GetDetectionLogLevel() > 0)
-	{
-		const AAIController* DbgC = Cast<AAIController>(GetOwner());
-		const APawn* DbgP = DbgC ? DbgC->GetPawn() : nullptr;
-		const float DbgDist = (IsValid(DbgP) && IsValid(Target)) ? FVector::Dist(DbgP->GetActorLocation(), Target->GetActorLocation()) : -1.f;
-		UE_LOG(LogTemp, Warning, TEXT("[DETECTDBG] DETECTED tgt=%s confirmedVisual=%d dist=%.0f fromState=%s"),
-			IsValid(Target) ? *Target->GetName() : TEXT("null"), bConfirmedVisual ? 1 : 0, DbgDist, *UEnum::GetValueAsString(CurrentState));
-	}
-
 	ClearInvestigateBody();
 
 	LastKnownLocation = IsValid(Target) ? Target->GetActorLocation() : LastKnownLocation;
@@ -1622,6 +1407,15 @@ void UEnemyAwarenessComponent::EnterCombat(AActor* Target, bool bConfirmedVisual
 
 	for (auto& Pair : SuspicionTracks)
 		Pair.Value.Suspicion = 0.f;
+
+	// Fight-liveness stamps are per-target: a swap must not inherit the old target's holds.
+	// Same-target re-entries (damage re-lock mid-fight) keep theirs — resetting those would
+	// drop a live hold.
+	if (CombatTarget.Get() != Target)
+	{
+		LastSquadSightTime = -1e9f;
+		LastTargetNoiseTime = -1e9f;
+	}
 
 	SetCombatTarget(Target);
 	if (CurrentState != EEnemyAwarenessState::Combat)
@@ -1702,7 +1496,7 @@ void UEnemyAwarenessComponent::TransitionToSearching(bool bContactLost)
 					// the full ring (doorways, balcony edges) would otherwise re-clump
 					// several members onto the centre.
 					UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(GetWorld());
-					const FVector NavExtent(200.f, 200.f, 400.f);
+					const FVector NavExtent(200.f, 200.f, EnemyNavProjectZExtent);
 					bool bProjected = false;
 					if (IsValid(NavSys))
 					{
@@ -2400,7 +2194,7 @@ void UEnemyAwarenessComponent::BroadcastSightingToSquad()
 	AActor* Target = CombatTarget.Get();
 	if (!IsValid(Target)) return;
 
-	Squad->ReportSighting(Target, LastKnownLocation);
+	Squad->ReportSighting(Target, LastKnownLocation, MyChar);
 }
 
 // --- Squad Sighting Ingress ---
@@ -2424,6 +2218,9 @@ void UEnemyAwarenessComponent::ReportSquadSighting(AActor* Target, const FVector
 		if (CombatTarget.Get() == Target)
 		{
 			LastKnownLocation = LastKnown;
+			// A mate is live-sighting our target right now — stamp the fight-liveness hold so
+			// our own lost-contact clock doesn't run while the squad still has him.
+			if (const UWorld* W = GetWorld()) LastSquadSightTime = W->GetTimeSeconds();
 			WriteBBVectors();
 		}
 		return;

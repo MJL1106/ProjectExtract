@@ -7,6 +7,8 @@
 #include "Engine/HitResult.h"
 #include "Engine/World.h"
 #include "GameFramework/Pawn.h"
+#include "NavigationSystem.h"
+#include "NavigationData.h"
 
 namespace AIAcoustics
 {
@@ -101,6 +103,49 @@ float ComputeMultiplier(UWorld* World, const FVector& ListenerEye, const FVector
 		if (TraceSolidBlocker(World, PortalPoint, ListenerEye, PortalIgnore, MaxPawnSkips, Block)) continue;
 
 		return DoorMultiplier(DoorClass, ThroughDoorMult);
+	}
+
+	// No door connects the spaces — but a doorless route can still carry the sound: an open-ended
+	// wall, a corridor corner, a gap in set dressing. Ask the navmesh for a same-storey walking
+	// route that isn't a huge detour. Cross-floor stays silent by construction: the slab walls the
+	// direct line (that's how we got here), and a stair route either crosses the Z gate or blows
+	// the detour budget.
+	if (IsValid(Listener))
+	{
+		const FVector ListenerLoc = Listener->GetActorLocation();
+
+		// Storey gate on FEET, not raw stimulus Z: a gunshot stimulus sits at the muzzle
+		// (~150cm above the shooter's feet) and the listener location is capsule centre —
+		// comparing those raw would shave nearly a full storey off the gate and let gunfire
+		// from the floor below read as same-storey. Normalise both ends to the ground.
+		const float ListenerFeetZ = ListenerLoc.Z - Listener->GetSimpleCollisionHalfHeight();
+		float StimFeetZ = StimLoc.Z;
+		if (const APawn* InstigatorPawn = Cast<APawn>(Instigator))
+			StimFeetZ = InstigatorPawn->GetActorLocation().Z - InstigatorPawn->GetSimpleCollisionHalfHeight();
+
+		if (FMath::Abs(StimFeetZ - ListenerFeetZ) <= SameStoreyZThreshold)
+		{
+			UNavigationSystemV1* NavSys = FNavigationSystem::GetCurrent<UNavigationSystemV1>(World);
+			const ANavigationData* NavData = NavSys ? NavSys->GetDefaultNavDataInstance() : nullptr;
+			if (NavData)
+			{
+				const float Direct = FMath::Max(FVector::Dist(StimLoc, ListenerLoc), 1.f);
+				const float Budget = Direct * NavDetourRatioMax + NavDetourSlack;
+
+				FPathFindingQuery Query(Listener, *NavData, ListenerLoc, StimLoc);
+				Query.bAllowPartialPaths = false;
+				// The common outcome here is "no route" (sealed room) — cap the search so a
+				// failed A* stops at the budget instead of exhausting the reachable navmesh.
+				Query.CostLimit = Budget;
+
+				const FPathFindingResult Result = NavSys->FindPathSync(Query, EPathFindingMode::Regular);
+				if (Result.IsSuccessful() && Result.Path.IsValid() && !Result.Path->IsPartial())
+				{
+					if (Result.Path->GetLength() <= Budget)
+						return NavDetourMult;
+				}
+			}
+		}
 	}
 
 	return 0.f;

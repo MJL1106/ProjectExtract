@@ -53,6 +53,37 @@ namespace
 		if (KeyName.IsNone()) return UKeybindHintLibrary::GetUnboundKeyText();
 		return FText::FromName(KeyName);
 	}
+	/** How informative an answer is. The mapping table is rebuilt ASYNCHRONOUSLY after every
+	 *  AddMappingContext/RemoveMappingContext — and the companion mode-select and takedown-prompt
+	 *  contexts come and go constantly during play — so a query landing mid-rebuild reads a partial
+	 *  table: fewer keys than are really bound, or none at all. That is indistinguishable at the call
+	 *  site from a genuinely unbound action, and it is why hints were degrading from "3" to a gamepad
+	 *  fallback (or to [unbound]) a second into the level and never recovering: a caller that polls a
+	 *  bounded number of times and then stops latches whichever answer it happened to see last. */
+	enum class EHintQuality : uint8 { Unbound = 0, GamepadOnly = 1, KeyboardOrMouse = 2 };
+
+	/** Ranks exactly the way PickKeyText chooses, so the cache can never prefer a text that
+	 *  PickKeyText would not itself have returned for that key set. */
+	EHintQuality RankKeys(const TArray<FKey>& Keys)
+	{
+		EHintQuality Best = EHintQuality::Unbound;
+		for (const FKey& Key : Keys)
+		{
+			if (!Key.IsValid()) continue;
+			if (!Key.IsGamepadKey() && !Key.IsTouch()) return EHintQuality::KeyboardOrMouse;
+			Best = EHintQuality::GamepadOnly;
+		}
+		return Best;
+	}
+
+	/** Best answer seen so far for each action. Keyed weakly so a GC'd action drops out on its own.
+	 *  Values are level- and session-stable (a key binding does not change on level load), and a real
+	 *  rebind still lands because it reports at the same quality and so replaces the entry. */
+	TMap<TWeakObjectPtr<const UInputAction>, TPair<EHintQuality, FText>>& BestHintSoFar()
+	{
+		static TMap<TWeakObjectPtr<const UInputAction>, TPair<EHintQuality, FText>> Cache;
+		return Cache;
+	}
 }
 
 FText UKeybindHintLibrary::GetUnboundKeyText()
@@ -88,11 +119,24 @@ FText UKeybindHintLibrary::GetActionKeyText(const UObject* WorldContextObject, c
 {
 	if (!IsValid(Action)) return GetUnboundKeyText();
 
+	TPair<EHintQuality, FText>& Best = BestHintSoFar().FindOrAdd(Action,
+		TPair<EHintQuality, FText>(EHintQuality::Unbound, GetUnboundKeyText()));
+
 	const UEnhancedInputLocalPlayerSubsystem* Input = FindLocalPlayerInputSubsystem(WorldContextObject);
-	if (!IsValid(Input)) return GetUnboundKeyText();
+	if (!IsValid(Input)) return Best.Value;
 
 	// The one 5.7 query for "which keys reach this action right now". It reads the rebuilt mapping
 	// table, so it reflects every applied context (and any remap profile) with no knowledge here of
 	// which contexts those are — see the header on why an early caller must re-ask after a rebuild.
-	return PickKeyText(Input->QueryKeysMappedToAction(Action));
+	const TArray<FKey> Keys = Input->QueryKeysMappedToAction(Action);
+	const EHintQuality Quality = RankKeys(Keys);
+
+	// Never trade down. A mid-rebuild read is strictly less informative than a settled one, so the
+	// only safe response is to keep the better answer we already proved. Equal quality still writes
+	// through, so a genuine rebind is picked up.
+	if (Quality < Best.Key) return Best.Value;
+
+	Best.Key = Quality;
+	Best.Value = PickKeyText(Keys);
+	return Best.Value;
 }

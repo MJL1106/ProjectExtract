@@ -1,0 +1,1 @@
+[data-streamdown-table-download]+div{margin-top:0}@keyframes sd-fade{0%{opacity:0}to{opacity:1}}@keyframes sd-blur{0%{opacity:0;filter:blur(5px)}to{opacity:1;filter:blur(0px)}}@keyframes sd-slideUp{0%{transform:translateY(10%);opacity:0}to{transform:translateY(0);opacity:1}}@keyframes sd-slideDown{0%{transform:translateY(-10%);opacity:0}to{transform:translateY(0);opacity:1}}

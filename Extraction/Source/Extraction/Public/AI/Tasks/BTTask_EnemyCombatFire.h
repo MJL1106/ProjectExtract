@@ -194,14 +194,6 @@ private:
 		FCover PendingShuffleFrom;
 		float ShuffleHoldTimer = 0.f;
 
-		// --- Cover-move debug (enemy.CoverMoveDebug) ---
-
-		/** World time of cover-move arrival (SeekingCover -> Acquire). Drives the post-arrival soak window. */
-		float CoverMoveArrivalTime = -1e9f;
-
-		/** Set to true each tick that ApplyCoverFacing runs inside the facing-lock block; read+cleared by the debug log. */
-		bool bFacingReassertedThisTick = false;
-
 		// --- Cached cone trig (PERF #10) ---
 		float CachedConeHalfCos = 0.f;
 		float CachedConeHalfAngle = -1.f;  // sentinel: recompute when DA value differs
